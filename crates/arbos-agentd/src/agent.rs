@@ -2978,16 +2978,15 @@ impl Agent {
         }
         match job.kind.as_str() {
             "code" => match job_named_subfolder(&job.brief, project) {
-                Some(dir) => {
-                    // A folder with its own `.git` is its own repo, so its git is its own lock.
-                    // A folder inside the project's repo shares that repo: take the whole of it.
-                    let git = if dir.join(".git").exists() {
-                        format!("git:{}", dir.display())
-                    } else {
-                        "git".to_owned()
-                    };
-                    vec![format!("path:{}", dir.display()), git]
-                }
+                // The folder's git is scoped to the folder even when no `.git` is there yet: the
+                // job that names `humanize/` is the job that clones into it, so the repo it is
+                // about to create is nobody else's. Waiting for a `.git` that the lock holder
+                // has not written yet means every clone job takes the project's whole git, which
+                // is what made T5 and T9 queue in Jacob's Test5 round 2 (bug I).
+                Some(dir) => vec![
+                    format!("path:{}", dir.display()),
+                    format!("git:{}", dir.display()),
+                ],
                 None => vec![format!("path:{}", project.display()), "git".to_owned()],
             },
             "ops" => vec!["routines".to_owned()],
@@ -3009,6 +3008,35 @@ impl Agent {
         };
         let title = self.job_title_or_other(&owner);
         Some((owner, title))
+    }
+
+    /// One standalone finished row in `chat_id`, anchored under `anchor`: the box's own words,
+    /// not the model's, for a fact the model may never get to say.
+    ///
+    /// `key` becomes the row's `deliveryKey`, the same marker the interrupted-job row carries.
+    /// Nothing reads that field back, so it is for tracing only — posting once is the caller's
+    /// job, not the key's.
+    async fn post_chat_line(
+        &self,
+        host: &SharedHost,
+        chat_id: &str,
+        anchor: &str,
+        key: &str,
+        line: &str,
+    ) {
+        let h = host.lock().await;
+        let id = ulid();
+        h.doc
+            .start_assistant_message(&id, anchor, &self.cfg.device_id);
+        if let Some(attr) = self.people_reply_fields(chat_id) {
+            h.doc.set_message_fields(&id, &attr.fields);
+        }
+        if let Some(p) = h.doc.add_text_part(&id, "text") {
+            h.doc.append_text(&id, &p, line);
+        }
+        h.doc
+            .set_message_fields(&id, &[("deliveryKey", json!(key))]);
+        h.doc.finish_message(&id, MessageStatus::Done);
     }
 
     fn job_title_or_other(&self, job_id: &str) -> String {
@@ -6817,12 +6845,25 @@ impl Agent {
             "title": title,
             "state": if no_slot || blocked_by.is_some() { "queued" } else { "running" },
         });
-        // A queued job has not started: say so, and say what it is behind, so the chat never
-        // reads as if the work had begun (Jacob's Test5 round 2, bug I).
+        // A queued job has not started, and the chat is told here rather than through the model.
+        // By now the acknowledgement row ("I'll start with a blobless clone") is closed and
+        // pushed, and the jobs prompt has the turn end on this call, so a correction that waits
+        // for the model may never come — T9 in Jacob's Test5 round 2 sat queued for ten minutes
+        // behind T8 while its own interim said the work had begun (bug I).
         if let Some((blocker_id, blocker_title)) = blocked_by {
+            self.post_chat_line(
+                host,
+                chat_id,
+                user_msg_id,
+                &format!("job:{job_id}:queued"),
+                &format!(
+                    "\"{title}\" is queued behind \"{blocker_title}\" — it starts when that one frees what they both need."
+                ),
+            )
+            .await;
             out["queued_behind"] = json!({ "job_id": blocker_id, "title": blocker_title });
             out["note"] = json!(format!(
-                "queued behind \"{blocker_title}\": this job starts when that one frees what they both need. Tell the user it is queued behind \"{blocker_title}\", not that this work has started."
+                "queued behind \"{blocker_title}\": this job starts when that one frees what they both need. The chat has been told already — do not repeat it, and do not say this work has started."
             ));
         } else if no_slot {
             out["note"] = json!(
@@ -9831,12 +9872,25 @@ fn lock_blocker(locks: &HashMap<String, String>, job_id: &str, keys: &[String]) 
 
 /// The project subfolder a code job's brief names, as the folder its default lock covers.
 ///
-/// A token counts when it has a slash (the router tells the main agent to name a folder as
-/// `subtensor/`), is not a URL, and resolves to a folder that exists in the project. The lock is
-/// the *first* level under the project folder: a brief that names one file still edits that
-/// folder's neighbours, so `crates/x/src/a.rs` locks `crates`. `None` when no token qualifies —
-/// a fresh clone, a project-wide refactor, prose only — and the caller then takes the whole
-/// project folder, which is what every code job used to take.
+/// A token must have a slash (the router tells the main agent to name a folder as `subtensor/`)
+/// and must not be a URL. It then counts in one of two ways:
+///
+/// * the folder is already there, or
+/// * the token ends in a slash, which is how a brief names a folder the job is about to make —
+///   `git clone … into humanize/`, `an app in taxi_app/`, `download … into data/nyc_tlc/`.
+///
+/// The second rule is what makes the narrowing reach a clone or a build. Requiring the folder to
+/// exist meant the job that creates its own folder got no narrowing at all, which is every code
+/// job in Jacob's Test5 round 2 (bug I). The slash is still required, so prose with a slash in it
+/// (`and/or`, `24/7`, `either/or`) names no folder and the job keeps the whole project.
+///
+/// The lock is the *first* level under the project folder: a brief that names one file still
+/// edits that folder's neighbours, so `crates/x/src/a.rs` locks `crates`. Only the first folder
+/// a brief names is taken; a brief that names two (work in `humanize/`, output to `out/`) locks
+/// the first, and `out/` is left to whoever names it first.
+///
+/// `None` when no token qualifies, and the caller then takes the whole project folder, which is
+/// what every code job used to take.
 fn job_named_subfolder(brief: &str, project: &Path) -> Option<PathBuf> {
     let prefix = format!("{}/", project.display());
     for raw in brief.split_whitespace() {
@@ -9859,7 +9913,10 @@ fn job_named_subfolder(brief: &str, project: &Path) -> Option<PathBuf> {
             continue;
         }
         let dir = project.join(first);
-        if dir.is_dir() {
+        // A brief ends its sentence on the folder — "clone it into humanize/." — so the full stop
+        // comes off before the slash is read. Interior dots stay, or `src/a.rs` would not parse.
+        let names_a_folder = token.trim_end_matches(['.', ',', ';', ':']).ends_with('/');
+        if names_a_folder || dir.is_dir() {
             return Some(dir);
         }
     }
@@ -11492,6 +11549,8 @@ mod tests {
         let p = project.as_path();
         std::fs::create_dir_all(p.join("alpha/src")).unwrap();
         std::fs::create_dir_all(p.join("crates/arbos-agentd/src")).unwrap();
+        // `out/` is there by the time the later jobs run: the earlier ones wrote into it.
+        std::fs::create_dir_all(p.join("out")).unwrap();
         let folder = |brief: &str| job_named_subfolder(brief, p);
         assert_eq!(
             folder("Fix the failing tests in alpha/."),
@@ -11506,14 +11565,38 @@ mod tests {
             folder(&format!("Build {}/alpha/src now.", p.display())),
             Some(p.join("alpha"))
         );
-        // A repo to clone is not a folder of this project yet.
+        // A folder the job is about to make counts when the brief names it with a slash, even
+        // though it is not there yet. These four tokens are verbatim from Jacob's Test5 round 2
+        // briefs (`t4`, `t5`, `t8`, `t9` events), and the full stop glued onto the first one is
+        // why the slash is read after sentence punctuation is trimmed.
+        assert_eq!(
+            folder("git clone https://github.com/python-humanize/humanize into humanize/."),
+            Some(p.join("humanize"))
+        );
+        assert_eq!(
+            folder("download the parquet files into data/nyc_tlc/ (verify sizes)."),
+            Some(p.join("data"))
+        );
+        assert_eq!(
+            folder("Build a small Flask app in taxi_app/ serving the stats."),
+            Some(p.join("taxi_app"))
+        );
+        // T9 names its clone target as a bare word with no slash, so the first folder it names
+        // is the output one.
+        assert_eq!(
+            folder("git clone --filter=blob:none https://github.com/pandas-dev/pandas pandas -> out/pandas_commits.csv"),
+            Some(p.join("out"))
+        );
+        // The slash is still required, so prose with a slash in it names no folder.
+        assert_eq!(folder("Decide whether it ships and/or waits."), None);
+        assert_eq!(folder("Keep it up 24/7 once it is live."), None);
+        assert_eq!(folder("Pick either/or, then report."), None);
+        // A repo named only as a URL, an absolute path outside the project, and prose: nothing.
         assert_eq!(
             folder("Clone https://github.com/opentensor/subtensor."),
             None
         );
         assert_eq!(folder("Read /etc/hosts and report what resolves."), None);
-        assert_eq!(folder("Decide whether it ships and/or waits."), None);
-        assert_eq!(folder("Fix the failing tests in beta/."), None);
         assert_eq!(folder("Make the suite green."), None);
         let _ = std::fs::remove_dir_all(p);
     }

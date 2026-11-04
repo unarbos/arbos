@@ -2032,6 +2032,189 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Bug I follow-up, the half the tool result cannot reach. The acknowledgement row the main
+    /// agent posts before `start_job` is closed and pushed by then, and the jobs prompt has the
+    /// turn end on that call, so a queued job's state can only reach the user if the box says it
+    /// itself. T9 in Jacob's Test5 round 2 sat queued ten minutes behind T8 while its own interim
+    /// said it was starting a blobless clone.
+    #[tokio::test]
+    async fn a_queued_job_tells_the_chat_itself() {
+        use crate::agent::JobSpec;
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATQUEUEDROW00000001";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        let holder = JobSpec {
+            id: "job-holder".into(),
+            title: "Building NYC taxi Flask app".into(),
+            kind: "code".into(),
+            brief: "Build a small Flask app in taxi_app/ serving the stats.".into(),
+            touches: vec!["path:/".into(), "git".into()],
+            attempt: 0,
+        };
+        agent
+            .store
+            .insert_job(
+                &holder.id,
+                chat,
+                "m-busy",
+                &holder.title,
+                "code",
+                &holder.brief,
+                &holder.touches,
+            )
+            .unwrap();
+        assert!(!agent.acquire_job_locks(&holder).await.is_empty());
+        // The interim the model posts before `start_job`, as the prompt has it: already a closed
+        // row, and wrong the moment the job turns out to be queued.
+        agent
+            .hook_send_message("I'll start with a blobless clone of pandas.", None, None)
+            .await
+            .unwrap();
+        agent
+            .hook_start_job(
+                "Analyzing pandas repository",
+                "Blobless clone pandas, compute commits per month, and write out/pandas_commits.csv.",
+                "code",
+                vec![],
+            )
+            .await
+            .unwrap();
+        let said: Vec<String> = reply_rows(&host, "m-busy")
+            .iter()
+            .map(|r| r.text().trim().to_owned())
+            .filter(|t| !t.is_empty())
+            .collect();
+        assert!(
+            said.iter().any(|t| t
+                == "\"Analyzing pandas repository\" is queued behind \"Building NYC taxi Flask \
+                    app\" — it starts when that one frees what they both need."),
+            "the box must say the job is queued without waiting for the model: {said:?}"
+        );
+        assert_eq!(
+            said.iter().filter(|t| t.contains("queued behind")).count(),
+            1,
+            "one line, not one per surface: {said:?}"
+        );
+        agent.release_job_locks("job-holder").await;
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The other half of the same rule: a job that waits for nothing says nothing, so an ordinary
+    /// start is not narrated twice.
+    #[tokio::test]
+    async fn a_job_that_waits_for_nothing_posts_no_queued_line() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATNOQUEUEDROW00001";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        agent
+            .hook_start_job(
+                "Charting the zones",
+                "Chart the top ten pickup zones from out/nyc_taxi_summary.csv and post it.",
+                "code",
+                vec![],
+            )
+            .await
+            .unwrap();
+        let said: Vec<String> = reply_rows(&host, "m-busy")
+            .iter()
+            .map(|r| r.text().trim().to_owned())
+            .filter(|t| !t.is_empty())
+            .collect();
+        assert!(
+            !said.iter().any(|t| t.contains("queued behind")),
+            "nothing held a key, so nothing was queued: {said:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Bug I, measured against the round-2 traces. Each brief below carries the folder token its
+    /// real brief carried (`t4`/`t5` and `t8`/`t9` in `test5/*.events.json`), and in the run T5
+    /// waited 6.5 min behind T4 and T9 waited about 10 min behind T8. None of these folders
+    /// exists when its job starts — each job is the thing that creates it — so the pair only runs
+    /// side by side when a named-but-absent folder scopes both the path and the git lock.
+    #[tokio::test]
+    async fn the_round_two_traces_run_side_by_side() {
+        use crate::agent::JobSpec;
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATTRACEREPLAY00001";
+        let _host = agent.sync.open_room(chat).await.unwrap();
+        let project = agent.cfg.work_dir.clone();
+        // By the time T8 and T9 ran, `out/` was on disk: T4 and T5 had written into it hours
+        // earlier. Their own folders — humanize, data, taxi_app — were still absent.
+        std::fs::create_dir_all(project.join("out")).unwrap();
+        let code_job = |id: &str, title: &str, brief: &str| JobSpec {
+            id: id.into(),
+            title: title.into(),
+            kind: "code".into(),
+            brief: brief.into(),
+            touches: vec![],
+            attempt: 0,
+        };
+        // T4 and T5: the clone target and the download target, neither on disk yet.
+        let t4 = code_job(
+            "job-t4",
+            "Hunting a humanize bug",
+            "git clone https://github.com/python-humanize/humanize into humanize/. Write the \
+             failing test output to out/humanize_before.txt.",
+        );
+        let t5 = code_job(
+            "job-t5",
+            "Analyzing NYC taxi data",
+            "Download the parquet files into data/nyc_tlc/ (verify sizes). Save the script to \
+             out/nyc_taxi.py.",
+        );
+        // T8 and T9: the app folder and, for T9, the output folder, since T9 names its clone
+        // target as a bare word with no slash.
+        let t8 = code_job(
+            "job-t8",
+            "Building NYC taxi Flask app",
+            "Build a small Flask app in taxi_app/ serving the stats already computed in \
+             out/nyc_taxi_summary.csv.",
+        );
+        let t9 = code_job(
+            "job-t9",
+            "Analyzing pandas repository",
+            "Blobless clone: git clone --filter=blob:none https://github.com/pandas-dev/pandas \
+             pandas. Commits per month to out/pandas_commits_per_month.csv.",
+        );
+        for j in [&t4, &t5, &t8, &t9] {
+            agent
+                .store
+                .insert_job(
+                    &j.id, chat, "m-busy", &j.title, "code", &j.brief, &j.touches,
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            agent.job_lock_keys(&t4),
+            vec![
+                format!("path:{}/humanize", project.display()),
+                format!("git:{}/humanize", project.display()),
+            ],
+            "T4 works in the folder it clones into"
+        );
+        assert_eq!(
+            agent.job_lock_keys(&t9),
+            vec![
+                format!("path:{}/out", project.display()),
+                format!("git:{}/out", project.display()),
+            ],
+            "T9 names no folder for its clone, so its first named folder is the output one"
+        );
+        // T4 is the stalled job: it never releases in this test.
+        agent.acquire_job_locks(&t4).await;
+        tokio::time::timeout(Duration::from_millis(500), agent.acquire_job_locks(&t5))
+            .await
+            .expect("T5 waited 6.5 min behind T4 in the run; it must start at once now");
+        agent.acquire_job_locks(&t8).await;
+        tokio::time::timeout(Duration::from_millis(500), agent.acquire_job_locks(&t9))
+            .await
+            .expect("T9 waited about 10 min behind T8 in the run; it must start at once now");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// py-06 on image 0.1.121 (parity after-run, 2026-10-25 02:11 UTC): an `act` turn computed the
     /// answer and wrote it as prose; the ack ("Checking the file now.") sat on the working row,
     /// counted as "posted", and the fallback never ran — the user got an empty row. An act ack is
