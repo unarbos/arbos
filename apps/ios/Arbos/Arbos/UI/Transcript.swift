@@ -441,7 +441,7 @@ enum Transcript {
                     return nil
                 }
                 for (ix, card) in Self.collapsingPictures(cards).enumerated() {
-                    rows.append(attachmentRow(id: "\(message.id)#\(card.part.id)", message: message, a: card.part.a,
+                    rows.append(attachmentRow(id: "\(message.id)#\(card.id)", message: message, a: card.attachment,
                                               projectId: projectId, fromUser: false, agentNames: agentNames,
                                               lane: inLane,
                                               sender: inLane ? .agent(id: whoId, handle: who.senderHandle ?? "",
@@ -551,13 +551,13 @@ enum Transcript {
                 // card each (Jacob 2026-11-03). The caption bar lands on the last card
                 // that still draws.
                 let cards = Self.collapsingPictures(mediaParts)
-                let lastCaptionableCard = cards.lastIndex { Self.isCaptionableMedia($0.part.a) }
+                let lastCaptionableCard = cards.lastIndex { Self.isCaptionableMedia($0.attachment) }
                 for (i, card) in cards.enumerated() {
                     let cap = (i == lastCaptionableCard) ? mediaCaption : nil
                     // Another person's picture / file sits left like their bubble, with their
                     // avatar beside it and their name on the first card when the run changes
                     // sender ([feedback forward-attachments-ios-2026-10-27]).
-                    chunk.append(attachmentRow(id: "\(message.id)#\(card.part.id)", message: message, a: card.part.a,
+                    chunk.append(attachmentRow(id: "\(message.id)#\(card.id)", message: message, a: card.attachment,
                                                projectId: projectId, fromUser: mine, agentNames: agentNames,
                                                caption: cap, lane: !mine,
                                                forwardedFrom: i == 0 && forwarded == nil ? forwardedBy : nil,
@@ -1083,26 +1083,35 @@ enum Transcript {
                                sender: sender, named: named, quote: quote))
     }
 
+    /// One attachment card the transcript will draw.
+    struct MediaCard {
+        let id: String
+        let attachment: Attachment
+        /// How many pictures this card stands for: `1` for a plain card, `n` for the
+        /// tile that `n` pictures collapsed into.
+        let stack: Int
+    }
+
     /// Which of a message's attachment parts draw, once its pictures have collapsed
     /// into one "+N" tile. Same rule as the Mac's `attachments::STACK_MIN`.
     ///
-    /// `parts` is every attachment part in message order. The answer keeps that order
-    /// and gives each surviving part the number of pictures it stands for: `1` for a
-    /// plain card, `n` for the tile the message's `n` pictures became. A chart's
-    /// fallback picture is already filtered out by the caller.
-    static func collapsingPictures(_ parts: [(id: String, a: Attachment)]) -> [(part: (id: String, a: Attachment), stack: Int)] {
+    /// `parts` is every attachment part in message order; the answer keeps that order.
+    /// A chart's fallback picture is already filtered out by the caller.
+    static func collapsingPictures(_ parts: [(id: String, a: Attachment)]) -> [MediaCard] {
         let pictures = parts.filter { $0.a.isImage }.count
-        guard pictures >= MediaStack.min else { return parts.map { ($0, 1) } }
-        var out: [(part: (id: String, a: Attachment), stack: Int)] = []
+        guard pictures >= MediaStack.min else {
+            return parts.map { MediaCard(id: $0.id, attachment: $0.a, stack: 1) }
+        }
+        var out: [MediaCard] = []
         var taken = false
         for part in parts {
             guard part.a.isImage else {
-                out.append((part, 1))
+                out.append(MediaCard(id: part.id, attachment: part.a, stack: 1))
                 continue
             }
             if taken { continue }
             taken = true
-            out.append((part, pictures))
+            out.append(MediaCard(id: part.id, attachment: part.a, stack: pictures))
         }
         return out
     }
