@@ -354,6 +354,10 @@ after() {
   if [ "$n" -ne 1 ]; then echo "VERDICT $(ts): STOP — $n changes since $prev, FOLDED"; return; fi
   read -r sha subj <<< "$ch"
   v=$(verdict "$sha"); echo "Release plan verdict for ${sha:0:9}: $v"
+  # Do not fold this onto verdict_class(): `RED GATE ...` reaches RED* by prefix
+  # and there is no REDGATE arm here, so classifying first would drop it into the
+  # default — the refusal-becomes-a-shrug this case was hardened against.
+  # Prerequisite for the fold: add a REDGATE arm, and a selftest case for it, first.
   case "$v" in
     TAG*)
       tag=$(echo "$v" | awk '{print $2}')
