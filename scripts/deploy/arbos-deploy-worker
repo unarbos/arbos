@@ -986,6 +986,10 @@ roll_continue() {
   sha="$(sed -n 's/^sha=//p' "$STATE/agentd.rolling" 2>/dev/null | head -1)"
   snapshot="$(sed -n 's/^snapshot=//p' "$STATE/agentd.rolling" 2>/dev/null | head -1)"
   [[ -n "$sha" && -n "$snapshot" ]] || exit 0
+  if agentd_held; then
+    log "agentd: roll pass for $sha skipped — lane held ($(sed -n 's/^reason=//p' "$(agentd_hold_file)" | head -1))"
+    return 0
+  fi
   if quota_headroom_or_wait "$sha"; then
     roll_pass "$snapshot"
     sleep 60
@@ -1446,6 +1450,12 @@ continue_roll_if_due() {
   local at
   at="$(sed -n 's/^at=//p' "$STATE/agentd.rolling" | head -1)"
   (( $(date -u +%s) - ${at:-0} >= ROLL_RETRY_EVERY_S )) || return 0
+  if agentd_held; then
+    # Restart the retry clock so a long hold logs once per ROLL_RETRY_EVERY_S, not every tick.
+    sed -i "s/^at=.*/at=$(date -u +%s)/" "$STATE/agentd.rolling"
+    log "agentd: roll pass for $(sed -n 's/^sha=//p' "$STATE/agentd.rolling" | head -1) not started — lane held ($(sed -n 's/^reason=//p' "$(agentd_hold_file)" | head -1)); 'arbos-deploy-worker hold-agentd off' resumes it"
+    return 0
+  fi
   dry && { log "dry-run: would start a roll-continue unit"; return 0; }
   systemctl reset-failed arbos-deploy-agentd.service 2>/dev/null || true
   systemd-run --unit=arbos-deploy-agentd --collect --quiet --no-block \
@@ -1598,6 +1608,43 @@ selftest() {
   # A box on the roll target is not pending whether or not the pin names that same snapshot.
   users='[{"id":"gh_8","machine":{"state":"awake","sandbox_id":"s4","snapshot":"new","pinned_snapshot":"new","upgrade":{"in_progress":false}}}]'
   [[ -z "$(pending_boxes new all)" ]] || { echo "selftest: a box on the target must not be pending" >&2; return 1; }
+  # finish_roll with only satisfied pins left (2026-11-04, 0.1.192): the roll is deployed, so
+  # agentd.deployed-sha advances and agentd.rolling goes; a box still behind keeps the roll pending.
+  real_min_sha() { echo "$c"; }
+  users='[{"id":"test_pinned","machine":{"state":"awake","sandbox_id":"s1","snapshot":"pin","pinned_snapshot":"pin","upgrade":{"in_progress":false}}},
+          {"id":"gh_7","machine":{"state":"awake","sandbox_id":"s5","snapshot":"new","pinned_snapshot":null,"upgrade":{"in_progress":false}}}]'
+  printf 'sha=%s\nsnapshot=new\nat=0\n' "$b" > "$STATE/agentd.rolling"
+  finish_roll "$b" new >/dev/null || { echo "selftest: finish_roll with a satisfied pin must deploy" >&2; return 1; }
+  [[ "$(cat "$STATE/agentd.deployed-sha" 2>/dev/null)" == "$b" && ! -f "$STATE/agentd.rolling" ]] \
+    || { echo "selftest: finish_roll did not record the deploy" >&2; return 1; }
+  users='[{"id":"gh_7","machine":{"state":"awake","sandbox_id":"s5","snapshot":"old","pinned_snapshot":null,"upgrade":{"in_progress":false}}}]'
+  finish_roll "$m" new >/dev/null && { echo "selftest: finish_roll with a box behind must not deploy" >&2; return 1; }
+  [[ "$(sed -n 's/^sha=//p' "$STATE/agentd.rolling")" == "$m" ]] || { echo "selftest: finish_roll must leave the roll pending" >&2; return 1; }
+  # The hold stops every roll pass, the 15-minute roll-continue included (2026-11-04: the scheduled
+  # pass ran under a hold). Held: no unit starts, roll_continue moves no box, and the retry clock
+  # restarts so a long hold logs once per ROLL_RETRY_EVERY_S rather than every tick.
+  local started="$t/started" passes="$t/passes"
+  roll_unit_running() { return 1; }
+  systemctl() { :; }
+  systemd-run() { echo "$*" >> "$started"; }
+  need_root() { :; }
+  ensure_repo() { :; }
+  quota_headroom_or_wait() { return 0; }
+  roll_pass() { echo "$1" >> "$passes"; }
+  sleep() { :; }
+  printf 'sha=%s\nsnapshot=new\nat=0\n' "$b" > "$STATE/agentd.rolling"
+  hold_agentd "$b" 0.1.0 "selftest hold" >/dev/null
+  continue_roll_if_due >/dev/null
+  [[ ! -s "$started" ]] || { echo "selftest: continue_roll_if_due started a unit under the hold" >&2; return 1; }
+  [[ "$(sed -n 's/^at=//p' "$STATE/agentd.rolling")" -gt 0 ]] || { echo "selftest: a held roll must restart its retry clock" >&2; return 1; }
+  roll_continue >/dev/null
+  [[ ! -s "$passes" ]] || { echo "selftest: roll_continue ran a pass under the hold" >&2; return 1; }
+  rm -f "$(agentd_hold_file)"
+  sed -i 's/^at=.*/at=0/' "$STATE/agentd.rolling"
+  continue_roll_if_due >/dev/null
+  [[ "$(grep -c roll-continue "$started" 2>/dev/null)" == 1 ]] || { echo "selftest: continue_roll_if_due must start a unit once the hold is off" >&2; return 1; }
+  roll_continue >/dev/null
+  [[ "$(cat "$passes" 2>/dev/null)" == new ]] || { echo "selftest: roll_continue must run a pass once the hold is off" >&2; return 1; }
   echo "selftest ok"
 }
 
