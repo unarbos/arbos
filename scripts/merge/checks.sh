@@ -115,6 +115,17 @@ commit_files() {
   rd "repos/$R/commits/$1" --jq '.files[]?.filename'
 }
 
+# files_capped <files>: 0 when the listing is at GitHub's 300-file cap, and so cannot be trusted to
+# contain the gated path.
+#
+# A function rather than an inline comparison because a guard that is only ever grepped for is not
+# a guard that is tested: the digits "300" survive in the BLOCKED message even after the
+# comparison is gone, so a source-level assertion passes against the broken state. This is
+# callable, so the cases can hand it 299, 300 and 301 files and watch what it does.
+files_capped() {
+  [ "$(printf '%s\n' "$1" | grep -c .)" -ge 300 ]
+}
+
 # gate_state <workflow> <sha>: one line — PASS <detail> | RED <detail> | NOVERDICT <detail> |
 # PENDING <detail> | NONE | BLOCKED <what could not be read>.
 #
@@ -213,8 +224,14 @@ gate_applies() {
 # so the message can say which, and so "wait" does not read as "wrong".
 #
 # <files> is the newline-separated diff for this head, from pr_files or commit_files.
+#
+# GATES_APPLIED is set to the number of gates that actually applied. A caller needs it to tell the
+# two very different states that both return 0 apart: "every gate that applies passed" and "no gate
+# applies, so nothing was tested here". Reporting both as a bare success is what let a head with
+# all of CI queued read as satisfied.
 require_gates() {
   local sha=$1 files=$2 wf name phead pbase pats state rc=0
+  GATES_APPLIED=0
   # GitHub's head_sha run filter matches the full 40-character sha only. An abbreviated one is not
   # an error: it returns total_count 0, which gate_state would report as "no run exists for this
   # sha at all". That is this file's own bug one level down — "nothing is there" standing in for
@@ -237,6 +254,7 @@ require_gates() {
       1) echo "    required check '$name' on ${sha:0:9}: $state"; continue ;;
       2) echo "    required check '$name' on ${sha:0:9}: $state"; rc=2; continue ;;
     esac
+    GATES_APPLIED=$((GATES_APPLIED + 1))
     state=$(gate_state "$wf" "$sha")
     case "$state" in
       PASS*)    echo "    required check '$name' on ${sha:0:9}: $state" ;;
@@ -306,5 +324,79 @@ verdict_clears_go() {
   case "$1" in
     NOMAC | NOPATH) return 0 ;;
     *) return 1 ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+# The same shape again, for stack_chain. These live here for the same two
+# reasons verdict_class does: merge-window.sh runs its dispatcher when sourced,
+# so selftest.sh cannot reach anything defined there, and a classification that
+# only exists as a caller's `case` is one that drifts from its second caller.
+#
+# Why it needs classifying at all. A pull request based on a branch does not
+# merge into main, so a clean reading of its own diff is accurate and partial
+# at the same time. The base chain is what completes it — and a chain that
+# cannot be walked completes nothing, which is a refusal rather than a pass.
+
+# stack_class <chain-line> <pr>: one word for a stack_chain result.
+#
+#   BLOCKED     a read failed, so the chain is unknown rather than absent
+#   SELF        based on main — this head's own reading IS the whole story
+#   ROOT        a real stack, terminating at a pull request based on main
+#   UNRESOLVED  a base branch that no open pull request produces
+#   CYCLE/DEPTH the walk does not terminate
+#   UNKNOWN     a chain shape nobody has reasoned about
+stack_class() {
+  case "$1" in BLOCKED*) echo BLOCKED; return ;; esac
+  local last; last=$(printf '%s' "$1" | awk '{print $NF}')
+  case "$last" in
+    UNRESOLVED:*) echo UNRESOLVED ;;
+    CYCLE)        echo CYCLE ;;
+    DEPTH)        echo DEPTH ;;
+    "$2")         echo SELF ;;
+    ''|*[!0-9]*)  echo UNKNOWN ;;
+    *)            echo ROOT ;;
+  esac
+}
+
+# stack_refuses <class>: 0 when the stack reading on its own must refuse.
+#
+# UNKNOWN refuses, for the reason everything in this file refuses on an
+# unrecognised word: forgetting to register a new shape costs a false refusal
+# and never a false pass. BLOCKED is deliberately not in the refusing set — it
+# refuses too, but its caller reports it as BLOCKED, so the reader is sent to
+# the failed read rather than to the stack.
+stack_refuses() {
+  case "$1" in
+    UNRESOLVED | CYCLE | DEPTH | UNKNOWN) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# result_line <rc> <gates-applied>: the one line a reader actually acts on.
+#
+# Here, and callable, for the same reason as everything else in this section: a
+# message asserted by grepping the caller is a message no case can really test.
+# The first version of the vacuous-pass case grepped checks() for the phrase,
+# and the phrase occurs twice there — once for the head and once for the stack
+# root — so a mutation that reverted the head's line survived behind the root's.
+#
+# rc=0 has TWO readings and that is the whole point of this function. "Every
+# gate that applies has passed" and "no gate applies, so nothing ran" are the
+# same exit code and very different facts, and collapsing them into one
+# sentence is what let a head with all of CI queued read as satisfied.
+result_line() {
+  case "$1" in
+    0) if [ "${2:-0}" -eq 0 ]; then
+         echo "SATISFIED VACUOUSLY — no path-filtered gate applies to this head, so none of them ran and none of them had to. This is NOT 'this head is green': require_gates reads only the gates in its GATES list and never looks at the always-on CI workflow (ci.yml), so CI may be queued, running or red right now."
+       else
+         echo "SATISFIED — every path-filtered gate that applies to this head ($2 of them) has a successful run on it. CI (ci.yml) is not among the gates read here, so this says nothing about CI."
+       fi ;;
+    1) echo "REFUSE — a gate that applies to this head has no successful run on it, or what reaches main cannot be determined" ;;
+    2) echo "BLOCKED — a gate could not be read, so nothing is inferred" ;;
+    3) echo "WAIT — a gate that applies to this head is still running" ;;
+    # An unrecognised code is not a pass. require_gates returns 0..3 today, so
+    # this arm is reachable only by a fourth code added without reading here.
+    *) echo "BLOCKED — unrecognised result code '$1', so nothing is inferred" ;;
   esac
 }
