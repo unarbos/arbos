@@ -1809,6 +1809,10 @@ mod glass_contrast_tests {
                 // card: `me.rs` `seg_row` wraps the pills in a `field_fill`
                 // capsule with a `field_border` rim. Measured off a shot of
                 // the Appearance page: card 35, rim 36, track 24, pill 92.
+                // Whoever repaints that `seg_row` must repoint this with it —
+                // a surface that no longer paints the track leaves the floor
+                // measuring a pair that is not on screen, and it goes on
+                // passing while it does.
                 (
                     "settings segment",
                     theme.segment_on_fill(),
