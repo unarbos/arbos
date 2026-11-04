@@ -1162,6 +1162,14 @@ mod chrome_tests {
 /// selected tab used to draw [`gpui::FontWeight::SEMIBOLD`], so it was wider
 /// than the same tab unselected, and moving the selection slid every tab
 /// after it sideways. These tests render the real [`tab_face`] and measure it.
+///
+/// **What this cannot prove.** GPUI's headless shaper measures every weight
+/// the same — a probe that lays the row out at `SEMIBOLD` and at `NORMAL`
+/// returns boxes that match to 0 pt. So the render tests here pin the box
+/// rule (padding, gap, height, and that none of them reads the selection);
+/// the text metric itself is proved on the iPhone, where `PaneTabsLayoutTests`
+/// measures real CoreText, and on the Linux Xvfb shots, which shape with the
+/// real Inter faces.
 #[cfg(test)]
 mod tab_tests {
     use gpui::{div, prelude::*, px, FontWeight, TestAppContext};
@@ -1263,28 +1271,6 @@ mod tab_tests {
                 assert!(*w > 2.0 * TAB_PAD_X, "{name}: {w} is narrower than its padding");
             }
         }
-    }
-
-    /// The test above is not vacuous: with the old selected-is-semibold rule
-    /// the same rows did move. This is the bug Jacob reported, measured.
-    #[gpui::test]
-    fn the_old_semibold_rule_did_move_the_row(cx: &mut TestAppContext) {
-        set_theme(cx);
-        let mut worst: f32 = 0.0;
-        for tabs in ROWS {
-            for selected in 0..tabs.len() {
-                let now = boxes(cx, tabs, selected, Some(TAB_WEIGHT));
-                let before = boxes(cx, tabs, selected, Some(FontWeight::SEMIBOLD));
-                // Only the selected tab went bold, so compare that one's width.
-                let shift = before[selected].1 - now[selected].1;
-                worst = worst.max(shift.abs());
-            }
-        }
-        assert!(
-            worst > 0.5,
-            "semibold and {TAB_WEIGHT:?} render the same width ({worst} pt), so \
-             `moving_the_selection_moves_no_tab` proves nothing"
-        );
     }
 
     /// One weight across the row, and it is the unselected one: the capsule
