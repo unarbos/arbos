@@ -116,6 +116,12 @@ jobs:
           set -euo pipefail
           cd "$APP_DIR"
           fastlane test
+      - name: TEMPORARY - fail on purpose to exercise the crash-evidence steps (remove before merge)
+        run: |
+          bash -c 'kill -SEGV $$' || true
+          sleep 15
+          echo "deliberate failure: verifying the if: failure() crash-evidence upload"
+          exit 1
       - name: Keep the xcodebuild logs
         if: always()
         uses: actions/upload-artifact@v4
