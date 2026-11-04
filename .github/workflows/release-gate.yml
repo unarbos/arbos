@@ -104,9 +104,8 @@ jobs:
       # report a pass. Exit 2, never 0.
       - name: Can this run decide anything?
         env:
-          # TEMPORARY, reverted in the next commit: exactly what workflow_dispatch supplied.
-          GATE_BASE_REF: ""
-          GATE_HEAD_SHA: ""
+          GATE_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          GATE_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: scripts/release/gate-can-decide.sh
       # The phone side reads ios.yml's path filter with a real YAML parser rather than a
       # hand-rolled one, so a filter this gate cannot parse is loud instead of silently empty.
@@ -117,9 +116,8 @@ jobs:
       - name: Does merging this collapse two fixes into one release?
         env:
           GH_TOKEN: ${{ github.token }}
-          # TEMPORARY, reverted in the next commit: exactly what workflow_dispatch supplied.
-          GATE_BASE_REF: ""
-          GATE_HEAD_SHA: ""
+          GATE_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          GATE_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
           # The same screen again, and the values come out of it rather than out of the event, so
@@ -164,9 +162,8 @@ jobs:
       # screen goes here too, and every job in this file refuses the same events.
       - name: Can this run decide anything?
         env:
-          # TEMPORARY, reverted in the next commit: exactly what workflow_dispatch supplied.
-          GATE_BASE_REF: ""
-          GATE_HEAD_SHA: ""
+          GATE_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          GATE_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: scripts/release/gate-can-decide.sh
       - uses: actions/setup-python@v5
         with:
