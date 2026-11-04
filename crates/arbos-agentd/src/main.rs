@@ -30,6 +30,8 @@ mod mcp;
 mod media;
 mod memory;
 mod people;
+#[cfg(test)]
+mod promise_tests;
 mod relay_error;
 #[cfg(test)]
 mod relay_turn_tests;
