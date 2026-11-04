@@ -134,45 +134,29 @@ impl InspectQuery {
     }
 }
 
-/// Who may see what. `Err` is the 403/404 to answer with.
-pub fn scope(
-    state: &AppState,
-    principal: &Principal,
-    project: &Project,
-) -> Result<Scope, Box<Response>> {
-    if state.owns(principal, &project.id) {
-        return Ok(Scope::Owner);
-    }
-    let Principal::Device { user_id, .. } = principal else {
-        return Err(Box::new(api_error(
-            StatusCode::FORBIDDEN,
-            "forbidden",
-            "not your agent",
-        )));
-    };
-    Err(Box::new(api_error(
-        StatusCode::FORBIDDEN,
-        "forbidden",
-        format!(
-            "not your agent: name a chat you share with it (`chat=`) to see its rows there (user {user_id})"
-        ),
-    )))
+/// The one answer for an agent the caller may not inspect: the answer a name nobody holds gets.
+/// While the two differed — `403 not your agent` for a name another owner held against `404 no
+/// such project` for a free one — these two routes told any signed-in caller which agent names
+/// were taken (`api::no_such_project`, reported 2026-11-02).
+fn hidden() -> Box<Response> {
+    Box::new(api_error(
+        StatusCode::NOT_FOUND,
+        "not_found",
+        "no such project",
+    ))
 }
 
 /// Member scope for a named chat: a people chat the caller is in with the agent in it, or a
-/// project chat of a project the caller is a guest of.
-pub fn member_scope(
+/// project chat of a project the caller is a guest of. `None` is "not a caller this chat opens
+/// the agent to", which reads as [`hidden`].
+fn member_scope(
     state: &AppState,
     principal: &Principal,
     project: &Project,
     chat: &str,
-) -> Result<Scope, Box<Response>> {
+) -> Option<Scope> {
     let Principal::Device { user_id, .. } = principal else {
-        return Err(Box::new(api_error(
-            StatusCode::FORBIDDEN,
-            "forbidden",
-            "not your agent",
-        )));
+        return None;
     };
     if state.db.people_chat(chat).ok().flatten().is_some() {
         let members = state.db.members_of(chat).unwrap_or_default();
@@ -182,16 +166,9 @@ pub fn member_scope(
         let agent_in = members
             .iter()
             .any(|m| m.project_id() == Some(project.id.as_str()));
-        if me_in && agent_in {
-            return Ok(Scope::Member {
-                chat: chat.to_owned(),
-            });
-        }
-        return Err(Box::new(api_error(
-            StatusCode::FORBIDDEN,
-            "forbidden",
-            "you and this agent are not both in that chat",
-        )));
+        return (me_in && agent_in).then(|| Scope::Member {
+            chat: chat.to_owned(),
+        });
     }
     let project_chat = state
         .db
@@ -199,16 +176,38 @@ pub fn member_scope(
         .ok()
         .flatten()
         .is_some_and(|p| p == project.id);
-    if project_chat && state.allows(principal, &project.id) {
-        return Ok(Scope::Member {
-            chat: chat.to_owned(),
-        });
-    }
-    Err(Box::new(api_error(
-        StatusCode::FORBIDDEN,
-        "forbidden",
-        "no such shared chat with this agent",
-    )))
+    (project_chat && state.allows(principal, &project.id)).then(|| Scope::Member {
+        chat: chat.to_owned(),
+    })
+}
+
+/// The agent named in the path and what this caller may see of it. The owner reads everything;
+/// anyone else has to name a chat they share with the agent. Every other caller — including one
+/// who names a chat that is not shared — gets [`hidden`], so none of them can tell an agent
+/// that is not theirs from one that is not there.
+fn project_and_scope(
+    state: &AppState,
+    principal: &Principal,
+    id_or_name: &str,
+    chat: Option<&str>,
+) -> Result<(Project, Scope), Box<Response>> {
+    let project = match state.db.project(id_or_name) {
+        Ok(Some(p)) => p,
+        Ok(None) => return Err(hidden()),
+        Err(e) => {
+            return Err(Box::new(api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db",
+                e.to_string(),
+            )))
+        }
+    };
+    let scope = state
+        .owns(principal, &project.id)
+        .then_some(Scope::Owner)
+        .or_else(|| member_scope(state, principal, &project, chat?))
+        .ok_or_else(hidden)?;
+    Ok((project, scope))
 }
 
 /// The events of one page plus the cursor bookkeeping (see module docs).
@@ -489,7 +488,7 @@ fn iso(ms: i64) -> String {
 }
 
 /// `format=md`: the shape the feedback rollout uses, for a bot's context window.
-fn render_markdown(body: &Value) -> String {
+pub(crate) fn render_markdown(body: &Value) -> String {
     let mut out = String::new();
     let ident = &body["identity"];
     out.push_str(&format!(
@@ -564,24 +563,40 @@ pub async fn project_inspect(
     Path(id): Path<String>,
     Query(raw): Query<HashMap<String, String>>,
 ) -> Response {
-    let project = match state.db.project(&id) {
-        Ok(Some(p)) => p,
-        Ok(None) => return api_error(StatusCode::NOT_FOUND, "not_found", "no such project"),
-        Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
-    };
     let mut q = InspectQuery::parse(&raw);
-    let scope = match (scope(&state, &principal, &project), q.chat.as_deref()) {
-        (Ok(s), _) => s,
-        (Err(_), Some(chat)) => match member_scope(&state, &principal, &project, chat) {
-            Ok(s) => s,
-            Err(r) => return *r,
-        },
-        (Err(r), None) => return *r,
+    let (project, scope) = match project_and_scope(&state, &principal, &id, q.chat.as_deref()) {
+        Ok(v) => v,
+        Err(r) => return *r,
     };
     if let Scope::Member { chat } = &scope {
         q.chat = Some(chat.clone());
     }
-    let box_result = box_page(&state, &project, &q).await;
+    let body = window(&state, &project, &scope, &q).await;
+    if q.markdown {
+        (
+            [(header::CONTENT_TYPE, "text/markdown; charset=utf-8")],
+            render_markdown(&body),
+        )
+            .into_response()
+    } else {
+        Json(body).into_response()
+    }
+}
+
+/// The agent's window itself, with authorisation already settled by the caller.
+///
+/// Split out of [`project_inspect`] so a caller that resolves its own authority can reuse the
+/// exact same window rather than assembling a second, drifting one. The agent access link is
+/// such a caller: it is not a [`Principal`], so it cannot go through `project_and_scope`, and a
+/// debugging view that disagreed with the owner's own would be worse than no view at all.
+/// Nothing here consults the caller's identity — `scope` is the whole of that decision.
+pub(crate) async fn window(
+    state: &AppState,
+    project: &Project,
+    scope: &Scope,
+    q: &InspectQuery,
+) -> Value {
+    let box_result = box_page(state, project, q).await;
     let box_ok = box_result.is_ok();
     let (bs, bs_since) = state.box_state(&project.user_id).await;
     let agentd = state.db.box_agentd(&project.user_id).ok().flatten();
@@ -626,13 +641,13 @@ pub async fn project_inspect(
             "handle": crate::people::agent_slug(&project.name), "live": false,
         });
     }
-    let mut relay = relay_events(&state, &project, &q, &scope, box_ok);
+    let mut relay = relay_events(state, project, q, scope, box_ok);
     // The box stopped at its own cursor: nothing newer from the relay may come first.
     if let Some(cut_at) = box_cursor {
         relay.retain(|e| e["at"].as_i64().unwrap_or(0) <= cut_at);
     }
     events.append(&mut relay);
-    if let Scope::Member { .. } = &scope {
+    if let Scope::Member { .. } = scope {
         events.retain(|e| MEMBER_KINDS.contains(&e["kind"].as_str().unwrap_or("")));
         if let Some(o) = identity.as_object_mut() {
             o.retain(|k, _| {
@@ -644,10 +659,10 @@ pub async fn project_inspect(
         }
         turn = json!({ "running": turn["running"] });
     }
-    let (events, next_cursor, truncated) = cut(events, &q);
-    let body = json!({
+    let (events, next_cursor, truncated) = cut(events, q);
+    json!({
         "project_id": project.id,
-        "scope": match &scope { Scope::Owner => "owner", Scope::Member { .. } => "member" },
+        "scope": match scope { Scope::Owner => "owner", Scope::Member { .. } => "member" },
         "chat": q.chat,
         "since": q.since,
         "next_cursor": next_cursor,
@@ -657,16 +672,7 @@ pub async fn project_inspect(
         "identity": identity,
         "turn": turn,
         "events": events,
-    });
-    if q.markdown {
-        (
-            [(header::CONTENT_TYPE, "text/markdown; charset=utf-8")],
-            render_markdown(&body),
-        )
-            .into_response()
-    } else {
-        Json(body).into_response()
-    }
+    })
 }
 
 /// `GET /projects/{id}/jobs/{job_id}?after=<seq>[&chat=<id>]` — the rollout view's document for
@@ -681,19 +687,11 @@ pub async fn project_job(
     Path((id, job_id)): Path<(String, String)>,
     Query(raw): Query<HashMap<String, String>>,
 ) -> Response {
-    let project = match state.db.project(&id) {
-        Ok(Some(p)) => p,
-        Ok(None) => return api_error(StatusCode::NOT_FOUND, "not_found", "no such project"),
-        Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
-    };
-    let scope = match (scope(&state, &principal, &project), raw.get("chat")) {
-        (Ok(s), _) => s,
-        (Err(_), Some(chat)) => match member_scope(&state, &principal, &project, chat) {
-            Ok(s) => s,
+    let (project, scope) =
+        match project_and_scope(&state, &principal, &id, raw.get("chat").map(String::as_str)) {
+            Ok(v) => v,
             Err(r) => return *r,
-        },
-        (Err(r), None) => return *r,
-    };
+        };
     let after = raw
         .get("after")
         .and_then(|s| s.parse::<i64>().ok())
@@ -853,18 +851,22 @@ mod tests {
         chat.id
     }
 
+    /// A stranger is told nothing but the answer a name nobody holds gets, because the two
+    /// answers used to differ and so listed the agents on the relay (`module_lookup_tests`).
     #[tokio::test]
-    async fn other_users_agent_is_forbidden_without_a_shared_chat() {
+    async fn other_users_agent_is_not_there_without_a_shared_chat() {
         let state = test_state(AuthMode::Github);
         let (owner, _) = person(&state, 1);
         let (_, stranger) = person(&state, 2);
         let project = project_of(&state, &owner, "GigChad");
         let (status, body) = call(&state, &stranger, &project, &[]).await;
-        assert_eq!(status, StatusCode::FORBIDDEN);
-        assert_eq!(body["error"]["type"], "forbidden");
-        // Naming a chat they are not in does not help.
-        let (status, _) = call(&state, &stranger, &project, &[("chat", "nope")]).await;
-        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["type"], "not_found");
+        assert_eq!(body["error"]["message"], "no such project");
+        // Naming a chat they are not in does not help, and does not say so either.
+        let (status, named) = call(&state, &stranger, &project, &[("chat", "nope")]).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(named["error"], body["error"]);
     }
 
     #[tokio::test]
@@ -951,9 +953,10 @@ mod tests {
             "no box facts for a member"
         );
         assert!(body["identity"].get("talking_model").is_none());
-        // A member must name the chat.
+        // A member must name the chat; without one they hear the same nothing a stranger does,
+        // since the route cannot tell the two apart before it knows the chat.
         let (status, _) = call(&state, &guest_dev, &project, &[]).await;
-        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

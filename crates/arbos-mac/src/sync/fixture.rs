@@ -93,6 +93,8 @@ struct Shared {
     shell_grants: Mutex<HashMap<Id, Vec<crate::model::ShellGrant>>>,
     /// Settings → Devices: this account's signed-in devices (this Mac first).
     devices: Mutex<Vec<DeviceView>>,
+    /// Settings → Agent access link: every agent token of the account.
+    agent_links: Mutex<Vec<crate::model::AgentLinkView>>,
     routines: Mutex<Vec<Routine>>,
     routine_runs: Mutex<HashMap<Id, Vec<RoutineRun>>>,
     local: Mutex<LocalView>,
@@ -156,6 +158,7 @@ impl SyncSource for FixtureSource {
                 secrets: Mutex::new(seed_secrets()),
                 shell_grants: Mutex::new(seed_shell_grants()),
                 devices: Mutex::new(seed_devices()),
+                agent_links: Mutex::new(seed_agent_links()),
                 routines: Mutex::new(seed_routines()),
                 routine_runs: Mutex::new(seed_routine_runs()),
                 local: Mutex::new(seed_local()),
@@ -2329,6 +2332,48 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             crate::ui::devices::remove_other(&mut shared.devices.lock().unwrap(), &id);
             emit_devices(shared);
         }
+        ClientCommand::AgentLinksRefresh => emit_agent_links(shared),
+        ClientCommand::AgentLinkMint {
+            label,
+            scope,
+            ttl_hours,
+        } => {
+            let now = now_ms() as i64;
+            let id = format!("lnk-fx-{now}");
+            shared.agent_links.lock().unwrap().insert(
+                0,
+                crate::model::AgentLinkView {
+                    id,
+                    origin: "link".into(),
+                    label: label.clone(),
+                    scope: scope.to_owned(),
+                    created_at: now,
+                    expires_at: Some(now + ttl_hours * 3_600_000),
+                    opened_at: None,
+                    revoked_at: None,
+                    last_seen_at: None,
+                    live: true,
+                    state: "waiting".into(),
+                    note: None,
+                },
+            );
+            let _ = shared.events.send(SyncEvent::AgentLinkMinted(Ok(
+                crate::model::AgentLinkReveal {
+                    // The shape the relay returns, so the sheet shortens a
+                    // real URL rather than a stand-in that happens to fit.
+                    url: "https://relay.arbos.life/agent-link/open/Kq2vB7xZ9kT2vQ".into(),
+                    label,
+                    scope: scope.to_owned(),
+                    expires_in: crate::ui::agent_links::expiry_label(ttl_hours).to_owned(),
+                    copied: false,
+                },
+            )));
+            emit_agent_links(shared);
+        }
+        ClientCommand::AgentLinkRevoke { id } => {
+            crate::ui::agent_links::remove(&mut shared.agent_links.lock().unwrap(), &id);
+            emit_agent_links(shared);
+        }
         ClientCommand::ProjectSecretsRefresh { project_id } => {
             let view = shared.secrets.lock().unwrap().clone();
             let items = view
@@ -3031,8 +3076,62 @@ fn emit_devices(shared: &Shared) {
     let _ = shared.events.send(SyncEvent::Devices(Ok(list)));
 }
 
+fn emit_agent_links(shared: &Shared) {
+    let list = shared.agent_links.lock().unwrap().clone();
+    let _ = shared.events.send(SyncEvent::AgentLinks(Ok(list)));
+}
+
+/// The approved mockup's three rows: a reply-as-me link an agent is using, a
+/// read-only link nobody has opened, and the migrated `GrokBot-Arbos` reader
+/// token — the `kind: "reader"` device that used to sit under Settings →
+/// Devices, here under its own name with the same "read only" tag a new
+/// read-only link wears.
+pub fn seed_agent_links() -> Vec<crate::model::AgentLinkView> {
+    let now = now_ms() as i64;
+    let link = |id: &str, label: &str, scope: &str| crate::model::AgentLinkView {
+        id: id.into(),
+        origin: "link".into(),
+        label: label.into(),
+        scope: scope.into(),
+        created_at: now - 2 * 24 * 3_600_000,
+        expires_at: Some(now + 5 * 24 * 3_600_000),
+        opened_at: None,
+        revoked_at: None,
+        last_seen_at: None,
+        live: true,
+        state: "waiting".into(),
+        note: None,
+    };
+    vec![
+        crate::model::AgentLinkView {
+            opened_at: Some(now - 3 * 3_600_000),
+            last_seen_at: Some(now - 2 * 3_600_000),
+            state: "in_use".into(),
+            ..link("lnk-fx-claude", "Jacob's Claude", "reply")
+        },
+        link("lnk-fx-codex", "Codex debugger", "read"),
+        crate::model::AgentLinkView {
+            origin: "export".into(),
+            created_at: now - 9 * 24 * 3_600_000,
+            // A reader token never expires, which is one reason it is not
+            // pretended to be a link.
+            expires_at: None,
+            opened_at: Some(now - 9 * 24 * 3_600_000),
+            last_seen_at: Some(now - 3 * 24 * 3_600_000),
+            state: "in_use".into(),
+            note: Some(
+                "This token predates agent links: it never expires and keeps no activity record."
+                    .into(),
+            ),
+            ..link("dev-fx-grokbot", "GrokBot-Arbos", "read")
+        },
+    ]
+}
+
 /// Three devices: this Mac (current), an iPhone seen an hour ago, and a
-/// read-only Grok Bot reader (`kind: "reader"`) from last week.
+/// read-only Grok Bot reader (`kind: "reader"`) from last week. The reader is
+/// seeded because the relay still holds it as a `devices` row; the Devices
+/// page leaves it out, and Agent access link lists it instead.
 pub fn seed_devices() -> Vec<DeviceView> {
     let now = now_ms() as i64;
     vec![

@@ -342,6 +342,11 @@ extension AppModel {
         if let spec = DebugHooks.perfOpens {
             Task { await fixtureOpens(spec) }
         }
+        if DebugHooks.fixtureMachineWaking {
+            machine.state = .waking
+            machine.since = nowMs()
+            Task { await fixtureWakes() }
+        }
         // `ARBOS_FIXTURE_DOC=<path>`: the fixture group becomes a real chat doc (a Loro
         // snapshot exported from the relay), so the transcript has the true shape —
         // members, avatars, mentions, replies, media, system rows (long-chat perf rig).
@@ -532,6 +537,18 @@ extension AppModel {
         ]
         link = .live
         seedFixtureSecrets(now: now)
+        if let delay = DebugHooks.fixtureRowsDelayMs {
+            let held = messages
+            messages = held.mapValues { _ in [] }
+            Task { await fixtureDelayRows(held, ms: delay) }
+        }
+    }
+
+    /// `ARBOS_FIXTURE_ROWS_DELAY=<ms>`: hand every chat its rows that long after launch, so a
+    /// chat opened before then is on screen when they land.
+    private func fixtureDelayRows(_ held: [Id: [Message]], ms: Int) async {
+        try? await Task.sleep(nanoseconds: UInt64(max(0, ms)) * 1_000_000)
+        messages = held
     }
 
     /// Settings → Secrets demo (D83), the Mac fixture's twin: a Stripe key for Affine and
@@ -1009,6 +1026,14 @@ extension AppModel {
             }
             try? await Task.sleep(nanoseconds: 2_000_000_000)
         }
+    }
+
+    /// `ARBOS_FIXTURE_MACHINE=waking`: the box reaches awake 3 s after launch, so the transcript's
+    /// waking banner leaves while a chat is already on screen.
+    private func fixtureWakes() async {
+        try? await Task.sleep(nanoseconds: 3_000_000_000)
+        machine.state = .awake
+        machine.since = nowMs()
     }
 
     /// `ARBOS_PERF_OPENS=<chat>[,<chat>…]:<n>` (perf baseline): from 6 s after launch, n chat

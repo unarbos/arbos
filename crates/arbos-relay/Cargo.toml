@@ -32,6 +32,7 @@ sha2.workspace = true
 hex.workspace = true
 nix.workspace = true
 base64.workspace = true
+url.workspace = true
 rand.workspace = true
 aes-gcm = "0.10"
 hmac = "0.12"

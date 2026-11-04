@@ -88,6 +88,27 @@ jobs:
           ./scripts/build-xcframework.sh
           test -d packages/ArbosFFI/ArbosFFIRust.xcframework
           test -f packages/ArbosFFI/Sources/ArbosFFI/ArbosFFI.swift
+      # The hosted image does not always carry the iPhone 17 simulator runtime, and the lanes' old
+      # hardcoded `name=iPhone 17` destination then failed xcodebuild in ~12 s with "Unable to find a
+      # device matching the provided destination specifier" (run 41598907652 on main). Name a device
+      # this runner actually has: iPhone 17 when it is there, else the newest available iPhone.
+      - name: Pick an available simulator
+        run: |
+          set -euo pipefail
+          name="$(xcrun simctl list devices available --json | python3 -c '
+          import json, re, sys
+          names = {d["name"] for devices in json.load(sys.stdin)["devices"].values() for d in devices}
+          iphones = [n for n in names if n.startswith("iPhone")]
+          if not iphones:
+              sys.exit("no iPhone simulator is available on this runner")
+          def newest(name):
+              model = re.search(r"[0-9]+", name)
+              # Highest model number first, and the plain model ahead of its Pro / Plus variants.
+              return (int(model.group()) if model else 0, -len(name))
+          print("iPhone 17" if "iPhone 17" in iphones else max(iphones, key=newest))
+          ')"
+          echo "ARBOS_SIM_NAME=$name" >> "$GITHUB_ENV"
+          echo "simulator for the test lane: $name"
       - name: fastlane test
         env:
           ARBOS_SPM_DIR: ${{ github.workspace }}/apps/ios/Arbos/build/spm

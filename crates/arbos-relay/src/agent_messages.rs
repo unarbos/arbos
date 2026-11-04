@@ -137,10 +137,7 @@ pub async fn send(
     Path(id): Path<String>,
     Json(b): Json<SendBody>,
 ) -> ApiResult {
-    let sender_id = resolve_project_id(&state, &id)?;
-    if !state.allows(&principal, &sender_id) {
-        return Err(forbidden("not your project"));
-    }
+    let sender_id = resolve_project_id(&state, &principal, &id)?;
     let sender = state
         .db
         .project(&sender_id)
@@ -181,8 +178,11 @@ pub async fn send(
     let target_id = match resolve_target(&b.to, &candidates) {
         Resolve::One(id) => id,
         Resolve::None => {
-            // An exact id of another owner's agent that did not grant: refuse, not "unknown".
-            if let Ok(Some(p)) = state.db.project(b.to.trim()) {
+            // An exact id of another owner's agent that did not grant: refuse, not "unknown",
+            // so an agent that already holds the id is told why it is getting nowhere. By id
+            // only — `db.project` also matches on name, and answering this way for a name
+            // would turn the route into a list of every agent name on the relay.
+            if let Ok(Some(p)) = state.db.project_by_id(b.to.trim()) {
                 if p.id != sender.id && p.user_id != sender.user_id {
                     return Err(forbidden(format!(
                         "refused: {}'s owner has not allowed messages from your agents",
@@ -364,10 +364,7 @@ pub async fn reply(
     Path((id, mid)): Path<(String, String)>,
     Json(b): Json<ReplyBody>,
 ) -> ApiResult {
-    let target_id = resolve_project_id(&state, &id)?;
-    if !state.allows(&principal, &target_id) {
-        return Err(forbidden("not your project"));
-    }
+    let target_id = resolve_project_id(&state, &principal, &id)?;
     let row = state
         .db
         .agent_message(&mid)
@@ -461,10 +458,7 @@ pub async fn list_grants(
     principal: Principal,
     Path(id): Path<String>,
 ) -> ApiResult {
-    let pid = resolve_project_id(&state, &id)?;
-    if !state.allows(&principal, &pid) {
-        return Err(forbidden("not your project"));
-    }
+    let pid = resolve_project_id(&state, &principal, &id)?;
     let project = state
         .db
         .project(&pid)
@@ -500,7 +494,7 @@ pub async fn put_grant(
     Path(id): Path<String>,
     Json(b): Json<GrantBody>,
 ) -> ApiResult {
-    let pid = resolve_project_id(&state, &id)?;
+    let pid = resolve_project_id(&state, &principal, &id)?;
     let project = state
         .db
         .project(&pid)
@@ -532,7 +526,7 @@ pub async fn delete_grant(
     principal: Principal,
     Path((id, grantee)): Path<(String, String)>,
 ) -> ApiResult {
-    let pid = resolve_project_id(&state, &id)?;
+    let pid = resolve_project_id(&state, &principal, &id)?;
     let project = state
         .db
         .project(&pid)
@@ -552,9 +546,13 @@ fn normalize_grantee(state: &AppState, raw: &str) -> Result<String, (StatusCode,
         return Err(bad("grantee required"));
     }
     if let Some(rest) = raw.strip_prefix("project:") {
+        // By id. A grant names someone else's agent, so this is the one lookup that reaches
+        // across owners on purpose — and the reason it must not take a name, which would let
+        // the route be asked which names are taken. People are still named by `@handle`,
+        // which is a public thing to be.
         let p = state
             .db
-            .project(rest)
+            .project_by_id(rest.trim())
             .map_err(internal)?
             .ok_or((StatusCode::NOT_FOUND, "no such agent".to_owned()))?;
         return Ok(format!("project:{}", p.id));

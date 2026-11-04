@@ -946,12 +946,14 @@ mod tests {
             default_snapshot: Arc::new(std::sync::RwLock::new(String::new())),
             started_at: std::time::Instant::now(),
             restart: Arc::new(crate::state::RestartSignal::default()),
+            revocations: Arc::new(tokio::sync::watch::Sender::new(0)),
             voice_dispatched: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             voice_worker: Arc::new(tokio::sync::Mutex::new(None)),
             voice_inbox: crate::voice::VoiceInbox::default(),
             image_health: Arc::new(tokio::sync::Mutex::new(None)),
             client_seen: Arc::new(std::sync::Mutex::new(HashMap::new())),
             matrix: crate::matrix::Matrix::new(crate::matrix::Config::off()),
+            link_hub: Arc::new(crate::agent_link_stream::LinkHub::default()),
         }
     }
 

@@ -529,6 +529,13 @@ pub enum SyncEvent {
     Secrets(SecretsView),
     /// Settings → Devices: this account's signed-in devices, or why they could not be read.
     Devices(Result<Vec<DeviceView>, UserError>),
+    /// Settings → Agent access link: every agent token of the account, or why
+    /// the list could not be read (`GET /me/agent-links`).
+    AgentLinks(Result<Vec<crate::model::AgentLinkView>, UserError>),
+    /// A link was minted: the copy sheet's one URL, carried exactly once.
+    /// `Err` leaves the page as it was with the reason on it, because a mint
+    /// that half-worked would show a sheet with nothing to copy.
+    AgentLinkMinted(Result<crate::model::AgentLinkReveal, UserError>),
     /// One agent's secrets page (`GET /projects/{id}/secrets`).
     ProjectSecrets {
         project_id: Id,
@@ -1252,6 +1259,21 @@ pub enum ClientCommand {
     DevicesRefresh,
     /// Settings → Devices: sign another device out (`DELETE /auth/devices/{id}`).
     DeviceRevoke {
+        id: Id,
+    },
+    /// Settings → Agent access link opened or asked for a refresh
+    /// (`GET /me/agent-links`).
+    AgentLinksRefresh,
+    /// Mint one link (`POST /me/agent-links`). The answer carries the URL
+    /// once; nothing stores it.
+    AgentLinkMint {
+        label: String,
+        /// `read` | `reply`.
+        scope: &'static str,
+        ttl_hours: i64,
+    },
+    /// Revoke one agent token of either origin (`DELETE /me/agent-links/{id}`).
+    AgentLinkRevoke {
         id: Id,
     },
     /// An agent's Secrets page opened.
