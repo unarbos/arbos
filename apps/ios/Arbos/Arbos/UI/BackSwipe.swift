@@ -568,21 +568,26 @@ final class BackPopAnimator: NSObject, UIViewControllerAnimatedTransitioning {
             arrivingView.transform = .identity
             (layer.shadowColor, layer.shadowOpacity, layer.shadowRadius, layer.shadowOffset) = shadow
             let cancelled = context.transitionWasCancelled
+            // Whichever view this animator leaves behind, it takes out of the container
+            // itself. UIKit does not promise to tidy up after a transition it did not run,
+            // and a leftover full-screen view here is invisible — its content is gone — and
+            // solid to every touch.
             if cancelled {
-                // This animator put the arriving view into the container, so this animator
-                // takes it out again when the pop does not happen. UIKit does not promise to.
                 arrivingView.removeFromSuperview()
-                // The leaving screen is staying, so it goes back where it was.
-                leavingView.transform = .identity
+            } else {
+                leavingView.removeFromSuperview()
             }
             context.completeTransition(!cancelled)
-            if !cancelled {
-                // **After** the completion, and not before it. Until UIKit has taken this view
-                // out of the container it is still the screen the pop just removed, and putting
-                // it back at the origin lays a whole screen over the one that replaced it —
-                // invisible, because it has no content left, and solid to every touch.
-                leavingView.transform = .identity
-            }
+            // Last, and after the completion in both cases.
+            //
+            // On a cancel it has to be after: an identity written before `completeTransition`
+            // does not survive UIKit's own cancel handling. Gate run 41737758724 measured the
+            // cost — the chat came to rest a whole screen width right of where it belonged,
+            // `chat-back` at x 418 in a 402 pt window, having been set to identity moments
+            // earlier. On a pop the view is out of the container by now, so putting it back
+            // at the origin cannot cover the screen that replaced it, and leaves it clean for
+            // whenever SwiftUI shows that screen again.
+            leavingView.transform = .identity
             #if DEBUG
             BackSwipeTrace.note(cancelled ? "done:back" : "done:popped")
             #endif
