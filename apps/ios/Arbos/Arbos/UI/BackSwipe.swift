@@ -85,12 +85,14 @@ enum BackSwipe {
     /// register when you are over top a user pfp which is common but this should still
     /// register as the slide and only a direct click should go to the user profile screen").
     ///
-    /// Every avatar beside a bubble is a SwiftUI `Button` (`sender-avatar` → `toggleProfile`),
-    /// and a `Button` tracks its press with a recognizer that enters `.began` on touch-down —
-    /// that is how the pressed state draws. UIKit then lets that already-begun recognizer
-    /// prevent every later one that does not share the touch with it, so the swipe was
-    /// prevented at `lockDistance`, before it had decided anything: the finger was on a
-    /// picture, so the screen did not move.
+    /// Every avatar beside a bubble is a profile door (`sender-avatar` → `toggleProfile`), and
+    /// it was a SwiftUI `Button` when this was written. A `Button` tracks its press with a
+    /// recognizer that enters `.began` on touch-down — that is how the pressed state draws.
+    /// UIKit then lets that already-begun recognizer prevent every later one that does not
+    /// share the touch with it, so the swipe was prevented at `lockDistance`, before it had
+    /// decided anything: the finger was on a picture, so the screen did not move. The doors are
+    /// `TapGesture`s now (`Transcript.ProfileDoor`), which changes nothing here — a tap is
+    /// still not a pan, so it is still on the yes side of the call below.
     ///
     /// The delegate's simultaneity call is UIKit's own answer to this and it is one-sided by
     /// design — returning true is *guaranteed* to allow simultaneous recognition, whatever
@@ -102,9 +104,18 @@ enum BackSwipe {
     /// Nothing is made to wait. `require(toFail:)` would be the other way to give the swipe
     /// priority, and it is the wrong one: the avatar's tap would then be held until the
     /// swipe had failed, and a profile that opens after a pause is its own regression. A
-    /// touch that does not move still opens the page on the frame it always did; a touch
-    /// that becomes a swipe leaves the avatar, and a button that the finger leaves cancels
-    /// itself, as every button does.
+    /// touch that does not move still opens the page on the frame it always did.
+    ///
+    /// This paragraph used to end by saying that a touch which becomes a swipe leaves the
+    /// avatar, and that a button the finger leaves cancels itself as every button does. That
+    /// was wrong, and it was the assumption that hid AF-859 for three days. Measured on gate
+    /// [41812227199](https://github.com/unarbos/arbos/actions/runs/41812227199), a 50 pt
+    /// rightward drag from the avatar column opened the sender's page at 11 of 11 start
+    /// positions: the `Button` was activating with the finger 50 pt away, and the reactive
+    /// region reached 6 pt above the disc's own frame. Saying yes to the presses is still the
+    /// right call — it is what buys the swipe — but it left the doors to decide for themselves
+    /// when a touch has stopped being a tap, and a `Button` decides that far too late. They do
+    /// it on a tap's slop now; see `Transcript.ProfileDoor`.
     ///
     /// The two back recognizers are excluded from each other by name, not by being pans —
     /// `DirectionalSwipeRecognizer` is a plain `UIGestureRecognizer`. One swipe right inside
