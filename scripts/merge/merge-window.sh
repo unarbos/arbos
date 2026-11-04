@@ -271,6 +271,45 @@ check_published() {  # <tag> — appends to nogo
   echo "$out" | grep -q '^feed (mirror, arbos.life): lists' || echo "    (mirror behind or unreachable: soft, not a NO-GO)"
 }
 
+# nomac_covers <sha> <covering-sha>: 0 when <covering-sha> has already been judged
+# "no Mac change since the tag being released" AND <sha> is an ancestor of it.
+#
+# WHY AN ANCESTOR MAY BE CLEARED BY A DESCENDANT'S VERDICT. The question this
+# window asks is whether main still OWES a Mac release. mac-change.sh answers it
+# by diffing the tag against a commit, so "no Mac change since <tag>" on commit T
+# means the Mac paths at T are identical to the Mac paths at <tag>. If that holds
+# at T, it holds for everything main would ship from T: a release cut there would
+# rebuild a byte-identical Mac app. An ancestor of T that touched a Mac path and
+# had it reverted before T is a transient that no release ever needed to carry,
+# and the debt is about what main owes now, not about what it briefly held.
+#
+# WHY THIS IS NOT A LOOSENING. <covering-sha> is only ever set from a verdict that
+# matched "NOMAC <the current tag>" exactly — a real Release run's recorded answer,
+# against the tag being released, not an inference. If genuine debt exists then
+# mac-change.sh returns 1 for the tip, so the tip's plan says "Mac sources changed"
+# and cuts a tag or waits; it never records NOMAC, nothing ever sets <covering-sha>,
+# and every refusal below fires exactly as it did before. The clearing path cannot
+# be reached without a current-tag NOMAC somewhere newer on main's first-parent line.
+#
+# THE DEFECT THIS REPAIRS. The check used to demand that EVERY commit since the tag
+# carry a verdict naming THAT tag. A verdict is recorded when its Release run
+# finishes, so a commit judged minutes before the next tag publishes is stamped with
+# the older tag and can never be re-stamped: nothing re-judges a commit already on
+# main, no new commit can land while the window is shut, and the tag cannot move
+# without a release that nothing needs. On 2026-11-04 that deadlocked the whole queue
+# on 562dc0cd0, whose run finished at 13:35Z carrying "NOMAC v0.6.381" while v0.6.382
+# published at 14:00Z — with zero Mac paths changed across the entire range.
+#
+# The explicit empty check below is belt-and-braces and survives mutation on
+# purpose: git already rejects an empty revision, so deleting the line changes
+# no answer this function can be asked for. It is kept because it states the
+# precondition where a reader looks for it, and because it makes a one-argument
+# call return 1 rather than die on an unbound variable under `set -u`.
+nomac_covers() {
+  [ -n "${2:-}" ] || return 1
+  git merge-base --is-ancestor "$1" "$2" 2>/dev/null
+}
+
 go() {
   echo "== merge-window GO check $(ts)"
   git fetch -q origin main --tags 2>/dev/null
@@ -286,7 +325,7 @@ go() {
   if [ -z "$ch" ]; then echo "  main $(git rev-parse --short=9 origin/main) is covered by $tag"
   else
     echo "  main has changes after $tag; each needs a Release plan verdict of 'no Mac change since $tag':"
-    local cls
+    local cls covering=""
     while read -r sha subj; do
       v=$(verdict "$sha" nogate); echo "    ${sha:0:9} ${subj:0:70} → $v"
       cls=$(verdict_class "$v")
@@ -299,10 +338,20 @@ go() {
       # The tag check stays here, and must. verdict_clears_go() is deliberately
       # ignorant of which tag is being released, so it answers for the class and
       # not for this release: a NOMAC naming an OLDER tag says nothing about
-      # this one and has to fall through to the NO-GO below, as it always did.
+      # this one ON ITS OWN, and still falls through to the NO-GO below unless a
+      # newer commit that contains it carries a verdict naming THIS tag.
+      #
+      # changes_since() lists newest first, so `covering` is set by the time any
+      # older commit is read. It is assigned here and nowhere else, from the exact
+      # "NOMAC $tag" match and from nothing weaker — see nomac_covers() above.
       if verdict_clears_go "$cls"; then
         case "$cls" in
-          NOMAC) case "$v" in "NOMAC $tag"*) continue ;; esac ;;
+          NOMAC)
+            case "$v" in "NOMAC $tag"*) covering=${covering:-$sha}; continue ;; esac
+            if nomac_covers "$sha" "$covering"; then
+              echo "      ^ cleared: ${covering:0:9} is judged 'no Mac change since $tag' and ${sha:0:9} is an ancestor of it, so main owes no Mac release for it"
+              continue
+            fi ;;
           *) continue ;;
         esac
       fi
@@ -316,6 +365,10 @@ go() {
         REDGATE)  nogo+=("${sha:0:9} has a required check with no successful run since $tag ($v)") ;;
         WAIT)     nogo+=("${sha:0:9} NOT JUDGED YET since $tag — still running ($v)") ;;
         BLOCKED)  nogo+=("${sha:0:9} COULD NOT BE READ since $tag, so nothing is inferred ($v)") ;;
+        # Name both tags. This refusal used to print only the tag being released,
+        # leaving the reader to find the other one inside the parenthetical and work
+        # out for themselves that the two differed.
+        NOMAC)    nogo+=("${sha:0:9} was judged 'no Mac change since $(echo "$v" | awk '{print $2}')', NOT since $tag, and no commit newer than it on main carries a '$tag' verdict that contains it — so whether main owes a Mac release for ${sha:0:9} is unanswered ($v)") ;;
         *)        nogo+=("${sha:0:9} not judged no-Mac-change since $tag ($v)") ;;
       esac
     done <<< "$ch"
