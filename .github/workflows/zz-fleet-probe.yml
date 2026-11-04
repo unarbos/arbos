@@ -30,7 +30,7 @@ jobs:
         run: |
           set -euo pipefail
           avail=$(df -B1M --output=avail / | tail -1 | tr -d ' ')
-          iavail=$(df -i --output=iavail / | tail -1 | tr -d ' ')
+          iavail=$(df --output=iavail / | tail -1 | tr -d ' ')
           echo "SAMPLE n=${{ matrix.n }} avail_mib=$avail inodes_free=$iavail image=${ImageVersion:-?}"
           df -h / /mnt /dev/shm 2>/dev/null || df -h /
           df -i / | tail -1
