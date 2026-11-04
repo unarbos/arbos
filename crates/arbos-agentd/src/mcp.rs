@@ -165,12 +165,25 @@ pub(crate) fn err_result(msg: impl std::fmt::Display) -> Value {
     json!({ "content": [{ "type": "text", "text": format!("error: {msg}") }], "isError": true })
 }
 
+/// Head of `s`, counted in characters, like the `clip` in `local.rs` and `connectors.rs`.
+///
+/// Counting bytes here cut inside multi-byte characters and panicked, which `peek` could reach
+/// with any slice over 16,000 bytes of non-ASCII text — one curly apostrophe across the cut is
+/// enough. Characters are also what `peek` slices by and what the suffix below claims to count.
 fn clip(s: &str, max: usize) -> String {
+    // A string never holds more characters than bytes, so this fast path is exact.
     if s.len() <= max {
-        s.to_owned()
-    } else {
-        format!("{}…[{} more chars]", &s[..max], s.len() - max)
+        return s.to_owned();
     }
+    let chars = s.chars().count();
+    if chars <= max {
+        return s.to_owned();
+    }
+    format!(
+        "{}…[{} more chars]",
+        s.chars().take(max).collect::<String>(),
+        chars - max
+    )
 }
 
 async fn call_tool(a: &Arc<Agent>, name: &str, args: &Value) -> Value {
@@ -956,6 +969,54 @@ pub fn router(agent: Arc<Agent>) -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `clip` used to slice by byte, so a cut landing inside a multi-byte character panicked.
+    /// Every offset below is one a caller really passes: the approval-card summary 160, the
+    /// per-call argument log 200, search snippets 300, `sub_llm` 2,000, `history_read` and
+    /// `page_rows` 8,000, `peek` 16,000.
+    #[test]
+    fn clip_cuts_between_characters_never_inside_one() {
+        for max in [160, 200, 300, 2_000, 8_000, 16_000] {
+            // Three bytes per character, so no multiple of a byte offset is a boundary.
+            let cjk = "日".repeat(max);
+            let out = clip(&cjk, max / 2);
+            assert_eq!(out.chars().filter(|c| *c == '日').count(), max / 2);
+            assert!(out.ends_with(&format!("…[{} more chars]", max - max / 2)));
+
+            // The realistic case: ordinary prose with one curly apostrophe across the cut.
+            let mut prose = "a".repeat(max - 1);
+            prose.push('\u{2019}');
+            prose.push_str(&"b".repeat(max));
+            assert!(clip(&prose, max).ends_with(&format!("…[{max} more chars]")));
+        }
+    }
+
+    /// The suffix says "chars", so it must count characters. It used to print `s.len() - max`,
+    /// a byte delta, which overstated the remainder by the multi-byte overhead.
+    #[test]
+    fn clip_reports_the_remainder_in_characters() {
+        assert_eq!(clip("日日日日", 1), "日…[3 more chars]");
+        assert_eq!(clip("abcd", 2), "ab…[2 more chars]");
+    }
+
+    /// The quiet half, on its own. The cut here lands on a character boundary, so the old
+    /// byte-slicing `clip` did not panic and returned this exact head — it just called the
+    /// three remaining characters nine. A correct slice with a lying count is still wrong.
+    #[test]
+    fn clip_counted_the_remainder_in_bytes_even_when_it_did_not_panic() {
+        let s = "aaaa日日日";
+        assert!(s.is_char_boundary(4), "the old byte cut was legal here");
+        assert_eq!(s.len() - 4, 9, "the old count would have said nine");
+        assert_eq!(clip(s, 4), "aaaa…[3 more chars]");
+    }
+
+    /// Text that fits comes back untouched, including text whose byte length exceeds `max`.
+    #[test]
+    fn clip_leaves_short_text_alone() {
+        assert_eq!(clip("abc", 8), "abc");
+        assert_eq!(clip("日日", 8), "日日");
+        assert_eq!(clip("日日", 2), "日日");
+    }
 
     /// D69: a subagent-role session may not speak for the Project to other Projects.
     #[test]
