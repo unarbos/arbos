@@ -10,6 +10,8 @@ import XCTest
 ///
 /// The class must sort first: UI cases run in case-insensitive alphabetical order, class first.
 /// An `-only-testing` filter that leaves it out leaves the first real case to pay the stall.
+/// It cannot help when the UI test runner itself fails to initialise, since that happens before
+/// any case loads.
 ///
 /// Issues are dropped in `record(_:)`, not matched with `XCTExpectFailure`: a failed launch
 /// interrupts the case even when its failure is expected, so the `terminate()` below would never
