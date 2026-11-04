@@ -1285,8 +1285,11 @@ pub struct TurnState {
     /// `error` event). pi 1.2 reports provider errors — a refusal, a context overflow, a 5xx —
     /// only on the final message, so this is the only place they surface.
     pub model_error: Option<ModelError>,
-    /// Fresh-session retry after a refusal already happened this turn (at most one).
+    /// Fresh-session retry after an empty turn already happened this turn (at most one).
     pub session_rotated: bool,
+    /// The one retry after a provider refusal already ran this turn: narrower prompt, fallback
+    /// talking model, no session rotation (fix F). A bool, not a budget — one retry, never a loop.
+    pub refusal_retried: bool,
     /// Relay turns (a subagent's result, an approval outcome) only speak: `route` must be
     /// `reply`, a tool call outside [`relay_turn_tool_allowed`] ends the turn, and a waiting
     /// user message preempts it. Doug, 2026-10-22: a result turn routed `act`, ran tools for
@@ -1414,8 +1417,12 @@ impl ModelError {
     /// One short line for the chat, first person like the limit announcements (#1037).
     /// `owner` names whose budget ran out for budget refusals ("Jacob's daily Arbos budget…").
     pub fn chat_line_for(&self, owner: &str) -> String {
+        // A refusal is about the request, not about agentd or the moment: it does not clear on
+        // its own, so the line names what happened and the one thing that gets through
+        // (Jacob, Test5 round 2, fix F — "ask me again in a moment" sent users back into the
+        // same refusal and lost the turn).
         if self.refusal {
-            return "I couldn't answer that: the model provider declined the request. Ask me again in a moment.".to_owned();
+            return "I couldn't do all of that: the model provider declined part of the request. Asking for the part you most want on its own is the way through — split it up rather than sending the same message again.".to_owned();
         }
         if let Some(b) = crate::budget::Refusal::classify(&self.detail) {
             return b.chat_line(owner);
@@ -1501,6 +1508,7 @@ impl TurnState {
             skills_used: Vec::new(),
             model_error: None,
             session_rotated: false,
+            refusal_retried: false,
             reply_only: false,
             relay_tool_tolerated: false,
             preempted: false,
@@ -4281,6 +4289,7 @@ impl Agent {
             skills_used: Vec::new(),
             model_error: None,
             session_rotated: false,
+            refusal_retried: false,
             reply_only: !matches!(kind, TurnKind::User | TurnKind::JobFallback { .. }),
             relay_tool_tolerated: false,
             preempted: false,
@@ -4404,6 +4413,39 @@ impl Agent {
                     t.parts_continuation = true;
                 }
                 result = self.run_main_turn(chat_id, host, &prompt).await;
+            }
+        }
+        // The provider declined the request. That is a judgement about the message, so neither a
+        // backoff nor a fresh window changes it, and the turn is not lost work: most refused
+        // messages are one unsafe part next to several ordinary ones. One narrower attempt, on
+        // the fallback talking model because it is a different provider lane, asks for the parts
+        // it can do and for a sentence naming the part it is leaving out — the user reads an
+        // answer plus a named gap instead of "I couldn't answer that" (fix F). The session is
+        // deliberately left alone; see `empty_turn_retry_reason_for`.
+        if result.is_ok() {
+            if let Some(m) = self.refusal_to_retry().await {
+                tracing::warn!(chat_id, detail = %m.detail, "provider refusal; one retry on the fallback model for the parts it can do");
+                let on_fallback = self.switch_talking_model(true).await;
+                let retry_prompt = {
+                    let mut tl = self.turn.lock().await;
+                    match tl.as_mut() {
+                        Some(t) if !t.stopped => {
+                            t.refusal_retried = true;
+                            t.model_error = None;
+                            t.route = None;
+                            t.route_attempts = 0;
+                            t.metrics.route_missing = false;
+                            Some(refusal_retry_prompt(prompt_text))
+                        }
+                        _ => None,
+                    }
+                };
+                if let Some(prompt) = retry_prompt {
+                    result = self.run_main_turn(chat_id, host, &prompt).await;
+                }
+                if on_fallback {
+                    self.switch_talking_model(false).await;
+                }
             }
         }
         // An empty turn is usually the model window, not the question: a provider refusal on a
@@ -7115,10 +7157,16 @@ impl Agent {
     }
 
     /// When the turn showed the user nothing, return why a fresh-session retry is warranted
-    /// (`model_refused` or `route_missing`). `None` when a retry would not help or already ran.
+    /// (`route_missing`). `None` when a retry would not help or already ran.
     async fn empty_turn_retry_reason(&self) -> Option<&'static str> {
         let tl = self.turn.lock().await;
         empty_turn_retry_reason_for(tl.as_ref()?)
+    }
+
+    /// The refusal this turn should retry once on the fallback model, if any (fix F).
+    async fn refusal_to_retry(&self) -> Option<ModelError> {
+        let tl = self.turn.lock().await;
+        refusal_retry_error(tl.as_ref()?)
     }
 
     /// `/hook/turn-without-route`: the main run settled without calling `route`. When pi could
@@ -9464,9 +9512,9 @@ pub(crate) fn model_retry_prompt(prompt_text: &str, ack: Option<&str>) -> String
     }
 }
 
-/// Why a turn that showed the user nothing is worth a fresh-session retry (`model_refused` or
-/// `route_missing`). `None` when a retry would not help or one already ran. Pure over the turn
-/// so the end-of-turn decision is testable without a live pi.
+/// Why a turn that showed the user nothing is worth a fresh-session retry (`route_missing`).
+/// `None` when a retry would not help or one already ran. Pure over the turn so the end-of-turn
+/// decision is testable without a live pi.
 pub(crate) fn empty_turn_retry_reason_for(t: &TurnState) -> Option<&'static str> {
     if t.stopped || t.session_rotated {
         return None;
@@ -9474,8 +9522,13 @@ pub(crate) fn empty_turn_retry_reason_for(t: &TurnState) -> Option<&'static str>
     if !t.streamed_text.trim().is_empty() || !t.ack_text.trim().is_empty() {
         return None;
     }
+    // A refusal is the provider declining this request, not a bloated window: a fresh session
+    // is refused the same way and costs the user the conversation they are mid-way through
+    // (fix F). The refusal route retries once on the fallback model instead — see
+    // `refusal_retry_error` — and that holds even when the refused turn also missed its
+    // `route` call, so the rotation below is not reached through that door either.
     if t.model_error.as_ref().is_some_and(|m| m.refusal) {
-        return Some("model_refused");
+        return None;
     }
     // Settled without `route` and without prose: pi cannot correct when `canContinue` is
     // false (ended on plain text / empty), so agentd rebuilds the window once.
@@ -9483,6 +9536,39 @@ pub(crate) fn empty_turn_retry_reason_for(t: &TurnState) -> Option<&'static str>
         return Some("route_missing");
     }
     None
+}
+
+/// The provider refusal this turn should retry once, on the fallback talking model, asking only
+/// for the parts it can do. A refusal is not transient, so it never spends the `MODEL_CALL_RETRIES`
+/// budget and never waits out a backoff; one narrower attempt either salvages the answer or
+/// produces the sentence that names what is being left out (fix F). `None` once that attempt has
+/// run, when the user already has prose, or when the refusal is really a budget or capacity wall,
+/// where a second call buys nothing.
+pub(crate) fn refusal_retry_error(t: &TurnState) -> Option<ModelError> {
+    let m = t.model_error.clone()?;
+    if !m.refusal
+        || t.refusal_retried
+        || t.stopped
+        || t.act_to_job
+        || t.steer_pending.is_some()
+        || !t.streamed_text.trim().is_empty()
+        || is_abort_text(&m.detail)
+        || crate::budget::Refusal::classify(&m.detail).is_some()
+        || classify_hard_limit(&m.detail).is_some()
+        || crate::disk::is_enospc(&m.detail)
+    {
+        return None;
+    }
+    Some(m)
+}
+
+/// The prompt of that one retry. The provider judged the message as a whole, so the retry must
+/// not send it again as a whole: it asks for the safe parts and for one plain sentence naming
+/// what is left out, which is the only place the declined part can actually be named.
+pub(crate) fn refusal_retry_prompt(prompt_text: &str) -> String {
+    format!(
+        "[Arbos] The model provider declined the message below as a whole. Do not attempt it as a whole again. Do the parts of it you can do, and deliver those now. Then, in one plain sentence, name the part you are leaving out and say that asking for it on its own is likely to work. Do not apologise at length, do not lecture the user, and do not refuse the whole message because one part of it was declined.]\n\n{prompt_text}"
+    )
 }
 
 /// A short message that announces more to come ("delivered in parts below", "the table
@@ -10192,6 +10278,72 @@ mod tests {
         let mut plain = TurnState::claim("chat", "user-msg", false);
         plain.metrics.route_missing = true;
         assert_eq!(empty_turn_retry_reason_for(&plain), Some("route_missing"));
+
+        // What the turn does instead of rotating: one narrower attempt, and only one.
+        assert!(refusal_retry_error(&t).is_some());
+        t.refusal_retried = true;
+        assert!(
+            refusal_retry_error(&t).is_none(),
+            "the refusal retry is one attempt, not a loop"
+        );
+
+        let p = refusal_retry_prompt("Summarise this thread and draft the reply");
+        assert!(p.contains("declined the message below as a whole"));
+        assert!(p.contains("the parts of it you can do"));
+        assert!(p.contains("name the part you are leaving out"));
+        assert!(p.ends_with("Summarise this thread and draft the reply"));
+    }
+
+    /// The refusal retry is for a provider judging the request, so it stays out of the walls a
+    /// second call cannot climb: a spent budget, a context or rate limit, a full disk, and an
+    /// abort of agentd's own. It also never fires once the user has prose in front of them.
+    #[test]
+    fn the_refusal_retry_skips_what_a_second_call_cannot_fix() {
+        let refusal = |detail: &str| ModelError {
+            detail: detail.to_owned(),
+            refusal: true,
+        };
+        let refused_turn = |m: ModelError| {
+            let mut t = TurnState::claim("chat", "user-msg", false);
+            t.model_error = Some(m);
+            t
+        };
+        assert!(refusal_retry_error(&refused_turn(refusal("I can't help with that."))).is_some());
+
+        // A transient failure is the other path's business (`transient_model_error`): backoff
+        // and the retry budget, not a narrower prompt.
+        let transient = refused_turn(ModelError {
+            detail: "529 overloaded_error".to_owned(),
+            refusal: false,
+        });
+        assert!(refusal_retry_error(&transient).is_none());
+
+        for detail in [
+            "This operation was aborted",
+            "credits_exhausted: this workspace's credits are used up",
+            "No space left on device",
+        ] {
+            assert!(
+                refusal_retry_error(&refused_turn(refusal(detail))).is_none(),
+                "a second call cannot fix: {detail}"
+            );
+        }
+
+        // Prose already streamed: the user has an answer, and a second attempt would talk over it.
+        let mut answered = refused_turn(refusal("I can't help with that."));
+        answered.streamed_text = "Here are the three of them.".to_owned();
+        assert!(refusal_retry_error(&answered).is_none());
+
+        // Agentd's own interruptions own the turn from here.
+        let mut stopped = refused_turn(refusal("I can't help with that."));
+        stopped.stopped = true;
+        assert!(refusal_retry_error(&stopped).is_none());
+        let mut steered = refused_turn(refusal("I can't help with that."));
+        steered.steer_pending = Some("actually, just the first one".to_owned());
+        assert!(refusal_retry_error(&steered).is_none());
+        let mut converted = refused_turn(refusal("I can't help with that."));
+        converted.act_to_job = true;
+        assert!(refusal_retry_error(&converted).is_none());
     }
 
     /// A codemode script that only searches the web is research, not an edit (the converted
