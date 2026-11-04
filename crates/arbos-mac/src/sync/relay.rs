@@ -4928,8 +4928,8 @@ async fn send_message(
         }
     }
     shared.unacked.lock().unwrap().insert(message_id.clone());
-    // People chats, and projects with more than one human, carry who wrote
-    // (API §3/§7); a solo project keeps the plain `user` the box expects.
+    // The people lane: mentions and avatars belong to a chat with other humans in it. Who
+    // wrote the row does not — that is written on every row below, people chat or not.
     let in_people = shared.is_people(&chat_id) || {
         let projects = shared.projects.lock().unwrap();
         projects
@@ -4962,11 +4962,15 @@ async fn send_message(
             attachments: user_attachments,
             mentions,
             reply_to,
-            sender: if in_people {
-                Some(format!("user:{}", shared.me_id()))
-            } else {
-                None
-            },
+            // Every row says who wrote it (API §3/§7). This used to be written only when the
+            // Mac believed the chat held more than one human, and that belief is the bug: the
+            // `shared` flag arrives late, and the relay reported it as false in the owner's
+            // own project list, so Jacob's rows in his shared agent's chat went out wearing
+            // the bare `user` marker. The relay reads one row at a time and cannot place a
+            // bare marker, so it reported those rows as `system` — the app, not him. Nothing
+            // the client can see settles whether a chat is shared at the moment of writing, so
+            // the row stops trying to and states the plain fact instead.
+            sender: Some(format!("user:{}", shared.me_id())),
             // Always attach the author's display name so agents address them by name, not @handle.
             sender_handle: me.as_ref().map(|u| u.login.clone()),
             sender_name: me
