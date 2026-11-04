@@ -52,11 +52,20 @@ permissions:
 # one 46-85 minute macos-15 job, and main is a sixth of nothing in the pool it waits in: of the 290
 # runs that consumed a macOS job 2026-11-01..04, 17 were main. Branch pushes own this pool.
 #
-# The constraint is NOT a job cap. "Five jobs at once" is wrong as a ceiling and is only the modal
-# level: measured 2026-10-29..11-04, this workflow alone reached 16 concurrent macos-15 jobs
-# (2026-10-30 19:29Z) and spent 1716 minutes above five. GitHub's macOS fleet is elastic, so the
-# cost of asking for more is not refusal — it is wait. That is what makes it expensive here, and it
-# is why the arithmetic below is in runner-hours of demand rather than in slots.
+# THE FIVE-JOB CAP IS REAL, and the ceiling is 120 runner-hours/day. Measured over the 498
+# machine-acquiring jobs of 2026-10-29..11-04: 36.2% of all time sits at EXACTLY 5 concurrent
+# (3134 min, 52.2 h) and the series never exceeds 6; time at 6 is 102 min, all inside one 47-minute
+# span on 10-31 where six long jobs overlapped. An elastic fleet does not pin at exactly five for
+# fifty-two hours. Per-day peaks are 5,5,6,5,5,5,5 — the signature of a hard limit.
+#
+# BEWARE: a sweep that includes never-run jobs reports peak 16 and 533 runner-hours instead, and
+# both are phantoms. A job that never got a machine has the placeholder started_at described below
+# AND a real completed_at once cancelled, so it appears to occupy a machine for its whole queued
+# life. The 223 never-run jobs contribute 102 phantom runner-hours. Filter on runner_name for
+# concurrency and consumption too, not only for waits.
+#
+# Real consumption against the 120 runner-hour ceiling: 10-29 32.9 (27%), 10-30 68.4 (57%),
+# 10-31 75.8 (63%), 11-01 85.5 (71%), 11-02 42.3 (35%), 11-03 54.0 (45%).
 #
 # MEASURING THE WAIT — two traps, both of which cost a wrong answer first time round. A job that
 # never gets a machine still reports `started_at`, equal to its `created_at` to the second: it is a
@@ -69,7 +78,7 @@ permissions:
 # B median 21.7 / p90 242 / max 727, and 152 of 503 waited over an hour for a machine.
 #
 # The split per day is what decides this file. On 10-30, A = B = 596 min at the worst: genuine
-# macOS starvation, and this workflow alone burned 140 runner-hours that day. On 11-01..11-03 the
+# macOS starvation, and this workflow alone consumed 68.4 runner-hours that day. On 11-01..11-03 the
 # worst B values are 359, 343 and 727 minutes while their A values are 0.1 — run 41598907652, on
 # MAIN, was held in this group for 726 minutes and then got a machine in six seconds. So the long
 # main latencies in the current regime are THIS GROUP serialising, not the pool being full.
@@ -113,11 +122,23 @@ permissions:
 # asks about — is the better middle rather than a compromise.
 #
 # Per-commit groups would add exactly the runs that are being evicted today, so the bill is the
-# eviction rate: at the 2026-10-21..28 cadence (48.8 main runs/day, 250 evicted) that is +34
-# runner-hours/day, about a quarter more demand on a pool whose tail already reaches 6 to 12 hours,
-# and main's own worst burst (18 arrivals inside one run) would roughly double the peak concurrent
-# demand ever observed. On a REQUIRED gate that trades missing verdicts for multi-hour ones, which
-# is the worse failure.
+# eviction rate: at the 2026-10-21..28 cadence (48.8 main runs/day, 250 evicted) that is +34.4
+# runner-hours/day. On top of the worst complete day measured (85.5) that is 119.9 of the 120
+# runner-hour ceiling — 100%. On a REQUIRED gate that trades missing verdicts for multi-hour ones,
+# which is the worse failure.
+#
+# THE WAIT IS CLUSTERING, NOT INSUFFICIENT CAPACITY, and that is the cheapest lever here by far.
+# A day's work spread perfectly evenly would need only 1.4 to 3.6 concurrent jobs (its consumed
+# runner-hours over 24 h), so every measured day fits inside the cap of 5 with room to spare — the
+# worst needs 3.6 of 5 slots. Yet the pool sits saturated at exactly 5 for 273 to 690 minutes a
+# day, and while saturated every arrival queues. That saturation is what produces the 209-minute
+# p90 wait; nothing was refused for want of total capacity on any day measured.
+#
+# And the clustering is mostly ours to fix: of 731 arrivals, 64.2% are cursor/* branches, 24.7%
+# feedback/*, 6.3% other and 4.8% main, while 39% of all arrivals land within 60 s of another (27%
+# within 10 s) against a 128 s median inter-arrival. A minimum-gap policy on our own fleet's pushes
+# reaches roughly a third to a half of arrivals and needs no change to this file. No predicted
+# minutes are quoted because that needs a queueing model and an uncontaminated sample.
 #
 # The cost therefore scales with precisely the cadence that makes the fix necessary, which is the
 # inverse of ci.yml and the whole reason the same one-line change does not belong here. At the
@@ -126,7 +147,17 @@ permissions:
 # The two cheaper shapes, both measured and neither landed here, both needing #2736 first:
 #   - A per-commit group for `workflow_dispatch` only, keeping `push` coalesced. A group per commit
 #     for the commits actually being judged, paid for one deliberate ask at a time rather than one
-#     merge at a time. Needs #2736's dispatch trigger to exist.
+#     merge at a time. Needs #2736's dispatch trigger to exist. It cannot remove the part of the
+#     wait that is GitHub's allocation order (measured above), and it does nothing about branch
+#     bursts, which are `push` events already in their own per-ref groups.
+#
+#     SEQUENCING, AND THESE TWO DO NOT COMPOSE: cursor/swift-gate-ec2-mac-ac8d rewrites this same
+#     block, keying on `swift-core-check-v2-${{ github.ref }}` and routing main, arbos-v2 and
+#     open-PR branches to the self-hosted `arbos-mac` pool. A dispatch arm written against
+#     `swift-core-check-${{ github.ref }}` is expressed against a world that branch deletes, and
+#     its per-commit reasoning does not carry over to a single self-hosted Mac, where one run at a
+#     time is the physical limit. WHICHEVER OF THE TWO LANDS SECOND MUST BE REWRITTEN AGAINST THE
+#     FIRST. Do not merge them in either order and assume they compose.
 #   - Moving this group onto the `check` job so an evicted commit leaves something to read. Proven
 #     on a scratch workflow: the job is evicted identically (cancelled, zero steps) but the run
 #     survives, an `always()` verdict job still runs, and the annotation names the sha. Serialising
