@@ -359,7 +359,18 @@ go() {
     if [ -z "$pfiles" ] || [ "${pfiles#BLOCKED}" != "$pfiles" ]; then
       echo "    required checks: BLOCKED — cannot read #$1's changed files"; nogo+=("PR #$1 required checks unreadable")
     else
-      require_gates "$phead" "$pfiles" || nogo+=("PR #$1 has a required check with no passing run on $phead")
+      # require_gates already answers in three words — 1 no passing run, 2 could not be read,
+      # 3 still running — and until now all three collapsed into "no passing run on <head>".
+      # That is the same defect this change removes one level down, repeated in the summary the
+      # operator actually acts on: a gate that died at exit 127 without judging the diff was
+      # summarised as the pull request having failed a check, which sends the reader to change
+      # the branch. Keep the refusal, name the right cause.
+      require_gates "$phead" "$pfiles"; local prc=$?
+      case $prc in
+        1) nogo+=("PR #$1 has a required check with no passing run on $phead") ;;
+        2) nogo+=("PR #$1 has a required check that could not be read on $phead, so nothing is inferred from it — read the finding above before touching the branch") ;;
+        3) nogo+=("PR #$1 has a required check still running on $phead") ;;
+      esac
     fi
   fi
   echo

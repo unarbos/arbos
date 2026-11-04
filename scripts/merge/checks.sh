@@ -115,6 +115,71 @@ commit_files() {
   rd "repos/$R/commits/$1" --jq '.files[]?.filename'
 }
 
+# gate_run_class: reads one `actions/runs/<id>/jobs` body on stdin and prints one line —
+# VERDICT | ABORTED <job> failed at '<step>' before reaching '<step>' | UNKNOWN <why>.
+#
+# WHY A FAILED RUN IS NOT AUTOMATICALLY A VERDICT, which is the whole point of this function.
+#
+# gate_state used to read `.conclusion` off the runs endpoint and nothing else, so every way a gate
+# run can end badly arrived as the same word. Three different things were one row:
+#
+#   1. the gate ran, judged the diff, and refused it     — a verdict, and the pull request's own;
+#   2. the gate never ran at all                         — already separate, `NONE`;
+#   3. the gate started and died before judging anything — reported as a refusal, and it is not.
+#
+# Case 3 is live and it is not an edge case. `.github/workflows/release-gate.yml`'s `gate` job
+# checks out `github.event.pull_request.head.sha` and then runs `scripts/release/gate-can-decide.sh`
+# out of that checkout, so a head that forked before that script landed on main (4704d45b8,
+# 2026-11-04 09:14:27Z) exits 127 at the first step. On 2026-11-04 that was 113 of the 235 open pull
+# requests — 113 of the 115 the gate applies to at all. The sibling job in the same file,
+# `Release gate refuses when it should`, takes the default `pull_request` checkout, which is the
+# merge commit, and passes on the very same run: run 41846184562 on #2713's head has `Release gate`
+# failed and `Release gate refuses when it should` succeeded.
+#
+# Calling that RED is not merely imprecise, it points at the wrong remedy, which is the harm this
+# file was written about. RED reads as "this pull request was judged and refused", and the way to
+# clear it is to change the pull request — so 113 branches get told to rebase, every one of them
+# goes green, and the gate's own defect is gone from the output with nothing fixed. BLOCKED reads
+# as "the question was not answered", and the way to clear that is to repair the gate. Both refuse
+# the merge. Only one of them is true.
+#
+# HOW IT TELLS THEM APART. The verdict is the conclusion of the step that decides, not the
+# conclusion of the run. GitHub skips every later step once one fails, so a job that died early
+# leaves its deciding step `skipped`, and a job that reached its decision and failed it has that
+# step `failure` with nothing real after it. Measured on the two live runs:
+#
+#   run 41846184562 (#2713, exit 127)   step 3 'Can this run decide anything?' failure
+#                                       step 6 'Does merging this collapse…'   skipped   -> ABORTED
+#   run 41845315633 (#2717, real debt)  steps 1-5 success
+#                                       step 6 'Does merging this collapse…'   failure   -> VERDICT
+#
+# "Real" steps exclude the three GitHub writes itself — `Set up job`, `Complete job`, and the
+# `Post <action>` teardown, which runs after a failure and is skipped in the verdict case too, so
+# counting it would invert the answer. The deciding step is the last real one rather than a name
+# this file hardcodes: naming it would make this function wrong the next time the gate grows a
+# step, silently and in the permissive direction.
+#
+# A job with no steps at all (a startup failure) is UNKNOWN, not ABORTED and not VERDICT. The run
+# ended, nothing is readable about why, and this file's rule is that an unanswerable question is
+# BLOCKED rather than an answer.
+gate_run_class() {
+  jq -r '
+    def real: [ .steps[]? | select(.name != "Set up job" and .name != "Complete job"
+                                   and (.name | startswith("Post ") | not)) ];
+    def classify: . as $j | (real) as $s
+      | if ($s | length) == 0 then "UNKNOWN \($j.name) lists no steps, so why it failed cannot be read"
+        elif ($s | last | .conclusion) == "failure"
+          then "VERDICT"
+        else "ABORTED \($j.name) failed at \"\(($s | map(select(.conclusion == "failure")) | last | .name) // "an unreadable step")\" before reaching \"\($s | last | .name)\""
+        end;
+    [ .jobs[]? | select(.conclusion == "failure") | classify ] as $c
+    | if ($c | length) == 0 then "UNKNOWN no job in this run concluded failure, so its red is not a job verdict"
+      elif ($c | index("VERDICT")) then "VERDICT"
+      else ($c | map(select(startswith("ABORTED"))) | first) // ($c | first)
+      end
+  ' 2>/dev/null || echo "UNKNOWN the jobs body could not be parsed"
+}
+
 # gate_state <workflow> <sha>: one line — PASS <detail> | RED <detail> | NOVERDICT <detail> |
 # PENDING <detail> | NONE | BLOCKED <what could not be read>.
 #
@@ -159,7 +224,25 @@ gate_state() {
   # skipped and neutral are not failures, and that is the whole trap: they are not verdicts either.
   # A job skipped by an `if:` condition did no work, so it proves nothing about this commit.
   red=$(printf '%s\n' "$list" | awk '$4!="success" && $4!="skipped" && $4!="neutral"')
-  [ -n "$red" ] && { echo "RED $got run(s) on this head, none successful: $all"; return; }
+  if [ -n "$red" ]; then
+    # A red run is only a verdict if some job in it reached its deciding step and failed there.
+    # See gate_run_class above for why, and for the 113-of-235 measurement behind it. One red run
+    # that really judged this head is enough to make the whole answer RED; the merge is refused
+    # either way, so this only ever decides which remedy the operator is sent to.
+    local rid jobs cls aborted=""
+    while read -r rid; do
+      [ -n "$rid" ] || continue
+      jobs=$(rd "repos/$R/actions/runs/$rid/jobs?per_page=100") \
+        || { echo "BLOCKED reading the jobs of ${wf##*/} run $rid for ${sha:0:8}: ${jobs#BLOCKED:}"; return; }
+      cls=$(printf '%s' "$jobs" | gate_run_class)
+      case "$cls" in
+        VERDICT) echo "RED $got run(s) on this head, none successful: $all"; return ;;
+        *)       aborted="${aborted:+$aborted; }run $rid ${cls#* }" ;;
+      esac
+    done <<< "$(printf '%s\n' "$red" | awk '{print $1}')"
+    echo "BLOCKED ${wf##*/} failed on this head without judging it, so this red is the gate's and not this head's — $aborted"
+    return
+  fi
   # A canary, not a live path — and kept deliberately. Under #2448 every run reaches the always()
   # verdict job, so a wholly skipped or neutral run should be unreachable for a fresh head. It stays
   # because it is still live for historical heads, whose all-skipped runs sit on main's history
