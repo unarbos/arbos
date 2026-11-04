@@ -244,7 +244,7 @@ mod mac {
     /// that name.
     fn configured(name: &str, size: f32, weight: Weight) -> Option<objc2::rc::Retained<NSImage>> {
         let ns_name = NSString::from_str(name);
-        let base = NSImage::imageWithSymbolName_accessibilityDescription(&ns_name, None)?;
+        let base = NSImage::imageWithSystemSymbolName_accessibilityDescription(&ns_name, None)?;
         let config = NSImageSymbolConfiguration::configurationWithPointSize_weight_scale(
             size as f64,
             font_weight(weight),
