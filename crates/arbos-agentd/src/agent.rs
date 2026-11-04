@@ -7118,22 +7118,7 @@ impl Agent {
     /// (`model_refused` or `route_missing`). `None` when a retry would not help or already ran.
     async fn empty_turn_retry_reason(&self) -> Option<&'static str> {
         let tl = self.turn.lock().await;
-        let t = tl.as_ref()?;
-        if t.stopped || t.session_rotated {
-            return None;
-        }
-        if !t.streamed_text.trim().is_empty() || !t.ack_text.trim().is_empty() {
-            return None;
-        }
-        if t.model_error.as_ref().is_some_and(|m| m.refusal) {
-            return Some("model_refused");
-        }
-        // Settled without `route` and without prose: pi cannot correct when `canContinue` is
-        // false (ended on plain text / empty), so agentd rebuilds the window once.
-        if t.metrics.route_missing {
-            return Some("route_missing");
-        }
-        None
+        empty_turn_retry_reason_for(tl.as_ref()?)
     }
 
     /// `/hook/turn-without-route`: the main run settled without calling `route`. When pi could
@@ -9477,6 +9462,27 @@ pub(crate) fn model_retry_prompt(prompt_text: &str, ack: Option<&str>) -> String
             "[Arbos] Your previous attempt at the message below failed on the model side and is being retried; answer it now.]\n\n{prompt_text}"
         ),
     }
+}
+
+/// Why a turn that showed the user nothing is worth a fresh-session retry (`model_refused` or
+/// `route_missing`). `None` when a retry would not help or one already ran. Pure over the turn
+/// so the end-of-turn decision is testable without a live pi.
+pub(crate) fn empty_turn_retry_reason_for(t: &TurnState) -> Option<&'static str> {
+    if t.stopped || t.session_rotated {
+        return None;
+    }
+    if !t.streamed_text.trim().is_empty() || !t.ack_text.trim().is_empty() {
+        return None;
+    }
+    if t.model_error.as_ref().is_some_and(|m| m.refusal) {
+        return Some("model_refused");
+    }
+    // Settled without `route` and without prose: pi cannot correct when `canContinue` is
+    // false (ended on plain text / empty), so agentd rebuilds the window once.
+    if t.metrics.route_missing {
+        return Some("route_missing");
+    }
+    None
 }
 
 /// A short message that announces more to come ("delivered in parts below", "the table
