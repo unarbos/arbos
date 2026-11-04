@@ -146,14 +146,12 @@ jobs:
       - name: Leave the reclaim nothing worth reclaiming
         run: |
           set -euo pipefail
-          # Take the two biggest targets away, then ballast both the disk and the space they
-          # freed, so the reclaim step below can only win back about 11 GiB against a 25 GiB
-          # floor. This is the short fleet with an image the reclaim list no longer fits.
+          # Take the two biggest targets away and then ballast the lot, so the reclaim step
+          # below can only win back about 11 GiB against a 25 GiB floor. This is the short
+          # fleet carrying an image the reclaim list no longer fits.
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet
-          for _ in 1 2; do
-            avail=$(df -B1M --output=avail / | tail -1 | tr -d ' ')
-            sudo fallocate -l "$(( avail - 500 ))M" "/ballast.$RANDOM.$_"
-          done
+          avail=$(df -B1M --output=avail / | tail -1 | tr -d ' ')
+          sudo fallocate -l "$(( avail - 2000 ))M" /ballast
           df -h /
       - name: Make room on the short-disk fleet
         run: |

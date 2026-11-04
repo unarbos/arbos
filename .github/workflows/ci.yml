@@ -77,7 +77,8 @@ jobs:
       # disk runs out during the first heavy write — the cache restore. The ENOSPC lands on the
       # runner's own `_diag` log and kills its worker, so the job dies with no step output and
       # no log, which is why this kept being read as a rust-cache flake. Reclaiming the image's
-      # unused SDKs costs about a minute, so only pay it when the headroom is actually short.
+      # unused SDKs wins back 28 GiB but costs about 90 seconds, so only pay it when the
+      # headroom is actually short.
       - name: Make room on the short-disk fleet
         run: |
           set -euo pipefail
