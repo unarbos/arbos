@@ -46,6 +46,31 @@ const CAPTION_LEFT: f32 = crate::ui::shell::TRAFFIC_LIGHTS_INSET + 12.0;
 /// The picture's room: top bar and bottom pills stay clear of it.
 const PICTURE_TOP: f32 = 70.0;
 const PICTURE_BOTTOM: f32 = 90.0;
+/// The thumbnail strip above the pills (Jacob 2026-11-03: "when clicking that
+/// should have a gallery viewer" — the album along the bottom, the one you are
+/// looking at outlined). Mac only: the iPhone keeps its approved page dots.
+///
+/// These four sizes are PROVISIONAL — Grok's reference image has not reached us.
+const STRIP_THUMB: f32 = 52.0;
+const STRIP_GAP: f32 = 6.0;
+const STRIP_RING: f32 = 2.0;
+/// A thumbnail that is not the current one sits back behind a scrim.
+const STRIP_DIM: f32 = 0.45;
+/// The strip's own bottom edge: clear of the pills.
+const STRIP_BOTTOM: f32 = 27.0 + PILL_HEIGHT + 14.0;
+/// How many thumbnails the strip holds at once. A longer album slides this window
+/// along as you page, so the strip never needs its own scrolling.
+pub const STRIP_MAX: usize = 9;
+
+/// The slice of the album the strip draws: at most `max` thumbnails, around
+/// `index`, never reaching past either end of the album.
+pub fn strip_window(index: usize, count: usize, max: usize) -> std::ops::Range<usize> {
+    if max == 0 || count <= max {
+        return 0..count;
+    }
+    let start = index.saturating_sub(max / 2).min(count - max);
+    start..start + max
+}
 /// Trackpad / wheel swipe-down past this many pixels closes the viewer
 /// (same idea as the iPhone's swipe-down dismiss).
 const DISMISS_SCROLL_PX: f32 = 48.0;
@@ -356,7 +381,13 @@ pub fn overlay(shell: &Shell, focus: &FocusHandle, cx: &mut Context<Shell>) -> A
             div()
                 .absolute()
                 .top(px(PICTURE_TOP))
-                .bottom(px(PICTURE_BOTTOM))
+                // The strip takes its room out of the picture's, so a thumbnail
+                // never sits over the picture it belongs to.
+                .bottom(px(if count > 1 && !viewer.forward_open {
+                    STRIP_BOTTOM + STRIP_THUMB + 14.0
+                } else {
+                    PICTURE_BOTTOM
+                }))
                 .left(px(EDGE + CONTROL + 20.0))
                 .right(px(EDGE + CONTROL + 20.0))
                 .flex()
@@ -415,6 +446,95 @@ pub fn overlay(shell: &Shell, focus: &FocusHandle, cx: &mut Context<Shell>) -> A
                         ),
                     ),
             );
+    }
+
+    // ----- the thumbnail strip --------------------------------------------
+    // Jacob 2026-11-03: the album along the bottom, the one on screen outlined,
+    // and a click goes straight to it. Only for a real album, and never behind
+    // the Forward picker.
+    if count > 1 && !viewer.forward_open {
+        let mut strip = div()
+            .absolute()
+            .bottom(px(STRIP_BOTTOM))
+            .left_0()
+            .right_0()
+            .flex()
+            .justify_center()
+            .gap(px(STRIP_GAP))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
+        for ix in strip_window(viewer.index, count, STRIP_MAX) {
+            let Some(entry) = viewer.items.get(ix) else {
+                continue;
+            };
+            let here = ix == viewer.index;
+            let thumb = match &entry.picture_url {
+                Some(url) => state.avatar(url),
+                None => entry
+                    .attachment
+                    .blob_ref
+                    .as_ref()
+                    .and_then(|k| state.thumbnails.get(k).cloned()),
+            };
+            let go = shell.state.clone();
+            strip = strip.child(
+                div()
+                    .id(ElementId::NamedInteger(
+                        "media-viewer-thumb".into(),
+                        ix as u64,
+                    ))
+                    .debug_selector(move || format!("media-viewer-thumb-{ix}"))
+                    .size(px(STRIP_THUMB))
+                    .rounded(px(6.0))
+                    .overflow_hidden()
+                    .bg(white(0.10))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .when(here, |el| {
+                        el.border(px(STRIP_RING)).border_color(white(1.0))
+                    })
+                    .when(!here, |el| {
+                        // hover-fill: exception overlay
+                        el.cursor_pointer().hover(|s| s.border_color(white(0.55)))
+                    })
+                    .child(match thumb {
+                        Some(image) => div()
+                            .relative()
+                            .size_full()
+                            .child(
+                                img(image)
+                                    .w_full()
+                                    .h_full()
+                                    .object_fit(ObjectFit::Cover)
+                                    .into_any_element(),
+                            )
+                            // The ones you are not looking at sit back.
+                            .when(!here, |el| {
+                                el.child(
+                                    div()
+                                        .absolute()
+                                        .inset_0()
+                                        .bg(Theme::with_alpha(gpui::black(), STRIP_DIM)),
+                                )
+                            })
+                            .into_any_element(),
+                        None => sf_symbols::glyph(
+                            match entry.attachment.kind() {
+                                AttachmentKind::Video => "video",
+                                _ => "photo",
+                            },
+                            16.0,
+                            white(0.45),
+                        )
+                        .into_any_element(),
+                    })
+                    .on_click(move |_, _, cx| {
+                        cx.stop_propagation();
+                        go.update(cx, |s, cx| s.media_viewer_show(ix, cx));
+                    }),
+            );
+        }
+        root = root.child(strip);
     }
 
     // × after the chevrons so the full-height next strip cannot steal its hits
@@ -765,6 +885,31 @@ fn forward_picker(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The strip holds `STRIP_MAX` thumbnails and slides along a longer album, so the
+    /// current one is in it wherever you are and the strip never runs off either end.
+    #[test]
+    fn the_strip_follows_the_page_and_stays_inside_the_album() {
+        // A short album is the whole album, however long the window is.
+        assert_eq!(strip_window(0, 3, 9), 0..3);
+        assert_eq!(strip_window(2, 3, 9), 0..3);
+        assert_eq!(strip_window(0, 0, 9), 0..0);
+        // A long one: pinned at the start, centred in the middle, pinned at the end.
+        assert_eq!(strip_window(0, 40, 9), 0..9);
+        assert_eq!(strip_window(4, 40, 9), 0..9);
+        assert_eq!(strip_window(5, 40, 9), 1..10);
+        assert_eq!(strip_window(20, 40, 9), 16..25);
+        assert_eq!(strip_window(39, 40, 9), 31..40);
+        // The page on screen is always one of the thumbnails drawn.
+        for count in [1usize, 2, 9, 10, 40] {
+            for index in 0..count {
+                let w = strip_window(index, count, STRIP_MAX);
+                assert!(w.contains(&index), "{index} of {count} is off the strip");
+                assert!(w.end <= count, "{index} of {count} runs past the album");
+                assert!(w.len() <= STRIP_MAX.min(count));
+            }
+        }
+    }
 
     #[test]
     fn when_label_names_today() {
