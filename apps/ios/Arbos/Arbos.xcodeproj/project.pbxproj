@@ -84,6 +84,7 @@
 		A136CC7A1B16DAA6EE6A41AA /* ProfilePages.swift in Sources */ = {isa = PBXBuildFile; fileRef = A17A2B0ACDD5E316BB8EA070 /* ProfilePages.swift */; };
 		A1EB042AE1EE736D57004E58 /* Recorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = A19B0E359DCB5FC76FD8B6CB /* Recorder.swift */; };
 		A1FF55551C48D291C2FD5310 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A11C70AFBE2CFC9BD0EB0AC1 /* SettingsView.swift */; };
+		A1D00000000000000000F002 /* TimezonePicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D00000000000000000F001 /* TimezonePicker.swift */; };
 		A16B7487AC090D4969019FDF /* SignInView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1947AC5E87D2B2E121B97A0 /* SignInView.swift */; };
 		A19E8F90C26169886405B87C /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1DA96384927E136586BC012 /* Theme.swift */; };
 		A1AF934D450F6DEFF67E0212 /* Transcript.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1ECED47C60FFA9826884A25 /* Transcript.swift */; };
@@ -339,6 +340,7 @@
 		A17A2B0ACDD5E316BB8EA070 /* ProfilePages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfilePages.swift; sourceTree = "<group>"; };
 		A19B0E359DCB5FC76FD8B6CB /* Recorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Recorder.swift; sourceTree = "<group>"; };
 		A11C70AFBE2CFC9BD0EB0AC1 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		A1D00000000000000000F001 /* TimezonePicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimezonePicker.swift; sourceTree = "<group>"; };
 		A1947AC5E87D2B2E121B97A0 /* SignInView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignInView.swift; sourceTree = "<group>"; };
 		A1DA96384927E136586BC012 /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
 		A1ECED47C60FFA9826884A25 /* Transcript.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Transcript.swift; sourceTree = "<group>"; };
@@ -641,6 +643,7 @@
 				A17A2B0ACDD5E316BB8EA070,
 				A19B0E359DCB5FC76FD8B6CB,
 				A11C70AFBE2CFC9BD0EB0AC1,
+				A1D00000000000000000F001 /* TimezonePicker.swift */,
 				A19678BD13DA9148706081DF,
 				A1947AC5E87D2B2E121B97A0,
 				A1DA96384927E136586BC012,
@@ -1048,6 +1051,7 @@
 				A136CC7A1B16DAA6EE6A41AA /* ProfilePages.swift in Sources */,
 				A1EB042AE1EE736D57004E58 /* Recorder.swift in Sources */,
 				A1FF55551C48D291C2FD5310 /* SettingsView.swift in Sources */,
+				A1D00000000000000000F002 /* TimezonePicker.swift in Sources */,
 				A1C98CB150ED95D675AD1811 /* SecretsViews.swift in Sources */,
 				A16B7487AC090D4969019FDF /* SignInView.swift in Sources */,
 				A19E8F90C26169886405B87C /* Theme.swift in Sources */,

@@ -3262,14 +3262,12 @@ impl Agent {
         } else if let Some(note) = self.owner_address_note(chat_id, host, &user_msg_id).await {
             prompt_text = format!("{note}{prompt_text}");
         }
-        // The user's moment (Grok parity, traits 1): the current time, and their zone when the
-        // client sent one, so "right now" and "tonight" are answered for them, not generically.
+        // The user's moment (Grok parity, traits 1): the current time in their zone, so "right
+        // now", "tonight" and "what time is it" are answered for them, not for the box.
         {
             let tz = {
                 let h = host.lock().await;
-                h.doc
-                    .message(&user_msg_id)
-                    .and_then(|m| message_time_zone(&m))
+                chat_time_zone(&h.doc.messages(), &user_msg_id)
             };
             prompt_text = format!(
                 "{}{prompt_text}",
@@ -9033,25 +9031,45 @@ fn message_time_zone(m: &arbos_core::doc::MessageView) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// One line that pins the turn to the user's moment: the UTC time always, their local time when
-/// the row carries a zone. Lives in the user turn (never the D87 prefix). "Right now" means this
-/// instant; a clock change or deadline inside the next day is worth a sentence.
+/// The zone to answer this turn in: the one on the row being answered, else the newest one any
+/// earlier row in the chat carried.
+///
+/// Only a row a client wrote carries `tz`, so a turn woken by voice, by a routine, or by another
+/// agent has none of its own. Falling back to the chat's last known zone is what makes the zone
+/// part of EVERY agent's context rather than only of turns a person typed. A zone is a property
+/// of the person, so the newest one they sent is the right answer for a row they did not write.
+fn chat_time_zone(messages: &[arbos_core::doc::MessageView], user_msg_id: &str) -> Option<String> {
+    let own = messages
+        .iter()
+        .find(|m| m.id == user_msg_id)
+        .and_then(message_time_zone);
+    own.or_else(|| messages.iter().rev().find_map(message_time_zone))
+}
+
+/// One line that pins the turn to the user's moment. The user's own clock comes FIRST and is the
+/// only time labelled "Now", because the model answers with whatever that label names: when UTC
+/// led the line, "what time is it?" was answered in the box's UTC ("02:51 UTC... where the box
+/// runs") with the user's 20:51 left unsaid. The box's UTC still rides along, marked as the box's
+/// and not the user's, for log and deadline arithmetic.
+///
+/// Lives in the user turn (never the D87 prefix). "Right now" means this instant; a clock change
+/// or deadline inside the next day is worth a sentence.
 pub(crate) fn moment_note(now: chrono::DateTime<chrono::Utc>, tz: Option<&str>) -> String {
     let utc = now.format("%A %Y-%m-%d %H:%M UTC");
-    let local = tz
-        .and_then(|z| z.parse::<chrono_tz::Tz>().ok())
-        .map(|z| {
+    match tz.and_then(|z| z.parse::<chrono_tz::Tz>().ok()) {
+        Some(z) => {
             let l = now.with_timezone(&z);
             format!(
-                " The user's clock says {} ({}); answer times and \"today\" for where they are.",
-                l.format("%A %H:%M"),
-                z.name()
+                "[Now: {} ({}) — the user's own clock. Answer every time, date and \"today\" in that zone by default, and say the zone only when it is not theirs. The box this agent runs on is on {}; that is the machine's clock, not the user's, so never answer \"what time is it\" with it. \"Right now\" and \"tonight\" mean this moment; mention a clock change or a deadline inside the next day when it changes the answer.]\n\n",
+                l.format("%A %Y-%m-%d %H:%M"),
+                z.name(),
+                utc
             )
-        })
-        .unwrap_or_else(|| {
-            " The user's time zone is not known: when the answer depends on it, say the time where they asked about and ask once if it matters.".to_owned()
-        });
-    format!("[Now: {utc}.{local} \"Right now\" and \"tonight\" mean this moment; mention a clock change or a deadline inside the next day when it changes the answer.]\n\n")
+        }
+        None => format!(
+            "[Now: {utc}, on the box this agent runs on. The user's time zone is not known: when the answer depends on it, say the time where they asked about and ask once if it matters. \"Right now\" and \"tonight\" mean this moment; mention a clock change or a deadline inside the next day when it changes the answer.]\n\n"
+        ),
+    }
 }
 
 /// The prose a turn posted, in order, for a live call's context (#1832): every progress bubble
@@ -10446,16 +10464,21 @@ mod tests {
         );
     }
 
-    /// Grok parity (traits 1): the turn carries the user's moment — UTC always, local time when
-    /// the app sent a zone — so "right now" is answered for them.
+    /// Grok parity (traits 1): the turn carries the user's moment. "Now" names THEIR clock, not
+    /// the box's — the whole point of the line, and what the UTC-first wording got wrong.
     #[test]
     fn moment_note_pins_the_turn_to_the_users_clock() {
         let now = chrono::DateTime::parse_from_rfc3339("2026-10-24T22:28:00Z")
             .unwrap()
             .with_timezone(&chrono::Utc);
         let n = moment_note(now, Some("America/Costa_Rica"));
-        assert!(n.starts_with("[Now: Saturday 2026-10-24 22:28 UTC."));
-        assert!(n.contains("The user's clock says Saturday 16:28 (America/Costa_Rica)"));
+        assert!(
+            n.starts_with("[Now: Saturday 2026-10-24 16:28 (America/Costa_Rica)"),
+            "{n}"
+        );
+        // The box's UTC is still there, and is named as the box's.
+        assert!(n.contains("box this agent runs on is on Saturday 2026-10-24 22:28 UTC"));
+        assert!(n.contains("never answer \"what time is it\" with it"));
         assert!(n.contains("mention a clock change or a deadline inside the next day"));
         assert!(n.ends_with("]\n\n"));
         let n = moment_note(now, None);
@@ -10467,6 +10490,37 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(message_time_zone(&row).as_deref(), Some("Europe/London"));
+    }
+
+    /// A row with no zone of its own (voice, a routine fire, another agent) still answers in the
+    /// user's zone: the chat's newest known one stands in.
+    #[test]
+    fn a_turn_without_a_zone_borrows_the_chats_last_one() {
+        let row = |id: &str, tz: Option<&str>| -> arbos_core::doc::MessageView {
+            let mut v = json!({ "id": id, "role": "user", "status": "done", "parts": [] });
+            if let Some(tz) = tz {
+                v["tz"] = json!(tz);
+            }
+            serde_json::from_value(v).unwrap()
+        };
+        let msgs = vec![
+            row("a", Some("Europe/London")),
+            row("b", Some("America/Costa_Rica")),
+            row("c", None),
+        ];
+        // The row's own zone wins.
+        assert_eq!(chat_time_zone(&msgs, "a").as_deref(), Some("Europe/London"));
+        // No zone on the row: the newest one in the chat, not the oldest.
+        assert_eq!(
+            chat_time_zone(&msgs, "c").as_deref(),
+            Some("America/Costa_Rica")
+        );
+        // An id that is not in the chat behaves the same way.
+        assert_eq!(
+            chat_time_zone(&msgs, "missing").as_deref(),
+            Some("America/Costa_Rica")
+        );
+        assert_eq!(chat_time_zone(&[row("z", None)], "z"), None);
     }
 
     /// #1713 (eval x1, "Clean up: delete everything under old/ for me"): the agent deleted five
