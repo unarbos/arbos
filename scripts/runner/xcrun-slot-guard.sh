@@ -11,10 +11,18 @@
 #                 to simctl.real by install-boot-guard.sh.
 #
 # The second one is what closes the hole. `xcrun` boots nothing: it looks `simctl` up in the
-# developer directory and execs it. So every route into a boot — the PATH shim, /usr/bin/xcrun, and
-# a direct $(xcode-select -p)/usr/bin/simctl — ends at the developer directory's simctl, and a guard
-# sitting there has nothing to walk around it. /usr/bin/xcrun is on the SIP volume and cannot be
-# replaced at all, which is exactly why the guard must not live at that layer.
+# developer directory and execs it. So every route anyone spells — the PATH shim, /usr/bin/xcrun,
+# and a direct $(xcode-select -p)/usr/bin/simctl — ends at the developer directory's simctl.
+# /usr/bin/xcrun is on the SIP volume and cannot be replaced at all, which is exactly why the guard
+# must not live at that layer.
+#
+# NOT the bottom of the stack, which an earlier version of this comment claimed. The developer
+# directory's simctl is itself a bash shim, and its last line execs
+# /Library/Developer/PrivateFrameworks/CoreSimulator.framework/Versions/A/Resources/bin/simctl.
+# That binary is reachable and unprotected (it is on /System/Volumes/Data with no `restricted`
+# flag), so calling it by its full path still boots without a slot, and --check does not look for
+# it. It is left open on purpose: interposing inside an Apple framework bundle is a different risk
+# class from interposing inside Xcode. Treat --check as "closed on the routes it knows".
 #
 # A boot is allowed when one of these holds: a heavy slot whose owner pid is an ancestor of this
 # process (the gate, a rig that did `slot=$(arbos-heavy-slot.sh acquire <rig> --pid $$)`),

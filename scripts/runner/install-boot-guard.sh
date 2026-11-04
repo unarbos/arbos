@@ -14,13 +14,20 @@
 #   /usr/bin/xcrun simctl boot →                                   developer-dir simctl
 #   $(xcode-select -p)/usr/bin/simctl boot →                       developer-dir simctl
 #
-# All three end at the same binary, so that binary is where the guard has to be. The PATH shims stay
+# All three end at the same file, so that file is where the guard has to be. The PATH shims stay
 # as well: they refuse a few milliseconds earlier and with the `xcrun` wording, and they are the only
 # protection left if an Xcode update restores its own simctl — which is why --check exists and why it
 # should run on a schedule rather than being trusted to stay true.
 #
 # /usr/bin/xcrun cannot be wrapped: it is on the SIP-protected system volume. That is the whole
 # reason the guard moved down a layer instead of being installed at one more name.
+#
+# WHAT --check DOES NOT LOOK FOR. The developer-directory simctl is a bash shim that execs
+# /Library/Developer/PrivateFrameworks/CoreSimulator.framework/.../bin/simctl, and that binary is
+# unprotected too, so its full path is a fourth route. Nothing here closes it or reports it. A
+# clean --check therefore means "every route I know about is closed", which is what anything
+# building on it — scripts/runner/arbos-heavy-slot.sh acquire, most of all — is entitled to assume
+# and no more.
 set -uo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
