@@ -60,6 +60,8 @@ jobs:
           set -euo pipefail
           sudo apt-get install -y -q shellcheck >/dev/null
           shellcheck -S warning scripts/*.sh scripts/release/*.sh scripts/runner/*.sh scripts/feedback/*.sh scripts/merge/*.sh image/*.sh
+          # The required-check gate is the only one there is, so it must refuse a head that wrote it.
+          ./scripts/merge/checks-selftest.sh
           # One avatar resolver on both platforms (ARB-394): no surface draws an agent picture outside it.
           ./scripts/avatar-lint.sh
           curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash | bash -s -- latest /tmp >/dev/null
