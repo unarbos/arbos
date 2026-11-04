@@ -1,0 +1,185 @@
+name: Release gate
+
+# What does merging this pull request publish, and what does main already owe a release for? The
+# answer goes in the log, the job summary and an annotation. It is never a refusal.
+#
+# This gate used to enforce one fix per release by holding the second pull request on a path while
+# the first was unbuilt. The owner withdrew that rule on 2026-11-04 — several fixes per Mac tag and
+# per TestFlight build are the expected cadence now — so the refusal is gone and the measurement
+# behind it stayed. Everything this file still refuses, it refuses with exit 2, because it could
+# not decide; read release-gate.py's "what this stopped doing" for where that line falls.
+#
+# The decision is scripts/release/release-gate.py; read its header for what the two sides mean and
+# why they are not symmetric. In short: the Mac side asks the repository's own predicates
+# (scripts/release/mac-change.sh over scripts/release/mac-paths.sh), the phone side reads the
+# literal path filter out of .github/workflows/ios.yml, and both are read at runtime so the
+# verdict cannot drift away from what actually publishes.
+#
+# ── this is a required check ────────────────────────────────────────────────────────────────────
+# main has no branch protection and no ruleset, so GitHub requires nothing. scripts/merge/checks.sh
+# is the repository's required-check policy, and this workflow is named in its GATES list: a merge
+# through the merge kit is refused while this run is red, absent or still going. The honest limit
+# is that an unprotected main still permits a direct push, which no check can see. This binds
+# every merge, not every possible write.
+#
+# ── CONSTRAINT: no job here may succeed without deciding ────────────────────────────────────────
+# checks.sh reads this workflow's RUN conclusion, and GitHub concludes a run `success` when every
+# job is success-or-skipped. So a job that can be skipped, or that passes without reaching a
+# verdict, turns this gate quietly permissive without a line of checks.sh changing. Both jobs here
+# are unconditional, and the gate job's one decisive step has no `if:` — a base branch that
+# publishes nothing is handled inside the step, which still runs and still says so. Keep it that
+# way, and do not add `continue-on-error` to anything in this file.
+#
+# That constraint used to be prose. It is now enforced twice: every job's first step is
+# scripts/release/gate-can-decide.sh, which refuses an event that carries no pull request, and
+# release-gate.py reads this file on every run and fails closed if any job has lost that step,
+# gained an `if:`, or gained `continue-on-error`. The hole those close was real — this workflow
+# used to offer `workflow_dispatch`, where `github.event.pull_request` is null, so the gate step
+# fell through to `github.ref_name`, exited 0 having judged nothing, and handed checks.sh a
+# `success` on a head it had never read. See gate-can-decide.sh for the whole mechanism.
+#
+# ── the trigger list, and why it is not a second copy of the predicates ─────────────────────────
+# GitHub needs a static `paths:` list to start a run at all, and a path the predicates watch that
+# this list misses is a pull request the gate never sees. So the list is a superset of both
+# predicates, and release-gate.py checks that on every run against mac-paths.sh and ios.yml as
+# they stand in the tree — a gap fails the gate instead of passing quietly. The list also names
+# ios.yml, mac-paths.sh and this file, so any pull request that moves either predicate runs this
+# check and cannot widen one without widening the other.
+#
+# ── what this must never touch ──────────────────────────────────────────────────────────────────
+# .github/workflows/ios.yml is inside its own trigger paths, so editing it cuts a TestFlight build.
+# Nothing the gate is made of is on either path set — not this file, not scripts/release/*.py,
+# not scripts/release/*.sh — so changing the gate never publishes anything. Keep it that way.
+#
+# Linux only. The hosted macos-15 pool is the critical path for a real release and a gate there
+# can wait an hour and a half; this one must never be in that queue.
+
+on:
+  pull_request:
+    paths:
+      # Everything the Mac app is built from (scripts/release/mac-paths.sh).
+      - "crates/arbos-mac/**"
+      - "crates/arbos-core/**"
+      - "crates/arbos-client/**"
+      - "crates/arbos-matrix/**"
+      - "crates/arbos-update/**"
+      - "scripts/bundle-mac.sh"
+      - "site/assets/logo/**"
+      # Everything ios.yml uploads a TestFlight build for, that the Mac list does not already have.
+      - "apps/ios/**"
+      - "crates/arbos-ffi/**"
+      - "packages/ArbosFFI/**"
+      - "scripts/build-xcframework.sh"
+      - "assets/avatars/trees/manifest.json"
+      - "assets/avatars/trees/lottie/**"
+      - "assets/avatars/leaves/**"
+      - "rust-toolchain.toml"
+      # On both lists.
+      - "Cargo.toml"
+      - "Cargo.lock"
+      # The three files that define all of the above. A pull request that moves a predicate runs
+      # this gate, so the coverage check above sees it.
+      - ".github/workflows/ios.yml"
+      - ".github/workflows/release-gate.yml"
+      - "scripts/release/mac-paths.sh"
+      - "scripts/release/gate-can-decide.sh"
+
+permissions:
+  contents: read
+  # The phone side asks which ios.yml run on main last uploaded a build.
+  actions: read
+
+concurrency:
+  group: release-gate-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    name: Release gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The head commit itself, not the merge commit: the gate judges what this pull request
+          # changes, and every history it walks is main's own. fetch-depth 0 brings the tags, which
+          # are how a Mac release is known to have happened.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+      # Before anything else: an event that carries no pull request cannot decide, so it must not
+      # report a pass. Exit 2, never 0.
+      - name: Can this run decide anything?
+        env:
+          GATE_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          GATE_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: scripts/release/gate-can-decide.sh
+      # The phone side reads ios.yml's path filter with a real YAML parser rather than a
+      # hand-rolled one, so a filter this gate cannot parse is loud instead of silently empty.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install --quiet 'pyyaml==6.0.2'
+      - name: What does merging this publish, and what does main owe?
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GATE_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          GATE_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          # The same screen again, and the values come out of it rather than out of the event, so
+          # there is one place that decides whether this run has a pull request to judge. No
+          # fallback to github.ref_name or github.sha: a fallback is what made a dispatch look
+          # like a verdict.
+          decided="$(scripts/release/gate-can-decide.sh)"
+          BASE_REF="$(sed -n 's/^base_ref=//p' <<< "$decided")"
+          HEAD_SHA="$(sed -n 's/^head_sha=//p' <<< "$decided")"
+          git fetch -q --tags --force origin "+refs/heads/main:refs/remotes/origin/main"
+          # Only main publishes: release.yml tags from it, and ios.yml uploads to TestFlight only
+          # for a push to it. A pull request into any other branch has no release to measure
+          # against. This is a step, not an `if:`, so the job never concludes without saying so.
+          if [[ "$BASE_REF" != main ]]; then
+            echo "Base branch is '$BASE_REF', not main: merging it publishes nothing." \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          # The merge base, not main's head: a two-dot diff against the head would count whatever
+          # main changed since this branch forked as part of the pull request.
+          base="$(git merge-base origin/main "$HEAD_SHA")"
+          # Exit 2 is the gate failing to decide, and it fails the job: a check that cannot tell
+          # must never read as a pass. There is no exit 1 — nothing about what main owes refuses
+          # a merge any more — so every red here is this gate's own problem, not the pull
+          # request's, and its output says what it could not read.
+          python3 scripts/release/release-gate.py \
+            --repo "$GITHUB_REPOSITORY" --main origin/main \
+            --pr-base "$base" --pr-head "$HEAD_SHA"
+
+  self-test:
+    # A gate that stopped refusing is trivially green and worth nothing, so these cases carry both
+    # halves: the shapes that used to be held now pass AND still name the debt, and every refusal
+    # the gate should still make is still made. They replay states main has really been in, and
+    # they are offline and pinned to permanent commits, so they do not change answer as main moves.
+    name: Release gate refuses when it should
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # This job's cases are offline and pinned, so they would pass on any ref — which is the same
+      # defect as the gate job's old dispatch path, seen a second time. A job that reports success
+      # on a run that judged nothing is a success checks.sh cannot tell from a verdict. So the
+      # screen goes here too, and every job in this file refuses the same events.
+      - name: Can this run decide anything?
+        env:
+          GATE_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          GATE_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: scripts/release/gate-can-decide.sh
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install --quiet 'pyyaml==6.0.2'
+      - run: scripts/release/release-gate-selftest.sh
+      # The cases above all pass on an exit code. This asks whether any of them could have passed
+      # on the case beside it, which an exit code cannot answer and a green self-test does not
+      # rule out.
+      - run: scripts/release/release-gate-selftest-audit.sh

@@ -19,7 +19,7 @@ set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 base="${1:?base commit}"
 target="${2:?target commit}"
-MAC_PATHS="${ARBOS_MAC_PATHS:-crates/arbos-mac crates/arbos-core crates/arbos-update Cargo.lock scripts/bundle-mac.sh site/assets/logo}"
+MAC_PATHS="$("$here/mac-paths.sh")"
 
 # Every Mac path except Cargo.lock: any difference there is a Mac change, full stop.
 sources=()
