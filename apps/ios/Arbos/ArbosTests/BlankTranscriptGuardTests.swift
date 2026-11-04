@@ -118,4 +118,78 @@ final class BlankTranscriptGuardTests: XCTestCase {
         XCTAssertTrue(model.hasKnownEmptyTranscript("new-chat"))
         XCTAssertFalse(model.transcriptPending("new-chat"))
     }
+
+    // MARK: The lazy stack's identity ([feedback iphone-blank-chat-on-open-2026-11-03])
+
+    private func lead(pending: Bool = false, caughtUp: Bool = true, fixture: Bool = false,
+                      messagesEmpty: Bool = false, knownEmpty: Bool = false, rowsEmpty: Bool = false,
+                      agentCopy: Bool = true, searchHits: Bool = false,
+                      visibleRowsEmpty: Bool = false) -> ChatSession.TranscriptLead {
+        ChatSession.transcriptLead(pending: pending, caughtUp: caughtUp, fixture: fixture,
+                                   messagesEmpty: messagesEmpty, knownEmpty: knownEmpty,
+                                   rowsEmpty: rowsEmpty, agentCopy: agentCopy,
+                                   searchHits: searchHits, visibleRowsEmpty: visibleRowsEmpty)
+    }
+
+    func testTheLeadChildIsTheOneTheTranscriptDraws() {
+        XCTAssertEqual(lead(pending: true), .pending)
+        XCTAssertEqual(lead(caughtUp: false, messagesEmpty: true), .catchUp)
+        XCTAssertEqual(lead(caughtUp: false, messagesEmpty: true, knownEmpty: true), .empty)
+        // A people chat or channel with nothing in it stays blank; it has no lead child at all.
+        XCTAssertEqual(lead(caughtUp: false, messagesEmpty: true, knownEmpty: true, agentCopy: false), .rowsOnly)
+        XCTAssertEqual(lead(rowsEmpty: true), .empty)
+        XCTAssertEqual(lead(rowsEmpty: true, agentCopy: false), .rowsOnly)
+        XCTAssertEqual(lead(searchHits: true, visibleRowsEmpty: true), .noMatches)
+        XCTAssertEqual(lead(), .rowsOnly)
+        // The fixture is always caught up, which is why no rig open ever showed the empty hint.
+        XCTAssertEqual(lead(caughtUp: false, fixture: true, messagesEmpty: true), .rowsOnly)
+    }
+
+    /// The reported open: an agent chat whose rows land while its empty hint is on screen. The
+    /// hint leaves and the window's rows arrive in one step, so the stack must be a new one.
+    func testRowsArrivingUnderTheEmptyHintRekeysTheStack() {
+        let before = ChatSession.transcriptStackIdentity(lead: .empty, banner: false, query: nil)
+        let after = ChatSession.transcriptStackIdentity(lead: .rowsOnly, banner: false, query: nil)
+        XCTAssertNotEqual(before, after)
+    }
+
+    /// Every other transition into and out of a lead child, and the waking banner.
+    func testEveryLeadChildComingOrGoingRekeysTheStack() {
+        let leads: [ChatSession.TranscriptLead] = [.rowsOnly, .pending, .catchUp, .empty, .noMatches]
+        var seen: Set<String> = []
+        for l in leads {
+            for banner in [false, true] {
+                let id = ChatSession.transcriptStackIdentity(lead: l, banner: banner, query: nil)
+                XCTAssertTrue(seen.insert(id).inserted, "\(l) banner=\(banner) shares a key with another state")
+            }
+        }
+    }
+
+    /// The hot path: rows up, no keyword, no banner. Nothing a streaming token or a window grow
+    /// step changes reaches the key, so the transcript never rebuilds while it is being read.
+    func testTheKeyIsStillConstantWithTheRowsUp() {
+        let id = ChatSession.transcriptStackIdentity(lead: .rowsOnly, banner: false, query: nil)
+        XCTAssertEqual(id, ChatSession.transcriptStackIdentity(lead: .rowsOnly, banner: false, query: nil))
+        XCTAssertEqual(id, "all:rowsOnly")
+    }
+
+    /// The shape — what the open-path re-settle watches — must not move with the keyword. It
+    /// does not: leaving a keyword is `closeSearch`'s business, and a result tap closes search
+    /// in order to land on its own message, which the tail is the last place for.
+    func testTheShapeIsBlindToTheKeyword() {
+        XCTAssertEqual(ChatSession.transcriptStackShape(lead: .rowsOnly, banner: false), "rowsOnly")
+        XCTAssertNotEqual(ChatSession.transcriptStackShape(lead: .rowsOnly, banner: false),
+                          ChatSession.transcriptStackShape(lead: .noMatches, banner: false))
+        XCTAssertNotEqual(ChatSession.transcriptStackShape(lead: .rowsOnly, banner: false),
+                          ChatSession.transcriptStackShape(lead: .rowsOnly, banner: true))
+    }
+
+    /// A keyword still gets its own stack per keyword (#2450), lead child and all.
+    func testAKeywordStillKeysTheStack() {
+        let all = ChatSession.transcriptStackIdentity(lead: .rowsOnly, banner: false, query: nil)
+        let hit = ChatSession.transcriptStackIdentity(lead: .rowsOnly, banner: false, query: "deck")
+        let other = ChatSession.transcriptStackIdentity(lead: .rowsOnly, banner: false, query: "launch")
+        let none = ChatSession.transcriptStackIdentity(lead: .noMatches, banner: false, query: "zzz")
+        XCTAssertEqual(Set([all, hit, other, none]).count, 4)
+    }
 }
