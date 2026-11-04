@@ -18,6 +18,10 @@ pub const COMPACTION_TURNS: i64 = 20;
 pub const COMPACTION_TOKENS: usize = 24_000;
 pub const VERBATIM_TURNS: usize = 12;
 pub const TOOL_OUTPUT_CAP_FOR_SUMMARISER: usize = 2_000;
+/// Summariser calls one compaction pass may spend narrowing a refusal. Halving reaches a single
+/// turn in at most 9 refused calls over `t3_thread`'s 400-turn read, so the budget cannot stop a
+/// pass before it has advanced; what it leaves over is the next pass's smaller window.
+pub const COMPACTION_REFUSAL_CALL_BUDGET: usize = 16;
 
 const WRITE_SYSTEM: &str = r#"You are the memory write decision for a project agent. Decide what, if anything, the project should remember from the event below.
 First a gate: is anything here worth storing beyond the raw transcript (a decision, a durable fact, a user preference or correction, a project reference such as a path or URL, or a status that others need)? Transient chatter, tool noise, and things already obvious from the files are not store-worthy. Never store the user's name, handle or how to address them: the name the agent used in a reply and the sender label on a message are presentation that comes live from the user's profile at every turn, not facts (a name can differ per device and change at any time). Candidates like "The user's name is X" / "address the user as X" are IGNORE. Refer to the project's owner as "the owner" (or "the user"), never by name: the name is resolved live when the record is read.
@@ -119,6 +123,45 @@ pub(crate) fn is_user_name_fact(text: &str) -> bool {
         "call me ",
     ];
     PATTERNS.iter().any(|p| t.contains(p))
+}
+
+/// Why a compaction pass stopped before the whole window was folded in.
+enum CompactionStop {
+    /// A failure a narrower request cannot fix — a timeout, a 5xx, a body that was not JSON.
+    /// Reported as the pass's error when no turn was handled at all.
+    Failed(anyhow::Error),
+    /// The summariser answered without a summary; the turns it was given stay for the next pass.
+    NoSummary,
+    /// `COMPACTION_REFUSAL_CALL_BUDGET` is spent on narrowing refusals.
+    Spent,
+}
+
+impl CompactionStop {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Failed(_) => "the summariser call failed",
+            Self::NoSummary => "the summariser answered without a summary",
+            Self::Spent => "the refusal-narrowing budget is spent",
+        }
+    }
+}
+
+/// Heading under which a summary names the turns that were stripped out of it.
+const WITHHELD_HEADING: &str = "## Withheld from this summary";
+
+/// What the summary says where a stripped turn was. Stripping is what lets compaction finish, so
+/// the gap is named rather than closed over: a later turn that needs one of these must ask,
+/// instead of reading a summary that looks complete.
+fn withheld_note(withheld: &[&T3Row]) -> String {
+    let ids: Vec<String> = withheld
+        .iter()
+        .map(|t| format!("{} ({})", t.id, t.role.as_deref().unwrap_or(&t.kind)))
+        .collect();
+    format!(
+        "\n\n{WITHHELD_HEADING}\n{} turn(s) of this chat are not summarised above: the model provider declined to read them, so they were left out instead of holding up the whole summary. Their content is not available to later turns — ask rather than assume. Transcript ids: {}.\n",
+        withheld.len(),
+        ids.join(", ")
+    )
 }
 
 /// One compaction request: the summary so far, then the turns being folded into it verbatim.
@@ -446,6 +489,18 @@ impl Memory {
 
     /// `maybe_compact` with the summariser call handed in, so the pass can be driven without a
     /// provider: `summarise` takes one request body and answers with the summariser's JSON.
+    ///
+    /// A provider that declines the request is never asked the same question again (Jacob, Test5
+    /// round 2, the F variant of #2750): one injected prompt in the history refused the whole
+    /// window, the pass returned that refusal, `compacted_through` never moved, and every later
+    /// pass resent the same turns into the same refusal, so the window only grew. A refused
+    /// slice is halved and retried instead, down to the single turn the provider will not read.
+    /// That turn is stripped — left out of the summary, named in it as a gap, and never
+    /// resubmitted — while the turns around it are summarised as usual.
+    ///
+    /// Stripped, not summarised: summarising refused content means sending it back to the
+    /// provider that refused it, which is the loop this fixes, and the injected text would then
+    /// be carried into the summary that rides in front of every later turn.
     async fn maybe_compact_with<F, Fut>(&self, chat_id: &str, summarise: F) -> Result<()>
     where
         F: Fn(String) -> Fut,
@@ -475,16 +530,83 @@ impl Memory {
             return Ok(());
         }
         let leaving = &turns[..turns.len() - VERBATIM_TURNS];
-        let through = leaving.last().map(|t| t.id.clone()).unwrap_or_default();
-        let body = compaction_body(chat.compaction_summary.as_deref(), leaving);
-        let v = summarise(body).await?;
-        let summary = v
-            .get("summary")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_owned();
+        let mut summary = chat.compaction_summary.unwrap_or_default();
+        let mut candidates: Vec<Value> = Vec::new();
+        // Turns the provider declined to read, stripped from the summary and named in it.
+        let mut withheld: Vec<&T3Row> = Vec::new();
+        // The last turn this pass handled — summarised or stripped. Both are progress: the next
+        // pass starts after it.
+        let mut handled: Option<&str> = None;
+        let mut calls = 0usize;
+        // Slices still to fold in, in chat order. A refused slice is split and retried narrower,
+        // never sent again whole.
+        let mut queue: std::collections::VecDeque<&[T3Row]> = std::collections::VecDeque::new();
+        queue.push_back(leaving);
+        let mut stop: Option<CompactionStop> = None;
+        while let Some(slice) = queue.pop_front() {
+            let Some(last) = slice.last() else { continue };
+            if calls >= COMPACTION_REFUSAL_CALL_BUDGET {
+                stop = Some(CompactionStop::Spent);
+                break;
+            }
+            calls += 1;
+            let body = compaction_body(Some(summary.as_str()).filter(|s| !s.is_empty()), slice);
+            match summarise(body).await {
+                Ok(v) => {
+                    let s = v
+                        .get("summary")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .trim()
+                        .to_owned();
+                    if s.is_empty() {
+                        stop = Some(CompactionStop::NoSummary);
+                        break;
+                    }
+                    summary = s;
+                    candidates.extend(
+                        v.get("candidates")
+                            .and_then(Value::as_array)
+                            .cloned()
+                            .unwrap_or_default(),
+                    );
+                    handled = Some(&last.id);
+                }
+                Err(e) if crate::agent::ModelError::detail_is_refusal(&format!("{e:#}")) => {
+                    if slice.len() == 1 {
+                        tracing::warn!(chat_id, turn = %last.id, kind = %last.kind, error = %e, "compaction: the provider declined one turn; it is stripped from the summary");
+                        withheld.push(last);
+                        handled = Some(&last.id);
+                    } else {
+                        let (first, second) = slice.split_at(slice.len() / 2);
+                        queue.push_front(second);
+                        queue.push_front(first);
+                        tracing::warn!(chat_id, turns = slice.len(), error = %e, "compaction refused; narrowing to the turns the provider will not read");
+                    }
+                }
+                Err(e) => {
+                    stop = Some(CompactionStop::Failed(e));
+                    break;
+                }
+            }
+        }
+        let Some(through) = handled.map(str::to_owned) else {
+            // Nothing was folded in, so the window is whole for the next pass — and a failure
+            // that pass could clear is still this pass's error.
+            return match stop {
+                Some(CompactionStop::Failed(e)) => Err(e),
+                _ => Ok(()),
+            };
+        };
+        let stripped = withheld.len();
+        if stripped > 0 {
+            summary.push_str(&withheld_note(&withheld));
+        }
         if summary.is_empty() {
             return Ok(());
+        }
+        if let Some(stop) = &stop {
+            tracing::info!(chat_id, %through, reason = stop.as_str(), "compaction stopped short of the whole window; the rest is the next pass's");
         }
         self.store
             .set_chat_compaction(chat_id, &summary, &through)?;
@@ -494,14 +616,12 @@ impl Memory {
             None,
             "compaction",
             Some("system"),
-            &format!("chat compacted through {through}: {} chars", summary.len()),
+            &format!(
+                "chat compacted through {through}: {} chars, {calls} summariser call(s), {stripped} turn(s) stripped after the provider declined them",
+                summary.len()
+            ),
             None,
         );
-        let candidates = v
-            .get("candidates")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
         if !candidates.is_empty() {
             self.write_pass(
                 &format!("compaction:{through}"),
@@ -614,12 +734,17 @@ mod tests {
     /// compaction triggers on `COMPACTION_TURNS` and the injected turn is inside the 8 that
     /// leave the verbatim window. Returns the row ids in order.
     async fn chat_with_an_injected_prompt(store: &Store, chat_id: &str) -> Vec<String> {
-        store.upsert_chat(chat_id, "stress", false, now_ms()).unwrap();
+        store
+            .upsert_chat(chat_id, "stress", false, now_ms())
+            .unwrap();
         let mut ids = Vec::new();
         for i in 0..20 {
             let (kind, text) = match i {
                 3 => ("user", INJECTED.to_owned()),
-                i if i % 2 == 0 => ("user", format!("turn {i}: what is left on the deploy plan?")),
+                i if i % 2 == 0 => (
+                    "user",
+                    format!("turn {i}: what is left on the deploy plan?"),
+                ),
                 i => ("assistant", format!("turn {i}: rollout step {i} is done.")),
             };
             ids.push(
@@ -735,13 +860,20 @@ mod tests {
                 }
             })
             .await;
-        assert!(r.is_ok(), "an all-refused window is not an error: {:?}", r.err());
+        assert!(
+            r.is_ok(),
+            "an all-refused window is not an error: {:?}",
+            r.err()
+        );
         let calls = calls.load(std::sync::atomic::Ordering::SeqCst);
         assert!(
             (1..=16).contains(&calls),
             "the narrowing must stop inside its call budget: {calls} calls"
         );
-        let after = store.chat(refuse_everything).unwrap().expect("the chat row");
+        let after = store
+            .chat(refuse_everything)
+            .unwrap()
+            .expect("the chat row");
         assert!(
             after
                 .compacted_through

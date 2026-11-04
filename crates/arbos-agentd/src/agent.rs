@@ -1034,6 +1034,12 @@ fn context_tokens(usage: &Value) -> i64 {
 /// should not need a lookup.
 const SOFT_COMPACTION_INSTRUCTIONS: &str = "Keep, exactly as written, every fact the user stated about themselves or their preferences, every decision and rule agreed, every number, date, name, file path, URL, identifier and command that was used or produced, and every open question or task with its current state. State the current goal and what the next step was going to be. Older detail you leave out is still retrievable with context_search / context_open, so prefer precision over coverage, and keep the whole summary under about 1,500 words.";
 
+/// Failed soft compactions in a row before a chat's window is treated as one the provider will
+/// not summarise, whatever its error said. The refusal wording comes from pi, which agentd does
+/// not own, so this is the net under `ModelError::detail_is_refusal` for prose it cannot predict;
+/// two is one free retry for a flake, against a window that is already over the threshold.
+const SOFT_COMPACTION_STRIKES: u32 = 2;
+
 /// A memory walk running beside the turn's setup. Dropped without `block` (stop, preempt, an
 /// error before the prompt) it is aborted, so no Jev request is spent on a turn that never ran.
 pub struct PendingMemory(Option<tokio::task::JoinHandle<Option<String>>>);
@@ -1419,6 +1425,12 @@ impl ModelError {
     /// proxy lane's: a moderation block arrives as an HTTP body or an OpenAI-style
     /// `finish_reason`, and #2750's three patterns matched none of them (Jacob, Test5 round 2,
     /// the F variant).
+    ///
+    /// `violative` is Anthropic's own word for it ("violative cyber content", the refusal in
+    /// both rounds of Test5). #2750 reads a turn's refusal off `rawStopReason`, which only an
+    /// assistant message carries; a refused compaction arrives as pi's free text, where the
+    /// provider's prose is all there is. `SOFT_COMPACTION_STRIKES` is the net for prose this
+    /// list cannot predict.
     pub fn detail_is_refusal(detail: &str) -> bool {
         let lower = detail.to_ascii_lowercase();
         lower.contains("refus")
@@ -1428,6 +1440,7 @@ impl ModelError {
             || lower.contains("content filter")
             || lower.contains("flagged")
             || lower.contains("usage polic")
+            || lower.contains("violative")
     }
 
     /// One short line for the chat, first person like the limit announcements (#1037).
@@ -1646,6 +1659,11 @@ pub struct Agent {
     /// D91 soft-compaction hysteresis per chat: `None` right after a compaction (the floor is
     /// not known yet), then the window observed on the first turn after it.
     compaction_floor: std::sync::Mutex<HashMap<String, Option<i64>>>,
+    /// Per chat: soft compactions pi answered with a failure, in a row. Cleared by one that
+    /// works. A window that will not compact is replaced rather than grown to the hard ceiling,
+    /// and this is what spots one when the error does not say "refusal" in words agentd knows
+    /// (`SOFT_COMPACTION_STRIKES`).
+    compaction_strikes: std::sync::Mutex<HashMap<String, u32>>,
     /// User messages waiting for `turn_lock` right now. Relay turns and the soft compaction
     /// yield to them (see `status.rs`).
     pub(crate) pending_sends: std::sync::atomic::AtomicUsize,
@@ -1808,6 +1826,7 @@ impl Agent {
             pi_run_orphaned: AtomicBool::new(false),
             pi_model: Mutex::new(None),
             compaction_floor: std::sync::Mutex::new(HashMap::new()),
+            compaction_strikes: std::sync::Mutex::new(HashMap::new()),
             pending_sends: std::sync::atomic::AtomicUsize::new(0),
             side_notes: std::sync::Mutex::new(HashMap::new()),
             quick_calls: std::sync::Mutex::new(HashMap::new()),
@@ -3894,7 +3913,7 @@ impl Agent {
     /// asked to compact: `keepRecentTokens` of recent turns stay verbatim, the rest becomes one
     /// summary, and the walk gets the compacted-away leaves of this chat as candidates. pi's own
     /// compaction at the 128k hard ceiling is unchanged and covers a single turn that balloons.
-    async fn maybe_soft_compact(&self, chat_id: &str, usage: Option<&Value>) {
+    async fn maybe_soft_compact(self: &Arc<Self>, chat_id: &str, usage: Option<&Value>) {
         let threshold = crate::workspace::compact_at_tokens();
         if threshold == 0 {
             return;
@@ -3966,15 +3985,93 @@ impl Agent {
                     .lock()
                     .expect("compaction floors")
                     .insert(chat_id.to_owned(), None);
+                self.compaction_strikes
+                    .lock()
+                    .expect("compaction strikes")
+                    .remove(chat_id);
                 tracing::info!(chat_id, tokens, threshold, compactions = n, cut = ?cut, ms = t0.elapsed().as_millis() as i64, "soft compaction");
             }
             Ok(resp) => {
-                tracing::warn!(chat_id, tokens, error = %resp.error.unwrap_or_default(), "soft compaction refused");
+                let error = resp.error.unwrap_or_default();
+                // A refused compaction is not a failed one. The provider judged the window's own
+                // content, so it will answer the same next turn and every turn after it, while
+                // the window only grows — Jacob's Test5 round 2 saw this at 69,368 tokens, on
+                // text task 3 had injected into the history hours earlier. Nothing downstream
+                // repairs it: pi's own compaction at the hard ceiling meets the same content, and
+                // a turn that hits the ceiling escalates to a job instead of fixing the window.
+                let refused = ModelError::detail_is_refusal(&error);
+                let strikes = {
+                    let mut s = self.compaction_strikes.lock().expect("compaction strikes");
+                    let n = s.entry(chat_id.to_owned()).or_insert(0);
+                    *n += 1;
+                    *n
+                };
+                if refused || strikes >= SOFT_COMPACTION_STRIKES {
+                    tracing::warn!(chat_id, tokens, strikes, refused, error = %error, "the provider will not summarise this window; replacing it");
+                    self.replace_uncompactable_window(chat_id, tokens, &error)
+                        .await;
+                } else {
+                    tracing::warn!(chat_id, tokens, strikes, error = %error, "soft compaction refused");
+                }
             }
             Err(e) => {
+                // pi did not answer at all: nothing is known about the window, so no strike.
                 tracing::warn!(chat_id, tokens, error = %e, "soft compaction failed");
             }
         }
+    }
+
+    /// The provider will not summarise this chat's window, so the window is replaced instead of
+    /// being carried — and paid for — until the hard ceiling (Jacob, Test5 round 2, the F
+    /// variant of #2750).
+    ///
+    /// This is not the route #2750 closed. #2750 settled that a refused *turn* must not rotate
+    /// the session: there the provider judged the request, and a fresh window answers nothing.
+    /// Here the provider judged the window itself, and the window is the only thing agentd can
+    /// strip — pi takes `Compact` for the whole window or `SwitchSession` for a new one, with
+    /// nothing in between (`arbos_core::rpc::Command`), and no call can name the turn to drop.
+    ///
+    /// The chat survives it. `maybe_compact` runs first and folds the turns into the chat's
+    /// rolling summary, stripping there too whatever the provider declines to read; that summary
+    /// rides in front of every later turn as "Summary of earlier turns in this chat", and
+    /// `note_session_cut(chat_id, 0)` inside the rotation hands the whole transcript to the
+    /// memory walk as candidates (D91).
+    async fn replace_uncompactable_window(
+        self: &Arc<Self>,
+        chat_id: &str,
+        tokens: i64,
+        error: &str,
+    ) {
+        if let Err(e) = self.memory.maybe_compact(chat_id).await {
+            tracing::warn!(chat_id, error = %e, "the rolling summary could not be brought up to date before the window was replaced; the memory walk still carries the turns");
+        }
+        if let Err(e) = self
+            .rotate_chat_session(chat_id, "compaction_refused")
+            .await
+        {
+            tracing::warn!(chat_id, error = %e, "could not replace the window the provider will not compact");
+            return;
+        }
+        self.compaction_floor
+            .lock()
+            .expect("compaction floors")
+            .insert(chat_id.to_owned(), None);
+        self.compaction_strikes
+            .lock()
+            .expect("compaction strikes")
+            .remove(chat_id);
+        let _ = self.store.t3_append(
+            chat_id,
+            None,
+            Some(chat_id),
+            "compaction",
+            Some("system"),
+            &format!(
+                "window replaced at {tokens} tokens: the provider would not summarise it ({}). The earlier turns stay in this chat's summary and in the memory tree.",
+                error.chars().take(200).collect::<String>()
+            ),
+            None,
+        );
     }
 
     /// Start the reply's memory walk beside the rest of the turn's setup (attachments, preludes,
@@ -11617,7 +11714,11 @@ mod tests {
 
     /// The window the provider refused: a session file holding the injected prompt and enough
     /// history to stand for `tokens`. Returns its path and its size.
-    fn poisoned_window(agent: &Arc<Agent>, chat_id: &str, tokens: usize) -> (std::path::PathBuf, u64) {
+    fn poisoned_window(
+        agent: &Arc<Agent>,
+        chat_id: &str,
+        tokens: usize,
+    ) -> (std::path::PathBuf, u64) {
         let dir = agent.cfg.pi_sessions_dir();
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(format!("refused_{chat_id}.jsonl"));
