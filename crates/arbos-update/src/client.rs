@@ -120,14 +120,58 @@ pub async fn fetch_appcast_with(feed_url: &str, retry: &Retry) -> anyhow::Result
 /// A feed is a few KB and the poll is five minutes apart, so the second request
 /// costs little; the 70 MB payload is still fetched from the mirror first
 /// ([`fetch::download_urls`]), which is what the mirror is for.
+///
+/// A round that reaches nothing is tried again, up to [`Retry::attempts`] times
+/// with the same backoff the download uses. One `getaddrinfo` failure is not an
+/// answer about the release: on 2026-11-03 a Mac that had been told about
+/// 0.6.380 then failed ten checks in a row, every one of them a name lookup that
+/// did not resolve while the Mac was online, because each check asked once and
+/// gave up for the rest of the five-minute interval.
 pub async fn fetch_appcast_from(urls: &[String], retry: &Retry) -> anyhow::Result<Appcast> {
     if urls.is_empty() {
         bail!("no feed URL");
     }
     let client = http(retry)?;
+    // A check must finish well inside the poll interval, or a Mac whose requests all hang
+    // would start the next check on top of this one. Lookups that fail fail at once, so this
+    // budget is spent only by a connection that is slow rather than absent.
+    let started = std::time::Instant::now();
+    let budget = retry.connect_timeout + retry.read_timeout;
+    let attempts = retry.attempts.max(1);
+    let mut last: Vec<anyhow::Error> = Vec::new();
+    for attempt in 1..=attempts {
+        let (feeds, errors) = feed_round(&client, urls, retry, attempt).await;
+        if !feeds.is_empty() {
+            return Ok(Appcast::union(feeds));
+        }
+        let again = attempt < attempts
+            && started.elapsed() < budget
+            && errors.iter().any(fetch::worth_retrying);
+        last = errors;
+        if !again {
+            break;
+        }
+        tokio::time::sleep(retry.delay(attempt)).await;
+    }
+    let joined = last
+        .iter()
+        .map(|e| format!("{e:#}"))
+        .collect::<Vec<_>>()
+        .join("; then ");
+    bail!("{joined}")
+}
+
+/// Ask every URL once, in parallel. Returns the feeds that came back and the errors from the
+/// URLs that gave nothing, both in the order of `urls`.
+async fn feed_round(
+    client: &reqwest::Client,
+    urls: &[String],
+    retry: &Retry,
+    attempt: u32,
+) -> (Vec<Appcast>, Vec<anyhow::Error>) {
     let answers = futures::future::join_all(
         urls.iter()
-            .map(|url| fetch_feed_once(&client, url, retry))
+            .map(|url| fetch_feed_once(client, url, retry))
             .collect::<Vec<_>>(),
     )
     .await;
@@ -137,20 +181,17 @@ pub async fn fetch_appcast_from(urls: &[String], retry: &Retry) -> anyhow::Resul
         match answer {
             Ok(appcast) => feeds.push(appcast),
             Err(err) => {
-                tracing::warn!(url, error = format!("{err:#}"), "feed fetch failed");
+                tracing::warn!(
+                    attempt,
+                    url,
+                    error = format!("{err:#}"),
+                    "feed fetch failed"
+                );
                 errors.push(err);
             }
         }
     }
-    if feeds.is_empty() {
-        let joined = errors
-            .iter()
-            .map(|e| format!("{e:#}"))
-            .collect::<Vec<_>>()
-            .join("; then ");
-        bail!("{joined}")
-    }
-    Ok(Appcast::union(feeds))
+    (feeds, errors)
 }
 
 async fn fetch_feed_once(
