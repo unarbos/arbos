@@ -1222,14 +1222,13 @@ impl Theme {
     /// 16 %, not more: over a white desktop the dark card already sits near
     /// `#4d4d4d`, and the white label must keep 4.5:1 on the segment there.
     ///
-    /// Matte dark is `#5C5C5C`, the grey the user bubble used to be: the chip
-    /// is read against the segment track it sits in (`field_fill`), not
-    /// against the page, and that track is Grok's `#1F1F1F` since the parity
-    /// pass. At the bubble's new `#3C3C3C` the chip would separate from the
-    /// track by only 1.49:1, down from 2.66:1 — the "on" segment stops
-    /// reading as a plate. Grok has no such control to measure, so the number
-    /// stays where it was rather than following a bubble it only ever shared
-    /// a value with.
+    /// Matte dark is `#5C5C5C`, the grey the user bubble used to be. The chip is
+    /// read against the segment track it sits in ([`Self::segment_track_fill`]),
+    /// not against the page, and the two are one control: at the bubble's new
+    /// `#3C3C3C` the chip would separate from its track by 1.49:1, down from
+    /// 2.66:1, and the "on" segment stops reading as a plate. Grok has no such
+    /// control to measure, so both halves keep the pair they were drawn as
+    /// rather than following a bubble they only ever shared a value with.
     pub fn segment_on_fill(&self) -> Hsla {
         if !self.is_frost() {
             return match self.appearance {
@@ -1242,6 +1241,30 @@ impl Theme {
         } else {
             hex_a(0xffffff, 0.16)
         }
+    }
+
+    /// The track a segmented choice sits in (the pill well behind
+    /// [`glass::segment`]), as distinct from a text field.
+    ///
+    /// Matte dark is `#181818`, the value `field` held before the parity pass.
+    /// The track is half of a control whose other half is
+    /// [`Self::segment_on_fill`], and it is read twice over: against the chip
+    /// inside it and against the settings card under it. Jacob measured Grok's
+    /// *composer*, and the track only ever shared that token — following the
+    /// composer to `#1F1F1F` would leave the track 4/255 off the card instead of
+    /// 11/255, so the well stops reading as recessed, while the chip's own
+    /// separation drops 2.66:1 → 2.47:1. Pinning both halves leaves the control
+    /// exactly as drawn, on both surfaces and at any opacity.
+    ///
+    /// Glass has no such split: the track is the same white 6 % wash a field is.
+    pub fn segment_track_fill(&self) -> Hsla {
+        if !self.is_frost() {
+            return match self.appearance {
+                Appearance::Dark => hex(0x181818),
+                Appearance::Light => self.field,
+            };
+        }
+        self.field_fill()
     }
 
     /// Secondary text on the pane (row subtitles and details, section titles,
@@ -1723,6 +1746,7 @@ mod glass_contrast_tests {
                 ("field", theme.field_fill()),
                 ("icon tile", theme.tile_fill()),
                 ("segment", theme.segment_on_fill()),
+                ("segment track", theme.segment_track_fill()),
             ] {
                 assert!(
                     fill.a > 0.0 && fill.a < 1.0,
@@ -1769,6 +1793,11 @@ mod glass_contrast_tests {
                 Appearance::Light => hex(0x111111),
             };
             assert_eq!(theme.segment_on_fill(), segment);
+            let track = match appearance {
+                Appearance::Dark => hex(0x181818),
+                Appearance::Light => theme.field,
+            };
+            assert_eq!(theme.segment_track_fill(), track);
             assert_eq!(theme.label_muted(), theme.text_muted);
             assert_eq!(theme.label_faint(), theme.text_faint);
             let tile = match appearance {
@@ -1777,6 +1806,54 @@ mod glass_contrast_tests {
             };
             assert_eq!(theme.tile_fill(), tile);
             assert_eq!(theme.tile_fill().a, 1.0);
+        }
+    }
+
+    /// A segmented choice is two tokens drawn as one control: the chip
+    /// (`segment_on_fill`) inside the track (`segment_track_fill`), the track
+    /// inside the settings card. Both greys were `bubble` and `field` once, so
+    /// Jacob's parity numbers would have moved the pair from both sides at
+    /// once. They are pinned, and this holds the two readings that make the
+    /// control legible.
+    ///
+    /// It is checked at half opacity too: `me.rs` dims a whole `seg_row` to
+    /// `.opacity(0.5)` when the choice is unusable (the Sound row while
+    /// notifications are off), which pulls chip, track and label toward the
+    /// card together and is where a weak pair shows first.
+    #[test]
+    fn a_dark_segment_keeps_its_chip_and_its_well_dimmed_or_not() {
+        let theme = Theme::with(Appearance::Dark, Surface::Matte);
+        let grey = |c: Hsla| c.to_rgb().r * 255.0;
+        // The row dims over the card it sits on; sRGB, as `ui::highlight` composites.
+        let dim = |c: Hsla| 0.5 * grey(c) + 0.5 * grey(theme.pane_card);
+        // Dimming pulls chip and track halfway to the card, so both steps halve
+        // with them; the floors say the control still reads once they have.
+        for (state, chip, track, chip_floor, well_floor) in [
+            (
+                "lit",
+                grey(theme.segment_on_fill()),
+                grey(theme.segment_track_fill()),
+                60.0,
+                10.0,
+            ),
+            (
+                "dimmed",
+                dim(theme.segment_on_fill()),
+                dim(theme.segment_track_fill()),
+                30.0,
+                5.0,
+            ),
+        ] {
+            assert!(
+                chip - track >= chip_floor,
+                "{state}: the selected chip is {:.1}/255 over its track",
+                chip - track
+            );
+            assert!(
+                grey(theme.pane_card) - track >= well_floor,
+                "{state}: the track is a well {:.1}/255 under the card",
+                grey(theme.pane_card) - track
+            );
         }
     }
 }

@@ -170,7 +170,7 @@ impl Shell {
                     .gap(px(2.0))
                     .p(px(2.0))
                     .rounded_full()
-                    .bg(theme.field_fill())
+                    .bg(theme.segment_track_fill())
                     .border_1()
                     .border_color(theme.field_border)
                     .child(segs),
