@@ -388,6 +388,8 @@ impl BoxConfig {
             decision_cfg: decision_cfg_of(&models),
             talking_model: talking,
             subagent_model: slot("subagent_model", &self.default_subagent_model),
+            box_default_talking_model: self.default_talking_model.clone(),
+            box_default_subagent_model: self.default_subagent_model.clone(),
             instructions: project
                 .get("instructions")
                 .and_then(Value::as_str)
@@ -471,6 +473,11 @@ pub struct Config {
     pub talking_model: String,
     pub subagent_model: String,
     pub decision_model: String,
+    /// The box-wide default a slot falls back to when the project named no model of its own.
+    /// A slot that differs from its box default is a choice someone made for this agent, and
+    /// [`crate::settings::LiveModels::resolve`] lets that choice govern the agent's whole work.
+    pub box_default_talking_model: String,
+    pub box_default_subagent_model: String,
     /// Responder decision: provider switch, decision-model id, threshold (`decision_model` slot).
     pub decision_cfg: DecisionConfig,
     pub instructions: String,
