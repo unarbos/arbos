@@ -142,9 +142,27 @@ permissions:
 #
 # And the clustering is mostly ours to fix: of 731 arrivals, 64.2% are cursor/* branches, 24.7%
 # feedback/*, 6.3% other and 4.8% main, while 39% of all arrivals land within 60 s of another (27%
-# within 10 s) against a 128 s median inter-arrival. A minimum-gap policy on our own fleet's pushes
-# reaches roughly a third to a half of arrivals and needs no change to this file. No predicted
-# minutes are quoted because that needs a queueing model and an uncontaminated sample.
+# within 10 s) against a 128 s median inter-arrival. No predicted minutes are quoted because that
+# needs a queueing model and an uncontaminated sample.
+#
+# BUT THE LEVER IS CROSS-BRANCH ONLY, and this PR is the demonstration, because a comment-only edit
+# to this file matches its own path filter and mints a run every time. Six commits here produced 12
+# runs. ALL SIX `push` jobs — 41875046345, 41877441892, 41878001983, 41886398664, 41887816516,
+# 41888555368 — have runner_name empty and zero steps, five evicted by the next push and one still
+# queued; all six `pull_request` runs skipped. So this PR's cost to the pool is ZERO machine-minutes
+# and six queue entries. Each eviction landed about one second after its successor was created,
+# which is merge-window.sh's "median gap one second" reproduced six times on one branch.
+#
+# Compare the cross-branch burst: of its 18 `push` runs, 15 were STILL QUEUED two hours later and
+# 3 had machines, and because each sits in its own per-ref group NONE can evict another — all 18
+# will eventually run. At the 63.6 min median that is ~19 runner-hours committed by 45 seconds of
+# pushing, 16% of the 120-hour daily ceiling.
+#
+# So: clustering WITHIN a branch is already free, because this `group:` absorbs it and the cost does
+# not grow with push count. Clustering ACROSS branches is fully additive, because no group
+# coalesces distinct refs. Any stagger policy therefore wants a global minimum gap between
+# DIFFERENT branches' pushes; pacing pushes within one branch would be useless at best and would
+# actively cost machine time by letting more of them survive to acquire a runner.
 #
 # The cost therefore scales with precisely the cadence that makes the fix necessary, which is the
 # inverse of ci.yml and the whole reason the same one-line change does not belong here. At the
