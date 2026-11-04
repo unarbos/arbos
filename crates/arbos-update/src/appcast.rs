@@ -148,6 +148,30 @@ impl Appcast {
             .max_by(|a, b| a.parsed_version().cmp(&b.parsed_version()))
     }
 
+    /// Every item of every feed, newest first: what the app knows about once it
+    /// has asked each place that serves the feed.
+    ///
+    /// A version named by more than one feed is taken from the first feed that
+    /// named it. Two feeds disagreeing about one version's payload is not
+    /// settled here and does not need to be — the Ed25519 check over the bytes
+    /// decides what installs, whichever feed described it.
+    pub fn union(feeds: Vec<Appcast>) -> Appcast {
+        let mut out = Appcast::default();
+        for feed in feeds {
+            if out.title.is_empty() {
+                out.title = feed.title;
+            }
+            for item in feed.items {
+                if !out.items.iter().any(|i| i.version == item.version) {
+                    out.items.push(item);
+                }
+            }
+        }
+        out.items
+            .sort_by_key(|i| std::cmp::Reverse(i.parsed_version()));
+        out
+    }
+
     /// Prepend `item` (replacing any item of the same version) and keep the
     /// newest `keep` items.
     pub fn push_newest(&mut self, item: Item, keep: usize) {
