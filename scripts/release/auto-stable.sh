@@ -9,6 +9,11 @@
 #                                                    ARBOS_HOTFIX_ONLY=1 + ARBOS_PUSHED_SHA: the push-to-main
 #                                                    trigger — do nothing unless the pushed commit is a hotfix)
 #
+# It writes only in CI. Outside it — a laptop, an agent VM, a worktree — it plans, prints what it
+# would have cut, and touches nothing: no worktree change, no commit, no tag, no push. Say
+# ARBOS_RELEASE_BY_HAND=1 to cut a release from somewhere else on purpose. See "may this run
+# write anything?" below for why the default is that way round.
+#
 # What it does:
 #   1. waits ARBOS_RELEASE_DEBOUNCE_S so a batch of merges that lands within a few minutes shares
 #      one release (a fix is never held longer than that) — not when a hotfix sits at the head of main;
@@ -51,6 +56,36 @@ DEBOUNCE="${ARBOS_RELEASE_DEBOUNCE_S:-150}"
 MAC_PATHS="$("$here/mac-paths.sh")"
 
 say() { echo "::notice::$*" >&2; }
+
+# ── may this run write anything? ───────────────────────────────────────────────────────────────
+# This script commits, tags and PUSHES with whatever credential the checkout holds, and a pushed
+# `vX.Y.Z` tag is an unconditional instruction to build, sign, notarize and publish to every Mac:
+# release.yml's tag arm sets `auto=false`, so it never calls this script and never reaches
+# mac-change.sh. It is the one publishing arm with no Mac-change predicate on it, by design, so
+# that a hand-pushed tag still works.
+#
+# The consequence is that a tag pushed from anywhere publishes. On 2026-11-04 this script was run
+# on an agent VM rather than in the `plan` job, and cut v0.6.382 — signed, notarized, offered to
+# every Mac, from a commit that is not on main, byte-identical to v0.6.381, ahead of CI. Nothing
+# objected, because nothing asked where it was running. `--dry-run` was the only brake and it is
+# opt-in, which is the wrong default for a command whose mistake is public.
+#
+# So writing is opt-in too. Outside CI this plans and prints and touches nothing: not the working
+# tree, not a tag, not the remote. Cutting a release by hand stays available and is sometimes
+# right — v0.6.377 was a legitimate hand cut when a red main had shut the merge window — it just
+# has to be said out loud with ARBOS_RELEASE_BY_HAND=1.
+#
+# GITHUB_ACTIONS is a pre-authorisation that CI grants for free, so a harness testing this guard
+# must strip it at its own boundary and re-grant it in exactly one case, or every refusal case
+# quietly becomes an allow case and the suite reports green having asked nothing (#2696).
+# scripts/release/auto-stable-release-guard-selftest.sh does that, and makes the stripping a case.
+WRITES=true
+if $DRY_RUN; then
+  WRITES=false
+elif [[ "${GITHUB_ACTIONS:-}" != "true" && "${ARBOS_RELEASE_BY_HAND:-}" != "1" ]]; then
+  WRITES=false
+  say "planning only: GITHUB_ACTIONS is '${GITHUB_ACTIONS:-unset}', not 'true', and ARBOS_RELEASE_BY_HAND is not 1. Nothing will be committed, tagged or pushed. Set ARBOS_RELEASE_BY_HAND=1 to cut a release from here on purpose."
+fi
 
 emit_none() {
   local head
@@ -157,9 +192,11 @@ if [[ -n "$last_tag" ]]; then
   say "Mac release needed: $mac_change"
 fi
 
-# 4. version
-git checkout -q --detach "$target"
-base="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+# 4. version. Read out of git rather than out of the worktree: the plan — version, tag name and
+#    notes — has to be computable without checking anything out, so a run that is not allowed to
+#    write can still say what it would have done. `sed -n 1p`, not `head -1`: head closes the pipe
+#    early and under `set -o pipefail` the SIGPIPE on `git show` would abort the plan.
+base="$(git show "$target:Cargo.toml" | sed -n 's/^version = "\(.*\)"/\1/p' | sed -n 1p)"
 last_v="${last_tag#v}"
 if [[ -n "$last_v" && "$(printf '%s\n%s\n' "$base" "$last_v" | sort -V | tail -1)" == "$last_v" ]]; then
   IFS=. read -r maj min pat <<< "$last_v"
@@ -185,6 +222,17 @@ if $hotfix; then summary="hotfix (released ahead of CI): $summary"; fi
 subject="release: $version — $summary"
 subject="${subject:0:480}"
 
+# Everything above this line is a read. Everything below writes — the worktree, a commit, a tag,
+# the remote — so the guard lands here, where the plan is complete enough to print and nothing has
+# happened yet. A refusal names the version it did not cut, because "nothing to do" and "I was not
+# allowed to do it" must not read the same (the whole shape of tonight's absence family).
+if ! $WRITES; then
+  say "plan only: would cut v$version on ${target:0:8} — $subject"
+  emit_none "plan only — v$version would be cut on ${target:0:8}$($DRY_RUN && echo ' (--dry-run)' || echo ' (not CI; set ARBOS_RELEASE_BY_HAND=1 to mean it)'); nothing was committed, tagged or pushed"
+  exit 0
+fi
+
+git checkout -q --detach "$target"
 sed -i.bak "0,/^version = \"$base\"/s//version = \"$version\"/" Cargo.toml && rm -f Cargo.toml.bak
 cargo update --workspace --offline >/dev/null 2>&1 || cargo update --workspace >/dev/null
 git config user.name "arbos-release[bot]"
@@ -194,18 +242,17 @@ git commit -q -m "$subject" -m "Automatic stable release (continuous delivery): 
 bump="$(git rev-parse HEAD)"
 git tag -a "v$version" -m "Arbos $version" "$bump"
 
-if $DRY_RUN; then
-  say "dry run: would tag v$version at $bump (target ${target:0:8}) and fast-forward main to it"
+# The tag is the release: it always lands (a new ref), even while main keeps moving. main is
+# fast-forwarded to the bump when nothing landed meanwhile; otherwise the bump commit lives under
+# its tag only, and the next release computes its number from the tags, not Cargo.toml.
+# A run reaching here is authorised: --dry-run and the outside-CI case both returned above, before
+# the checkout, so neither leaves a local bump commit or a local tag behind. That matters more
+# than it reads — a stray local `vX.Y.Z` is what the next stable-tag-base.sh would answer with.
+git push -q origin "refs/tags/v$version"
+if git push -q origin "HEAD:refs/heads/main" 2>/dev/null; then
+  say "released: v$version at ${bump:0:8} (target ${target:0:8}); main fast-forwarded to the bump"
 else
-  # The tag is the release: it always lands (a new ref), even while main keeps moving. main is
-  # fast-forwarded to the bump when nothing landed meanwhile; otherwise the bump commit lives
-  # under its tag only, and the next release computes its number from the tags, not Cargo.toml.
-  git push -q origin "refs/tags/v$version"
-  if git push -q origin "HEAD:refs/heads/main" 2>/dev/null; then
-    say "released: v$version at ${bump:0:8} (target ${target:0:8}); main fast-forwarded to the bump"
-  else
-    say "released: v$version at ${bump:0:8} (target ${target:0:8}); main moved meanwhile, the bump stays under its tag"
-  fi
+  say "released: v$version at ${bump:0:8} (target ${target:0:8}); main moved meanwhile, the bump stays under its tag"
 fi
 
 echo "channel=stable"

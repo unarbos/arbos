@@ -64,6 +64,11 @@ jobs:
           ./scripts/avatar-lint.sh
           # Which verdicts refuse a merge. No network, no credentials, ~0.1s.
           ./scripts/merge/selftest.sh
+          # Whether auto-stable.sh will commit, tag and push from somewhere that is not CI. Runs
+          # the real script against a bare repository it creates in $TMPDIR; it cannot reach
+          # origin. Strips GITHUB_ACTIONS at its own boundary, or running here would grant every
+          # refusal case the bypass it is checking.
+          ./scripts/release/auto-stable-release-guard-selftest.sh
           curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash | bash -s -- latest /tmp >/dev/null
           /tmp/actionlint -color
 
