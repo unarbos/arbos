@@ -248,14 +248,23 @@ pub enum ModelRole<'a> {
 #[derive(Clone)]
 pub struct LiveModels {
     slots: Arc<RwLock<Models>>,
+    /// The memory-tree mode of `slots`, mirrored as one byte. `Agent::tree_mode` is called from
+    /// sync code, where the only way to read `slots` was `try_read`; a fair lock hands that a
+    /// failure whenever the 3 s registry poll has a writer queued, and the box default took the
+    /// project's choice's place — so an agent's recall flipped mode on an ordinary timer.
+    tree_mode: Arc<std::sync::atomic::AtomicU8>,
     box_default_talking: String,
     box_default_subagent: String,
 }
 
 impl LiveModels {
     pub fn new(cfg: &crate::config::Config) -> Self {
+        let slots = Models::from_cfg(cfg);
         Self {
-            slots: Arc::new(RwLock::new(Models::from_cfg(cfg))),
+            tree_mode: Arc::new(std::sync::atomic::AtomicU8::new(
+                slots.decision_cfg.memory_tree.code(),
+            )),
+            slots: Arc::new(RwLock::new(slots)),
             box_default_talking: cfg.box_default_talking_model.clone(),
             box_default_subagent: cfg.box_default_subagent_model.clone(),
         }
@@ -280,6 +289,9 @@ impl LiveModels {
                     memory_tree: crate::tree::TreeMode::On,
                 },
             })),
+            tree_mode: Arc::new(std::sync::atomic::AtomicU8::new(
+                crate::tree::TreeMode::On.code(),
+            )),
             box_default_talking: id.to_owned(),
             box_default_subagent: id.to_owned(),
         }
@@ -289,8 +301,23 @@ impl LiveModels {
         self.slots.read().await
     }
 
-    pub async fn write(&self) -> tokio::sync::RwLockWriteGuard<'_, Models> {
-        self.slots.write().await
+    /// Replace the slots.
+    ///
+    /// **This is the only writer, and the sync-readable mirrors below are correct only because
+    /// it is.** `slots` is private and nothing else takes its write lock, so `tree_mode` cannot
+    /// drift from `decision_cfg.memory_tree`. A second writer would silently break that: add one
+    /// here, or have it update every mirror this function updates.
+    pub async fn set(&self, m: Models) {
+        self.tree_mode.store(
+            m.decision_cfg.memory_tree.code(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        *self.slots.write().await = m;
+    }
+
+    /// The memory-tree mode, without the async lock and without a fallback.
+    pub fn tree_mode(&self) -> crate::tree::TreeMode {
+        crate::tree::TreeMode::from_code(self.tree_mode.load(std::sync::atomic::Ordering::Relaxed))
     }
 
     pub fn try_read(
@@ -609,7 +636,7 @@ impl Agent {
     pub async fn apply_models(self: &Arc<Self>, m: &Models) -> Result<()> {
         let prev = self.settings.models.read().await.clone();
         // Remember first so a respawn / system-prompt rewrite reads the new slots.
-        *self.settings.models.write().await = m.clone();
+        self.settings.models.set(m.clone()).await;
         // The new models need their context-window override before pi (re)reads models.json.
         if let Err(e) =
             crate::workspace::write_models_json(&self.cfg, &m.talking.id, &m.subagent.id)
