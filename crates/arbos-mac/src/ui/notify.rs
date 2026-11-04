@@ -373,6 +373,9 @@ pub fn deliver(n: &Notification) {
     {
         let mut cmd = Command::new("notify-send");
         cmd.arg("--app-name=Arbos").arg("--expire-time=8000");
+        if !sound_on() {
+            cmd.arg("--hint=boolean:suppress-sound:true");
+        }
         if let Some(image) = &n.image {
             cmd.arg(format!("--icon={}", image.display()));
         }
@@ -617,6 +620,19 @@ fn set_permission(p: Permission) {
         Permission::Allowed => 3,
     };
     PERMISSION.store(v, Ordering::Relaxed);
+}
+
+/// Settings → Notifications → Sound: off posts every banner silently. Process-wide
+/// because [`deliver`] runs without a `cx` (the same shape as `link_card::ENABLED`).
+/// The ringing call banner ([`deliver_call`]) keeps its sound: a call rings.
+static SOUND: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+pub fn sound_on() -> bool {
+    SOUND.load(Ordering::Relaxed)
+}
+
+pub fn set_sound(on: bool) {
+    SOUND.store(on, Ordering::Relaxed);
 }
 
 /// Ask the OS again (asynchronous on macOS; the answer lands in [`permission`]).
@@ -1106,7 +1122,9 @@ mod mac {
         let content = UNMutableNotificationContent::new();
         content.setTitle(&NSString::from_str(&n.title));
         content.setBody(&NSString::from_str(&n.body));
-        content.setSound(Some(&UNNotificationSound::defaultSound()));
+        if super::sound_on() {
+            content.setSound(Some(&UNNotificationSound::defaultSound()));
+        }
         if let Some(chat) = &n.chat_id {
             content.setThreadIdentifier(&NSString::from_str(chat));
         }
