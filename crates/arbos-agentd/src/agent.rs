@@ -6527,6 +6527,12 @@ impl Agent {
                 }
             }
             t.progress_texts.push(text.to_owned());
+            // The id of the bubble this text is in, read before the next row exists. Recorded
+            // after `open_row`, `t.assistant_msg_id` is the *result* row that follows — so the
+            // record named a row the message was not in, and matched the id the turn would
+            // later end on. In AF-782 that read as a final event overwriting the table Jacob
+            // had been shown; nothing was overwritten, the record was simply late.
+            let bubble_id = t.assistant_msg_id.clone();
             self.close_row(&host, t, "progress").await;
             self.open_row(&host, t, "result").await;
             let _ = self.store.t3_append(
@@ -6536,7 +6542,7 @@ impl Agent {
                 "assistant",
                 Some("assistant"),
                 text,
-                Some(&json!({ "message_id": t.assistant_msg_id, "progress": true })),
+                Some(&json!({ "message_id": bubble_id, "progress": true })),
             );
             tracing::info!(chat_id = %t.chat_id, chars = text.chars().count(), "progress bubble");
         }
