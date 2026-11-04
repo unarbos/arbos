@@ -76,6 +76,8 @@ jobs:
           set -euo pipefail
           sudo apt-get install -y -q shellcheck >/dev/null
           shellcheck -S warning scripts/*.sh scripts/release/*.sh scripts/runner/*.sh scripts/feedback/*.sh scripts/merge/*.sh image/*.sh
+          # CONTROL BRANCH ONLY — never merge. Proves a red lint no longer hides the steps below it.
+          false
 
       - name: Avatar resolver lint
         if: ${{ !cancelled() && steps.checkout.conclusion == 'success' }}
