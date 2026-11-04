@@ -2789,9 +2789,10 @@ enum PaneKinds {
     static let group = ["Members", "Library"]
     static let server = ["Channels", "Members", "Settings"]
     static let channel = ["Profile", "Settings"]
-    /// One kind and the tabs it carries. Named rather than a tuple: a tuple is read by
-    /// position, and a Swift key path cannot reach a tuple element at all, so mapping one
-    /// out by index does not compile where `map(\.tabs)` does.
+    /// One kind and the tabs it carries. Named rather than a tuple because `kind.tabs`
+    /// says at the call site what `kind.1` only counts to — not because a tuple would
+    /// fail. Key paths reach tuple elements fine and this app relies on that in three
+    /// dozen places, `HomeView`'s `rankedRows.map(\.2)` among them.
     struct Kind {
         let name: String
         let tabs: [String]
