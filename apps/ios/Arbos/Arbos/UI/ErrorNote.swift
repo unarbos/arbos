@@ -251,18 +251,27 @@ struct ToastHost: View {
         }
         .padding(.horizontal, 16)
         .padding(.top, 8)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        // No layout height while there is nothing in here. A container with no children has no
+        // child frames to union, so SwiftUI publishes the element at its own layout box — and
+        // with `maxHeight: .infinity` that box is the whole content area, which is what an
+        // empty slot used to put into the accessibility tree: measured at `(0, 62, 402, 778)`
+        // on a 402×874 screen, over every row underneath, for as long as no toast is showing.
+        // Collapsing it to 0 publishes `(0, 62, 402, 0)` instead, which covers nothing.
+        //
+        // The element itself stays, with its identifier, so the move-and-fade above stays a
+        // transition within one container rather than becoming an insertion of a new one. The
+        // non-empty branch is the chain this view has always had, so no call site's layout
+        // changes: with a toast up the slot publishes `(16, 70, 370, 90)`, as it did before.
+        //
+        // `.accessibilityHidden(model.toasts.isEmpty)` was tried here first and is **measured
+        // to do nothing at all** — on a container that is not itself an accessibility element
+        // it sets `accessibilityElementsHidden`, which hides descendants, and the published box
+        // came back byte-identical. The box is the thing to remove, not its visibility.
+        .frame(maxWidth: .infinity, maxHeight: model.toasts.isEmpty ? 0 : .infinity,
+               alignment: .top)
         .allowsHitTesting(!model.toasts.isEmpty)
         .animation(.easeOut(duration: 0.2), value: model.toasts)
         .accessibilityIdentifier("toast-slot")
-        // An empty slot is still a full-screen view, and a container with no children has no
-        // child frames to union, so SwiftUI publishes it at its own layout box: one element
-        // covering the whole content area, sitting over every row underneath. VoiceOver reads
-        // that, and XCUITest computes hit points from the same tree — which is why a Home row
-        // with a perfectly good frame reports no hit point while UIKit delivers the touch
-        // normally. Hidden while empty, and only while empty: with a toast up the slot has to
-        // stay in the tree so the note, its × and its Try again can be reached.
-        .accessibilityHidden(model.toasts.isEmpty)
     }
 }
 
