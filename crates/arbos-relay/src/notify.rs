@@ -462,6 +462,9 @@ pub async fn announce_with(
     let mentions = &union_resolved_mentions(state, chat, &member, text, mentions);
     // Outside agents in this chat get the message as an ASP event (#2140).
     crate::outside::on_announce(state, chat, sender, message_id, text, None, mentions);
+    // An agent holding an access link gets it on its SSE stream. Returns after one read lock
+    // when no account on this relay holds a live link, which is the normal case.
+    crate::agent_link_stream::on_announce(state, chat, sender, message_id, text, None, mentions);
     state.matrix.message(
         state,
         &chat.chat_id,

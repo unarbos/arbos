@@ -576,26 +576,32 @@ impl Db {
         })
     }
 
-    /// Forget a device's Matrix identity, handing back `(mxid, matrix device id, encrypted
-    /// access token)` — the token so the caller can log it out, which is the only thing that
-    /// makes the device gone at the homeserver.
-    pub fn matrix_delete_device(
+    /// `(mxid, matrix device id, encrypted access token)` of a device whose Matrix identity is
+    /// about to be closed. Read only: the row is the relay's one handle on a live Matrix access
+    /// token, so it is dropped by [`Db::matrix_forget_device`] after the logout lands and not
+    /// before — a row deleted ahead of a failed logout leaves a token nobody can find (#2433).
+    pub fn matrix_device_to_revoke(
         &self,
         device_id: &str,
     ) -> Result<Option<(String, String, String)>> {
         self.with(|c| {
-            let row = c
-                .query_row(
-                    "SELECT mxid, mx_device_id, mx_token_enc FROM matrix_devices WHERE device_id = ?1",
-                    params![device_id],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-                )
-                .optional()?;
+            c.query_row(
+                "SELECT mxid, mx_device_id, mx_token_enc FROM matrix_devices WHERE device_id = ?1",
+                params![device_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()
+        })
+    }
+
+    /// Drop a device's Matrix identity. Call it once the homeserver has logged the token out.
+    pub fn matrix_forget_device(&self, device_id: &str) -> Result<()> {
+        self.with(|c| {
             c.execute(
                 "DELETE FROM matrix_devices WHERE device_id = ?1",
                 params![device_id],
-            )?;
-            Ok(row)
+            )
+            .map(|_| ())
         })
     }
 

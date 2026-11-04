@@ -356,6 +356,13 @@ pub struct AppState {
     pub started_at: std::time::Instant,
     /// Planned-restart signal: room sockets close with 1012 when it flips (`restart.rs`).
     pub restart: Arc<RestartSignal>,
+    /// Bumped once per device revocation (`signin::revoke_device_everywhere`). A live room
+    /// socket resolved its principal at upgrade and never looks again, so without this a
+    /// revoked device keeps reading and writing until it disconnects. The value is a counter
+    /// rather than the device id: a watch channel keeps only the latest value, so two
+    /// revocations in the same moment would hide one another. Watchers re-read
+    /// `device_status`, which is the authority.
+    pub revocations: Arc<tokio::sync::watch::Sender<u64>>,
     /// `call:project` → when the voice worker was last dispatched for it (no double dispatch).
     pub voice_dispatched: Arc<Mutex<HashMap<String, i64>>>,
     /// What the voice worker last reported about itself (`POST /voice/worker/hello`).
@@ -370,6 +377,10 @@ pub struct AppState {
     pub client_seen: Arc<crate::releases::ClientSeen>,
     /// Chats on Matrix (D88): mode, homeserver tokens and the outbox wake-up.
     pub matrix: Arc<crate::matrix::Matrix>,
+    /// Who is watching an agent access link's stream, and how to wake them. Holds the set of
+    /// accounts with a live link, which the announce path reads before it does anything else —
+    /// an account without a link pays one read lock and one `is_empty`.
+    pub link_hub: Arc<crate::agent_link_stream::LinkHub>,
 }
 
 impl AppState {
@@ -438,6 +449,18 @@ impl AppState {
                 })
             })
             .clone()
+    }
+
+    /// Tell every live socket that some device was revoked, so each one re-reads
+    /// `device_status` and closes if it was the device in question (see [`AppState::revocations`]).
+    pub fn note_device_revoked(&self) {
+        self.revocations.send_modify(|n| *n = n.wrapping_add(1));
+    }
+
+    /// Is this device still a live session? `false` for a revoked row and for a row that is
+    /// gone, so a socket cannot outlive the row it was authorised by.
+    pub fn device_is_live(&self, device_id: &str) -> bool {
+        matches!(self.db.device_status(device_id), Ok(Some((_, false))))
     }
 
     /// The user whose box serves a project.
@@ -696,12 +719,14 @@ pub(crate) mod test_support {
             default_snapshot: Arc::new(std::sync::RwLock::new(String::new())),
             started_at: std::time::Instant::now(),
             restart: Arc::new(RestartSignal::default()),
+            revocations: Arc::new(tokio::sync::watch::Sender::new(0)),
             voice_dispatched: Arc::new(Mutex::new(HashMap::new())),
             voice_worker: Arc::new(Mutex::new(None)),
             voice_inbox: crate::voice::VoiceInbox::default(),
             image_health: Arc::new(Mutex::new(None)),
             client_seen: Arc::new(std::sync::Mutex::new(HashMap::new())),
             matrix: crate::matrix::Matrix::new(crate::matrix::Config::off()),
+            link_hub: Arc::new(crate::agent_link_stream::LinkHub::default()),
         }
     }
 }

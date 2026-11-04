@@ -232,24 +232,94 @@ fn two_workspaces_of_one_box_get_different_mcp_tokens() {
     );
 }
 
-/// What deriving does *not* fix, recorded so the follow-up has something to turn green. On a
-/// daemon booted with no `ARBOS_MCP_TOKEN` the derivation has no secret to mix in, so the
-/// workspace token is a constant anyone who knows the project id can compute. Being non-empty, it
-/// does stop a request with no header from passing — that is
-/// `an_unset_box_token_does_not_authenticate_a_request_without_one` above — but only the explicit
-/// `configured.is_empty()` guard, the shape #2575 gives the hook API, refuses the computed value.
+/// The token an unconfigured box used to hand its workspaces: with no `ARBOS_MCP_TOKEN` the
+/// derivation had no secret to mix in, so it answered a constant anyone knowing the project id
+/// could compute — and a non-empty one, which every `tok == configured` arm accepted as the main
+/// session. The `configured.is_empty()` guard alone could not refuse it, because the computed
+/// constant *was* the configured value. Deriving nothing from nothing is what arms that guard.
 #[test]
-fn an_unset_box_token_still_derives_a_token_with_no_secret_in_it() {
+fn an_unset_box_token_derives_no_workspace_token_at_all() {
     use sha2::Digest;
     let root = std::env::temp_dir().join(format!("arbos-xws-pub-{}", ulid()));
     let mut bx = box_cfg(&root);
     bx.mcp_token = String::new();
     let w = bx.workspace(&json!({ "id": PROJECT_A }), 0);
-    let anyone_can_compute = format!(
+    let anyone_could_compute = format!(
         "mcp_{}",
         hex::encode(&sha2::Sha256::digest(format!("arbos-mcp:v1::{PROJECT_A}").as_bytes())[..16])
     );
-    assert_eq!(w.mcp_token, anyone_can_compute);
+    assert_ne!(
+        w.mcp_token, anyone_could_compute,
+        "an unconfigured box still mints the guessable constant"
+    );
+    assert!(
+        w.mcp_token.is_empty(),
+        "an unconfigured box must derive no token, so the servers authenticate nobody"
+    );
+}
+
+/// The whole of the unconfigured box over HTTP: the token anyone can compute is refused, a
+/// request with no bearer at all is still refused, and a *configured* box's own tokens still
+/// work — so the refusal is the guard firing and not a server broken for everyone.
+#[tokio::test]
+async fn an_unconfigured_box_refuses_the_computable_token_and_anonymous_alike() {
+    use sha2::Digest;
+    let root = std::env::temp_dir().join(format!("arbos-xws-unconf-{}", ulid()));
+    std::fs::create_dir_all(&root).unwrap();
+    let mut bx = box_cfg(&root);
+    bx.mcp_token = String::new();
+    let w = bx.workspace(&json!({ "id": PROJECT_A, "name": "Alice" }), 0);
+    let computable = format!(
+        "mcp_{}",
+        hex::encode(&sha2::Sha256::digest(format!("arbos-mcp:v1::{PROJECT_A}").as_bytes())[..16])
+    );
+    let computable_subagent = format!(
+        "sub_{}",
+        hex::encode(&sha2::Sha256::digest(format!("subagent:{computable}").as_bytes())[..16])
+    );
+    let base = serve(crate::mcp::router(agent_for(w))).await;
+    let url = format!("{base}/mcp");
+
+    for (what, token) in [
+        ("the computable main token", &computable),
+        ("the computable subagent token", &computable_subagent),
+    ] {
+        let (status, body) = post(
+            &url,
+            token,
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
+        )
+        .await;
+        assert_eq!(status, 401, "{what} opened an unconfigured box: {body}");
+    }
+
+    let r = reqwest::Client::new()
+        .post(&url)
+        .json(&json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        r.status().as_u16(),
+        401,
+        "deriving nothing let a request with no bearer through as the main session"
+    );
+
+    let (a, _b, configured_root) = two_workspaces();
+    let configured = serve(crate::mcp::router(a.clone())).await;
+    let (status, body) = post(
+        &format!("{configured}/mcp"),
+        &a.cfg.mcp_token,
+        json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/list" }),
+    )
+    .await;
+    assert_eq!(
+        status, 200,
+        "a configured box stopped taking its own token: {body}"
+    );
+
+    let _ = std::fs::remove_dir_all(&configured_root);
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// The derivation is keyed on the project and not on the workspace index, which comes from a
