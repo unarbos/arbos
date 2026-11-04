@@ -24,6 +24,25 @@
 # pool when the real answer is to go read the failed run. So the rule here is to assert a floor, and
 # to let an unanswerable question be BLOCKED rather than letting it become an answer.
 #
+# The wider shape, because those three are one instance of it and not the whole: A CHECK THAT FAILED
+# TO RUN REPORTS A VERDICT ABOUT ITS SUBJECT. Three more turned up in a single evening, in three
+# different tools, none of them this file:
+#   - a self-test case printed UNKNOWN because an unset $R made building an API path fatal under
+#     `set -u`, so the stub it was about never executed. UNKNOWN was read as a finding about the
+#     workflow under test. It was a finding about the test's own environment;
+#   - a CI run evicted from an unkeyed concurrency group completed with zero jobs, and a zero-job
+#     run satisfies "no job failed". It was read as green. Nothing had been compiled;
+#   - a query returning no rows was read as "no job ran", when the query had never been constrained
+#     to the thing being asked about.
+# In each case something answered a question it had not asked, and the answer was a pass. The three
+# wording changes in this change are the same bug in the reporting layer rather than the reading
+# layer: SATISFIED printed when no gate applied said "this head is good" when it meant "I read
+# nothing"; one-argument `checks` on a merge commit measured the incoming parent and said it was
+# measuring the PR; a 300-entry file listing is GitHub's cap, so "the diff touches no gated path"
+# may mean "the gated path is on page two". A reader that cannot say which of those it did is
+# indistinguishable from one that checked, and that is the whole defect — so each of them now says
+# what it did not read, and the two that cannot know refuse instead of reporting.
+#
 # This list IS the repository's required-check policy. main has no branch protection and no ruleset
 # (branches/main reports "protected": false; rulesets and rules/branches/main are both empty), and
 # the protection endpoint needs a token with Administration:Read, which the merge lane's token is
