@@ -19,7 +19,12 @@
 #      was "did not look at everything" (#2467);
 #   3. gate_state's run lookup, which gets total_count 0 for an abbreviated head_sha and so reported
 #      "no run exists for this sha at all" about a head whose gate had in fact run and failed.
-# All three failed closed, and all three gave a false reason. The false reason is the harm: it points
+#   4. that same sentence again, this time for a head whose gate COULD not have run: a branch that
+#      forked before the gate landed on main has no workflow in the tree a run would start from,
+#      so GitHub created nothing. Measured on #2695 — merge base e445f70ad at 02:35Z, release-gate.yml
+#      landed at 29713cae9 at 13:21:35Z. Same words as a broken query, opposite remedy. See
+#      no_run_state below, which is what splits them.
+# All four failed closed, and all four gave a false reason. The false reason is the harm: it points
 # at the wrong remedy, and "no run exists" sends the reader to push and wait out a saturated macOS
 # pool when the real answer is to go read the failed run. So the rule here is to assert a floor, and
 # to let an unanswerable question be BLOCKED rather than letting it become an answer.
@@ -172,6 +177,47 @@ gate_state() {
   echo "NOVERDICT $got run(s) on this head, every one skipped or neutral, so none of them tested it: $all"
 }
 
+# no_run_state <workflow> <sha>: gate_state said NONE. Which of the two "no run" states is it?
+# One line — ABSENT <detail> | MISSING <detail> | BLOCKED <what could not be read>.
+#
+# Why this exists. "No run of <workflow> exists for this sha at all" was one sentence covering two
+# states that need opposite actions, which is entry 4 in this file's header.
+#
+#   ABSENT   the workflow is not in the tree a run for this head would have started from, so
+#            GitHub had nothing to start and created nothing. A definite fact about this head,
+#            not an unknown, and the remedy is to move the head. Nothing will appear while it
+#            sits still, so "wait for the run" is advice that never comes true.
+#   MISSING  the workflow IS in that tree, this kit says the diff touches its filter, and a run
+#            still does not exist. One of those three is wrong — the run was deleted, or GitHub's
+#            own path matching disagrees with files_match_patterns, or the query is bad. That is
+#            unanswerable from here, so it is BLOCKED by the caller rather than becoming a
+#            verdict. It is also the state that must stay reachable: a branch that could only
+#            ever say ABSENT would absorb a broken query into a reassuring explanation.
+#
+# Why the MERGE BASE is the tree to ask about, and why one read serves both callers. A
+# pull_request run starts from the merge of the head into its base, so a branch that forked
+# before the workflow landed has it on neither side of that merge. A push run starts from the
+# pushed commit's own tree. For a commit already on GATE_BASE the merge base IS that commit, so
+# `compare/GATE_BASE...<sha>` answers the question for a pull request head and for a main commit
+# without require_gates having to know which it was handed.
+#
+# This read is made only when gate_state has already said NONE. verdict() and range_gate() walk
+# many commits, and every one of them would otherwise pay for a compare it does not need.
+no_run_state() {
+  local wf=$1 sha=$2 base=${GATE_BASE:-main} mb rc
+  mb=$(rd "repos/$R/compare/$base...$sha" --jq '.merge_base_commit.sha') \
+    || { echo "BLOCKED cannot read ${sha:0:8}'s merge base with $base, so why no run of ${wf##*/} exists is unknown: ${mb#BLOCKED:}"; return; }
+  case "$mb" in
+    "" | null) echo "BLOCKED $base and ${sha:0:8} report no merge base, so why no run of ${wf##*/} exists is unknown"; return ;;
+  esac
+  gate_patterns "$wf" "$mb" >/dev/null; rc=$?
+  case $rc in
+    2) echo "ABSENT $wf is not in the tree of this head's merge base ${mb:0:9} with $base — it landed on $base after this head forked. A run starts from the workflow as it stood in the base, so none was ever created for this head and none will appear while the head sits still. Move the head — rebase onto $base and push — and the run is created. The gate is unrun, not failing." ;;
+    0) echo "MISSING $wf IS in the tree of this head's merge base ${mb:0:9} with $base and this kit reads the diff as touching its filter, so a run should exist for this head and none does. Rule the query out before reading it as a missing verdict — the run may have been deleted, or GitHub's path matching may disagree with this kit's. Read it directly: gh api \"repos/$R/actions/workflows/${wf##*/}/runs?head_sha=$sha\"" ;;
+    *) echo "BLOCKED cannot read $wf at the merge base ${mb:0:9}, so why no run of ${wf##*/} exists for ${sha:0:8} is unknown" ;;
+  esac
+}
+
 # gate_applies <workflow> <sha> <files>: 0 when the diff touches the workflow's path filter, 1 when it
 # touches none, 2 when that cannot be told. For 1 and 2 it prints why.
 #
@@ -242,7 +288,16 @@ require_gates() {
       PASS*)    echo "    required check '$name' on ${sha:0:9}: $state" ;;
       BLOCKED*) echo "    required check '$name' on ${sha:0:9}: $state"; rc=2 ;;
       PENDING*) echo "    required check '$name' on ${sha:0:9}: NO VERDICT YET — $state"; [ $rc -eq 0 ] && rc=3 ;;
-      NONE)     echo "    required check '$name' on ${sha:0:9}: NO VERDICT — required by path, and no run of $wf exists for this sha at all"; [ $rc -eq 2 ] || rc=1 ;;
+      # Two states, two remedies, and until now one sentence. ABSENT is a fact about this head and
+      # refuses like any other missing verdict; MISSING and an unreadable merge base are both
+      # unanswerable from here, so they are BLOCKED rather than becoming one.
+      NONE)
+        state=$(no_run_state "$wf" "$sha")
+        case "$state" in
+          ABSENT*)  echo "    required check '$name' on ${sha:0:9}: NO VERDICT — required by path, and the workflow did not exist in this head's base: ${state#ABSENT }"; [ $rc -eq 2 ] || rc=1 ;;
+          MISSING*) echo "    required check '$name' on ${sha:0:9}: BLOCKED — required by path, the workflow did exist in this head's base, and no run exists for this head: ${state#MISSING }"; rc=2 ;;
+          *)        echo "    required check '$name' on ${sha:0:9}: BLOCKED — $state"; rc=2 ;;
+        esac ;;
       *)        echo "    required check '$name' on ${sha:0:9}: NO VERDICT — $state"; [ $rc -eq 2 ] || rc=1 ;;
     esac
   done <<< "$GATES"
