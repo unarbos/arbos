@@ -32,6 +32,7 @@ use crate::app::AppState;
 use crate::model::{Id, MachineState, Message, Project, Role, ServerInfo};
 use crate::search;
 use crate::ui::avatars;
+use crate::ui::back_swipe;
 use crate::ui::composer::Composer;
 use crate::ui::frost::{edge_faded, edge_faded_sides};
 use crate::ui::glass::{self, WindowDrag};
@@ -1286,6 +1287,7 @@ pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<S
         .px(px(8.0))
         .overflow_x_scroll()
         .track_scroll(&shell.filter_scroll)
+        .map(back_swipe::mark_sideways_scroller)
         .children(ListFilter::ALL.into_iter().enumerate().map(|(ix, f)| {
             let on = f == filter;
             div()
@@ -1610,6 +1612,34 @@ pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<S
     // point the column collapses to the rail (`ui::sidebar_fit`).
     let resize = resize_handle("sidebar-resize", &theme, &shell.split_drag, cx);
 
+    // A back swipe out of a server or Hidden chats moves the list with the
+    // fingers (`ui::back_swipe`); the column clips it meanwhile.
+    let swipe_offset = shell
+        .back_swipe_drawn
+        .filter(|v| {
+            v.target
+                .is_some_and(|t| t.region() == back_swipe::Region::Sidebar)
+        })
+        .map_or(0.0, |v| v.offset);
+    let list = match open_server.as_ref() {
+        // Inside a server the left pane shows its channels (mockup h).
+        Some(server) => faded_list(server_channels(server, shell, &theme, cx)),
+        None => faded_list(list),
+    };
+    let list = if swipe_offset == 0.0 {
+        list
+    } else {
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .relative()
+            .left(px(swipe_offset))
+            .child(list)
+            .into_any_element()
+    };
+
     let column = div()
         .relative()
         .h_full()
@@ -1620,16 +1650,13 @@ pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<S
         .bg(theme.chrome())
         .border_r_1()
         .border_color(theme.border)
+        .when(swipe_offset != 0.0, |el| el.overflow_hidden())
         .child(strip)
         // The filter belongs to the chat list, not to a server's channel list.
         .when(filter_shown(open_server.is_some()), |el| {
             el.child(edge_faded_sides(FILTER_FADE_BAND, filter_bar))
         })
-        .child(match open_server.as_ref() {
-            // Inside a server the left pane shows its channels (mockup h).
-            Some(server) => faded_list(server_channels(server, shell, &theme, cx)),
-            None => faded_list(list),
-        });
+        .child(list);
     // Grok Bot's update disc at the footer's right end, only when an update is
     // ready for a click ([feedback footer-update-button-grok-2026-10-24]).
     let update_disc = shell.render_update_disc(cx);

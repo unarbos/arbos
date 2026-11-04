@@ -190,6 +190,32 @@ pub fn check_push(
         }
     }
 
+    // A second row wearing an id the list already holds. Nothing legitimate does this: a
+    // message id is a ulid, and a heal re-inserts a row the list is *missing*, so after a real
+    // heal the id appears once. Two rows under one id is a client minting a new message under a
+    // name the record has already given out.
+    //
+    // It has to be refused here rather than answered by its readers, because the record cannot
+    // tell the two rows apart afterwards. `message_authors` is keyed on `(chat, message id)`
+    // alone, so the author the relay attested for the first row answers for the second one too
+    // — and every reader that resolves a message by id then reads the new row as the old row's
+    // author: `moderation`, the "save this" hand-off, and `secrets::directing`, which takes who
+    // is directing a turn from exactly this record.
+    //
+    // The pusher-attribution arms below do not catch it, because this push is not introducing a
+    // message as far as the record is concerned: the id already has an author, so the
+    // `(Some(a), s)` arm reads it as a heal of attested history and attests nothing new.
+    for (id, _) in &changes.inserted {
+        if changes.ids_after.iter().filter(|x| *x == id).count() > 1 {
+            return PushCheck::Refuse {
+                code: "duplicate_id",
+                detail: format!(
+                    "{id} is already a message in this chat; a new message needs an id of its own"
+                ),
+            };
+        }
+    }
+
     let mut carries_new_message = false;
     let mut attributed = Vec::new();
     for (id, sender) in &changes.inserted {
@@ -320,6 +346,79 @@ mod tests {
                 .unwrap();
         }
         (chat, alice, bob, alice_dev, bob_dev)
+    }
+
+    /// The long path through this check. A member who writes a *new* id is recorded under their
+    /// own name by the arms below, and that is what the earlier probe exercised. Re-using an id
+    /// the chat already holds takes a different arm entirely: the id has an author already, so
+    /// the push reads as a heal of attested history and attests nothing — leaving the owner's
+    /// name in the record answering for a row the member wrote.
+    ///
+    /// `message_authors` is keyed on `(chat, message id)`, so every reader that resolves a
+    /// message by id reads the new row as the old row's author, including
+    /// `secrets::directing`, which takes who is directing a turn from this record.
+    #[test]
+    fn a_push_cannot_mint_a_second_message_under_an_id_the_chat_already_holds() {
+        let state = test_state(AuthMode::Github);
+        let (chat, alice, _bob, alice_dev, bob_dev) = chat_with_two(&state);
+        let as_alice = || {
+            let mut c = changes();
+            c.inserted = vec![("m_alice".to_owned(), Some(format!("user:{alice}")))];
+            c
+        };
+
+        // Bob appends his own text under Alice's id and Alice's name. Both rows are in the list
+        // afterwards, which is what says this is a new message rather than a heal.
+        let mut c = as_alice();
+        c.ids_after = vec![
+            "m_alice".to_owned(),
+            "m_bob".to_owned(),
+            "m_alice".to_owned(),
+        ];
+        assert!(refused(&check_push(
+            &state,
+            &bob_dev,
+            PEOPLE_PROJECT,
+            &chat,
+            true,
+            &c
+        )));
+        // Not claiming the heal does not help him either.
+        assert!(refused(&check_push(
+            &state,
+            &bob_dev,
+            PEOPLE_PROJECT,
+            &chat,
+            false,
+            &c
+        )));
+        // Nor does the owner's own socket get to recycle an id: the record could not name
+        // either row afterwards, whoever pushed them.
+        assert!(refused(&check_push(
+            &state,
+            &alice_dev,
+            PEOPLE_PROJECT,
+            &chat,
+            true,
+            &c
+        )));
+
+        // The heal this must not break: Alice's row is *missing* from the list, so putting it
+        // back leaves one of it. That is the shape every real heal has.
+        let mut c = as_alice();
+        c.ids_after = vec!["m_alice".to_owned(), "m_bob".to_owned()];
+        assert_eq!(
+            kind(&check_push(
+                &state,
+                &bob_dev,
+                PEOPLE_PROJECT,
+                &chat,
+                true,
+                &c
+            )),
+            Some(false),
+            "re-inserting attested history under the name the relay recorded"
+        );
     }
 
     /// Finding 1: the bypass. A push that deletes a message the relay attests to someone else

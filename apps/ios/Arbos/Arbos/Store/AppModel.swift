@@ -439,6 +439,12 @@ final class AppModel: ObservableObject {
         /// D88: a server's channel list (the slid-in left pane); its channels open as
         /// `.chat(chatId: channelId, projectId: channelSlot)` on top of it.
         case server(serverId: Id)
+        /// A profile page — person, group, agent, server or channel (Jacob, 2026-11-01:
+        /// profiles push in from the right like any other page instead of rising as a
+        /// bottom sheet, and get the stack's back swipe). Pushed *over* whatever is
+        /// below it, so it never replaces the chat on screen: `PerfSignpost.pathChanged`
+        /// skips it for exactly that reason.
+        case profile(ProfileTarget)
     }
 
     // MARK: Servers (D88)
@@ -508,6 +514,18 @@ final class AppModel: ObservableObject {
     func isShowing(chatId: Id) -> Bool {
         if case .chat(let id, _)? = path.last { return id == chatId }
         return false
+    }
+
+    /// The chat the stack has open, which is not always the top of the path: a profile is
+    /// pushed *over* the chat it was opened from, so the chat is still open behind it.
+    /// `isShowing(chatId:)` and `chatIsUp` deliberately stay about the *top* screen —
+    /// they place the toast and the collapsed call pill in the chat's own header, which a
+    /// profile covers.
+    var openChat: (chatId: Id, projectId: Id)? {
+        for route in path.reversed() {
+            if case .chat(let id, let projectId) = route { return (id, projectId) }
+        }
+        return nil
     }
 
     /// Opening only views: an archived row stays in Hidden chats until Unarchive or a new
@@ -4518,7 +4536,21 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func showProfile(_ target: ProfileTarget) {
+    /// Open a profile page. On the stack (everywhere but inside another sheet) it is a
+    /// push, so it slides in from the right and the stack's back swipe takes it away.
+    func showProfile(_ target: ProfileTarget, in host: ProfileHost = .stack) {
+        switch host {
+        case .stack:
+            // A row that opens the page already on top would push a duplicate.
+            if case .profile(let top)? = path.last, top == target { return }
+            path.append(.profile(target))
+        case .sheet:
+            showProfileInSheet(target)
+        }
+    }
+
+    /// The sheet-local presentation, for a profile opened from inside another sheet.
+    private func showProfileInSheet(_ target: ProfileTarget) {
         if let root = profile, case .channel = root, case .server = target {
             // The channel page's server row pushes the server's page (back returns).
             if profilePath.last != target { profilePath.append(target) }
@@ -4592,22 +4624,38 @@ final class AppModel: ObservableObject {
     /// The one action behind every profile target in a chat — a sender name, the
     /// avatar beside a bubble, an @mention chip, the header pill, a status-row
     /// picture ([feedback profile-pane-toggle-ios-2026-10-26], `ProfileToggle`):
-    /// open the sheet on `target`; dismiss it when that same person or agent is
-    /// already up, whichever target opened it; swap it in place for someone else.
-    func toggleProfile(_ target: ProfileTarget) {
-        guard let next = ProfileToggle.next(showing: profilePath.last ?? profile, tapped: target) else {
+    /// open `target`'s page; go back when that same person or agent is already up,
+    /// whichever target opened it; swap it in place for someone else.
+    func toggleProfile(_ target: ProfileTarget, in host: ProfileHost = .stack) {
+        switch host {
+        case .stack:
+            guard case .profile(let top)? = path.last else {
+                path.append(.profile(target))
+                return
+            }
+            guard let next = ProfileToggle.next(showing: top, tapped: target) else {
+                // The same subject again: go back to whatever opened the page.
+                path.removeLast()
+                return
+            }
+            // Someone else swaps in place, so a chain of taps never deepens the stack.
+            path[path.count - 1] = .profile(next)
+        case .sheet:
+            guard let next = ProfileToggle.next(showing: profilePath.last ?? profile, tapped: target) else {
+                profilePath = []
+                profile = nil
+                return
+            }
             profilePath = []
-            profile = nil
-            return
+            profile = next
         }
-        profilePath = []
-        profile = next
     }
 
-    /// True while the sheet's top page is `target`'s subject (the label then
-    /// says "Close profile").
+    /// True while the page on top is `target`'s subject (the label then says
+    /// "Close profile"), on the stack or in a sheet.
     func profileShows(_ target: ProfileTarget) -> Bool {
-        (profilePath.last ?? profile)?.sameSubject(as: target) ?? false
+        if case .profile(let top)? = path.last { return top.sameSubject(as: target) }
+        return (profilePath.last ?? profile)?.sameSubject(as: target) ?? false
     }
 
     /// The page a sender's handle opens: the chat's member, else the directory
@@ -6160,7 +6208,11 @@ final class AppModel: ObservableObject {
         closedJobTabs.insert(jobId)
         messages.removeValue(forKey: chatId)
         pendingSteers.removeValue(forKey: jobId)
-        if isShowing(chatId: chatId) { path.removeLast() }
+        // By index, and taking anything above it: a profile opened from the tab's header
+        // would otherwise be left standing over a tab that no longer exists.
+        if let i = path.lastIndex(where: { if case .chat(let id, _) = $0 { return id == chatId } else { return false } }) {
+            path.removeSubrange(i...)
+        }
     }
 
     /// The open job tab polls its document each tick while the job runs (the whole document
@@ -6474,9 +6526,12 @@ final class AppModel: ObservableObject {
                   forwardedFrom: item.forwardedFrom)
         }
 
-        // Swap the navigation id for the real one, then drop the local mirrors.
-        if case .chat(let id, let pid)? = path.last, id == localId {
-            path[path.count - 1] = .chat(chatId: real.id, projectId: pid)
+        // Swap the navigation id for the real one, then drop the local mirrors. By index,
+        // not at the top: a profile opened from the new chat's header sits over it, and
+        // leaving the local id in place behind the profile would pop back to a dead chat.
+        if let i = path.lastIndex(where: { if case .chat(let id, _) = $0 { return id == localId } else { return false } }),
+           case .chat(_, let pid) = path[i] {
+            path[i] = .chat(chatId: real.id, projectId: pid)
         }
         if visibleChatId == localId { visibleChatId = real.id }
         messages[localId] = nil
@@ -6491,8 +6546,10 @@ final class AppModel: ObservableObject {
         messages[localId] = nil
         caughtUp.remove(localId)
         chats[projectId] = (chats[projectId] ?? []).filter { $0.id != localId }
-        if case .chat(let id, _)? = path.last, id == localId {
-            path.removeLast()
+        // The chat never existed, so anything pushed over it (a profile opened from its
+        // header) goes with it rather than being left over a screen that is gone.
+        if let i = path.lastIndex(where: { if case .chat(let id, _) = $0 { return id == localId } else { return false } }) {
+            path.removeSubrange(i...)
         }
         if visibleChatId == localId { visibleChatId = nil }
         fail(UserError.fromText("start the chat", reason))
