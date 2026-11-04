@@ -38,6 +38,33 @@ const STEER_PREFIX = "[Arbos steer:";
 // Mirrors `agent::RELAY_TURN_MARK`: agentd stamps every relay turn (a job's or subagent's
 // result, an approval outcome, an agent's reply) — turns whose only valid route is `reply`.
 const RELAY_TURN_MARK = "[Arbos relay turn]";
+// AF-782. A relay turn speaks and delivers; it does not work. It may say its result
+// (`send_message`), ask one question (`ask_user`), and hand over the file, picture or chart its
+// words promised — the delivery tools, declared on their own specs and passed in by agentd so
+// this list and `agent::relay_turn_tool` cannot disagree. Anything else is refused *in band*:
+// the model reads the refusal and can still deliver in the same turn. agentd's own backstop ends
+// the turn instead, which is how Jacob's bar chart was lost — the call to post it was killed
+// mid-flight and nothing carried the promise forward.
+const DELIVERY_TOOLS = new Set(
+  (process.env.ARBOS_DELIVERY_TOOLS ?? "deliver_file,generate_image,post_chart")
+    .split(",")
+    .map((n) => n.trim())
+    .filter(Boolean),
+);
+const RELAY_TURN_TALKING_TOOLS = new Set(["route", "send_message", "ask_user"]);
+const RELAY_TURN_REFUSAL =
+  "This turn only delivers a result you already have. Say it with send_message, hand over a file or chart with deliver_file / post_chart, or ask one question with ask_user — each as a direct call, not from a script. Start no other work here.";
+
+/** `mcp__arbos__post_chart` and `post_chart` name the same tool; pi prefixes every MCP tool. */
+function bareToolName(toolName: string): string {
+  return toolName.startsWith("mcp__arbos__") ? toolName.slice("mcp__arbos__".length) : toolName;
+}
+
+/** What a relay turn may call: talk, ask, or deliver. */
+export function relayTurnTool(toolName: string): boolean {
+  const bare = bareToolName(toolName);
+  return RELAY_TURN_TALKING_TOOLS.has(bare) || DELIVERY_TOOLS.has(bare);
+}
 
 /**
  * A shell command that would outlive the turn (nohup / setsid / disown / a trailing `&` / tmux /
@@ -291,6 +318,14 @@ export default function arbosPiExt(pi: ExtensionAPI) {
         reason:
           "Call `route` first (required every turn). For act/new/wake, set `ack` to one short sentence the user sees before any work runs.",
       };
+    }
+    // AF-782: a relay turn's other calls are refused here, in band, so the model reads why and
+    // can still deliver what it promised in the same turn. Nested calls count too — Jacob's
+    // chart died inside a `codemode` script, and refusing only the script would leave the model
+    // guessing which tool it may use instead.
+    if (SESSION_ROLE === "main" && relayTurn && !relayTurnTool(event.toolName)) {
+      audit({ kind: "relay_turn_tool_refused", session: sessionId, tool: event.toolName, call_id: event.toolCallId, parent });
+      return { block: true, reason: RELAY_TURN_REFUSAL };
     }
     if (event.toolName === "codemode" && parent === null) {
       aliasArbosToolNames(event.input as { code?: unknown });

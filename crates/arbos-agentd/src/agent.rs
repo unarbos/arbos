@@ -1347,6 +1347,24 @@ pub struct TurnState {
 /// extension treats a `send_message` before `route` in such a turn as the `reply` route.
 pub(crate) const RELAY_TURN_MARK: &str = "[Arbos relay turn]";
 
+/// What a relay turn may call. It speaks (`route`, `send_message`, handled before this), it may
+/// ask one question, and it may **deliver** — hand over the file, picture or chart its words
+/// promised. Everything else is work, and a relay turn does not work (Doug, 2026-10-22: a result
+/// turn routed `act`, ran tools for 13 minutes and held every chat).
+///
+/// Delivery is a property each tool declares on its own spec ([`crate::mcp::is_delivery_tool`]),
+/// not a list kept here: a guard with a list of names is how AF-782 happened, and how a working
+/// `post_chart` was blocked twice in six days by two separate guards that had never heard of it.
+pub(crate) fn relay_turn_tool(tool_name: &str) -> bool {
+    crate::mcp::bare_tool_name(tool_name) == "ask_user" || crate::mcp::is_delivery_tool(tool_name)
+}
+
+/// The answer a relay turn's refused call is recorded with. The model reads the same sentence
+/// from the extension, which blocks the call in band before it runs (`arbos-pi-ext`); this copy
+/// is agentd's record for the turn that got past it.
+pub(crate) const RELAY_TURN_TOOL_REFUSAL: &str =
+    "refused: this turn only delivers a result it already has. Say it with send_message, hand over a file or chart with deliver_file / post_chart, or ask one question with ask_user. Start no other work here.";
+
 /// How many times a user turn's model call is retried in the same turn after a transient
 /// failure (a provider 5xx, overload, a timeout) before the user reads "the model call failed":
 /// once after 2 s on the same model, once more after 5 s on the fallback talking model
@@ -5582,8 +5600,34 @@ impl Agent {
                     return Ok(false);
                 }
                 // A relay turn that starts real work is ended here (the route hook already
-                // refused `act`; this catches a tool call without one).
-                if t.reply_only && tool_name != "ask_user" && tool_name != "mcp__arbos__ask_user" {
+                // refused `act`; this catches a tool call without one). Delivering the thing the
+                // turn promised is not starting work, so a delivery tool runs here as `ask_user`
+                // does — AF-782: a result turn promised a bar chart, reached for `post_chart`,
+                // and was killed mid-call with the promise lost.
+                if t.reply_only && !relay_turn_tool(tool_name) {
+                    // Record the refused call as a call that happened. Returning before the
+                    // counter and before the T3 rows is what left AF-782 unreadable: the turn
+                    // reported no tool calls at all, and agentd's record held neither half of
+                    // the one it killed, so the trace showed a call that nothing ever answered.
+                    t.metrics.tool_calls += 1;
+                    let _ = self.store.t3_append(
+                        chat_id,
+                        None,
+                        Some(chat_id),
+                        "tool_call",
+                        Some("assistant"),
+                        &step_label(tool_name, args),
+                        Some(&json!({ "call_id": tool_call_id, "input": args, "parent_call_id": parent_tool_call_id })),
+                    );
+                    let _ = self.store.t3_append(
+                        chat_id,
+                        None,
+                        Some(chat_id),
+                        "tool_output",
+                        Some("tool"),
+                        &format!("{tool_name}: {RELAY_TURN_TOOL_REFUSAL}"),
+                        Some(&json!({ "call_id": tool_call_id, "parent_call_id": parent_tool_call_id, "is_error": true, "refused": "relay_turn" })),
+                    );
                     self.cut_relay_turn_short_locked(host, t, "tool call in a relay turn")
                         .await;
                     if let Ok(pi) = self.pi().await {

@@ -31,6 +31,8 @@ mod media;
 mod memory;
 mod people;
 mod relay_error;
+#[cfg(test)]
+mod relay_turn_tests;
 mod reply;
 mod resources;
 mod responders;
