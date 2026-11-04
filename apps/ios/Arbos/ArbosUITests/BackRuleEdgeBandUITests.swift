@@ -21,9 +21,17 @@ import XCTest
 /// look like.
 ///
 /// **What this file measures.** One fixed 50 pt distance — deliberately under the app's rule,
-/// so *any* pop is the system's — swept across start x. Every point relaunches, because a pop
-/// changes the screen. The sweep prints a line per point so the log carries the whole table
-/// even when the verdict is a single failure, and then fails naming every x that popped.
+/// so *any* pop is the system's — swept across start x, **repeated at each point**. Every
+/// trial relaunches, because a pop changes the screen. The sweep prints a line per trial and a
+/// tally per point, so the log carries the whole table even when the verdict is a single
+/// assertion, and then fails naming every x that ever popped.
+///
+/// **Repeats, not one shot, because the thing being measured is a race.** A drag that does not
+/// pop shows only that the app's recogniser won that touch; it is not evidence UIKit cannot
+/// claim there. Reading a single quiet observation as "clear" is what made the recorded
+/// hand-sweep's lone `x = 28` result look like proof that UIKit's reach stopped short of 40.
+/// A pop is sound evidence of reach; a run of non-pops is weak evidence of clearance, and
+/// weakens no further than the trial count allows.
 ///
 /// **Why the Comms chat.** The drag has to begin on bare transcript, or the measurement is of
 /// something else. A group row draws a sender avatar across 12–48 pt (`Theme.memberAvatar`,
@@ -52,11 +60,24 @@ final class BackRuleEdgeBandUITests: XCTestCase {
 
     /// Start points, in screen points from the leading edge.
     ///
-    /// Dense from 8 to 56 because that is where the transition has to be if there is one:
-    /// `edgeZoneWidth` is 24 and the gates popped at 40. The tail out to 120 is the control —
-    /// if those pop too, the reading is not an edge band at all and the app's own path is
-    /// popping under its own threshold, which would be a different and worse defect.
-    private static let starts: [CGFloat] = [8, 16, 20, 24, 28, 32, 36, 40, 44, 48, 56, 72, 96, 120]
+    /// Spread rather than dense, because trials per point buy more here than points do (see
+    /// `trials`). 24 is `edgeZoneWidth` itself; 40 is where the gates popped and so is the
+    /// known-contested control; 80 is `SwipeDirectionsUITests.appOwnedStartX`, chosen on the
+    /// assumption that nothing but the app can answer there, which is the assumption under
+    /// test; 120 is the far control — a pop there would mean this is not an edge band at all.
+    private static let starts: [CGFloat] = [16, 24, 32, 40, 48, 56, 72, 80, 96, 120]
+
+    /// Observations per start point.
+    ///
+    /// One is not enough, and that is the whole lesson of this investigation. The two
+    /// recognisers race, so a drag that does not pop shows only that the app won *that* touch
+    /// — not that UIKit cannot claim there. At x = 40 three gates split one stay to two pops,
+    /// so the app takes roughly a third of them; a single trial would mis-read a contested
+    /// point about that often.
+    ///
+    /// The signal is therefore **ever popped**, not popped. Five trials put a contested point
+    /// surviving as all-stayed under a percent at that win rate.
+    private static let trials = 5
 
     override func setUpWithError() throws {
         continueAfterFailure = false
@@ -139,25 +160,38 @@ final class BackRuleEdgeBandUITests: XCTestCase {
         return chatIsFrontmost(app) ? .stayed : .covered
     }
 
-    /// Sweep the start point and name every x where a 50 pt drag popped the chat.
+    /// Sweep the start point and name every x where a 50 pt drag ever popped the chat.
     ///
-    /// The expected result on a build whose back rule holds everywhere is `stayed` at every
-    /// point: 50 pt is under 70 pt, so nothing should go back from anywhere. A run of `popped`
-    /// at the low end and `stayed` above it locates UIKit's reach, and the width of that run
-    /// is how far `edgeZoneWidth` is short of where the app actually stops being in charge.
-    func testNoFiftyPointDragPopsTheChatFromAnywhere() {
-        var table: [(CGFloat, Outcome)] = []
+    /// On a build whose back rule holds everywhere, every trial at every point stays: 50 pt is
+    /// under 70 pt, so nothing should go back from anywhere. A block of points that pop at
+    /// least once, running from the leading edge up to some x, is UIKit's reach — and the gap
+    /// between `edgeZoneWidth` and the top of that block is how far the app is wrong about
+    /// where it stops being in charge.
+    ///
+    /// Asymmetry worth stating, because it decides how the table may be read: a pop is sound
+    /// evidence that UIKit claims the point, since no app path can pop 50 pt. A point that
+    /// never pops across `trials` attempts is *weak* evidence it is clear — the more trials,
+    /// the less weak, and never proof.
+    func testNoFiftyPointDragEverPopsTheChatFromAnywhere() {
+        var rows: [(x: CGFloat, pops: Int, covers: Int)] = []
         for x in Self.starts {
-            let result = outcome(startX: x)
-            table.append((x, result))
-            print("edge-band sweep: x=\(Int(x)) distance=\(Int(Self.distance)) -> \(result.rawValue)")
+            var pops = 0, covers = 0
+            for trial in 1...Self.trials {
+                let result = outcome(startX: x)
+                if result == .popped { pops += 1 }
+                if result == .covered { covers += 1 }
+                print("edge-band sweep: x=\(Int(x)) trial \(trial)/\(Self.trials) "
+                      + "distance=\(Int(Self.distance)) -> \(result.rawValue)")
+            }
+            rows.append((x, pops, covers))
+            print("edge-band sweep: x=\(Int(x)) popped \(pops)/\(Self.trials)")
         }
 
-        let printed = table.map { "\(Int($0.0)):\($0.1.rawValue)" }.joined(separator: " ")
-        print("edge-band sweep table: \(printed)")
+        let printed = rows.map { "\(Int($0.x)):\($0.pops)/\(Self.trials)" }.joined(separator: " ")
+        print("edge-band sweep table (pops per start x): \(printed)")
 
-        let popped = table.filter { $0.1 == .popped }.map { Int($0.0) }
-        let covered = table.filter { $0.1 == .covered }.map { Int($0.0) }
+        let popped = rows.filter { $0.pops > 0 }.map { Int($0.x) }
+        let covered = rows.filter { $0.covers > 0 }.map { Int($0.x) }
         XCTAssertTrue(covered.isEmpty,
                       "a 50 pt drag put something over the chat at x = \(covered) — not a pop, "
                       + "and not the app's back rule either. Whole sweep: \(printed)")
