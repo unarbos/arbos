@@ -615,6 +615,10 @@ final class BackPopAnimator: NSObject, UIViewControllerAnimatedTransitioning {
                 if let window = BackSwipeTrace.window {
                     BackSwipeTrace.hitTest("mid", CGPoint(x: window.bounds.midX,
                                                           y: window.bounds.midY))
+                    // From the window and not from the leaving view, because which view is
+                    // carrying the offset is the open question and starting the walk at a
+                    // guess would beg it.
+                    BackSwipeTrace.displaced("off", from: window)
                 }
             }
             #endif
@@ -1170,6 +1174,35 @@ enum BackSwipeTrace {
         let speed = String(format: "%.1f", view.layer.speed)
         let parented = view.superview == nil ? 0 : 1
         note("\(what):tx=\(model),ptx=\(presented),anim=\(animations),spd=\(speed),sup=\(parented)")
+    }
+
+    /// Every view that is not where it belongs, **named**. Run 41765917913 showed the chat's
+    /// contents a screen width to the right while the view this code transforms read clean at
+    /// the origin, which says the restore has been going to the wrong object all along. An
+    /// inferred object has been wrong five times; this one is read off the hierarchy.
+    ///
+    /// It separates the two ways a view moves sideways, because they need different fixes: a
+    /// transform (`:tx`) or its own frame (`:frame`). Capped at both ends — the first few
+    /// offenders are the answer, and the transcript alone is eight thousand points tall.
+    static func displaced(_ what: String, from root: UIView?) {
+        guard on else { return }
+        guard let root else { return note("\(what):gone") }
+        let edge = root.bounds.width / 2
+        var found: [String] = []
+        var stack = [root]
+        var visited = 0
+        while let view = stack.popLast(), found.count < 8, visited < 3000 {
+            visited += 1
+            stack.append(contentsOf: view.subviews)
+            let shifted = view.transform.tx != 0
+            let box = view.convert(view.bounds, to: nil)
+            guard shifted || box.minX >= edge else { continue }
+            found.append(String(describing: type(of: view))
+                + "/" + (view.accessibilityIdentifier ?? "-")
+                + "@\(Int(box.minX))"
+                + (shifted ? ":tx\(Int(view.transform.tx))" : ":frame"))
+        }
+        note("\(what):" + (found.isEmpty ? "none" : found.joined(separator: " ")))
     }
 
     /// Who takes a touch at a point, named rather than guessed at. "Not hittable" is a
