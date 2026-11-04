@@ -37,6 +37,163 @@ on:
 permissions:
   contents: read
 
+# main COALESCES here, and that is a decision, not an oversight. Read this before porting #2735.
+#
+# The mechanism is the same one #2735 fixed in ci.yml. `cancel-in-progress` governs only a RUNNING
+# run; a run still PENDING in a group is evicted when a newer run joins it, whatever the flag says,
+# because GitHub keeps one pending run per group. So on main `false` does not protect — it makes
+# each push queue, and queueing is what evicts it. merge-window.sh has measured that here all
+# along: "on main a queued gate run is cancelled when the next one is created (260 of 264 cancelled
+# runs, median gap one second)", and `range_gate` is built around it, treating an older commit's
+# gate result as a finding because a per-commit-green rule could essentially never be met.
+#
+# #2735's remedy — a group per commit on main — is REFUSED here, because the resource is not the
+# same one. ci.yml is four ubuntu jobs against an allowance no burst we have can exhaust. This is
+# one 46-85 minute macos-15 job, and main is a sixth of nothing in the pool it waits in: of the 290
+# runs that consumed a macOS job 2026-11-01..04, 17 were main. Branch pushes own this pool.
+#
+# THE FIVE-JOB CAP IS REAL, and the ceiling is 120 runner-hours/day. Measured over the 498
+# machine-acquiring jobs of 2026-10-29..11-04: 36.2% of all time sits at EXACTLY 5 concurrent
+# (3134 min, 52.2 h) and the series never exceeds 6; time at 6 is 102 min, all inside one 47-minute
+# span on 10-31 where six long jobs overlapped. An elastic fleet does not pin at exactly five for
+# fifty-two hours. Per-day peaks are 5,5,6,5,5,5,5 — the signature of a hard limit.
+#
+# BEWARE: a sweep that includes never-run jobs reports peak 16 and 533 runner-hours instead, and
+# both are phantoms. A job that never got a machine has the placeholder started_at described below
+# AND a real completed_at once cancelled, so it appears to occupy a machine for its whole queued
+# life. The 223 never-run jobs contribute 102 phantom runner-hours. Filter on runner_name for
+# concurrency and consumption too, not only for waits.
+#
+# Real consumption against the 120 runner-hour ceiling: 10-29 32.9 (27%), 10-30 68.4 (57%),
+# 10-31 75.8 (63%), 11-01 85.5 (71%), 11-02 42.3 (35%), 11-03 54.0 (45%).
+#
+# MEASURING THE WAIT — two traps, both of which cost a wrong answer first time round. A job that
+# never gets a machine still reports `started_at`, equal to its `created_at` to the second: it is a
+# placeholder, written for real only on machine acquisition. 223 of 726 jobs in this window never
+# got one (all 223 have zero steps and no runner_name), so counting them injects 223 fake
+# zero-minute waits and halves every percentile. Filter on runner_name, not on conclusion. And
+# separate the two latencies, because they have different causes: A = job.started - job.created is
+# the wait for a MACHINE; B = job.started - run.created adds the time the run was held PENDING in
+# this concurrency group. Over the 503 machine-acquiring jobs, A median 13.9 / p90 209 / max 596,
+# B median 21.7 / p90 242 / max 727, and 152 of 503 waited over an hour for a machine.
+#
+# The split per day is what decides this file. On 10-30, A = B = 596 min at the worst: genuine
+# macOS starvation, and this workflow alone consumed 68.4 runner-hours that day. On 11-01..11-03 the
+# worst B values are 359, 343 and 727 minutes while their A values are 0.1 — run 41598907652, on
+# MAIN, was held in this group for 726 minutes and then got a machine in six seconds. So the long
+# main latencies in the current regime are THIS GROUP serialising, not the pool being full.
+#
+# NOT ALL OF THE WAIT IS OURS, which bounds what any concurrency change here can deliver.
+# Allocation is not FIFO. At 17:55Z on 11-04, run 41862996301 (created 15:58:10Z) had been queued
+# two hours with runner_name empty and zero steps, while three runs created 44 to 106 minutes LATER
+# — 41870076599, 41870349712, 41870386425 — held machines, acquired at 17:41, 17:34 and 17:15. All
+# four jobs request labels [macos-15]; the three running ones hold GitHub-hosted runners. So some
+# of the wait is GitHub's placement order, and no `group:` expression touches that portion.
+#
+# Two further runs looked like they had jumped the same queue and had NOT: 41877623803 and
+# 41877633751, both on cursor/swift-gate-ec2-mac-ac8d, whose heavy job requests [arbos-mac] and ran
+# on the self-hosted runner arbos-ec2-mac — a different pool, never competing for a macos-15
+# machine, and in-progress partly on cheap ubuntu-24.04 route jobs. That branch also keys its own
+# concurrency on `swift-core-check-v2-`. Compare labels before calling anything non-FIFO; two of
+# the five apparent cases here were two pools rather than queue-jumping.
+#
+# THE DEMAND IS BURSTY ON BRANCHES, NOT ON MAIN. 31 runs were created between 16:43:20Z and
+# 16:44:05Z on 11-04 — 18 `push` and 13 `pull_request`, across 18 distinct branches, NONE on main.
+# The pull_request halves all concluded `skipped` (the guard below), so the real demand was 18
+# macOS jobs in 45 seconds. Note what this is NOT: it is not one merge sequence fanning out, and
+# Option A would not prevent any of it, because every one of those runs is a `push` already sitting
+# in its own per-ref group. Branch coalescing is working as designed; the burst is 18 agents
+# pushing at once. It argues for the capacity refusal above and against nothing else.
+#
+# A live eviction, for the reader who wants one instance rather than a rate: on this branch run
+# 41877441892 concluded `cancelled` after a newer push of this very file joined its group — the
+# mechanism eating a real verdict while the file documenting it was being written. Its successor
+# then sat queued over 50 minutes, which is the long tail on that 13.9-minute median.
+#
+# Anything timed on 2026-11-04 after ~16:43Z is contaminated by that backlog (19 queued against 7
+# running at 17:55Z) and should be quoted separately rather than blended into the distribution
+# above.
+#
+# Which is the honest shape of the trade, and it is regime-dependent. When cadence is low, machines
+# are there and a per-commit group would cost nearly nothing while removing multi-hour verdict
+# delays. When cadence is high, the pool is genuinely full and the same change adds the demand
+# below to the day that can least carry it. A static per-commit group buys the cheap case and the
+# ruinous one together, which is why Option A below — paying only for the commits someone actually
+# asks about — is the better middle rather than a compromise.
+#
+# Per-commit groups would add exactly the runs that are being evicted today, so the bill is the
+# eviction rate: at the 2026-10-21..28 cadence (48.8 main runs/day, 250 evicted) that is +34.4
+# runner-hours/day. On top of the worst complete day measured (85.5) that is 119.9 of the 120
+# runner-hour ceiling — 100%. On a REQUIRED gate that trades missing verdicts for multi-hour ones,
+# which is the worse failure.
+#
+# DO NOT READ THAT 100% AS "WE NEED MORE RUNNERS". Both of these are true and the order matters:
+# the cap is real and it is binding UNDER CURRENT CLUSTERING; but the same work spread evenly needs
+# only 1.4 to 3.6 of the 5 slots, so remove the clustering and it fits comfortably. The ask this
+# data supports is not more machines — it is that we stop standing on our own foot, 64.2% of the
+# arrivals being our own fleet against 4.8% from main.
+#
+# THE WAIT IS CLUSTERING, NOT INSUFFICIENT CAPACITY, and that is the cheapest lever here by far.
+# A day's work spread perfectly evenly would need only 1.4 to 3.6 concurrent jobs (its consumed
+# runner-hours over 24 h), so every measured day fits inside the cap of 5 with room to spare — the
+# worst needs 3.6 of 5 slots. Yet the pool sits saturated at exactly 5 for 273 to 690 minutes a
+# day, and while saturated every arrival queues. That saturation is what produces the 209-minute
+# p90 wait; nothing was refused for want of total capacity on any day measured.
+#
+# And the clustering is mostly ours to fix: of 731 arrivals, 64.2% are cursor/* branches, 24.7%
+# feedback/*, 6.3% other and 4.8% main, while 39% of all arrivals land within 60 s of another (27%
+# within 10 s) against a 128 s median inter-arrival. No predicted minutes are quoted because that
+# needs a queueing model and an uncontaminated sample.
+#
+# BUT THE LEVER IS CROSS-BRANCH ONLY, and this PR is the demonstration, because a comment-only edit
+# to this file matches its own path filter and mints a run every time. Six commits here produced 12
+# runs. ALL SIX `push` jobs — 41875046345, 41877441892, 41878001983, 41886398664, 41887816516,
+# 41888555368 — have runner_name empty and zero steps, five evicted by the next push and one still
+# queued; all six `pull_request` runs skipped. So this PR's cost to the pool is ZERO machine-minutes
+# and six queue entries. Each eviction landed about one second after its successor was created,
+# which is merge-window.sh's "median gap one second" reproduced six times on one branch.
+#
+# Compare the cross-branch burst: of its 18 `push` runs, 15 were STILL QUEUED two hours later and
+# 3 had machines, and because each sits in its own per-ref group NONE can evict another — all 18
+# will eventually run. At the 63.6 min median that is ~19 runner-hours committed by 45 seconds of
+# pushing, 16% of the 120-hour daily ceiling.
+#
+# So: clustering WITHIN a branch is already free, because this `group:` absorbs it and the cost does
+# not grow with push count. Clustering ACROSS branches is fully additive, because no group
+# coalesces distinct refs. Any stagger policy therefore wants a global minimum gap between
+# DIFFERENT branches' pushes; pacing pushes within one branch would be useless at best and would
+# actively cost machine time by letting more of them survive to acquire a runner.
+#
+# The cost therefore scales with precisely the cadence that makes the fix necessary, which is the
+# inverse of ci.yml and the whole reason the same one-line change does not belong here. At the
+# current cadence (5.9 main runs/day since 2026-11-01) it would also buy nothing: zero evictions.
+#
+# The two cheaper shapes, both measured and neither landed here, both needing #2736 first:
+#   - A per-commit group for `workflow_dispatch` only, keeping `push` coalesced. A group per commit
+#     for the commits actually being judged, paid for one deliberate ask at a time rather than one
+#     merge at a time. Needs #2736's dispatch trigger to exist. It cannot remove the part of the
+#     wait that is GitHub's allocation order (measured above), and it does nothing about branch
+#     bursts, which are `push` events already in their own per-ref groups.
+#
+#     SEQUENCING, AND THESE TWO DO NOT COMPOSE: cursor/swift-gate-ec2-mac-ac8d rewrites this same
+#     block, keying on `swift-core-check-v2-${{ github.ref }}` and routing main, arbos-v2 and
+#     open-PR branches to the self-hosted `arbos-mac` pool. A dispatch arm written against
+#     `swift-core-check-${{ github.ref }}` is expressed against a world that branch deletes, and
+#     its per-commit reasoning does not carry over to a single self-hosted Mac, where one run at a
+#     time is the physical limit. WHICHEVER OF THE TWO LANDS SECOND MUST BE REWRITTEN AGAINST THE
+#     FIRST. Do not merge them in either order and assume they compose.
+#   - Moving this group onto the `check` job so an evicted commit leaves something to read. Proven
+#     on a scratch workflow: the job is evicted identically (cancelled, zero steps) but the run
+#     survives, an `always()` verdict job still runs, and the annotation names the sha. Serialising
+#     is unchanged, so it costs no macOS minutes. It is NOT a workflow-only change, and that is
+#     inherent rather than fixable: its signal is a verdict job that fails on purpose, so it
+#     manufactures a step concluding `failure`, and at step level that is what a genuine test
+#     failure looks like — being visible to GitHub as a failure is the whole design. So
+#     ci_abort_state's `grep -qx failure` sends an eviction to RED, and the paired fix belongs in
+#     checks.sh, discriminating on the heavy job's own `cancelled` conclusion rather than on a job
+#     name someone can rename. Land it after #2733 and bring the kit change with it. Fail-closed
+#     throughout either ordering: the run still concludes `cancelled`, and gate_state reads that as
+#     RED regardless, so the cost of the wrong order is evictions reading as reds, not a bad merge.
 concurrency:
   group: swift-core-check-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
