@@ -32,7 +32,7 @@ import XCTest
 /// it. A complete walk of the window taken at the instant of the failing read found 38 views,
 /// none displaced and none transformed, against 53 accessibility elements in the same tree:
 /// there is no displaced view to find, because the bubbles are drawn rather than view-backed.
-/// That is a separate defect, filed and unowned. See
+/// That is a separate defect, owned elsewhere. See
 /// `internal/2637-back-swipe-tracks-the-finger.md`.
 final class ChatSwipeTrackingUITests: XCTestCase {
     /// The shared Mac runs the gate and releases at the same time; waits are generous.
