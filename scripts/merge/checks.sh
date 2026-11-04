@@ -386,6 +386,7 @@ verdict_class() {
     RED*)         echo RED ;;
     UNTESTED*)    echo UNTESTED ;;
     BLOCKED*)     echo BLOCKED ;;
+    NOPLAN*)      echo NOPLAN ;;
     WAIT*)        echo WAIT ;;
     *)            echo UNKNOWN ;;
   esac
@@ -400,9 +401,13 @@ verdict_class() {
 # Everything else refuses, UNTESTED included. An aborted run tested nothing,
 # which is the definition of ungated, so it is exactly the state that must not
 # pass. See the comment above `ci_abort_state` in merge-window.sh.
+# NOPLAN is "may clear", exactly as NOMAC is, and NOT "clears". Both require go() to find a
+# covering descendant carrying a current-tag NOMAC; neither clears on its own. The difference
+# from NOPATH, which does clear outright, is the whole reason go() must keep an explicit arm for
+# each of them rather than letting either fall into its default.
 verdict_clears_go() {
   case "$1" in
-    NOMAC | NOPATH) return 0 ;;
+    NOMAC | NOPATH | NOPLAN) return 0 ;;
     *) return 1 ;;
   esac
 }
