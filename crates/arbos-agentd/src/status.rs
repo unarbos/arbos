@@ -990,8 +990,23 @@ pub(crate) mod tests {
         test_agent_with(axum::Router::new()).await
     }
 
+    /// Same, under a project id of its own. The secrets state is process-wide and keyed by
+    /// project, so a test that seeds a grant needs a project no concurrent test refreshes.
+    pub(crate) async fn test_agent_for_project(
+        project_id: &str,
+    ) -> (Arc<Agent>, std::path::PathBuf) {
+        test_agent_inner(axum::Router::new(), project_id).await
+    }
+
     /// Same, with extra mock-relay routes merged in (`/box/secrets/…` for the hand-off tests).
     pub(crate) async fn test_agent_with(extra: axum::Router) -> (Arc<Agent>, std::path::PathBuf) {
+        test_agent_inner(extra, "01TESTPROJECTQUICKREPLY000").await
+    }
+
+    async fn test_agent_inner(
+        extra: axum::Router,
+        project_id: &str,
+    ) -> (Arc<Agent>, std::path::PathBuf) {
         let app = axum::Router::new()
             .merge(extra)
             .route(
@@ -1032,10 +1047,7 @@ pub(crate) mod tests {
             default_subagent_model: "mock-sub".into(),
             legacy_project_id: None,
         };
-        let cfg = Arc::new(bx.workspace(
-            &json!({ "id": "01TESTPROJECTQUICKREPLY000", "name": "Doug" }),
-            0,
-        ));
+        let cfg = Arc::new(bx.workspace(&json!({ "id": project_id, "name": "Doug" }), 0));
         std::fs::create_dir_all(cfg.state_dir.join("agentd")).unwrap();
         let store =
             crate::store::Store::open(&cfg.state_dir.join("agentd").join("agentd.db")).unwrap();

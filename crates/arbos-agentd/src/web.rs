@@ -53,6 +53,20 @@ const RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(60);
 /// search already proved was not coming. Every search in a fan-out starts its own budget at the
 /// same moment, so the whole fan-out settles inside one of these rather than N of them.
 const RATE_LIMIT_BUDGET: Duration = Duration::from_secs(8);
+/// The secret that holds a paid key for the search endpoint, when the box has one. Nothing
+/// requires it and nothing warns about its absence: with no such secret, search runs against the
+/// keyless endpoint exactly as it did before, which is still the only path CI exercises.
+const SEARCH_KEY_SECRET: &str = "EXA_API_KEY";
+/// Exa authenticates the MCP endpoint with a header at the same URL, so the key never enters the
+/// URL. That is what keeps `ARBOS_WEB_SEARCH_MCP_URL` plain configuration that is safe to log and
+/// safe to audit, and it keeps the grant's allowed-hosts list meaningful — a secret that *is* a
+/// URL would choose its own destination, and the host check could not constrain anything.
+///
+/// Measured against `https://mcp.exa.ai/mcp` on 2026-11-04, because the original ask assumed the
+/// key had to be part of the URL. A `tools/call` with a bad key answers, at the MCP layer,
+/// "Invalid API key. Provide a valid key using 'Authorization: Bearer <key>' or 'x-api-key:
+/// <key>'" — so the header is read, and the keyless URL needs no change to carry a key.
+const SEARCH_KEY_HEADER: &str = "x-api-key";
 
 pub fn tool_specs() -> Vec<Value> {
     vec![
@@ -75,6 +89,19 @@ fn search_mcp_url() -> String {
         .ok()
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| DEFAULT_SEARCH_MCP_URL.to_owned())
+}
+
+/// A paid key for the search endpoint, if the owner has put one in this box.
+///
+/// `None` is the ordinary case and means the keyless endpoint, unchanged: no key in the vault, no
+/// header, the same request as before. The key comes from the secrets state agentd already keeps,
+/// so this asks the relay for nothing and cannot fail — see `vault::real_value_for_host` for why
+/// agentd attaching a credential to a call of its own is the `browser_fill` shape rather than a
+/// way round `egress`. The host it is scoped to is read off the URL about to be called, so an
+/// endpoint pointed somewhere else does not take the key with it.
+fn search_key(agent: &Arc<Agent>, url: &str) -> Option<String> {
+    let host = reqwest::Url::parse(url).ok()?.host_str()?.to_owned();
+    crate::vault::real_value_for_host(&agent.cfg.project_id, SEARCH_KEY_SECRET, &host)
 }
 
 /// `mcp_call`'s own wording for a rejected search. That `format!` is a few lines up and is the
@@ -282,13 +309,19 @@ async fn mcp_call(
     timeout: Duration,
 ) -> Result<String, String> {
     let body = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": tool, "arguments": arguments } });
-    let resp = agent
+    // One read of the URL, so the host the key is scoped to is the host being called.
+    let url = search_mcp_url();
+    let mut req = agent
         .http_client()
-        .post(search_mcp_url())
+        .post(&url)
         .timeout(timeout)
         .header("content-type", "application/json")
         .header("accept", "application/json, text/event-stream")
-        .header("user-agent", USER_AGENT)
+        .header("user-agent", USER_AGENT);
+    if let Some(key) = search_key(agent, &url) {
+        req = req.header(SEARCH_KEY_HEADER, key);
+    }
+    let resp = req
         .json(&body)
         .send()
         .await
@@ -860,6 +893,8 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static CALLS: AtomicUsize = AtomicUsize::new(0);
         CALLS.store(0, Ordering::SeqCst);
+        // This test points the endpoint at itself, so it queues with the others that do.
+        let _lock = endpoint_lock().lock().await;
 
         let app = axum::Router::new().route(
             "/mcp",
@@ -909,6 +944,146 @@ mod tests {
             text.contains("Python 3.15.2"),
             "the retry's answer is the result: {text}"
         );
+    }
+
+    /// A box with no key in it must behave exactly as it did before the key path existed: the
+    /// request carries no key header at all, not an empty or placeholder one. This is the path
+    /// every other web test runs on, and the only one CI ever exercises.
+    #[tokio::test]
+    async fn without_a_key_in_the_vault_the_request_is_unchanged() {
+        let (seen, agent, _root, _lock) = key_test_box().await;
+
+        let out = web_search(
+            &agent,
+            &json!({ "query": "latest python release" }),
+            "c-test",
+        )
+        .await;
+
+        let headers = seen.lock().unwrap().clone();
+        assert_eq!(headers.len(), 1, "one call reached the endpoint");
+        assert!(
+            !headers[0].iter().any(|(k, _)| k == SEARCH_KEY_HEADER),
+            "no secret in the box means no key header: {:?}",
+            headers[0]
+        );
+        // And the keyless answer is still what the caller gets.
+        let text = serde_json::to_string(&out).unwrap();
+        assert!(text.contains("Python 3.15.2"), "{text}");
+    }
+
+    /// With a key in the box, the same call carries it as a header — so the day the owner puts a
+    /// paid key in the vault, nothing else has to change. The key stays out of the URL, which is
+    /// what keeps the host check meaningful and the audit trail safe to write.
+    #[tokio::test]
+    async fn a_key_in_the_vault_is_sent_as_a_header() {
+        let (seen, agent, _root, _lock) = key_test_box().await;
+        crate::vault::tests::grant_a_real_value(
+            &agent.cfg.project_id,
+            SEARCH_KEY_SECRET,
+            &["127.0.0.1"],
+            "exa-paid-key-not-real",
+        );
+
+        let _ = web_search(
+            &agent,
+            &json!({ "query": "latest python release" }),
+            "c-test",
+        )
+        .await;
+
+        let headers = seen.lock().unwrap().clone();
+        let key = headers[0]
+            .iter()
+            .find(|(k, _)| k == SEARCH_KEY_HEADER)
+            .map(|(_, v)| v.clone());
+        assert_eq!(key.as_deref(), Some("exa-paid-key-not-real"));
+    }
+
+    /// The host the key is scoped to comes from the URL about to be called, so an endpoint moved
+    /// to a host the grant does not list does not take the key with it.
+    #[tokio::test]
+    async fn a_key_does_not_follow_the_endpoint_to_another_host() {
+        let (seen, agent, _root, _lock) = key_test_box().await;
+        crate::vault::tests::grant_a_real_value(
+            &agent.cfg.project_id,
+            SEARCH_KEY_SECRET,
+            &["mcp.exa.ai"],
+            "exa-paid-key-not-real",
+        );
+
+        let _ = web_search(
+            &agent,
+            &json!({ "query": "latest python release" }),
+            "c-test",
+        )
+        .await;
+
+        let headers = seen.lock().unwrap().clone();
+        assert!(
+            !headers[0].iter().any(|(k, _)| k == SEARCH_KEY_HEADER),
+            "the grant lists mcp.exa.ai and the call went to 127.0.0.1: {:?}",
+            headers[0]
+        );
+    }
+
+    type SeenHeaders = Arc<std::sync::Mutex<Vec<Vec<(String, String)>>>>;
+
+    /// `ARBOS_WEB_SEARCH_MCP_URL` is one process-wide variable, so two tests that point the
+    /// search endpoint at their own server would decide what the other's call reaches. Any such
+    /// test takes this first.
+    fn endpoint_lock() -> &'static tokio::sync::Mutex<()> {
+        static L: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+        L.get_or_init(Default::default)
+    }
+
+    /// A box for one key test: a local stand-in for the search endpoint that records the headers
+    /// of every call, an agent under a project id of its own, and the endpoint lock. The private
+    /// project is what makes seeding a grant safe — the secrets state is process-wide and keyed
+    /// by project, and a concurrent hand-off test refreshing the shared one would wipe it.
+    async fn key_test_box() -> (
+        SeenHeaders,
+        Arc<Agent>,
+        std::path::PathBuf,
+        tokio::sync::MutexGuard<'static, ()>,
+    ) {
+        let lock = endpoint_lock().lock().await;
+        let seen: SeenHeaders = Arc::default();
+        let sink = seen.clone();
+        let app = axum::Router::new().route(
+            "/mcp",
+            axum::routing::post(move |headers: axum::http::HeaderMap| {
+                let sink = sink.clone();
+                async move {
+                    sink.lock().unwrap().push(
+                        headers
+                            .iter()
+                            .map(|(k, v)| {
+                                (
+                                    k.as_str().to_owned(),
+                                    v.to_str().unwrap_or_default().to_owned(),
+                                )
+                            })
+                            .collect(),
+                    );
+                    axum::Json(json!({
+                        "jsonrpc": "2.0", "id": 1,
+                        "result": { "content": [{ "type": "text",
+                            "text": "Python 3.15.2 — https://www.python.org/downloads/" }] }
+                    }))
+                }
+            }),
+        );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        std::env::set_var(
+            "ARBOS_WEB_SEARCH_MCP_URL",
+            format!("http://127.0.0.1:{port}/mcp"),
+        );
+        let (agent, root) =
+            crate::status::tests::test_agent_for_project(&arbos_core::ids::ulid()).await;
+        (seen, agent, root, lock)
     }
 
     #[test]
