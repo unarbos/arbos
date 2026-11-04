@@ -113,6 +113,26 @@ pub const COMPOSER_RADIUS: f32 = COMPOSER_HEIGHT / 2.0;
 /// it too: phone → right edge and mic → phone, so the pair never reads as one
 /// cramped blob ([feedback glass-composer-button-spacing-mac-2026-10-29]).
 const BUTTON_INSET: f32 = (COMPOSER_HEIGHT - 2.0 - PLUS_BUTTON) / 2.0;
+/// The rim around the `+` disc, as white over whatever `surface_2` is.
+///
+/// Measured on `2-grok-plus-TARGET.png` (2 px/pt): Grok's disc is `#272727` on
+/// a `#1f1f1f` field and its outermost pixel is `#333333` — **brighter than
+/// the disc and brighter than the field both**. Antialiasing between two
+/// colours can only land between them, so that pixel is a stroke and not an
+/// edge artefact. It is +12/255 over the fill, which is white at this alpha,
+/// and it is one device pixel wide, hence the half-point border.
+///
+/// The divisor is `#272727`'s channel value: the rim is a fraction of the
+/// distance from the fill to white, so a palette move carries it.
+const PLUS_RIM: f32 = 12.0 / (255.0 - 39.0);
+/// How far the white disc's mark lifts off `on_primary` toward the disc.
+///
+/// Grok's send arrow is `#121212` on an `#f5f5f5` disc where ours was pure
+/// `#000000` on `#ffffff` (`4-grok-send-arrow-TARGET.png`). The strokes
+/// already matched to within 6 %, so what differs is the ink: 18/255 of the
+/// way off black. Carried as a fraction of the disc colour rather than a hex
+/// so light mode, whose disc is `#111111`, softens by the same step.
+const SEND_MARK_SOFTEN: f32 = 18.0 / 255.0;
 /// How long the trailing controls take to trade the empty field's pair (grey
 /// mic + white phone) for the send arrow, and back (Jacob, 2026-10-30: "a
 /// quick scale+fade crossfade, matching the Grok/iMessage feel"). The middle
@@ -3997,6 +4017,12 @@ impl Render for Composer {
             .justify_center()
             .cursor_pointer()
             .map(|el| highlight::washed(el, theme.surface_2, &theme))
+            // Grok's disc wears a rim; ours did not. Dark only: the crop is a
+            // dark one, and light has no measurement to set an alpha against.
+            .when(!theme.is_light(), |el| {
+                el.border(px(0.5))
+                    .border_color(Theme::with_alpha(gpui::white(), PLUS_RIM))
+            })
             .child(sf_symbols::glyph("plus", 16.0, theme.text_muted))
             // Option B (ARB-544): `+` opens the attach menu; "Photo or file…" is the
             // old file prompt, the second row the Emoji · Stickers · GIFs picker.
@@ -4423,14 +4449,22 @@ fn glyph_size(action: ButtonAction) -> f32 {
 }
 
 /// The round button's mark colour: white on the red memo Stop, the text colour
-/// on the red hang-up, the on-primary colour on the white disc.
+/// on the red hang-up, a softened on-primary on the white disc.
+///
+/// The white disc carries the arrow, the turn's Stop and the phone, so all
+/// three take the same ink; only the arrow has a Grok crop behind it, but a
+/// disc whose mark changed depth with the action would read as a flicker
+/// through the swap. The two red discs are untouched — neither was measured.
 fn mark_color(action: ButtonAction, red: bool, theme: &Theme) -> gpui::Hsla {
     if action == ButtonAction::StopMemo {
         gpui::white()
     } else if red {
         theme.text
     } else {
-        theme.on_primary
+        highlight::over(
+            theme.on_primary,
+            Theme::with_alpha(theme.primary, SEND_MARK_SOFTEN),
+        )
     }
 }
 
