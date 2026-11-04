@@ -107,6 +107,23 @@ struct EditSnapshot {
 
 const UNDO_LIMIT: usize = 100;
 
+/// What the field could do at the moment its editing menu opened: which of
+/// Undo · Redo · Cut · Copy · Paste · Select All are live. Read once, as
+/// AppKit validates a menu once when it appears, never per frame — the
+/// pasteboard read alone is too dear to repeat on every draw.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EditState {
+    pub can_undo: bool,
+    pub can_redo: bool,
+    /// A run of characters is selected, and the field is not masked.
+    pub has_selection: bool,
+    pub has_text: bool,
+    /// The selection is already the whole draft, so Select All is a no-op.
+    pub all_selected: bool,
+    /// The pasteboard holds words, files or a picture.
+    pub pasteboard_has_content: bool,
+}
+
 pub const MAX_LINES: usize = 10;
 pub const COMPOSER_RADIUS: f32 = COMPOSER_HEIGHT / 2.0;
 /// The `+` disc's distance from the pill's left edge. The trailing discs keep
@@ -133,6 +150,9 @@ pub type MentionKeyHandler = Rc<dyn Fn(&mut App) -> bool>;
 pub type ArrowHandler = Rc<dyn Fn(i32, &mut App)>;
 /// Files and images from a ⌘V, for the owner to stage.
 pub type PasteMediaHandler = Rc<dyn Fn(Vec<PathBuf>, Vec<gpui::Image>, &mut App)>;
+/// A secondary click (right-click / control-click) in the field, at that
+/// window position: the owner opens the editing menu there.
+pub type ContextMenuHandler = Rc<dyn Fn(Point<Pixels>, &mut App)>;
 
 /// A clipboard sorted by what ⌘V should do with it.
 ///
@@ -229,6 +249,11 @@ pub enum ComposerEvent {
         message_id: String,
         text: String,
     },
+    /// Right-click / control-click in the field: open its editing menu at
+    /// this window position (`ui::composer_menu`).
+    ContextMenu {
+        at: Point<Pixels>,
+    },
     Stop,
 }
 
@@ -289,6 +314,10 @@ pub struct ComposerInput {
     pub on_arrow: Option<ArrowHandler>,
     /// ⌘V with files or an image on the clipboard: the owner stages them.
     pub on_paste_media: Option<PasteMediaHandler>,
+    /// Right-click / control-click in the field: the owner opens the editing
+    /// menu (Undo · Redo · Cut · Copy · Paste · Select All) at that point.
+    /// A field without this hook has no menu, as before.
+    pub on_context_menu: Option<ContextMenuHandler>,
     /// Multi-line editors (skill bodies): Enter inserts a newline instead of
     /// submitting.
     pub enter_inserts_newline: bool,
@@ -337,6 +366,7 @@ impl ComposerInput {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             on_submit: None,
+            on_context_menu: None,
             on_mention_next: None,
             on_mention_prev: None,
             on_mention_accept: None,
@@ -642,10 +672,13 @@ impl ComposerInput {
         self.selected_range = 0..0;
     }
 
-    /// Select the whole contents (inline rename fields).
+    /// Select the whole contents: ⌘A, Edit → Select All, the field's menu and
+    /// the inline rename fields, all through here. Every wrapped and
+    /// hard-broken line of the draft, not the caret's line.
     pub fn select_all_text(&mut self, cx: &mut Context<Self>) {
         self.selected_range = 0..self.content.len();
         self.selection_reversed = false;
+        self.caret_downstream = false;
         cx.notify();
     }
 
@@ -871,6 +904,12 @@ impl ComposerInput {
     }
 
     fn undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
+        self.undo_edit(cx);
+    }
+
+    /// ⌘Z / Edit → Undo / the field's menu — one entry point, so the three
+    /// never drift apart.
+    pub(crate) fn undo_edit(&mut self, cx: &mut Context<Self>) {
         let Some(prev) = self.undo_stack.pop() else {
             return;
         };
@@ -880,6 +919,10 @@ impl ComposerInput {
     }
 
     fn redo(&mut self, _: &Redo, _: &mut Window, cx: &mut Context<Self>) {
+        self.redo_edit(cx);
+    }
+
+    pub(crate) fn redo_edit(&mut self, cx: &mut Context<Self>) {
         let Some(next) = self.redo_stack.pop() else {
             return;
         };
@@ -972,8 +1015,7 @@ impl ComposerInput {
     }
 
     fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_to(0, cx);
-        self.select_to(self.content.len(), cx)
+        self.select_all_text(cx);
     }
 
     /// ⌘← / Home — NSTextView's `moveToLeftEndOfLine:`: the start of the
@@ -1204,20 +1246,31 @@ impl ComposerInput {
     }
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.selected_range.is_empty() {
-            cx.write_to_clipboard(ClipboardItem::new_string(
-                self.plain_slice(self.selected_range.clone()),
-            ));
+        self.copy_selection(cx);
+    }
+
+    /// ⌘C / Edit → Copy / the field's menu: the selected run as it would be
+    /// sent (`plain_slice` turns a chip back into its `@handle`). A masked
+    /// field never gives up its characters.
+    pub(crate) fn copy_selection(&mut self, cx: &mut Context<Self>) {
+        if self.selected_range.is_empty() || self.masked {
+            return;
         }
+        cx.write_to_clipboard(ClipboardItem::new_string(
+            self.plain_slice(self.selected_range.clone()),
+        ));
     }
 
     fn cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.selected_range.is_empty() {
-            cx.write_to_clipboard(ClipboardItem::new_string(
-                self.plain_slice(self.selected_range.clone()),
-            ));
-            self.replace_text_in_range(None, "", window, cx)
+        self.cut_selection(window, cx);
+    }
+
+    pub(crate) fn cut_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_range.is_empty() || self.masked {
+            return;
         }
+        self.copy_selection(cx);
+        self.replace_text_in_range(None, "", window, cx)
     }
 
     fn on_mouse_down(
@@ -1226,6 +1279,13 @@ impl ComposerInput {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Control + left click is the other half of the macOS secondary click
+        // (the half a trackpad without a right button gives you): the editing
+        // menu, never a caret move or a drag-select.
+        if event.modifiers.control && self.on_context_menu.is_some() {
+            self.on_secondary_mouse_down(event, window, cx);
+            return;
+        }
         if !self.focus_handle.is_focused(window) {
             window.focus(&self.focus_handle, cx);
         }
@@ -1261,6 +1321,73 @@ impl ComposerInput {
 
     fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
         self.is_selecting = false;
+    }
+
+    /// The macOS secondary click — a right-click, or a left click holding
+    /// Control — asks for the field's editing menu ([feedback
+    /// mac-composer-context-menu-2026-11-03]: "option click in Arbos chat does
+    /// not pull up options at all"). AppKit's rule for where the caret ends
+    /// up: a click **inside** the selection leaves it alone, so Cut and Copy
+    /// still act on what the user picked; a click outside collapses it to the
+    /// caret under the pointer, the same as a plain click. The field takes
+    /// focus either way, so the menu's items act on this field.
+    fn on_secondary_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.on_context_menu.is_none() {
+            return;
+        }
+        cx.stop_propagation();
+        if !self.focus_handle.is_focused(window) {
+            window.focus(&self.focus_handle, cx);
+        }
+        let ix = self.index_for_mouse_position(event.position);
+        if !self.selected_range.contains(&ix) {
+            self.move_to(ix, cx);
+        }
+        if let Some(cb) = self.on_context_menu.clone() {
+            let at = event.position;
+            // The owner reads and updates this very entity; it must run after
+            // this update ends (same re-entrancy rule as `send`, #1208).
+            window.defer(cx, move |_, cx| cb(at, cx));
+        }
+    }
+
+    /// The selected run as it stands in the field (chips still as their
+    /// display text; `plain_slice` is what Copy puts on the pasteboard).
+    #[cfg(test)]
+    pub(crate) fn selected_text(&self) -> &str {
+        &self.content[self.selected_range.clone()]
+    }
+
+    /// Drag-select `range`, as a pointer would, for tests outside this module.
+    #[cfg(test)]
+    pub(crate) fn select_range(&mut self, range: Range<usize>, cx: &mut Context<Self>) {
+        self.move_to(range.start, cx);
+        self.select_to(range.end, cx);
+    }
+
+    /// What the editing menu may offer the moment it opens. AppKit validates
+    /// its edit items once, when the menu appears; this is that snapshot.
+    pub(crate) fn edit_state(&self, cx: &App) -> EditState {
+        EditState {
+            can_undo: !self.undo_stack.is_empty(),
+            can_redo: !self.redo_stack.is_empty(),
+            has_selection: !self.selected_range.is_empty() && !self.masked,
+            has_text: !self.content.is_empty(),
+            all_selected: !self.content.is_empty()
+                && self.selected_range == (0..self.content.len()),
+            pasteboard_has_content: crate::pasteboard::read(cx)
+                .map(|item| Pasted::from_clipboard(&item))
+                .is_some_and(|p| {
+                    p.text.as_deref().is_some_and(|t| !t.is_empty())
+                        || !p.files.is_empty()
+                        || !p.images.is_empty()
+                }),
+        }
     }
 
     fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -1316,7 +1443,7 @@ impl ComposerInput {
         cx.notify()
     }
 
-    fn cursor_offset(&self) -> usize {
+    pub(crate) fn cursor_offset(&self) -> usize {
         let raw = if self.selection_reversed {
             self.selected_range.start
         } else {
@@ -2762,6 +2889,10 @@ impl Render for ComposerInput {
             .on_action(cx.listener(Self::redo))
             .on_key_down(cx.listener(Self::on_key_down))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(Self::on_secondary_mouse_down),
+            )
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
@@ -2876,9 +3007,13 @@ impl Composer {
         let weak_accept = weak.clone();
         let weak_escape = weak.clone();
         let weak_paste = weak.clone();
+        let weak_menu = weak.clone();
         input.update(cx, |input, _| {
             input.on_submit = Some(Rc::new(move |window, cx| {
                 let _ = weak.update(cx, |composer, cx| composer.submit(window, cx));
+            }));
+            input.on_context_menu = Some(Rc::new(move |at, cx| {
+                let _ = weak_menu.update(cx, |_, cx| cx.emit(ComposerEvent::ContextMenu { at }));
             }));
             input.on_paste_media = Some(Rc::new(move |files, images, cx| {
                 let _ = weak_paste.update(cx, |composer, cx| {
@@ -3274,7 +3409,7 @@ impl Composer {
     }
 
     #[cfg(test)]
-    fn staged_paths(&self) -> Vec<PathBuf> {
+    pub(crate) fn staged_paths(&self) -> Vec<PathBuf> {
         self.attachments.iter().map(|a| a.path.clone()).collect()
     }
 
