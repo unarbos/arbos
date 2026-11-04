@@ -1,0 +1,37 @@
+name: zz fleet probe
+
+# TEMPORARY. Deleted before this branch's pull request. One question only: how much free disk
+# does a hosted ubuntu-24.04 runner actually hand us at job start, across many runners? The
+# rust gate dies of ENOSPC on roughly one job in twenty-five, and a single instrumented run
+# measured 86 GiB free, which cannot produce ENOSPC. Either the fleet is uneven or the cause
+# is not the starting headroom, and forty samples tell us which.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["cursor/rust-gate-disk-exhaustion-b608"]
+    paths: [".github/workflows/zz-fleet-probe.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  sample:
+    name: "sample ${{ matrix.n }}"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        n: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+            21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40]
+    steps:
+      - name: What this runner starts with
+        run: |
+          set -euo pipefail
+          avail=$(df -B1M --output=avail / | tail -1 | tr -d ' ')
+          iavail=$(df -i --output=iavail / | tail -1 | tr -d ' ')
+          echo "SAMPLE n=${{ matrix.n }} avail_mib=$avail inodes_free=$iavail image=${ImageVersion:-?}"
+          df -h / /mnt /dev/shm 2>/dev/null || df -h /
+          df -i / | tail -1
+          free -m | head -2
