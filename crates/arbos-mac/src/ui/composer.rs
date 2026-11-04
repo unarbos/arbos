@@ -39,8 +39,8 @@ use crate::ui::mention::{self, Mention, MentionToken, Mentions};
 use crate::ui::select::{self, word_range};
 use crate::ui::sf_symbols;
 use crate::ui::theme::{
-    Theme, COMPOSER_HEIGHT, LINE_HEIGHT, PANEL_RADIUS, PLUS_BUTTON, SEND_BUTTON, TEXT_BODY,
-    TEXT_SMALL, TEXT_TINY,
+    Theme, COMPOSER_HEIGHT, PANEL_RADIUS, PLUS_BUTTON, SEND_BUTTON, TEXT_BODY, TEXT_SMALL,
+    TEXT_TINY,
 };
 use crate::ui::transcript;
 use crate::ui::voice::{render_recording_row, Voice, VoiceEvent};
@@ -206,8 +206,13 @@ pub(crate) fn stash_pasted_image(image: &gpui::Image, dir: &Path) -> std::io::Re
 pub(crate) fn pasted_images_dir() -> PathBuf {
     std::env::temp_dir().join("arbos-pasted")
 }
-const INPUT_LINE_HEIGHT: f32 = LINE_HEIGHT;
-const INPUT_FONT_SIZE: f32 = TEXT_BODY;
+// The composer's own type, written out rather than read from `TEXT_BODY` /
+// `LINE_HEIGHT`. Jacob is moving the composer toward Grok's smaller field and
+// said nothing about body text; those two constants have some sixty consumers
+// across thirteen files, so sizing the composer from them would turn one
+// measured control into an app-wide change. Same values as before the split.
+const INPUT_LINE_HEIGHT: f32 = 21.0;
+const INPUT_FONT_SIZE: f32 = 15.0;
 
 #[derive(Clone, Debug)]
 pub enum ComposerEvent {
@@ -296,7 +301,7 @@ pub struct ComposerInput {
     masked: bool,
     /// Profile hero rename: paint and hit-test the name centered under the avatar.
     text_center: bool,
-    /// Type size; the composer's `TEXT_BODY` unless a smaller field asks otherwise.
+    /// Type size; the composer's `INPUT_FONT_SIZE` unless a smaller field asks otherwise.
     font_size: f32,
     /// Known `@handle`s (people, agents, `@here`, `@agents`): paint them in the
     /// accent as soon as the full token is typed, same as bubble chips resolve.

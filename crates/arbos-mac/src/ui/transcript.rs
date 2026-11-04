@@ -2613,9 +2613,12 @@ impl Transcript {
             .child(sender_bubble_column(
                 name_el,
                 quote_header,
-                render_block(
+                // Not `render_block`: that one inks every block in `theme.text`,
+                // and this bubble's ink is its own token.
+                render_block_in(
                     row_id,
                     &block,
+                    theme.bubble_assistant_text(),
                     bubble_text.at,
                     veil.as_ref(),
                     now,
@@ -2754,7 +2757,7 @@ impl Transcript {
                     (theme.text, selectable.clone())
                 } else {
                     (
-                        theme.bubble_text(),
+                        theme.bubble_user_text(),
                         selectable.with_color(Theme::with_alpha(theme.accent, 0.45)),
                     )
                 };
@@ -2862,7 +2865,7 @@ impl Transcript {
                     .when(link_only, |b| b.px(px(6.0)).py(px(6.0)))
                     .rounded(px(BUBBLE_RADIUS))
                     .bg(theme.bubble)
-                    .text_color(theme.bubble_text())
+                    .text_color(theme.bubble_user_text())
                     .text_size(px(CHAT_BODY))
                     .line_height(px(CHAT_LINE_HEIGHT))
                     .child(sender_bubble_column(
@@ -5909,6 +5912,10 @@ fn apply_veil(
     out
 }
 
+/// A block inked in the page's text colour. Only tests still want that: every
+/// bubble on screen now inks its blocks from its own token, so the shipping
+/// path calls [`render_block_in`] directly.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn render_block(
     row_id: &str,
@@ -8212,7 +8219,7 @@ mod layout_tests {
                     let body = user_message_body(
                         "u",
                         self.text,
-                        theme.bubble_text(),
+                        theme.bubble_user_text(),
                         &theme,
                         &selectable,
                         &CodeCopy::default(),
@@ -11811,7 +11818,7 @@ mod delivery_tests {
                     .py(px(BUBBLE_PAD_Y))
                     .rounded(px(BUBBLE_RADIUS))
                     .bg(theme.bubble)
-                    .text_color(theme.bubble_text())
+                    .text_color(theme.bubble_user_text())
                     .child(text)
             };
             div()
