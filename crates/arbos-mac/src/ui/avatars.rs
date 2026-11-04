@@ -851,10 +851,11 @@ fn fonts() -> &'static Mutex<(cosmic_text::FontSystem, cosmic_text::SwashCache)>
         OnceLock::new();
     FONTS.get_or_init(|| {
         // Bundled Inter SemiBold (same subset as chart PNGs: Latin letters +
-        // digits). cosmic-text's default sans is "Open Sans", which macOS does
-        // not ship — shaping then panics with "no default font found" when
-        // building the notification attachment
-        // (feedback app-01M61N05XSVV6PFWWAW0R2BJYP).
+        // digits) — Inter, SIL Open Font License 1.1; attribution and licence
+        // text in crates/arbos-core/assets/README.md. cosmic-text's default
+        // sans is "Open Sans", which macOS does not ship — shaping then panics
+        // with "no default font found" when building the notification
+        // attachment (feedback app-01M61N05XSVV6PFWWAW0R2BJYP).
         const INTER_SEMIBOLD: &[u8] =
             include_bytes!("../../../arbos-core/assets/Inter-SemiBold-subset.ttf");
         let mut font_system = cosmic_text::FontSystem::new();
