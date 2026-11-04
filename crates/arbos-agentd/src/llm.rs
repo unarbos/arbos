@@ -245,11 +245,17 @@ impl Llm {
             .pointer("/choices/0/finish_reason")
             .and_then(Value::as_str)
             .map(str::to_owned);
+        let refusal = v
+            .pointer("/choices/0/message/refusal")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+            .map(str::to_owned);
         Ok(Completion {
             text,
             latency_ms: t0.elapsed().as_millis() as i64,
             usage,
             finish_reason,
+            refusal,
         })
     }
 
@@ -325,14 +331,20 @@ impl Llm {
         user: &str,
         max_tokens: u32,
     ) -> Result<(Value, i64, Value)> {
-        let (text, ms, usage) = self
-            .complete_with_usage(
+        let c = self
+            .complete_full(
                 model,
                 &format!("{system}\nAnswer with one JSON object and nothing else."),
                 user,
                 max_tokens,
+                None,
             )
             .await?;
+        // A declined request is named as one, so a caller can tell it from a call that failed.
+        if let Some(r) = c.refusal_reason() {
+            return Err(anyhow!("the model provider refused the request: {r}"));
+        }
+        let (text, ms, usage) = (c.text, c.latency_ms, c.usage);
         let v = parse_json_loose(&text).ok_or_else(|| {
             anyhow!(
                 "model did not return JSON: {}",
@@ -352,9 +364,31 @@ pub struct Completion {
     /// `stop`, `length` (the `max_tokens` cap cut the answer), `content_filter`, … as the
     /// provider reports it; `None` when absent.
     pub finish_reason: Option<String>,
+    /// The provider's own refusal text, when it answered with one instead of content
+    /// (OpenAI-style `message.refusal`).
+    pub refusal: Option<String>,
 }
 
 impl Completion {
+    /// The provider declined the request's content rather than failing: it said so on the
+    /// message, or it stopped on a moderation reason. Either way the text is not an answer, and
+    /// sending the same request again gets the same refusal.
+    ///
+    /// Without this, a declined call reached the caller as "model did not return JSON" — a
+    /// failure, by its wording, that no lane could tell from a transient one (Jacob, Test5
+    /// round 2, the F variant of #2750).
+    pub fn refusal_reason(&self) -> Option<String> {
+        if let Some(r) = self.refusal.as_deref() {
+            return Some(r.to_owned());
+        }
+        let reason = self.finish_reason.as_deref()?.to_ascii_lowercase();
+        matches!(
+            reason.as_str(),
+            "content_filter" | "content-filter" | "safety" | "blocklist" | "prohibited_content"
+        )
+        .then(|| format!("the provider stopped on {reason}"))
+    }
+
     /// The provider stopped because `max_tokens` was reached: the text is a fragment.
     pub fn truncated(&self) -> bool {
         matches!(
