@@ -1,0 +1,69 @@
+name: zz free probe
+
+# TEMPORARY. Deleted before this branch's pull request. How much of a hosted ubuntu-24.04 image
+# the rust job can throw away, what each piece costs to remove, and what the runner starts with.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["cursor/rust-gate-disk-exhaustion-b608"]
+    paths: [".github/workflows/zz-free-probe.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  reclaim:
+    name: What the image is holding
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Before
+        run: |
+          set -euo pipefail
+          echo "## filesystems"
+          df -h / /mnt /dev/shm 2>/dev/null || df -h
+          echo
+          echo "## avail on / in MiB"
+          df -B1M --output=avail / | tail -1
+          echo
+          echo "## candidates, largest first"
+          for d in /usr/local/lib/android /opt/hostedtoolcache /usr/share/dotnet /opt/ghc \
+                   /usr/local/.ghcup /usr/share/swift /usr/local/share/powershell \
+                   /usr/local/share/chromium /usr/local/lib/node_modules /opt/az \
+                   /usr/share/miniconda /opt/google /opt/pipx /usr/local/julia* \
+                   /opt/hostedtoolcache/CodeQL /usr/local/share/vcpkg /usr/lib/google-cloud-sdk; do
+            if [ -e "$d" ]; then du -sh "$d" 2>/dev/null || true; fi
+          done
+          echo
+          echo "## docker"
+          docker image ls --format '{{.Size}} {{.Repository}}:{{.Tag}}' 2>/dev/null || true
+          docker system df 2>/dev/null || true
+      - name: Reclaim, timed one piece at a time
+        run: |
+          set -euo pipefail
+          before=$(df -B1M --output=avail / | tail -1 | tr -d ' ')
+          for d in /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
+                   /usr/share/swift /usr/local/share/powershell /opt/hostedtoolcache/CodeQL \
+                   /usr/local/lib/node_modules /opt/az /usr/share/miniconda /usr/local/share/vcpkg; do
+            [ -e "$d" ] || continue
+            t0=$(date +%s)
+            sudo rm -rf "$d"
+            now=$(df -B1M --output=avail / | tail -1 | tr -d ' ')
+            echo "$(( $(date +%s) - t0 ))s  +$(( now - before ))MiB cumulative  after removing $d"
+          done
+          t0=$(date +%s)
+          docker image prune -af >/dev/null 2>&1 || true
+          now=$(df -B1M --output=avail / | tail -1 | tr -d ' ')
+          echo "$(( $(date +%s) - t0 ))s  +$(( now - before ))MiB cumulative  after docker image prune"
+          echo "FREED_TOTAL_MIB=$(( now - before ))"
+      - name: After
+        run: df -h / && df -B1M --output=avail / | tail -1
+      - name: Does the rust job still work with all that gone?
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q && sudo apt-get install -y -q libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb-xkb-dev libasound2-dev libssl-dev libgl1-mesa-dev libfontconfig-dev libstdc++-14-dev libglib2.0-dev
+          wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
+          sudo bash /tmp/llvm.sh 21 >/dev/null
+          /usr/lib/llvm-21/bin/clang --version | head -1
+          df -h /
