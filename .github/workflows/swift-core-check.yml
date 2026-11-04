@@ -109,6 +109,26 @@ jobs:
           ')"
           echo "ARBOS_SIM_NAME=$name" >> "$GITHUB_ENV"
           echo "simulator for the test lane: $name"
+      # No artifact this gate has ever uploaded carries CoreSimulator lifecycle: `Booting`,
+      # `device booted` and `CoreSimulator` occur zero times in xcodebuild's default log level, so
+      # the cost of the first boot could not be read from any run after the fact. Boot the device
+      # here instead, where it can be timed, and let the test lane find it already up.
+      - name: Boot the simulator
+        run: |
+          set -euo pipefail
+          udid="$(xcrun simctl list devices available --json | python3 -c '
+          import json, sys
+          want = sys.argv[1]
+          for devices in json.load(sys.stdin)["devices"].values():
+              for d in devices:
+                  if d["name"] == want:
+                      print(d["udid"]); raise SystemExit
+          raise SystemExit(f"no available simulator named {want}")
+          ' "$ARBOS_SIM_NAME")"
+          start=$(date +%s)
+          xcrun simctl boot "$udid" 2>/dev/null || true
+          xcrun simctl bootstatus "$udid" -b
+          echo "booted $ARBOS_SIM_NAME ($udid) in $(( $(date +%s) - start )) s"
       - name: fastlane test
         env:
           ARBOS_SPM_DIR: ${{ github.workspace }}/apps/ios/Arbos/build/spm
@@ -116,6 +136,9 @@ jobs:
           set -euo pipefail
           cd "$APP_DIR"
           fastlane test
+      - name: UI first-launch report
+        if: always()
+        run: python3 scripts/ci/ui-launch-report.py "$APP_DIR/build/xcodebuild-test.log"
       - name: Keep the xcodebuild logs
         if: always()
         uses: actions/upload-artifact@v4
