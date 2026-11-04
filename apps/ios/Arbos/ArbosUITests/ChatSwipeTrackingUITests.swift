@@ -26,13 +26,12 @@ import XCTest
 /// other lanes (#2386).
 ///
 /// **Hittability after the transition is deliberately not asserted here, and re-adding it will
-/// go red for a reason this fix does not own.** SwiftUI publishes accessibility frames for the
-/// transcript one screen width right of where its views are, so XCUITest — and VoiceOver with
-/// it — reads the chat as off-screen while UIKit has it at the origin and delivers touches to
-/// it. A complete walk of the window taken at the instant of the failing read found 38 views,
-/// none displaced and none transformed, against 53 accessibility elements in the same tree:
-/// there is no displaced view to find, because the bubbles are drawn rather than view-backed.
-/// That is a separate defect, owned elsewhere. See
+/// go red for a reason this fix does not own.** It is not the frames: those were a real defect
+/// of this animator (AF-834, the last case below), and they are fixed. It is the toast layer —
+/// an empty toast container publishes a full-screen accessibility element over every row, so
+/// XCUITest computes no hit point for anything underneath it while UIKit delivers touches
+/// normally. Filed against `ErrorNote.swift`; `main` works around it in two places by tapping
+/// by coordinate, as the last two cases here do. See
 /// `internal/2637-back-swipe-tracks-the-finger.md`.
 final class ChatSwipeTrackingUITests: XCTestCase {
     /// The shared Mac runs the gate and releases at the same time; waits are generous.
@@ -246,5 +245,45 @@ final class ChatSwipeTrackingUITests: XCTestCase {
         row.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
         XCTAssertTrue(back(app).waitForExistence(timeout: settle),
                       "Home pushed the chat back on: the stack and SwiftUI's path agree about what is on it")
+    }
+
+    /// After a drag that comes back, the transcript's accessibility frames are where its views
+    /// are (AF-834). Before the fix every bubble came back reported one screen width to the
+    /// right of where it was drawn, so VoiceOver read the open chat as off-screen.
+    ///
+    /// **This case must not read the trace, which is why it cannot also assert tracking.**
+    /// Reading the readout heals the defect asserted here — its `accessibilityValue` getter
+    /// walks the window, and that walk is enough to make SwiftUI republish. One build measured
+    /// both ways read 414 with `ARBOS_SWIPE_TRACE` unset and 12 with it set, and four earlier
+    /// measurements taken through the trace all reported "fixed" when nothing was. So this drag
+    /// is driven blind, and the two cases above own tracking — which they can, because the
+    /// healing moves the frames and not what the trace records.
+    func testTheTranscriptIsWhereItIsDrawnAfterTheChatComesBack() {
+        let app = XCUIApplication()
+        app.launchEnvironment = ["ARBOS_FIXTURE": "1", "ARBOS_OPEN_PEOPLE": chatId,
+                                 "ARBOS_FIXTURE_LONG_ROWS": "120"]
+        app.launch()
+        XCTAssertTrue(back(app).waitForExistence(timeout: appear), "the Launch week group opened")
+        settleTranscript(app)
+
+        let distance = Self.comesBack
+        let start = startPoint(app, distance: distance)
+        start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: distance, dy: 0)),
+                    withVelocity: .slow, thenHoldForDuration: 0.6)
+        XCTAssertTrue(back(app).exists, "the chat is still here: a drag this short does not go back")
+
+        // One read after a fixed wait, rather than polling until it passes. The defect is a
+        // stale publication, so a poll would turn "the frames were wrong for two seconds and
+        // VoiceOver read the chat as gone" into a pass.
+        Thread.sleep(forTimeInterval: 1.5)
+
+        let window = app.windows.firstMatch.frame
+        let frames = app.descendants(matching: .any).matching(bubbleQuery).allElementsBoundByIndex.map(\.frame)
+        XCTAssertFalse(frames.isEmpty, "there are bubbles to read")
+        let worst = frames.map(\.minX).max() ?? 0
+        XCTAssertLessThan(worst, window.midX,
+                          "every bubble is reported inside the window it is drawn in — the "
+                          + "furthest out is at \(Int(worst)) of a \(Int(window.width)) pt "
+                          + "screen: \(frames.map { Int($0.minX) })")
     }
 }

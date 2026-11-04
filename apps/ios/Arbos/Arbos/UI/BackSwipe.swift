@@ -272,9 +272,11 @@ final class DirectionalSwipeRecognizer: UIGestureRecognizer {
     ///
     /// Measuring the drag in the recognizer's own view is what broke the interactive pop, and
     /// it is worth spelling out because the bug is invisible in the recognizer: the moment the
-    /// pop begins, `BackPopAnimator` sets the leaving screen's `transform` to its finished
-    /// position, because that is what `UIView.animate` does — the model value jumps to the end
-    /// state and only the presentation layer is animated. The recognizer sits on that screen.
+    /// pop begins, `BackPopAnimator` moves the leaving screen to its finished position — by
+    /// transforming the box it puts the screen in — because that is what `UIView.animate` does:
+    /// the model value jumps to the end state and only the presentation layer is animated. The
+    /// recognizer sits on that screen, and an ancestor moving carries it just as its own
+    /// transform did.
     /// So from the second touch sample onwards `location(in: view)` was read in a frame that
     /// had already slid a whole screen width to the right, the translation collapsed to about
     /// minus one screen, and a rightward drag read as a leftward one: the screen moved on the
@@ -565,6 +567,32 @@ final class BackPopAnimator: NSObject, UIViewControllerAnimatedTransitioning {
         dim.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         container.insertSubview(dim, aboveSubview: arrivingView)
 
+        // What moves is a container put up for the transition, not the leaving screen itself.
+        //
+        // Moving the screen directly is what the first version of this animator did, and it cost
+        // the open chat its accessibility (AF-834): every bubble came back from a cancelled drag
+        // reported one screen width to the right of where it was drawn, so VoiceOver read the
+        // chat as off-screen and XCUITest could not compute a hit point on it. `UIView.animate`
+        // writes the end state to the model layer immediately and animates the presentation
+        // layer away from it, and SwiftUI publishes accessibility frames from the model layer —
+        // so for the length of the transition, and after a cancel for as long as nothing
+        // republishes, the frames say where the screen was going rather than where it is.
+        //
+        // Moving a parent instead fixes it because SwiftUI does not read an ancestor's transform
+        // at all: the frames stay at the resting position throughout, which is where the screen
+        // ends up on a cancel and is the only answer that is ever right for a screen that is
+        // about to be gone. Five arms off one build say it is this and nothing else — moving by
+        // `center` instead of `transform` reproduces the defect just as the transform does, and
+        // so do both halves of the debug trace that was accidentally masking it. The three ways
+        // of moving the screen were also photographed mid-drag and are byte-identical, so this
+        // is invisible to the eye. `internal/af834-voiceover-bubble-frames.md`.
+        let box = UIView(frame: container.bounds)
+        box.backgroundColor = .clear
+        container.addSubview(box)
+        leavingView.frame = box.bounds
+        box.addSubview(leavingView)
+
+        // The shadow stays on the screen the eye sees, not on the box carrying it.
         let layer = leavingView.layer
         let shadow = (layer.shadowColor, layer.shadowOpacity, layer.shadowRadius, layer.shadowOffset)
         layer.shadowColor = UIColor.black.cgColor
@@ -573,7 +601,7 @@ final class BackPopAnimator: NSObject, UIViewControllerAnimatedTransitioning {
         layer.shadowOffset = CGSize(width: -3, height: 0)
 
         UIView.animate(withDuration: transitionDuration(using: context), delay: 0, options: .curveLinear) {
-            leavingView.transform = CGAffineTransform(translationX: width, y: 0)
+            box.transform = CGAffineTransform(translationX: width, y: 0)
             arrivingView.transform = .identity
             dim.alpha = 0
         } completion: { _ in
@@ -585,6 +613,12 @@ final class BackPopAnimator: NSObject, UIViewControllerAnimatedTransitioning {
             dim.removeFromSuperview()
             arrivingView.transform = .identity
             (layer.shadowColor, layer.shadowOpacity, layer.shadowRadius, layer.shadowOffset) = shadow
+            // The box comes down and the screen goes back to the container, before the lines
+            // below decide which of the two screens this animator leaves behind.
+            leavingView.transform = .identity
+            container.addSubview(leavingView)
+            leavingView.frame = container.bounds
+            box.removeFromSuperview()
             let cancelled = context.transitionWasCancelled
             // Whichever view this animator leaves behind, it takes out of the container
             // itself. UIKit does not promise to tidy up after a transition it did not run,
@@ -596,13 +630,10 @@ final class BackPopAnimator: NSObject, UIViewControllerAnimatedTransitioning {
                 leavingView.removeFromSuperview()
             }
             context.completeTransition(!cancelled)
-            // Defensive only, and known to be so. Run 41756275132 probed this view on both
-            // paths: on a cancel it is already back at the origin by the time this block runs
-            // (`left:tx=0,ptx=0,anim=0,spd=1.0`), because UIKit undoes a cancelled transition
-            // itself, and on a pop it is out of the container and on its way to being freed.
-            // There is no stuck animation here and never was — three separate attempts to fix
-            // this screen by rewriting this line all measured the same thing afterwards.
-            leavingView.transform = .identity
+            // What used to be here was a defensive `leavingView.transform = .identity`, kept
+            // because this screen had been through three attempted fixes that all rewrote it.
+            // Nothing sets that transform any more — the box above carries the movement — so
+            // the teardown resets it once and there is nothing left for this line to undo.
             #if DEBUG
             BackSwipeTrace.probe("rest", leavingView)
             BackSwipeTrace.note(cancelled ? "done:back" : "done:popped")
