@@ -601,6 +601,7 @@ impl Agent {
         let kind = TurnKind::SubagentResult {
             subagent_id: format!("agent-message:{mid}"),
             name: from_name.clone(),
+            job_id: None,
             status: status.clone(),
         };
         self.run_notice_turn_unless_relayed(

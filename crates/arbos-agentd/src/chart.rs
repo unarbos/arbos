@@ -89,6 +89,7 @@ pub async fn post(
                 chat_id: c.to_owned(),
                 ask_id: None,
                 main_turn: false,
+                job_id: None,
             };
         }
     }
@@ -97,7 +98,8 @@ pub async fn post(
     };
     let png = picture_png(&chart, &credit).map_err(|e| anyhow::anyhow!("fallback picture: {e}"))?;
     let png_len = png.len();
-    let key = media::upload(a, &target.chat_id, png, "image/png").await?;
+    let key = media::blob_key(&png);
+    media::upload(a, &target.chat_id, png, &key, "image/png").await?;
     let Some(host) = a.sync.host(&target.chat_id).await else {
         anyhow::bail!("chat {} is not open on this box", target.chat_id);
     };
