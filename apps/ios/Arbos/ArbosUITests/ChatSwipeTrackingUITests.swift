@@ -26,13 +26,27 @@ import XCTest
 /// other lanes (#2386).
 ///
 /// **Hittability after the transition is deliberately not asserted here, and re-adding it will
-/// go red for a reason this fix does not own.** It is not the frames: those were a real defect
-/// of this animator (AF-834, the last case below), and they are fixed. It is the toast layer —
-/// an empty toast container publishes a full-screen accessibility element over every row, so
-/// XCUITest computes no hit point for anything underneath it while UIKit delivers touches
-/// normally. Filed against `ErrorNote.swift`; `main` works around it in two places by tapping
-/// by coordinate, as the last two cases here do. See
-/// `internal/2637-back-swipe-tracks-the-finger.md`.
+/// go red for a cause nobody has yet established.** It is not the frames: those were a real
+/// defect of this animator (AF-834, the last case below), and they are fixed — measured, five
+/// arms in one build, control reproducing at `minX = 414` against `12` for the fix.
+///
+/// **An earlier version of this comment blamed the toast layer, and that is refuted.** The
+/// claim was that an empty toast container publishes a full-screen accessibility element over
+/// every row, so XCUITest computes no hit point for anything underneath it. It is left here
+/// rather than deleted because `main`'s two coordinate workarounds carry the same story and the
+/// next reader will meet it there. Five arms measured on #2705 at `3c6e498d7`: the empty
+/// container does publish `(0, 62, 402, 778)`, and the row underneath is hittable and takes
+/// `row.tap()` regardless; collapsing the container changes neither. About a dozen *other*
+/// full-screen elements contain every row's centre in every arm — a window, a `Toolbar` at
+/// `(0, 0, 402, 874)`, eight to ten unnamed containers at the same frame — so "something
+/// full-screen covers the row" never separated a working build from a broken one.
+///
+/// What is measured and still unexplained: `Computed hit point {-1, -1}` on this branch, three
+/// times, **after a committed pop**. Whether that belongs to this animator is open, and an
+/// earlier "measured with no pop at all, so it is not this fix's" is withdrawn — it rested on
+/// one reading that the five above contradict. See
+/// `internal/2637-back-swipe-tracks-the-finger.md`,
+/// `internal/af834-voiceover-bubble-frames.md`, and AF-851.
 final class ChatSwipeTrackingUITests: XCTestCase {
     /// The shared Mac runs the gate and releases at the same time; waits are generous.
     private let appear: TimeInterval = 90
@@ -236,12 +250,15 @@ final class ChatSwipeTrackingUITests: XCTestCase {
         // Home opens on the All tab, which lists the group (`HomeFilterTabsUITests`).
         let row = app.descendants(matching: .any)["home-row:\(chatId)"].firstMatch
         XCTAssertTrue(row.waitForExistence(timeout: settle), "the group is in the list again")
-        // By coordinate, as `TranscriptFirstFrameUITests` already does, because the empty toast
-        // container stays in the accessibility tree spanning the whole content area, so XCUITest
-        // computes no hit point for any row while UIKit delivers the touch normally (filed
-        // against `ErrorNote.swift`; measured with no pop at all, so it is not this fix's). The
-        // old `row.tap()` here never synthesised an event, so it asserted nothing — the open
-        // below is what says the touch landed.
+        // By coordinate, as `TranscriptFirstFrameUITests` already does, because `row.tap()`
+        // here reported `Computed hit point {-1, -1}` three times while UIKit delivered the
+        // touch normally. The old `row.tap()` never synthesised an event, so it asserted
+        // nothing — the open below is what says the touch landed.
+        //
+        // **The cause is open.** This comment used to name the empty toast container; five arms
+        // measured on #2705 refute it, since the row is hittable and takes `row.tap()` with that
+        // container published full-screen. Do not inherit the attribution from here or from
+        // `main`'s two workarounds — see the class comment above and AF-851.
         row.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
         XCTAssertTrue(back(app).waitForExistence(timeout: settle),
                       "Home pushed the chat back on: the stack and SwiftUI's path agree about what is on it")
