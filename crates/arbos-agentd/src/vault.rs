@@ -22,6 +22,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -599,10 +600,38 @@ pub fn write_env_file(cfg: &Config) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let tmp = path.with_extension("env.tmp");
-    std::fs::write(&tmp, text)?;
-    secure_env_file(&tmp, cfg)?;
-    std::fs::rename(&tmp, &path)
+    // The temporary name is per writer. A fixed one would only move the truncate down a level:
+    // the write into it is still create-truncate-write, so two writers sharing the name give one
+    // of them a short file to rename over `secrets.env` and the other an ENOENT on a name the
+    // first already renamed away.
+    //
+    // The permissions step is the reason this site needs it most. `secure_env_file` runs between
+    // the write and the rename, so with a shared name a writer could chown or chmod another
+    // writer's bytes, or take its own ENOENT there rather than on the rename — a file of secrets
+    // left at the wrong owner or mode. A temporary per writer keeps each one's bytes, mode and
+    // owner its own from creation to rename.
+    //
+    // Two secret pushes in one 5 s poll batch is the real trigger: `Agent::dispatch_push` spawns
+    // a task per push, and `on_push`'s catch-all arm calls `refresh_all`, which lands here.
+    static NEXT_TMP: AtomicU64 = AtomicU64::new(0);
+    let tmp = path.with_extension(format!(
+        "env.{}.{}.tmp",
+        std::process::id(),
+        NEXT_TMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let write_then_secure = || -> std::io::Result<()> {
+        std::fs::write(&tmp, text)?;
+        secure_env_file(&tmp, cfg)
+    };
+    if let Err(e) = write_then_secure() {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    if let Err(e) = std::fs::rename(&tmp, &path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
 }
 
 fn secure_env_file(path: &Path, cfg: &Config) -> std::io::Result<()> {
@@ -1866,6 +1895,92 @@ mod tests {
         assert!(!promises_secret_request(
             "You can approve the design in the chat."
         ));
+    }
+
+    /// `secrets.env` has more than one writer. `Agent::dispatch_push` spawns a task per push and
+    /// `on_push`'s catch-all arm calls `refresh_all`, which writes this file — so two secret
+    /// pushes in one 5 s poll batch write it at once, which is what happens when someone toggles
+    /// Access. Every shell of every harness child sources it.
+    ///
+    /// Two writers, therefore, not one: a single writer passes against a shared temporary name
+    /// just as readily as against a correct implementation, so it would prove nothing about
+    /// either. The reader must only ever see a whole file, no writer may fail, no temporary may
+    /// be left behind, and the mode must be the restrictive one on every read.
+    #[tokio::test]
+    async fn secrets_env_is_never_half_written() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (agent, root) = crate::status::tests::test_agent().await;
+        let project = agent.cfg.project_id.clone();
+        // Grants for this project only. The global state is shared by every test in the binary
+        // and `render_env_file` filters by project, so nothing is removed and nothing leaks.
+        {
+            let mut st = state().lock().expect("secrets state");
+            let mut names: Vec<String> = Vec::new();
+            // Three grants, not hundreds. A big file is the wrong fixture here and actively
+            // hides the bug: `write_env_file` renders under the `state()` mutex, so an expensive
+            // render holds every other writer back and keeps their write-then-rename windows
+            // from overlapping. Measured against a shared temporary name — 200 grants (56 KB)
+            // failed 6 writes in 40,000, while 3 grants (1.4 KB, the size a real agent has)
+            // failed 29,019 in 60,000. The cheap render is what lets writers collide.
+            for i in 0..3 {
+                let env = format!("ARBOS_TMPRACE_KEY_{i:03}");
+                let g = Grant::from_item(
+                    &project,
+                    &json!({ "env": env, "kind": "key", "enabled": true, "inject_env": true,
+                             "placeholders": { "value": format!("arbos-secret://{env}/value") } }),
+                )
+                .expect("grant");
+                st.grants.push(g);
+                names.push(env);
+            }
+            st.known_vars
+                .insert(project.clone(), names.into_iter().collect());
+        }
+        write_env_file(&agent.cfg).unwrap();
+        let path = env_file(&agent.cfg);
+        let whole = std::fs::read_to_string(&path).unwrap();
+        assert!(whole.contains("export ARBOS_TMPRACE_KEY_000="));
+
+        const EACH: usize = 2000;
+        let writers: Vec<_> = (0..2)
+            .map(|w| {
+                let cfg = agent.cfg.clone();
+                tokio::task::spawn_blocking(move || {
+                    for i in 0..EACH {
+                        write_env_file(&cfg)
+                            .unwrap_or_else(|e| panic!("writer {w} failed on write {i}: {e}"));
+                    }
+                })
+            })
+            .collect();
+        let reads = {
+            let path = path.clone();
+            let whole = whole.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut n = 0usize;
+                while n < EACH * 2 {
+                    let got = std::fs::read_to_string(&path).expect("the file is always there");
+                    assert_eq!(got, whole, "read {n} saw a partial secrets.env");
+                    let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+                    assert_eq!(mode & 0o777, 0o600, "read {n} saw mode {:o}", mode & 0o777);
+                    n += 1;
+                }
+                n
+            })
+        };
+        for w in writers {
+            w.await.unwrap();
+        }
+        assert!(reads.await.unwrap() >= EACH * 2);
+        let strays: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .filter(|n| n.to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(strays.is_empty(), "{strays:?}");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// The file every shell sources: the real value for a switched-on grant, the placeholder for
