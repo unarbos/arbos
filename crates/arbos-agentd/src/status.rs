@@ -157,14 +157,18 @@ pub fn finish_cleanly(text: &str, truncated: bool) -> Option<String> {
 }
 
 /// What the model's reading becomes. A `[status]` answer must read as a whole sentence
-/// (`finish_cleanly`), else it is not posted and the message queues (`Task`, `None`). A
-/// `[guide]` is a steer whatever the quick line looks like — the line is never shown, so a
-/// missing full stop must not demote the steer to a silent job (#1657). A `[task]` has no line.
+/// (`finish_cleanly`) and must not put a clock on the finish (Jacob, Test5 T7), else it is not
+/// posted and the message queues (`Task`, `None`) for the main session, which answers with the
+/// step it is on. A `[guide]` is a steer whatever the quick line looks like — the line is never
+/// shown, so a missing full stop must not demote the steer to a silent job (#1657). A `[task]`
+/// has no line.
 pub fn settle_quick(kind: SideKind, text: &str, truncated: bool) -> (SideKind, Option<String>) {
     match kind {
         SideKind::Status => match finish_cleanly(text, truncated) {
-            Some(clean) => (SideKind::Status, Some(clean)),
-            None => (SideKind::Task, None),
+            Some(clean) if !crate::agent::promises_a_time(&clean) => {
+                (SideKind::Status, Some(clean))
+            }
+            Some(_) | None => (SideKind::Task, None),
         },
         SideKind::Guide => (SideKind::Guide, None),
         SideKind::Task => (SideKind::Task, None),
@@ -596,7 +600,7 @@ impl Agent {
                                 chat_id,
                                 truncated,
                                 chars = text.chars().count(),
-                                "quick reply did not end a sentence; silent queue"
+                                "quick reply could not stand as a status line; silent queue"
                             );
                             (SideKind::Task, String::new())
                         }
@@ -866,6 +870,59 @@ pub(crate) mod tests {
             Some("Still on it (about a minute in).")
         );
         assert_eq!(finish_cleanly("   ", false), None);
+    }
+
+    /// Jacob, Test5 T7, both rounds, on agentd 0.1.192: asked "ETA?" the agent answered "10–15
+    /// minutes more… a guess" while ≈3.5 min of a 5 min 04 s task remained, and in round 1
+    /// "5–10 minutes" while 34 s remained. Nothing in the box derives that figure — how many
+    /// more model turns the rest needs is not known until they run — so every one of them is
+    /// invented, and the model's own "a guess" label was judged not to help. The owner's rule:
+    /// no invented number; an honest range or the current step.
+    ///
+    /// The property, not the wording: a posted status line carries no fabricated duration, and
+    /// an answer that describes progress instead is still posted, so "ETA?" is answered rather
+    /// than deflected. A line with a clock is dropped and the message queues for the main
+    /// session (the silent-queue path of #1479), which answers with the step it is on.
+    #[test]
+    fn a_status_answer_describes_the_step_and_invents_no_duration() {
+        for promise in [
+            // Round 2, as observed.
+            "I'm about two thirds of the way through — another 10–15 minutes.",
+            // The same figure with the hedge the report judged insufficient.
+            "Roughly 10–15 minutes more, though that is a guess.",
+            // Round 1, as observed.
+            "I've converted three of the five files; 5–10 minutes to go.",
+            "About 3 minutes left on the last file.",
+            "ETA 10 minutes.",
+            "Give me 5-10 minutes and I'll have the summary.",
+            "It should be done in about 10 minutes.",
+            "I'll have the table ready in 5 minutes.",
+            "Two files left to convert, so maybe 10 more minutes until it's done.",
+        ] {
+            assert_eq!(
+                settle_quick(SideKind::Status, promise, false),
+                (SideKind::Task, None),
+                "a status line put an invented clock on the finish: {promise}"
+            );
+        }
+        // The answers the rule asks for instead — the step, what is done, what is left as work
+        // — still post, and so do the spans that are facts: time already spent, the user's own
+        // clock, a check-in a routine keeps.
+        for fine in [
+            "I'm on the third of five model families; the charts and the PDF come after that.",
+            "Three of the five files are converted; the fourth is running now.",
+            "I've been on this one for about seven minutes.",
+            "The benchmark took 12 minutes.",
+            "I'll check back in 10 minutes with where it stands.",
+            "Your meeting starts in 15 minutes, so I'll keep this short.",
+            "Still on it (about a minute in).",
+        ] {
+            assert_eq!(
+                settle_quick(SideKind::Status, fine, false),
+                (SideKind::Status, Some(fine.to_owned())),
+                "a status line that invents nothing was dropped: {fine}"
+            );
+        }
     }
 
     #[test]

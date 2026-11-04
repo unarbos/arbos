@@ -6498,6 +6498,19 @@ impl Agent {
         if text.is_empty() && activity.is_none() {
             return Err("nothing to send".into());
         }
+        // Jacob, Test5 T7: a bubble that says how much longer the work will take is refused —
+        // no clock in the box measures that, so the figure is invented however it is hedged.
+        if promises_a_time(text) {
+            tracing::warn!(
+                chars = text.chars().count(),
+                "send_message promised a time; refused"
+            );
+            self.append_audit(
+                "time_promise_refused",
+                json!({ "surface": "send_message", "text": text.chars().take(200).collect::<String>() }),
+            );
+            return Err(TIME_PROMISE_REFUSAL.into());
+        }
         // #2025: a sentence that says a file / chart / picture is posted or confirmed is sent
         // only when a read-back row exists for this chat since the turn's ask. A timed-out or
         // gated call never becomes "confirmed" later.
@@ -6877,6 +6890,22 @@ impl Agent {
                         "a reply must not promise a secret request or an approval card that was not made; {hint}"
                     ));
                 }
+            }
+            // Jacob, Test5 T7: "ETA?" was answered "10–15 minutes more… a guess" with ≈3.5 min
+            // of work left. The reply and the ack are the turn's other two ways to reach the
+            // user, so the same refusal applies to both. Twice refused the route degrades to a
+            // reply with no text (`route_failed`), which is the outcome wanted here: the turn
+            // writes its answer with `send_message`, and a clock cannot ride in on the decision.
+            let reply = match &r {
+                ValidRoute::Reply { reply: Some(text) } => Some(text.as_str()),
+                _ => None,
+            };
+            if [reply, args.get("ack").and_then(Value::as_str)]
+                .into_iter()
+                .flatten()
+                .any(promises_a_time)
+            {
+                return Err(TIME_PROMISE_REFUSAL.to_owned());
             }
             Ok(r)
         });
@@ -9760,6 +9789,224 @@ pub(crate) fn claims_posted(text: &str) -> bool {
     claims.iter().any(|c| t.contains(c))
 }
 
+/// What the model is told when a bubble, a reply or an ack puts a clock on the finish (Jacob,
+/// Test5 T7, round 1 and round 2). It names the answer that is wanted, because "ETA?" is a fair
+/// question the turn still has to answer — with progress, not a number.
+pub(crate) const TIME_PROMISE_REFUSAL: &str = "Not sent: this says how much longer the work will take (\"another 10-15 minutes\", \"about 3 minutes left\", \"ETA 10 minutes\"). Nothing here measures that: how many more model turns the rest needs is not known until they run, so any figure is invented and the user plans around it — calling it a guess does not fix that. Answer the question with progress instead: the step you are on, what is already finished, what is left to do, and that you will say so as soon as it lands. A span the user already owns (\"your meeting starts in 15 minutes\"), a span already spent (\"the benchmark took 12 minutes\") and a check-in a routine will really keep (\"I'll check back in 10 minutes\") are all fine.";
+
+/// Clock units a span of time can be written in.
+const SPAN_UNITS: &[&str] = &[
+    "second", "seconds", "sec", "secs", "minute", "minutes", "min", "mins", "hour", "hours", "hr",
+    "hrs", "day", "days",
+];
+
+/// Words that count a span: a digit run ("10", "10-15", "10–15") or a written number.
+fn counts_a_span(w: &str) -> bool {
+    w.starts_with(|c: char| c.is_ascii_digit())
+        || matches!(
+            w,
+            "a" | "an"
+                | "one"
+                | "two"
+                | "three"
+                | "four"
+                | "five"
+                | "six"
+                | "seven"
+                | "eight"
+                | "nine"
+                | "ten"
+                | "fifteen"
+                | "twenty"
+                | "thirty"
+                | "forty"
+                | "sixty"
+                | "ninety"
+                | "half"
+                | "couple"
+                | "few"
+                | "several"
+        )
+}
+
+/// Words that may sit between the count and the frame that governs it ("in about 10 minutes",
+/// "roughly 3 min", "at most 5 minutes"). Walked over to find the frame. `another` is handled
+/// separately: it is itself a statement about what is left.
+const SPAN_HEDGES: &[&str] = &[
+    "about",
+    "around",
+    "roughly",
+    "approximately",
+    "approx",
+    "maybe",
+    "perhaps",
+    "probably",
+    "some",
+    "like",
+    "just",
+    "only",
+    "at",
+    "least",
+    "most",
+    "up",
+    "to",
+    "or",
+    "so",
+    "say",
+    "still",
+];
+
+/// Words that say the sentence is about this work reaching its end.
+const FINISH_WORDS: &[&str] = &[
+    "done",
+    "finish",
+    "ready",
+    "complete",
+    "wrap",
+    "left",
+    "remaining",
+    "to go",
+    "eta",
+];
+
+/// Words that make the agent's own work the subject, so a third party's clock is not caught.
+const WORK_SUBJECTS: &[&str] = &[
+    "i",
+    "i'm",
+    "i'll",
+    "i've",
+    "i'd",
+    "me",
+    "my",
+    "we",
+    "we'll",
+    "it",
+    "it's",
+    "this",
+    "that",
+    "everything",
+];
+
+/// Spans that are facts, not promises: time already spent, a clock the user owns, a check-in a
+/// routine keeps. Any of these in the sentence and its spans are left alone.
+const SPAN_IS_A_FACT: &[&str] = &[
+    "took",
+    "spent",
+    "elapsed",
+    "been running",
+    "ran for",
+    "ago",
+    "remind",
+    "check back",
+    "check in",
+    "checking in",
+    "ping you",
+    "message you",
+    "get back to you",
+    "follow up",
+    "update you",
+    "start in",
+    "starts in",
+    "begin in",
+    "begins in",
+    "leaves in",
+    "arrives in",
+    "due in",
+    "opens in",
+    "closes in",
+];
+
+/// Does this text tell the user how much longer the agent's own work will take? Nothing in the
+/// box derives that number, so every one of them is invented (Jacob, Test5 T7: "5–10 minutes"
+/// with 34 s left in round 1, "10–15 minutes more… a guess" with ≈3.5 min left in round 2).
+///
+/// A span counts as a promise when it is framed as time ahead of the finish — "another 10-15
+/// minutes", "3 minutes left", "ETA 10 minutes", "give me 5 minutes", "done in about 10
+/// minutes". A span that is a fact about the world keeps working: time already spent, the
+/// user's own clock, a scheduled check-in, a duration of something that is not this work.
+///
+/// Deliberately not caught: a bare duration with no frame at all ("About 20 minutes."). Without
+/// the question in hand that is indistinguishable from the length of a drive or a recipe, and
+/// refusing it would eat correct answers. The prompt rule still covers that shape.
+pub(crate) fn promises_a_time(text: &str) -> bool {
+    text.to_lowercase()
+        .split(['.', '!', '?', '\n', ';'])
+        .any(sentence_promises_a_time)
+}
+
+/// `promises_a_time` for one lowercased sentence.
+fn sentence_promises_a_time(sentence: &str) -> bool {
+    if SPAN_IS_A_FACT.iter().any(|f| sentence.contains(f)) {
+        return false;
+    }
+    let words: Vec<&str> = sentence
+        .split_whitespace()
+        .map(|w| {
+            w.trim_matches(|c: char| !c.is_alphanumeric() && c != '-' && c != '–' && c != '\'')
+        })
+        .filter(|w| !w.is_empty())
+        .collect();
+    for (unit_at, unit) in words.iter().enumerate() {
+        if !SPAN_UNITS.contains(unit) {
+            continue;
+        }
+        // The count, past the words that can sit between it and the unit ("10 more minutes",
+        // "a couple of minutes").
+        let mut count_at = unit_at;
+        let mut ahead = false;
+        while count_at > 0 {
+            count_at -= 1;
+            match words[count_at] {
+                "more" | "additional" | "further" => ahead = true,
+                "of" | "to" => {}
+                _ => break,
+            }
+        }
+        if !counts_a_span(words[count_at]) {
+            continue;
+        }
+        // The frame: the first word before the count that is not a hedge.
+        let mut frame = None;
+        let mut frame_at = count_at;
+        while frame_at > 0 {
+            frame_at -= 1;
+            if words[frame_at] == "another" {
+                ahead = true;
+            } else if !SPAN_HEDGES.contains(&words[frame_at]) {
+                frame = Some(words[frame_at]);
+                break;
+            }
+        }
+        let trail = words.get(unit_at + 1..).unwrap_or_default();
+        let gave = matches!(frame, Some("me" | "it"))
+            && frame_at > 0
+            && matches!(words[frame_at - 1], "give" | "gave");
+        // Shapes that are about what is left whatever else the sentence says.
+        if ahead
+            || gave
+            || matches!(frame, Some("eta" | "estimate" | "estimated"))
+            || trail
+                .first()
+                .is_some_and(|t| matches!(*t, "left" | "remaining" | "more"))
+            || trail.starts_with(&["to", "go"])
+        {
+            return true;
+        }
+        // Time ahead, said about this work, said about its end.
+        let ahead_frame = matches!(
+            frame,
+            Some("in" | "within" | "under" | "need" | "needs" | "take" | "takes" | "taking")
+        ) || trail.first() == Some(&"until");
+        if ahead_frame
+            && FINISH_WORDS.iter().any(|f| sentence.contains(f))
+            && WORK_SUBJECTS.iter().any(|s| words.contains(s))
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// The prompt of a `TurnKind::JobFallback` turn: the job is gone, do the ask here and now.
 pub(crate) fn job_fallback_prompt(
     job: &JobSpec,
@@ -10236,6 +10483,53 @@ mod tests {
         assert!(!claims_posted(
             "It is not posted yet; the card above needs your approval."
         ));
+    }
+
+    /// Jacob, Test5 T7 (agentd 0.1.192): "ETA?" was answered "10–15 minutes more… a guess" with
+    /// ≈3.5 min of a 5 min 04 s task left, and in round 1 "5–10 minutes" with 34 s left. The
+    /// box derives no such number, so the guard refuses the shape instead of tuning it. Spans
+    /// that are facts — time spent, the user's clock, a check-in, the length of something that
+    /// is not this work — have to keep working, or the guard eats correct answers.
+    #[test]
+    fn a_promised_finish_time_is_told_apart_from_a_real_duration() {
+        for promise in [
+            "I'm about two thirds of the way through — another 10–15 minutes.",
+            "Roughly 10–15 minutes more, though that is a guess.",
+            "I've converted three of the five files; 5–10 minutes to go.",
+            "About 3 minutes left on the last file.",
+            "ETA 10 minutes.",
+            "Estimated 2 hours for the remaining repositories.",
+            "Give me 5-10 minutes and I'll have the summary.",
+            "It should be done in about 10 minutes.",
+            "I'll have the table ready in 5 minutes.",
+            "I need another half hour for the charts.",
+            "That leaves 20 minutes remaining on the download.",
+            "Two files left to convert, so maybe 10 more minutes until it's done.",
+            "This will take about 45 seconds more to finish.",
+        ] {
+            assert!(promises_a_time(promise), "not caught: {promise}");
+        }
+        for fine in [
+            // The answer the rule asks for: the step and the work that is left, no clock.
+            "I'm on the third of five model families; the charts and the PDF come after that.",
+            "Three of the five files are converted; the fourth is running now.",
+            // Time already spent.
+            "I've been on this one for about seven minutes.",
+            "The benchmark took 12 minutes.",
+            "That search ran for 90 seconds before it timed out.",
+            // A check-in a routine really keeps.
+            "I'll check back in 10 minutes with where it stands.",
+            "I've set a reminder to ping you in 30 minutes.",
+            // The user's own clock, and durations of things that are not this work.
+            "Your meeting starts in 15 minutes, so I'll keep this short.",
+            "The last bus leaves in 20 minutes.",
+            "Santa Teresa is about 20 minutes from the airport, and the lesson runs two hours.",
+            "The dough needs to rest for 30 minutes before you shape it.",
+            "Both courses are 90 minutes and cost $60.",
+            "Still on it (about a minute in).",
+        ] {
+            assert!(!promises_a_time(fine), "wrongly caught: {fine}");
+        }
     }
 
     /// Proof run 1 (2026-10-26 01:0x UTC): "Here are seven well-rated San Jose restaurants,
