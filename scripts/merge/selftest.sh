@@ -18,6 +18,16 @@ D=$(cd "$(dirname "$0")" && pwd)
 # shellcheck source=scripts/merge/checks.sh
 source "$D/checks.sh"
 
+# R is the repository every API path in checks.sh is built from. Nothing here calls the API —
+# each case stubs the fetch — but a stubbed function is still CALLED with its arguments built
+# first, and under `set -u` an unset R makes building that string a fatal error before the stub
+# runs. The case then reads the error as the classifier's own answer.
+#
+# This is not hypothetical and it is why the default is here: case 10 passed on a developer
+# machine and failed in CI, because a shell that has run merge-window.sh has R exported and a
+# fresh runner does not. A case whose result depends on who is watching is worse than no case.
+R=${R:-unarbos/arbos}
+
 fail=0
 ok() { printf '  ok    %s\n' "$1"; }
 bad() { printf '  FAIL  %s\n' "$1"; fail=1; }
@@ -339,6 +349,24 @@ if printf '%s\n' "$rgbody" | grep -qE 'NOTASKED\*\).*continue'; then
   ok "NOTASKED is a finding that continues, not a verdict that decides the gate"
 else
   bad "range_gate has no NOTASKED arm that continues, so a gate that cannot be asked refuses the merge again — the defect this change removes"
+fi
+
+# The suite must pass with an EMPTY environment, because CI has one and a
+# developer does not. This is the only case that tests the suite itself, and it
+# exists because case 10 passed here and failed in CI: a shell that has run
+# merge-window.sh has R exported, a fresh runner does not, and under `set -u`
+# an unset R turned a stubbed read into the classifier's own answer. Every case
+# above read UNKNOWN and said so as though it were a verdict about the workflow.
+#
+# A re-exec rather than an assertion about one variable, because the next such
+# dependency will not be R. SELFTEST_CLEAN_RUN stops the recursion.
+if [ "${SELFTEST_CLEAN_RUN:-}" != 1 ]; then
+  echo "the suite itself does not read anything out of the operator's shell:"
+  if env -i PATH="$PATH" HOME=/tmp SELFTEST_CLEAN_RUN=1 bash "$D/selftest.sh" >/dev/null 2>&1; then
+    ok "it passes with an empty environment, so CI sees what you see"
+  else
+    bad "it FAILS with an empty environment — a case is reading something from your shell that a runner will not have. Reproduce with: env -i PATH=\$PATH HOME=/tmp bash $D/selftest.sh"
+  fi
 fi
 
 echo
