@@ -2789,9 +2789,21 @@ enum PaneKinds {
     static let group = ["Members", "Library"]
     static let server = ["Channels", "Members", "Settings"]
     static let channel = ["Profile", "Settings"]
-    static let all: [(String, [String])] = [
-        ("person", person), ("own profile", ownProfile), ("agent", agent),
-        ("group", group), ("server", server), ("channel", channel),
+    /// One kind and the tabs it carries. Named rather than a tuple: a tuple is read by
+    /// position, and a Swift key path cannot reach a tuple element at all, so mapping one
+    /// out by index does not compile where `map(\.tabs)` does.
+    struct Kind {
+        let name: String
+        let tabs: [String]
+    }
+
+    static let all: [Kind] = [
+        Kind(name: "person", tabs: person),
+        Kind(name: "own profile", tabs: ownProfile),
+        Kind(name: "agent", tabs: agent),
+        Kind(name: "group", tabs: group),
+        Kind(name: "server", tabs: server),
+        Kind(name: "channel", tabs: channel),
     ]
 }
 

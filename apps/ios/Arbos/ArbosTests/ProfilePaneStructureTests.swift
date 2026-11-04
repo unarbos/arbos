@@ -9,10 +9,10 @@ import UIKit
 /// The Mac twin is `crates/arbos-mac/src/ui/profiles/pane.rs` `tests`.
 final class ProfilePaneStructureTests: XCTestCase {
     func testEveryKindLaysOutHeroThenPillThenOptions() {
-        for (kind, tabs) in PaneKinds.all {
-            XCTAssertGreaterThanOrEqual(tabs.count, 2, "\(kind): a pane has at least two tabs")
-            XCTAssertEqual(ProfilePane.layout(tabs: tabs.count, footerSections: 1), [.hero, .tabPill, .options, .footer], kind)
-            XCTAssertEqual(ProfilePane.layout(tabs: tabs.count, footerSections: 0), [.hero, .tabPill, .options], kind)
+        for kind in PaneKinds.all {
+            XCTAssertGreaterThanOrEqual(kind.tabs.count, 2, "\(kind.name): a pane has at least two tabs")
+            XCTAssertEqual(ProfilePane.layout(tabs: kind.tabs.count, footerSections: 1), [.hero, .tabPill, .options, .footer], kind.name)
+            XCTAssertEqual(ProfilePane.layout(tabs: kind.tabs.count, footerSections: 0), [.hero, .tabPill, .options], kind.name)
         }
         // One tab: no pill, the options follow the hero directly.
         XCTAssertEqual(ProfilePane.layout(tabs: 1, footerSections: 0), [.hero, .options])
@@ -27,8 +27,8 @@ final class ProfilePaneStructureTests: XCTestCase {
         XCTAssertEqual(PaneKinds.group, ["Members", "Library"])
         XCTAssertEqual(PaneKinds.server, ["Channels", "Members", "Settings"])
         XCTAssertEqual(PaneKinds.channel, ["Profile", "Settings"])
-        for (kind, tabs) in PaneKinds.all {
-            XCTAssertEqual(Set(tabs).count, tabs.count, "\(kind): a tab label appears once")
+        for kind in PaneKinds.all {
+            XCTAssertEqual(Set(kind.tabs).count, kind.tabs.count, "\(kind.name): a tab label appears once")
         }
     }
 
@@ -257,7 +257,7 @@ final class OneAddRowPerPaneTests: XCTestCase {
 /// `crates/arbos-mac/src/ui/profiles/mod.rs` `tab_tests`.
 final class PaneTabsLayoutTests: XCTestCase {
     /// Every tab set the control carries, plus Home's filter row.
-    private var rows: [[String]] { PaneKinds.all.map(\.1) + [HomeListFilter.allCases.map(\.rawValue)] }
+    private var rows: [[String]] { PaneKinds.all.map(\.tabs) + [HomeListFilter.allCases.map(\.rawValue)] }
 
     private func textWidth(_ s: String, _ weight: UIFont.Weight) -> CGFloat {
         (s as NSString).size(withAttributes: [.font: UIFont.systemFont(ofSize: Theme.body, weight: weight)]).width
@@ -310,19 +310,26 @@ final class PaneTabsLayoutTests: XCTestCase {
     }
 
     /// Grok's capsule is grey 27 ([feedback grok-tab-bold-2026-11-03]); ours was the
-    /// assistant-bubble grey, 32. It is its own token now, so moving the assistant bubble
-    /// (Jacob's separate 35 → 28 on the Mac) cannot drag the capsule with it.
-    func testTheSelectedCapsuleIsItsOwnGrey27() {
+    /// assistant-bubble grey, 32. It owns both its shades now, so moving the assistant
+    /// bubble cannot drag it in either appearance. Light keeps the 242 it has always had,
+    /// which means light's two values are still equal and equality cannot tell an alias
+    /// from a pin — the pinned number is the assertion instead. When the bubble moves,
+    /// this stays.
+    func testTheSelectedCapsuleIsItsOwnGrey() {
         XCTAssertEqual(grey(Theme.dark.tabOnFill), 27)
         XCTAssertNotEqual(Theme.dark.tabOnFill, Theme.dark.bubbleAssistant, "the capsule owns its grey")
-        XCTAssertEqual(Theme.light.tabOnFill, Theme.light.bubbleAssistant, "light is unmeasured, so unchanged")
+        XCTAssertEqual(grey(Theme.light.tabOnFill), 242, "light is unmeasured, so unchanged — but pinned")
     }
 
     /// The capsule and the label colour are the only selected signals left now that the tab
-    /// does not go bold, so the capsule must still step off the page it sits on.
+    /// does not go bold, so the capsule must still step off the page it sits on. Every
+    /// `PaneTabs` call site puts the row straight on `bg` — Home, the profile pane's pinned
+    /// block and the FunPicker sheet all paint it — so `bg` is the surface to measure.
     func testTheSelectedCapsuleStillStepsOverThePage() {
-        let step = abs(grey(Theme.dark.tabOnFill) - grey(Theme.dark.bg))
-        XCTAssertGreaterThanOrEqual(step, 6, "capsule \(grey(Theme.dark.tabOnFill)) on page \(grey(Theme.dark.bg)) is invisible")
+        for theme in [Theme.dark, Theme.light] {
+            let step = abs(grey(theme.tabOnFill) - grey(theme.bg))
+            XCTAssertGreaterThanOrEqual(step, 6, "capsule \(grey(theme.tabOnFill)) on page \(grey(theme.bg)) is invisible")
+        }
     }
 
     /// A grey token's 0–255 channel value, the way Jacob reads these colours.
