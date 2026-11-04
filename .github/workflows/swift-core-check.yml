@@ -33,6 +33,20 @@ on:
       - "rust-toolchain.toml"
       - "apps/ios/Arbos/**"
       - ".github/workflows/swift-core-check.yml"
+  # A head whose tip commit is a merge of main has no run here: the merge's own first-parent diff
+  # is main's incoming content, which touches none of the paths above, so `push` never fires, and
+  # the `pull_request` arm then skips itself because an in-repo branch "already gets the push run".
+  # Both triggers defer to the other and the commit goes untested, presenting as skipping, not red.
+  # Dispatch is the way to ask for the verdict those two declined, and it needs no new trust from
+  # scripts/merge/checks.sh: gate_state already takes the first successful run on a head sha
+  # without asking which event produced it.
+  #
+  # scripts/release/gate-can-decide.sh exists because release-gate.yml's dispatch trigger was a
+  # fail-open, and its header names this workflow as the one not to copy that screen into. The
+  # reason is that this job needs no pull request: it checks out a commit, builds the xcframework
+  # and runs ArbosTests, so a dispatch run is a real verdict on a real tree, exactly as its push
+  # runs are. Nothing here reads github.event.pull_request, so there is no fallback to misland.
+  workflow_dispatch:
 
 permissions:
   contents: read
