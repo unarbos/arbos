@@ -1510,7 +1510,7 @@ impl SecretsPanel {
             .gap(px(2.0))
             .p(px(2.0))
             .rounded_full()
-            .bg(theme.field);
+            .bg(theme.segment_track_fill());
         for (value, label, on) in [
             ("refuse", "Refuse", !card_mode),
             ("card", "Ask me", card_mode),
@@ -1696,7 +1696,7 @@ impl SecretsPanel {
             .gap(px(2.0))
             .p(px(3.0))
             .rounded_full()
-            .bg(theme.field)
+            .bg(theme.segment_track_fill())
             .children(
                 [AddKind::Key, AddKind::Login, AddKind::Text]
                     .into_iter()

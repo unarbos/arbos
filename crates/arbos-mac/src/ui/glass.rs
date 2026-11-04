@@ -727,6 +727,64 @@ pub fn switch(on: bool, theme: &Theme) -> Div {
 }
 
 #[cfg(test)]
+mod segment_track_lint {
+    use std::path::{Path, PathBuf};
+
+    fn sources() -> Vec<(PathBuf, String)> {
+        fn walk(dir: &Path, out: &mut Vec<(PathBuf, String)>) {
+            for entry in std::fs::read_dir(dir).expect("ui dir") {
+                let path = entry.expect("entry").path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    let text = std::fs::read_to_string(&path).expect("read source");
+                    out.push((path, text));
+                }
+            }
+        }
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ui");
+        let mut out = Vec::new();
+        walk(&root, &mut out);
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
+    /// A segmented choice is a chip ([`super::segment`]) inside a track, and the
+    /// two are read against each other — but the track is drawn by whoever
+    /// places the chips, in their own file, so nothing links them. Four separate
+    /// tracks were written that way (`seg_row` and the Expires control in
+    /// `profiles/me.rs`, two in `secrets.rs`), and when the chip's grey was
+    /// pinned for Grok parity three of them were missed on the first pass: the
+    /// chip held while the track moved under it, which no per-token check sees.
+    ///
+    /// So: a file that places segments must take its track from
+    /// `Theme::segment_track_fill`, not from `field` / `field_fill` — those
+    /// follow Grok's composer, and a segment track is not a composer field.
+    ///
+    /// This is a file-level rule, which is as far as a text lint reaches. It
+    /// catches a hand-rolled track in a new file; a second hand-rolled track in
+    /// a file that already has a correct one would slip past, so the pairing is
+    /// also pinned numerically by
+    /// `theme::glass_contrast_tests::a_dark_segment_keeps_its_chip_and_its_well_dimmed_or_not`.
+    #[test]
+    fn every_file_that_places_segments_takes_its_track_from_the_segment_token() {
+        let mut offenders = Vec::new();
+        for (path, text) in sources() {
+            if path.ends_with("glass.rs") || !text.contains("glass::segment(") {
+                continue;
+            }
+            if !text.contains("segment_track_fill()") {
+                offenders.push(path.display().to_string());
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "these place `glass::segment` but draw no `segment_track_fill()` track: {offenders:#?}"
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

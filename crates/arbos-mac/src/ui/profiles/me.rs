@@ -1294,7 +1294,7 @@ impl Shell {
                 .p(px(2.0))
                 .mx(px(0.0))
                 .rounded(px(kit::CARD_RADIUS))
-                .bg(theme.field_fill())
+                .bg(theme.segment_track_fill())
                 .border_1()
                 .border_color(theme.field_border)
                 .children(agent_links::EXPIRIES.map(|e| {
