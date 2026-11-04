@@ -228,12 +228,21 @@ final class BackRuleEdgeBandUITests: XCTestCase {
 
     // MARK: The measurement
 
+    /// What a trial did, as far as this test can see.
+    ///
+    /// `popped` is read from `chat-back:<id>` being absent, and that is weaker than it sounds: the
+    /// button is a navigation-bar item, so a push swaps it out along with the rest of the bar.
+    /// Absence therefore covers both "the chat popped" and "a page was pushed whose cover marker
+    /// this test failed to recognise". Only `covered`, which carries a positive marker for the
+    /// page on top, is read from evidence of its own — so prefer it when both could apply, and
+    /// treat `popped` as implicating the back rule only when no cover marker is present.
     private enum Outcome: String {
-        /// The chat is gone from the stack.
+        /// No `chat-back` and no cover named itself. See the caveat above before reading this as
+        /// a pop.
         case popped
         /// The chat is still there and still in front: nobody acted.
         case stayed
-        /// The chat is still on the stack but something is over it. Never a pop.
+        /// Something named itself over the chat. Never a pop.
         case covered
     }
 
@@ -285,13 +294,18 @@ final class BackRuleEdgeBandUITests: XCTestCase {
         sleep(1)
         let backThere = chatBack(app).exists
         let frontmost = backThere && chatIsFrontmost(app)
-        let outcome: Outcome = !backThere ? .popped : (frontmost ? .stayed : .covered)
+        let profile = profilePageShowing(app)
+        // The cover marker is asked first and on its own. A push swaps the navigation bar, so it
+        // takes `chat-back` with it and satisfies the pop test too — ordering the pop test first
+        // scored 19 covers as pops and re-opened a retracted theory.
+        let outcome: Outcome = profile ? .covered
+            : (!backThere ? .popped : (frontmost ? .stayed : .covered))
         let readAt = Date()
         // Every discriminator printed, so a cover, a pop and a profile page are read off the
         // line rather than worked out from it.
         print("short-right-swipe repro: x=\(Int(startX)) y=\(Int(y)) row=\(Self.row) "
               + "avatar=\(onAvatar) chat-back=\(backThere) frontmost=\(frontmost) "
-              + "profile=\(profilePageShowing(app)) -> \(outcome.rawValue) "
+              + "profile=\(profile) -> \(outcome.rawValue) "
               + "| pressed=\(Self.stamp.string(from: pressedAt)) "
               + "released=\(Self.stamp.string(from: releasedAt)) "
               + "read=\(Self.stamp.string(from: readAt)) "
@@ -302,11 +316,18 @@ final class BackRuleEdgeBandUITests: XCTestCase {
     /// Sweep the start point in the chat and on the row where the pop was observed, and print
     /// what each trial did.
     ///
-    /// Read the table with the asymmetry in mind. A `popped` is sound: no app path can pop
-    /// 50 pt, since both pop sites are gated on `fullScreenPops` and its `absX > 70` guard.
-    /// A run of `stayed` bounds a rate and never establishes absence — except at a start point
-    /// inside `edgeZoneWidth`, where the app stands aside by construction and the trial becomes
-    /// a test of UIKit's completion threshold instead of a sample of a race.
+    /// Read the table with two asymmetries in mind. A run of `stayed` bounds a rate and never
+    /// establishes absence — except at a start point inside `edgeZoneWidth`, where the app stands
+    /// aside by construction and the trial becomes a test of UIKit's completion threshold instead
+    /// of a sample of a race. And a `popped` is the **weakest** reading here, not the soundest: it
+    /// is the absence of a navigation-bar button, which a push also produces, so it means "no
+    /// cover named itself" rather than "the chat popped". It was the sound reading only while the
+    /// pop sites' `absX > 70` guard was thought to leave no other way for the chat to leave the
+    /// front; a page pushed over it is exactly that other way, and it is what this run found.
+    ///
+    /// The fixture is part of the measurement rather than a backdrop: the mechanism lives in the
+    /// sender-avatar column, which only a group draws, so the same sweep in a DM returns `stayed`
+    /// at every start point and says nothing at all.
     func testWhatAFiftyPointRightSwipeDoesWhereOneWasObservedToPop() {
         var rows: [(x: CGFloat, pops: Int, covers: Int, avatar: Int, trials: Int)] = []
         for x in Self.starts {
@@ -333,9 +354,12 @@ final class BackRuleEdgeBandUITests: XCTestCase {
             print("short-right-swipe repro: not reproduced at any start point. Every trial "
                   + "stayed, so each point's rate is bounded and none is shown to be zero.")
         } else {
-            print("short-right-swipe repro: REPRODUCED at x = \(reproduced) — a 50 pt drag took "
-                  + "the chat off the front, which BackSwipe.fullScreenPops cannot do. Read the "
-                  + "per-trial lines above for popped versus covered, which are different bugs.")
+            print("short-right-swipe repro: REPRODUCED at x = \(reproduced) — a \(Int(Self.distance)) pt "
+                  + "drag took the chat off the front. Read the per-trial lines for which way: "
+                  + "`profile=true` names a page pushed over the chat, and that is a cover, not a "
+                  + "pop. This test cannot tell a pop from a cover on `chat-back` alone — that is a "
+                  + "navigation-bar item and a push swaps the bar out — so a popped reading without "
+                  + "a cover marker is the only one that implicates the back rule.")
         }
     }
 }
