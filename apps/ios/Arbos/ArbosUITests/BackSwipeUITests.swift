@@ -332,7 +332,10 @@ final class BackSwipeUITests: XCTestCase {
     /// pop is measured. Read the numbers in the xcodebuild log (`measured [...]`).
     func testEdgeSwipeBackTransitionTiming() {
         let options = XCTMeasureOptions()
-        options.iterationCount = 5
+        // One in the gate: each iteration is a launch (~15 s), XCTest runs one more first and discards
+        // it, and `testGroupChatEdgeSwipeGoesHome` asserts the same pop. For a spread, run with
+        // TEST_RUNNER_ARBOS_PERF_ITERATIONS=5.
+        options.iterationCount = Int(ProcessInfo.processInfo.environment["ARBOS_PERF_ITERATIONS"] ?? "") ?? 1
         options.invocationOptions = [.manuallyStart, .manuallyStop]
         measure(metrics: [XCTOSSignpostMetric.navigationTransitionMetric, XCTClockMetric()], options: options) {
             let app = launch(["ARBOS_OPEN_PEOPLE": "fx-group-launch"])

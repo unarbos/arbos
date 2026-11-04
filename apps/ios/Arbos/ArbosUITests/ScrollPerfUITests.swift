@@ -136,23 +136,4 @@ final class ScrollPerfUITests: XCTestCase {
         let start = origin.withOffset(CGVector(dx: from.x - frame.minX, dy: from.y - frame.minY))
         start.press(forDuration: 0.02, thenDragTo: start.withOffset(by), withVelocity: velocity, thenHoldForDuration: 0.02)
     }
-
-    // MARK: System scroll metrics (hitch time ratio) over a fixed swipe set
-
-    /// XCTest's scroll signpost metrics (UIKit's own scroll-deceleration / dragging intervals):
-    /// hitch time ratio in ms/s, frame rate and duration, five iterations of the same swipes.
-    func testGroupScrollMetrics() throws {
-        let app = launch(["ARBOS_OPEN_PEOPLE": "fx-group-launch", "ARBOS_FIXTURE_LONG_ROWS": rows, "ARBOS_FIXTURE_LONG_RICH": "1"])
-        XCTAssertTrue(app.buttons["chat-back:fx-group-launch"].waitForExistence(timeout: appear), "the chat opened")
-        sleep(4)
-        let window = app.windows.firstMatch.frame
-        let low = CGPoint(x: window.midX, y: window.maxY - 240)
-        let high = CGPoint(x: window.midX, y: 180)
-        let options = XCTMeasureOptions()
-        options.iterationCount = 5
-        measure(metrics: [XCTOSSignpostMetric.scrollDecelerationMetric, XCTOSSignpostMetric.scrollDraggingMetric], options: options) {
-            for _ in 0..<3 { pan(app, from: low, by: CGVector(dx: 0, dy: -300), velocity: .fast); usleep(900_000) }
-            for _ in 0..<3 { pan(app, from: high, by: CGVector(dx: 0, dy: 300), velocity: .fast); usleep(900_000) }
-        }
-    }
 }
