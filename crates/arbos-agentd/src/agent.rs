@@ -2885,10 +2885,10 @@ impl Agent {
     /// currently running pi turn via `RpcCommand::Steer`. When nothing is running, fall back to
     /// a normal `send` so a late Guide still lands.
     /// This agent as the reply-to note names it (own rows vs. another agent's).
-    fn reply_me(&self) -> crate::reply::Me<'_> {
+    fn reply_me(&self) -> crate::reply::Me {
         crate::reply::Me {
-            name: &self.cfg.project_name,
-            project_id: &self.cfg.project_id,
+            name: self.name(),
+            project_id: self.cfg.project_id.clone(),
         }
     }
 
