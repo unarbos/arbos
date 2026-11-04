@@ -30,6 +30,10 @@
 #
 # Output lines: channel=stable|none, publish=true|false, promote=true, sha=<bump commit or head>,
 # version=<X.Y.Z or X.Y.Z.<count>>, build=<commit count>, notes=<one line>, tag=<vX.Y.Z or empty>.
+#
+# Exits 0 having printed a plan, or 2 when a predicate it depends on did not answer at all. 2 is
+# not "no release": it is "no decision", and it stops the run instead of picking a side (see
+# mac_verdict).
 set -euo pipefail
 
 DRY_RUN=false
@@ -86,6 +90,51 @@ is_hotfix() {
   git log --format='%s%n%b' "$1^1..$1" 2>/dev/null | grep -qiE '^(revert\b|hotfix\b)|\[hotfix\]' \
     || git log -1 --format='%s%n%b' "$1" | grep -qiE '^(revert\b|hotfix\b)|\[hotfix\]'
 }
+
+# Does main owe a Mac release? mac-change.sh follows `git diff --quiet`: 0 is no change, 1 is a
+# change, and it has no third verdict. Every other exit code is the instrument failing — 127 when
+# the script or something it needs is not there, 126 when it is not executable, 128 out of git —
+# and this returns UNDECIDED for those rather than naming one of the two answers.
+#
+#   0 no Mac change   1 the Mac app must be released   2 undecided, the predicate did not answer
+#
+# It used to be `if mac_change="$(mac-change.sh ...)"; then no release; fi`, which is a two-way
+# split on a three-way instrument: 0 meant no release and *any* non-zero meant release, so a
+# crashed predicate was read as a verdict. It erred towards publishing, so nothing ever shipped
+# wrong from it, but which way an unhandled error happens to fall is not a safety property — the
+# same conflation read the other way ships nothing and says nothing. scripts/release/release-gate.py
+# and crates/arbos-update/tests/release_mac_change.rs already refuse to classify a third code; this
+# was the last caller that did. The exit codes are release-gate.py's: 0, 1, 2 = allow, block,
+# undetermined.
+# The two streams are kept apart deliberately. On 0 and 1 the reason is the predicate's own line
+# of stdout and nothing else, because it is written into `notes=` and read back by the merge kit —
+# folding stderr in there would put a git `fatal:` into a release note, or a second line into
+# key=value output. On an undecided reading there is no note to write and stderr is usually the
+# only thing that says what went wrong, so it is kept and shown.
+mac_verdict() {  # <base> <target>; prints the reason on stdout
+  local out err rc=0 detail
+  err="$(mktemp)" || {
+    echo "mac-change.sh could not be run: no temporary file"
+    return 2
+  }
+  out="$("$here/mac-change.sh" "$1" "$2" 2>"$err")" || rc=$?
+  if [[ "$rc" == 0 || "$rc" == 1 ]]; then
+    rm -f "$err"
+    printf '%s\n' "$out"
+    return "$rc"
+  fi
+  detail="$(printf '%s %s' "$out" "$(cat "$err")" | tr -s ' \t\n' ' ')"
+  rm -f "$err"
+  detail="${detail# }"
+  detail="${detail% }"
+  printf 'mac-change.sh exited %s for %s..%s: %s\n' "$rc" "${1:0:8}" "${2:0:8}" "${detail:-no output}"
+  return 2
+}
+
+# Everything above is callable on its own; everything below is the release itself. The self-test
+# sources this file to exercise mac_verdict against the real thing rather than against a copy of
+# it — see scripts/release/auto-stable-selftest.sh.
+[[ "${ARBOS_AUTO_STABLE_LIB:-}" == 1 ]] && return 0
 
 git fetch -q --tags --force origin "+refs/heads/main:refs/remotes/origin/main"
 head_main="$(git rev-parse origin/main)"
@@ -147,11 +196,22 @@ if [[ -n "$last_tag" ]]; then
     emit_none "stable $last_tag already covers the newest green commit ${target:0:8}"
     exit 0
   fi
-  if mac_change="$("$here/mac-change.sh" "$tag_base" "$target")"; then
-    emit_none "no Mac change since $last_tag — $mac_change (newest green commit ${target:0:8}$($pending_seen && echo '; newer commits still in CI'))"
-    exit 0
-  fi
-  say "Mac release needed: $mac_change"
+  mac_rc=0
+  mac_change="$(mac_verdict "$tag_base" "$target")" || mac_rc=$?
+  case "$mac_rc" in
+    0)
+      emit_none "no Mac change since $last_tag — $mac_change (newest green commit ${target:0:8}$($pending_seen && echo '; newer commits still in CI'))"
+      exit 0
+      ;;
+    1) say "Mac release needed: $mac_change" ;;
+    *)
+      # Undecided is not a verdict, so it does not become one. Stopping here fails the `plan` job
+      # and the Release run goes red, which is the loud direction: emit_none would skip the
+      # release quietly and look exactly like "nothing to do".
+      echo "::error title=Mac release undecided::$mac_change. This is the predicate failing, not an answer about ${target:0:8}, so no release is cut and none is skipped. Fix the predicate and re-run; do not read this as either verdict." >&2
+      exit 2
+      ;;
+  esac
 fi
 
 # 4. version
