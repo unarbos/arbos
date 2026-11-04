@@ -16,6 +16,7 @@ use arbos_core::rpc::{AssistantEvent, Command as RpcCommand, Event, StreamingBeh
 
 use crate::config::Config;
 use crate::rpc_child::RpcChild;
+use crate::settings::{LiveModels, ModelRole};
 use crate::store::Store;
 
 /// Harness-neutral stream (design §4.4.2).
@@ -275,24 +276,50 @@ impl RpcSessions {
     }
 }
 
+/// The model a session that is coming back runs on: the one it was started with when the store
+/// knows it, else the model this agent's work runs on now. Never the box boot value: an agent
+/// whose model was changed must not resume its workers on the old one (Jacob, 2026-11-04).
+async fn resume_model(store: &Store, models: &LiveModels, session_id: &str) -> String {
+    match store
+        .session_model(session_id)
+        .ok()
+        .flatten()
+        .filter(|m| !m.trim().is_empty())
+    {
+        Some(m) => m,
+        None => {
+            models
+                .resolve(ModelRole::Worker {
+                    job_kind: None,
+                    research: None,
+                })
+                .await
+        }
+    }
+}
+
 // ---- PrimeAdapter ------------------------------------------------------------------------------
 
 pub struct PrimeAdapter {
     cfg: Arc<Config>,
     store: Store,
+    /// The agent's live model slots: a child is spawned with the model the agent has now, not
+    /// with the one the box booted with (Jacob, 2026-11-04).
+    models: LiveModels,
     sessions: RpcSessions,
 }
 
 impl PrimeAdapter {
-    pub fn new(cfg: Arc<Config>, store: Store) -> Self {
+    pub fn new(cfg: Arc<Config>, store: Store, models: LiveModels) -> Self {
         Self {
             cfg,
             store,
+            models,
             sessions: RpcSessions::new(),
         }
     }
 
-    fn envs(&self, session_id: &str) -> Vec<(String, String)> {
+    async fn envs(&self, session_id: &str) -> Vec<(String, String)> {
         let prime_dir = self.cfg.prime_dir();
         let mut envs = self.cfg.browser_env();
         envs.extend(vec![
@@ -322,7 +349,10 @@ impl PrimeAdapter {
                 "ARBOS_MODEL_PROXY_URL".into(),
                 format!("{}/v1", self.cfg.proxy_base()),
             ),
-            ("ARBOS_TALKING_MODEL".into(), self.cfg.talking_model.clone()),
+            (
+                "ARBOS_TALKING_MODEL".into(),
+                self.models.resolve(ModelRole::Talking).await,
+            ),
             // D2: Prime's `openrouter` provider is pointed at the loopback stub by models.json in the prime
             // dir; the box token is the only credential it ever sees.
             ("OPENROUTER_API_KEY".into(), self.cfg.box_token.clone()),
@@ -377,7 +407,7 @@ impl PrimeAdapter {
             &format!("prime:{session_id}"),
             &self.cfg.prime_bin,
             &args,
-            &self.envs(session_id),
+            &self.envs(session_id).await,
             cwd,
             &log,
             self.cfg.run_as.as_ref(),
@@ -455,7 +485,7 @@ impl HarnessAdapter for PrimeAdapter {
             "--provider".into(),
             self.cfg.pi_provider(),
             "--model".into(),
-            self.cfg.subagent_model.clone(),
+            resume_model(&self.store, &self.models, session_id).await,
         ];
         let child = self.spawn(session_id, &extra, &self.cfg.work_dir).await?;
         self.sessions.attach(session_id, child, true).await;
@@ -559,14 +589,16 @@ impl HarnessAdapter for PrimeAdapter {
 pub struct PiAdapter {
     cfg: Arc<Config>,
     store: Store,
+    models: LiveModels,
     sessions: RpcSessions,
 }
 
 impl PiAdapter {
-    pub fn new(cfg: Arc<Config>, store: Store) -> Self {
+    pub fn new(cfg: Arc<Config>, store: Store, models: LiveModels) -> Self {
         Self {
             cfg,
             store,
+            models,
             sessions: RpcSessions::new(),
         }
     }
@@ -689,7 +721,12 @@ impl HarnessAdapter for PiAdapter {
     async fn start(&self, req: StartRequest) -> Result<()> {
         let extra = vec!["--session-id".into(), req.session_id.clone()];
         let model = if req.model.trim().is_empty() {
-            self.cfg.subagent_model.clone()
+            self.models
+                .resolve(ModelRole::Worker {
+                    job_kind: None,
+                    research: None,
+                })
+                .await
         } else {
             req.model.clone()
         };
@@ -737,14 +774,7 @@ impl HarnessAdapter for PiAdapter {
                 .join(format!("{session_id}.md")),
         )
         .unwrap_or_default();
-        // A resumed worker keeps the model its session was started with when the store knows it.
-        let model = self
-            .store
-            .session_model(session_id)
-            .ok()
-            .flatten()
-            .filter(|m| !m.trim().is_empty())
-            .unwrap_or_else(|| self.cfg.subagent_model.clone());
+        let model = resume_model(&self.store, &self.models, session_id).await;
         let child = self
             .spawn(session_id, &extra, &self.cfg.work_dir, &pack, &model)
             .await?;
@@ -867,15 +897,17 @@ type ClaudeChild = (
 pub struct ClaudeCodeAdapter {
     cfg: Arc<Config>,
     store: Store,
+    models: LiveModels,
     children: Mutex<HashMap<String, ClaudeChild>>,
     streams: Mutex<HashMap<String, broadcast::Sender<AgentEvent>>>,
 }
 
 impl ClaudeCodeAdapter {
-    pub fn new(cfg: Arc<Config>, store: Store) -> Self {
+    pub fn new(cfg: Arc<Config>, store: Store, models: LiveModels) -> Self {
         Self {
             cfg,
             store,
+            models,
             children: Mutex::new(HashMap::new()),
             streams: Mutex::new(HashMap::new()),
         }
@@ -922,6 +954,7 @@ impl ClaudeCodeAdapter {
             .join("logs")
             .join(format!("claude-{session_id}.log"));
         std::fs::create_dir_all(log.parent().unwrap())?;
+        let model = resume_model(&self.store, &self.models, session_id).await;
         let mut cmd = tokio::process::Command::new(&self.cfg.claude_bin);
         cmd.args(&args)
             .current_dir(cwd)
@@ -929,9 +962,11 @@ impl ClaudeCodeAdapter {
             .env("ANTHROPIC_BASE_URL", self.cfg.proxy_base())
             .env("ANTHROPIC_AUTH_TOKEN", &self.cfg.box_token)
             // The relay's Anthropic passthrough may sit on OpenRouter, whose ids are `anthropic/<model>`.
-            .env("ANTHROPIC_MODEL", &self.cfg.subagent_model)
-            .env("ANTHROPIC_DEFAULT_SONNET_MODEL", &self.cfg.subagent_model)
-            .env("ANTHROPIC_DEFAULT_HAIKU_MODEL", &self.cfg.talking_model)
+            // Claude Code's own cheap lane is pointed at the same model: a worker of an agent set
+            // to one model never quietly drops to another (Jacob, 2026-11-04).
+            .env("ANTHROPIC_MODEL", &model)
+            .env("ANTHROPIC_DEFAULT_SONNET_MODEL", &model)
+            .env("ANTHROPIC_DEFAULT_HAIKU_MODEL", &model)
             .env("ARBOS_MCP_TOKEN", self.cfg.subagent_mcp_token())
             .env("ARBOS_AUDIT_PATH", self.cfg.audit_path())
             .env("DISABLE_AUTOUPDATER", "1")
@@ -970,7 +1005,7 @@ impl ClaudeCodeAdapter {
             Some(session_id),
             None,
             &cwd.display().to_string(),
-            &self.cfg.subagent_model,
+            &model,
             "claude_code",
             "subagent",
         )?;
