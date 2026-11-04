@@ -631,12 +631,14 @@ async fn main() -> anyhow::Result<()> {
         .route("/asp/socket", get(outside::socket))
         .route("/asp/files/{slot}/{key}", get(outside::file))
         .route("/asp/chats/{id}/messages", get(outside::history))
+        .route("/asp/approvals/{id}", get(outside::approval_read))
         .route("/asp/connect/{id}", get(outside::connect_page))
         // Sidecar support (#2189): members, and the public texts an agent is handed.
         .route("/asp/chats/{id}/members", get(outside_sidecar::members))
         .route("/llms.txt", get(outside_sidecar::llms_txt))
         .route("/agents/llms.txt", get(outside_sidecar::llms_txt))
         .route("/sidecar/install.sh", get(outside_sidecar::install_sh))
+        .route("/acp/install.sh", get(outside_sidecar::acp_install_sh))
         // Agent access links. The owner side takes an ordinary device bearer; the
         // `/agent-link/*` routes take a `LinkPrincipal` and are the only routes an `arbl_`
         // token can reach, because Axum will not call a handler whose extractor does not
@@ -913,6 +915,7 @@ async fn main() -> anyhow::Result<()> {
             "/skills/{id}",
             get(skills::get).put(skills::update).delete(skills::delete),
         )
+        .route("/skills/{id}/refile", post(skills::refile))
         .route(
             "/projects/{id}/audit",
             post(api::record_audit).get(api::list_audit),

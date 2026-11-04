@@ -12,7 +12,7 @@ use gpui::{
 };
 
 use crate::app::AppState;
-use crate::model::{Id, Part, Skill};
+use crate::model::{Id, Part, Skill, SpaceKind};
 use crate::ui::composer::ComposerInput;
 use crate::ui::frost::{frosted, MENU_BLUR};
 use crate::ui::highlight;
@@ -33,6 +33,12 @@ pub struct SkillsPanel {
     drafting: bool,
     draft_shared: bool,
     draft_origin: Option<Id>,
+    /// The destination picker under "Re-file…" is open.
+    refiling: bool,
+    /// Rig: the slug `ARBOS_OPEN_SKILLS` named, selected as soon as the library lists it.
+    /// Cleared once applied. The library is empty when the panel is built, so this cannot be
+    /// done at construction.
+    rig_slug: Option<String>,
     name: Entity<ComposerInput>,
     description: Entity<ComposerInput>,
     tags: Entity<ComposerInput>,
@@ -76,6 +82,10 @@ impl SkillsPanel {
             drafting: false,
             draft_shared: false,
             draft_origin: None,
+            refiling: false,
+            rig_slug: std::env::var("ARBOS_OPEN_SKILLS")
+                .ok()
+                .filter(|v| !v.is_empty() && v != "1"),
             focus_handle: cx.focus_handle(),
         }
     }
@@ -119,6 +129,20 @@ impl SkillsPanel {
     }
 
     fn reconcile_selection(&mut self, cx: &mut Context<Self>) {
+        if let Some(wanted) = self.rig_slug.clone() {
+            let skill = self
+                .state
+                .read(cx)
+                .skills
+                .iter()
+                .find(|s| s.slug == wanted)
+                .cloned();
+            if let Some(skill) = skill {
+                self.rig_slug = None;
+                self.load(&skill, cx);
+                return;
+            }
+        }
         // A just-created skill came back from the source: adopt it.
         if self.drafting {
             let slug = arbos_core::skill::slugify(self.name.read(cx).text());
@@ -149,6 +173,7 @@ impl SkillsPanel {
     fn load(&mut self, skill: &Skill, cx: &mut Context<Self>) {
         self.selected = Some(skill.slug.clone());
         self.drafting = false;
+        self.refiling = false;
         self.draft_shared = skill.shared;
         self.draft_origin = skill.origin_project_id.clone();
         let name = skill.name.clone();
@@ -172,6 +197,7 @@ impl SkillsPanel {
     fn start_new(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.selected = None;
         self.drafting = true;
+        self.refiling = false;
         self.draft_shared = false;
         self.draft_origin = self.state.read(cx).selected_project.clone();
         for input in [
@@ -268,6 +294,35 @@ impl SkillsPanel {
         }
     }
 
+    /// A skill filed in a project the user is only a guest of (`shared`, from the relay's
+    /// `GET /projects`). Those are the rows the re-file route accepts: the relay refuses a
+    /// project the caller does not own as a destination, and refuses a row altogether when it
+    /// recorded somebody else as having written it. A project not in the list at all is somebody
+    /// else's entirely and is left unmarked, because re-filing it would only earn a 404.
+    fn filed_elsewhere(&self, origin: Option<&str>, cx: &App) -> bool {
+        origin.is_some_and(|id| self.state.read(cx).project(id).is_some_and(|p| p.shared))
+    }
+
+    /// The projects a re-file may name: mine, never one I am a guest of.
+    fn my_projects(&self, cx: &App) -> Vec<(Id, String)> {
+        self.state
+            .read(cx)
+            .projects
+            .iter()
+            .filter(|p| !p.shared && p.kind == SpaceKind::Project)
+            .map(|p| (p.id.clone(), p.name.clone()))
+            .collect()
+    }
+
+    fn refile(&mut self, project_id: Id, cx: &mut Context<Self>) {
+        if let Some(skill) = self.current(cx) {
+            self.refiling = false;
+            self.state
+                .update(cx, |s, cx| s.refile_skill(skill.id, project_id, cx));
+        }
+        cx.notify();
+    }
+
     fn render_list(&self, theme: &Theme, cx: &mut Context<Self>) -> Stateful<Div> {
         let skills = self.state.read(cx).skills.clone();
         let mut list = div()
@@ -310,6 +365,19 @@ impl SkillsPanel {
                         .text_color(theme.accent)
                         .font_weight(FontWeight::MEDIUM)
                         .child("Shared"),
+                );
+            }
+            if self.filed_elsewhere(skill.origin_project_id.as_deref(), cx) {
+                meta = meta.child(
+                    div()
+                        .px(px(6.0))
+                        .py(px(1.0))
+                        .rounded_full()
+                        .border_1()
+                        .border_color(theme.warn)
+                        .text_color(theme.warn)
+                        .font_weight(FontWeight::MEDIUM)
+                        .child("Not your project"),
                 );
             }
             list = list.child(
@@ -453,6 +521,8 @@ impl SkillsPanel {
                 this.draft_shared = !this.draft_shared;
                 cx.notify();
             }));
+        let elsewhere =
+            existing.is_some() && self.filed_elsewhere(self.draft_origin.as_deref(), cx);
         let mut footer = div()
             .flex()
             .items_center()
@@ -460,6 +530,14 @@ impl SkillsPanel {
             .pt(px(4.0))
             .child(share);
         let mut actions = div().flex().items_center().gap(px(6.0));
+        if elsewhere {
+            actions = actions.child(button("skill-refile", "Re-file…", false, false).on_click(
+                cx.listener(|this, _, _, cx| {
+                    this.refiling = !this.refiling;
+                    cx.notify();
+                }),
+            ));
+        }
         if existing.is_some() {
             actions = actions.child(
                 button("skill-delete", "Delete", false, true)
@@ -508,6 +586,54 @@ impl SkillsPanel {
                     ))),
             )
             .child(body_field)
+            // One slot with two states, never both: the editor column is a fixed height and a
+            // second block of its own pushes the body field past the bottom of the card.
+            .when(elsewhere, |el| {
+                let slot = div()
+                    .flex_shrink_0()
+                    .px(px(10.0))
+                    .py(px(6.0))
+                    .rounded(px(8.0))
+                    .border_1()
+                    .border_color(theme.warn);
+                if !self.refiling {
+                    return el.child(
+                        slot.text_size(px(11.0))
+                            .text_color(theme.text_muted)
+                            // Both outcomes are named because the Mac cannot tell which it will
+                            // be: only the relay knows whether it recorded a writer for the row.
+                            .child(format!(
+                                "This skill lives in {origin}, a project shared with you. \
+                                 Re-filing moves it if the relay recorded you as its author, \
+                                 and claims a copy into your project if it recorded nobody."
+                            )),
+                    );
+                }
+                let mut picker = slot.flex().flex_wrap().items_center().gap(px(6.0)).child(
+                    div()
+                        .text_size(px(10.5))
+                        .text_color(theme.text_faint)
+                        .child("RE-FILE INTO"),
+                );
+                for (ix, (id, name)) in self.my_projects(cx).into_iter().enumerate() {
+                    picker = picker.child(
+                        div()
+                            .id(("skill-refile-target", ix))
+                            .px(px(10.0))
+                            .py(px(4.0))
+                            .rounded(px(6.0))
+                            .text_size(px(12.0))
+                            .text_color(theme.text)
+                            .cursor_pointer()
+                            .map(|el| highlight::washed(el, theme.surface_2, theme))
+                            .child(name)
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| this.refile(id.clone(), cx)),
+                            ),
+                    );
+                }
+                el.child(picker)
+            })
             .child(footer)
     }
 }
