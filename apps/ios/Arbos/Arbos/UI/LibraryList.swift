@@ -392,7 +392,7 @@ struct LibraryPreview: View {
 
     @ViewBuilder private var senderPicture: some View {
         if let id = item.agentId, let project = model.project(id) {
-            AgentAvatar(project: project, theme: theme, size: LibraryList.previewAvatar, still: true)
+            AgentAvatar(project: project, theme: theme, size: LibraryList.previewAvatar)
         } else {
             PersonAvatar(url: item.fromAvatar, handle: item.fromHandle ?? "", size: LibraryList.previewAvatar,
                          name: item.by.isEmpty ? nil : item.by, id: item.fromId)

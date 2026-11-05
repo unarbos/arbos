@@ -150,10 +150,12 @@ pub struct PeopleChat {
     /// Blob key under `people:{chat_id}` for an optional group picture.
     #[serde(default)]
     pub image_key: Option<String>,
-    /// D92 amendment: the group's leaf picture (shape 0–8, disc colour 0–9) picked on the
-    /// Create screen; `None` = today's member cluster. A `image_key` picture wins.
+    /// Dormant: the leaf avatars' shape pick. Always written `None` and never read; the column
+    /// stays so a relay on the previous binary still reads this table.
     #[serde(default)]
     pub avatar_leaf: Option<i64>,
+    /// The group's disc colour (0–9) picked on the Create screen; `None` = today's member
+    /// cluster. An `image_key` picture wins.
     #[serde(default)]
     pub avatar_leaf_color: Option<i64>,
     /// Optional about text for a people group (≤200 chars); `None` or empty = unset.

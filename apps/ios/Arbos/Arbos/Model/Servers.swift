@@ -129,15 +129,10 @@ struct Server: Identifiable, Equatable {
     var generalChannelId: String?
     /// D79 `avatar_color_index_effective` (nil → derived from `id`).
     var avatarColorIndex: Int?
-    /// D92 amendment: the server's leaf picture from the Create screen; nil → initials (or the
+    /// D92 amendment: the server's disc colour from the Create screen; nil → initials (or the
     /// neutral initial when `isNeutralAvatar`, Jacob 2026-10-25).
-    var avatarLeaf: Int? = nil
-    var avatarLeafColor: Int? = nil
-    var leafPick: LeafPick? {
-        guard let l = avatarLeaf, let c = avatarLeafColor, !LeafArt.isNeutral(l) else { return nil }
-        return LeafPick(leaf: UInt8(clamping: l), color: UInt8(clamping: c))
-    }
-    var isNeutralAvatar: Bool { LeafArt.isNeutral(avatarLeaf) }
+    var avatarDiscColor: Int? = nil
+    var isNeutralAvatar: Bool { DiscArt.isNeutral(avatarDiscColor) }
     /// Anyone on Arbos can search and join without an invite link.
     var isOpen: Bool
     /// Only for owner/admin.
@@ -180,8 +175,7 @@ struct Server: Identifiable, Equatable {
             channels: channels,
             generalChannelId: (d["general_channel_id"] as? String).flatMap { $0.isEmpty ? nil : $0 },
             avatarColorIndex: (d["avatar_color_index_effective"] as? NSNumber)?.intValue,
-            avatarLeaf: (d["avatar_leaf"] as? NSNumber)?.intValue,
-            avatarLeafColor: (d["avatar_leaf_color"] as? NSNumber)?.intValue,
+            avatarDiscColor: (d["avatar_disc_color"] as? NSNumber)?.intValue,
             isOpen: (d["open"] as? Bool) ?? (d["open"] as? NSNumber)?.boolValue ?? false,
             invite: ServerInvite.parse(d["invite"]),
             invites: ((d["invites"] as? [Any]) ?? []).compactMap(ServerInviteLink.parse),

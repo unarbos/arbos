@@ -283,17 +283,19 @@ pub struct Project {
     /// Telegram-style initials colour override (D79), 0–6; `None` = derived from the id.
     #[serde(default)]
     pub avatar_color_index: Option<i64>,
-    /// Leaf avatar (D92): the owner's shape pick, 0–8; `None` = derived from the id.
+    /// Dormant: the leaf avatars' shape pick. Kept so a relay on the previous binary still reads
+    /// this table; always written `None` and never read.
     #[serde(default)]
     pub avatar_leaf: Option<i64>,
-    /// Leaf avatar (D92): the owner's disc colour pick, 0–9; `None` = derived from the id.
+    /// Disc avatar: the owner's colour pick, 0–9; `None` = derived from the id. The column keeps
+    /// the old name — renaming it would rewrite the whole `projects` table.
     #[serde(default)]
     pub avatar_leaf_color: Option<i64>,
-    /// D92 amendment: an uploaded or generated picture (blob key in the project's own slot); wins
-    /// over the leaf. `None` = the leaf.
+    /// An uploaded or generated picture (blob key in the project's own slot); wins over the
+    /// disc. `None` = the disc.
     #[serde(default)]
     pub image_key: Option<String>,
-    /// Stamp (ms) of the last avatar change (picture, leaf, colour); `0` = never changed.
+    /// Stamp (ms) of the last avatar change (picture, colour); `0` = never changed.
     /// Clients order their copies of the agent by it (`avatar::identity`).
     #[serde(default)]
     pub avatar_version: i64,

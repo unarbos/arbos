@@ -917,7 +917,7 @@ struct ChatSession: View {
                 guard seen.insert(p.id).inserted else { continue }
                 out.append(PresenceParticipant(
                     id: "working:\(p.id)", name: p.name, activity: .working,
-                    picture: AnyView(AgentAvatar(project: p, theme: theme, size: PresenceRow.avatar, working: true)),
+                    picture: AnyView(AgentAvatar(project: p, theme: theme, size: PresenceRow.avatar)),
                     target: .agent(projectId: p.id)
                 ))
             }
@@ -925,7 +925,7 @@ struct ChatSession: View {
             let p = model.agent(id: project.id, name: project.name)
             out.append(PresenceParticipant(
                 id: "working:\(p.id)", name: p.name, activity: .working,
-                picture: AnyView(AgentAvatar(project: p, theme: theme, size: PresenceRow.avatar, working: true)),
+                picture: AnyView(AgentAvatar(project: p, theme: theme, size: PresenceRow.avatar)),
                 target: .agent(projectId: project.id)
             ))
         }
@@ -2088,9 +2088,9 @@ struct ChatSession: View {
                                     .font(.system(size: Theme.body, weight: .semibold))
                                     .foregroundStyle(theme.text)
                                     .lineLimit(1)
-                            } else if people.isGroup, let leaf = people.leafPick, LeafAvatarsFlag.shared.on {
-                                // D92 amendment: the leaf picked on the Create screen.
-                                LeafAvatar(pick: leaf, size: Controls.avatar)
+                            } else if people.isGroup, let color = people.avatarDiscColor {
+                                // D92 amendment: the colour picked on the Create screen.
+                                DiscAvatar(color: UInt8(clamping: color), size: Controls.avatar)
                                 Text(people.title)
                                     .font(.system(size: Theme.body, weight: .semibold))
                                     .foregroundStyle(theme.text)
@@ -2122,7 +2122,7 @@ struct ChatSession: View {
                     } else {
                         HStack(spacing: Theme.headerPillGap) {
                             if let project {
-                                AgentAvatar(project: project, theme: theme, size: Controls.avatar, mark: machineMark(model.machine.state), working: streaming)
+                                AgentAvatar(project: project, theme: theme, size: Controls.avatar, mark: machineMark(model.machine.state))
                             }
                             Text(name)
                                 .font(.system(size: Theme.body, weight: .semibold))
@@ -3373,7 +3373,7 @@ struct ChatSession: View {
                     } label: {
                         HStack(spacing: 6) {
                             if m.isAgent {
-                                AgentAvatar(project: model.agent(member: m, chatId: chatId), theme: theme, size: 18, still: true)
+                                AgentAvatar(project: model.agent(member: m, chatId: chatId), theme: theme, size: 18)
                             } else {
                                 PersonAvatar(url: m.avatarUrl, handle: m.handle, size: 18, name: m.name, id: m.id, colorIndex: m.avatarColorIndex)
                             }
@@ -3930,7 +3930,7 @@ struct ChatSession: View {
                         Button { completeMention(m) } label: {
                             HStack(spacing: 12) {
                                 if m.isAgent {
-                                    AgentAvatar(project: model.agent(member: m, chatId: chatId), theme: theme, size: 28, still: true)
+                                    AgentAvatar(project: model.agent(member: m, chatId: chatId), theme: theme, size: 28)
                                 } else {
                                     PersonAvatar(url: m.avatarUrl, handle: m.handle, size: 28, name: m.name, id: m.id, colorIndex: m.avatarColorIndex)
                                 }

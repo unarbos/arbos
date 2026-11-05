@@ -186,7 +186,7 @@ struct NewChatSheet: View {
                 CreateEntityView(kind: showCreate ?? .agent, onDone: { dismiss() })
             }
             .navigationDestination(isPresented: $showGroupPicker) {
-                NewGroupView(onDone: { dismiss() }, draft: GroupDraft(title: "Launch week", leaf: LeafArt.pick(seed: "rig")))
+                NewGroupView(onDone: { dismiss() }, draft: GroupDraft(title: "Launch week", discColor: DiscArt.pick(seed: "rig")))
             }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) { Button("Cancel") { dismiss() }.foregroundStyle(theme.text) }
@@ -397,7 +397,7 @@ struct AgentPickRow: View {
 
     var body: some View {
         HStack(spacing: SheetRow.gap) {
-            AgentAvatar(project: project, theme: theme, size: SheetRow.avatar, still: true)
+            AgentAvatar(project: project, theme: theme, size: SheetRow.avatar)
             VStack(alignment: .leading, spacing: 2) {
                 Text(project.name).font(theme.font(Theme.body, weight: .medium)).foregroundStyle(theme.text).lineLimit(1)
                 Text(note.map { "@\(mentionSlug(project.name)) · \($0)" } ?? "@\(mentionSlug(project.name))")
@@ -534,12 +534,12 @@ enum ConnectTransport: String, CaseIterable, Identifiable {
 /// the field. Pushed from New Message with its own header; × and Cancel close the whole sheet.
 ///
 /// **Picture (Jacob, 2026-10-25, [feedback create-sheet-avatar-upload-generate-ios-2026-10-25]):
-/// the sixteen-leaf grid and the ten pastel swatches are gone. Under the name field sit the
+/// the sixteen-shape grid and the ten pastel swatches are gone. Under the name field sit the
 /// agent avatar picker's own two options — `Upload | Generate` (`AvatarTabPill` +
 /// `AvatarSourceBody` on an `AvatarSourceState`) — and the preview above the field shows the
 /// chosen photo, the generated picture, or, when neither was picked, the fallback every new
 /// agent / group / server gets: the name's first letter on a neutral grey disc (`NeutralAvatar`).
-/// The entity is stored with the neutral pair (`LeafArt.neutral`), never an automatic leaf;
+/// The entity is stored with the neutral value (`DiscArt.neutral`), never an automatic colour;
 /// existing agents keep theirs.**
 struct CreateEntityView: View {
     @EnvironmentObject private var model: AppModel
@@ -563,9 +563,9 @@ struct CreateEntityView: View {
 
     /// The two options every Create sheet offers, in order — the draft picker's tabs.
     static let options: [AvatarPickerTab] = [.upload, .generate]
-    /// The leaf pair a new entity is stored with: the neutral one, whatever else was picked, so
-    /// no leaf is ever auto-assigned (a later Reset lands on the initial, not on a leaf).
-    static var storedLeaf: LeafPick { LeafArt.neutralPick }
+    /// The disc colour a new entity is stored with: the neutral one, whatever else was picked,
+    /// so no colour is ever auto-assigned (a later Reset lands on the initial, not on a disc).
+    static var storedDisc: UInt8 { UInt8(clamping: DiscArt.neutral) }
     /// Rig: `ARBOS_CREATE_PICTURE=generate[:<prompt>]` opens the sheet on Generate.
     private static var initialOption: AvatarPickerTab {
         (DebugHooks.createPicture ?? "").hasPrefix("generate") ? .generate : .upload
@@ -643,7 +643,7 @@ struct CreateEntityView: View {
         .background(sheetBg.ignoresSafeArea())
         .toolbar(.hidden, for: .navigationBar)
         .navigationDestination(isPresented: $next) {
-            NewGroupView(onDone: onDone, draft: GroupDraft(title: clean, leaf: Self.storedLeaf, picture: source.draftPicture(for: option)))
+            NewGroupView(onDone: onDone, draft: GroupDraft(title: clean, discColor: Self.storedDisc, picture: source.draftPicture(for: option)))
         }
         .navigationDestination(isPresented: Binding(get: { reveal != nil }, set: { if !$0 { reveal = nil } })) {
             if let reveal {
@@ -775,7 +775,7 @@ struct CreateEntityView: View {
         let picture = source.draftPicture(for: option)
         switch kind {
         case .agent:
-            model.createProject(name: clean, leaf: Self.storedLeaf, picture: picture)
+            model.createProject(name: clean, discColor: Self.storedDisc, picture: picture)
             onDone()
         case .group:
             next = true
@@ -783,7 +783,7 @@ struct CreateEntityView: View {
             creating = true
             localError = nil
             Task {
-                if await model.createServer(name: clean, leaf: Self.storedLeaf, picture: picture) {
+                if await model.createServer(name: clean, discColor: Self.storedDisc, picture: picture) {
                     onDone()
                 }
                 // A refusal is the claimed failure drawn by the note above the hero.
@@ -1008,7 +1008,7 @@ struct ConnectRevealView: View {
 /// What the Create group screen hands to the member picker (step 2).
 struct GroupDraft: Equatable {
     var title: String
-    var leaf: LeafPick
+    var discColor: UInt8
     /// The Create screen's uploaded / generated picture, applied once the group exists.
     var picture: DraftPicture? = nil
 }
@@ -1028,7 +1028,7 @@ struct NewGroupView: View {
     /// Secret id whose People list the picks join (Secret page › "Give a person access…",
     /// spec §7.7): people only, listed people greyed.
     var addToSecret: String? = nil
-    /// D93 step 1's name + leaf picture (nil when opened as Add members).
+    /// D93 step 1's name + disc colour (nil when opened as Add members).
     var draft: GroupDraft? = nil
     @State private var query = ""
     @State private var remote: [Person] = []
@@ -1146,7 +1146,7 @@ struct NewGroupView: View {
                     HStack(spacing: 8) {
                         ForEach(pickedAgents) { p in
                             MemberChip(label: "@\(mentionSlug(p.name))", onRemove: { toggleAgent(p) }) {
-                                AgentAvatar(project: p, theme: theme, size: memberChipAvatar, still: true)
+                                AgentAvatar(project: p, theme: theme, size: memberChipAvatar)
                             }
                         }
                         ForEach(picked) { p in
@@ -1320,7 +1320,7 @@ struct NewGroupView: View {
         localError = nil
         let agentIds = pickedAgents.map(\.id)
         Task {
-            if await model.createGroup(handles: picked.map(\.handle), agentIds: agentIds, title: draft?.title, leaf: draft?.leaf, picture: draft?.picture) {
+            if await model.createGroup(handles: picked.map(\.handle), agentIds: agentIds, title: draft?.title, discColor: draft?.discColor, picture: draft?.picture) {
                 onDone()
             }
             creating = false
@@ -1558,7 +1558,7 @@ struct GroupCallPickerSheet: View {
                                 Button { toggle(m.id) } label: {
                                     HStack(spacing: SheetRow.gap) {
                                         if m.isAgent, let p = m.project {
-                                            AgentAvatar(project: p, theme: theme, size: SheetRow.avatar, still: true)
+                                            AgentAvatar(project: p, theme: theme, size: SheetRow.avatar)
                                         } else {
                                             PersonAvatar(url: m.avatarUrl, handle: m.handle, size: SheetRow.avatar,
                                                          name: m.name, id: m.id, colorIndex: m.avatarColorIndex)

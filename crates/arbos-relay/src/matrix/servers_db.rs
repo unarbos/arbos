@@ -73,9 +73,11 @@ pub struct Server {
     pub created_at: i64,
     /// Anyone on Arbos can find and join without an invite link.
     pub is_open: bool,
-    /// D92 amendment: the server's leaf picture (0–8) and disc colour (0–9) from the Create
-    /// screen; `None` = initials. An `image_key` picture wins.
+    /// Dormant: the leaf avatars' shape pick. Always written `None` and never read; the column
+    /// stays so a relay on the previous binary still reads this table.
     pub avatar_leaf: Option<i64>,
+    /// The server's disc colour (0–9) from the Create screen; `None` = initials. An `image_key`
+    /// picture wins.
     pub avatar_leaf_color: Option<i64>,
 }
 
@@ -307,7 +309,7 @@ impl Db {
         })
     }
 
-    /// D92 amendment: the server's leaf picture (`None` = none).
+    /// The server's disc colour (`None` = none).
     /// `avatar_leaf_color` kept its column name from the leaf avatars this replaced; the
     /// companion `avatar_leaf` shape column is dormant and nothing reads it.
     pub fn update_server_disc_color(&self, id: &str, color: Option<i64>) -> Result<()> {

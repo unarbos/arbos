@@ -668,7 +668,7 @@ pub const USER_BLOB_PREFIX: &str = "users:";
 /// `sync::agent_avatar`, iOS `Project.pictureURL`).
 /// Why not `/blob/{project}/{key}`: that slot is the owner's and the project's guests' (it holds
 /// the agent's working files too), so a viewer who only shares a group with the agent got 403
-/// and drew the automatic leaf instead of the owner's picture (Jacob, 2026-10-25: "Hezbola,
+/// and drew the automatic disc instead of the owner's picture (Jacob, 2026-10-25: "Hezbola,
 /// run by @unarbos, purple leaf"). Clients append `?v={avatar_version}`, so a change is a new
 /// URL and the day-long cache never serves the old bytes. 404 while the agent has no picture.
 /// `?w=<px>` serves the picture at that bucket (`avatar_image`).
@@ -1486,7 +1486,7 @@ mod avatar_generate_tests {
         // Members read the slot (the apps fetch the picture); strangers do not.
         assert!(state.allows(&bob_dev, &slot));
         assert!(!state.allows(&carol_dev, &slot));
-        // Set avatar on the server accepts it, and the leaf PATCH works beside it.
+        // Set avatar on the server accepts it, and the disc PATCH works beside it.
         let r = crate::matrix::servers::patch(
             State(state.clone()),
             alice_dev.clone(),

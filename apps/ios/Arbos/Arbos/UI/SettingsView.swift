@@ -901,7 +901,7 @@ struct MachineAgentRow: View {
     var body: some View {
         HStack(spacing: PaneKit.gap) {
             if let project {
-                AgentAvatar(project: project, theme: theme, size: PaneKit.avatar, still: true)
+                AgentAvatar(project: project, theme: theme, size: PaneKit.avatar)
             } else {
                 NeutralAvatar(name: workspace.name, size: PaneKit.avatar)
             }

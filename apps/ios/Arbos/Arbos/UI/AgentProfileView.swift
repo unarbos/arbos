@@ -31,7 +31,7 @@ struct AgentEditSheet: View {
                         card {
                             // D92 amendment: the avatar picker sheet (Bot | Generate | Upload).
                             Button { if !project.shared { showAvatarPicker = true } } label: {
-                                row(icon: "photo.circle", title: "Avatar", value: project.imageKey != nil ? "Picture" : LeafArt.names[Int(LeafArt.pick(project).leaf)])
+                                row(icon: "photo.circle", title: "Avatar", value: project.imageKey != nil ? "Picture" : DiscArt.colorNames[Int(DiscArt.pick(project))])
                             }
                             .buttonStyle(.plain)
                             .disabled(project.shared)
@@ -110,7 +110,7 @@ struct AgentEditSheet: View {
 
     private func hero(_ project: Project) -> some View {
         VStack(spacing: 12) {
-            AgentAvatar(project: project, theme: theme, size: 116, mark: machineMark(model.machine.state), working: model.isStreaming(project: project.id), idle: true)
+            AgentAvatar(project: project, theme: theme, size: 116, mark: machineMark(model.machine.state))
                 .padding(.top, 18)
                 .id("\(project.effectiveAvatarColorIndex.map(String.init) ?? "auto")")
                 .animation(.snappy, value: project.color)
@@ -471,21 +471,21 @@ struct AgentProfileView: View {
         model.updateProject(projectId, name: clean)
     }
 
-    /// The hero picture: the leaf / photo, with the crayon → avatar picker for my own agent.
+    /// The hero picture: the disc / photo, with the crayon → avatar picker for my own agent.
     @ViewBuilder
     private func heroPicture(_ project: Project) -> some View {
         if isMine {
             Button { showAvatarPicker = .bot } label: {
-                AgentAvatar(project: project, theme: theme, size: PaneKit.heroAvatar, working: model.isStreaming(project: project.id), idle: true)
+                AgentAvatar(project: project, theme: theme, size: PaneKit.heroAvatar)
                     .paneCrayon()
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Change avatar")
         } else {
-            // Someone else's agent: its picture opens full-size in the media viewer (a leaf opens nothing).
+            // Someone else's agent: its picture opens full-size in the media viewer (a disc opens nothing).
             ViewablePicture(name: project.name, url: model.projectImageURL(project)?.absoluteString) {
-                AgentAvatar(project: project, theme: theme, size: PaneKit.heroAvatar, working: model.isStreaming(project: project.id), idle: true)
+                AgentAvatar(project: project, theme: theme, size: PaneKit.heroAvatar)
             }
         }
     }

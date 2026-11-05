@@ -36,7 +36,7 @@ struct FeedbackSheet: View {
                         }
                         if let project {
                             HStack(spacing: 8) {
-                                AgentAvatar(project: project, theme: theme, size: 22, still: true)
+                                AgentAvatar(project: project, theme: theme, size: 22)
                                 Text("About \(project.name)").font(theme.font(Theme.tiny, weight: .medium)).foregroundStyle(theme.muted)
                             }
                             .padding(.horizontal, 12).frame(height: 30)

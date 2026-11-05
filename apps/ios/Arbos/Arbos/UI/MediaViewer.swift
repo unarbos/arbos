@@ -1012,7 +1012,7 @@ struct ForwardSheet: View {
     private func avatar(_ target: ForwardTarget) -> some View {
         switch target.kind {
         case .agent(let p):
-            AgentAvatar(project: p, theme: theme, size: 44, still: true)
+            AgentAvatar(project: p, theme: theme, size: 44)
         case .people(let c):
             if c.isGroup {
                 // The group's own picture first; the member stack only when it has none.

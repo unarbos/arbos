@@ -81,14 +81,14 @@ struct AgentPickerField: View {
     }
 
     /// The agent's current picture through the shared resolver (the newest copy the model
-    /// holds — my record or a roster's), never the leaf of a stale copy.
+    /// holds — my record or a roster's), never the disc of a stale copy.
     private func resolved(_ p: Project) -> Project {
         model.agentProject(model.agentIdentity(sender: p.id, handle: mentionSlug(p.name), name: p.name, chatId: nil), chatId: nil)
     }
 
     private func chip(_ p: Project) -> some View {
         HStack(spacing: 7) {
-            AgentAvatar(project: resolved(p), theme: theme, size: Self.picture, still: true)
+            AgentAvatar(project: resolved(p), theme: theme, size: Self.picture)
             Text(p.name).font(theme.font(Theme.small, weight: .medium)).lineLimit(1)
             Button {
                 Haptics.pick()
@@ -166,7 +166,7 @@ struct AddAgentSheet: View {
                                 dismiss()
                             } label: {
                                 PaneRow(
-                                    leading: .avatar(AnyView(AgentAvatar(project: resolved(p), theme: theme, size: PaneKit.avatar, still: true))),
+                                    leading: .avatar(AnyView(AgentAvatar(project: resolved(p), theme: theme, size: PaneKit.avatar))),
                                     title: p.name,
                                     subtitle: "@\(mentionSlug(p.name))",
                                     trailing: AnyView(

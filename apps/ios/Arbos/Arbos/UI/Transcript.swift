@@ -2080,10 +2080,10 @@ struct RowView: View, Equatable {
     }
 
     /// The disc beside a people-chat agent's bubble: the agent's picture through the shared
-    /// identity (`AppModel.agent`) — its uploaded picture, its leaf, never initials seeded by
+    /// identity (`AppModel.agent`) — its uploaded picture, its disc, never initials seeded by
     /// the handle (#1592).
     private func memberAvatar(_ agent: Project) -> some View {
-        AgentAvatar(project: agent, theme: theme, size: Theme.memberAvatar, still: true)
+        AgentAvatar(project: agent, theme: theme, size: Theme.memberAvatar)
     }
 
     /// The avatar column beside an incoming row: the sender's picture when this row shows
@@ -2177,32 +2177,17 @@ struct RowView: View, Equatable {
     /// (`memberBubble`), with the `agent` tag: the identity's display name, never the handle.
     @ViewBuilder
     private func memberName(_ agent: Project) -> some View {
-        if LeafAvatarsFlag.shared.on {
-            LiveSenderName(name: agent.name, url: nil, seed: agent.id, fixed: LeafArt.accent(agent, dark: theme.isDark), agent: true)
-        } else {
-            LiveSenderName(name: agent.name, url: nil, seed: agent.id, override: agent.effectiveAvatarColorIndex, agent: true)
-        }
+        LiveSenderName(name: agent.name, url: nil, seed: agent.id, fixed: DiscArt.accent(agent, dark: theme.isDark), agent: true)
     }
 
-    /// Mac parity: an agent's bubbles in a people chat carry its disc colour
-    /// (the leaf's disc under D92, the D79 gradient midpoint otherwise). Accent
-    /// observation stays in `LiveSenderBar` so one new colour does not rebuild
-    /// every bubble in a group chat.
+    /// Mac parity: an agent's bubbles in a people chat carry its D92 disc colour.
     @ViewBuilder
     private func memberBubble<Content: View>(_ agent: Project, content: Content) -> some View {
-        if LeafAvatarsFlag.shared.on {
-            content
-                .padding(.horizontal, Theme.bubbleHPad)
-                .padding(.vertical, Theme.bubbleVPad)
-                .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
-                .senderBar(LeafArt.accent(agent, dark: theme.isDark))
-        } else {
-            content
-                .padding(.horizontal, Theme.bubbleHPad)
-                .padding(.vertical, Theme.bubbleVPad)
-                .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
-                .modifier(LiveSenderBar(url: nil, seed: agent.id, override: agent.effectiveAvatarColorIndex))
-        }
+        content
+            .padding(.horizontal, Theme.bubbleHPad)
+            .padding(.vertical, Theme.bubbleVPad)
+            .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
+            .senderBar(DiscArt.accent(agent, dark: theme.isDark))
     }
 
     /// Grok Bot's quote header at the top of a reply bubble: speech-bubble glyph, then the
@@ -2246,7 +2231,7 @@ struct RowView: View, Equatable {
     @ViewBuilder
     private func agentGlyph(named name: String) -> some View {
         if let target = model.projects.first(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) {
-            AgentAvatar(project: target, theme: theme, size: 16, still: true)
+            AgentAvatar(project: target, theme: theme, size: 16)
         } else {
             // An agent we do not list: initials on the colour its name hashes to.
             InitialsAvatar(name: name, handle: name, id: name, size: 16)
@@ -2902,7 +2887,7 @@ final class AvatarImageCache {
     }
 
     /// Waits between attempts. A cold launch asks for pictures before the network is up (a
-    /// phone that just woke, the relay mid-restart); one failed attempt used to leave the leaf
+    /// phone that just woke, the relay mid-restart); one failed attempt used to leave the disc
     /// placeholder on every surface until the view was rebuilt (Jacob, 2026-10-26, Mac and
     /// iPhone alike).
     nonisolated static let retrySeconds: [UInt64] = [2, 5, 10, 20, 40]
@@ -3024,9 +3009,9 @@ struct AvatarCluster: View {
     var size: CGFloat = Theme.avatar
     var maxVisible: Int = 3
     var imageUrl: String? = nil
-    /// D92 amendment: the group's leaf picture from the Create screen (a custom picture wins).
-    var leaf: LeafPick? = nil
-    /// Jacob, 2026-10-25: a group created with no leaf shows its title's initial on grey.
+    /// D92 amendment: the group's disc colour from the Create screen (a custom picture wins).
+    var discColor: UInt8? = nil
+    /// Jacob, 2026-10-25: a group created with no picture shows its title's initial on grey.
     var neutralName: String? = nil
 
     private var shown: [ChatMember] { Array(members.prefix(maxVisible)) }
@@ -3035,8 +3020,8 @@ struct AvatarCluster: View {
     var body: some View {
         if let neutralName, imageUrl?.isEmpty ?? true {
             NeutralAvatar(name: neutralName, size: size * 1.12)
-        } else if let leaf, imageUrl?.isEmpty ?? true, LeafAvatarsFlag.shared.on {
-            LeafAvatar(pick: leaf, size: size * 1.12)
+        } else if let discColor, imageUrl?.isEmpty ?? true {
+            DiscAvatar(color: discColor, size: size * 1.12)
         } else if let imageUrl, !imageUrl.isEmpty {
             // Keep the group silhouette under the picture until it arrives so we
             // do not flash initials ("G") then flip to the selected image.

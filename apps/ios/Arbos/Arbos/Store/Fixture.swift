@@ -200,8 +200,7 @@ extension AppModel {
         if DebugHooks.fixtureForeignAgent {
             var testAgent = Project(id: "fx-foreign-testagent", name: "TestAgent", icon: "T", color: "#8b7cf6", state: .awake, stateSince: nil,
                                     stateDetail: nil, model: "", effort: .low, spendTodayUsd: 0, spendCapUsd: 0, avatar: nil, avatarColor: nil)
-            testAgent.avatarLeaf = 3
-            testAgent.avatarLeafColor = 7
+            testAgent.avatarDiscColor = 7
             testAgent.avatarColorIndexEffective = 3
             groupAgents.insert(ChatMember(id: testAgent.id, kind: .agent, member: "agent:\(testAgent.id)", role: "agent", handle: "testagent", avatarUrl: nil,
                                           name: "TestAgent", status: "member", joinedAt: now - 86_400_000, project: testAgent, ownerId: "gh_459",

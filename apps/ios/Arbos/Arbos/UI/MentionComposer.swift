@@ -532,7 +532,7 @@ struct MentionTextView: UIViewRepresentable {
             switch m.target {
             case .member(let member) where member.isAgent:
                 if let p = parent.agentProject(member) {
-                    picture = AnyView(AgentAvatar(project: p, theme: theme, size: MentionTable.picture, still: true))
+                    picture = AnyView(AgentAvatar(project: p, theme: theme, size: MentionTable.picture))
                 } else {
                     picture = AnyView(InitialsAvatar(name: member.name ?? member.handle, handle: member.handle, id: member.id, size: MentionTable.picture))
                 }
