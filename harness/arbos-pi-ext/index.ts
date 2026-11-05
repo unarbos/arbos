@@ -661,8 +661,8 @@ export default function arbosPiExt(pi: ExtensionAPI) {
   if (SESSION_ROLE === "main") pi.registerTool({
     name: "steer_job",
     label: "Steer job",
-    description: "Send a correction into a running job (\"only group lessons under $70\"). `job_id` from list_jobs, or \"latest\" for the newest running job. Ack to the user yourself in one line.",
-    promptSnippet: "steer_job: a mid-flight correction to a running job",
+    description: "Send a correction into a running job (\"only group lessons under $70\"). `job_id` from list_jobs, or \"latest\" for the newest running job. Call it as soon as the user corrects the work, including when the job has just posted its answer: within half a minute of that the correction replaces the file it posted instead of being refused. Ack to the user yourself in one line.",
+    promptSnippet: "steer_job: a correction to a running or just-finished job",
     parameters: Type.Object({
       job_id: Type.String({ description: "Job id, or \"latest\"" }),
       text: Type.String({ description: "The correction, as an instruction to the worker" }),
@@ -674,7 +674,12 @@ export default function arbosPiExt(pi: ExtensionAPI) {
       if (res && !res.ok) {
         return { content: [{ type: "text", text: `Not steered (${res.error ?? "unknown"}). Start a new job for it, or tell the user.` }], details: undefined };
       }
-      const job = (res as { job?: { job_id?: string; title?: string } } | undefined)?.job;
+      const job = (res as { job?: { job_id?: string; title?: string; state?: string; note?: string } } | undefined)?.job;
+      // The job had already posted its answer, so agentd marked that card superseded and sent
+      // the job again for the corrected one. Its own note says what to tell the user.
+      if (job?.state === "replacing") {
+        return { content: [{ type: "text", text: `Job ${job?.job_id ?? "?"} (${job?.title ?? ""}) had already posted; the correction replaces it. ${job?.note ?? ""}`.trim() }], details: undefined };
+      }
       return { content: [{ type: "text", text: `Steered job ${job?.job_id ?? "?"} (${job?.title ?? ""}). Tell the user in one line what changed, then end the turn.` }], details: undefined };
     },
   });

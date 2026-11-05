@@ -50,6 +50,13 @@ pub enum AgentEvent {
     CompactionEnded {
         summary: Option<String>,
     },
+    /// What the session still has queued for the model. `steering` falling to zero is how a
+    /// correction handed to a job's worker is known to have reached it (bug AB, `steer_gate.rs`):
+    /// pi dequeues a steer at a tool boundary and reports the queue it has left.
+    QueueUpdate {
+        steering: usize,
+        follow_up: usize,
+    },
     Done {
         aborted: bool,
         error: Option<String>,
@@ -186,6 +193,13 @@ pub fn translate_rpc_event(e: &Event) -> Vec<AgentEvent> {
                 is_error: *is_error,
             }]
         }
+        Event::QueueUpdate {
+            steering,
+            follow_up,
+        } => vec![AgentEvent::QueueUpdate {
+            steering: steering.len(),
+            follow_up: follow_up.len(),
+        }],
         Event::CompactionStart { .. } => vec![AgentEvent::CompactionStarted],
         Event::CompactionEnd { result, .. } => vec![AgentEvent::CompactionEnded {
             summary: result
@@ -205,7 +219,6 @@ pub fn translate_rpc_event(e: &Event) -> Vec<AgentEvent> {
         | Event::MessageStart { .. }
         | Event::MessageEnd { .. }
         | Event::ToolExecutionUpdate { .. }
-        | Event::QueueUpdate { .. }
         | Event::EntryAppended { .. }
         | Event::ExtensionUiRequest { .. }
         | Event::Other => vec![],

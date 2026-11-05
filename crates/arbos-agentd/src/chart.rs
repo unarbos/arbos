@@ -93,12 +93,23 @@ pub async fn post(
             };
         }
     }
-    // Same rule as `deliver_file` (bug S): a cancelled job puts nothing more in the chat.
+    // Same rules as `deliver_file`: a cancelled job puts nothing more in the chat (bug S), and a
+    // worker's post waits while a message of this chat is still being routed and is refused while
+    // a correction sits unread in its session (bug AB, `steer_gate.rs`).
     if let Some(job_id) = target.job_id.as_deref() {
         if a.job_is_cancelled(job_id) {
             anyhow::bail!(
                 "this job was cancelled, so nothing more of it goes into the chat; the chart was NOT posted"
             );
+        }
+        if !target.main_turn {
+            let hold = a
+                .steer_gate
+                .hold(&target.chat_id, job_id, a.cfg.steer_hold())
+                .await;
+            if hold == crate::steer_gate::Hold::SteerFirst {
+                anyhow::bail!(crate::steer_gate::SteerFirst);
+            }
         }
     }
     let credit = PictureCredit {
@@ -264,6 +275,9 @@ pub async fn post_chart(a: &Arc<Agent>, args: &Value) -> Value {
             })
             .to_string(),
         ),
+        // Same as `deliver_file`: the steer gate's refusal is an instruction about the correction
+        // waiting in this session, so it goes through unwrapped.
+        Err(e) if crate::steer_gate::is_steer_first(&e) => err_result(e.to_string()),
         Err(e) => err_result(format!(
             "NOT posted — the chart is not in the chat: {e}. Fix the chart and call post_chart again, or tell the user plainly that it could not be posted; do not say it was."
         )),

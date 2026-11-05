@@ -458,6 +458,20 @@ pub async fn deliver(
                 "this job was cancelled, so nothing more of it goes into the chat; the file was NOT posted"
             );
         }
+        // Bug AB: the worker posted the uncorrected CSV one second after the main lane steered
+        // the job with the user's correction. A worker's delivery waits here while a message of
+        // this chat is still being routed, and is refused outright while a correction is sitting
+        // unread in its session (`steer_gate.rs`). The main turn is not held: it is the lane that
+        // does the routing, so there is nothing for it to wait for.
+        if !target.main_turn {
+            let hold = a
+                .steer_gate
+                .hold(&target.chat_id, job_id, a.cfg.steer_hold())
+                .await;
+            if hold == crate::steer_gate::Hold::SteerFirst {
+                return Err(anyhow::Error::new(crate::steer_gate::SteerFirst));
+            }
+        }
         if let Some(message_id) = a.job_file_posted(job_id, &key).await {
             // Only a card that is still in the chat may stand in for this one; if it went, the
             // honest answer is to write a new one.
@@ -609,6 +623,10 @@ pub async fn deliver_file(a: &Arc<Agent>, args: &Value) -> Value {
                 .to_string(),
             )
         }
+        // The steer gate's refusal is an instruction, not a failure to report: it says what to do
+        // with the correction waiting in this session. Passed through word for word rather than
+        // wrapped in "tell the user it could not be posted".
+        Err(e) if crate::steer_gate::is_steer_first(&e) => err_result(e.to_string()),
         Err(e) => err_result(format!(
             "NOT posted — the file is not in the chat: {e}. Tell the user plainly that it could not be posted; do not say it was."
         )),

@@ -1379,6 +1379,16 @@ pub(crate) const OWN_ROWS_MAX: usize = 512;
 /// without end.
 const JOB_FILES_MAX: usize = 256;
 
+/// One file a job put in the chat: what the duplicate guard matches on, and what a correction
+/// arriving after the answer supersedes (bug AB).
+struct JobFile {
+    job_id: String,
+    /// Content hash of the bytes, not the path (`media::blob_key`).
+    key: String,
+    msg_id: String,
+    at_ms: i64,
+}
+
 /// The rows this box wrote itself, newest last.
 #[derive(Default)]
 struct OwnRows {
@@ -1853,12 +1863,12 @@ pub struct Agent {
     /// stand on (#1900, #2025: a timed-out gated call was upgraded to "the chat service
     /// confirmed it" 66 s later).
     pub posted_ledger: Mutex<HashMap<String, Vec<(String, i64)>>>,
-    /// Files a job already put in the chat, newest last: `(job id, content hash, message id)`.
+    /// Files a job already put in the chat, newest last.
     /// One job delivers through several callers — its worker, the fresh worker a failed attempt
     /// gets, and the result turn that relays the answer — and each of them posted the same bytes
     /// again, so the user read one ask and got the same card two or three times. Bounded by
     /// [`JOB_FILES_MAX`].
-    job_files: Mutex<Vec<(String, String, String)>>,
+    job_files: Mutex<Vec<JobFile>>,
     /// Message ids of rows this box wrote itself as the ask for a turn: a routine firing, a
     /// voice line, a bound channel's message. Bounded; see `OWN_ROWS_MAX`.
     ///
@@ -1963,6 +1973,11 @@ pub struct Agent {
     /// [`Agent::acquire_turn_lock`], an ask running as a job in [`Agent::write_job_result`], and
     /// the job fallback turn. See `send_order.rs`.
     pub(crate) send_order: Arc<crate::send_order::SendOrder>,
+    /// The hold between a user message arriving for a chat and a job of that chat putting its
+    /// file in the chat (bug AB). Marked by [`Agent::handle_command`] while it routes a message,
+    /// read by `media::deliver` and `chart::post` before a worker's delivery. See
+    /// `steer_gate.rs`.
+    pub(crate) steer_gate: Arc<crate::steer_gate::SteerGate>,
     /// User `send` / `answer` commands this box is handling right now, from the moment
     /// [`Agent::handle_command`] takes one until it is done with it. A relay turn never opens
     /// its row while this is non-zero: that row would be ordered between the user's message and
@@ -2145,6 +2160,7 @@ impl Agent {
             compaction_strikes: std::sync::Mutex::new(HashMap::new()),
             pending_sends: std::sync::atomic::AtomicUsize::new(0),
             send_order: Arc::new(crate::send_order::SendOrder::default()),
+            steer_gate: Arc::new(crate::steer_gate::SteerGate::default()),
             sends_in_flight: std::sync::atomic::AtomicUsize::new(0),
             side_notes: std::sync::Mutex::new(HashMap::new()),
             quick_calls: std::sync::Mutex::new(HashMap::new()),
@@ -3544,6 +3560,26 @@ impl Agent {
                 .and_then(|id| self.send_order.join(chat_id, id)),
             _ => None,
         };
+        // Bug AB: this message may be a correction for a job of this chat, and until the lanes
+        // below have looked at it nobody knows. While the mark is up, that job's file delivery
+        // waits (`steer_gate.rs`) instead of posting the version the user has already corrected.
+        //
+        // Held for the rest of this function, so every exit releases it — the error paths and an
+        // unwinding panic included. A mark older than the hold stops counting on its own, so even
+        // a leak costs one delayed delivery and never a lost file.
+        //
+        // Only for the kinds that can become a steer, and only while this chat has a job open: a
+        // chat with nothing running has nothing to hold, and `stop` is absent here for the same
+        // reason it takes no ticket — a cancel waits on no work.
+        let _routing = match cmd.kind.as_str() {
+            "send" | "steer" | "guide" | "answer" if self.chat_has_open_job(chat_id) => cmd
+                .payload
+                .get("messageId")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
+                .map(|id| self.steer_gate.routing(chat_id, id)),
+            _ => None,
+        };
         // Inside a budget block (the owner's cap / credits / read-only relay, `budget.rs`): the
         // chat already carries the one line that says so; a model call would only be refused
         // again. The command is done, nothing is written, the next send after the block probes.
@@ -4290,6 +4326,17 @@ impl Agent {
 
     /// Was this job cancelled? The one question every late writer asks before it puts anything
     /// in the chat (bug S: a cancelled job posted a result and a file 23 minutes afterwards).
+    /// Has this chat a job that is `queued` or `running`? The question `handle_command` asks
+    /// before it marks a message as being routed (bug AB): with nothing open there is no delivery
+    /// to hold.
+    pub(crate) fn chat_has_open_job(&self, chat_id: &str) -> bool {
+        self.store
+            .jobs_for_chat(chat_id)
+            .unwrap_or_default()
+            .iter()
+            .any(crate::store::JobRow::is_open)
+    }
+
     pub(crate) fn job_is_cancelled(&self, job_id: &str) -> bool {
         self.store
             .job(job_id)
@@ -4354,6 +4401,7 @@ impl Agent {
             .store
             .set_subagent_last_status(subagent_id, "cancelled");
         self.release_job_locks(job_id).await;
+        self.steer_gate.forget_job(job_id);
         self.refresh_job_activity(chat_id).await;
         let _ = self.store.t3_append(
             chat_id,
@@ -4382,18 +4430,35 @@ impl Agent {
         job_id: &str,
         text: &str,
     ) -> Result<Value, String> {
-        let text = text.trim();
-        if text.is_empty() {
-            return Err("nothing to steer with".into());
-        }
         let chat_id = {
             let tl = self.turn.lock().await;
             tl.as_ref()
                 .map(|t| t.chat_id.clone())
                 .ok_or("no turn is running")?
         };
-        let job = self.resolve_job(&chat_id, job_id)?;
+        self.steer_job_in(&chat_id, job_id, text).await
+    }
+
+    /// The body of [`Self::hook_steer_job`], with the chat named rather than read from the
+    /// running turn.
+    pub(crate) async fn steer_job_in(
+        self: &Arc<Self>,
+        chat_id: &str,
+        job_id: &str,
+        text: &str,
+    ) -> Result<Value, String> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Err("nothing to steer with".into());
+        }
+        let job = self.resolve_steer_target(chat_id, job_id)?;
         if job.state != "running" {
+            // Bug AB: a correction that reached a job seconds after it posted its file was told
+            // "is done" and dropped, so the user kept the file they had just corrected
+            // (r10steer's third change). Inside the window the correction replaces that file.
+            if let Some(replaced) = self.replace_just_posted_job(chat_id, &job, text).await {
+                return Ok(replaced);
+            }
             return Err(format!(
                 "job {} ({}) is {}: steer a running job, or start a new one",
                 job.id, job.title, job.state
@@ -4405,6 +4470,10 @@ impl Agent {
             .steer(&sid, text)
             .await
             .map_err(|e| format!("steer failed: {e}"))?;
+        // Counted before anything else can await: from here on a delivery of this job knows a
+        // correction is in its worker's session and will not post the uncorrected file in front
+        // of it (bug AB, `steer_gate.rs`).
+        self.steer_gate.steer_delivered(&job.id);
         // On the job row as well as in the worker's session. The session dies with its worker;
         // the job does not, and both of the things that can carry it on — a fresh worker and
         // the inline fallback — used to go back to the uncorrected brief (bug V).
@@ -4413,9 +4482,9 @@ impl Agent {
             .store
             .set_job_step(&job.id, "Taking your correction into account");
         let _ = self.store.t3_append(
-            &chat_id,
+            chat_id,
             None,
-            Some(&chat_id),
+            Some(chat_id),
             "job_steer",
             Some("user"),
             text,
@@ -4433,6 +4502,137 @@ impl Agent {
         );
         tracing::info!(chat_id, job = %job.id, "job steered");
         Ok(json!({ "job_id": job.id, "title": job.title, "state": "steered" }))
+    }
+
+    /// The job a `steer_job` is about: a running one as [`Self::resolve_job`] finds it, or — for
+    /// `latest` / an empty id with nothing running — the newest job of this chat that finished
+    /// inside [`crate::config::STEER_REPLACE_WINDOW_MS`].
+    ///
+    /// Without that fallback `steer_job("latest")` cannot name the job the user is correcting at
+    /// all: the file is in the chat, the user is talking about it, and the only job that matches
+    /// their words finished two seconds ago. `stop_job` keeps the stricter rule — there is
+    /// nothing to stop about a job that has ended.
+    fn resolve_steer_target(
+        &self,
+        chat_id: &str,
+        job_id: &str,
+    ) -> Result<crate::store::JobRow, String> {
+        let err = match self.resolve_job(chat_id, job_id) {
+            Ok(job) => return Ok(job),
+            Err(e) => e,
+        };
+        let id = job_id.trim();
+        if !id.is_empty() && !id.eq_ignore_ascii_case("latest") {
+            return Err(err);
+        }
+        self.store
+            .jobs_for_chat(chat_id)
+            .unwrap_or_default()
+            .into_iter()
+            .find(|j| j.state == "done" && Self::ended_inside_replace_window(j))
+            .ok_or(err)
+    }
+
+    /// Did this job finish recently enough for a correction to replace its file?
+    fn ended_inside_replace_window(job: &crate::store::JobRow) -> bool {
+        job.ended_at.is_some_and(|at| {
+            arbos_core::ids::now_ms() - at <= crate::config::STEER_REPLACE_WINDOW_MS
+        })
+    }
+
+    /// A correction for a job that finished and put a file in the chat moments ago: mark that
+    /// card superseded, reopen the job with the correction on its row, and send the same worker
+    /// session back for the corrected file. `None` when this job is not a replace case, and then
+    /// the caller refuses the steer as before.
+    ///
+    /// Only a `done` job, only inside [`crate::config::STEER_REPLACE_WINDOW_MS`] of both the end
+    /// and the card, and only while the card is still in the chat: "replace" is about the file
+    /// the user is looking at, not about restarting yesterday's work. A `failed` or `cancelled`
+    /// job is not replaced either — it has no answer to supersede.
+    async fn replace_just_posted_job(
+        self: &Arc<Self>,
+        chat_id: &str,
+        job: &crate::store::JobRow,
+        text: &str,
+    ) -> Option<Value> {
+        if job.state != "done" || !Self::ended_inside_replace_window(job) {
+            return None;
+        }
+        let (card_id, posted_at) = self.job_last_file(&job.id).await?;
+        if arbos_core::ids::now_ms() - posted_at > crate::config::STEER_REPLACE_WINDOW_MS {
+            return None;
+        }
+        let sid = job.subagent_id.clone()?;
+        let host = self.sync.host(chat_id).await?;
+        {
+            let h = host.lock().await;
+            // The card has to still be there to be superseded; a row that went is a new delivery.
+            h.doc.message(&card_id)?;
+            h.doc
+                .set_message_fields(&card_id, &[("superseded", json!(true))]);
+        }
+        let _ = self.store.append_job_steer(&job.id, text);
+        let _ = self.store.set_job_state(&job.id, "running", None);
+        let _ = self
+            .store
+            .set_job_step(&job.id, "Taking your correction into account");
+        let _ = self.store.t3_append(
+            chat_id,
+            None,
+            Some(chat_id),
+            "job_steer_replace",
+            Some("user"),
+            text,
+            Some(&json!({ "job_id": job.id, "superseded_message_id": card_id })),
+        );
+        let steers = self
+            .store
+            .job(&job.id)
+            .ok()
+            .flatten()
+            .map(|r| r.steers)
+            .unwrap_or_default();
+        let brief = format!(
+            "{}\n\nYou posted the answer to this already and the user then corrected it, so that file is marked superseded in the chat and the corrected one has to take its place. Do the work again with the correction applied and post the corrected file with deliver_file — one file, not a second copy of the old one. Say in one line what changed.{}",
+            job.brief,
+            job_steers_note(&steers)
+        );
+        self.spawn_subagent_task(
+            chat_id,
+            &host,
+            &job.ask_message_id,
+            Some(sid),
+            String::new(),
+            job.title.clone(),
+            brief,
+            Some(Harness::Pi),
+            false,
+            false,
+            Some(JobSpec {
+                id: job.id.clone(),
+                title: job.title.clone(),
+                kind: job.kind.clone(),
+                brief: job.brief.clone(),
+                touches: job.touches.clone(),
+                attempt: 0,
+            }),
+            // The ask this job answers was answered when the first file went out; nothing in the
+            // chat's send order is waiting on this run.
+            None,
+        );
+        tracing::info!(
+            chat_id,
+            job = %job.id,
+            card = %card_id,
+            "job steered after it posted; the earlier file is superseded and the job goes again"
+        );
+        Some(json!({
+            "job_id": job.id,
+            "title": job.title,
+            "state": "replacing",
+            "superseded_message_id": card_id,
+            "note": "This job had already posted its file, so the correction replaces it: the earlier card is marked superseded and the job is running again for the corrected one. Tell the user the corrected file is on its way and that the old card no longer counts. Do not post anything yourself.",
+        }))
     }
 
     /// `stop_job(job_id | "latest" | "all")` from the main turn.
@@ -9091,15 +9291,32 @@ impl Agent {
             .await
             .iter()
             .rev()
-            .find(|(j, k, _)| j == job_id && k == key)
-            .map(|(_, _, msg_id)| msg_id.clone())
+            .find(|f| f.job_id == job_id && f.key == key)
+            .map(|f| f.msg_id.clone())
+    }
+
+    /// The newest file `job_id` put in the chat, as `(message id, when)`. What a correction that
+    /// arrives after the answer has to supersede (bug AB).
+    pub(crate) async fn job_last_file(&self, job_id: &str) -> Option<(String, i64)> {
+        self.job_files
+            .lock()
+            .await
+            .iter()
+            .rev()
+            .find(|f| f.job_id == job_id)
+            .map(|f| (f.msg_id.clone(), f.at_ms))
     }
 
     /// Record a file `job_id` delivered (called by `media::deliver` after the row was read back,
     /// never before).
     pub(crate) async fn note_job_file(&self, job_id: &str, key: &str, msg_id: &str) {
         let mut l = self.job_files.lock().await;
-        l.push((job_id.to_owned(), key.to_owned(), msg_id.to_owned()));
+        l.push(JobFile {
+            job_id: job_id.to_owned(),
+            key: key.to_owned(),
+            msg_id: msg_id.to_owned(),
+            at_ms: arbos_core::ids::now_ms(),
+        });
         if l.len() > JOB_FILES_MAX {
             let drop = l.len() - JOB_FILES_MAX;
             l.drain(..drop);
@@ -10730,6 +10947,15 @@ impl Agent {
                     h.doc.add_question_part(&msg_id, &qid, &question, None);
                     h.doc.add_status_part(&msg_id, "waiting_user", &question);
                 }
+                AgentEvent::QueueUpdate { steering, .. } => {
+                    // An empty steering queue means the session has handed its corrections to the
+                    // model, so a delivery of this job is no longer the uncorrected one (bug AB).
+                    if steering == 0 {
+                        if let Some(j) = &job {
+                            self.steer_gate.steers_drained(&j.id);
+                        }
+                    }
+                }
                 AgentEvent::CompactionStarted => {}
                 AgentEvent::CompactionEnded { summary } => {
                     let n = self
@@ -10927,6 +11153,9 @@ impl Agent {
                     .set_job_state(&j.id, final_state, done_err.as_deref());
             }
             self.release_job_locks(&j.id).await;
+            // This job's worker is finished, so its steer counts have nothing left to gate; a
+            // correction from here on goes through the replace path (bug AB).
+            self.steer_gate.forget_job(&j.id);
             {
                 let h = host.lock().await;
                 h.doc.set_activity(&msg_id, None);
@@ -13363,6 +13592,17 @@ impl Agent {
     /// box with no pi binary cannot have.
     pub(crate) fn test_note_job_steer(&self, job_id: &str, text: &str) {
         let _ = self.store.append_job_steer(job_id, text);
+    }
+
+    /// Test seam: `steer_job` for a named chat rather than the running turn's, which is the only
+    /// thing [`Agent::hook_steer_job`] reads the turn for.
+    pub(crate) async fn test_steer_job_from(
+        self: &Arc<Self>,
+        chat_id: &str,
+        job_id: &str,
+        text: &str,
+    ) -> Result<Value, String> {
+        self.steer_job_in(chat_id, job_id, text).await
     }
 
     /// Test seam: the end-of-turn text writers (staged prose, then the route's reply text).
