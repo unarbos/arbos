@@ -1,7 +1,10 @@
 // Horizontal gestures on every chat screen (agent 1:1, DM, group, server channel, job tab)
-// and on the server channel list — one owner for all of them (Jacob, 2026-10-28:
-// "remove the swipe to reply and replace it with performant and high fidelity swipe to go
-// back"; supersedes the 2026-10-26 iMessage reply-swipe rule):
+// and on the server channel list — one owner for all of them.
+//
+// The two gestures are told apart by DIRECTION, and only by direction (Jacob, 2026-10-30:
+// "you should be swiping to the right to go back and swiping to the left to reply so those
+// should not be interfering with each other"). Right is always back; left on a message is
+// always reply; neither ever does the other's job.
 //
 // 1. A swipe from the screen's left edge is the system's interactive pop: the screen
 //    follows the finger, a release short of halfway cancels, UIKit drives the frames. Each
@@ -10,15 +13,23 @@
 //    is its delegate (begins whenever the stack has something to pop to; keyboard open or
 //    closed — the keyboard goes down as the pop begins). Nothing else reads a drag that
 //    starts in the edge zone.
-// 2. A swipe to the right anywhere else on the screen (header, transcript, empty space, the
-//    channel list) is also "back" (since 7d2d3797, 2026-10-16) — an animated pop, never from
-//    the composer bar (a drag there selects text or slides the mic) and never from the edge
-//    zone, which is the system's. `FullScreenBackHost`, a `DirectionalSwipeRecognizer` that
-//    fails at once on anything but a clear rightward pan.
-// 3. A swipe to the left on the transcript peeks the message times (iMessage); the same
-//    recognizer class, on the scroll view, declines every rightward or vertical pan.
+// 2. A swipe to the right anywhere else on the screen (header, transcript, a message bubble,
+//    empty space, the channel list) is also "back" (since 7d2d3797, 2026-10-16) — an animated
+//    pop, never from the composer bar (a drag there selects text or slides the mic) and never
+//    from the edge zone, which is the system's. Outside the transcript that is
+//    `FullScreenBackHost`; inside it the transcript's own recognizer claims the rightward pan
+//    beside the scroll pan (fc245a08d: a root recognizer never gets a horizontal pan that
+//    started in the scroll view). Both use `BackSwipe.fullScreenPops`, so "back" needs a
+//    deliberate 70 pt — a 40 pt flick does not pop.
+// 3. A swipe to the LEFT on a message bubble replies to it (`BubbleSwipe`): the bubble follows
+//    the finger, the reply arrow comes out from behind its trailing edge, a haptic fires at the
+//    threshold and releasing armed opens the composer with the quote.
+// 4. A swipe to the left that is NOT on a repliable message peeks the message times
+//    (iMessage) — date separators, system rows, the channel list, a channel's transcript.
 //
-// There is no swipe-to-reply. Reply stays on long-press and in the actions menu.
+// A rightward pan can never reply: the reply branch is only reachable from `dx < 0`. A
+// leftward pan can never go back: `fullScreenPops` requires `dx > 0`. That is the whole of
+// the "not interfering with each other" guarantee, and `BackSwipeTests` pins it.
 //
 // A drag that starts on something tappable — a sender's avatar above all — is the swipe, not
 // the tap: both back recognizers declare themselves simultaneous with the presses and taps
@@ -32,6 +43,9 @@
 // begin: the finger-tracking pop was gone and "back" became a 40 pt threshold with an
 // animation that did not follow the finger (Jacob, 2026-10-28: "very buggy and not working").
 // The system pop had been on since 731cdec9 (2026-10-16) until #1985 removed its enabler.
+// 59ea0fecd then removed swipe-to-reply outright rather than re-pointing it, because the
+// reply it removed was a RIGHT swipe — the one that collided with going back. This file
+// re-points reply to the left, which is what that call was asking for.
 
 import SwiftUI
 import UIKit
@@ -116,6 +130,140 @@ enum BackSwipe {
     }
 }
 
+/// Swipe LEFT on a message bubble → reply. Rules as data, tested in `BackSwipeTests`;
+/// `RowView` draws them and `TranscriptSwipeHost` runs them.
+///
+/// Left, not right: a rightward reply is what collided with swiping back (59ea0fecd), so the
+/// direction is the thing that keeps the two apart (Jacob, 2026-10-30).
+enum BubbleSwipe {
+    /// Pan length at which the swipe decides, once, what the drag is.
+    static let lockDistance: CGFloat = BackSwipe.lockDistance
+    /// How far the bubble follows the finger 1:1 before it rubber-bands.
+    static let revealWidth: CGFloat = 56
+    /// Fraction of `revealWidth` at which the reply arms (haptic; release replies).
+    static let triggerFraction: CGFloat = 0.7
+
+    /// Decide what a leftward drag on the transcript is. Mirrors `BackSwipe.fullScreenLock`:
+    /// a clear pan to the LEFT (more than 1.15× as wide as tall) is a reply, anything else is
+    /// left to the scroll view for the rest of the touch. A rightward pan is never a reply —
+    /// that is the direction guarantee, so it is checked here and not only by the caller.
+    static func lock(translation: CGSize) -> SwipeClaim {
+        let dx = translation.width, dy = translation.height
+        guard abs(dx) + abs(dy) >= lockDistance else { return .undecided }
+        return dx < 0 && abs(dx) > abs(dy) * 1.15 ? .claimed : .declined
+    }
+
+    /// Bubble travel for a leftward pan: 1:1 up to `revealWidth`, then a fifth of the excess,
+    /// at most 24 pt more (the time reveal's curve). `dx` is the raw translation (negative
+    /// going left); the result is a positive distance the bubble moves left by.
+    static func reveal(for dx: CGFloat) -> CGFloat {
+        let raw = max(0, -dx)
+        return raw <= revealWidth ? raw : revealWidth + min(24, (raw - revealWidth) * 0.2)
+    }
+
+    /// Armed: releasing here replies.
+    static func triggers(reveal: CGFloat) -> Bool { reveal >= revealWidth * triggerFraction }
+}
+
+/// One transcript row as the recognizer finds it at touch time.
+struct RowHit {
+    let id: String
+    /// In whatever space the caller asked for — the scroll view's, at the only call site.
+    let frame: CGRect
+    let canReply: Bool
+}
+
+/// A zero-cost marker a row puts behind itself so the swipe recognizer can find the row under
+/// the finger from live UIKit geometry.
+///
+/// This replaces a cache (`RowFrameIndex`) that the rows wrote on `onGeometryChange` and
+/// cleared on `onDisappear`. The cache was wrong in three ways, and only the first was a race:
+///
+/// 1. `onDisappear` could not tell "this row left the screen" from "this row's view was
+///    replaced". When the lazy stack's container is re-keyed — Search opening or closing does
+///    it today — every surviving row is destroyed and rebuilt under the *same* row id, so the
+///    arriving instance writes the key and the departing one deletes it, in an order SwiftUI
+///    does not define.
+/// 2. A wrong delete never healed. Row frames are measured in a space that scrolls with the
+///    content, so their values do not change while the user scrolls, and `onGeometryChange`
+///    stays silent until the layout itself changes. Reply targeting stayed dead for the rest
+///    of that screen's life and failed *silently*: the drag degraded into the time peek, which
+///    reads as "the gesture didn't take".
+/// 3. Nothing ever noticed, because an index miss, a recognizer that never decided and a
+///    row-lookup miss at release all produce exactly the same nothing.
+///
+/// Live geometry has none of those properties. A marker cannot be stale, it needs no
+/// appear/disappear bookkeeping, and a re-key destroys and recreates it with its row, so the
+/// new one is correct by construction. The cost is one leaf `UIView` per *realized* row.
+final class RowMarkerView: UIView {
+    var rowId = ""
+    var canReply = false
+}
+
+struct RowMarker: UIViewRepresentable {
+    let rowId: String
+    let canReply: Bool
+
+    func makeUIView(context: Context) -> RowMarkerView {
+        let v = RowMarkerView()
+        v.isUserInteractionEnabled = false
+        v.backgroundColor = .clear
+        v.isAccessibilityElement = false
+        return v
+    }
+
+    func updateUIView(_ uiView: RowMarkerView, context: Context) {
+        uiView.rowId = rowId
+        uiView.canReply = canReply
+    }
+}
+
+/// Choosing the row a leftward drag is on.
+enum RowPick {
+    /// Every `RowMarkerView` under `root`, measured in `space`.
+    static func hits(under root: UIView, in space: UIView) -> [RowHit] {
+        var out: [RowHit] = []
+        var stack = [root]
+        while let view = stack.popLast() {
+            if let marker = view as? RowMarkerView, !marker.rowId.isEmpty {
+                out.append(RowHit(id: marker.rowId,
+                                  frame: marker.convert(marker.bounds, to: space),
+                                  canReply: marker.canReply))
+            }
+            stack.append(contentsOf: view.subviews)
+        }
+        return out
+    }
+
+    /// The repliable row under `point`.
+    ///
+    /// Every row whose frame holds the point is considered, not just the first one found.
+    /// Rows overlap: a frame includes the row's own padding, and tall rows (an album, a
+    /// picture, a file card) overlap more of their neighbours than a line of text does. An
+    /// earlier version took the first match and returned nil when that one row was not
+    /// repliable, without looking at the others, so a non-repliable neighbour could shadow the
+    /// bubble under the finger — which is why swipe-to-reply missed album and image bubbles
+    /// far more often than text ones.
+    ///
+    /// Ties go to the smallest frame: the innermost row is the one the finger is really on.
+    static func replyableRow(at point: CGPoint, among rows: [RowHit]) -> String? {
+        var best: (id: String, area: CGFloat)?
+        for row in rows where row.canReply && row.frame.contains(point) {
+            let area = row.frame.width * row.frame.height
+            if best == nil || area < best!.area { best = (row.id, area) }
+        }
+        return best?.id
+    }
+}
+
+/// The reply swipe in progress on the chat screen: which row follows the finger, how far
+/// (`BubbleSwipe.reveal`), and whether releasing now replies (`BubbleSwipe.triggers`).
+struct ReplySwipe: Equatable {
+    var rowId: String?
+    var reveal: CGFloat = 0
+    var armed = false
+}
+
 /// Which optional chat-screen gestures are installed. All of them in Release; the Debug
 /// scroll rig leaves single ones out (`ARBOS_PERF_GESTURES_OFF`) to measure what each one
 /// costs the scroll view's pan (iphone-scroll-perf, 2026-10-27).
@@ -123,6 +271,8 @@ enum ChatGestures {
     static let timeReveal = on("time")
     /// The full-screen swipe-right (the system edge pop is never off).
     static let backSwipe = on("back")
+    /// The leftward swipe-to-reply on a message bubble.
+    static let replySwipe = on("reply")
     static let longPress = on("longpress")
 
     private static func on(_ name: String) -> Bool {
@@ -266,27 +416,34 @@ enum TranscriptSwipeEvent {
     /// The time peek follows the finger: `dx` is the translation (negative = left).
     case timeChanged(dx: CGFloat)
     case timeEnded
+    /// A reply swipe on `row` follows the finger: `dx` is the translation (negative = left).
+    case replyChanged(row: String, dx: CGFloat)
+    /// The reply swipe ended; `fire` when it was armed (`BubbleSwipe.triggers`).
+    case replyEnded(row: String, fire: Bool)
     /// A clear swipe right on the transcript, away from the edge, ended far enough: back.
     case back
 }
 
-/// One recognizer on the transcript's `UIScrollView` for the two horizontal swipes inside
-/// it — swipe left anywhere on the transcript peeks the message times, swipe right (away
-/// from the edge zone, which is the system pop's) is "back" — instead of SwiftUI drags.
+/// One recognizer on the transcript's `UIScrollView` for every horizontal swipe inside it,
+/// routed by direction: right (away from the edge zone, which is the system pop's) is "back";
+/// left on a repliable message bubble is "reply"; left anywhere else peeks the message times.
 /// Sits as the `.background` of the ScrollView's content. It is on the scroll view itself,
 /// beside the scroll pan, so the two decide on equal footing; a recognizer on an ancestor
 /// of the scroll view does not get a horizontal pan that starts inside it (rig, 2026-10-28).
 /// Declines every vertical pan (the scroll's).
 struct TranscriptSwipeHost: UIViewRepresentable {
-    /// Install the time peek / the swipe-right back (the Debug scroll rig can leave one out).
+    /// Install the time peek / the swipe-right back / the leftward reply (the Debug scroll rig
+    /// can leave one out).
     var timePeek = true
     var backSwipe = true
+    var replySwipe = true
     let onEvent: (TranscriptSwipeEvent) -> Void
     /// The scroll view's own pan began (a finger scroll started).
     let onScrollPanBegan: () -> Void
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(timePeek: timePeek, backSwipe: backSwipe, onEvent: onEvent, onScrollPanBegan: onScrollPanBegan)
+        Coordinator(timePeek: timePeek, backSwipe: backSwipe, replySwipe: replySwipe,
+                    onEvent: onEvent, onScrollPanBegan: onScrollPanBegan)
     }
 
     func makeUIView(context: Context) -> HostView {
@@ -311,7 +468,7 @@ struct TranscriptSwipeHost: UIViewRepresentable {
             var node: UIView? = superview
             while let current = node {
                 if let scroll = current as? UIScrollView {
-                    coordinator?.attach(to: scroll)
+                    coordinator?.attach(to: scroll, host: self)
                     return
                 }
                 node = current.superview
@@ -322,27 +479,30 @@ struct TranscriptSwipeHost: UIViewRepresentable {
     final class Coordinator: NSObject, UIGestureRecognizerDelegate {
         let timePeek: Bool
         let backSwipe: Bool
+        let replySwipe: Bool
         var onEvent: (TranscriptSwipeEvent) -> Void
         var onScrollPanBegan: () -> Void
         private weak var scroll: UIScrollView?
         private var recognizer: DirectionalSwipeRecognizer?
-        private enum Mode { case time, back }
+        private enum Mode { case time, back, reply(row: String) }
         private var mode: Mode?
 
-        init(timePeek: Bool, backSwipe: Bool, onEvent: @escaping (TranscriptSwipeEvent) -> Void, onScrollPanBegan: @escaping () -> Void) {
+        init(timePeek: Bool, backSwipe: Bool, replySwipe: Bool,
+             onEvent: @escaping (TranscriptSwipeEvent) -> Void, onScrollPanBegan: @escaping () -> Void) {
             self.timePeek = timePeek
             self.backSwipe = backSwipe
+            self.replySwipe = replySwipe
             self.onEvent = onEvent
             self.onScrollPanBegan = onScrollPanBegan
         }
 
-        func attach(to scroll: UIScrollView) {
+        func attach(to scroll: UIScrollView, host: UIView) {
             guard self.scroll !== scroll else { return }
             self.scroll?.panGestureRecognizer.removeTarget(self, action: #selector(scrollPan(_:)))
             if let old = recognizer { old.view?.removeGestureRecognizer(old) }
             self.scroll = scroll
             scroll.panGestureRecognizer.addTarget(self, action: #selector(scrollPan(_:)))
-            guard timePeek || backSwipe else { return }
+            guard timePeek || backSwipe || replySwipe else { return }
             let gr = DirectionalSwipeRecognizer(target: self, action: #selector(handle(_:)))
             gr.delegate = self
             gr.shouldStart = { [weak scroll] touch, start in
@@ -357,21 +517,89 @@ struct TranscriptSwipeHost: UIViewRepresentable {
                 }
                 return true
             }
-            gr.decide = { [weak self] _, translation in
-                guard let self else { return .declined }
+            // Direction decides, once, at `lockDistance`. Right is back; left is reply when a
+            // repliable row is under the finger and the time peek otherwise. The two never see
+            // each other's drags, which is the whole guarantee.
+            gr.decide = { [weak self, weak scroll] start, translation in
+                guard let self, let scroll else { return .declined }
                 let dx = translation.width, dy = translation.height
                 guard abs(dx) > abs(dy) * 1.15 else { return .declined }
-                if dx < 0 {
-                    guard self.timePeek else { return .declined }
-                    self.mode = .time
-                } else {
+                if dx > 0 {
                     guard self.backSwipe else { return .declined }
                     self.mode = .back
+                    return .claimed
                 }
+                switch BubbleSwipe.lock(translation: translation) {
+                case .undecided: return .undecided
+                case .declined: return .declined
+                case .claimed: break
+                }
+                // `start` is already in the recognizer's view, the scroll view, so the markers
+                // are measured into that same space and no conversion of the touch is needed.
+                // Read live, at touch time: these are the rows UIKit has on screen right now.
+                if self.replySwipe {
+                    let rows = RowPick.hits(under: scroll, in: scroll)
+                    let row = RowPick.replyableRow(at: start, among: rows)
+                    self.note(point: start, rows: rows, chose: row)
+                    if let row {
+                        self.mode = .reply(row: row)
+                        return .claimed
+                    }
+                }
+                guard self.timePeek else { return .declined }
+                self.mode = .time
                 return .claimed
             }
             scroll.addGestureRecognizer(gr)
             recognizer = gr
+            #if DEBUG
+            installProbe(on: host)
+            #endif
+        }
+
+        #if DEBUG
+        /// A 1 pt element carrying the line `note` writes, read by `chat-swipe-probe`.
+        private weak var probe: UIView?
+
+        private func installProbe(on host: UIView) {
+            guard probe == nil else { return }
+            let p = UIView(frame: CGRect(x: 0, y: 0, width: 1, height: 1))
+            p.isUserInteractionEnabled = false
+            p.backgroundColor = .clear
+            p.isAccessibilityElement = true
+            p.accessibilityIdentifier = "chat-swipe-probe"
+            p.accessibilityLabel = "no leftward decide yet"
+            host.addSubview(p)
+            probe = p
+        }
+        #endif
+
+        /// What the last leftward decide saw, in `revealTrace`'s shape.
+        ///
+        /// This stays in after the tests go green, on purpose. A left swipe that produces no
+        /// reply has three causes and they are identical from outside: no marker held the
+        /// point, the recognizer never decided at all because the scroll view's pan took the
+        /// touch first, or the release could not resolve the row. The third says so itself in
+        /// `fireReply`; the first two are only separable from here, and the difference between
+        /// them is the difference between a geometry bug and an arbitration bug.
+        ///
+        /// It is also the cure for the property that makes this area dangerous: a reply that
+        /// does not fire degrades into the time peek, so a regression here is silent unless
+        /// something writes it down.
+        private func note(point: CGPoint, rows: [RowHit], chose: String?) {
+            #if DEBUG
+            let holding = rows.filter { $0.frame.contains(point) }
+            let detail = "point=\(Int(point.x)),\(Int(point.y)) markers=\(rows.count) "
+                + "repliable=\(rows.filter(\.canReply).count) holding=\(holding.count) "
+                + "holdingRepliable=\(holding.filter(\.canReply).count) chose=\(chose ?? "-")"
+            SwipeLog.event("reply-decide \(detail)")
+            // Follow the viewport, so the element a test reads is inside the scrolled content
+            // rather than parked at the top of a transcript hundreds of rows long.
+            if let probe, let scroll {
+                probe.frame = CGRect(origin: scroll.contentOffset, size: CGSize(width: 1, height: 1))
+                probe.accessibilityLabel = detail
+            }
+            #endif
         }
 
         @objc private func scrollPan(_ gr: UIPanGestureRecognizer) {
@@ -380,26 +608,55 @@ struct TranscriptSwipeHost: UIViewRepresentable {
 
         @objc private func handle(_ gr: DirectionalSwipeRecognizer) {
             guard let mode else { return }
-            switch (mode, gr.state) {
-            case (.time, .began), (.time, .changed):
-                onEvent(.timeChanged(dx: gr.translation.width))
-            case (.time, .ended), (.time, .cancelled), (.time, .failed):
-                onEvent(.timeEnded)
-                self.mode = nil
-            case (.back, .ended):
-                if BackSwipe.fullScreenPops(translation: gr.translation, velocity: gr.velocity) {
-                    #if DEBUG
-                    SwipeLog.event("transcript back dx=\(Int(gr.translation.width))")
-                    #endif
-                    onEvent(.back)
+            switch mode {
+            case .time:
+                switch gr.state {
+                case .began, .changed:
+                    onEvent(.timeChanged(dx: gr.translation.width))
+                case .ended, .cancelled, .failed:
+                    onEvent(.timeEnded)
+                    self.mode = nil
+                case .possible:
+                    break
+                @unknown default:
+                    break
                 }
-                self.mode = nil
-            case (.back, .cancelled), (.back, .failed):
-                self.mode = nil
-            case (.back, .began), (.back, .changed), (_, .possible):
-                break
-            @unknown default:
-                break
+            case .reply(let row):
+                switch gr.state {
+                case .began, .changed:
+                    onEvent(.replyChanged(row: row, dx: gr.translation.width))
+                case .ended:
+                    let fire = BubbleSwipe.triggers(reveal: BubbleSwipe.reveal(for: gr.translation.width))
+                    #if DEBUG
+                    SwipeLog.event("transcript reply row=\(row) dx=\(Int(gr.translation.width)) fire=\(fire)")
+                    #endif
+                    onEvent(.replyEnded(row: row, fire: fire))
+                    self.mode = nil
+                case .cancelled, .failed:
+                    onEvent(.replyEnded(row: row, fire: false))
+                    self.mode = nil
+                case .possible:
+                    break
+                @unknown default:
+                    break
+                }
+            case .back:
+                switch gr.state {
+                case .ended:
+                    if BackSwipe.fullScreenPops(translation: gr.translation, velocity: gr.velocity) {
+                        #if DEBUG
+                        SwipeLog.event("transcript back dx=\(Int(gr.translation.width))")
+                        #endif
+                        onEvent(.back)
+                    }
+                    self.mode = nil
+                case .cancelled, .failed:
+                    self.mode = nil
+                case .began, .changed, .possible:
+                    break
+                @unknown default:
+                    break
+                }
             }
         }
 

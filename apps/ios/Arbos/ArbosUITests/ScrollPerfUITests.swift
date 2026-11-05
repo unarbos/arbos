@@ -10,7 +10,7 @@ import XCTest
 ///
 /// Every `ARBOS_*` variable of the test runner's environment is passed to the app, so one
 /// `xcodebuild test-without-building` with `TEST_RUNNER_ARBOS_PERF_GESTURES_OFF=time` is
-/// the "time peek off" arm of the A/B (the reply swipe is gone since 2026-10-28). Defaults: `ARBOS_PERF_LOG=1`, `ARBOS_PERF_TOUCH=1`.
+/// the "time peek off" arm of the A/B; `reply` leaves the swipe-left reply out. Defaults: `ARBOS_PERF_LOG=1`, `ARBOS_PERF_TOUCH=1`.
 final class ScrollPerfUITests: XCTestCase {
     private let appear: TimeInterval = 120
     private let settle: TimeInterval = 30

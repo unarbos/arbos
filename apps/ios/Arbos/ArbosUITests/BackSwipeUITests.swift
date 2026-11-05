@@ -2,9 +2,11 @@ import XCTest
 
 /// Back gestures on every chat screen (Jacob, 2026-10-28: the system's interactive edge pop,
 /// finger-tracking and cancellable, is the one owner of the edge; a swipe right anywhere
-/// else is an animated "back"; there is no swipe-to-reply — Reply stays on long-press and in
-/// the actions menu). Runs the fixture app (`ARBOS_FIXTURE=1`, Debug builds): no relay,
-/// deterministic screens.
+/// else is an animated "back"). Swipe left replies, on any message bubble including your own
+/// (Affinity, 2026-10-31) — that direction and its separation from back live in
+/// `SwipeDirectionsUITests`; what this file guards is that right is always back and never a
+/// reply. Runs the fixture app (`ARBOS_FIXTURE=1`, Debug builds): no relay, deterministic
+/// screens.
 ///
 /// Screens are told apart by their back chevron: `chat-back:<chatId>` on a chat,
 /// `server-back:<serverId>` on a server's channel list, the `Agents` / `People` filter on Home.

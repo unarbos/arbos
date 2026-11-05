@@ -1477,9 +1477,13 @@ struct RowView: View, Equatable {
     /// Search-in-chat hit: soft accent wash so the keyword match stands out while
     /// searching ([feedback app-01M5Z0GE2GV4ZJ5RH28QBT7H12]).
     var searchHit: Bool = false
-    /// A message row (long-press menu, `bubble:<id>` for the UI tests). False on system /
-    /// channel / non-message rows.
+    /// A message row (long-press menu, `bubble:<id>` for the UI tests, and the swipe-left
+    /// reply). False on system / channel / non-message rows.
     var isMessage: Bool = false
+    /// Reply swipe (owned by the transcript's one recognizer, `TranscriptSwipeHost`): how far
+    /// this bubble follows the finger to the LEFT, and whether releasing now replies.
+    var replyDrag: CGFloat = 0
+    var replyArmed: Bool = false
     /// Shared mention table from ChatView (built once per directory sync).
     let mentions: MentionTable
     /// When true (held-bubble overlay), list everyone under every reaction chip so
@@ -1508,6 +1512,8 @@ struct RowView: View, Equatable {
             && lhs.composerInset == rhs.composerInset
             && lhs.people == rhs.people
             && lhs.isMessage == rhs.isMessage
+            && lhs.replyDrag == rhs.replyDrag
+            && lhs.replyArmed == rhs.replyArmed
             && lhs.theme == rhs.theme
             && lhs.showReactionSenders == rhs.showReactionSenders
         #if DEBUG
@@ -1588,8 +1594,9 @@ struct RowView: View, Equatable {
         )
         .animation(.easeInOut(duration: 0.35), value: highlighted)
         .animation(.easeOut(duration: 0.18), value: searchHit)
-        // iMessage: drag left → times.
-        .offset(x: -timeReveal)
+        // Drag left → reply on a message, times elsewhere. Exclusive: the recognizer gives one
+        // drag to one of them, so only one of these offsets is ever non-zero.
+        .offset(x: -replyDrag - timeReveal)
         .overlay(alignment: .trailing) {
             if let time = swipeTimeLabel, timeReveal > 0.5 {
                 Text(time)
@@ -1600,6 +1607,19 @@ struct RowView: View, Equatable {
                     .opacity(Double(min(1, timeReveal / (Self.timeRevealWidth * 0.55))))
                     .allowsHitTesting(false)
                     .accessibilityHidden(timeReveal < 12)
+            }
+        }
+        .overlay(alignment: .trailing) {
+            // The reply arrow slides out from behind the bubble's trailing edge.
+            if isMessage, replyDrag > 0.5 {
+                Image(systemName: "arrowshape.turn.up.left")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(replyArmed ? theme.accent : theme.muted)
+                    .frame(width: BubbleSwipe.revealWidth, alignment: .trailing)
+                    .offset(x: BubbleSwipe.revealWidth - replyDrag)
+                    .opacity(Double(min(1, replyDrag / (BubbleSwipe.revealWidth * 0.55))))
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
             }
         }
         .accessibilityElement(children: .contain)
