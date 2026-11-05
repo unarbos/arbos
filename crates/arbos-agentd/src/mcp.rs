@@ -104,6 +104,24 @@ fn tools(chat_text_max: Option<usize>) -> Value {
     list
 }
 
+/// The tool definitions this box serves, fixed for the life of the process.
+///
+/// Tool definitions sit inside the model's cached prefix — on this box about 27,900 tokens of
+/// system prompt and tools, ahead of every turn of every chat. A definition that moves while a
+/// chat is live throws that cache away for the chat and for each of its later turns: the
+/// prompt-size measurement of 2026-11-05 caught a request whose only change was one tool's
+/// definition, and it read nothing from cache and paid about $0.14 to write the prefix again.
+///
+/// So the one part of the block that is not a literal is read once. `send_message`'s size
+/// sentence comes from the `chat_text_max` knob, which is read from disk at every call and can
+/// therefore be written under a running box; pinning it here means an operator's edit reaches
+/// the model at the next start, the same moment the rest of the prefix may move, rather than
+/// at whatever turn a pi child happens to re-list the tools on.
+fn pinned_tools(chat_text_max: Option<usize>) -> &'static Value {
+    static PINNED: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+    PINNED.get_or_init(|| tools(chat_text_max))
+}
+
 fn widget_schema() -> Value {
     serde_json::from_str(WIDGET_SCHEMA_JSON).unwrap_or_else(|_| json!({ "type": "object" }))
 }
@@ -1063,7 +1081,7 @@ async fn mcp(State(a): State<S>, headers: HeaderMap, Json(req): Json<Value>) -> 
         "initialize" => json!({ "protocolVersion": "2025-03-26", "capabilities": { "tools": {} }, "serverInfo": { "name": "arbos", "version": env!("CARGO_PKG_VERSION") } }),
         "notifications/initialized" | "notifications/cancelled" => return StatusCode::ACCEPTED.into_response(),
         "ping" => json!({}),
-        "tools/list" => json!({ "tools": tools(a.cfg.chat_text_max()) }),
+        "tools/list" => json!({ "tools": pinned_tools(a.cfg.chat_text_max()) }),
         "tools/call" => {
             let name = params.get("name").and_then(Value::as_str).unwrap_or("");
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
@@ -1088,6 +1106,44 @@ pub fn router(agent: Arc<Agent>) -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The tool block is the cached prefix, so the bar is identity rather than presence: the
+    /// bytes a later `tools/list` answers must be the bytes of the first one, name for name,
+    /// description for description, schema for schema and in the same order. A tool whose
+    /// definition merely still exists, reworded or moved, has already cost the chat its cache.
+    ///
+    /// The one way this block could move under a live box is the `chat_text_max` knob, which
+    /// `send_message`'s description quotes and which is read from disk at every call. Here that
+    /// knob is written between two calls, as an operator may write it at any moment.
+    #[test]
+    fn the_tool_block_a_later_call_gets_is_the_one_the_first_call_got() {
+        let first = serde_json::to_string(pinned_tools(None)).expect("the tool block");
+        let after_a_knob_change =
+            serde_json::to_string(pinned_tools(Some(4_000))).expect("the tool block");
+        assert_eq!(
+            first, after_a_knob_change,
+            "a knob written under a running box must not move the tool block: it takes effect at the next start"
+        );
+
+        let names: Vec<&str> = pinned_tools(None)
+            .as_array()
+            .expect("a list of tools")
+            .iter()
+            .map(|t| t["name"].as_str().expect("a named tool"))
+            .collect();
+        assert!(
+            names.contains(&"send_message") && names.len() > 20,
+            "the pinned block is the real one, not an empty list: {names:?}"
+        );
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            names.len(),
+            "and no tool is defined twice, which would make the block's order ambiguous: {names:?}"
+        );
+    }
 
     /// `clip` used to slice by byte, so a cut landing inside a multi-byte character panicked.
     /// Every offset below is one a caller really passes: the approval-card summary 160, the

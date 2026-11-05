@@ -135,6 +135,54 @@ test("a detached script in the main turn is refused with the start_job hint (#17
   assert.equal(fg, undefined);
 });
 
+/** A tool exactly as pi puts it in the cached prefix: name, prose and schema, in order. */
+function toolPrefix(tools: Map<string, any>): string {
+  return JSON.stringify(
+    [...tools.entries()].map(([name, t]) => [name, t.label, t.description, t.promptSnippet, t.parameters, t.exposure]),
+  );
+}
+
+test("the tool set is byte-identical turn to turn, whatever the chat is doing", async () => {
+  // The tool definitions live inside the model's cached prefix — about 27,900 tokens of system
+  // prompt and tools on a real box. One tool appearing, disappearing or being reworded rewrites
+  // that prefix for the chat and for every later turn of it, at about $0.14 a time; the
+  // prompt-size measurement of 2026-11-05 found a request whose only change was `stop_job`
+  // moving, and it read nothing from cache. So the bar is identity, not presence: a tool that is
+  // merely still registered, reworded or in a different position, has already cost the cache.
+  const { emit, tools } = fakePi();
+  const before = toolPrefix(tools);
+  for (const name of ["route", "send_message", "start_job", "stop_job", "ask_user", "peek"]) {
+    assert.ok(tools.has(name), `the block under test is the real one: ${name} is missing`);
+  }
+
+  // A whole turn's worth of state change: the chat routes, starts a job, offloads a big result
+  // into a handle, has the job cancelled, settles, and has its window compacted.
+  const input = await emit("input", { text: "Start the long one, then cancel it.", source: "rpc" });
+  await emit("before_agent_start", { messageType: "user", prompt: input.text, systemPromptOptions: { sections: {} } });
+  await tools.get("route").execute("r", { action: "act", ack: "Starting it." });
+  await emit("tool_call", { toolCallId: "t1", toolName: "bash", input: { command: "ls" }, parentToolCallId: null });
+  await emit("tool_result", {
+    toolCallId: "t1",
+    toolName: "bash",
+    input: { command: "ls" },
+    parentToolCallId: null,
+    content: [{ type: "text", text: "x\n".repeat(5000) }],
+  });
+  await emit("agent_before_settle", { text: "done" });
+  await emit("agent_settled", { aborted: false });
+  await emit("session_compact", {});
+
+  assert.equal(
+    toolPrefix(tools),
+    before,
+    "a running job, a new handle and a compaction must leave the tool block alone",
+  );
+
+  // And a second load registers the same tools in the same order, so a restart on the same
+  // chat — an idle park, a prompt refresh — resumes on the prefix it left.
+  assert.equal(toolPrefix(fakePi().tools), before, "the tool block must not depend on load order");
+});
+
 test("a kill in the main turn is refused with the stop_job hint (Test5 round 6, bug S)", async () => {
   // The round-6 command itself, and the shapes around it.
   assert.ok(killsAProcess("bash", { command: "kill 14237" }));
