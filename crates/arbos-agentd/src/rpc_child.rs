@@ -22,6 +22,31 @@ pub struct RpcChild {
     events: broadcast::Sender<Event>,
     seq: AtomicU64,
     pub exited: Arc<std::sync::atomic::AtomicBool>,
+    /// Kept from spawn: `Child::id` is `None` once the process has been reaped, and the pid is
+    /// what tells a workspace cgroup's leftovers apart from the children the box still owns.
+    pid: Option<u32>,
+}
+
+/// How a child that is gone went: its exit code, or the signal that took it.
+///
+/// Test5 round 8 (bug Y) spawned about four thousand main pi children in two and a half hours
+/// and recorded this for none of them, because nothing ever waited on one. `RpcChild` notices a
+/// child through its stdout reaching EOF and then drops the handle, so the status the kernel
+/// held was thrown away — including the `SIGKILL` an OOM kill would have left.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ChildExit {
+    pub code: Option<i32>,
+    pub signal: Option<i32>,
+}
+
+impl std::fmt::Display for ChildExit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match (self.code, self.signal) {
+            (_, Some(s)) => write!(f, "signal {s}"),
+            (Some(c), _) => write!(f, "exit {c}"),
+            _ => write!(f, "unknown"),
+        }
+    }
 }
 
 impl RpcChild {
@@ -66,6 +91,7 @@ impl RpcChild {
         if let (Some(ra), Some(pid)) = (run_as, child.id()) {
             crate::isolation::Isolation::attach(ra, pid);
         }
+        let pid = child.id();
         let stdin = child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?;
         let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
         let (events, _) = broadcast::channel(4096);
@@ -77,6 +103,7 @@ impl RpcChild {
             events,
             seq: AtomicU64::new(1),
             exited: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            pid,
         });
         let reader_me = me.clone();
         tokio::spawn(async move {
@@ -183,5 +210,39 @@ impl RpcChild {
 
     pub fn is_alive(&self) -> bool {
         !self.exited.load(Ordering::SeqCst)
+    }
+
+    pub fn pid(&self) -> Option<u32> {
+        self.pid
+    }
+
+    /// Wait on a child that is gone and report how it went.
+    ///
+    /// Call this only once [`Self::is_alive`] is false. EOF on stdout can beat the process's own
+    /// exit by a moment, so a child that has not quite finished is given a short wait rather
+    /// than reported as unknown; the handle stays in place, so a later [`Self::shutdown`] is
+    /// still safe. A status that cannot be read at all — a child the runtime already reaped —
+    /// reports `unknown` instead of inventing a code.
+    pub async fn exit_report(&self) -> ChildExit {
+        use std::os::unix::process::ExitStatusExt;
+        let mut held = self.child.lock().await;
+        let Some(child) = held.as_mut() else {
+            return ChildExit::default();
+        };
+        let status = match child.try_wait() {
+            Ok(Some(st)) => Some(st),
+            Ok(None) => tokio::time::timeout(Duration::from_secs(2), child.wait())
+                .await
+                .ok()
+                .and_then(Result::ok),
+            Err(_) => None,
+        };
+        match status {
+            Some(st) => ChildExit {
+                code: st.code(),
+                signal: st.signal(),
+            },
+            None => ChildExit::default(),
+        }
     }
 }

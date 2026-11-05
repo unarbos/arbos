@@ -108,6 +108,34 @@ pub fn act_ack_bubble_after_with(files: &[std::path::PathBuf]) -> std::time::Dur
     std::time::Duration::from_secs(secs)
 }
 
+/// Override file for the pi respawn backoff: `.arbos/pi-backoff-ms`, the first wait after the
+/// main pi child is lost, in milliseconds. The ceiling scales with it ([`PI_BACKOFF_MAX_RATIO`]
+/// times the first wait), so one number moves the whole curve.
+///
+/// It exists for the tests. Six deaths cost just over two minutes of waiting at the shipped
+/// 2 s → 60 s, which no test suite can spend, and a test that cannot reach the sixth death
+/// cannot measure what happens after the fifth. The doubling, the ceiling and the
+/// crash-loop threshold are the same code at either scale.
+pub const PI_BACKOFF_MS_FILE: &str = "pi-backoff-ms";
+/// The first wait after the main pi child is lost. Test5's box waited nothing at all and
+/// respawned about four thousand times in two and a half hours (bug Y).
+pub const PI_BACKOFF_START_MS_DEFAULT: u64 = 2_000;
+/// The ceiling, as a multiple of the first wait: 2 s doubling to a 60 s cap.
+pub const PI_BACKOFF_MAX_RATIO: u64 = 30;
+
+/// The first wait after a lost pi child, in milliseconds: override files, then the default.
+pub fn pi_backoff_start_ms_with(files: &[std::path::PathBuf]) -> u64 {
+    files
+        .iter()
+        .find_map(|f| {
+            std::fs::read_to_string(f)
+                .ok()
+                .and_then(|s| s.trim().parse::<u64>().ok())
+        })
+        .filter(|ms| *ms > 0)
+        .unwrap_or(PI_BACKOFF_START_MS_DEFAULT)
+}
+
 /// Override file for the research-job worker model: `.arbos/research-worker-model` holding a model
 /// id, or `off` to run research jobs on the subagent model like every other kind.
 pub const RESEARCH_WORKER_MODEL_FILE: &str = "research-worker-model";
@@ -626,6 +654,16 @@ impl Config {
     /// Seconds before an act ack is promoted to a bubble; project file, box file, env, default.
     pub fn act_ack_bubble_after(&self) -> std::time::Duration {
         act_ack_bubble_after_with(&self.knob_files(ACT_ACK_BUBBLE_SECS_FILE))
+    }
+
+    /// The first wait after a lost main pi child; project file, box file, default.
+    pub fn pi_backoff_start_ms(&self) -> u64 {
+        pi_backoff_start_ms_with(&self.knob_files(PI_BACKOFF_MS_FILE))
+    }
+
+    /// The ceiling the respawn backoff doubles up to.
+    pub fn pi_backoff_max_ms(&self) -> u64 {
+        self.pi_backoff_start_ms() * PI_BACKOFF_MAX_RATIO
     }
 
     /// The model `research` jobs run on (cost knob 1); `None` = the subagent model.
