@@ -93,6 +93,14 @@ pub async fn post(
             };
         }
     }
+    // Same rule as `deliver_file` (bug S): a cancelled job puts nothing more in the chat.
+    if let Some(job_id) = target.job_id.as_deref() {
+        if a.job_is_cancelled(job_id) {
+            anyhow::bail!(
+                "this job was cancelled, so nothing more of it goes into the chat; the chart was NOT posted"
+            );
+        }
+    }
     let credit = PictureCredit {
         left: format!("{} · Arbos · {}", a.name(), today()),
     };

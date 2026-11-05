@@ -10,7 +10,7 @@ process.env.ARBOS_STATE_DIR = mkdtempSync(join(tmpdir(), "arbos-pi-ext-test-"));
 process.env.ARBOS_HOOK_URL = "";
 process.env.ARBOS_SESSION_ROLE = "main";
 
-const { default: arbosPiExt, promisesMore, detachedShell } = await import("./index.ts");
+const { default: arbosPiExt, promisesMore, detachedShell, killsAProcess } = await import("./index.ts");
 
 type Handler = (event: any) => Promise<any> | any;
 
@@ -133,4 +133,28 @@ test("a detached script in the main turn is refused with the start_job hint (#17
   assert.match(verdict.reason, /start_job/);
   const fg = await emit("tool_call", { toolCallId: "b2", toolName: "bash", input: { command: "seq 1 10 > step1.txt" }, parentToolCallId: null });
   assert.equal(fg, undefined);
+});
+
+test("a kill in the main turn is refused with the stop_job hint (Test5 round 6, bug S)", async () => {
+  // The round-6 command itself, and the shapes around it.
+  assert.ok(killsAProcess("bash", { command: "kill 14237" }));
+  assert.ok(killsAProcess("bash", { command: "kill -9 14237" }));
+  assert.ok(killsAProcess("bash", { command: "pkill -f 'sleep 20'" }));
+  assert.ok(killsAProcess("bash", { command: "ps aux | grep mersenne; killall python3" }));
+  assert.ok(killsAProcess("bash", { command: "pgrep -f mersenne | xargs kill" }));
+  assert.ok(killsAProcess("bash", { command: "sudo kill 14237" }));
+  assert.ok(killsAProcess("codemode", { code: "await tools.bash({command: 'kill 14237'}); return 'cancelled'" }));
+  // A word that only contains "kill" is not a signal.
+  assert.equal(killsAProcess("bash", { command: "tail -5 killed.log" }), null);
+  assert.equal(killsAProcess("bash", { command: "cargo test --features killswitch" }), null);
+  assert.equal(killsAProcess("bash", { command: "grep -c kill out/report.txt" }), null);
+  assert.equal(killsAProcess("read", { path: "/x" }), null);
+  const { emit, tools } = fakePi();
+  const input = await emit("input", { text: "cancel the Mersenne job", source: "rpc" });
+  await emit("before_agent_start", { messageType: "user", prompt: input.text, systemPromptOptions: { sections: {} } });
+  await tools.get("route").execute("r", { action: "act", ack: "Cancelling it." });
+  const verdict = await emit("tool_call", { toolCallId: "k", toolName: "bash", input: { command: "kill 14237" }, parentToolCallId: null });
+  assert.equal(verdict?.block, true);
+  assert.match(verdict.reason, /stop_job/);
+  assert.match(verdict.reason, /signal is not a cancel/);
 });

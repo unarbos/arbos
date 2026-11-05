@@ -26,6 +26,8 @@ mod identity;
 mod inspect;
 mod isolation;
 #[cfg(test)]
+mod job_cancel_tests;
+#[cfg(test)]
 mod job_notice_tests;
 mod jobs_view;
 mod llm;
