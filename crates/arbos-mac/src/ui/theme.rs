@@ -1693,6 +1693,130 @@ mod glass_contrast_tests {
         }
     }
 
+    /// The Mac composer is **not** on Glass, and these are the facts that
+    /// hold that true.
+    ///
+    /// [`every_pane_component_reads_over_every_desktop_on_glass`] sweeps
+    /// three desktops and three slider values, and not one of them reaches
+    /// the composer. Its `+`, its mic and its staged attachment tiles are all
+    /// children of the field pill (`composer.rs`, `.bg(theme.field)`), and
+    /// `field` is opaque on Glass exactly as on Matte — the palette
+    /// constructors take a [`Surface`] and then never consult it. So the
+    /// composer's controls composite onto a slab and have no desktop
+    /// dependence at all. The gate's "control on the pane" row is a different
+    /// object that happens to share a word.
+    ///
+    /// The region is a false lead, and it is the one a reader reaches for
+    /// first: the chat column the composer lives in and the pane the gate
+    /// samples composite to a maximum difference of exactly 0.000000000
+    /// across that whole matrix. They share a tint ([`Self::wash_tint`] gives
+    /// both `shell_tint()`) and a floor (`CHAT_WASH_FLOOR`), and differ only
+    /// in which backdrop band they read — which the gate's uniform sample
+    /// erases. Swapping the gate to [`GlassRegion::Chat`] would change no
+    /// number and fix nothing.
+    ///
+    /// **This test fails the moment somebody washes the pill or a disc, and
+    /// that is deliberate.** Washing them cannot make the desktop show
+    /// through, because the pill in front of it is what hides it; and on
+    /// Glass dark it costs muted contrast (5.08:1 → 3.90:1 against a 3:1
+    /// floor) while pushing the `+` disc to `#393939`, 18 bytes off the
+    /// `#272727` Grok's own disc measures. That trade was priced and
+    /// refused — contrast and parity spent for no visible change. The fix
+    /// that does work takes the pill and the discs together, the way the
+    /// iPhone's did ([feedback iphone-composer-glass-2026-10-28], Jacob
+    /// 2026-10-28: "Grok chat is actual transparent glass. Ours isn't."), and
+    /// it needs this gate to grow first — the draft text, the placeholder and
+    /// both staged-chip labels would all gain a desktop dependence they do
+    /// not have today.
+    ///
+    /// One number below is deliberately not pinned: `text_faint` on the disc
+    /// is 2.81:1, under the 3:1 a glyph wants, on Matte and Glass alike. It
+    /// is a pre-existing defect on its own track, so fixing it must not have
+    /// to come back through this test.
+    #[test]
+    fn the_mac_composer_sits_on_a_slab_and_not_on_glass() {
+        let src = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ui/composer.rs"),
+        )
+        .expect("read composer.rs");
+        // Comments talk about these tokens; only the code counts.
+        let code = src
+            .lines()
+            .map(|l| l.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        for (what, needle) in [
+            ("the field pill", ".bg(theme.field)"),
+            (
+                "the + disc",
+                "highlight::washed(el, theme.surface_2, &theme)",
+            ),
+            ("a staged attachment tile", ".bg(theme.surface_2);"),
+        ] {
+            assert!(
+                code.contains(needle),
+                "{what} no longer reads {needle:?}; read this test's note \
+                 before changing what it reads"
+            );
+        }
+        // The mic is the fourth read (`danger_soft` while recording, this
+        // otherwise); the fifth is the tooltip plate, a popover rather than a
+        // control in the pill.
+        assert_eq!(
+            code.matches("theme.surface_2").count(),
+            4,
+            "composer.rs reads theme.surface_2 four times: the + disc, the \
+             mic, a staged tile and the tooltip plate. Another one is not \
+             wrong, but inside the pill it is a slab on a slab — say so here"
+        );
+        for family in ["control_fill()", "field_fill()"] {
+            assert!(
+                !code.contains(family),
+                "composer.rs now calls {family}, so the Glass component \
+                 family has reached the composer. Read this test's note: the \
+                 gate has to grow before that can land"
+            );
+        }
+
+        for appearance in [Appearance::Dark, Appearance::Light] {
+            // What the + and the mic are drawn on, and what carries the
+            // staged chip's file name and size label.
+            let expected = match appearance {
+                Appearance::Dark => 38,
+                Appearance::Light => 232,
+            };
+            for surface in [Surface::Matte, Surface::Glass] {
+                let theme = Theme::with(appearance, surface);
+                assert_eq!(
+                    theme.field.a, 1.0,
+                    "{appearance:?} {surface:?}: the composer's pill is a slab, \
+                     which is what makes its controls desktop-independent"
+                );
+                let disc = composite(theme.surface_2, theme.field);
+                let byte = (disc.to_rgb().r * 255.0).round() as i32;
+                assert_eq!(
+                    byte, expected,
+                    "{appearance:?} {surface:?}: the composer's disc is byte \
+                     {byte}, not {expected} — the same on both surfaces is the \
+                     point, it is what says the composer never went Glass"
+                );
+                let body = text_contrast(theme.text, disc);
+                let muted = text_contrast(theme.text_muted, disc);
+                assert!(
+                    body >= 4.5,
+                    "{appearance:?} {surface:?}: the staged chip's file name \
+                     reads {body:.2}:1 on the disc"
+                );
+                assert!(
+                    muted >= 3.0,
+                    "{appearance:?} {surface:?}: the + glyph, the mic glyph and \
+                     the staged chip's size label read {muted:.2}:1 on the disc"
+                );
+            }
+        }
+    }
+
     /// On Glass no pane component is a slab: every fill is translucent (the
     /// desktop shows through it as through the pane) and the card wears a rim.
     #[test]
