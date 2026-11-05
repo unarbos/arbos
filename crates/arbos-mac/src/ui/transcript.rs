@@ -37,6 +37,7 @@ use crate::ui::mention::{self, Mentions};
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
 use crate::ui::profile_target;
+use crate::ui::reveal::RevealInset;
 use crate::ui::secret_card::SecretOfferCard;
 use crate::ui::select::{BubbleAt, BubbleSelectable, LinkIcons, Selectable, Span, TextSelection};
 use crate::ui::sf_symbols;
@@ -274,15 +275,13 @@ pub const HEADER_FADE_BAND: f32 = crate::ui::header::metrics::FADE_BAND;
 /// Where a reveal brings a message to rest: its row's top edge this far below
 /// the transcript's own top edge.
 ///
-/// The band is the floor, and it is read from the header rather than written
-/// down twice: a row that lands inside it is the faintest on screen, which is
-/// the one place the message a search just found must not go. Clearing the band
-/// is not the whole of it, though — a row whose first line starts exactly where
-/// the dimming stops still reads as jammed under the chrome. The turn gap on
-/// top of it is the air the transcript already opens between two speakers, so
-/// the message above shows its last line through the fade and the hit reads as
-/// a message in a conversation.
-pub(crate) const REVEAL_TOP_INSET: f32 = HEADER_FADE_BAND + TURN_GAP;
+/// The chat pane's reading of the shared rule in [`crate::ui::reveal`] — the
+/// band the floating header fades the list out over, plus the gap the transcript
+/// already opens between two speakers. Both terms are read from where they live,
+/// so a header that changes size carries the inset with it. Any other list a
+/// reveal lands in states its own two terms through `reveal::top_inset` rather
+/// than reaching for this one.
+pub const REVEAL_TOP_INSET: f32 = crate::ui::reveal::top_inset(HEADER_FADE_BAND, TURN_GAP);
 /// How long the hover copy glyph stays a checkmark after a successful copy.
 const COPY_FEEDBACK_MS: u64 = 2_000;
 /// Ignore pointer noise until a click-drag travels this far before it is a
@@ -897,10 +896,8 @@ pub struct Transcript {
     pub(crate) rows_laid_out: u64,
     /// Reveal request (`AppState::reveal_nonce`) we already scrolled for.
     revealed: Option<u64>,
-    /// The row index a reveal still owes its [`REVEAL_TOP_INSET`] to. Shared
-    /// with the row's element because the request has to be made from inside
-    /// the list's prepaint, and cleared there so one reveal corrects once.
-    reveal_inset: Rc<std::cell::Cell<Option<usize>>>,
+    /// The row a reveal still owes its [`REVEAL_TOP_INSET`] to.
+    reveal_inset: crate::ui::reveal::RevealInset,
     spring: StickSpring,
     /// Set by the scroll callback; the next frame re-pins when the user
     /// stopped within `STICK_THRESHOLD_PX` of the end.
@@ -1006,7 +1003,7 @@ impl Transcript {
             arrived_at: None,
             rows_laid_out: 0,
             revealed: None,
-            reveal_inset: Rc::default(),
+            reveal_inset: RevealInset::default(),
             spring: StickSpring::default(),
             repin_check_pending: false,
             hover: HoverFade::default(),
@@ -1776,7 +1773,7 @@ impl Transcript {
         let state = self.state.read(cx);
         let Some((chat, msg)) = state.reveal_message.clone() else {
             self.revealed = None;
-            self.reveal_inset.set(None);
+            self.reveal_inset.clear();
             return;
         };
         let nonce = state.reveal_nonce;
@@ -1793,51 +1790,24 @@ impl Transcript {
         };
         self.pinned_to_bottom = false;
         // The row to the top of the pane, then `REVEAL_TOP_INSET` back down it
-        // from inside the list's own prepaint: `offset_in_item` cannot carry
-        // the inset itself, because a negative one anchors the row below the
-        // viewport's top edge without drawing anything above it and leaves a
-        // blank strip where the conversation should be.
+        // from inside the list's own prepaint (`RevealInset::row_request`).
+        //
+        // `offset_in_item` cannot carry the inset, however much it looks like
+        // the field for it. A negative one does anchor the row below the
+        // viewport's top edge — the list's own `scroll_by` says so — but it
+        // renders nothing above the row it anchors: `layout_items` only walks
+        // into earlier rows when the ones from the scroll top down fail to fill
+        // the viewport, and a negative offset makes them appear to fill more of
+        // it, not less. The reveal would land in a blank strip under the header
+        // instead of in the conversation, which is a worse artefact than the dim
+        // row it replaces.
         self.list.scroll_to(gpui::ListOffset {
             item_ix: ix,
             offset_in_item: px(0.0),
         });
-        self.reveal_inset.set(Some(ix));
+        self.reveal_inset.owed(ix);
         self.revealed = Some(nonce);
         cx.notify();
-    }
-
-    /// The inset a reveal owes the row it landed on, asked for the way the
-    /// list takes it: an autoscroll request whose top edge sits
-    /// [`REVEAL_TOP_INSET`] above the row's own. `List`'s prepaint walks into
-    /// the rows above until the offset it lands on is non-negative, so the hit
-    /// comes to rest that far down the pane with the messages above it drawn.
-    /// It corrects inside the same frame, so there is no second step to see.
-    ///
-    /// The first message in a chat has nothing above it to give: the walk runs
-    /// out of rows, clamps at the top and lands exactly where a reveal landed
-    /// before this. Near the end of a transcript the list's own fill keeps the
-    /// last page on screen, so the hit rests lower than the inset rather than
-    /// scrolling past the newest message.
-    fn inset_revealed_row(
-        pending: &Rc<std::cell::Cell<Option<usize>>>,
-        ix: usize,
-    ) -> impl IntoElement {
-        let pending = pending.clone();
-        canvas(
-            move |bounds, window, _| {
-                if pending.get() != Some(ix) {
-                    return;
-                }
-                pending.set(None);
-                window.request_autoscroll(Bounds::from_corners(
-                    point(bounds.left(), bounds.top() - px(REVEAL_TOP_INSET)),
-                    point(bounds.right(), bounds.top()),
-                ));
-            },
-            |_, _, _, _| {},
-        )
-        .absolute()
-        .size_full()
     }
 
     /// The message a selection bubble key (`<message>#text`, `<row>.u`, see
@@ -3702,8 +3672,7 @@ impl Transcript {
             self.state.read(cx).highlight_message.as_deref() == Some(row.message_id.as_str());
         let turn_start = self.is_turn_start(ix);
         let measure = Self::measure_into(&self.measured, Some(row_frame_id.clone()));
-        let inset = (self.reveal_inset.get() == Some(ix))
-            .then(|| Self::inset_revealed_row(&self.reveal_inset, ix));
+        let inset = self.reveal_inset.row_request(ix, REVEAL_TOP_INSET);
         div()
             .id(SharedString::from(format!("{row_frame_id}#frame")))
             .relative()
