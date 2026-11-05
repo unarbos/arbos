@@ -14,7 +14,7 @@ use gpui::{
 use crate::app::{ActiveCall, AppState, CallParticipant, CallStatus};
 use crate::model::{self, now_ms, Call, CallKind, Project, Sender};
 use crate::ui::avatars;
-use crate::ui::glass::{self, WindowDrag};
+use crate::ui::glass;
 use crate::ui::highlight;
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
@@ -67,83 +67,6 @@ fn picture(sender: &Sender, image: Option<Arc<RenderImage>>, size: f32, theme: &
     avatars::sender(sender, size, theme)
 }
 
-/// One tile: the camera when it is on, else the picture on a dark card.
-fn tile(
-    id: ElementId,
-    p: &CallParticipant,
-    image: Option<Arc<RenderImage>>,
-    video: Option<Arc<RenderImage>>,
-    label: String,
-    big: bool,
-    theme: &Theme,
-) -> Stateful<Div> {
-    let avatar_size = if big { 112.0 } else { 72.0 };
-    let mut card = div()
-        .id(id)
-        .relative()
-        .flex_1()
-        .min_w(px(180.0))
-        .min_h(px(if big { 260.0 } else { 160.0 }))
-        .rounded(px(24.0))
-        .overflow_hidden()
-        .bg(theme.surface_1)
-        .border_2()
-        .border_color(if p.speaking {
-            theme.online
-        } else {
-            gpui::transparent_black()
-        })
-        .flex()
-        .items_center()
-        .justify_center();
-    match video {
-        Some(frame) => {
-            card = card.child(
-                gpui::img(frame)
-                    .absolute()
-                    .inset_0()
-                    .size_full()
-                    .object_fit(gpui::ObjectFit::Cover),
-            );
-        }
-        None => {
-            card = card.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .gap(px(14.0))
-                    .child(picture(&p.sender, image, avatar_size, theme))
-                    .child(sf_symbols::glyph(
-                        "video.slash.fill",
-                        22.0,
-                        theme.text_faint,
-                    )),
-            );
-        }
-    }
-    // Name (and the muted mic) pinned to the bottom-left.
-    card.child(
-        div()
-            .absolute()
-            .left(px(12.0))
-            .bottom(px(10.0))
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .px(px(10.0))
-            .py(px(4.0))
-            .rounded_full()
-            .bg(gpui::hsla(0.0, 0.0, 0.0, 0.45))
-            .text_size(px(TEXT_SMALL))
-            .text_color(theme.text)
-            .when(p.muted, |el| {
-                el.child(sf_symbols::glyph("mic.slash", 12.0, theme.text_muted))
-            })
-            .child(label),
-    )
-}
-
 fn round_button(
     id: &'static str,
     glyph: &str,
@@ -194,17 +117,158 @@ fn round_button(
         )
 }
 
-/// The full call screen, over the conversation column.
-pub fn screen(shell: &Shell, active: &ActiveCall, cx: &mut Context<Shell>) -> Div {
+/// The call strip (Jacob, 2026-10-23, "call + chat"): the call lives at the top of the OPEN
+/// CHAT COLUMN only — the sidebar is never covered or shrunk. One rounded group with the
+/// participant tiles (avatar + name, a muted-mic glyph on muted tiles, the active speaker
+/// outlined, #1436 ringing tiles greyed "Ringing…" until they join) and Mute / Camera /
+/// "Let <agent> see" (#1353) / Hang up to the right; under it a thin drag handle that resizes
+/// the strip against the transcript (`AppState::call_strip_height`). The messages and the
+/// composer stay visible below. Ending the call removes it; the column is a plain chat again.
+pub mod strip_layout {
+    /// Smallest strip: one row of tiles with their names.
+    pub const MIN_HEIGHT: f32 = 112.0;
+    /// Default strip height (four tiles with 56 pt avatars, like the mock).
+    pub const DEFAULT_HEIGHT: f32 = 168.0;
+    /// The transcript keeps at least this much of the column (header + a few rows + composer).
+    pub const TRANSCRIPT_MIN: f32 = 260.0;
+    /// The handle under the strip: its hit height and the visible pill.
+    pub const HANDLE_HEIGHT: f32 = 12.0;
+
+    /// Largest strip for a column this tall.
+    pub fn max_height(column_height: f32) -> f32 {
+        (column_height - TRANSCRIPT_MIN).max(MIN_HEIGHT)
+    }
+
+    /// Clamp a wanted height into the bounds for this column.
+    pub fn clamp_height(wanted: f32, column_height: f32) -> f32 {
+        wanted.round().clamp(MIN_HEIGHT, max_height(column_height))
+    }
+
+    /// The height after a drag of the handle by `dy` (down = taller strip).
+    pub fn height_after_drag(current: f32, dy: f32, column_height: f32) -> f32 {
+        clamp_height(current + dy, column_height)
+    }
+
+    /// Tile avatar size for a strip this tall (name row and paddings taken off).
+    pub fn avatar_size(strip_height: f32) -> f32 {
+        (strip_height - 100.0).clamp(28.0, 96.0)
+    }
+
+    /// Is the strip shown in the column of `space_id`? Only while MY call is live there and
+    /// expanded (collapsed = the slim bar; a call in another chat = nothing here, that chat's
+    /// column has it).
+    pub fn shown(my_call: Option<&crate::app::ActiveCall>, space_id: &str) -> bool {
+        my_call.is_some_and(|c| c.expanded && c.call.is_live() && c.call.space_id() == space_id)
+    }
+}
+
+/// Drag payload for the strip's resize handle.
+#[derive(Clone)]
+struct StripResizeDrag;
+
+struct StripResizeDragGhost;
+
+impl gpui::Render for StripResizeDragGhost {
+    fn render(&mut self, _: &mut gpui::Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+    }
+}
+
+/// One tile of the strip: a person (or agent) in the room or still being rung.
+fn strip_tile(
+    id: ElementId,
+    p: &CallParticipant,
+    image: Option<Arc<RenderImage>>,
+    avatar: f32,
+    caption: Option<&str>,
+    theme: &Theme,
+) -> Stateful<Div> {
+    let ringing = caption.is_some();
+    let mut card = div()
+        .id(id)
+        .relative()
+        .flex_1()
+        .min_w(px(84.0))
+        .max_w(px(220.0))
+        .h_full()
+        .rounded(px(14.0))
+        .overflow_hidden()
+        .bg(theme.surface_2)
+        .border_2()
+        .border_color(if p.speaking {
+            theme.online
+        } else {
+            gpui::transparent_black()
+        })
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap(px(6.0))
+        .when(ringing, |el| el.opacity(0.55));
+    match p.video.clone() {
+        Some(frame) => {
+            card = card.child(
+                gpui::img(frame)
+                    .absolute()
+                    .inset_0()
+                    .size_full()
+                    .object_fit(gpui::ObjectFit::Cover),
+            );
+        }
+        None => {
+            card = card.child(picture(&p.sender, image, avatar, theme));
+        }
+    }
+    let name = if p.identity == "local" {
+        "You".to_string()
+    } else {
+        p.sender.display_name()
+    };
+    // Name (truncated to the tile), the muted mic before it, "Ringing…" under it.
+    card = card.child(
+        div()
+            .max_w_full()
+            .px(px(8.0))
+            .flex()
+            .flex_col()
+            .items_center()
+            .child(
+                div()
+                    .max_w_full()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.0))
+                    .px(px(6.0))
+                    .py(px(2.0))
+                    .rounded_full()
+                    .when(p.video.is_some(), |el| {
+                        el.bg(gpui::hsla(0.0, 0.0, 0.0, 0.45))
+                    })
+                    .text_size(px(TEXT_SMALL))
+                    .text_color(theme.text)
+                    .when(p.muted, |el| {
+                        el.child(sf_symbols::glyph("mic.slash", 11.0, theme.text_muted))
+                    })
+                    .child(div().truncate().child(name)),
+            )
+            .children(caption.map(|c| {
+                div()
+                    .text_size(px(TEXT_TINY))
+                    .text_color(theme.text_muted)
+                    .child(c.to_string())
+            })),
+    );
+    card
+}
+
+/// The strip plus its handle, for `pre` of the chat column.
+pub fn strip(shell: &Shell, active: &ActiveCall, cx: &mut Context<Shell>) -> Div {
     let theme = Theme::of(cx).clone();
     PulseClock::request(cx);
     let state = shell.state.read(cx);
-    let elapsed = now_ms().saturating_sub(active.joined_at);
-    let title = match active.status {
-        CallStatus::Connecting => "Connecting…".to_string(),
-        CallStatus::Connected => format!("{} · {}", active.call.kind.label_title(), mmss(elapsed)),
-        CallStatus::Failed(ref why) => format!("Could not connect · {why}"),
-    };
+    let height = state.call_strip_height;
+    let avatar = strip_layout::avatar_size(height);
     let me = Sender {
         kind: "user".into(),
         id: state.me_id(),
@@ -225,73 +289,45 @@ pub fn screen(shell: &Shell, active: &ActiveCall, cx: &mut Context<Shell>) -> Di
             .map(|a| a.avatar_url.clone())
             .unwrap_or_default(),
     };
-    // Tiles: everyone else, then me (small) — alone, my own tile fills the screen.
-    let remote: Vec<(CallParticipant, Option<Arc<RenderImage>>)> = active
+    // Tiles: everyone in the room, then who is still being rung (#1436), then me.
+    let in_room: Vec<String> = active
         .participants
         .iter()
-        .map(|p| (p.clone(), sender_image(state, &p.sender)))
+        .map(|p| p.identity.clone())
         .collect();
-    // Who was rung and has not joined yet (#1430): a greyed tile each, "Ringing…", so a group
-    // call shows the whole group while only the agent has picked up.
-    let ringing: Vec<(Sender, Option<Arc<RenderImage>>)> =
-        if active.call.is_live() && active.status == CallStatus::Connected {
-            let expected = state
-                .project(active.call.space_id())
-                .map(|p| model::call_people(p, &state.me_id(), &active.call.agents))
-                .unwrap_or_else(|| active.call.agents.clone());
-            let in_room: Vec<String> = active
-                .participants
-                .iter()
-                .map(|p| p.identity.clone())
-                .collect();
-            model::still_ringing(&expected, &in_room)
-                .into_iter()
-                .map(|s| {
-                    let image = sender_image(state, &s);
-                    (s, image)
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
-    let my_image = state.avatar(&me.avatar_url);
-    let me_tile = CallParticipant {
-        identity: "local".into(),
-        sender: me,
-        speaking: false,
-        muted: active.muted,
-        video: active.local_video.clone(),
+    let ringing: Vec<Sender> = if active.status == CallStatus::Connected {
+        let expected = state
+            .project(active.call.space_id())
+            .map(|p| model::call_people(p, &state.me_id(), &active.call.agents))
+            .unwrap_or_else(|| active.call.agents.clone());
+        model::still_ringing(&expected, &in_room)
+    } else {
+        Vec::new()
     };
-    let n = remote.len() + ringing.len();
-    let big = n <= 1;
-    let mut grid = div()
-        .flex()
-        .flex_wrap()
-        .items_stretch()
-        .justify_center()
-        .gap(px(12.0))
-        .w_full()
-        .max_w(px(if n <= 1 { 720.0 } else { 1100.0 }))
+    let humans_ringing: Vec<String> = ringing
+        .iter()
+        .filter(|s| s.kind != "agent")
+        .map(|s| s.display_name())
+        .collect();
+    let mut tiles = div()
         .flex_1()
-        .min_h_0();
-    for (i, (p, image)) in remote.iter().enumerate() {
-        let video = p.video.clone();
-        grid = grid.child(tile(
-            ElementId::Name(SharedString::from(format!("tile-{i}"))),
+        .min_w_0()
+        .h_full()
+        .flex()
+        .items_stretch()
+        .gap(px(8.0));
+    for (i, p) in active.participants.iter().enumerate() {
+        let image = sender_image(state, &p.sender);
+        tiles = tiles.child(strip_tile(
+            ElementId::Name(SharedString::from(format!("strip-tile-{i}"))),
             p,
-            image.clone(),
-            video,
-            p.sender.display_name(),
-            big,
+            image,
+            avatar,
+            None,
             &theme,
         ));
     }
-    for (i, (s, image)) in ringing.iter().enumerate() {
-        let caption = if s.kind == "agent" {
-            "Joining…"
-        } else {
-            "Ringing…"
-        };
+    for (i, s) in ringing.iter().enumerate() {
         let ghost = CallParticipant {
             identity: s.identity(),
             sender: s.clone(),
@@ -299,59 +335,84 @@ pub fn screen(shell: &Shell, active: &ActiveCall, cx: &mut Context<Shell>) -> Di
             muted: false,
             video: None,
         };
-        grid = grid.child(
-            tile(
-                ElementId::Name(SharedString::from(format!("tile-ringing-{i}"))),
-                &ghost,
-                image.clone(),
-                None,
-                format!("{} · {caption}", s.display_name()),
-                big,
-                &theme,
-            )
-            .opacity(0.55),
-        );
+        let caption = if s.kind == "agent" {
+            "Joining…"
+        } else {
+            "Ringing…"
+        };
+        tiles = tiles.child(strip_tile(
+            ElementId::Name(SharedString::from(format!("strip-ringing-{i}"))),
+            &ghost,
+            sender_image(state, s),
+            avatar,
+            Some(caption),
+            &theme,
+        ));
     }
     let seeing_agent = active
         .agent_seeing
         .then(|| agent_name(shell, active, cx))
         .flatten();
-    if n == 0 {
-        let me_big = tile(
-            ElementId::Name("tile-me".into()),
-            &me_tile,
-            my_image.clone(),
-            active.local_video.clone(),
-            "You".into(),
-            true,
-            &theme,
-        );
-        grid = grid.child(match seeing_agent.as_deref() {
-            Some(agent) => me_big.child(
-                div()
-                    .absolute()
-                    .top(px(12.0))
-                    .right(px(12.0))
-                    .child(seeing_badge(agent, &theme)),
-            ),
-            None => me_big,
-        });
-    }
-    let waiting = n == 0 && active.status == CallStatus::Connected;
+    let me_tile = CallParticipant {
+        identity: "local".into(),
+        sender: me.clone(),
+        speaking: false,
+        muted: active.muted,
+        video: active.local_video.clone(),
+    };
+    let my_image = state.avatar(&me.avatar_url);
+    let me_card = strip_tile(
+        ElementId::Name("strip-tile-me".into()),
+        &me_tile,
+        my_image,
+        avatar,
+        None,
+        &theme,
+    );
+    tiles = tiles.child(match seeing_agent.as_deref() {
+        Some(agent) => me_card.child(
+            div()
+                .absolute()
+                .top(px(6.0))
+                .right(px(6.0))
+                .child(seeing_badge(agent, &theme)),
+        ),
+        None => me_card,
+    });
 
-    // "Let <agent> see" (#1353): beside the camera while it is on in a call
-    // with an agent — the one switch for the agent's `vision_enabled`.
+    let elapsed = now_ms().saturating_sub(active.joined_at);
+    let status = if let Some(notice) = active.notice.clone() {
+        notice
+    } else if !humans_ringing.is_empty() && active.reachable.is_some() {
+        // "Ringing Bob's iPhone" / "X's Arbos isn't open — they'll see a missed call"
+        // (contract §8), kept while anyone is still being rung.
+        active.reachable.clone().unwrap_or_default()
+    } else if !humans_ringing.is_empty() {
+        ringing_line(&humans_ringing)
+    } else {
+        match &active.status {
+            CallStatus::Connecting => "Connecting…".into(),
+            CallStatus::Failed(why) => format!("Could not connect · {why}"),
+            CallStatus::Connected if active.participants.is_empty() => {
+                "Waiting for others to join…".into()
+            }
+            CallStatus::Connected => {
+                format!("{} · {}", active.call.kind.label_title(), mmss(elapsed))
+            }
+        }
+    };
+
+    // "Let <agent> see" (#1353): beside the camera while it is on in a call with an agent.
     let vision = active
         .camera
         .then(|| vision_agent(shell, active, cx))
         .flatten();
-
     let controls = div()
+        .flex_shrink_0()
         .flex()
         .items_start()
-        .justify_center()
-        .gap(px(36.0))
-        .pb(px(28.0))
+        .gap(px(18.0))
+        .pl(px(16.0))
         .child(
             round_button(
                 "call-mute",
@@ -377,11 +438,7 @@ pub fn screen(shell: &Shell, active: &ActiveCall, cx: &mut Context<Shell>) -> Di
                 } else {
                     "video.slash.fill"
                 },
-                if active.camera {
-                    "Camera on"
-                } else {
-                    "Camera off"
-                },
+                "Camera",
                 active.camera,
                 false,
                 &theme,
@@ -413,145 +470,90 @@ pub fn screen(shell: &Shell, active: &ActiveCall, cx: &mut Context<Shell>) -> Di
             ),
         );
 
-    let mut column = div()
-        .absolute()
-        .inset_0()
+    let group = div()
+        .relative()
+        .w_full()
+        .h(px(height))
+        .rounded(px(PANEL_RADIUS))
+        .bg(theme.surface_1)
+        .border_1()
+        .border_color(theme.border)
+        .p(px(10.0))
         .flex()
-        .flex_col()
-        .items_center()
-        .bg(theme.bg)
+        .items_stretch()
+        .child(tiles)
+        .child(controls)
+        // Collapse to the slim bar (the agents' in-call bar) — the bar brings it back.
         .child(
             div()
-                .w_full()
-                .h(px(HEADER_HEIGHT))
-                .flex_shrink_0()
+                .id("call-collapse")
+                .absolute()
+                .top(px(6.0))
+                .left(px(6.0))
+                .size(px(22.0))
+                .rounded(px(6.0))
                 .flex()
-                .items_center()
-                .px(px(12.0))
-                .window_drag()
-                .child(
-                    div()
-                        .id("call-collapse")
-                        .size(px(32.0))
-                        .rounded(px(8.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .cursor_pointer()
-                        .map(|el| highlight::button(el, &theme))
-                        .child(sf_symbols::glyph("chevron.down", 16.0, theme.text_muted))
-                        .on_mouse_down(
-                            gpui::MouseButton::Left,
-                            cx.listener(|this, _, _, cx| {
-                                cx.stop_propagation();
-                                this.state.update(cx, |s, cx| s.toggle_call_expanded(cx));
-                            }),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .text_center()
-                        .text_size(px(TEXT_SMALL))
-                        .text_color(theme.text_muted)
-                        .child(title),
-                )
-                .child(div().size(px(32.0))),
-        )
-        .child(
-            div()
-                .flex_1()
-                .min_h_0()
-                .w_full()
-                .flex()
-                .flex_col()
                 .items_center()
                 .justify_center()
-                .px(px(40.0))
-                .py(px(12.0))
-                .child(grid),
+                .cursor_pointer()
+                .map(|el| highlight::button(el, &theme))
+                .child(sf_symbols::glyph("chevron.up", 12.0, theme.text_faint))
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.state.update(cx, |s, cx| s.toggle_call_expanded(cx));
+                    }),
+                ),
         );
-    // Name under the single big tile, like the iPhone.
-    if n <= 1 {
-        let name = remote
-            .first()
-            .map(|(p, _)| p.sender.display_name())
-            .or_else(|| ringing.first().map(|(s, _)| s.display_name()))
-            .unwrap_or_else(|| "You".into());
-        column = column.child(
+
+    // The handle: a thin band with a pill; dragging it resizes the strip against the chat.
+    let handle = div()
+        .id("call-strip-handle")
+        .w_full()
+        .h(px(strip_layout::HANDLE_HEIGHT))
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor(gpui::CursorStyle::ResizeRow)
+        // hover-fill: exception handle
+        .hover(|s| s.bg(Theme::with_alpha(theme.primary, 0.12)))
+        .child(div().w(px(40.0)).h(px(4.0)).rounded_full().bg(theme.border))
+        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_drag(StripResizeDrag, |_, _, _, cx| {
+            cx.new(|_| StripResizeDragGhost)
+        })
+        .on_drag_move(cx.listener(
+            |this, ev: &gpui::DragMoveEvent<StripResizeDrag>, window, cx| {
+                // The handle follows the pointer: grow by how far the pointer is below its
+                // middle, shrink by how far above.
+                let middle = f32::from(ev.bounds.origin.y) + f32::from(ev.bounds.size.height) / 2.0;
+                let dy = f32::from(ev.event.position.y) - middle;
+                let column = f32::from(window.viewport_size().height);
+                this.state.update(cx, |s, cx| {
+                    let next = strip_layout::height_after_drag(s.call_strip_height, dy, column);
+                    s.set_call_strip_height(next, cx);
+                });
+            },
+        ));
+
+    div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .px(px(12.0))
+        .pt(px(8.0))
+        .child(group)
+        .child(
             div()
-                .pt(px(6.0))
-                .text_size(px(TEXT_BODY + 7.0))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme.text)
-                .child(name),
-        );
-    }
-    let humans_ringing: Vec<String> = ringing
-        .iter()
-        .filter(|(s, _)| s.kind != "agent")
-        .map(|(s, _)| s.display_name())
-        .collect();
-    let sub = if let Some(notice) = active.notice.clone() {
-        Some(notice)
-    } else if !humans_ringing.is_empty() && active.reachable.is_some() {
-        // "Robert's Arbos isn't open — they'll see a missed call" / "Ringing
-        // Robert's iPhone" (contract §8, same words as the iPhone app) — kept while
-        // anyone is still being rung, not only while the room is empty.
-        active.reachable.clone()
-    } else if !humans_ringing.is_empty() {
-        Some(ringing_line(&humans_ringing))
-    } else if waiting {
-        Some("Waiting for others to join…".into())
-    } else if let CallStatus::Failed(_) = active.status {
-        Some("Hang up and try again.".into())
-    } else {
-        None
-    };
-    if let Some(sub) = sub {
-        column = column.child(
-            div()
+                .w_full()
                 .pt(px(4.0))
-                .px(px(40.0))
                 .text_center()
-                .text_size(px(TEXT_BODY))
+                .text_size(px(TEXT_TINY))
                 .text_color(theme.text_muted)
-                .child(sub),
-        );
-    }
-    // My small self-view in the corner when others are here and my camera is on.
-    if n >= 1 && active.local_video.is_some() {
-        column = column.child(
-            div()
-                .absolute()
-                .right(px(24.0))
-                .bottom(px(140.0))
-                .w(px(180.0))
-                .h(px(135.0))
-                .child({
-                    let me_small = tile(
-                        ElementId::Name("tile-me-small".into()),
-                        &me_tile,
-                        my_image,
-                        active.local_video.clone(),
-                        "You".into(),
-                        false,
-                        &theme,
-                    );
-                    match seeing_agent.as_deref() {
-                        Some(agent) => me_small.child(
-                            div()
-                                .absolute()
-                                .top(px(8.0))
-                                .right(px(8.0))
-                                .child(seeing_badge(agent, &theme)),
-                        ),
-                        None => me_small,
-                    }
-                }),
-        );
-    }
-    column.child(div().h(px(24.0))).child(controls)
+                .child(status),
+        )
+        .child(handle)
 }
 
 /// The in-call bar under the header while the call screen is collapsed: the
@@ -1076,4 +1078,93 @@ pub fn ring_card(shell: &Shell, call: &Call, sender: &Sender, cx: &mut Context<S
             crate::ui::frost::MENU_BLUR,
             card,
         )))
+}
+
+#[cfg(test)]
+mod strip_tests {
+    //! Jacob, 2026-10-23 ("call + chat"): the call is a strip at the top of the open chat
+    //! column — present only while my call is live there, resizable within bounds by its
+    //! handle, gone when the call ends; the sidebar is never part of it.
+
+    use super::strip_layout::{
+        avatar_size, clamp_height, height_after_drag, max_height, shown, DEFAULT_HEIGHT,
+        MIN_HEIGHT, TRANSCRIPT_MIN,
+    };
+    use crate::app::{ActiveCall, CallStatus};
+    use crate::model::{Call, CallKind};
+
+    fn live_call(space: &str) -> ActiveCall {
+        ActiveCall {
+            call: Call {
+                call_id: "c1".into(),
+                chat_id: space.into(),
+                project_id: "people".into(),
+                kind: CallKind::Voice,
+                ..Default::default()
+            },
+            status: CallStatus::Connected,
+            muted: false,
+            camera: false,
+            participants: Vec::new(),
+            local_video: None,
+            joined_at: 0,
+            expanded: true,
+            notice: None,
+            outgoing: true,
+            reachable: None,
+            agent_seeing: false,
+        }
+    }
+
+    #[test]
+    fn the_strip_is_only_in_the_column_of_my_live_call() {
+        let call = live_call("chat_product_launch");
+        assert!(shown(Some(&call), "chat_product_launch"));
+        assert!(
+            !shown(Some(&call), "chat_other"),
+            "another chat's column stays plain chat"
+        );
+        assert!(!shown(None, "chat_product_launch"), "no call, no strip");
+        let mut collapsed = live_call("chat_product_launch");
+        collapsed.expanded = false;
+        assert!(
+            !shown(Some(&collapsed), "chat_product_launch"),
+            "collapsed = the slim bar"
+        );
+        let mut ended = live_call("chat_product_launch");
+        ended.call.ended_at = Some(1);
+        assert!(
+            !shown(Some(&ended), "chat_product_launch"),
+            "hang-up collapses the strip"
+        );
+    }
+
+    #[test]
+    fn the_handle_resizes_within_bounds() {
+        let column = 780.0;
+        assert_eq!(clamp_height(DEFAULT_HEIGHT, column), DEFAULT_HEIGHT);
+        assert_eq!(
+            height_after_drag(DEFAULT_HEIGHT, 40.0, column),
+            DEFAULT_HEIGHT + 40.0
+        );
+        assert_eq!(
+            height_after_drag(DEFAULT_HEIGHT, -500.0, column),
+            MIN_HEIGHT
+        );
+        assert_eq!(
+            height_after_drag(DEFAULT_HEIGHT, 5000.0, column),
+            column - TRANSCRIPT_MIN
+        );
+        assert!(
+            max_height(column) + TRANSCRIPT_MIN <= column,
+            "the transcript keeps its room"
+        );
+        // A tiny window: the strip never goes under its minimum, whatever the column.
+        assert_eq!(max_height(200.0), MIN_HEIGHT);
+        assert_eq!(clamp_height(999.0, 200.0), MIN_HEIGHT);
+        // Avatars follow the strip height between sensible sizes.
+        assert_eq!(avatar_size(MIN_HEIGHT), 28.0);
+        assert_eq!(avatar_size(DEFAULT_HEIGHT), 68.0);
+        assert_eq!(avatar_size(600.0), 96.0);
+    }
 }
