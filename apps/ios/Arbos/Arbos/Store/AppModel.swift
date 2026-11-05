@@ -531,6 +531,9 @@ final class AppModel: ObservableObject {
     /// Opening only views: an archived row stays in Hidden chats until Unarchive or a new
     /// message from someone else (`unarchiveOnActivity`) brings it back.
     func open(chat: Chat) {
+        // Opening a chat the ordinary way leaves any agent-to-agent exchange closed again
+        // (Mac `select_tab`). What opens one sets `crossRevealedChat` after calling this.
+        crossRevealedChat = nil
         path = [.chat(chatId: chat.id, projectId: chat.projectId)]
     }
 
@@ -1129,6 +1132,11 @@ final class AppModel: ObservableObject {
         } else {
             pendingOpen = (chatId, projectId)
         }
+        // A "message from another project" banner announced an agent-to-agent exchange,
+        // which the transcript leaves out by default (Jacob, 2026-11-04). The tap is what
+        // opens it. `retryPendingOpen` comes back through here once the docs have loaded,
+        // so a deferred open gets the same answer off the messages it can see by then.
+        crossRevealedChat = messages(of: chatId).contains(where: \.isAgentCrossMessage) ? chatId : nil
     }
 
     /// What the chat header's connection pill says for `chatId`, or nil when the
@@ -3551,6 +3559,7 @@ final class AppModel: ObservableObject {
     }
 
     func open(peopleChat chat: PeopleChat) {
+        crossRevealedChat = nil
         path = [.chat(chatId: chat.id, projectId: peopleSlot)]
     }
 
@@ -4499,6 +4508,10 @@ final class AppModel: ObservableObject {
     /// A message the next ChatView should scroll to and tint (a search result opened
     /// from the bottom bar, [feedback iphone-bottom-search-bar-2026-10-25]).
     @Published var pendingReveal: MessageReveal?
+    /// The chat whose agent-to-agent exchange is on screen. The transcript leaves that
+    /// exchange out by default (Jacob, 2026-11-04); the notification that announced it, or
+    /// a search hit on one of its rows, opens it here, and the next chat opened clears it.
+    @Published var crossRevealedChat: Id?
     /// The Settings page the next Settings sheet lands on (a Settings row opened
     /// from search, [feedback search-settings-ios-2026-10-26]): Home presents the
     /// sheet when this is set and clears it when the sheet closes.
