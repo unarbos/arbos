@@ -183,6 +183,33 @@ pub fn send_tool_mode(override_file: &std::path::Path) -> SendTool {
         .and_then(|s| parse_send_tool(&s))
         .unwrap_or(SendTool::On)
 }
+/// Override file for the chat-text limit: `.arbos/chat-text-max`, a number of characters or `off`,
+/// in the project's state dir first, then box-wide.
+pub const CHAT_TEXT_MAX_FILE: &str = "chat-text-max";
+
+/// Characters one chat message may carry, or `None` for **no limit** — the default, because
+/// nothing in the box bounds one: `hook_send_message` never measures the text, `ChatDoc` stores
+/// it whole, and an update too big for one relay frame (`arbos_core::wire::ROW_MAX`) is cut into
+/// frames that fit (#2762, #2765) — a cut Loro can make inside a long text insert. The 51k-char
+/// table of Jacob's Test5 round 5 (bug Q) is about 5 % of one frame.
+///
+/// Set a number only to hold a box below that; it is then the figure the `send_message`
+/// description carries and the figure its refusal names, so the model quotes a real limit
+/// instead of inventing one. Files first (an A/B flips it with no restart), then
+/// `ARBOS_CHAT_TEXT_MAX`; `off`, `0` or anything unparseable means no limit.
+pub fn chat_text_max_with(files: &[PathBuf]) -> Option<usize> {
+    let raw = files
+        .iter()
+        .find_map(|f| {
+            std::fs::read_to_string(f)
+                .ok()
+                .map(|s| s.trim().to_owned())
+                .filter(|s| !s.is_empty())
+        })
+        .or_else(|| std::env::var("ARBOS_CHAT_TEXT_MAX").ok())?;
+    raw.trim().parse::<usize>().ok().filter(|n| *n > 0)
+}
+
 /// Box-local override of the compact memory pack: `<work_root>/.arbos/memory-pack-compact`, `on` or `off`.
 pub const MEMORY_PACK_COMPACT_FILE: &str = "memory-pack-compact";
 /// Box-local override of the fast memory walk: `<work_root>/.arbos/memory-walk-fast`, `on` or `off`.
@@ -573,6 +600,12 @@ impl Config {
     /// The model `research` jobs run on (cost knob 1); `None` = the subagent model.
     pub fn research_worker_model(&self) -> Option<String> {
         research_worker_model_with(&self.knob_files(RESEARCH_WORKER_MODEL_FILE))
+    }
+
+    /// Characters one chat message may carry; `None` (the default) = no limit. Read per call and
+    /// per `tools/list`, so the description and the refusal always carry the same figure.
+    pub fn chat_text_max(&self) -> Option<usize> {
+        chat_text_max_with(&self.knob_files(CHAT_TEXT_MAX_FILE))
     }
 
     /// A knob's override files in precedence order: this project's `.arbos/<name>` (so an A/B can

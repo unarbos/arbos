@@ -31,7 +31,19 @@ const MAX_HITS: i64 = 20;
 const PAGE_TOKENS_CHARS: usize = 32_000; // ≈ 8k tokens
 const DRAFT_CHANNELS: &[&str] = &["email", "slack", "telegram", "whatsapp", "sms"];
 
-fn tools() -> Value {
+/// The `send_message` description. `chat_text_max` is this box's configured character limit for
+/// one chat message, or `None` for no limit — which is the default and the truth about the box:
+/// see `config::chat_text_max_with`. The figure here is the one the refusal names, so the model
+/// has a real number to quote instead of the invented one of Test5 round 5 (bug Q).
+fn send_message_description(chat_text_max: Option<usize>) -> String {
+    let size = match chat_text_max {
+        Some(max) => format!("One message holds at most {max} characters on this box; over that the call is refused and names the limit."),
+        None => "There is no size limit: one call posts the whole thing, however long — a 1,500-row markdown table goes in one message. Never split an answer because you believe a limit exists, and never tell the user one does.".to_owned(),
+    };
+    format!("Message another agent, or post to this chat. `to` = its name, @handle or id (your owner's agents; another owner's only when they allowed it). The text lands in that agent's own chat and its reply comes back to you here — never write `@name …` as a bubble in this chat to reach them. Inside a group chat, omit `to` to speak to the other agents in the group. Without `to` outside a group, the text is posted in this chat for the user, as its own bubble. {size}")
+}
+
+fn tools(chat_text_max: Option<usize>) -> Value {
     let mut list = json!([
         { "name": "context_search", "description": "Search this agent's memory tree: raw events (every past message, tool call and result) plus index cards of episodes and threads. Returns ids for context_open / context_around. Scoped to what this chat may see.",
           "inputSchema": { "type": "object", "properties": { "query": { "type": "string" }, "limit": { "type": "integer" } }, "required": ["query"] } },
@@ -61,7 +73,7 @@ fn tools() -> Value {
           "inputSchema": { "type": "object", "properties": { "name": { "type": "string" }, "value": { "type": ["string","null"] } }, "required": ["name"] } },
         { "name": "recall", "description": "Read a note saved with remember.", "inputSchema": { "type": "object", "properties": { "name": { "type": "string" } }, "required": ["name"] } },
         { "name": "projects_list", "description": "List the user's other Projects (name, state).", "inputSchema": { "type": "object", "properties": {} } },
-        { "name": "send_message", "description": "Message another agent. `to` = its name, @handle or id (your owner's agents; another owner's only when they allowed it). The text lands in that agent's own chat and its reply comes back to you here — never write `@name …` as a bubble in this chat to reach them. Inside a group chat, omit `to` to speak to the other agents in the group. Without `to`, the progress-note `send_message(text)` is for the user in this chat only.",
+        { "name": "send_message", "description": send_message_description(chat_text_max),
           "inputSchema": { "type": "object", "properties": { "to": { "type": "string", "description": "Agent name, @handle or id" }, "text": { "type": "string" } }, "required": ["text"] } },
         { "name": "ask_user", "description": "Ask the user one question and wait; the answer arrives as the next message. Pass `widget` for a typed answer (choice, multi_select, text, date, form).",
           "inputSchema": { "type": "object", "properties": { "question": { "type": "string" }, "widget": widget_schema() }, "required": ["question"] } },
@@ -944,7 +956,7 @@ async fn mcp(State(a): State<S>, headers: HeaderMap, Json(req): Json<Value>) -> 
         "initialize" => json!({ "protocolVersion": "2025-03-26", "capabilities": { "tools": {} }, "serverInfo": { "name": "arbos", "version": env!("CARGO_PKG_VERSION") } }),
         "notifications/initialized" | "notifications/cancelled" => return StatusCode::ACCEPTED.into_response(),
         "ping" => json!({}),
-        "tools/list" => json!({ "tools": tools() }),
+        "tools/list" => json!({ "tools": tools(a.cfg.chat_text_max()) }),
         "tools/call" => {
             let name = params.get("name").and_then(Value::as_str).unwrap_or("");
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
@@ -1015,6 +1027,131 @@ mod tests {
         assert_eq!(clip("abc", 8), "abc");
         assert_eq!(clip("日日", 8), "日日");
         assert_eq!(clip("日日", 2), "日日");
+    }
+
+    /// A markdown table of `rows` data rows, in the shape the apps draw.
+    fn sensor_table(rows: usize) -> String {
+        let mut t = String::from("| # | sensor | reading | note |\n| --- | --- | --- | --- |");
+        for i in 1..=rows {
+            t.push_str(&format!(
+                "\n| {i} | sensor-{i:04} | {}.{:02} | steady |",
+                i % 90,
+                i % 100
+            ));
+        }
+        t
+    }
+
+    /// Jacob, Test5 round 5 (bug Q, r5giant 20:22). The user asked for a 1,500-row table in one
+    /// chat message. The turn built it in a `codemode` script and posted it with
+    /// `mcp__arbos__send_message({text})` — the only text surface a script has, since the
+    /// harness `send_message` is direct-only. The call was refused ("say who to message …") and
+    /// the turn told the user the table was too big for one chat message, and that an earlier
+    /// 200-row table had therefore needed four. Both claims were invented.
+    ///
+    /// Nothing bounds a bubble's text, so the whole table goes out as one row, inside one relay
+    /// frame, and a history fetch afterwards is healthy.
+    #[tokio::test]
+    async fn a_fifty_one_thousand_character_table_posts_as_one_row_in_this_chat() {
+        let (agent, root) = crate::status::tests::test_agent().await;
+        let chat = "01TESTCHATBIGTABLE00000001";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().expect("the held turn");
+            agent.test_open_row(&host, t).await;
+        }
+
+        let table = sensor_table(1_500);
+        let chars = table.chars().count();
+        assert!(
+            chars >= 51_000,
+            "the round-5 table was 51,372 chars; this one is {chars}"
+        );
+        let out = call_tool(&agent, "send_message", &json!({ "text": table })).await;
+        assert!(out.get("isError").is_none(), "the table was refused: {out}");
+
+        let rows: Vec<arbos_core::doc::MessageView> = {
+            let h = host.lock().await;
+            h.doc
+                .messages()
+                .into_iter()
+                .filter(|m| m.has_visible_content())
+                .collect()
+        };
+        assert_eq!(rows.len(), 1, "one message, one row: {} rows", rows.len());
+        assert_eq!(rows[0].text(), table, "the row is not the table verbatim");
+
+        // The one real bound on the path, for scale: a push frame. One table is a few per cent
+        // of it, and a backlog over it is cut into frames that fit (#2762) rather than refused.
+        let update = {
+            let h = host.lock().await;
+            h.doc.export_updates_since(&loro::VersionVector::default())
+        };
+        assert!(
+            update.len() <= arbos_core::wire::ROW_MAX,
+            "{chars} chars exported to {} bytes, over the {} a frame holds",
+            update.len(),
+            arbos_core::wire::ROW_MAX
+        );
+
+        // A history fetch afterwards is healthy: a message past one page comes back as its head
+        // plus a handle for `peek`, the same way every large output does, not as an error.
+        let fetched = call_tool(
+            &agent,
+            "chat_messages",
+            &json!({ "chat_id": chat, "message_id": rows[0].id }),
+        )
+        .await;
+        assert!(fetched.get("isError").is_none(), "{fetched}");
+        let body: Value = serde_json::from_str(
+            fetched["content"][0]["text"]
+                .as_str()
+                .expect("one text part"),
+        )
+        .expect("the row is json");
+        let head = body["text"].as_str().unwrap_or_default();
+        assert!(
+            head.starts_with("| # | sensor | reading | note |"),
+            "the fetch lost the head of the table"
+        );
+        assert!(
+            head.contains(&format!("of {chars} chars")),
+            "the fetch must name the message's true size: {head:?}"
+        );
+        assert!(
+            body["handle"].as_str().is_some_and(|h| !h.is_empty()),
+            "a message past one page must come back with a handle to peek: {body}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The description is where the model learns whether a limit exists, so it states the truth
+    /// either way: no number when there is none, the exact number when an operator set one.
+    #[test]
+    fn the_send_message_description_names_a_limit_only_when_one_exists() {
+        let none = send_message_description(None);
+        assert!(none.contains("There is no size limit"), "{none}");
+        assert!(
+            none.contains("posted in this chat for the user"),
+            "the no-`to` behaviour is undocumented: {none}"
+        );
+        let capped = send_message_description(Some(4_000));
+        assert!(
+            capped.contains("at most 4000 characters on this box"),
+            "{capped}"
+        );
+        assert!(
+            !capped.contains("no size limit"),
+            "a capped box must not also claim there is none: {capped}"
+        );
+        let listed = tools(Some(4_000));
+        let spec = listed
+            .as_array()
+            .and_then(|a| a.iter().find(|t| t["name"] == "send_message"))
+            .expect("send_message is listed");
+        assert_eq!(spec["description"], json!(capped));
     }
 
     /// D69: a subagent-role session may not speak for the Project to other Projects.

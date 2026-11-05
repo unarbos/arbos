@@ -128,8 +128,8 @@ impl Agent {
     }
 
     /// The `send_message` tool. Inside a group chat with no `to` (or a `to` that names a
-    /// participant) the words go to the group as before; otherwise `to` names an agent and the
-    /// text is delivered into that agent's own chat.
+    /// participant) the words go to the group as before; with `to` they are delivered into that
+    /// agent's own chat; with no `to` outside a group they are a bubble in this chat.
     pub async fn send_message_from_turn(
         self: &Arc<Self>,
         to: Option<&str>,
@@ -148,10 +148,45 @@ impl Agent {
         }
         match to {
             Some(t) => self.agent_send_from_turn(t, text).await,
-            None => Err(anyhow!(
-                "say who to message: `to` is an agent's name, @handle or id (this chat is not a group)"
-            )),
+            None => self.post_to_this_chat_from_turn(text).await,
         }
+    }
+
+    /// `send_message(text)` with no `to` outside a group: the words are a bubble in the chat this
+    /// turn runs in, which is what the tool's own description has always promised.
+    ///
+    /// Jacob, Test5 round 5 (bug Q, r5giant 20:22): a `codemode` script built a 1,500-row,
+    /// 51,372-character markdown table and posted it with `mcp__arbos__send_message({text})`.
+    /// That call went down the agent-to-agent branch, refused the message for want of a `to`,
+    /// and the turn told the user the table was too big for one chat message — and that an
+    /// earlier 200-row table had needed four. Neither was true. No size limit exists unless an
+    /// operator sets one (`Config::chat_text_max`, enforced by `hook_send_message` so both text
+    /// surfaces refuse alike); the harness tool of the same name reaches this very path through
+    /// `/hook/send_message`, but scripts may not call it (`DIRECT_ONLY_TOOLS`), which left the
+    /// MCP tool as the only text surface a script had.
+    ///
+    /// The row itself is written by `hook_send_message`, whose host lookup
+    /// (`sync.host(&t.chat_id)`) refuses with "no room for this chat" when the room is shut.
+    /// That arm is unreachable while rooms never close, and #2395 makes it reachable, so this
+    /// path reopens the room through `Agent::room` (host-or-`open_room`) first, outside every
+    /// lock, rather than leaving a closed room to swallow the answer.
+    async fn post_to_this_chat_from_turn(self: &Arc<Self>, text: &str) -> Result<String> {
+        let chars = text.chars().count();
+        let chat_id = self
+            .turn
+            .lock()
+            .await
+            .as_ref()
+            .map(|t| t.chat_id.clone())
+            .ok_or_else(|| anyhow!("no turn is running"))?;
+        self.room(&chat_id).await?;
+        self.hook_send_message(text, None, None)
+            .await
+            .map_err(|e| anyhow!(e))?;
+        Ok(json!({ "status": "posted", "chars": chars,
+            "note": "Posted in this chat as its own bubble. Do not repeat it; anything you write outside send_message is not shown.",
+        })
+        .to_string())
     }
 
     /// Deliver `text` to agent `to` through the relay and write the hand-off row in the chat
@@ -745,6 +780,94 @@ mod tests {
         assert!(agent_reply_prompt("lane-b", "done", "hello", "fine")
             .contains("[Arbos] lane-b replied"));
         assert!(agent_reply_prompt("lane-b", "empty", "hello", "").contains("wrote nothing back"));
+    }
+
+    /// A box held below a limit by its operator: the refusal names that number and nothing else,
+    /// so the sentence the model writes for the user carries the true figure. Both text surfaces
+    /// refuse alike, because `hook_send_message` is the single writer behind them. Without the
+    /// file there is no limit, and the same text posts (bug Q, Test5 round 5).
+    #[tokio::test]
+    async fn a_configured_limit_is_named_in_the_refusal_and_is_absent_by_default() {
+        let (agent, root) = crate::status::tests::test_agent().await;
+        let chat = "01TESTCHATTEXTLIMIT0000001";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().expect("the held turn");
+            agent.test_open_row(&host, t).await;
+        }
+        let text = "x".repeat(5_000);
+
+        assert_eq!(agent.cfg.chat_text_max(), None, "no limit by default");
+        agent
+            .send_message_from_turn(None, &text)
+            .await
+            .expect("with no limit configured, 5,000 characters post");
+
+        std::fs::write(agent.cfg.state_dir.join("chat-text-max"), "4000").unwrap();
+        assert_eq!(agent.cfg.chat_text_max(), Some(4_000));
+        let err = agent
+            .send_message_from_turn(None, &text)
+            .await
+            .expect_err("over the configured limit")
+            .to_string();
+        assert!(
+            err.contains("5000 characters is over this box's configured chat-message limit of 4000 characters"),
+            "{err}"
+        );
+        assert!(
+            err.contains("tell the user the limit is 4000 characters"),
+            "the refusal must hand the model the figure to quote: {err}"
+        );
+        assert_eq!(
+            agent.hook_send_message(&text, None, None).await,
+            Err(crate::agent::chat_text_over_limit(5_000, 4_000)),
+            "the harness surface must refuse with the same figure"
+        );
+
+        std::fs::write(agent.cfg.state_dir.join("chat-text-max"), "off").unwrap();
+        assert_eq!(agent.cfg.chat_text_max(), None, "`off` is no limit");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// #2395 closes the rooms agentd never releases today, which turns every "no open room" arm
+    /// from dead code into a live path — the shape that shipped broken twice (#2757, #2759). The
+    /// row here is written by `hook_send_message`, whose own lookup refuses a shut room, so this
+    /// path reopens the room first and the answer still lands.
+    #[tokio::test]
+    async fn a_closed_room_is_reopened_instead_of_swallowing_the_message() {
+        let (agent, root) = crate::status::tests::test_agent().await;
+        let chat = "01TESTCHATREOPENPOST000001";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().expect("the held turn");
+            agent.test_open_row(&host, t).await;
+        }
+        agent.sync.persist(&host).await.unwrap();
+        drop(host);
+        agent.sync.close_room(chat).await;
+        assert!(agent.sync.host(chat).await.is_none(), "the room is shut");
+
+        agent
+            .send_message_from_turn(None, "One message, as asked.")
+            .await
+            .expect("a shut room is reopened, not an error the user reads as a limit");
+
+        let reopened = agent.sync.host(chat).await.expect("the room is open again");
+        let posted: Vec<String> = {
+            let h = reopened.lock().await;
+            h.doc
+                .messages()
+                .into_iter()
+                .filter(|m| m.has_visible_content())
+                .map(|m| m.text())
+                .collect()
+        };
+        assert_eq!(posted, vec!["One message, as asked.".to_owned()]);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Arbonites, 2026-10-28 (01M627S7…): a hand-off row in a group came out as bare

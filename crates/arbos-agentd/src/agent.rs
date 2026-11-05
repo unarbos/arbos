@@ -6926,6 +6926,18 @@ impl Agent {
         if text.is_empty() && activity.is_none() {
             return Err("nothing to send".into());
         }
+        // Nothing in the box bounds a bubble's text (see `config::chat_text_max_with`), so this
+        // refuses only on a box whose operator set a limit — and then it names the figure, which
+        // is the figure the tool description carries. Checked here because this is the single
+        // writer behind both text surfaces: the MCP `send_message` and the harness tool's
+        // `/hook/send_message`. Jacob's Test5 round 5, bug Q: the model invented a limit for a
+        // 51,372-character table because nothing ever told it one.
+        if let Some(max) = self.cfg.chat_text_max() {
+            let chars = text.chars().count();
+            if chars > max {
+                return Err(chat_text_over_limit(chars, max));
+            }
+        }
         // Jacob, Test5 T7: a bubble that says how much longer the work will take is refused —
         // no clock in the box measures that, so the figure is invented however it is hedged.
         if promises_a_time(text) {
@@ -10086,6 +10098,16 @@ pub(crate) fn wordless_row(m: &arbos_core::doc::MessageView) -> (bool, bool) {
     (wordless, only_empty)
 }
 
+/// The refusal for a chat message over this box's configured character limit. It names the limit
+/// three times over — the measurement, the way out, and the sentence to write for the user — so a
+/// turn that hits it quotes a real figure instead of inventing one (Test5 round 5, bug Q).
+/// `config::chat_text_max_with` sets the limit, and there is none by default.
+pub(crate) fn chat_text_over_limit(chars: usize, max: usize) -> String {
+    format!(
+        "{chars} characters is over this box's configured chat-message limit of {max} characters: post it in parts of at most {max} characters each, and tell the user the limit is {max} characters"
+    )
+}
+
 /// Take a row the box wrote out of the chat, without deleting it.
 ///
 /// **Never `delete_message` on a row that may have been pushed.** The relay refuses a removal
@@ -10952,10 +10974,12 @@ pub const ROUTER_PROMPT: &str = include_str!("../prompts/router.md");
 /// with the `post_chart` clause of [feedback chart-post-tool-agentd-2026-10-26] on top of the
 /// secrets rewrite of [feedback secret-handoff-agentd-2026-10-26] — measured together at
 /// 29 062 bytes, set once; 29.3 KB on 2026-11-04 for the 160-byte "never promise a time" rule
-/// of Jacob's Test5 T7, measured at 29 260). The unit test fails when a prompt edit crosses it,
-/// so growth is a decision, not drift.
+/// of Jacob's Test5 T7, measured at 29 260; 30.0 KB on 2026-11-05 for the message-size rule of
+/// Jacob's Test5 round 5 bug Q — one message is as long as the answer needs, and no limit is
+/// stated or inferred that the `send_message` description does not name — measured at 29 983).
+/// The unit test fails when a prompt edit crosses it, so growth is a decision, not drift.
 #[cfg(test)]
-pub const BASE_PROMPT_MAX_BYTES: usize = 29_300;
+pub const BASE_PROMPT_MAX_BYTES: usize = 30_000;
 
 /// The byte-stable part of the main agent's system prompt: core, then routing, then code mode
 /// when it is on. Everything per project (folder, model, instructions, memory) comes after it.
