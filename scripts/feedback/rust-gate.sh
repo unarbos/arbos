@@ -33,13 +33,25 @@ disk_floor_check() {
   # idle worker checkouts) and re-reads free space — #1466's iOS half hit ENOSPC at 17 GB free on
   # 2026-10-23 20:4x. Under MIN_FREE_GB the run is refused as an infrastructure error (the poller retries
   # next tick) and the loop journal gets an ALERT line.
-  local free
+  local free swept
   free=$(df -g /System/Volumes/Data 2>/dev/null | awk 'NR==2 {print $4}')
-  [ -n "$free" ] || return 0
+  # An unreadable df is not "enough disk", and it has to refuse rather than carry on loudly. Carrying
+  # on was tried and measured: this line reaches `status`, and the poller stores it in the cursor as
+  # mac_tail — but both renderers of mac_tail are guarded on `mac == "fail"`, and this case only
+  # happens on a run that then goes green, so on the one path it occurs on it reaches no human at all.
+  # Refusing puts it where someone sees it: rc 2 is `infra`, which the poller logs with the body
+  # (feedback_poller.py:3199) and retries next tick. A floor that cannot be read stalling the queue
+  # visibly beats it being skipped invisibly — the ENOSPC it exists to prevent (#1466, 2026-10-23)
+  # costs more than a tick, and a renamed volume is then a loud one-line fix rather than a silence.
+  case "$free" in
+    *[!0-9]*|"") echo "== disk: cannot read free space on /System/Volumes/Data (df gave '${free}'); the ${MIN_FREE_GB:-6} GiB floor could NOT be checked, so this run is refused rather than started blind"
+                 return 1 ;;
+  esac
   if [ "$free" -lt "${PRUNE_FREE_GB:-40}" ]; then
     echo "== disk: ${free} GiB free on the Mac (< ${PRUNE_FREE_GB:-40}); running arbos-mac-clean.sh --if-low first"
     sudo -n /bin/bash /usr/local/bin/arbos-mac-clean.sh --if-low >/dev/null 2>&1 || true
-    free=$(df -g /System/Volumes/Data 2>/dev/null | awk 'NR==2 {print $4}')
+    swept=$(df -g /System/Volumes/Data 2>/dev/null | awk 'NR==2 {print $4}')
+    case "$swept" in *[!0-9]*|"") ;; *) free=$swept ;; esac
     echo "== disk: ${free} GiB free after the sweep"
   fi
   if [ "$free" -lt "${MIN_FREE_GB:-6}" ]; then
@@ -156,6 +168,13 @@ case "$cmd" in
       bash "$HOME/arbos-gate/ios-gate.sh" "$mac" "$mode"; s=$?
       echo "== done rc=$s"
       finish "$s"
+    fi
+    # `start-batch <id> <tree> 0` without `full` compiles nothing and used to reach "== done rc=0", so
+    # `status` answered `ok` for a run that checked the tree in no way at all. A gate that measured
+    # nothing is an infrastructure error (the poller retries), never a pass.
+    if [ "$mode" != "full" ] && [ "$mac" != "1" ]; then
+      echo "== refusing: neither the release build (3rd arg 1) nor the full suite (4th arg full) was asked for — this run would check nothing"
+      finish 2
     fi
     take_slot "gate-mac-$id"
     cd "$repo" || finish 2

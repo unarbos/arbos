@@ -66,7 +66,11 @@ key 'keystroke "c" using command down'; sleep 1
 if [[ "$(pbpaste 2>/dev/null)" != *"$TEXT"* ]]; then
   cannot_drive "keystrokes did not reach the composer"
 fi
-key 'key code 36'   # Enter
+# The one keystroke this smoke exists to send is the one whose result must be read: an Enter that
+# never arrived leaves the app trivially alive, and "ALIVE after typing + Enter" — which goes into the
+# release job's step summary as the evidence that P0 #1208 has not come back — would be printed by a
+# run that pressed nothing.
+key 'key code 36' || cannot_drive "the Enter keystroke was blocked"   # Enter
 sleep 4
 if kill -0 "$PID" 2>/dev/null; then
   echo "== enter smoke: ALIVE after typing + Enter"
