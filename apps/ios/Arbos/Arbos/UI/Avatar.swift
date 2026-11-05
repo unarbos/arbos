@@ -112,8 +112,8 @@ struct AgentAvatar: View {
     }
 }
 
-/// An agent's uploaded / generated picture, through `AvatarImageCache` (one download per
-/// URL, URLCache behind it). While a *new* URL loads (the owner just changed the picture:
+/// An agent's, group's or server's uploaded / generated picture, through `AvatarImageCache`
+/// (one download per URL, kept on disk). While a *new* URL loads (the owner just changed the picture:
 /// the version in the URL moved) the picture last shown stays up — the leaf placeholder is
 /// drawn only when nothing has ever loaded. Jacob, 2026-10-25: the leaf flashing between the
 /// old and the new picture read as "sometimes the old pfp, sometimes the new one".

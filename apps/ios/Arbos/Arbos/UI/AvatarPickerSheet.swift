@@ -652,10 +652,7 @@ struct AvatarPickerSheet: View {
             }
         case .group(let id):
             if let key = people?.imageKey, let url = model.blobURL(projectId: "\(peopleSlot):\(id)", key: key) {
-                AsyncImage(url: url) { phase in
-                    if let image = phase.image { image.resizable().scaledToFill() } else { Circle().fill(mutedDisc) }
-                }
-                .frame(width: 114, height: 114).clipShape(Circle())
+                AgentPicture(url: url.absoluteString, size: 114) { Circle().fill(mutedDisc) }
             } else if let leaf = people?.leafPick {
                 LeafAvatar(pick: leaf, size: 114)
             } else {

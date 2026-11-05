@@ -2049,8 +2049,18 @@ final class AppModel: ObservableObject {
         // pre-#1813 cache held the owner-only blob URL — Jacob's relaunch leaf, 2026-10-26).
         reconcileAgentAvatars()
         AvatarImageCache.shared.warm(urls: projects.compactMap(\.imageURL))
+        warmChatListPictures()
         if !projects.isEmpty || !peopleChats.isEmpty { contentOrigin = "store" }
         LaunchClock.mark("kv-loaded", detail: "projects=\(projects.count) people=\(peopleChats.count)")
+    }
+
+    /// The pictures the chat list draws, in its order — each group's upload, each DM's other
+    /// person — so the rows, the chat header and the profile hero opened from them all find
+    /// the picture already decoded.
+    private func warmChatListPictures() {
+        AvatarImageCache.shared.warm(urls: peopleChats.map { chat in
+            chat.isGroup ? GroupAvatar.pictureURL(chat, model: self) : chat.counterpart(me: user?.id)?.avatarUrl
+        })
     }
 
     /// Import every saved room off the main thread (last opened first), then
@@ -3120,7 +3130,10 @@ final class AppModel: ObservableObject {
         do {
             let raw = try await api.peopleChatsJSON()
             let list = raw.compactMap(PeopleChat.parse)
-            if list != peopleChats { peopleChats = list }
+            if list != peopleChats {
+                peopleChats = list
+                warmChatListPictures()
+            }
             reconcileAgentAvatars()
             reconcileArchivedPeople(list)
             for c in list where c.unread && !peopleUnread.contains(c.id) { peopleUnread.insert(c.id) }
