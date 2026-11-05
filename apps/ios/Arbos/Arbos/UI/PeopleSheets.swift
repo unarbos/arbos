@@ -1415,6 +1415,7 @@ struct ProjectMembersSheet: View {
                                 Button("Remove", role: .destructive) {
                                     Task { await model.removeProjectMember(project.id, userId: m.id); await load() }
                                 }
+                                .tint(theme.danger)
                             }
                         }
                     }

@@ -1189,7 +1189,9 @@ struct HiddenChatsView: View {
                         .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
                         .listRowSeparator(.hidden)
                         .listRowBackground(theme.bg)
-                        // Unarchive first = full-swipe restores; Delete needs a tap.
+                        // Unarchive first = full-swipe restores; Delete needs a tap. Both name
+                        // their own colour: the scene tint ArbosApp sets (white in dark) takes
+                        // the place of the red a destructive role would otherwise have.
                         .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                             Button { withAnimation { model.unarchive(project.id) } } label: {
                                 Label("Unarchive", systemImage: "tray.and.arrow.up")
@@ -1199,6 +1201,7 @@ struct HiddenChatsView: View {
                                 Button(role: .destructive) { model.deleteProject(project.id) } label: {
                                     Label("Delete", systemImage: "trash")
                                 }
+                                .tint(theme.danger)
                             }
                         }
                     case .people(let chat):
@@ -1218,7 +1221,9 @@ struct HiddenChatsView: View {
                         .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
                         .listRowSeparator(.hidden)
                         .listRowBackground(theme.bg)
-                        // Unarchive first = full-swipe restores; Delete needs a tap.
+                        // Unarchive first = full-swipe restores; Delete needs a tap. Both name
+                        // their own colour: the scene tint ArbosApp sets (white in dark) takes
+                        // the place of the red a destructive role would otherwise have.
                         .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                             Button { withAnimation { model.unarchive(peopleChatId: chat.id) } } label: {
                                 Label("Unarchive", systemImage: "tray.and.arrow.up")
@@ -1227,6 +1232,7 @@ struct HiddenChatsView: View {
                             Button(role: .destructive) { model.deleteOrLeavePeopleChat(chat) } label: {
                                 Label("Delete", systemImage: "trash")
                             }
+                            .tint(theme.danger)
                         }
                     case .server(let server):
                         Button { model.open(server: server) } label: {
