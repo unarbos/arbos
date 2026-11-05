@@ -2727,6 +2727,95 @@ mod tests {
         bx.stop().await;
     }
 
+    /// #2367 where it meets a per-chat send valve. A chat whose reply is parked in such a queue
+    /// has written nothing yet, so its doc reads settled with no work in flight; the cap evicts
+    /// with `closable(now, false)`, which skips the quiet check; and nobody holds the host lock
+    /// during the wait, so the `try_lock` guard does not count the room as in use. The room is
+    /// therefore evictable for the whole wait. This test is why that is safe, not why it cannot
+    /// happen.
+    ///
+    /// The safety rests on one property: a write path acquires its host at the moment it
+    /// writes. Then an eviction costs one reopen and nothing else. The first half here shows
+    /// what breaking that property costs — a handle resolved before the wait and written
+    /// through after it reaches nobody, because `close_room` aborts the room's session task, so
+    /// the ops sit in a `DocHost` that no session will push and no reopen will load.
+    ///
+    /// That asymmetry is the argument for fixing a queued reply at the writer rather than
+    /// here. No marker in this layer can make a stale handle live, and a marker is not free:
+    /// `keep_open` is unbounded, so one that outlived its turn would pin the room for good,
+    /// which is the leak this PR exists to remove.
+    #[tokio::test]
+    async fn a_room_evicted_with_a_reply_pending_is_reopened_by_the_write() {
+        let bx = TestBox::start("01TESTPROJECTVALVE000000").await;
+        let cap = max_open_rooms();
+        let chat = "chat-with-a-parked-reply";
+
+        bx.hub.open_room(chat).await.unwrap();
+        bx.wait_caught_up(chat).await;
+        // The handle a spawned task holds across the wait.
+        let parked: SharedHost = bx.hub.host(chat).await.expect("open");
+        wait_for("the room to settle", || async {
+            parked.lock().await.settled()
+        })
+        .await;
+        parked.lock().await.last_active_ms = now_ms() - 60_000;
+        assert!(
+            parked.lock().await.closable(now_ms(), false),
+            "a room whose reply is still queued reads evictable, which is this test's premise"
+        );
+
+        for i in 0..cap {
+            bx.hub.open_room(&format!("other{i:04}")).await.unwrap();
+        }
+        assert!(
+            !bx.hub.is_open(chat).await,
+            "the cap took the room while its reply was still parked"
+        );
+
+        let lost = ulid();
+        {
+            let h = parked.lock().await;
+            h.doc.start_assistant_message(&lost, "m1", "box:test");
+            h.doc
+                .finish_message(&lost, arbos_core::doc::MessageStatus::Done);
+            // The write itself succeeds, which is what makes the loss silent: the row is real,
+            // it is just in a doc nothing reads. Without this the check below would pass for a
+            // write that never happened.
+            assert!(
+                h.doc.message(&lost).is_some(),
+                "the stale write did not land at all, so the next check proves nothing"
+            );
+            assert!(h.closed, "the host the task still holds is the closed one");
+        }
+
+        let host = bx
+            .hub
+            .open_room(chat)
+            .await
+            .expect("a write path reopens it");
+        assert!(bx.hub.is_open(chat).await);
+        let delivered = ulid();
+        {
+            let h = host.lock().await;
+            assert!(
+                h.doc.message(&lost).is_none(),
+                "the stale handle's row came back, so this test cannot tell the two apart"
+            );
+            h.doc.start_assistant_message(&delivered, "m1", "box:test");
+            h.doc
+                .finish_message(&delivered, arbos_core::doc::MessageStatus::Done);
+        }
+        wait_for("the reopened room to push its reply", || async {
+            host.lock().await.settled()
+        })
+        .await;
+        assert!(
+            host.lock().await.doc.message(&delivered).is_some(),
+            "the reply written after the reopen is in the room the relay is reading"
+        );
+        bx.stop().await;
+    }
+
     /// 2026-10-24 02:23 (image 0.1.106): after the roll TestAgent re-gated 189 Arbonites
     /// sends, the oldest 12 h old — all `taken` (by whichever agent answered), which boot read
     /// as its own interrupted turns. In a people chat a stale taken send is history like a
