@@ -1738,6 +1738,11 @@ pub struct Agent {
     /// User messages waiting for `turn_lock` right now. Relay turns and the soft compaction
     /// yield to them (see `status.rs`).
     pub(crate) pending_sends: std::sync::atomic::AtomicUsize,
+    /// One FIFO per chat of the user messages still owed an answer, in send order (bug O). The
+    /// single order every lane that answers a message reads: the main session in
+    /// [`Agent::acquire_turn_lock`], an ask running as a job in [`Agent::write_job_result`], and
+    /// the job fallback turn. See `send_order.rs`.
+    pub(crate) send_order: Arc<crate::send_order::SendOrder>,
     /// User `send` / `answer` commands this box is handling right now, from the moment
     /// [`Agent::handle_command`] takes one until it is done with it. A relay turn never opens
     /// its row while this is non-zero: that row would be ordered between the user's message and
@@ -1906,6 +1911,7 @@ impl Agent {
             compaction_floor: std::sync::Mutex::new(HashMap::new()),
             compaction_strikes: std::sync::Mutex::new(HashMap::new()),
             pending_sends: std::sync::atomic::AtomicUsize::new(0),
+            send_order: Arc::new(crate::send_order::SendOrder::default()),
             sends_in_flight: std::sync::atomic::AtomicUsize::new(0),
             side_notes: std::sync::Mutex::new(HashMap::new()),
             quick_calls: std::sync::Mutex::new(HashMap::new()),
@@ -1918,12 +1924,86 @@ impl Agent {
         })
     }
 
-    /// Relay turns queue behind the user: wait (up to a minute) while user messages are waiting
-    /// for the lock, so "what is going on?" is not stuck behind a result that can wait.
-    pub(crate) async fn let_user_sends_go_first(&self) {
-        let t0 = Instant::now();
-        while self.sends_waiting() > 0 && t0.elapsed() < Duration::from_secs(60) {
-            tokio::time::sleep(Duration::from_millis(200)).await;
+    /// Wait for `user_msg_id`'s turn in its chat's send order before this lane answers it.
+    ///
+    /// Past `SEND_ORDER_WAIT` the answer goes out regardless, because silence costs more than
+    /// order; that is an ordinary outcome and not a fault, but it is logged either way. The log
+    /// is how often it happens, which is the thing worth watching.
+    ///
+    /// `waited_s` is measured rather than assumed. The bound is the same number on every lane,
+    /// so logging the constant would read the same whether the wait happened or not; the
+    /// measurement is what tells a crossing from a bug in the wait itself. The clock is
+    /// `tokio::time`'s, so a test can drive it.
+    pub(crate) async fn await_send_order(&self, chat_id: &str, user_msg_id: &str, lane: &str) {
+        let t0 = tokio::time::Instant::now();
+        if self
+            .send_order
+            .wait_turn(chat_id, user_msg_id, crate::send_order::SEND_ORDER_WAIT)
+            .await
+        {
+            return;
+        }
+        tracing::warn!(
+            chat_id,
+            user_msg_id,
+            lane,
+            ahead = self.send_order.ahead(chat_id, user_msg_id),
+            waited_s = t0.elapsed().as_secs(),
+            "send order: the messages ahead have not answered yet; posting out of turn"
+        );
+    }
+
+    /// The room to write a reply into, for a lane that resolved its handle before waiting.
+    ///
+    /// **Requirement on every caller that closes a room: a room dropped because it is *cold* —
+    /// a cap, an idle sweep, anything meaning "we may want this chat again" — must leave
+    /// `DocHost::closed` false. Only leaving a chat for good may set it.**
+    ///
+    /// That is the condition this function is correct under, not a remark about how the code
+    /// happens to behave today, and it is worth stating because both ways of getting it wrong
+    /// have already been bugs. Reopen a chat the agent was *removed* from and the box redials a
+    /// room the relay answers 403 to, every 16 s, until it restarts (#1440). Decline to reopen
+    /// a room that was merely cold and the reply is written into a `ChatDoc` nothing pushes —
+    /// invisible to the user and to every gate we have. `closed` is the only thing that tells
+    /// those apart, so `reply_dropped_closed_room` below is what the requirement costs when it
+    /// is broken: at least the loss is loud and countable instead of silent.
+    ///
+    /// Why any of this is needed: a `SharedHost` is resolved once and then carried — into a
+    /// spawned job task, or across `await_send_order` and `turn_lock`. The hub can drop the room
+    /// inside that window, and the write through the old handle still appears to succeed. So the
+    /// handle is taken again here, after the wait and immediately before the row.
+    pub(crate) async fn room_for_reply(&self, chat_id: &str, held: &SharedHost) -> SharedHost {
+        if let Some(live) = self.sync.host(chat_id).await {
+            return live;
+        }
+        // Gone from the hub and marked closed: by the requirement above, a chat the agent was
+        // removed from. The reply goes where it was always going to go, which is nowhere — said
+        // out loud and counted, because if that requirement is ever broken this line is all that
+        // stands between a dropped reply and silence.
+        if held.lock().await.closed {
+            tracing::warn!(
+                chat_id,
+                "the chat's room is closed, so this reply is written where nothing will push it; \
+                 if the room was closed for being cold rather than left for good, that is the \
+                 bug — a cold drop must leave `closed` false"
+            );
+            let _ = self
+                .post_timing("reply_dropped_closed_room", 1, Some("send_order"))
+                .await;
+            return held.clone();
+        }
+        match self.sync.open_room(chat_id).await {
+            Ok(live) => {
+                tracing::info!(
+                    chat_id,
+                    "the room closed while a reply waited; reopened for it"
+                );
+                live
+            }
+            Err(e) => {
+                tracing::warn!(chat_id, error = %e, "the room closed while a reply waited and could not be reopened");
+                held.clone()
+            }
         }
     }
 
@@ -2536,6 +2616,19 @@ impl Agent {
                 .doc
                 .set_command_status(&cmd.id, CommandStatus::Taken, None);
         }
+        // The message's place in its chat's send order (bug O), held until whichever lane
+        // answers it has posted the row. The main session keeps the ticket for the rest of this
+        // function; an ask that runs as a job takes it below and keeps it until its own answer
+        // is posted, so a job that finishes early cannot answer in front of an older message.
+        let mut ticket = match cmd.kind.as_str() {
+            "send" | "answer" => cmd
+                .payload
+                .get("messageId")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
+                .and_then(|id| self.send_order.join(chat_id, id)),
+            _ => None,
+        };
         // Inside a budget block (the owner's cap / credits / read-only relay, `budget.rs`): the
         // chat already carries the one line that says so; a model call would only be refused
         // again. The command is done, nothing is written, the next send after the block probes.
@@ -2594,7 +2687,10 @@ impl Agent {
         // multitask): it runs as its own job beside the running turn, bounded by the job caps;
         // over the cap it queues as before. The job answers with one bubble when it is done.
         let quick = if cmd.kind == "send" && quick == crate::status::QuickOutcome::Queued {
-            match self.start_job_for_send(chat_id, &host, &cmd).await {
+            match self
+                .start_job_for_send(chat_id, &host, &cmd, &mut ticket)
+                .await
+            {
                 Ok(true) => crate::status::QuickOutcome::Answered,
                 Ok(false) => quick,
                 Err(e) => {
@@ -2711,14 +2807,21 @@ impl Agent {
 
     /// Take `turn_lock`. For typed (non-voice) sends: while another turn holds the lock, abort
     /// an in-flight voice-call turn for this chat so the owner is not stuck after hanging up.
-    async fn acquire_turn_lock(
+    pub(crate) async fn acquire_turn_lock(
         &self,
         chat_id: &str,
+        user_msg_id: &str,
         this_is_voice: bool,
     ) -> tokio::sync::MutexGuard<'_, ()> {
         if this_is_voice {
             return self.turn_lock.lock().await;
         }
+        // The chat's send order first (bug O). `try_lock` below is a lottery and not a queue:
+        // thirteen waiters each retrying every 50 ms are served in whatever order the spins
+        // fall, and one of them can be passed over again and again. Waiting here for this
+        // message to reach the head of its chat's FIFO leaves only the oldest unanswered
+        // message contending for the lock, so a burst is answered in the order it was sent.
+        self.await_send_order(chat_id, user_msg_id, "main").await;
         loop {
             let should_stop = self
                 .turn
@@ -3351,8 +3454,13 @@ impl Agent {
         };
         // Counted while waiting: relay turns and the soft compaction step aside for it.
         self.pending_sends.fetch_add(1, Ordering::SeqCst);
-        let _guard = self.acquire_turn_lock(chat_id, this_is_voice).await;
+        let _guard = self
+            .acquire_turn_lock(chat_id, &user_msg_id, this_is_voice)
+            .await;
         self.pending_sends.fetch_sub(1, Ordering::SeqCst);
+        // The send order and the turn lock both waited since `handle_command` looked this room
+        // up, and every row of this turn goes through the handle from here on.
+        let host = &self.room_for_reply(chat_id, host).await;
         // Claim before attachments / tree_pack so hang-up `voice_cancel` and a later typed send
         // can preempt this turn while setup still holds the lock.
         *self.turn.lock().await = Some(TurnState::claim(chat_id, &user_msg_id, this_is_voice));
@@ -4089,13 +4197,15 @@ impl Agent {
         let usage = usage.cloned();
         tokio::spawn(async move {
             // A user message waiting for the lock goes first; the window is checked again after
-            // that turn (Doug, 2026-10-22: an 11 s compaction sat between two replies).
-            if me.sends_waiting() > 0 {
+            // that turn (Doug, 2026-10-22: an 11 s compaction sat between two replies). Read
+            // from this chat's own send order (bug O): the box-wide count this used to read kept
+            // a quiet chat's compaction deferred for as long as another chat was busy.
+            if me.send_order.waiting(&chat) > 0 {
                 tracing::debug!(chat_id = %chat, "soft compaction deferred: a user message is waiting");
                 return;
             }
             let _guard = me.turn_lock.lock().await;
-            if me.sends_waiting() > 0 {
+            if me.send_order.waiting(&chat) > 0 {
                 tracing::debug!(chat_id = %chat, "soft compaction skipped: a user message arrived");
                 return;
             }
@@ -5393,8 +5503,14 @@ impl Agent {
         error: &str,
         partial: &str,
     ) -> Result<()> {
-        self.let_user_sends_go_first().await;
+        // This turn *is* the user's answer, so it queues in the chat's send order like any other
+        // lane (bug O) rather than on a box-wide count of waiting sends, which a burst in one
+        // chat never let fall to zero and which made every such turn pay the whole 60 s wait.
+        self.await_send_order(chat_id, user_msg_id, "job_fallback")
+            .await;
         let _guard = self.turn_lock.lock().await;
+        // Two waits since this task resolved its handle: the send order, then the turn lock.
+        let host = &self.room_for_reply(chat_id, host).await;
         let ask = {
             let h = host.lock().await;
             h.doc
@@ -8075,6 +8191,7 @@ impl Agent {
         chat_id: &str,
         host: &SharedHost,
         cmd: &CommandView,
+        ticket: &mut Option<crate::send_order::SendTicket>,
     ) -> Result<bool> {
         if cmd.issued_by == self.cfg.device_id {
             return Ok(false);
@@ -8189,6 +8306,10 @@ impl Agent {
         let me = self.clone();
         let chat = chat_id.to_owned();
         let host2 = host.clone();
+        // The ask takes its place in the chat's send order with it (bug O). The job runs beside
+        // the turn as before, but the place is only released once this task has posted the
+        // answer, so a short ask that overtakes an older one still answers after it.
+        let ticket = ticket.take();
         tokio::spawn(async move {
             let r = me
                 .run_subagent(
@@ -8219,7 +8340,10 @@ impl Agent {
                 if has_row {
                     return;
                 }
-                let h = host2.lock().await;
+                // Even the failure line is a reply to this message and waits its turn.
+                me.await_send_order(&chat, &user_msg_id, "job_failed").await;
+                let live = me.room_for_reply(&chat, &host2).await;
+                let h = live.lock().await;
                 let id = ulid();
                 h.doc
                     .start_assistant_message(&id, &user_msg_id, &me.cfg.device_id);
@@ -8235,6 +8359,8 @@ impl Agent {
                     .add_hidden_part(&id, "job_failed_detail", &e.to_string(), &json!({}));
                 h.doc.finish_message(&id, MessageStatus::Error);
             }
+            // The answer is posted (or this task is giving up): the chat's next message may go.
+            drop(ticket);
         });
         Ok(true)
     }
@@ -9156,7 +9282,7 @@ impl Agent {
     /// prose by a direct model call (talking model, no main-session lock), written in reply to
     /// the ask with the chat's attribution. Empty or failed → one plain line, never nothing.
     #[allow(clippy::too_many_arguments)]
-    async fn write_job_result(
+    pub(crate) async fn write_job_result(
         self: &Arc<Self>,
         chat_id: &str,
         host: &SharedHost,
@@ -9224,6 +9350,13 @@ impl Agent {
             }
         };
         let text = crate::store::redact(&text);
+        // The answer is written; where it lands in the chat is the chat's send order to decide
+        // (bug O). A job that overtook an older message waits here, after its own model call, so
+        // the hold costs nothing once the older answer is posted. A job whose ask is not queued
+        // — the model's own `start_job`, or an ask already answered — is not held at all.
+        self.await_send_order(chat_id, in_reply_to, "job").await;
+        // This task resolved its handle before the job ran, which is minutes ago and a wait ago.
+        let host = &self.room_for_reply(chat_id, host).await;
         let row_id = ulid();
         let room = {
             let h = host.lock().await;
@@ -11010,8 +11143,18 @@ impl Agent {
     /// Test seam: hold the turn lock as a running act turn of `chat_id` would, with a turn state
     /// the quick-reply snapshot can read. Dropping the guard frees the lock; the state stays.
     pub(crate) async fn test_hold_turn(&self, chat_id: &str) -> tokio::sync::MutexGuard<'_, ()> {
+        self.test_hold_turn_for(chat_id, "m-busy").await
+    }
+
+    /// Same, for a named user message: the send-order tests need the held turn to be the turn of
+    /// the message at the head of the chat's FIFO, which is what a real turn always is.
+    pub(crate) async fn test_hold_turn_for(
+        &self,
+        chat_id: &str,
+        user_msg_id: &str,
+    ) -> tokio::sync::MutexGuard<'_, ()> {
         let g = self.turn_lock.lock().await;
-        let mut t = TurnState::claim(chat_id, "m-busy", false);
+        let mut t = TurnState::claim(chat_id, user_msg_id, false);
         t.activity = Some("Running a command…".into());
         t.ack_text = "Starting the long benchmark now.".into();
         t.act_transcript
