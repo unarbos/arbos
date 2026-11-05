@@ -901,6 +901,22 @@ echo "merge.sh re-reads main rather than trusting mergeable:"
 # The kit's defence is three live reads of main's head around the GO, compared against each other. The reads
 # themselves need the network; what can be asserted here is that they are made, that each one refuses, and
 # that nothing in this file has started inferring staleness from the rollup's mergeable fields instead.
+#
+# THE COMMENT-STRIPPING IS LOAD-BEARING. DO NOT GREP THE RAW FILE, AND DO NOT TIGHTEN nocomment.
+# merge.sh says in prose why a running lane cannot be inferred from mergeStateStatus, so the string
+# appears there legitimately — in a comment, stating the very rule this case enforces. nocomment
+# strips only lines whose first non-space character is '#', so that occurrence is invisible here
+# solely because it is a FULL-LINE comment. Two consequences, both of which cost nothing to avoid:
+#
+#   - Grepping the raw file fails on that sentence, and the failure names whichever pull request
+#     happens to land next. Its author then reads a diff that has nothing to do with the failure.
+#   - Rewriting that sentence as a TRAILING comment on a line of code trips this case for the same
+#     reason, and the author who merely moved a comment sees nothing wrong in their own change.
+#
+# Prose that agrees with a rule must not trip the check enforcing it. A slightly loose assertion
+# beats one whose failure accuses the wrong change — and nothing is lost, because the mutation worth
+# defending against is a real READ, and a read is code. Verified: a real `--json mergeable` read
+# appended to merge.sh still fails this case.
 mcode=$(nocomment <"$D/merge.sh")
 if printf '%s\n' "$mcode" | grep -qE 'mergeable|mergeStateStatus'; then
   bad "merge.sh reads mergeable/mergeStateStatus. main has no branch protection, so that field reports on text and not on tests, and a MERGEABLE pull request 20 commits behind reads identically to a current one."
