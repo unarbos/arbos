@@ -728,8 +728,11 @@ impl Store {
     pub fn test_backdate_job_end(&self, id: &str, ms_ago: i64) -> Result<()> {
         let at = now_ms().saturating_sub(ms_ago);
         self.with(|c| {
-            c.execute("UPDATE jobs SET ended_at = ?2 WHERE id = ?1", params![id, at])
-                .map(|_| ())
+            c.execute(
+                "UPDATE jobs SET ended_at = ?2 WHERE id = ?1",
+                params![id, at],
+            )
+            .map(|_| ())
         })
     }
 
