@@ -1047,6 +1047,14 @@ seed_check() {
   return 0
 }
 
+image_in_ghcr() {
+  # image_in_ghcr <version> — is this version's manifest already published? Asked only when no
+  # image.yml run can be found for the tag, to tell "nobody built it" from "somebody else did".
+  command -v docker >/dev/null 2>&1 || return 1
+  gh_token | docker login ghcr.io -u x --password-stdin >/dev/null 2>&1 || true
+  docker manifest inspect "ghcr.io/$GH_REPO/arbos-agent:$1" >/dev/null 2>&1
+}
+
 roll_image() {
   need_root
   local sha="$1" version tag t0 st waited=0 image snapshot
@@ -1070,6 +1078,17 @@ roll_image() {
     case "$st" in
       ok) break ;;
       failed) record_failure agentd "$sha" "image workflow for $tag failed (build or smoke); nothing rolled"; exit 1 ;;
+      none)
+        # No run at all for this tag, and the image is in GHCR anyway: release.yml's `agent`
+        # channel tagged and built this version, and its run is not one this query found. Waiting
+        # out IMAGE_WAIT_S for a run that will never arrive would fail a roll whose image is
+        # sitting there ready. Only the `none` branch does this, so the ordinary path still waits
+        # for the build AND the smoke; here the smoke has no run to be read from, and seed_check
+        # below is the content gate either way — it reads the image itself, not a workflow.
+        if image_in_ghcr "$version"; then
+          log "agentd: no image.yml run for $tag, but $version is already in GHCR; going straight to the seed check"
+          break
+        fi ;;
     esac
     (( waited >= IMAGE_WAIT_S )) && { record_failure agentd "$sha" "image workflow for $tag not done after $waited s"; exit 1; }
     sleep 30; waited=$((waited + 30))
