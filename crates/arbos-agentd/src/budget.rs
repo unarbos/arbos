@@ -45,10 +45,13 @@ impl Refusal {
         if l.contains("read_only") || l.contains("read-only mode") {
             return Some(Self::ReadOnly);
         }
+        // Only codes and wordings the relay actually sends (`credits::refused_response`). It
+        // has no `spend_cap` type — that text is two column names, `spend_cap_usd` and
+        // `spend_cap_daily`, which ride along in ordinary account and project payloads, so
+        // matching it read a refusal out of an error that carried no refusal at all.
         if l.contains("credits_exhausted")
             || l.contains("credits are used up")
             || l.contains("insufficient credits")
-            || l.contains("spend_cap")
         {
             return Some(Self::CreditsExhausted);
         }
@@ -83,6 +86,21 @@ impl Refusal {
                 "Arbos is in read-only mode right now; I'll answer again when it's lifted."
                     .to_owned()
             }
+        }
+    }
+
+    /// The static in-turn notice for the hard-limit lane (`classify_hard_limit`), which has no
+    /// owner label to hand. Each refusal says its own cause: one line for all three used to call
+    /// credits exhaustion and a read-only relay "the spend limit for today", which is neither.
+    pub fn hard_limit_notice(self) -> &'static str {
+        match self {
+            Self::DailyCap => {
+                "I've reached the daily Arbos budget, so I have to stop here; it resets at 00:00 UTC."
+            }
+            Self::CreditsExhausted => {
+                "The Arbos credits for this workspace are used up, so I have to stop here."
+            }
+            Self::ReadOnly => "Arbos is in read-only mode right now, so I have to stop here.",
         }
     }
 

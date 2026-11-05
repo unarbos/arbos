@@ -13667,19 +13667,17 @@ fn classify_script_limit(result: &str) -> Option<(&'static str, bool)> {
 /// Map a provider / tool error to a short chat announcement and whether to escalate to a subagent.
 /// Returns `None` when the error is not a known hard limit (ordinary tool failures stay quiet).
 fn classify_hard_limit(err: &str) -> Option<(&'static str, bool)> {
-    let lower = err.to_ascii_lowercase();
-    if lower.contains("spend_cap")
-        || lower.contains("credits_exhausted")
-        || lower.contains("credits are used up")
-        || lower.contains("daily spend cap")
-        || lower.contains("insufficient credits")
-        || (lower.contains("spend") && lower.contains("cap"))
-    {
-        return Some((
-            "I hit the spend limit for today, so I have to stop here.",
-            false,
-        ));
+    // Spend is decided in exactly one place: the relay's own refusal codes, read by
+    // `budget::Refusal::classify`. This lane used to keep a second, looser copy of that list
+    // whose last clause stopped work whenever an error happened to carry "spend" and "cap"
+    // anywhere in it — so an unrelated failure announced a spend limit that no ledger had
+    // reached (AF, Test5 round 13: a cancel turn ended "I hit the spend limit for today" with
+    // every cap unlimited since 9:19). The copy also missed a real `daily_cap` body, whose
+    // words are "daily cap", not "daily spend cap".
+    if let Some(r) = crate::budget::Refusal::classify(err) {
+        return Some((r.hard_limit_notice(), false));
     }
+    let lower = err.to_ascii_lowercase();
     if lower.contains("context_length")
         || lower.contains("context length")
         || lower.contains("context window")
@@ -14660,6 +14658,54 @@ mod tests {
             "Script failed\nScript error:\nError: not executed: approval rejected"
         )
         .is_none());
+    }
+
+    /// AF (Jacob, Test5 round 13, 2026-11-05): a cancel turn ended "I hit the spend limit for
+    /// today, so I have to stop here." at 14:58:01 CR with every cap unlimited since 9:19, and
+    /// the box went on spending normally either side of it — no ledger had refused anything.
+    /// The hard-limit lane read a spend limit out of any error carrying "spend" and "cap"
+    /// anywhere in it, so unrelated failures stopped work that no limit could stop.
+    #[test]
+    fn an_unlimited_account_is_never_told_it_hit_a_spend_limit() {
+        use crate::budget::Refusal;
+
+        // What a box sees while every cap is unlimited: no relay refusal code anywhere, and
+        // "spend"/"cap" only as a settings key, a suspended worker, and a column name.
+        for err in [
+            r#"tool error: GET /projects/01M6KTFT1X6WVXB39DX50RGF8Z returned 502 Bad Gateway; body {"name":"Test5","spendCapUsd":0,"models":{}}"#,
+            "stop_job: worker 1698 suspended; the host is at capacity, retry",
+            r#"relay 500: {"error":{"message":"column spend_cap_daily is NOT NULL","type":"server_error"}}"#,
+        ] {
+            assert_eq!(Refusal::classify(err), None, "{err}");
+            assert_eq!(
+                classify_hard_limit(err),
+                None,
+                "an unrelated failure must not stop the turn with a spend limit: {err}"
+            );
+        }
+
+        // The relay's own refusals still stop work, each naming its own cause. A real daily cap
+        // says "daily cap", not "daily spend cap", so the old copy of this list missed it.
+        for (body, want) in [
+            (
+                r#"model call failed: HTTP 402: {"error":{"message":"daily cap of $20.00 reached ($20.01 spent today); it resets at midnight UTC","type":"daily_cap"}}"#,
+                Refusal::DailyCap,
+            ),
+            (
+                "HTTP 402: your credits are used up (balance $0.00); ask for a top-up",
+                Refusal::CreditsExhausted,
+            ),
+            (
+                "HTTP 503: Arbos is in read-only mode: the global daily spend cap of $500.00 was reached",
+                Refusal::ReadOnly,
+            ),
+        ] {
+            assert_eq!(
+                classify_hard_limit(body),
+                Some((want.hard_limit_notice(), false)),
+                "{body}"
+            );
+        }
     }
 
     /// The assembled main-agent prompt (core first, then routing) carries every rule Jacob's

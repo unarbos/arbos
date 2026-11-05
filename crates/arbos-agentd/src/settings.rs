@@ -187,6 +187,12 @@ fn clamp_effort_for_model(model: &str, effort: &str) -> String {
     }
 }
 
+/// The relay's "no daily limit" for a project (`credits::PROJECT_CAP_UNLIMITED`), which is what
+/// it sends for every project it creates. The box starts here so it never reports a limit of its
+/// own before the first settings payload arrives: a boot default of `25.0` had the apps show a
+/// $25/day cap on an account with no limit at all (Jacob, Test5 round 13).
+pub const UNLIMITED_SPEND_CAP: f64 = -1.0;
+
 #[derive(Debug, Default, Clone)]
 pub struct SettingsState {
     pub name: String,
@@ -197,6 +203,9 @@ pub struct SettingsState {
     /// Avatar colour slug (`Project.avatar_color`).
     pub avatar_color: String,
     pub instructions: String,
+    /// The account's daily limit as the relay reports it (`Project.spend_cap_daily`), for display
+    /// only: nothing on the box gates on it, and the relay's ledger is the one thing that
+    /// refuses a spend. [`UNLIMITED_SPEND_CAP`] is the relay's "no limit".
     pub spend_cap_usd: f64,
     /// Visible note when a configured model id was unknown and a default took its place.
     pub model_note: String,
@@ -377,7 +386,7 @@ impl Settings {
             state: RwLock::new(SettingsState {
                 name: cfg.project_name.clone(),
                 instructions: cfg.instructions.clone(),
-                spend_cap_usd: 25.0,
+                spend_cap_usd: UNLIMITED_SPEND_CAP,
                 ..Default::default()
             }),
             catalog: RwLock::new(None),
