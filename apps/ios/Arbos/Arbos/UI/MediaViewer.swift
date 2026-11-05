@@ -348,39 +348,56 @@ struct MediaViewer: View {
                 .padding(.bottom, 12)
                 .accessibilityHidden(true)
             }
-            HStack(spacing: 12) {
-                // Close beside Download / Forward — same as Mac; always exits even
-                // when swipe-down or the top × lose the gesture race with zoom/paging.
-                pill("Close", system: "xmark") { close() }
-                // A profile picture is not a chat attachment: Close only.
-                if item?.pictureURL == nil {
-                    // The picture itself, original bytes under its own type
-                    // ([feedback copy-image-messages-ios-2026-10-27]).
-                    pill("Copy", system: "doc.on.doc") { Task { await copy() } }
-                        .disabled(!canAct || busy)
-                        .opacity(canAct ? 1 : 0.5)
-                    pill("Download", system: "arrow.down.to.line") { Task { await download() } }
-                        .disabled(!canAct || busy)
-                        .opacity(canAct ? 1 : 0.5)
-                    pill("Forward", system: "arrowshape.turn.up.right") { showForward = true }
-                        .disabled(!canAct || busy)
-                        .opacity(canAct ? 1 : 0.5)
-                }
+            // The full row is wider than any iPhone, so SwiftUI used to shrink the
+            // labels until they broke inside a word ("Clos e" — [feedback
+            // viewer-pill-labels-ios-2026-10-29]). A smaller size takes over when the
+            // one above it does not fit; `ViewerPill.sizes` is the same order.
+            ViewThatFits(in: .horizontal) {
+                pillRow(.full)
+                pillRow(.compact)
+                pillRow(.tight)
             }
             .padding(.bottom, 14)
         }
         .animation(.easeOut(duration: 0.2), value: toast)
     }
 
-    private func pill(_ label: String, system: String, action: @escaping () -> Void) -> some View {
+    private func pillRow(_ size: ViewerPill) -> some View {
+        HStack(spacing: size.gap) {
+            // Close beside Download / Forward — same as Mac; always exits even
+            // when swipe-down or the top × lose the gesture race with zoom/paging.
+            pill("Close", system: "xmark", size: size) { close() }
+            // A profile picture is not a chat attachment: Close only.
+            if item?.pictureURL == nil {
+                // The picture itself, original bytes under its own type
+                // ([feedback copy-image-messages-ios-2026-10-27]).
+                pill("Copy", system: "doc.on.doc", size: size) { Task { await copy() } }
+                    .disabled(!canAct || busy)
+                    .opacity(canAct ? 1 : 0.5)
+                pill("Download", system: "arrow.down.to.line", size: size) { Task { await download() } }
+                    .disabled(!canAct || busy)
+                    .opacity(canAct ? 1 : 0.5)
+                pill("Forward", system: "arrowshape.turn.up.right", size: size) { showForward = true }
+                    .disabled(!canAct || busy)
+                    .opacity(canAct ? 1 : 0.5)
+            }
+        }
+        .padding(.horizontal, size.inset)
+    }
+
+    private func pill(_ label: String, system: String, size: ViewerPill,
+                      action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            HStack(spacing: 8) {
-                Image(systemName: system).font(.system(size: 14, weight: .semibold))
-                Text(label).font(theme.font(15, weight: .medium))
+            HStack(spacing: size.innerSpacing) {
+                Image(systemName: system).font(.system(size: size.glyph, weight: .semibold))
+                Text(label).font(theme.font(size.label, weight: .medium))
+                    .lineLimit(1)
+                    .minimumScaleFactor(ViewerPill.minimumLabelScale)
+                    .fixedSize(horizontal: size.labelKeepsItsWidth, vertical: false)
             }
             .foregroundStyle(.white)
-            .padding(.horizontal, 16)
-            .frame(height: 38)
+            .padding(.horizontal, size.padding)
+            .frame(height: size.height)
             .background(ViewerChromeBackground(shape: Capsule(), interactive: true))
         }
         .buttonStyle(.plain)
@@ -538,6 +555,62 @@ struct ViewerChromeBackground<S: InsettableShape>: View {
             plate
         }
     }
+}
+
+/// The sizes of the viewer's bottom pills ([feedback
+/// viewer-pill-labels-ios-2026-10-29]: "Clos e", "Downl oad"). The full row —
+/// Close · Copy · Download · Forward at the design size — is wider than every iPhone,
+/// and the row had no inset, so SwiftUI squeezed each label below its own width and
+/// broke it inside the word. The row now takes the first of `sizes` that fits, every
+/// label is one line, and the row keeps its own `inset` from the screen edges.
+///
+/// The labels must also stay whole at every step of the app's Text Size, up to the
+/// largest (`TextScale.steps`, 1.3 — the viewer does not use Dynamic Type; `theme.font`
+/// is the one scale). The tight size buys the room for that; below it the label itself
+/// gives, shrinking to `minimumLabelScale` the way the sheet header's title does.
+/// `ViewerPillStyleTests` measures every size against every width and every step.
+struct ViewerPill {
+    /// Label point size, scaled by the app's text size through `theme.font`.
+    let label: CGFloat
+    /// The SF symbol beside the label.
+    let glyph: CGFloat
+    /// Glyph → label.
+    let innerSpacing: CGFloat
+    /// Capsule end → glyph, and label → capsule end.
+    let padding: CGFloat
+    let height: CGFloat
+    /// Pill → pill.
+    let gap: CGFloat
+    /// Row → screen edge, both sides.
+    let inset: CGFloat
+    /// The full row either fits whole or gives way to a smaller size, so its labels never
+    /// squeeze. The smaller sizes let the label take the width it is given and scale.
+    let labelKeepsItsWidth: Bool
+
+    /// The size the viewer shipped with (#1381), unchanged.
+    static let full = ViewerPill(label: 15, glyph: 14, innerSpacing: 8, padding: 16,
+                                 height: 38, gap: 12, inset: 12, labelKeepsItsWidth: true)
+    static let compact = ViewerPill(label: 13, glyph: 13, innerSpacing: 5, padding: 9,
+                                    height: 34, gap: 6, inset: 12, labelKeepsItsWidth: false)
+    /// The last size: the chrome around each label is as small as the family allows, so the
+    /// four labels keep their own width on the narrowest iPhone at the largest Text Size.
+    static let tight = ViewerPill(label: 13, glyph: 12, innerSpacing: 4, padding: 8,
+                                  height: 34, gap: 4, inset: 8, labelKeepsItsWidth: false)
+
+    /// Widest first — the order `ViewThatFits` tries them in. The last one is the floor.
+    static let sizes: [ViewerPill] = [.full, .compact, .tight]
+
+    /// How far a label may shrink before a one-line label would be cut instead — the sheet
+    /// header's rule for its title (`SheetHeaderLayout.minimumTitleScale`) applied here.
+    ///
+    /// 0.65 is the smallest Text Size step over the largest (0.85 / 1.3): a label shrunk all
+    /// the way at the largest step is still no smaller than the same label at the smallest
+    /// step, so the biggest setting never reads smaller than the smallest one.
+    ///
+    /// It is the backstop under `tight`, not the plan. On every width and every step the app
+    /// ships, `ViewerPillStyleTests` shows the labels need less shrink than this, so no label
+    /// is cut and none wraps.
+    static let minimumLabelScale: CGFloat = 0.65
 }
 
 /// The caption, counter and page dots have no plate; a soft dark halo keeps them
