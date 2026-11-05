@@ -4320,6 +4320,23 @@ impl Agent {
                     if !me.wait_for_live_pi(Agent::PI_RESPAWN_WAIT).await {
                         tracing::warn!(job = %j.id, "fresh worker starts with no live main pi child");
                     }
+                    // The cancelled check above was read before that wait, and the wait is long
+                    // enough for the user to cancel inside it. #2779's rule is that a cancelled
+                    // job is never resumed, so the state is read again here rather than acting
+                    // on a snapshot this branch has just spent up to `PI_RESPAWN_WAIT` holding.
+                    // Returning here drops `ticket`, which is what a job that will never answer
+                    // owes the chat: the place goes back rather than being stranded.
+                    if me
+                        .store
+                        .job(&j.id)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|row| row.state == "cancelled")
+                    {
+                        tracing::info!(job = %j.id, "the job was cancelled while the box got a pi child back; no fresh worker");
+                        me.refresh_job_activity(&chat).await;
+                        return;
+                    }
                     // The user's corrections outlive the worker they were spoken to.
                     let brief = format!(
                         "{brief}{}",
