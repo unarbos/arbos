@@ -93,6 +93,43 @@ final class BackSwipeUITests: XCTestCase {
         return bubble.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0.5)).withOffset(CGVector(dx: inset, dy: 0))
     }
 
+    /// 48 scripted pans: flicks, slow drags, short wobbly pans and pans that start on a bubble. There is
+    /// no pause between them. Each pan lands when XCUITest reports the app idle, which comes before a
+    /// flick's deceleration ends, so the next pan can catch a list that is still moving. Pans start clear
+    /// of the header (top ~140 pt) and the composer (bottom ~200 pt).
+    private func sustainedPans(_ app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) {
+        let bubbles = app.descendants(matching: .any).matching(bubbleQuery)
+        XCTAssertTrue(bubbles.firstMatch.waitForExistence(timeout: settle), "the transcript shows bubbles", file: file, line: line)
+        settleTranscript(app)
+        // Read once: each `frame` read is an accessibility snapshot of the whole screen.
+        let window = app.windows.firstMatch.frame
+        let origin = app.coordinate(withNormalizedOffset: .zero)
+        func pan(from: CGPoint, by: CGVector, velocity: XCUIGestureVelocity) {
+            let start = origin.withOffset(CGVector(dx: from.x - window.minX, dy: from.y - window.minY))
+            start.press(forDuration: 0.02, thenDragTo: start.withOffset(by), withVelocity: velocity, thenHoldForDuration: 0.02)
+        }
+        let low = CGPoint(x: window.midX, y: window.maxY - 240)
+        let high = CGPoint(x: window.midX, y: 180)
+        for _ in 0..<8 { pan(from: low, by: CGVector(dx: 0, dy: -300), velocity: .fast) }
+        for _ in 0..<8 { pan(from: high, by: CGVector(dx: 0, dy: 300), velocity: .fast) }
+        for _ in 0..<6 { pan(from: low, by: CGVector(dx: 0, dy: -250), velocity: .slow) }
+        for _ in 0..<6 { pan(from: high, by: CGVector(dx: 0, dy: 250), velocity: .slow) }
+        // Short pans with a sideways wobble, as a thumb makes them: the ones a horizontal recognizer can swallow.
+        for i in 0..<12 {
+            let wobble = CGFloat(i % 3) * 6 - 6
+            pan(from: CGPoint(x: window.midX + CGFloat(i % 4) * 30 - 45, y: low.y - CGFloat(i % 5) * 40),
+                by: CGVector(dx: wobble, dy: -70), velocity: .default)
+        }
+        // Pans that start on a bubble, which the per-bubble recognizers see first.
+        for _ in 0..<8 {
+            guard let bubble = bubbles.allElementsBoundByIndex.first(where: {
+                $0.frame.minY > 160 && $0.frame.maxY < window.maxY - 260 && $0.frame.height > 20
+            }) else { break }
+            let start = bubble.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            start.press(forDuration: 0.02, thenDragTo: start.withOffset(CGVector(dx: 4, dy: -220)), withVelocity: .default, thenHoldForDuration: 0.02)
+        }
+    }
+
     /// Tap the composer so the keyboard is up (what every sent message leaves behind).
     private func raiseKeyboard(_ app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) {
         let field = app.descendants(matching: .any)["composer-field"]
@@ -140,9 +177,12 @@ final class BackSwipeUITests: XCTestCase {
         assertHome(app)
     }
 
+    /// Sustained scripted pans first: none of them may pop the chat, and the edge pop must still work after them.
     func testDMEdgeSwipeGoesHomeWithTheKeyboardUp() {
         let app = launch(["ARBOS_OPEN_PEOPLE": "fx-dm-unconst"])
         XCTAssertTrue(chatBack(app, "fx-dm-unconst").waitForExistence(timeout: appear), "the @unconst DM opened")
+        sustainedPans(app)
+        XCTAssertTrue(chatBack(app, "fx-dm-unconst").isHittable, "the DM is still open after the pans")
         raiseKeyboard(app)
         edgeSwipeBack(app)
         assertGone(chatBack(app, "fx-dm-unconst"))
@@ -332,7 +372,10 @@ final class BackSwipeUITests: XCTestCase {
     /// pop is measured. Read the numbers in the xcodebuild log (`measured [...]`).
     func testEdgeSwipeBackTransitionTiming() {
         let options = XCTMeasureOptions()
-        options.iterationCount = 5
+        // One in the gate: each iteration is a launch (~15 s), XCTest runs one more first and discards
+        // it, and `testGroupChatEdgeSwipeGoesHome` asserts the same pop. For a spread, run with
+        // TEST_RUNNER_ARBOS_PERF_ITERATIONS=5.
+        options.iterationCount = Int(ProcessInfo.processInfo.environment["ARBOS_PERF_ITERATIONS"] ?? "") ?? 1
         options.invocationOptions = [.manuallyStart, .manuallyStop]
         measure(metrics: [XCTOSSignpostMetric.navigationTransitionMetric, XCTClockMetric()], options: options) {
             let app = launch(["ARBOS_OPEN_PEOPLE": "fx-group-launch"])
