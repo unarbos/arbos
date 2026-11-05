@@ -971,6 +971,32 @@ impl SyncHub {
                                 tracing::warn!(room = %room, header = %f.header, "relay refused a push; batch dropped, link kept");
                             } else {
                                 tracing::warn!(room = %room, header = %f.header, "relay error frame");
+                                // A refusal is the relay's answer to the push in flight, and
+                                // it is final: `push_guard` refuses on what the push contains,
+                                // so sending the same bytes again gets the same answer. The
+                                // relay says so and sends no Ack, and waiting for one took the
+                                // whole room down ten seconds later — "push not acked in 10s;
+                                // link presumed dead" — which is how one refused delete ended
+                                // the session (Jacob's Test3 chat, 2026-11-04).
+                                //
+                                // So the refusal closes the push the way an Ack does. Not
+                                // because the ops were stored — they were not — but because
+                                // nothing is still owed on them. Leaving them in flight is the
+                                // worse failure: `next_push` sends nothing while one is in
+                                // flight, so a permanently refused batch would freeze every
+                                // later message behind it, or redial forever.
+                                //
+                                // The frame names no batch, and there is only ever one in
+                                // flight, so "the push in flight" is unambiguous. Carrying the
+                                // batch id on the refusal would make it exact; that is a relay
+                                // change and is tracked separately.
+                                let mut h = host.lock().await;
+                                if let Some((batch, _)) = h.inflight.clone() {
+                                    h.on_ack(&batch);
+                                }
+                                drop(h);
+                                inflight_since = None;
+                                dirty_since_persist = true;
                             }
                         }
                         FrameType::ProbeOk | FrameType::Presence | FrameType::Hello | FrameType::RowsReq | FrameType::Push | FrameType::Probe | FrameType::Wake => {}
