@@ -181,3 +181,5 @@ exit code; `axbin/osascript` is a shim on `runner.sh`'s PATH that forwards every
 - Image rolls pause after a failed canary until a tagged fix lands or an operator lifts the hold.
 
 Runbook (how the loop implements this): the project store's `docs/feedback-loop.md`.
+
+<!-- Measurement harness for PR #2776: a no-op edit so the pull request has a diff. Not for merge. -->
