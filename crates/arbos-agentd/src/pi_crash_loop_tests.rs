@@ -39,7 +39,7 @@ use arbos_core::ids::{now_ms, ulid};
 use serde_json::{json, Value};
 
 use crate::agent::Agent;
-use crate::status::tests::test_agent_with_pi;
+use crate::status::tests::{test_agent, test_agent_with_pi};
 use crate::sync::SharedHost;
 
 /// The first respawn wait the tests run on. The shipped value is 2,000.
@@ -644,6 +644,64 @@ async fn the_turn_end_race_does_not_start_a_crash_loop_and_the_correction_lands(
     assert!(
         !agent.pi_degraded.load(std::sync::atomic::Ordering::SeqCst),
         "a box that recovered inside the race is not degraded"
+    );
+}
+
+/// Success criterion 5: two minutes without a ready child on an awake box is unhealthy.
+///
+/// Read directly rather than waited for — two minutes of real sleep is not a test, and
+/// `now_ms()` has no seam — so this sets the clock the predicate reads and asks it the question.
+/// `is_healthy` is what the relay's existing restart path consults; before this change it only
+/// looked at whether a turn was wedged, so Test5's box answered "well" for two and a half hours
+/// with no agent at all.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_box_with_no_ready_child_for_two_minutes_is_not_healthy() {
+    use std::sync::atomic::Ordering;
+    let (agent, _root) = test_agent().await;
+    assert!(
+        agent.is_healthy(),
+        "a box nobody has asked anything is well"
+    );
+
+    // No child, and the clock on being without one has just started.
+    agent.note_pi_not_ready();
+    assert!(
+        agent.is_healthy(),
+        "a box that lost its child a moment ago is restarting, not broken"
+    );
+
+    let now = now_ms() as u64;
+    agent
+        .pi_unready_since_ms
+        .store(now - Agent::PI_UNHEALTHY_AFTER_MS + 5_000, Ordering::SeqCst);
+    assert!(
+        agent.is_healthy(),
+        "five seconds short of the threshold is still restarting"
+    );
+    agent
+        .pi_unready_since_ms
+        .store(now - Agent::PI_UNHEALTHY_AFTER_MS - 1, Ordering::SeqCst);
+    assert!(
+        !agent.is_healthy(),
+        "past two minutes with no child, the box is unhealthy and the restart path may have it"
+    );
+
+    // A child that answers clears it, and a parked one is not a missing one.
+    agent.note_pi_ready();
+    assert!(agent.is_healthy(), "a ready child makes the box well again");
+    agent.note_pi_not_ready();
+    agent
+        .pi_unready_since_ms
+        .store(now - Agent::PI_UNHEALTHY_AFTER_MS - 1, Ordering::SeqCst);
+    agent.pi_parked.store(true, Ordering::SeqCst);
+    assert!(
+        agent.is_healthy(),
+        "a box parked to save memory has an agent; it just has not started it yet"
+    );
+    assert_eq!(
+        Agent::PI_UNHEALTHY_AFTER_MS,
+        120_000,
+        "the threshold the relay's restart path inherits"
     );
 }
 
