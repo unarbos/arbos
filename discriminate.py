@@ -169,6 +169,72 @@ def p6():
     )
 
 
+@revert("P7-switch-body-check")
+def p7():
+    """The session switch reads only the transport again: a refusal fails the turn and the child stays."""
+    edit(
+        AGENT,
+        [
+            (
+                """        let answered = pi
+            .call(RpcCommand::SwitchSession {
+                id: pi.next_id("sw"),
+                session_path: path.display().to_string(),
+            })
+            .await;""",
+                """        let answered: Result<arbos_core::rpc::Response> = {
+            pi.call_ok(RpcCommand::SwitchSession {
+                id: pi.next_id("sw"),
+                session_path: path.display().to_string(),
+            })
+            .await?;
+            Ok(arbos_core::rpc::Response {
+                id: None,
+                command: "switch_session".into(),
+                success: true,
+                data: None,
+                error: None,
+            })
+        };""",
+            )
+        ],
+    )
+
+
+@revert("P8-count-send-failures")
+def p8():
+    """Send failures are a row in the chat and nothing else: no event, no probe, no conclusion."""
+    edit(
+        AGENT,
+        [
+            (
+                "        let Err(e) = res else {",
+                "        if true {\n            let _ = (chat_id, res);\n            return;\n        }\n        let Err(e) = res else {",
+            )
+        ],
+    )
+
+
+@revert("P9-failed-boot-gets-a-supervisor")
+def p9():
+    """A boot that fails returns before the supervisor starts, so nothing retries it."""
+    edit(
+        AGENT,
+        [
+            (
+                "        if boot_failed.is_none() {",
+                "        if let Some(why) = &boot_failed {\n            return Err(anyhow!(\"{why}\"));\n        }\n        if boot_failed.is_none() {",
+            )
+        ],
+    )
+
+
+@revert("P10-a-failed-row-is-not-an-answer")
+def p10():
+    """A row that failed counts as the answer, so the re-run decides there is nothing to do."""
+    edit(AGENT, [('        && m.status != "error"\n', "")])
+
+
 def run(name):
     subprocess.run(["git", "checkout", "--", "crates/"], check=True)
     REVERTS[name]()

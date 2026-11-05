@@ -841,7 +841,11 @@ async fn a_job_start_and_three_quick_messages_are_all_answered_and_the_child_nev
     let (job_msg, job_cmd) = send_cmd(&job_host, "start the nightly export").await;
     let _ = agent.handle_command(job_chat, job_cmd).await;
 
-    // The burst: three sends inside two seconds, each needing the session switched back.
+    // The burst: three sends inside two seconds, each needing the session switched back. The
+    // window is on delivering them, not on answering them — a wedged box takes seconds to fail
+    // a send, and timing the answers would fire this guard before the real assertions below and
+    // hide what it was meant to expose.
+    let burst_opened = Instant::now();
     let mut burst = Vec::new();
     for text in [
         "make it CSV, not JSON",
@@ -855,15 +859,14 @@ async fn a_job_start_and_three_quick_messages_are_all_answered_and_the_child_nev
             tokio::spawn(async move { a.handle_command(chat, cmd).await }),
         ));
     }
-    let started = Instant::now();
+    assert!(
+        burst_opened.elapsed() < Duration::from_secs(2),
+        "the three sends have to be delivered inside two seconds to be the burst: {:?}",
+        burst_opened.elapsed()
+    );
     for (_, task) in &mut burst {
         let _ = task.await.unwrap();
     }
-    assert!(
-        started.elapsed() < Duration::from_secs(2),
-        "the three sends have to land inside two seconds to be the burst: {:?}",
-        started.elapsed()
-    );
 
     // And the fourth, two minutes later in the round 9 timeline.
     let (fourth, fourth_cmd) = send_cmd(&host, "still there?").await;
