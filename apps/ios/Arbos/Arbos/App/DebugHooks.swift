@@ -177,6 +177,21 @@ enum DebugHooks {
         return list.isEmpty ? nil : list
     }
     static var rigAutoAddMs: Int? { value("ARBOS_RIG_AUTO_ADD").flatMap(Int.init) }
+    /// `ARBOS_RIG_SEND_MEDIA=<caption>`: once the opened chat is caught up, send a message
+    /// carrying one synthetic video with that caption ([feedback caption-sent-without-media]
+    /// shots). Capture scaffolding, not product behaviour — the rig's step vocabulary has no
+    /// media verb, and a real attachment means the system photo picker over an empty
+    /// simulator library, so a send that carries a file is otherwise unphotographable. The
+    /// value is the caption; an empty one reads as unset, so pass `-` for a bare clip.
+    static var rigSendMedia: String? { value("ARBOS_RIG_SEND_MEDIA").map { $0 == "-" ? "" : $0 } }
+    /// `ARBOS_RIG_MEDIA_BYTES=<n>`: how big that synthetic clip claims to be, so the card
+    /// reads a plausible size. Default 3.2 MB.
+    static var rigMediaBytes: Int { value("ARBOS_RIG_MEDIA_BYTES").flatMap(Int.init) ?? 3_200_000 }
+    /// `ARBOS_FIXTURE_UPLOAD=slow:<ms>[,fails]`: hold an attachment upload that long,
+    /// reporting progress as it waits, then let it land or refuse it. Capture scaffolding —
+    /// without it an iPhone shot of an upload in flight has no window to catch, because the
+    /// fixture has no relay and a hosted runner's unauthenticated `PUT` is refused at once.
+    static var fixtureUpload: String? { value("ARBOS_FIXTURE_UPLOAD") }
     /// `ARBOS_RIG_AGENT_PICKER=<query>`: the picker's "Add agent" sheet starts open with that
     /// query typed (empty = open, nothing typed).
     static var agentPickerQuery: String? { value("ARBOS_RIG_AGENT_PICKER") }
