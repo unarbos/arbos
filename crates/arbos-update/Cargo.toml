@@ -31,3 +31,10 @@ sha2.workspace = true
 hex.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+
+# Measurement harness for PR #2776, not for merge. `anyhow` is already a dependency above, so
+# naming it again here moves this member manifest — which is what Swatinem/rust-cache keys on —
+# while Cargo.lock stays byte-identical and the compiled graph does not change at all. That
+# isolates the cache from everything else the duration could be measuring.
+[dev-dependencies]
+anyhow.workspace = true
