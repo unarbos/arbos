@@ -26,6 +26,7 @@ use crate::config::Config;
 use crate::harness::{
     AgentEvent, ClaudeCodeAdapter, HarnessAdapter, PiAdapter, PrimeAdapter, StartRequest,
 };
+use crate::isolation::{ProcessTree, Sweep};
 use crate::llm::{extract_return_contract, Llm};
 use crate::memory::Memory;
 use crate::rpc_child::{ChildExit, RpcChild};
@@ -1094,12 +1095,89 @@ pub(crate) struct StoppedJob {
     pub title: String,
     /// The job row's state after the stop: `cancelled` when the stop landed.
     pub state: String,
+    /// What the kill of the job's process tree did, read back from the kernel.
+    pub sweep: Sweep,
 }
 
 impl StoppedJob {
+    /// The job is cancelled *and* its work really stopped. A row that reads `cancelled` over a
+    /// loop that is still writing is the whole of bug Z, so the state alone is not the question.
     fn cancelled(&self) -> bool {
-        self.state == "cancelled"
+        self.state == "cancelled" && self.sweep.clean()
     }
+}
+
+/// How many leftover pids one chat remembers for [`Agent::hook_kill_allowed`].
+const LEFTOVER_PIDS_MAX: usize = 32;
+
+/// What `stop_job` tells the model it may now say, which is decided by what the cancel actually
+/// achieved rather than by the word in the job row.
+///
+/// Three outcomes, and the middle one is bug Z: a row that reads `cancelled` over work that is
+/// still running. The model is told not to report a cancel, told which pid to name, and told
+/// that the `kill` the guard refused in r10cancel is allowed for exactly that pid.
+pub(crate) fn stop_job_note(stopped: &[StoppedJob]) -> String {
+    if stopped.iter().any(|s| s.state != "cancelled") {
+        return "At least one job above does NOT read `cancelled`. Do not tell the user it stopped: say which one is still open, call stop_job again for it, and only then report a cancel.".to_owned();
+    }
+    let leftovers: Vec<u32> = stopped
+        .iter()
+        .flat_map(|s| s.sweep.survivors.clone())
+        .collect();
+    if leftovers.is_empty() {
+        return "Every job above reads `cancelled` in its own row, and every process it had started is dead: its worker is closed, its tool call is dead and no result or file will arrive from it. Say it is cancelled in one line and end the turn.".to_owned();
+    }
+    let pids = pid_list(&leftovers);
+    format!(
+        "Every job above reads `cancelled`, but {} it started did NOT die: pid(s) {pids}. Do not tell the user the work stopped. Say the job is cancelled and that pid(s) {pids} are still running, then run `kill -9 {pids}` — a kill aimed at a pid stop_job reported it could not kill is allowed in this chat — and check with `ps -p {pids}`.",
+        if leftovers.len() == 1 { "a process" } else { "processes" },
+    )
+}
+
+fn pid_list(pids: &[u32]) -> String {
+    pids.iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// What the extension is told when a `kill` is refused. The same words as its own fallback
+/// hint, so the model reads one rule whether agentd answered or not.
+pub(crate) const KILL_REFUSAL: &str = "A signal is not a cancel. `stop_job(job_id)` is the only thing that cancels a job: it ends the worker's turn and its tool call, kills the processes the job started, marks the job `cancelled`, and answers with that state and with what it killed. Call list_jobs for the id, then stop_job(job_id) (or stop_job(\"all\")), and say \"cancelled\" only where the state it returns reads `cancelled`. If stop_job reports a pid it could NOT kill, a `kill` aimed at that pid is allowed — but only that one. For a process of your own that is not a job, let the command finish in the foreground instead.";
+
+/// The pids a bare `kill` command names, or none when the command is anything this cannot read
+/// pid by pid.
+///
+/// None is the safe answer and the caller refuses on it, so everything ambiguous belongs here:
+/// a `pkill` or `killall` (no pid at all), `kill -- -1234` (a process group, which can hold far
+/// more than the leftover), a `$(pgrep …)` substitution, or a second command after a `;`.
+/// `-9` and `-TERM` are signals and are skipped.
+fn pids_in_command(command: &str) -> Vec<u32> {
+    let words: Vec<&str> = command.split_whitespace().collect();
+    let mut rest = words.as_slice();
+    while let Some(("sudo", tail)) = rest.split_first().map(|(w, t)| (*w, t)) {
+        rest = tail;
+    }
+    let Some(("kill", args)) = rest.split_first().map(|(w, t)| (*w, t)) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for w in args {
+        if let Some(flag) = w.strip_prefix('-') {
+            // A signal by number (1–64) or by name. A bigger number is a process group.
+            let signal = flag.parse::<u32>().is_ok_and(|n| (1..=64).contains(&n))
+                || flag.chars().all(|c| c.is_ascii_alphabetic() || c == '_');
+            if signal && !flag.is_empty() {
+                continue;
+            }
+            return Vec::new();
+        }
+        match w.parse::<u32>() {
+            Ok(pid) if pid > 1 => out.push(pid),
+            _ => return Vec::new(),
+        }
+    }
+    out
 }
 
 /// The line the chat gets when the user's stop ended one or more jobs. It names the state the
@@ -1111,18 +1189,53 @@ pub(crate) fn stop_line(stopped: &[StoppedJob]) -> String {
         .map(|s| s.title.to_lowercase())
         .collect::<Vec<_>>()
         .join(", ");
-    if let Some(open) = stopped.iter().find(|s| !s.cancelled()) {
+    if let Some(open) = stopped.iter().find(|s| s.state != "cancelled") {
         return format!(
             "Stopped: {titles}. “{}” still reads {}, so I cannot tell you it is cancelled.",
             open.title.to_lowercase(),
             open.state
         );
     }
+    // Cancelled, but something it started is still running. Naming the pid is the point: it is
+    // what the user needs to get rid of it, and bug Z is what happens when the line says
+    // "cancelled" and stops there.
+    if let Some(leaky) = stopped.iter().find(|s| !s.sweep.clean()) {
+        return format!(
+            "Stopped: {titles}. “{}” reads cancelled, but {} it started {} still running ({}). \
+             I am not able to say its work has stopped.",
+            leaky.title.to_lowercase(),
+            if leaky.sweep.survivors.len() == 1 {
+                "a process"
+            } else {
+                "processes"
+            },
+            if leaky.sweep.survivors.len() == 1 {
+                "is"
+            } else {
+                "are"
+            },
+            leaky
+                .sweep
+                .survivors
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    let killed: usize = stopped.iter().map(|s| s.sweep.killed).sum();
+    let also = match killed {
+        0 => String::new(),
+        1 => " The one process it had left running was killed too.".to_owned(),
+        n => format!(" The {n} processes it had left running were killed too."),
+    };
     if stopped.len() == 1 {
-        format!("Stopped: {titles}. Its state is cancelled now, so nothing more arrives from it.")
+        format!(
+            "Stopped: {titles}. Its state is cancelled now, so nothing more arrives from it.{also}"
+        )
     } else {
         format!(
-            "Stopped: {titles}. Their state is cancelled now, so nothing more arrives from them."
+            "Stopped: {titles}. Their state is cancelled now, so nothing more arrives from them.{also}"
         )
     }
 }
@@ -1720,6 +1833,21 @@ pub struct Agent {
     /// Running subagents → (chat id, progress message id), so a file a subagent delivers lands
     /// on its own card (F10 `deliver_file`).
     pub subagent_msgs: Mutex<HashMap<String, (String, String)>>,
+    /// Subagent id → the process group its harness child leads, recorded at spawn.
+    ///
+    /// "The job has no record of child pids" was the true half of bug Z's hunch. A cancel has to
+    /// reach processes the worker spawned, and by then the worker itself is dead and they have
+    /// been reparented to PID 1 — so the pid that started them is no use and the group is what
+    /// is left to name them by. The cgroup half of [`ProcessTree`] needs no map: it is derived
+    /// from the session id, so it survives an agentd restart that empties this one.
+    pub worker_pgids: Mutex<HashMap<String, u32>>,
+    /// Chat id → pids a cancel signalled and could not kill, newest last.
+    ///
+    /// Bug Z left the user with no way out at all: the job read `cancelled`, its loop kept
+    /// writing, and the bash guard refused the agent's `kill 561` because "a signal is not a
+    /// cancel". It is a cancel when the job is already cancelled and the pid is what its sweep
+    /// could not reap, and this is the list that says so. Bounded by [`LEFTOVER_PIDS_MAX`].
+    pub cancel_leftovers: Mutex<HashMap<String, Vec<u32>>>,
     /// Per chat: the message ids of files / charts that were written and READ BACK from the doc
     /// (`media::deliver`, `chart::post`), newest last. The only ground a "posted" sentence may
     /// stand on (#1900, #2025: a timed-out gated call was upgraded to "the chat service
@@ -1982,6 +2110,8 @@ impl Agent {
             skills: SkillsIndex::new(),
             approvals: crate::approval::Approvals::default(),
             subagent_msgs: Mutex::new(HashMap::new()),
+            worker_pgids: Mutex::new(HashMap::new()),
+            cancel_leftovers: Mutex::new(HashMap::new()),
             posted_ledger: Mutex::new(HashMap::new()),
             job_files: Mutex::new(Vec::new()),
             own_rows: std::sync::Mutex::new(OwnRows::default()),
@@ -2849,9 +2979,9 @@ impl Agent {
         let Some(cgroup) = self.cfg.run_as.as_ref().and_then(|r| r.cgroup.clone()) else {
             return 0;
         };
-        let Ok(text) = std::fs::read_to_string(cgroup.join("cgroup.procs")) else {
-            return 0;
-        };
+        // Recursive: since bug Z every harness child sits in a leaf of its own under this
+        // cgroup, so a read of this directory's own `cgroup.procs` alone would find nothing.
+        let found = crate::isolation::cgroup_procs(&cgroup);
         let mut keep: Vec<u32> = vec![std::process::id()];
         if let Some(c) = self.pi.lock().await.as_ref() {
             keep.extend(c.pid());
@@ -2860,12 +2990,12 @@ impl Agent {
             keep.extend(a.live_child_pids().await);
         }
         let mut killed = 0;
-        for pid in text.lines().filter_map(|l| l.trim().parse::<i32>().ok()) {
-            if keep.contains(&(pid as u32)) {
+        for pid in found {
+            if keep.contains(&pid) {
                 continue;
             }
             let _ = nix::sys::signal::kill(
-                nix::unistd::Pid::from_raw(pid),
+                nix::unistd::Pid::from_raw(pid as i32),
                 nix::sys::signal::Signal::SIGKILL,
             );
             killed += 1;
@@ -4003,8 +4133,9 @@ impl Agent {
             let _ = self
                 .store
                 .set_job_state(&j.id, "cancelled", Some("stopped by the user"));
+            let mut sweep = Sweep::default();
             if let Some(sid) = &j.subagent_id {
-                self.end_cancelled_worker(&j.id, sid).await;
+                sweep = self.end_cancelled_worker(&j.id, sid).await;
             }
             self.release_job_locks(&j.id).await;
             self.retire_live_job_rows(chat_id, &j.id).await;
@@ -4015,11 +4146,18 @@ impl Agent {
                 .flatten()
                 .map(|row| row.state)
                 .unwrap_or_else(|| "unknown".to_owned());
-            tracing::info!(job = %j.id, %state, "job cancelled");
+            tracing::info!(
+                job = %j.id, %state, killed = sweep.killed, survivors = ?sweep.survivors,
+                "job cancelled"
+            );
+            if !sweep.clean() {
+                self.note_cancel_leftovers(chat_id, &sweep.survivors).await;
+            }
             stopped.push(StoppedJob {
                 id: j.id.clone(),
                 title: j.title.clone(),
                 state,
+                sweep,
             });
         }
         if !stopped.is_empty() {
@@ -4028,17 +4166,61 @@ impl Agent {
         stopped
     }
 
-    /// End the worker of a job that was just cancelled: abort its turn, then close its harness
-    /// child so any in-flight tool call dies with it.
+    /// Remember pids a cancel could not kill, so the agent's `kill` on one of them is allowed
+    /// through instead of refused (bug Z part 2, `hook_kill_allowed`).
+    async fn note_cancel_leftovers(&self, chat_id: &str, pids: &[u32]) {
+        let mut all = self.cancel_leftovers.lock().await;
+        let list = all.entry(chat_id.to_owned()).or_default();
+        for pid in pids {
+            if !list.contains(pid) {
+                list.push(*pid);
+            }
+        }
+        let over = list.len().saturating_sub(LEFTOVER_PIDS_MAX);
+        if over > 0 {
+            list.drain(..over);
+        }
+    }
+
+    /// The processes of a worker: its recorded process group and its cgroup leaf.
+    pub(crate) async fn worker_tree(&self, sid: &str) -> ProcessTree {
+        ProcessTree {
+            pgid: self.worker_pgids.lock().await.get(sid).copied(),
+            cgroup: self
+                .cfg
+                .run_as
+                .as_ref()
+                .and_then(|ra| crate::isolation::Isolation::leaf_path(ra, sid)),
+        }
+    }
+
+    /// Record the process group a freshly spawned worker leads.
+    pub(crate) async fn note_worker_pgid(&self, sid: &str, pgid: u32) {
+        self.worker_pgids.lock().await.insert(sid.to_owned(), pgid);
+    }
+
+    /// End the worker of a job that was just cancelled: abort its turn, close its harness child
+    /// so any in-flight tool call dies with it, and kill everything that child spawned.
     ///
     /// The abort alone is not enough, and that is the second half of bug S. A worker's tool call
     /// can be a whole program — the Mersenne job's was `for i<70: bash 'sleep 20; tail -1 log'`
     /// under a 1 500 000 ms `timeout_ms` — and the harness acknowledges the abort while that
     /// program keeps running inside it. A cancelled job gets no result turn and is never resumed,
     /// so there is nothing its child is kept alive for.
-    async fn end_cancelled_worker(&self, job_id: &str, sid: &str) {
+    ///
+    /// Closing the child is not enough either, and that is bug Z. `RpcChild::shutdown` SIGKILLs
+    /// one pid — the worker's — and killing a process does not kill its children: they are
+    /// reparented to PID 1 and carry on. In r10cancel the job read `cancelled` at 42 s and pid
+    /// 561 wrote all forty of its lines afterwards. The detach in that job's brief is not what
+    /// did it; a plain `bash` grandchild of a worker survives the same way, which is why the
+    /// tree and not the detach is what is reaped here.
+    ///
+    /// The returned [`Sweep`] is read back from the kernel after the kill. A cancel that cannot
+    /// prove the work stopped has to say which pid is still alive rather than repeat the claim
+    /// that nothing is.
+    async fn end_cancelled_worker(&self, job_id: &str, sid: &str) -> Sweep {
         let Ok(Some(row)) = self.store.subagent(sid) else {
-            return;
+            return Sweep::default();
         };
         let adapter = self.adapter(match row.harness.as_str() {
             "pi" => Harness::Pi,
@@ -4051,8 +4233,27 @@ impl Agent {
         if let Err(e) = adapter.stop(sid).await {
             tracing::warn!(job = %job_id, error = %e, "cancel: the worker's child did not close");
         }
+        // After `stop`, so the worker cannot answer the kill by starting something else.
+        let tree = self.worker_tree(sid).await;
+        let sweep = if tree.is_empty() {
+            Sweep::default()
+        } else {
+            // Blocking: the sweep signals, sleeps and re-reads `/proc`. Short (2 s at worst) but
+            // long enough that it must not sit on a runtime thread the rest of the box shares.
+            let t = tree.clone();
+            tokio::task::spawn_blocking(move || t.kill())
+                .await
+                .unwrap_or_default()
+        };
+        if sweep.clean() {
+            self.worker_pgids.lock().await.remove(sid);
+            if let Some(dir) = &tree.cgroup {
+                crate::isolation::Isolation::remove_leaf(dir);
+            }
+        }
         let _ = self.store.set_subagent_status(sid, "idle");
         let _ = self.store.set_subagent_last_status(sid, "cancelled");
+        sweep
     }
 
     /// Retire the rows a cancelled job still has open: its hidden worker row and anything else
@@ -4255,19 +4456,63 @@ impl Agent {
         if stopped.is_empty() {
             return Err("no running job matched; list_jobs shows what is open in this chat".into());
         }
-        let all_cancelled = stopped.iter().all(StoppedJob::cancelled);
         Ok(json!({
             "stopped": stopped
                 .iter()
-                .map(|s| json!({ "job_id": s.id, "title": s.title, "state": s.state }))
+                .map(|s| json!({
+                    "job_id": s.id,
+                    "title": s.title,
+                    "state": s.state,
+                    // What the cancel did to the job's processes, not what it meant to do.
+                    "processes_killed": s.sweep.killed,
+                    "processes_still_alive": s.sweep.survivors,
+                }))
                 .collect::<Vec<_>>(),
-            "all_cancelled": all_cancelled,
-            "note": if all_cancelled {
-                "Every job above reads `cancelled` in its own row: its worker is closed, its tool call is dead and no result or file will arrive from it. Say it is cancelled in one line and end the turn."
-            } else {
-                "At least one job above does NOT read `cancelled`. Do not tell the user it stopped: say which one is still open, call stop_job again for it, and only then report a cancel."
-            },
+            "all_cancelled": stopped.iter().all(StoppedJob::cancelled),
+            "note": stop_job_note(&stopped),
         }))
+    }
+
+    /// May the main agent run this `kill`? `Ok(())` to allow it, `Err(reason)` to refuse.
+    ///
+    /// The refusal ("a signal is not a cancel") is right for the case it was written for: bug S,
+    /// where `kill 14237` was used *instead of* `stop_job` and the job carried on. It was wrong
+    /// in r10cancel, where `stop_job` had already run, the job read `cancelled`, and pid 561 was
+    /// what its sweep had failed to reap. Refusing there left the user with no way to stop the
+    /// loop at all — a worse outcome than the mistaken `kill` the guard exists to prevent.
+    ///
+    /// So the exception is narrow and evidence-backed rather than a relaxation: every pid named
+    /// in the command must be one [`Agent::stop_jobs`] recorded as a survivor of a cancelled job
+    /// **of this chat**. A `kill` naming anything else — a pid not on the list, a `pkill` by
+    /// pattern, a running job's worker — is refused exactly as before.
+    pub async fn hook_kill_allowed(&self, command: &str) -> Result<(), String> {
+        let chat_id = {
+            let tl = self.turn.lock().await;
+            tl.as_ref().map(|t| t.chat_id.clone())
+        };
+        let Some(chat_id) = chat_id else {
+            return Err(KILL_REFUSAL.into());
+        };
+        let leftovers = self
+            .cancel_leftovers
+            .lock()
+            .await
+            .get(&chat_id)
+            .cloned()
+            .unwrap_or_default();
+        if leftovers.is_empty() {
+            return Err(KILL_REFUSAL.into());
+        }
+        let named = pids_in_command(command);
+        if named.is_empty() || !named.iter().all(|p| leftovers.contains(p)) {
+            return Err(KILL_REFUSAL.into());
+        }
+        tracing::info!(
+            chat_id,
+            ?named,
+            "kill allowed: leftovers of a cancelled job"
+        );
+        Ok(())
     }
 
     /// A job of this chat by id, or the newest running one for `latest` / an empty id
@@ -10291,6 +10536,11 @@ impl Agent {
                 }
             }
         }
+        // Recorded once the child exists and before it is prompted, so a cancel that lands on
+        // the worker's first tool call already knows which process group to reap (bug Z).
+        if let Some(pgid) = adapter.child_pgid(&subagent_id).await {
+            self.note_worker_pgid(&subagent_id, pgid).await;
+        }
         let stream = adapter
             .stream(&subagent_id)
             .ok_or_else(|| anyhow!("no stream for {subagent_id}"))?;
@@ -13968,11 +14218,11 @@ mod tests {
             "call `send_message(to, text)` from whatever chat you are in",
             "Bare `send_message(text)` (no `to`) is only a progress note here",
             "Never post `@name …` or a group message to reach one agent",
-            // long tasks: loop, light plan, detached jobs, standby
+            // long tasks: loop, light plan, jobs run the work (never detached), standby
             "understand the current state, act, observe what happened, repeat",
             "exactly one step in progress",
             "Do not stop at analysis",
-            "starts detached and gets a scheduled check-in",
+            "runs as a job and gets a scheduled check-in",
             "stand by",
             // verify before done, diagnostics after edits, ~3 attempts then escalate
             "Before you say something is done, check it",

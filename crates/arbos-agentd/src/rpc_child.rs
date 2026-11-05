@@ -25,6 +25,9 @@ pub struct RpcChild {
     /// Kept from spawn: `Child::id` is `None` once the process has been reaped, and the pid is
     /// what tells a workspace cgroup's leftovers apart from the children the box still owns.
     pid: Option<u32>,
+    /// Where this child's descendants can be found after it is gone (bug Z). Killing the pid
+    /// above reaches nothing it spawned, so a cancel needs a handle on the set instead.
+    tree: crate::isolation::ProcessTree,
 }
 
 /// How a child that is gone went: its exit code, or the signal that took it.
@@ -74,6 +77,10 @@ impl RpcChild {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::from(log))
+            // The child leads a process group of its own, so everything it starts can be
+            // signalled as a set without the signal reaching agentd (bug Z). Without this the
+            // child sits in agentd's own group and no group kill is possible at all.
+            .process_group(0)
             .kill_on_drop(true);
         for (k, v) in envs {
             cmd.env(k, v);
@@ -88,10 +95,19 @@ impl RpcChild {
         let mut child = cmd
             .spawn()
             .with_context(|| format!("spawn {program} ({name})"))?;
-        if let (Some(ra), Some(pid)) = (run_as, child.id()) {
-            crate::isolation::Isolation::attach(ra, pid);
-        }
         let pid = child.id();
+        // A cgroup of this child's own under the workspace's. Membership is inherited on fork
+        // and survives `setsid`, so it is the one handle that finds every descendant; the
+        // process group below misses a child that deliberately leaves the session.
+        let cgroup = match (run_as, pid) {
+            (Some(ra), Some(pid)) => crate::isolation::Isolation::attach_leaf(ra, name, pid),
+            _ => None,
+        };
+        let tree = crate::isolation::ProcessTree {
+            // `process_group(0)` makes the child a group leader, so its pgid is its pid.
+            pgid: pid,
+            cgroup,
+        };
         let stdin = child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?;
         let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
         let (events, _) = broadcast::channel(4096);
@@ -104,6 +120,7 @@ impl RpcChild {
             seq: AtomicU64::new(1),
             exited: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             pid,
+            tree,
         });
         let reader_me = me.clone();
         tokio::spawn(async move {
@@ -214,6 +231,11 @@ impl RpcChild {
 
     pub fn pid(&self) -> Option<u32> {
         self.pid
+    }
+
+    /// Where this child's descendants can be reached, for a cancel that has to reap them.
+    pub fn tree(&self) -> crate::isolation::ProcessTree {
+        self.tree.clone()
     }
 
     /// Wait on a child that is gone and report how it went.

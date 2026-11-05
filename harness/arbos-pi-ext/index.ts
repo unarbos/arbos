@@ -93,7 +93,7 @@ export function killsAProcess(toolName: string, input: Record<string, unknown>):
 }
 
 const KILL_HINT =
-  "A signal is not a cancel. `stop_job(job_id)` is the only thing that cancels a job: it ends the worker's turn and its tool call, marks the job `cancelled`, and answers with that state — a `kill` leaves the job running and its result still arrives in the chat later. Call list_jobs for the id, then stop_job(job_id) (or stop_job(\"all\")), and say \"cancelled\" only where the state it returns reads `cancelled`. For a process of your own that is not a job, let the command finish in the foreground instead.";
+  "A signal is not a cancel. `stop_job(job_id)` is the only thing that cancels a job: it ends the worker's turn and its tool call, kills the processes the job started, marks the job `cancelled`, and answers with that state and with what it killed. Call list_jobs for the id, then stop_job(job_id) (or stop_job(\"all\")), and say \"cancelled\" only where the state it returns reads `cancelled`. If stop_job reports a pid it could NOT kill, a `kill` aimed at that pid is allowed — but only that one. For a process of your own that is not a job, let the command finish in the foreground instead.";
 
 /**
  * A `reply` text that announces more to come ("delivered in parts below", "table follows") is an
@@ -309,8 +309,19 @@ export default function arbosPiExt(pi: ExtensionAPI) {
       }
       const killing = killsAProcess(event.toolName, event.input as Record<string, unknown>);
       if (killing) {
-        audit({ kind: "kill_refused", session: sessionId, tool: event.toolName, fragment: killing.slice(0, 160) });
-        return { block: true, reason: `Refused (\`${killing.slice(0, 80)}\`): ${KILL_HINT}` };
+        // One exception, and agentd is the only thing that can judge it: a pid a `stop_job` of
+        // this chat already reported it could not reap (Test5 round 10, bug Z — the job read
+        // `cancelled`, its loop kept writing, and refusing the kill left no way to stop it).
+        // Refused by default: no agentd, an unreachable one, or any other answer blocks.
+        const verdict = await hook("/hook/kill-allowed", {
+          session_id: sessionId,
+          command: String((event.input as { command?: unknown })?.command ?? (event.input as { code?: unknown })?.code ?? ""),
+        });
+        if (verdict?.ok !== true) {
+          audit({ kind: "kill_refused", session: sessionId, tool: event.toolName, fragment: killing.slice(0, 160) });
+          return { block: true, reason: `Refused (\`${killing.slice(0, 80)}\`): ${verdict?.error ?? KILL_HINT}` };
+        }
+        audit({ kind: "kill_allowed_leftover", session: sessionId, tool: event.toolName, fragment: killing.slice(0, 160) });
       }
     }
     if (beforeRoute && relayTurn && event.toolName === "send_message") {
@@ -604,7 +615,7 @@ export default function arbosPiExt(pi: ExtensionAPI) {
     promptSnippet: "start_job: run longer work beside the chat; its result arrives later as an [Arbos] job notice",
     parameters: Type.Object({
       title: Type.String({ description: "2-5 words, present tense, what the user sees while it runs (\"Searching for surf schools\")" }),
-      brief: Type.String({ description: "The exact instruction for the worker: what to find or build, for whom, the acceptance criterion, what to return (URLs and sources for research)" }),
+      brief: Type.String({ description: "The exact instruction for the worker: what to find or build, for whom, the acceptance criterion, what to return (URLs and sources for research). The job is already running beside the chat, so never tell the worker to detach anything (no nohup, setsid or trailing &) — its steps run in the foreground, and a process it detaches is one stop_job may not be able to kill." }),
       kind: Type.Union([Type.Literal("research"), Type.Literal("code"), Type.Literal("ops"), Type.Literal("other")]),
       touches: Type.Optional(Type.Union([Type.Array(Type.String()), Type.Null()], { description: "Resources the job changes: paths, 'git', 'routines', 'secret:<name>' (none for research)" })),
     }),

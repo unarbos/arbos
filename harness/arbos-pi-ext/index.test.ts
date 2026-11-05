@@ -158,3 +158,24 @@ test("a kill in the main turn is refused with the stop_job hint (Test5 round 6, 
   assert.match(verdict.reason, /stop_job/);
   assert.match(verdict.reason, /signal is not a cancel/);
 });
+
+test("a kill is refused when agentd cannot vouch for it, and the hint names the one exception (Test5 round 10, bug Z)", async () => {
+  // Whether a given kill is the allowed one is agentd's judgement — it is the only side that
+  // knows which pids a `stop_job` of this chat failed to reap — and it is tested there
+  // (`job_leftover_tests::a_kill_is_allowed_only_for_a_pid_a_cancel_of_this_chat_could_not_reap`).
+  // What belongs here is that the extension refuses unless agentd says yes.
+  //
+  // These tests run with ARBOS_HOOK_URL unset, so the hook answers `null`: no agentd, no
+  // vouching, no kill. That is also the production default for a local pi run, and it is the
+  // behaviour the guard shipped with — the exception widens nothing on its own.
+  const { emit, tools } = fakePi();
+  const input = await emit("input", { text: "that loop is still going, kill it", source: "rpc" });
+  await emit("before_agent_start", { messageType: "user", prompt: input.text, systemPromptOptions: { sections: {} } });
+  await tools.get("route").execute("r", { action: "act", ack: "Looking." });
+  const verdict = await emit("tool_call", { toolCallId: "k", toolName: "bash", input: { command: "kill 561" }, parentToolCallId: null });
+  assert.equal(verdict?.block, true);
+  // r10cancel's dead end: the hint said only "a signal is not a cancel" while stop_job had
+  // already run and the loop was still writing. It now names the way out.
+  assert.match(verdict.reason, /stop_job reports a pid it could NOT kill/);
+  assert.match(verdict.reason, /kills the processes the job started/);
+});

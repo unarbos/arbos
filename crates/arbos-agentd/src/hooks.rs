@@ -199,6 +199,22 @@ async fn stop_job(State(a): State<S>, headers: HeaderMap, Json(b): Json<Value>) 
     }
 }
 
+/// Is this `kill` the one case a signal is allowed in: a pid a cancel of this chat's job could
+/// not reap (bug Z)? The extension refuses every `kill` whose answer here is not `ok`.
+async fn kill_allowed(State(a): State<S>, headers: HeaderMap, Json(b): Json<Value>) -> Response {
+    let Some(role) = authed(&a, &headers) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if let Some(reason) = main_turn_only(role, "kill") {
+        return err(reason);
+    }
+    let command = b.get("command").and_then(Value::as_str).unwrap_or("");
+    match a.hook_kill_allowed(command).await {
+        Ok(()) => Json(json!({ "ok": true })).into_response(),
+        Err(e) => err(e),
+    }
+}
+
 async fn list_jobs(State(a): State<S>, headers: HeaderMap) -> Response {
     if authed(&a, &headers).is_none() {
         return StatusCode::UNAUTHORIZED.into_response();
@@ -495,6 +511,7 @@ pub fn router(agent: Arc<Agent>) -> Router {
         .route("/hook/list_jobs", post(list_jobs))
         .route("/hook/steer_job", post(steer_job))
         .route("/hook/stop_job", post(stop_job))
+        .route("/hook/kill-allowed", post(kill_allowed))
         .route("/hook/approval", post(approval))
         .route("/hook/approval-status", post(approval_status))
         .route("/hook/approval-abandon", post(approval_abandon))
