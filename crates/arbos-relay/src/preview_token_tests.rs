@@ -84,7 +84,13 @@ async fn setup(mcp_token: &str) -> (AppState, Arc<Fake>) {
     state.daytona = Some(dt);
     state
         .db
-        .insert_test_user(USER, "preview-token-test", None, None, 10.0)
+        .insert_test_user(
+            USER,
+            "preview-token-test",
+            None,
+            None,
+            crate::credits::SpendLimit::Unlimited,
+        )
         .expect("user");
     state
         .db

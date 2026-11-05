@@ -40,7 +40,7 @@ CREATE TABLE IF NOT EXISTS projects (
   id TEXT PRIMARY KEY, name TEXT NOT NULL, icon TEXT NOT NULL DEFAULT '',
   instructions TEXT NOT NULL DEFAULT '', models TEXT NOT NULL DEFAULT '{}',
   state TEXT NOT NULL DEFAULT 'waking', created_at INTEGER NOT NULL, last_active_at INTEGER NOT NULL,
-  spend_cap_daily REAL NOT NULL DEFAULT 25.0,
+  spend_cap_daily REAL NOT NULL DEFAULT -1.0,
   project_token_hash TEXT
 );
 CREATE TABLE IF NOT EXISTS chats (
@@ -721,6 +721,7 @@ impl Db {
         crate::db_people::migrate_people(&c);
         c.execute_batch(crate::db_people::PEOPLE_SCHEMA)?;
         Self::migrate_mono_avatar_defaults(&c)?;
+        Self::migrate_account_caps_to_unlimited(&c)?;
         c.execute_batch(crate::db_push::PUSH_SCHEMA)?;
         c.execute_batch(crate::push::store::OUTBOX_SCHEMA)?;
         c.execute_batch(crate::push::eligibility::LEVEL_SCHEMA)?;
@@ -827,6 +828,33 @@ impl Db {
     /// in thirteen stored `avatar_color = 'mono'` without anyone choosing it. Clear those once;
     /// NULL means "the (now always coloured) default" on every client. Later explicit `mono`
     /// picks stay: the `meta` flag makes this a one-shot.
+    /// Jacob, 2026-11-05: "Increase our agent caps to infinity", and all spending belongs in one
+    /// cap rather than one per app function. New accounts are unlimited; rows already carrying a
+    /// cap are lifted here, once. Two things are left alone on purpose: a `spend_cap_usd` of 0 is
+    /// an admin freezing an account (`PUT /admin/users/{id}/credits {"daily_cap_usd": 0}`), which
+    /// is an instruction, not a leftover default; and the per-project column, which nothing reads
+    /// any more. Guarded by `meta`, so an admin who sets a cap after this keeps it across restarts.
+    fn migrate_account_caps_to_unlimited(c: &Connection) -> Result<()> {
+        const KEY: &str = "account_caps_lifted";
+        let done: Option<String> = c
+            .query_row("SELECT value FROM meta WHERE key = ?1", params![KEY], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        if done.is_some() {
+            return Ok(());
+        }
+        c.execute(
+            "UPDATE users SET cap_unlimited = 1 WHERE cap_unlimited = 0 AND spend_cap_usd > 0",
+            [],
+        )?;
+        c.execute(
+            "INSERT INTO meta(key, value) VALUES (?1, '1') ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![KEY],
+        )?;
+        Ok(())
+    }
+
     fn migrate_mono_avatar_defaults(c: &Connection) -> Result<()> {
         const KEY: &str = "avatar_mono_defaults_cleared";
         let done: Option<String> = c
@@ -881,7 +909,7 @@ impl Db {
                    id TEXT PRIMARY KEY, name TEXT NOT NULL, icon TEXT NOT NULL DEFAULT '',
                    instructions TEXT NOT NULL DEFAULT '', models TEXT NOT NULL DEFAULT '{}',
                    state TEXT NOT NULL DEFAULT 'waking', created_at INTEGER NOT NULL, last_active_at INTEGER NOT NULL,
-                   spend_cap_daily REAL NOT NULL DEFAULT 25.0,
+                   spend_cap_daily REAL NOT NULL DEFAULT -1.0,
                    project_token_hash TEXT,
                    color TEXT NOT NULL DEFAULT '#8b7cf6',
                    user_id TEXT NOT NULL DEFAULT 'u_default',
@@ -997,17 +1025,6 @@ impl Db {
     }
 
     // ---- projects and chats -------------------------------------------------------------------
-
-    /// Admin: a project's daily cap in USD, or the unlimited sentinel.
-    pub fn set_project_spend_cap(&self, id: &str, cap: f64) -> Result<bool> {
-        self.with(|c| {
-            c.execute(
-                "UPDATE projects SET spend_cap_daily = ?2 WHERE id = ?1",
-                params![id, cap],
-            )
-            .map(|n| n > 0)
-        })
-    }
 
     pub fn insert_project(&self, p: &Project) -> Result<()> {
         self.with(|c| {
@@ -3924,7 +3941,7 @@ mod vault_scope_tests {
                 "CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT NOT NULL, user_id TEXT NOT NULL DEFAULT 'u_default',
                    icon TEXT NOT NULL DEFAULT '', instructions TEXT NOT NULL DEFAULT '', models TEXT NOT NULL DEFAULT '{}',
                    state TEXT NOT NULL DEFAULT 'waking', created_at INTEGER NOT NULL DEFAULT 0, last_active_at INTEGER NOT NULL DEFAULT 0,
-                   spend_cap_daily REAL NOT NULL DEFAULT 25.0, project_token_hash TEXT, color TEXT NOT NULL DEFAULT '#8b7cf6',
+                   spend_cap_daily REAL NOT NULL DEFAULT -1.0, project_token_hash TEXT, color TEXT NOT NULL DEFAULT '#8b7cf6',
                    workspace_state TEXT NOT NULL DEFAULT 'stopped', avatar TEXT, deleted_at INTEGER, avatar_color TEXT,
                    description TEXT NOT NULL DEFAULT '', primary_chat_id TEXT, avatar_color_index INTEGER,
                    avatar_leaf INTEGER, avatar_leaf_color INTEGER, image_key TEXT, avatar_version INTEGER NOT NULL DEFAULT 0);
@@ -3963,6 +3980,88 @@ mod vault_scope_tests {
         drop(db);
         let db = Db::open(&path).expect("reopen");
         assert_eq!(db.list_vault_items("bob").unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[cfg(test)]
+mod account_cap_migration_tests {
+    //! The one ledger's one limit, on an existing relay database.
+
+    use super::*;
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "arbos-caps-{tag}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    fn limit_of(db: &Db, id: &str) -> Option<f64> {
+        db.user(id).unwrap().unwrap().daily_cap_usd
+    }
+
+    /// Opening an existing database lifts the caps already on it, leaves a deliberate freeze
+    /// alone, and does not undo a cap an admin sets afterwards.
+    #[test]
+    fn opening_lifts_the_caps_already_on_the_rows() {
+        let dir = temp_dir("lift");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("relay.db");
+        let db = Db::open(&path).expect("open");
+        for (id, cap) in [("u_capped", 25.0), ("u_other", 20.0), ("u_frozen", 0.0)] {
+            db.set_user_limits(id, Some(Some(cap)), None).unwrap();
+        }
+        // Rewind to a relay database from before this migration: the rows carry their caps and
+        // the marker is not set yet, which is what the next boot of the live relay will meet.
+        db.with(|c| c.execute("DELETE FROM meta WHERE key = 'account_caps_lifted'", []))
+            .unwrap();
+        drop(db);
+
+        let db = Db::open(&path).expect("reopen");
+        assert_eq!(limit_of(&db, "u_capped"), None, "a default cap is lifted");
+        assert_eq!(limit_of(&db, "u_other"), None, "a default cap is lifted");
+        assert_eq!(
+            limit_of(&db, "u_frozen"),
+            Some(0.0),
+            "an admin freezing an account is an instruction, not a leftover default"
+        );
+
+        // A cap set after the lift survives the next boot: the migration runs once.
+        db.set_user_limits("u_capped", Some(Some(3.0)), None)
+            .unwrap();
+        drop(db);
+        let db = Db::open(&path).expect("reopen again");
+        assert_eq!(limit_of(&db, "u_capped"), Some(3.0));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A project is not a ledger: a row that names no cap is stored with the unlimited sentinel.
+    #[test]
+    fn a_project_row_defaults_to_no_cap_of_its_own() {
+        let dir = temp_dir("project");
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Db::open(&dir.join("relay.db")).expect("open");
+        db.with(|c| {
+            c.execute(
+                "INSERT INTO projects(id, name, user_id, created_at, last_active_at) VALUES ('p1', 'Home', 'u1', 0, 0)",
+                [],
+            )
+        })
+        .unwrap();
+        let cap: f64 = db
+            .with(|c| {
+                c.query_row(
+                    "SELECT spend_cap_daily FROM projects WHERE id = 'p1'",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(cap, crate::credits::PROJECT_CAP_UNLIMITED);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

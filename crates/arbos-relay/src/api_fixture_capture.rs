@@ -464,7 +464,7 @@ async fn me_and_machine_unread_fixtures() {
                 avatar_url: None,
                 name: None,
             },
-            20.0,
+            crate::credits::SpendLimit::Unlimited,
         )
         .unwrap();
     fix_user_created_at(&state, &user.id);
@@ -638,7 +638,7 @@ async fn token_and_refresh_grace_match_fixtures() {
                 avatar_url: None,
                 name: Some("Fixture User".into()),
             },
-            20.0,
+            crate::credits::SpendLimit::Unlimited,
         )
         .unwrap();
     state

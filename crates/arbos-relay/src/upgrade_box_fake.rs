@@ -278,7 +278,13 @@ pub(crate) async fn setup(fail: &[(&str, &str)]) -> (AppState, Arc<Fake>) {
     state.daytona = Some(dt);
     state
         .db
-        .insert_test_user(USER, "rollback-test", None, None, 10.0)
+        .insert_test_user(
+            USER,
+            "rollback-test",
+            None,
+            None,
+            crate::credits::SpendLimit::Unlimited,
+        )
         .expect("user");
     state.db.upsert_box(&row(SRC, "hash-src")).expect("row");
     *state.default_snapshot.write().unwrap() = TARGET.to_owned();

@@ -6186,7 +6186,7 @@ pub(crate) mod tests_support {
                     avatar_url: None,
                     name: None,
                 },
-                20.0,
+                crate::credits::SpendLimit::Unlimited,
             )
             .expect("user");
         let device_id = ulid();

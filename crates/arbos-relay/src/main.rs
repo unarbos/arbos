@@ -311,7 +311,7 @@ async fn main() -> anyhow::Result<()> {
         github_client_secret,
         auth_redirects: auth_redirects_from_env(),
         default_grant_usd: env_f64("ARBOS_DEFAULT_GRANT_USD", 100.0),
-        default_daily_cap_usd: env_f64("ARBOS_DEFAULT_DAILY_CAP_USD", 20.0),
+        default_account_limit: credits::SpendLimit::from_env("ARBOS_DEFAULT_DAILY_CAP_USD"),
         global_daily_cap_usd: env_f64("ARBOS_GLOBAL_DAILY_CAP_USD", 500.0),
         global_machine_daily_cap_usd: env_f64("ARBOS_GLOBAL_MACHINE_DAILY_CAP_USD", 400.0),
         always_on: match env_nonempty("ARBOS_ALWAYS_ON").as_deref() {
@@ -607,10 +607,6 @@ async fn main() -> anyhow::Result<()> {
             "/projects/{id}/voice",
             get(voice::get_agent_settings).put(voice::put_agent_settings),
         )
-        .route(
-            "/admin/users/{id}/voice",
-            axum::routing::put(voice::put_user_cap),
-        )
         .route("/voice/worker/hello", post(voice::worker_hello))
         .route("/voice/calls/{id}/inbox", get(voice::call_inbox))
         .route("/voices", get(voice::list_voices))
@@ -876,10 +872,6 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/admin/users/{id}/credits",
             axum::routing::put(admin::set_credits),
-        )
-        .route(
-            "/admin/projects/{id}/spend-cap",
-            axum::routing::put(admin::set_project_cap),
         )
         .route(
             "/admin/killswitch",

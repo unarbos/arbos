@@ -312,20 +312,6 @@ pub async fn generations(
     if let Err(r) = crate::credits::check_call(&state, &principal, &project_id) {
         return crate::credits::refused_response(&r);
     }
-    if let Ok(Some(p)) = state.db.project(&project_id) {
-        let today = state
-            .db
-            .usage_since(&project_id, crate::proxy::start_of_utc_day_ms())
-            .map(|u| u.usd)
-            .unwrap_or(0.0);
-        if today >= p.spend_cap_daily {
-            return (
-                StatusCode::PAYMENT_REQUIRED,
-                Json(json!({ "error": { "type": "spend_cap", "message": format!("daily spend cap ${:.2} reached", p.spend_cap_daily) } })),
-            )
-                .into_response();
-        }
-    }
     // gpt-image-* models only return base64; DALL·E needs to be asked for it.
     if model.starts_with("dall-e") {
         body["response_format"] = json!("b64_json");
@@ -403,15 +389,6 @@ pub async fn generations(
 }
 
 // ---- avatar generation (D92 amendment: the avatar picker's Generate tab) --------------------
-
-/// Pictures the picker may generate per project per UTC day (`ARBOS_AVATAR_GEN_DAILY`, default 20):
-/// one `gpt-image-1` square at low quality is $0.011, so a day of taps costs cents.
-fn avatar_gen_daily_cap() -> i64 {
-    std::env::var("ARBOS_AVATAR_GEN_DAILY")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(20)
-}
 
 /// Models tried in order for an avatar (`ARBOS_AVATAR_GEN_MODELS`, comma-separated, overrides).
 /// Production hits api.openai.com directly with the relay's `OPENAI_API_KEY`; on 2026-10-24
@@ -592,8 +569,6 @@ pub struct AvatarTarget {
     /// The user whose credits pay (the agent's owner, the member / admin asking for a group /
     /// server picture).
     pub payer: String,
-    /// The agent's daily spend cap, when the target is an agent.
-    pub spend_cap_daily: Option<f64>,
     /// The project id to meter against for an agent; the slot for the others.
     pub meter_id: String,
 }
@@ -602,7 +577,7 @@ pub struct AvatarTarget {
 /// prompt, through the relay's OpenAI key, stored in the project's blob slot and **not yet set**:
 /// the answer is `{image_key}` for the picker's preview, and "Set avatar" makes it the picture via
 /// `PATCH /projects/{id} {image_key}`. Metered like `/proxy/v1/images/generations` (usage row,
-/// credits, the project's daily spend cap) plus a per-target daily count cap. `ARBOS_IMAGE_MOCK=1`
+/// credits against the owner's account ledger), with no count cap of its own. `ARBOS_IMAGE_MOCK=1`
 /// answers with the labelled placeholder.
 pub async fn avatar_generate(
     State(state): State<AppState>,
@@ -626,7 +601,6 @@ pub async fn avatar_generate(
     let target = AvatarTarget {
         slot: project.id.clone(),
         payer: project.user_id.clone(),
-        spend_cap_daily: Some(project.spend_cap_daily),
         meter_id: project.id.clone(),
     };
     generate_into(&state, target, &body.prompt).await
@@ -652,7 +626,6 @@ pub async fn chat_avatar_generate(
     let target = AvatarTarget {
         slot: slot.clone(),
         payer: me,
-        spend_cap_daily: None,
         meter_id: slot,
     };
     generate_into(&state, target, &body.prompt).await
@@ -678,7 +651,6 @@ pub async fn server_avatar_generate(
     let target = AvatarTarget {
         slot: slot.clone(),
         payer: me,
-        spend_cap_daily: None,
         meter_id: slot,
     };
     generate_into(&state, target, &body.prompt).await
@@ -871,7 +843,6 @@ pub async fn me_avatar_generate(
     let target = AvatarTarget {
         slot: slot.clone(),
         payer: user_id.clone(),
-        spend_cap_daily: None,
         meter_id: slot,
     };
     generate_into(&state, target, &body.prompt).await
@@ -887,16 +858,6 @@ async fn generate_into(state: &AppState, target: AvatarTarget, prompt: &str) -> 
         .db
         .usage_count_since(&target.meter_id, "openai-images", "avatar:", since)
         .unwrap_or(0);
-    if made_today >= avatar_gen_daily_cap() {
-        return avatar_error(
-            StatusCode::TOO_MANY_REQUESTS,
-            "avatar_gen_cap",
-            format!(
-                "{} generated pictures today is the limit; try again tomorrow or upload one",
-                avatar_gen_daily_cap()
-            ),
-        );
-    }
     let models = avatar_gen_models();
     let mut model = format!("avatar:{}", models[0]);
     let t0 = Instant::now();
@@ -924,20 +885,6 @@ async fn generate_into(state: &AppState, target: AvatarTarget, prompt: &str) -> 
         };
         if let Err(r) = crate::credits::check(state, &target.payer) {
             return crate::credits::refused_response(&r);
-        }
-        if let Some(cap) = target.spend_cap_daily {
-            let today = state
-                .db
-                .usage_since(&target.meter_id, since)
-                .map(|u| u.usd)
-                .unwrap_or(0.0);
-            if today >= cap {
-                return avatar_error(
-                    StatusCode::PAYMENT_REQUIRED,
-                    "spend_cap",
-                    format!("daily spend cap ${cap:.2} reached"),
-                );
-            }
         }
         let url = format!(
             "{}/images/generations",
@@ -1103,7 +1050,6 @@ async fn generate_into(state: &AppState, target: AvatarTarget, prompt: &str) -> 
         "model": model.trim_start_matches("avatar:"),
         "mock": state.cfg.image_mock,
         "made_today": made_today + 1,
-        "daily_cap": avatar_gen_daily_cap(),
     }))
     .into_response()
 }

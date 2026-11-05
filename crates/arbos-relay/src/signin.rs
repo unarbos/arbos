@@ -585,7 +585,7 @@ pub async fn github_callback(
     };
     let (user, created) = match state
         .db
-        .upsert_github_user(&gh, state.cfg.default_daily_cap_usd)
+        .upsert_github_user(&gh, state.cfg.default_account_limit)
     {
         Ok(v) => v,
         Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
@@ -2075,7 +2075,7 @@ mod refresh_tests {
                     avatar_url: None,
                     name: None,
                 },
-                state.cfg.default_daily_cap_usd,
+                state.cfg.default_account_limit,
             )
             .expect("user");
         let device_id = ulid();

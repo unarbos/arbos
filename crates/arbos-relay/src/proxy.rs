@@ -392,9 +392,6 @@ async fn forward(
     let project_id = project_of(&state, &principal, &headers)
         .or(project_override)
         .unwrap_or_else(|| "relay-admin".to_owned());
-    if let Some(r) = crate::credits::project_cap_refusal(&state, &project_id) {
-        return r;
-    }
     if let Err(r) = crate::credits::check_call(&state, &principal, &project_id) {
         return crate::credits::refused_response(&r);
     }
@@ -997,12 +994,12 @@ fn audio_project(state: &AppState, principal: &Principal, headers: &HeaderMap) -
         .unwrap_or_else(|| "relay-admin".to_owned())
 }
 
-/// `Some(response)` when the project's daily cap is already spent or the user may not spend.
+/// `Some(response)` when the account behind this project may not spend.
 fn audio_spend_cap(state: &AppState, principal: &Principal, project_id: &str) -> Option<Response> {
     if let Err(r) = crate::credits::check_call(state, principal, project_id) {
         return Some(crate::credits::refused_response(&r));
     }
-    crate::credits::project_cap_refusal(state, project_id)
+    None
 }
 
 fn audio_key(state: &AppState) -> Option<String> {

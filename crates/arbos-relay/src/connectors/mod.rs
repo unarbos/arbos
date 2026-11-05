@@ -886,7 +886,7 @@ mod tests {
             github_client_secret: None,
             auth_redirects: Vec::new(),
             default_grant_usd: 100.0,
-            default_daily_cap_usd: 20.0,
+            default_account_limit: crate::credits::SpendLimit::Unlimited,
             global_daily_cap_usd: 500.0,
             global_machine_daily_cap_usd: 400.0,
             always_on: false,
