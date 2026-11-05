@@ -36,3 +36,10 @@ regex-lite.workspace = true
 rand.workspace = true
 base64.workspace = true
 ulid.workspace = true
+
+# `tokio::time::pause`, for the send-order valve test: its wait is minutes long, so a test has to
+# drive the clock rather than sit on it. A dev-dependency and not a feature on the line above,
+# because resolver 2 keeps dev-only features out of the shipped binary, and tokio asks that
+# `test-util` stay out of production builds. `arbos-sidecar` enables it the same way.
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

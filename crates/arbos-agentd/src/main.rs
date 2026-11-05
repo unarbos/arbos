@@ -41,6 +41,9 @@ mod responders;
 mod routines;
 mod rpc_child;
 mod selfref;
+mod send_order;
+#[cfg(test)]
+mod send_order_tests;
 mod settings;
 mod silence;
 mod sites;
