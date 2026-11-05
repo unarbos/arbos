@@ -1113,9 +1113,10 @@ const LEFTOVER_PIDS_MAX: usize = 32;
 /// What `stop_job` tells the model it may now say, which is decided by what the cancel actually
 /// achieved rather than by the word in the job row.
 ///
-/// Three outcomes, and the middle one is bug Z: a row that reads `cancelled` over work that is
-/// still running. The model is told not to report a cancel, told which pid to name, and told
-/// that the `kill` the guard refused in r10cancel is allowed for exactly that pid.
+/// Four outcomes, and the middle two are the round-13 pair: a row that reads `cancelled` over
+/// work that is still running (bug Z), and a clean-sounding answer from a sweep that never read
+/// the kernel (bug AE). The model is told not to report a cancel, told which pid to name, and
+/// told that the `kill` the guard refused in r10cancel is allowed for exactly that pid.
 pub(crate) fn stop_job_note(stopped: &[StoppedJob]) -> String {
     if stopped.iter().any(|s| s.state != "cancelled") {
         return "At least one job above does NOT read `cancelled`. Do not tell the user it stopped: say which one is still open, call stop_job again for it, and only then report a cancel.".to_owned();
@@ -1125,7 +1126,10 @@ pub(crate) fn stop_job_note(stopped: &[StoppedJob]) -> String {
         .flat_map(|s| s.sweep.survivors.clone())
         .collect();
     if leftovers.is_empty() {
-        return "Every job above reads `cancelled` in its own row, and every process it had started is dead: its worker is closed, its tool call is dead and no result or file will arrive from it. Say it is cancelled in one line and end the turn.".to_owned();
+        if stopped.iter().any(|s| !s.sweep.checked) {
+            return "Every job above reads `cancelled`, but its processes could NOT be checked: agentd has no handle on them (it was restarted since the job started). Do not tell the user the work stopped. Say the job is cancelled and that you cannot confirm the processes it started are gone, and offer to look with `ps`.".to_owned();
+        }
+        return "Every job above reads `cancelled` in its own row, and every process it had started was checked and is dead: its worker is closed, its tool call is dead and no result or file will arrive from it. Say it is cancelled in one line and end the turn.".to_owned();
     }
     let pids = pid_list(&leftovers);
     format!(
@@ -1199,7 +1203,7 @@ pub(crate) fn stop_line(stopped: &[StoppedJob]) -> String {
     // Cancelled, but something it started is still running. Naming the pid is the point: it is
     // what the user needs to get rid of it, and bug Z is what happens when the line says
     // "cancelled" and stops there.
-    if let Some(leaky) = stopped.iter().find(|s| !s.sweep.clean()) {
+    if let Some(leaky) = stopped.iter().find(|s| !s.sweep.survivors.is_empty()) {
         return format!(
             "Stopped: {titles}. “{}” reads cancelled, but {} it started {} still running ({}). \
              I am not able to say its work has stopped.",
@@ -1221,6 +1225,15 @@ pub(crate) fn stop_line(stopped: &[StoppedJob]) -> String {
                 .map(u32::to_string)
                 .collect::<Vec<_>>()
                 .join(", ")
+        );
+    }
+    // Cancelled, nothing found running — but by a sweep that had no handle to look with. The
+    // promise below rests on a reading of the kernel, so a cancel that took none cannot make it.
+    if let Some(unchecked) = stopped.iter().find(|s| !s.sweep.checked) {
+        return format!(
+            "Stopped: {titles}. “{}” reads cancelled, but I could not check whether the \
+             processes it started are gone.",
+            unchecked.title.to_lowercase()
         );
     }
     let killed: usize = stopped.iter().map(|s| s.sweep.killed).sum();
@@ -4221,7 +4234,9 @@ impl Agent {
             let _ = self
                 .store
                 .set_job_state(&j.id, "cancelled", Some("stopped by the user"));
-            let mut sweep = Sweep::default();
+            // A job that never had a worker started no processes, so "none are running" is a
+            // fact rather than the unchecked claim bug AE made.
+            let mut sweep = Sweep::nothing_to_check();
             if let Some(sid) = &j.subagent_id {
                 sweep = self.end_cancelled_worker(&j.id, sid).await;
             }
@@ -4270,19 +4285,29 @@ impl Agent {
         }
     }
 
-    /// The processes of a worker: its recorded process group and its cgroup leaf.
+    /// The processes of a worker: its recorded session and process group, its cgroup leaf, and
+    /// the mark its descendants carry.
+    ///
+    /// One recorded number is both the session id and the group id, because `RpcChild` spawns
+    /// through `setsid` and the child leads both. The mark and the cgroup path are derived from
+    /// the session id rather than remembered, so a cancel after an agentd restart — which has
+    /// lost the number — can still find what the dead agentd's worker left running.
     pub(crate) async fn worker_tree(&self, sid: &str) -> ProcessTree {
+        let leader = self.worker_pgids.lock().await.get(sid).copied();
         ProcessTree {
-            pgid: self.worker_pgids.lock().await.get(sid).copied(),
+            pgid: leader,
+            sid: leader,
             cgroup: self
                 .cfg
                 .run_as
                 .as_ref()
                 .and_then(|ra| crate::isolation::Isolation::leaf_path(ra, sid)),
+            mark: Some(sid.to_owned()),
         }
     }
 
-    /// Record the process group a freshly spawned worker leads.
+    /// Record the session and process group a freshly spawned worker leads, which are both its
+    /// pid.
     pub(crate) async fn note_worker_pgid(&self, sid: &str, pgid: u32) {
         self.worker_pgids.lock().await.insert(sid.to_owned(), pgid);
     }
@@ -4829,7 +4854,9 @@ impl Agent {
                     "job_id": s.id,
                     "title": s.title,
                     "state": s.state,
-                    // What the cancel did to the job's processes, not what it meant to do.
+                    // What the cancel did to the job's processes, read back from the kernel
+                    // afterwards — not what it meant to do, and not what it assumes (bug AE).
+                    "processes_checked": s.sweep.checked,
                     "processes_killed": s.sweep.killed,
                     "processes_still_alive": s.sweep.survivors,
                 }))

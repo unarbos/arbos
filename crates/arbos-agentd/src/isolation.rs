@@ -22,31 +22,56 @@ pub struct RunAs {
     pub cgroup: Option<PathBuf>,
 }
 
+/// The environment variable every harness child is spawned with, carrying its session id.
+///
+/// An environment is copied on fork and carried through exec, so every process a job's tool
+/// calls start inherits this mark — and keeps it when its parent dies, when it is reparented to
+/// PID 1, when it changes process group and when it starts a session of its own. Nothing the
+/// kernel maintains survives all four, which is why the mark is how a cancel *verifies* its
+/// work ([`ProcessTree::escapees`]).
+///
+/// It is evidence of descent, not membership of a set, so it is read and never signalled: see
+/// [`ProcessTree::kill`].
+pub const WORKER_MARK_ENV: &str = "ARBOS_WORKER";
+
 /// Where a harness child's descendants can be found again once the child itself is gone.
 ///
 /// Killing a process does not kill its children on Linux, so a job's `bash` tool call outlives
 /// the worker that started it — detached or not (Test5 round 10, bug Z: pid 561 wrote all 40
-/// lines after the job read `cancelled`). Neither handle here is the child's pid: both name a
-/// set the kernel keeps for us, so a tree can be reaped after its root has died and its
+/// lines after the job read `cancelled`). None of the handles here is the child's pid: each
+/// names a set the kernel keeps for us, so a tree can be reaped after its root has died and its
 /// children have been reparented to PID 1.
 ///
 /// Which one catches what, measured rather than assumed:
 ///
 /// - **cgroup**: everything. Membership is inherited on fork and `setsid` does not change it.
+///   Only exists where agentd is root and cgroup v2 is writable, so it is absent on a dev box
+///   and on a box running without isolation.
+/// - **session**: everything except an explicit `setsid`. A session id is inherited on fork,
+///   is untouched by reparenting, and — unlike the group — is untouched by the `setpgid` a tool
+///   runner does to give its command a group it can time out. This is the handle Test5 round 13
+///   needed: the job backgrounded `(bash tmp/tick13.sh > tmp/tick13.run.out 2>&1; …) &`, shell
+///   1698 was reparented to PID 1 in its own group, and 1698, 1700, 1701 and 1702 ran to
+///   60/60 after the job read `cancelled`.
 /// - **process group**: a plain child and `nohup … &` (neither leaves the group — `nohup` only
-///   ignores `SIGHUP`, and `&` starts no new group in a non-interactive shell), but not an
-///   explicit `setsid`.
+///   ignores `SIGHUP`, and `&` starts no new group in a non-interactive shell), but not a
+///   command the tool runner put in a group of its own, and not an explicit `setsid`.
 ///
-/// So the cgroup is the container and the group is the fallback for a box with no isolation
-/// (a dev machine, or agentd not running as root). The fallback is knowingly incomplete, which
-/// is why [`ProcessTree::kill`] re-reads and reports survivors instead of assuming a clean kill.
+/// All three are read together, because each is incomplete on its own. Even together they are
+/// knowingly incomplete — an explicit `setsid` leaves every one of them — which is why
+/// [`ProcessTree::kill`] verifies against [`WORKER_MARK_ENV`] and reports survivors instead of
+/// assuming a clean kill.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProcessTree {
-    /// The child's own process group. `RpcChild` spawns with `process_group(0)`, so the child
-    /// leads a group of its own and a kill of it cannot reach agentd.
+    /// The child's own process group.
     pub pgid: Option<u32>,
+    /// The child's own session. `RpcChild` spawns through `setsid`, so the child leads both a
+    /// session and a group of its own, and a kill of either cannot reach agentd.
+    pub sid: Option<u32>,
     /// The child's cgroup leaf under the workspace cgroup, when isolation made one.
     pub cgroup: Option<PathBuf>,
+    /// The child's [`WORKER_MARK_ENV`] value, for the read-back.
+    pub mark: Option<String>,
 }
 
 /// What a kill of a [`ProcessTree`] did, read back from the kernel afterwards rather than
@@ -57,14 +82,50 @@ pub struct Sweep {
     pub found: usize,
     /// How many of them are gone now.
     pub killed: usize,
-    /// Pids still alive after the re-read. Empty is the only result that lets a caller say the
-    /// job's work really stopped.
+    /// Pids still alive after the read-back, each one a process the caller must name rather
+    /// than quietly leave to the user.
     pub survivors: Vec<u32>,
+    /// Did this sweep read the kernel at all?
+    ///
+    /// `false` is the default, because a cancel that looked at nothing knows nothing. Test5
+    /// round 13, bug AE: `stop_job` reported "every process it had started is dead" from a
+    /// sweep that had found nothing to look at, the agent repeated it, and the guard then
+    /// refused `kill 1700 1701 1702` because no pid had been reported unkillable.
+    pub checked: bool,
 }
 
 impl Sweep {
+    /// A job with no worker: there were never any processes, and saying so is not a guess.
+    pub fn nothing_to_check() -> Self {
+        Self {
+            checked: true,
+            ..Self::default()
+        }
+    }
+
+    /// The job's work really stopped — which needs the kernel to have been read, not only an
+    /// empty survivor list from a sweep that never looked.
     pub fn clean(&self) -> bool {
-        self.survivors.is_empty()
+        self.checked && self.survivors.is_empty()
+    }
+}
+
+/// One process as it was when the kill started: its pid and the start time that tells it from a
+/// later process the kernel gave the same pid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Witness {
+    pid: u32,
+    start: u64,
+}
+
+impl Witness {
+    /// `None` once the process is gone or is a zombie waiting to be reaped.
+    fn of(pid: u32) -> Option<Self> {
+        let st = read_stat(pid)?;
+        st.running().then_some(Self {
+            pid,
+            start: st.start,
+        })
     }
 }
 
@@ -76,21 +137,33 @@ const REAP_TRIES: usize = 20; // 2 s, inside the spec's five-second budget
 
 impl ProcessTree {
     pub fn is_empty(&self) -> bool {
-        self.pgid.is_none() && self.cgroup.is_none()
+        self.pgid.is_none() && self.sid.is_none() && self.cgroup.is_none() && self.mark.is_none()
     }
 
-    /// Every live process of this tree: the cgroup's members and the process group's, together.
+    /// Every live process the kernel still counts as a member of this tree: the cgroup's, the
+    /// session's and the process group's, together.
     ///
-    /// Both are read, not whichever looks authoritative: on a box with isolation the cgroup is
-    /// the complete set, and the group adds nothing — but on one without it the cgroup is
-    /// `None` and the group is all there is.
+    /// All three are read, not whichever looks authoritative: on a box with isolation the
+    /// cgroup is the complete set and the other two add nothing — but on one without it the
+    /// cgroup is `None` and they are all there is.
+    ///
+    /// A handle that names agentd's **own** session or group is dropped rather than swept. The
+    /// ids are recorded from a child that leads both, so this cannot happen from a correct
+    /// record — and the one outcome it rules out is a cancel that SIGKILLs the box's agentd.
     pub fn members(&self) -> Vec<u32> {
+        let mine = Ids::own();
+        let sid = self.sid.filter(|s| *s != mine.sid);
+        let pgid = self.pgid.filter(|g| *g != mine.pgid);
         let mut pids: Vec<u32> = Vec::new();
         if let Some(dir) = &self.cgroup {
             pids.extend(cgroup_procs(dir));
         }
-        if let Some(pgid) = self.pgid {
-            pids.extend(procs_in_group(pgid));
+        if sid.is_some() || pgid.is_some() {
+            for (pid, st) in all_stats() {
+                if sid == Some(st.session) || pgid == Some(st.pgrp) {
+                    pids.push(pid);
+                }
+            }
         }
         let me = std::process::id();
         pids.retain(|p| *p > 1 && *p != me && is_running(*p));
@@ -99,52 +172,108 @@ impl ProcessTree {
         pids
     }
 
-    /// SIGKILL everything in the tree, then read the kernel back and report what is left.
+    /// Live processes that carry this tree's [`WORKER_MARK_ENV`] and are in none of the sets
+    /// above: what the job started and what then left every set the cancel owns.
     ///
-    /// The read-back is the point. `stop_job` told the user a job was cancelled while its loop
-    /// kept writing; a cancel that cannot prove the work stopped must say so rather than repeat
-    /// that claim.
+    /// These are reported and never signalled. A mark is inherited through exec and is never
+    /// revoked, so it says where a process came from and not what it still belongs to; the
+    /// kernel's sets say the second thing, and a kill acts on that. Reporting is not a
+    /// consolation prize either — `stop_job`'s note names these pids, and the bash guard's
+    /// exception lets the agent `kill -9` exactly them, which is the escape hatch Test5 round
+    /// 13 did not have.
+    pub fn escapees(&self) -> Vec<u32> {
+        let Some(mark) = &self.mark else {
+            return Vec::new();
+        };
+        let members = self.members();
+        let me = std::process::id();
+        let mut out: Vec<u32> = marked_procs(mark)
+            .into_iter()
+            .filter(|p| *p > 1 && *p != me && !members.contains(p) && is_running(*p))
+            .collect();
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// SIGKILL every member of the tree, then read the kernel back and report what is left.
+    ///
+    /// The read-back is the point, and it is done **by pid**: each process found at the start
+    /// is re-read at `/proc/<pid>` and matched on its start time, rather than the handles being
+    /// enumerated a second time. Re-enumerating proves only that the handle is empty, which is
+    /// what a process that left the handle makes true without dying — bug AE's claim, in one
+    /// sentence.
     pub fn kill(&self) -> Sweep {
         let found = self.members();
-        if found.is_empty() {
-            return Sweep::default();
+        let witnesses: Vec<Witness> = found.iter().copied().filter_map(Witness::of).collect();
+        if !found.is_empty() {
+            // `cgroup.kill` (cgroup v2, Linux 5.14+) kills the whole subtree in one atomic
+            // write, so a process forked while we are enumerating cannot slip out between the
+            // read and the signal. Where it is missing, the enumerated kill below is the
+            // fallback.
+            if let Some(dir) = &self.cgroup {
+                let _ = std::fs::write(dir.join("cgroup.kill"), "1");
+            }
+            for pid in &found {
+                signal(*pid);
+            }
+            // The group and the session as wholes, which cover a child forked since the
+            // enumeration.
+            let mine = Ids::own();
+            if let Some(pgid) = self.pgid.filter(|g| *g != mine.pgid) {
+                let _ = nix::sys::signal::killpg(
+                    nix::unistd::Pid::from_raw(pgid as i32),
+                    nix::sys::signal::Signal::SIGKILL,
+                );
+            }
         }
-        // `cgroup.kill` (cgroup v2, Linux 5.14+) kills the whole subtree in one atomic write, so
-        // a process forked while we are enumerating cannot slip out between the read and the
-        // signal. Where it is missing, the enumerated kill below is the fallback.
-        if let Some(dir) = &self.cgroup {
-            let _ = std::fs::write(dir.join("cgroup.kill"), "1");
-        }
-        for pid in &found {
-            signal(*pid);
-        }
-        if let Some(pgid) = self.pgid {
-            // The group as a whole, which covers a child forked since the enumeration.
-            let _ = nix::sys::signal::killpg(
-                nix::unistd::Pid::from_raw(pgid as i32),
-                nix::sys::signal::Signal::SIGKILL,
-            );
-        }
-        let mut survivors = Vec::new();
+        let mut alive = Vec::new();
         for attempt in 0..REAP_TRIES {
+            if found.is_empty() {
+                break;
+            }
             std::thread::sleep(REAP_WAIT);
-            survivors = self.members();
-            if survivors.is_empty() {
+            alive = still_alive(&witnesses);
+            for pid in self.members() {
+                if !alive.contains(&pid) {
+                    alive.push(pid);
+                }
+            }
+            if alive.is_empty() {
                 break;
             }
             // Something forked after the first pass, or is still dying. Signal again.
             if attempt < REAP_TRIES - 1 {
-                for pid in &survivors {
+                for pid in &alive {
                     signal(*pid);
                 }
             }
         }
+        let mut survivors = alive;
+        for pid in self.escapees() {
+            if !survivors.contains(&pid) {
+                survivors.push(pid);
+            }
+        }
+        survivors.sort_unstable();
         Sweep {
             found: found.len(),
-            killed: found.len().saturating_sub(survivors.len()),
+            killed: found.iter().filter(|p| !survivors.contains(p)).count(),
             survivors,
+            checked: true,
         }
     }
+}
+
+/// The witnesses that are still the process they were, read one pid at a time. A pid the kernel
+/// has given to something else since is not a survivor, and signalling it again would be a kill
+/// aimed at a stranger.
+fn still_alive(witnesses: &[Witness]) -> Vec<u32> {
+    witnesses
+        .iter()
+        .filter(|w| Witness::of(w.pid) == Some(**w))
+        .map(|w| w.pid)
+        .collect()
 }
 
 fn signal(pid: u32) {
@@ -181,24 +310,66 @@ pub fn cgroup_procs(dir: &Path) -> Vec<u32> {
 /// be dead, and it keeps its `/proc` entry and its process group while it waits — so counting
 /// one as a survivor would make a cancel that worked perfectly report that it had failed.
 fn is_running(pid: u32) -> bool {
-    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
-        return false; // gone between the read and here, which is the outcome we wanted
-    };
-    let Some(after) = stat.rsplit_once(')').map(|(_, rest)| rest) else {
-        return false;
-    };
-    // `Z` zombie, `X` dead.
-    !matches!(
-        after.split_whitespace().next(),
-        Some("Z") | Some("X") | None
-    )
+    read_stat(pid).is_some_and(|st| st.running())
 }
 
-/// Pids whose process group is `pgid`, from `/proc`.
-///
-/// `/proc/<pid>/stat` is `pid (comm) state ppid pgrp …` and `comm` may hold spaces and
-/// parentheses, so the fields are counted from the last `)` rather than split on whitespace.
-fn procs_in_group(pgid: u32) -> Vec<u32> {
+/// agentd's own session and process group, which no sweep may take as a job's.
+struct Ids {
+    sid: u32,
+    pgid: u32,
+}
+
+impl Ids {
+    fn own() -> Self {
+        // Both calls read ids of the calling process and cannot fail.
+        unsafe {
+            Self {
+                sid: nix::libc::getsid(0).max(0) as u32,
+                pgid: nix::libc::getpgrp().max(0) as u32,
+            }
+        }
+    }
+}
+
+/// The fields of `/proc/<pid>/stat` a sweep reads.
+struct ProcStat {
+    state: char,
+    pgrp: u32,
+    session: u32,
+    /// Clock ticks since boot at which the process started: what tells a pid from the same pid
+    /// after the kernel has reused it.
+    start: u64,
+}
+
+impl ProcStat {
+    /// `Z` zombie, `X` dead.
+    fn running(&self) -> bool {
+        !matches!(self.state, 'Z' | 'X')
+    }
+}
+
+/// `/proc/<pid>/stat` is `pid (comm) state ppid pgrp session … starttime …` and `comm` may hold
+/// spaces and parentheses, so the fields are counted from the last `)` rather than split on
+/// whitespace.
+fn parse_stat(stat: &str) -> Option<ProcStat> {
+    let after = stat.rsplit_once(')').map(|(_, rest)| rest)?;
+    let fields: Vec<&str> = after.split_whitespace().collect();
+    Some(ProcStat {
+        state: fields.first()?.chars().next()?,
+        pgrp: fields.get(2)?.parse().ok()?,
+        session: fields.get(3)?.parse().ok()?,
+        // state is field 3 of the file, starttime is field 22, so 19 fields along from here.
+        start: fields.get(19)?.parse().ok()?,
+    })
+}
+
+fn read_stat(pid: u32) -> Option<ProcStat> {
+    // Gone between a read and here is the outcome a cancel wants, so it reads as `None`.
+    parse_stat(&std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?)
+}
+
+/// Every process on the box with the stat fields a sweep reads, in one pass of `/proc`.
+fn all_stats() -> Vec<(u32, ProcStat)> {
     let Ok(entries) = std::fs::read_dir("/proc") else {
         return Vec::new();
     };
@@ -210,11 +381,36 @@ fn procs_in_group(pgid: u32) -> Vec<u32> {
         let Ok(stat) = std::fs::read_to_string(e.path().join("stat")) else {
             continue;
         };
-        let Some(after) = stat.rsplit_once(')').map(|(_, rest)| rest) else {
+        if let Some(st) = parse_stat(&stat) {
+            out.push((pid, st));
+        }
+    }
+    out
+}
+
+/// Pids whose environment holds `ARBOS_WORKER=<mark>`.
+///
+/// `/proc/<pid>/environ` is the environment the process was exec'd with, readable by its owner
+/// — agentd is root on a box and owns its children on a dev machine. A process whose environ
+/// cannot be read is skipped: the mark is how a cancel finds what escaped it, and a read that
+/// fails is one more reason to report rather than to promise.
+fn marked_procs(mark: &str) -> Vec<u32> {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    let needle = format!("{WORKER_MARK_ENV}={mark}");
+    let mut out = Vec::new();
+    for e in entries.flatten() {
+        let Ok(pid) = e.file_name().to_string_lossy().parse::<u32>() else {
             continue;
         };
-        // After the comm: state, ppid, pgrp.
-        if after.split_whitespace().nth(2).and_then(|f| f.parse().ok()) == Some(pgid) {
+        let Ok(environ) = std::fs::read(e.path().join("environ")) else {
+            continue;
+        };
+        if environ
+            .split(|b| *b == 0)
+            .any(|entry| entry == needle.as_bytes())
+        {
             out.push(pid);
         }
     }
