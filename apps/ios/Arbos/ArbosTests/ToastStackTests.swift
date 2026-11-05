@@ -82,4 +82,45 @@ final class ToastStackTests: XCTestCase {
         XCTAssertTrue(note.contains("\"toast-folded-close\""), "the N more line's ×")
         XCTAssertTrue(note.contains("count: toast.count"), "the ×N reaches the note")
     }
+
+    /// AF-857: the layer is as tall as its notices, and its callers place it.
+    ///
+    /// A `maxHeight: .infinity` here made the layout box the whole content area. SwiftUI
+    /// publishes a container that has no children at its own box, not at the union of children
+    /// it does not have, so an empty toast layer stood one full-screen accessibility element over
+    /// every row — measured at `(0, 62, 402, 778)` on a 402×874 screen. The two halves have to
+    /// hold together: a content-sized box centres vertically unless the caller aligns it, so the
+    /// three call sites are pinned beside the frame they now depend on.
+    func testTheToastLayerIsSizedByItsNoticesAndPlacedByItsCallers() throws {
+        guard let note = try source("UI/ErrorNote.swift"), let app = try source("App/ArbosApp.swift"),
+              let chat = try source("UI/ChatView.swift"), let settings = try source("UI/SettingsView.swift") else {
+            throw XCTSkip("sources not beside the test bundle (CI without the tree)")
+        }
+        guard let open = note.range(of: "struct ToastHost: View {"),
+              let close = note.range(of: "private struct ToastRow: View {"), open.upperBound < close.lowerBound else {
+            return XCTFail("ToastHost is not where this test reads it; the slice below would be wrong")
+        }
+        // Comment lines are dropped before the check, because the comment on the frame explains
+        // what `maxHeight` did here and would otherwise fail this on its own prose.
+        let host = note[open.lowerBound..<close.lowerBound]
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+            .joined(separator: "\n")
+        // Without this the slice could be empty or the wrong struct and the next line would pass
+        // for the wrong reason.
+        XCTAssertTrue(host.contains("\"toast-slot\""), "the slice really is the toast layer")
+        XCTAssertFalse(host.contains("maxHeight"),
+                       "the toast layer must not expand past its notices: an empty one then "
+                       + "publishes a full-screen element over every row")
+
+        for (file, src) in [("ArbosApp.swift", app), ("ChatView.swift", chat), ("SettingsView.swift", settings)] {
+            guard let call = src.range(of: "ToastHost()") else {
+                XCTFail("no ToastHost() in \(file)"); continue
+            }
+            XCTAssertTrue(String(src[src.startIndex..<call.lowerBound].suffix(300))
+                            .contains(".overlay(alignment: .top)"),
+                          "\(file) must align the layer to the top itself, now that the layer no "
+                          + "longer fills the screen to put itself there")
+        }
+    }
 }
