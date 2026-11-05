@@ -11,6 +11,9 @@ import time
 from collections import Counter
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from lib import parity as py  # noqa: E402
+
 HERE = Path(__file__).resolve().parent
 SB = HERE / "scoreboard"
 
@@ -113,12 +116,38 @@ def weaknesses(board, n=5):
     return [(k, v, sorted(set(examples[k]))) for k, v in c.most_common(n)]
 
 
+def run_kind(board):
+    m = board["meta"]
+    if m.get("subset"):
+        return m["subset"]
+    # runs before the tag: mostly-parity runs were the parity subset, 30+ tasks were full runs, the rest reruns.
+    # A merged run keeps part (a)'s meta.tasks (run 13: 21 of 54), so count the results too.
+    n = max(m.get("tasks", 0), len(board.get("results") or []))
+    par = (board["summary"].get("parity") or {}).get("tasks", 0)
+    if par * 2 > n:
+        return "parity"
+    return "full" if n >= 30 else "tasks"
+
+
+def previous_run(runs, run_id, kind=None, with_parity=False):
+    """The latest earlier run to compare with: same kind (full vs a named subset) so a 4-task rerun or a
+    parity-only run never becomes the baseline of the scheduled full run; `with_parity` picks the latest
+    earlier run carrying a parity block (the gate's reference) whatever its kind."""
+    for b in reversed(runs):
+        if b["meta"]["run_id"] >= run_id:
+            continue
+        if with_parity and not (b["summary"].get("parity") or {}).get("tasks"):
+            continue
+        if kind and run_kind(b) != kind:
+            continue
+        return b
+    return None
+
+
 def parity_section(board, prev):
     p = (board["summary"].get("parity") or {})
     if not p.get("tasks"):
         return []
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from lib import parity as py
     lines = ["", "## Grok parity", "", f"**{p['passed']}/{p['tasks']} parity tasks passed**; first bubble p50 {fmt(p['first_bubble_p50_s'], ' s')} / p95 {fmt(p['first_bubble_p95_s'], ' s')}; judge mean {fmt(p['judge_overall'])} over {p['with_baseline']} task(s) with a Grok baseline.", "", "| trait | pass / total |", "|---|---|"]
     for t, v in sorted(p["per_trait"].items()):
         lines.append(f"| {t} | {v['pass']} / {v['total']} |")
@@ -136,7 +165,7 @@ def parity_section(board, prev):
     return lines
 
 
-def run_report(board, prev, issues, fixed_text):
+def run_report(board, prev, issues, fixed_text, parity_prev=None):
     m, s = board["meta"], board["summary"]
     date = m["started_at"][:10]
     lines = [f"# Agent eval run {m['run_id']} — {date}", ""]
@@ -165,7 +194,7 @@ def run_report(board, prev, issues, fixed_text):
     ]
     for c, v in sorted(s["categories"].items()):
         lines.append(f"| {c} | {v['passed']} / {v['tasks']} |")
-    lines += parity_section(board, prev)
+    lines += parity_section(board, parity_prev if parity_prev is not None else prev)
     if board["summary"].get("convergence"):
         from lib import convergence as cv
         lines += cv.section(board["summary"]["convergence"], (prev or {}).get("summary", {}).get("convergence") if prev else None)
@@ -220,10 +249,13 @@ def main():
         cost = s.get("run_cost_usd") if s.get("run_cost_usd") is not None else s["cost_usd"]
         print(f"{s['passed']}/{s['run']} passed ({s['pass_pct']} %), first reply p50 {s['ttfr_p50_s']} s, tool errors {s['tool_errors']}, cost ${cost:.2f}")
         return
-    prev = load(args.prev) if args.prev else next((b for b in reversed(runs) if b["meta"]["run_id"] < args.run), None)
+    kind = run_kind(board)
+    # a hand-picked rerun compares with the last full run (newly fixed / broken per task); a subset only with its own kind
+    prev = load(args.prev) if args.prev else previous_run(runs, args.run, kind="full" if kind == "tasks" else kind)
+    parity_prev = previous_run(runs, args.run, with_parity=True)
     issues = json.loads(Path(args.issues).read_text()) if args.issues and Path(args.issues).exists() else []
     (SB / "SUMMARY.md").write_text(summary_md(runs))
-    rep = run_report(board, prev, issues, args.fixed)
+    rep = run_report(board, prev, issues, args.fixed, parity_prev=parity_prev)
     out = Path(args.report_out) if args.report_out else SB / f"{args.run}.md"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(rep)

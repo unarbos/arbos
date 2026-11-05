@@ -24,5 +24,6 @@
   "verify_wait": {
     "verify": "f={D}/zeros.txt; test -f $f || { echo FAIL: no zeros.txt yet; exit 0; }; v=$(tr -dc '0-9' < $f); echo \"SHOW zeros=$v\"; [ -n \"$v\" ] && [ $v -gt 10000 ] && [ $v -lt 13000 ] && echo PASS || echo FAIL: got $v",
     "wait_s": 600
-  }
+  },
+  "regression": "run 15: #2303 — 'still running' after the job had finished (fix in #2346)"
 }
