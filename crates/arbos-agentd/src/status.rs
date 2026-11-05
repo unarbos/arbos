@@ -3154,6 +3154,120 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Test5 round 5: the same empty `done` row outside any burst. A request that runs as an
+    /// inline subagent leaves the helper's own row holding an empty text part and a `Done`
+    /// status — everything it took on the way (the tool parts, the raw `subagent_result`) is
+    /// `hidden`, and the answer the user reads is a separate row. Three were visible on the
+    /// relay: `01M6MQV1VPE51J4BQKG7FYBER5`, `01M6MR21MV7N4TKN70BSRMJ1QS`,
+    /// `01M6MS91NW0FYS9EBNGHV8XVA8`.
+    ///
+    /// #2770's sweep missed them for one reason only: a helper's row is minted by
+    /// `run_subagent`, never by `open_turn_row` or `open_row`, so it never joins
+    /// `TurnState::rows_opened` and was never a candidate. The predicate was always right about
+    /// this shape, which is why the fix widens where the rule is applied and leaves the rule
+    /// alone. The first assertion below is that claim, pinned.
+    #[tokio::test]
+    async fn an_inline_subagent_row_that_shows_nothing_is_retired() {
+        use crate::agent::{retire_if_wordless, wordless_row};
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATQUICKREPLY000026";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        // The helper's row, written exactly as `run_subagent` settles one.
+        let clean = "01M6MQV1VPE51J4BQKG7FYBER5";
+        let failed = "01M6MR21MV7N4TKN70BSRMJ1QS";
+        for (id, with_error) in [(clean, false), (failed, true)] {
+            let h = host.lock().await;
+            h.doc
+                .start_assistant_message(id, "m-busy", &agent.cfg.device_id);
+            h.doc.set_message_fields(
+                id,
+                &[
+                    ("subagentId", json!("01TESTSUBAGENT000000000001")),
+                    ("subagentName", json!("Pip")),
+                    ("turn", json!({ "kind": "spawn" })),
+                    ("worker", json!(true)),
+                ],
+            );
+            h.doc.add_tool_part(
+                id,
+                "c1",
+                "bash",
+                &json!({"command": "cargo test"}),
+                "ok",
+                None,
+                Some(2),
+                false,
+            );
+            if with_error {
+                h.doc
+                    .add_error_part(id, "subagent_error", "the worker could not start");
+            }
+            h.doc.add_hidden_part(
+                id,
+                "subagent_result",
+                "Sorted the list and checked it twice.",
+                &json!({ "subagentId": "01TESTSUBAGENT000000000001", "status": "done" }),
+            );
+            h.doc.add_status_part(
+                id,
+                if with_error { "failed" } else { "done" },
+                if with_error { "Failed" } else { "Done" },
+            );
+            h.doc.finish_message(id, MessageStatus::Done);
+        }
+        {
+            let h = host.lock().await;
+            let m = h.doc.message(clean).unwrap();
+            // The round-5 symptom, and the reason #2770 missed it: the predicate already reads
+            // this row as wordless, so nothing was wrong with the rule — the row was simply
+            // never offered to it.
+            assert!(
+                wordless_row(&m).0,
+                "the predicate already covers this shape"
+            );
+            assert!(m.rest.get("hidden").is_none());
+            assert!(!m.has_visible_content());
+            assert_eq!(m.status.as_str(), "done");
+        }
+        // The answer arrives on its own row, through the quick lane, while the turn lock is held.
+        let (quick_ask, cmd) = send_cmd(&host, "what is going on now?");
+        agent.handle_command(chat, cmd).await.unwrap();
+        let quick = reply_rows(&host, &quick_ask);
+        assert_eq!(quick.len(), 1, "one quick row");
+        assert!(!quick[0].text().trim().is_empty());
+        let quick_id = quick[0].id.clone();
+        {
+            let h = host.lock().await;
+            assert!(
+                retire_if_wordless(&h.doc, clean),
+                "a helper's row with nothing left on it is retired"
+            );
+            assert!(
+                !retire_if_wordless(&h.doc, failed),
+                "a failure keeps its row: the error line is the user's only account of it"
+            );
+            assert!(
+                !retire_if_wordless(&h.doc, &quick_id),
+                "the row that holds the answer is never touched"
+            );
+            assert!(
+                !retire_if_wordless(&h.doc, clean),
+                "a row already hidden is not written a second time"
+            );
+            let m = h.doc.message(clean).unwrap();
+            assert_eq!(m.rest.get("hidden").and_then(Value::as_bool), Some(true));
+            assert_eq!(m.status.as_str(), "done");
+            assert!(
+                h.doc.message(clean).is_some(),
+                "retired, never deleted: a removal the relay cannot attribute to the box is \
+                 refused `not_yours`, and a refused op holds the whole push queue behind it"
+            );
+            assert!(h.doc.message(failed).unwrap().rest.get("hidden").is_none());
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// Bubble in Arbonites (2026-10-28 21:50 UTC, agentd 0.6.338): `route reply` with a first
     /// line, then `send_message` parts. The first part was appended to the first line's row and
     /// the bubble read "…never became a reply for him.Bob was up. When I messaged him…".
