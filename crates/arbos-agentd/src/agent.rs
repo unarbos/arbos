@@ -3936,15 +3936,28 @@ impl Agent {
                 h.doc.finish_message(&id, MessageStatus::Done);
             }
         }
-        {
+        let evicted: Vec<(String, CommandView)> = {
             let mut owed = self.pi_owed_sends.lock().await;
             owed.retain(|(_, held)| {
                 held.payload.get("messageId").and_then(Value::as_str) != Some(&user_msg_id)
             });
             owed.push((chat_id.to_owned(), cmd.clone()));
-            while owed.len() > Self::PI_OWED_MAX {
-                owed.remove(0);
-            }
+            let over = owed.len().saturating_sub(Self::PI_OWED_MAX);
+            owed.drain(..over).collect()
+        };
+        // The bound above is deliberate and the eviction is the intended behaviour; the silence
+        // was not. The user whose message goes has already read the line promising the agent
+        // would come back to them, so the drop is recorded even though nothing will retry it.
+        for (lost_chat, lost_cmd) in evicted {
+            tracing::warn!(
+                chat_id = lost_chat,
+                command_id = %lost_cmd.id,
+                "the owed queue is full; the oldest promised message is dropped"
+            );
+            self.append_audit(
+                "owed_send_evicted",
+                json!({ "chat_id": lost_chat, "command_id": lost_cmd.id }),
+            );
         }
         self.append_audit(
             "send_owed_while_restarting",
@@ -3996,9 +4009,28 @@ impl Agent {
         }
         let owed: Vec<(String, CommandView)> =
             std::mem::take(&mut *self.pi_owed_sends.lock().await);
+        // The list is emptied above, before anything is decided, so from here every exit either
+        // delivers, restores or records. A path that merely skips has consumed the promise and
+        // lost the message, which is the contentless row this whole part exists to prevent — so
+        // the one that cannot be delivered is recorded rather than restored: a chat this box left
+        // for good never becomes deliverable, and an entry put back for it would sit in the queue
+        // and be retried on every tick.
         for (chat_id, cmd) in owed {
-            let Some(host) = self.sync.host(&chat_id).await else {
-                continue;
+            let host = match self.room(&chat_id).await {
+                Ok(h) => h,
+                Err(e) => {
+                    tracing::warn!(
+                        chat_id,
+                        command_id = %cmd.id,
+                        error = %e,
+                        "the promised message has nowhere to go and is dropped"
+                    );
+                    self.append_audit(
+                        "owed_send_undeliverable",
+                        json!({ "chat_id": chat_id, "command_id": cmd.id, "reason": e.to_string() }),
+                    );
+                    continue;
+                }
             };
             if self.message_answered(&host, &cmd).await {
                 continue;
@@ -4012,8 +4044,13 @@ impl Agent {
                 "owed_send_resumed",
                 json!({ "chat_id": chat_id, "command_id": cmd.id }),
             );
+            let command_id = cmd.id.clone();
             if let Err(e) = self.handle_command(&chat_id, cmd).await {
                 tracing::warn!(chat_id, error = %e, "the promised message could not be answered");
+                self.append_audit(
+                    "owed_send_undeliverable",
+                    json!({ "chat_id": chat_id, "command_id": command_id, "reason": e.to_string() }),
+                );
             }
         }
     }
@@ -8734,9 +8771,7 @@ impl Agent {
                 None => return Err("no turn is running".into()),
             }
         };
-        let Some(host) = self.sync.host(&chat_id).await else {
-            return Err("no room for this chat".into());
-        };
+        let host = self.room(&chat_id).await.map_err(|e| e.to_string())?;
         // The same signal the burst path reads (`forced_job.rs`), read from the ask itself: a
         // job the user asked for in words must not meet the per-chat cap in one path and pass
         // it in the other.
@@ -9085,18 +9120,32 @@ impl Agent {
                 return Err(CANCEL_CLAIM_REFUSAL.into());
             }
         }
-        let mut tl = self.turn.lock().await;
-        let Some(t) = tl.as_mut() else {
-            return Err("no turn is running".into());
-        };
         // The idle close and the room cap make "no open room" a live state here (#2367), and
         // this is the writer that holds nothing: `hooks.rs` calls straight in, so there is no
         // handle to ask and a refusal would simply swallow the message. Opening is safe because
         // the hub refuses a chat the agent was removed from — the judgement is the record's, not
         // this site's, which is why #1440's 403 loop cannot come back through here.
-        let host = match self.room(&t.chat_id).await {
+        //
+        // The chat is read under a short lock, the room opened with the lock released, and the
+        // lock then re-taken: opening awaits the relay, and the turn lock is the one every part
+        // of a turn waits on. `post_to_this_chat_from_turn` resolves outside the lock for the
+        // same reason, and this inherits the seam that path already accepts — the turn can
+        // change between the two acquisitions, so the host is the one this chat had when it was
+        // read, and everything written below belongs to the turn read after it.
+        let chat_id = {
+            let tl = self.turn.lock().await;
+            match tl.as_ref() {
+                Some(t) => t.chat_id.clone(),
+                None => return Err("no turn is running".into()),
+            }
+        };
+        let host = match self.room(&chat_id).await {
             Ok(h) => h,
             Err(e) => return Err(format!("no room for this chat: {e}")),
+        };
+        let mut tl = self.turn.lock().await;
+        let Some(t) = tl.as_mut() else {
+            return Err("no turn is running".into());
         };
         // Silence is an outcome, not a message: a bubble that only says the agent is not
         // answering never reaches a shared chat. The tool answers as if posted, so the model

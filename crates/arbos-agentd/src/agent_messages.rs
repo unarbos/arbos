@@ -168,8 +168,8 @@ impl Agent {
     /// The row itself is written by `hook_send_message`, which opens the room itself now, for
     /// the writers that reach it without coming through here. This path still opens first, and
     /// the reason is the ordering rather than the outcome: here it happens **outside every
-    /// lock**, where `hook_send_message` resolves under the turn lock, so the common case is a
-    /// live host by the time it looks.
+    /// lock**, where `hook_send_message` has to release the turn lock and re-take it to do the
+    /// same, so the common case is a live host by the time it looks.
     async fn post_to_this_chat_from_turn(self: &Arc<Self>, text: &str) -> Result<String> {
         let chars = text.chars().count();
         let chat_id = self
@@ -1274,6 +1274,58 @@ mod tests {
         assert!(
             agent.sync.is_open(chat).await,
             "the message went somewhere nothing will push it"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The background-job hook is a writer too, and it refused with "no room for this chat" —
+    /// which the model reads as a box that cannot run jobs, so it does the work in the turn
+    /// instead. A chat quiet long enough for the idle close is exactly the chat someone comes
+    /// back to with a long ask, so this is the likeliest of all the write paths to meet a cold
+    /// room.
+    #[tokio::test]
+    async fn a_background_job_starts_in_a_room_the_idle_close_took() {
+        use arbos_core::doc::UserMessageOpts;
+
+        let (agent, root) = crate::status::tests::test_agent().await;
+        let chat = "01TESTCHATJOBCOLD0000001";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn_for(chat, "m-job").await;
+        {
+            let h = host.lock().await;
+            h.doc
+                .append_user_message(
+                    "m-job",
+                    "Find me surf schools in Ericeira",
+                    "dev-mac",
+                    &UserMessageOpts::default(),
+                )
+                .expect("user message");
+        }
+        agent.sync.persist(&host).await.unwrap();
+        drop(host);
+
+        agent.sync.test_close_cold(chat).await;
+        assert!(agent.sync.host(chat).await.is_none(), "premise: no handle");
+        assert!(agent.sync.may_open(chat).await, "premise: nothing recorded");
+
+        let got = agent
+            .hook_start_job(
+                "Searching for surf schools",
+                "Find surf schools in Ericeira that take beginners, and return a list with prices.",
+                "research",
+                vec![],
+            )
+            .await;
+        if let Err(e) = &got {
+            assert!(
+                !e.contains("no room"),
+                "a cold room is reopened for a job, not reported as a box with no room: {e}"
+            );
+        }
+        assert!(
+            agent.sync.is_open(chat).await,
+            "the job has a room to write its rows into"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
