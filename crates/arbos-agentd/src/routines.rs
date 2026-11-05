@@ -263,13 +263,24 @@ impl Agent {
                 };
                 let mut chat = payload.clone();
                 chat["id"] = Value::String(chat_id.to_owned());
-                // Rows the relay already holds for this chat. A push that names them means a
-                // turn is owed as soon as the room catches up, so pi's session switch — which
-                // needs no room at all — runs beside the connect instead of after it.
-                let pending = payload
-                    .get("pending_rows")
-                    .and_then(Value::as_array)
-                    .map_or(0, Vec::len);
+                // How far the room has got on the relay against how far this box has read it.
+                // Rows waiting mean a turn is owed as soon as the room catches up, so pi's
+                // session switch — which needs no room at all — runs beside the connect
+                // instead of after it.
+                let pending = {
+                    let head_seq = payload
+                        .get("head_seq")
+                        .and_then(Value::as_i64)
+                        .unwrap_or_default();
+                    let room = arbos_core::wire::room_name(&self.cfg.project_id, chat_id);
+                    let cursor = self
+                        .store
+                        .room_doc(&room)
+                        .ok()
+                        .flatten()
+                        .map_or(0, |(cursor, _, _)| cursor);
+                    (head_seq - cursor).max(0)
+                };
                 let prefetch = (pending > 0).then(|| {
                     let agent = self.clone();
                     let chat_id = chat_id.to_owned();

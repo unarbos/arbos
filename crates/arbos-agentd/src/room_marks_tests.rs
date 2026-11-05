@@ -6,9 +6,10 @@
 //! so the legs could only be reconstructed by subtracting one journal timestamp from another,
 //! and only when both lines happened to be present.
 //!
-//! The second half is what the push says. A push that mentions rows are already waiting lets
-//! the box start the slow part of a turn — pi's session switch — while the room is still
-//! connecting, instead of discovering the work afterwards.
+//! The second half is what the push says. The relay sends how far the room has got; the box
+//! holds its own cursor, so the two together say rows are already waiting. That lets the box
+//! start the slow part of a turn — pi's session switch — while the room is still connecting,
+//! instead of discovering the work afterwards.
 
 use serde_json::json;
 
@@ -48,7 +49,7 @@ async fn a_chat_open_push_reports_what_it_cost_and_what_was_waiting() {
                 json!({
                     "chat_id": CHAT,
                     "reason": "rows_pending",
-                    "pending_rows": ["01TESTMESSAGEROOMMARKS0001"],
+                    "head_seq": 1,
                 }),
             )
             .await;
@@ -83,7 +84,7 @@ async fn pending_rows_start_the_session_switch_while_the_room_connects() {
                 json!({
                     "chat_id": CHAT,
                     "reason": "rows_pending",
-                    "pending_rows": ["01TESTMESSAGEROOMMARKS0002"],
+                    "head_seq": 3,
                 }),
             )
             .await;
