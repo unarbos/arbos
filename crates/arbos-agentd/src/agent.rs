@@ -8771,6 +8771,7 @@ impl Agent {
             }
         });
         let failed = done_err.is_some() || status == "blocked";
+        let retired_wordless;
         {
             let h = host.lock().await;
             if let Some(e) = &done_err {
@@ -8808,6 +8809,24 @@ impl Agent {
                     MessageStatus::Done
                 },
             );
+            // Everything this row just took is drawer-only — the raw output, the contract, the
+            // tool parts — so a helper that ran cleanly leaves a row holding an empty text part
+            // and a `Done` status and nothing else. Three were visible on the relay in Test5
+            // round 5 (`01M6MQV1VPE51J4BQKG7FYBER5`, `01M6MR21MV7N4TKN70BSRMJ1QS`,
+            // `01M6MS91NW0FYS9EBNGHV8XVA8`). The answer is a separate row the main agent writes,
+            // so this one has nothing left to say. `worker: true` was meant to keep it out of
+            // the transcript, but that asks every client to agree; hiding it decides here.
+            //
+            // A failure keeps its row: `add_error_part` above is visible content, so the
+            // predicate holds the row open where there is a line for the user to read.
+            retired_wordless = retire_if_wordless(&h.doc, &msg_id);
+        }
+        if retired_wordless {
+            // Same counter as the turn-finish sweep, told apart by its detail: these rows come
+            // from a helper settling, not from a turn walking away mid-flight.
+            let _ = self
+                .post_timing("wordless_rows_retired", 1, Some("subagent"))
+                .await;
         }
         self.subagent_msgs.lock().await.remove(&subagent_id);
         let mut job_cancelled = false;
@@ -10142,22 +10161,34 @@ pub(crate) fn retire_wordless_rows(
     rows: &[String],
     last: &str,
 ) -> usize {
-    let mut retired = 0;
-    for id in rows.iter().filter(|id| id.as_str() != last) {
-        let Some(m) = doc.message(id) else {
-            continue;
-        };
-        if m.rest.get("hidden").and_then(Value::as_bool) == Some(true) {
-            continue;
-        }
-        let (wordless, _) = wordless_row(&m);
-        if !wordless {
-            continue;
-        }
-        retire_row(doc, id);
-        retired += 1;
+    rows.iter()
+        .filter(|id| id.as_str() != last)
+        .filter(|id| retire_if_wordless(doc, id))
+        .count()
+}
+
+/// Retire one finished row when it shows nothing. Returns whether it was retired.
+///
+/// The rule the two callers share, stated once. A row already hidden is left alone so a
+/// pointless field write does not join the push batch, and a row with words, a card, a file,
+/// a question or an error line is kept — an error line is the whole reason a failed helper's
+/// row stays where the user can read it.
+///
+/// Nothing here is gated on what the rest of the chat shows, so a caller that owns a row the
+/// apps may draw their stock "didn't answer" line on must not use it: that is
+/// [`trim_wordless_result_row`]'s job, and the difference is written out there.
+pub(crate) fn retire_if_wordless(doc: &arbos_core::doc::ChatDoc, msg_id: &str) -> bool {
+    let Some(m) = doc.message(msg_id) else {
+        return false;
+    };
+    if m.rest.get("hidden").and_then(Value::as_bool) == Some(true) {
+        return false;
     }
-    retired
+    if !wordless_row(&m).0 {
+        return false;
+    }
+    retire_row(doc, msg_id);
+    true
 }
 
 /// Subagents started by `start_job_for_send` are named `ask-…`; they answer directly.
