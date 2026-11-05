@@ -1203,6 +1203,12 @@ pub(crate) mod tests {
         test_agent_full(extra, "/nonexistent/pi").await
     }
 
+    /// Same, pointed at a relay the caller serves itself. The model-stub tests count the TCP
+    /// connections the box opens, which `axum::serve` cannot report.
+    pub(crate) async fn test_agent_on_relay(relay_url: &str) -> (Arc<Agent>, std::path::PathBuf) {
+        test_agent_on(relay_url.to_owned(), "/nonexistent/pi").await
+    }
+
     async fn test_agent_full(
         extra: axum::Router,
         pi_bin: &str,
@@ -1227,11 +1233,15 @@ pub(crate) mod tests {
         tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
+        test_agent_on(format!("http://127.0.0.1:{port}"), pi_bin).await
+    }
+
+    async fn test_agent_on(relay_url: String, pi_bin: &str) -> (Arc<Agent>, std::path::PathBuf) {
         let root = std::env::temp_dir().join(format!("arbos-quick-{}", ulid()));
         std::fs::create_dir_all(&root).unwrap();
         let bx = crate::config::BoxConfig {
             user_id: Some("u-test".into()),
-            relay_url: format!("http://127.0.0.1:{port}"),
+            relay_url,
             box_token: "test-token".into(),
             mcp_token: "test-mcp".into(),
             work_root: root.clone(),
