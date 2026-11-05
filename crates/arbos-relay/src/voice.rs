@@ -66,9 +66,7 @@ pub struct VoiceCfg {
     /// LiveKit agent name the worker registers with (`ARBOS_VOICE_AGENT_NAME`).
     pub agent_name: String,
     /// `ARBOS_VOICE_DAILY_CAP_USD` (default 5.0): per user, over every agent they own.
-    pub daily_cap_usd: f64,
     /// `ARBOS_VOICE_CALL_CAP_USD` (default 1.50): per agent per call.
-    pub call_cap_usd: f64,
     /// `ARBOS_VOICE=0` turns dispatch off while leaving people calls alone.
     pub enabled: bool,
     /// Speech model the worker is expected to use (for the admin view and the docs).
@@ -84,22 +82,12 @@ impl Default for VoiceCfg {
     fn default() -> Self {
         Self {
             agent_name: "arbos-voice".to_owned(),
-            daily_cap_usd: 5.0,
-            call_cap_usd: 1.5,
             enabled: true,
             model: "gpt-realtime-2.1".to_owned(),
             voices_dir: std::path::PathBuf::from("voices"),
             default_voice: "marin".to_owned(),
         }
     }
-}
-
-fn env_f64(k: &str, default: f64) -> f64 {
-    std::env::var(k)
-        .ok()
-        .and_then(|v| v.trim().parse::<f64>().ok())
-        .filter(|v| v.is_finite() && *v >= 0.0)
-        .unwrap_or(default)
 }
 
 pub fn cfg_from_env(data_dir: &std::path::Path) -> VoiceCfg {
@@ -119,8 +107,6 @@ pub fn cfg_from_env(data_dir: &std::path::Path) -> VoiceCfg {
             .map(|v| v.trim().to_owned())
             .filter(|v| !v.is_empty())
             .unwrap_or(d.agent_name),
-        daily_cap_usd: env_f64("ARBOS_VOICE_DAILY_CAP_USD", d.daily_cap_usd),
-        call_cap_usd: env_f64("ARBOS_VOICE_CALL_CAP_USD", d.call_cap_usd),
         enabled: std::env::var("ARBOS_VOICE")
             .map(|v| v != "0")
             .unwrap_or(true),
@@ -131,8 +117,8 @@ pub fn cfg_from_env(data_dir: &std::path::Path) -> VoiceCfg {
             .unwrap_or(d.model),
     };
     tracing::info!(
-        agent = %cfg.agent_name, model = %cfg.model, daily_cap = cfg.daily_cap_usd,
-        call_cap = cfg.call_cap_usd, enabled = cfg.enabled, voices = %cfg.voices_dir.display(),
+        agent = %cfg.agent_name, model = %cfg.model,
+        enabled = cfg.enabled, voices = %cfg.voices_dir.display(),
         default_voice = %cfg.default_voice, "agent voice calls"
     );
     cfg
@@ -799,7 +785,7 @@ async fn dispatch_missing(
             recent.insert(key, now);
         }
         let payer = project.user_id.clone();
-        if let Err(stop) = stops_for(state, &payer, &call.id, &project.id) {
+        if let Err(stop) = stops_for(state, &payer) {
             tracing::info!(call = %call.id, project = %project.id, stop, "voice: agent not dispatched (cost stop)");
             continue;
         }
@@ -836,14 +822,9 @@ async fn dispatch_missing(
 
 // ---- cost stops ----------------------------------------------------------------------------------
 
-/// Why the agent must not (keep) talk(ing): `kill_switch`, `credits`, `daily_cap`,
-/// `voice_daily_cap`, `call_cap`. `Ok` while every rail has room.
-pub fn stops_for(
-    state: &AppState,
-    payer: &str,
-    call_id: &str,
-    project_id: &str,
-) -> Result<(), &'static str> {
+/// Why the agent must not (keep) talk(ing): `kill_switch`, `credits`, `daily_cap`. Voice spends
+/// the caller's account like any other source, so it has no cap of its own to check.
+pub fn stops_for(state: &AppState, payer: &str) -> Result<(), &'static str> {
     if crate::credits::check_read_only(state).is_err() {
         return Err("kill_switch");
     }
@@ -853,36 +834,10 @@ pub fn stops_for(
         Err(crate::db_accounts::DebitRefused::ReadOnly { .. }) => return Err("kill_switch"),
         Err(crate::db_accounts::DebitRefused::Insufficient { .. }) => return Err("credits"),
     }
-    if crate::credits::metered(state) {
-        let cap = state
-            .db
-            .voice_user_cap(payer)
-            .ok()
-            .flatten()
-            .unwrap_or(state.voice.daily_cap_usd);
-        let spent = state
-            .db
-            .voice_spent_since(payer, start_of_utc_day_ms())
-            .unwrap_or(0.0);
-        if spent >= cap {
-            return Err("voice_daily_cap");
-        }
-    }
-    if let Ok(Some(row)) = state.db.voice_call(call_id, project_id) {
-        if row.usage.usd >= state.voice.call_cap_usd {
-            return Err("call_cap");
-        }
-    }
     Ok(())
 }
 
 fn caps_json(state: &AppState, payer: &str, call_id: &str, project_id: &str) -> Value {
-    let cap = state
-        .db
-        .voice_user_cap(payer)
-        .ok()
-        .flatten()
-        .unwrap_or(state.voice.daily_cap_usd);
     let spent = state
         .db
         .voice_spent_since(payer, start_of_utc_day_ms())
@@ -895,13 +850,11 @@ fn caps_json(state: &AppState, payer: &str, call_id: &str, project_id: &str) -> 
         .map(|r| r.usage.usd)
         .unwrap_or(0.0);
     json!({
-        "call_cap_usd": state.voice.call_cap_usd,
         "call_spent_usd": call_usd,
-        "daily_cap_usd": cap,
         "daily_spent_usd": spent,
         "call_max_minutes": CALL_MAX_MINUTES,
         "metered": crate::credits::metered(state),
-        "stop": stops_for(state, payer, call_id, project_id).err(),
+        "stop": stops_for(state, payer).err(),
     })
 }
 
@@ -1086,7 +1039,7 @@ pub async fn call_tool(
     if !call.active() {
         return api_error(StatusCode::GONE, "call_ended", "this call has ended");
     }
-    if let Err(stop) = stops_for(&state, &project.user_id, &call.id, &project.id) {
+    if let Err(stop) = stops_for(&state, &project.user_id) {
         return api_error(
             StatusCode::PAYMENT_REQUIRED,
             stop,
@@ -1455,42 +1408,6 @@ pub async fn put_agent_settings(
     }
 }
 
-#[derive(Deserialize)]
-pub struct UserCapBody {
-    /// `null` returns the user to the relay default.
-    pub daily_cap_usd: Option<f64>,
-}
-
-/// `PUT /admin/users/{id}/voice {daily_cap_usd}` → `{ user_id, daily_cap_usd, default }`.
-pub async fn put_user_cap(
-    State(state): State<AppState>,
-    principal: Principal,
-    Path(id): Path<String>,
-    Json(b): Json<UserCapBody>,
-) -> Response {
-    if !matches!(principal, Principal::Admin) {
-        return api_error(StatusCode::FORBIDDEN, "forbidden", "admin token required");
-    }
-    if let Some(c) = b.daily_cap_usd {
-        if !c.is_finite() || c < 0.0 {
-            return api_error(
-                StatusCode::BAD_REQUEST,
-                "bad_request",
-                "daily_cap_usd must be a non-negative number",
-            );
-        }
-    }
-    if let Err(e) = state.db.set_voice_user_cap(&id, b.daily_cap_usd) {
-        return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
-    }
-    Json(json!({
-        "user_id": id, "daily_cap_usd": b.daily_cap_usd.unwrap_or(state.voice.daily_cap_usd),
-        "default": b.daily_cap_usd.is_none(),
-        "spent_today_usd": state.db.voice_spent_since(&id, start_of_utc_day_ms()).unwrap_or(0.0),
-    }))
-    .into_response()
-}
-
 /// `POST /voice/worker/hello {sha, version, model}` (admin token): the worker says which build
 /// it runs; shown as `voice.worker_sha` / `voice.worker` in `GET /admin/calls`.
 pub async fn worker_hello(
@@ -1564,8 +1481,6 @@ pub fn admin_json(state: &AppState) -> Value {
         "model": state.voice.model,
         "default_voice": state.voice.default_voice,
         "voices": voice_catalogue(state).len(),
-        "daily_cap_usd": state.voice.daily_cap_usd,
-        "call_cap_usd": state.voice.call_cap_usd,
         "call_max_minutes": CALL_MAX_MINUTES,
         "boxes_linked": state.voice_conns.try_lock().map(|c| c.len()).unwrap_or(0),
         "vision": {

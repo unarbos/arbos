@@ -142,6 +142,16 @@ pub struct Credits {
     /// Machine time (always-on box) — informational, outside the balance and caps.
     pub machine_today_usd: f64,
     pub machine_total_usd: f64,
+    /// Today's spend split by source (`inference`, `decision`, `image`, `voice`, …), largest
+    /// first. One limit covers them all, so this is where "what is spending it" is answered.
+    pub today_by_kind: Vec<KindSpend>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct KindSpend {
+    pub kind: String,
+    pub usd: f64,
+    pub calls: i64,
 }
 
 /// Why a debit was refused.
@@ -251,9 +261,10 @@ impl Db {
     pub fn upsert_github_user(
         &self,
         gh: &GithubIdentity,
-        default_daily_cap_usd: f64,
+        default_limit: crate::credits::SpendLimit,
     ) -> Result<(User, bool)> {
         let id = format!("gh_{}", gh.id);
+        let (cap_usd, cap_unlimited) = default_limit.columns();
         let now = now_ms();
         let created = self.with(|c| {
             let existing: Option<String> = c
@@ -289,17 +300,18 @@ impl Db {
                     // refresh avatar (unless custom) and last_login_at.
                     c.execute(
                         "UPDATE users SET avatar_url = ?2, last_login_at = ?3, status = 'member',
-                            spend_cap_usd = CASE WHEN status = 'invited' THEN ?4 ELSE spend_cap_usd END
+                            spend_cap_usd = CASE WHEN status = 'invited' THEN ?4 ELSE spend_cap_usd END,
+                            cap_unlimited = CASE WHEN status = 'invited' THEN ?5 ELSE cap_unlimited END
                          WHERE github_id = ?1",
-                        params![gh.id, avatar, now, default_daily_cap_usd],
+                        params![gh.id, avatar, now, cap_usd, cap_unlimited],
                     )?;
                     Ok(first)
                 }
                 None => {
                     c.execute(
-                        "INSERT INTO users(id, snapshot, spend_cap_usd, created_at, github_id, login, avatar_url, name, last_login_at, status)
-                         VALUES (?1, NULL, ?2, ?3, ?4, ?5, ?6, ?7, ?3, 'member')",
-                        params![id, default_daily_cap_usd, now, gh.id, gh.login, gh.avatar_url, gh.name],
+                        "INSERT INTO users(id, snapshot, spend_cap_usd, cap_unlimited, created_at, github_id, login, avatar_url, name, last_login_at, status)
+                         VALUES (?1, NULL, ?2, ?8, ?3, ?4, ?5, ?6, ?7, ?3, 'member')",
+                        params![id, cap_usd, now, gh.id, gh.login, gh.avatar_url, gh.name, cap_unlimited],
                     )?;
                     Ok(true)
                 }
@@ -328,13 +340,14 @@ impl Db {
         handle: &str,
         name: Option<&str>,
         avatar_url: Option<&str>,
-        daily_cap_usd: f64,
+        limit: crate::credits::SpendLimit,
     ) -> Result<()> {
+        let (cap_usd, cap_unlimited) = limit.columns();
         self.with(|c| {
             c.execute(
-                "INSERT INTO users(id, snapshot, spend_cap_usd, created_at, login, avatar_url, name, last_login_at, status, test)
-                 VALUES (?1, NULL, ?2, ?3, ?4, ?5, ?6, ?3, 'member', 1)",
-                params![id, daily_cap_usd, now_ms(), handle, avatar_url, name],
+                "INSERT INTO users(id, snapshot, spend_cap_usd, cap_unlimited, created_at, login, avatar_url, name, last_login_at, status, test)
+                 VALUES (?1, NULL, ?2, ?7, ?3, ?4, ?5, ?6, ?3, 'member', 1)",
+                params![id, cap_usd, now_ms(), handle, avatar_url, name, cap_unlimited],
             )
             .map(|_| ())
         })
@@ -974,6 +987,8 @@ impl Db {
             return Err(anyhow!("debit must be a non-negative amount"));
         }
         self.with(|c| {
+            // No row yet (a device-token user `ensure_account` has not reached) is unlimited, not
+            // a limit of zero: an account nobody configured must not be the one that cannot spend.
             let (cap, unlimited, allow_negative): (f64, i64, i64) = c
                 .query_row(
                     "SELECT spend_cap_usd, cap_unlimited, allow_negative FROM users WHERE id = ?1",
@@ -981,7 +996,7 @@ impl Db {
                     |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                 )
                 .optional()?
-                .unwrap_or((0.0, 0, 0));
+                .unwrap_or((0.0, 1, 0));
             let balance: f64 = c.query_row(
                 "SELECT COALESCE(SUM(usd), 0.0) FROM credit_ledger WHERE user_id = ?1 AND kind != 'machine'",
                 params![user_id],
@@ -993,13 +1008,21 @@ impl Db {
                     needed_usd: usd,
                 }));
             }
-            if unlimited == 0 {
+            // Machine time is its own bucket: the day's total below leaves it out, so the limit
+            // must leave it out here too, or a day of inference would stop the box being billed
+            // for time it is still running.
+            let limit = if kind == "machine" {
+                crate::credits::SpendLimit::Unlimited
+            } else {
+                crate::credits::SpendLimit::from_row(cap, unlimited != 0)
+            };
+            if let crate::credits::SpendLimit::Daily(cap) = limit {
                 let today: f64 = c.query_row(
                     "SELECT COALESCE(-SUM(usd), 0.0) FROM credit_ledger WHERE user_id = ?1 AND usd < 0 AND kind != 'machine' AND at >= ?2",
                     params![user_id, start_of_day_ms],
                     |r| r.get(0),
                 )?;
-                if today >= cap {
+                if limit.reached(today) {
                     return Ok(Err(DebitRefused::DailyCap {
                         cap_usd: cap,
                         spent_today_usd: today,
@@ -1037,6 +1060,20 @@ impl Db {
                 params![user_id, start_of_day_ms],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )?;
+            let mut st = c.prepare(
+                "SELECT kind, -SUM(usd), COUNT(*) FROM credit_ledger
+                 WHERE user_id = ?1 AND usd < 0 AND at >= ?2 GROUP BY kind",
+            )?;
+            let mut today_by_kind: Vec<KindSpend> = st
+                .query_map(params![user_id, start_of_day_ms], |r| {
+                    Ok(KindSpend {
+                        kind: r.get(0)?,
+                        usd: r.get(1)?,
+                        calls: r.get(2)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<_>>()?;
+            today_by_kind.sort_by(|a, b| b.usd.total_cmp(&a.usd).then_with(|| a.kind.cmp(&b.kind)));
             Ok(Credits {
                 balance_usd: granted - spent,
                 granted_usd: granted,
@@ -1046,6 +1083,7 @@ impl Db {
                 allow_negative: user.as_ref().is_some_and(|u| u.allow_negative),
                 machine_today_usd: machine_today,
                 machine_total_usd: machine_total,
+                today_by_kind,
             })
         })
     }
@@ -1370,6 +1408,115 @@ mod box_history_archive_tests {
 }
 
 #[cfg(test)]
+mod one_ledger_tests {
+    //! One ledger, one limit, every spend source counted against it.
+
+    use crate::credits::SpendLimit;
+    use crate::db::Db;
+
+    fn db(tag: &str) -> (Db, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "arbos-ledger-{tag}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let db = Db::open(&dir.join("relay.db")).expect("db");
+        db.grant_credits("u", 1000.0, "test", "test").unwrap();
+        (db, dir)
+    }
+
+    /// An account with no limit spends without end, however many sources charge it. This is the
+    /// direction a parse bug breaks: a `0.0` standing in for "unlimited" would stop all of them.
+    #[test]
+    fn an_unlimited_account_is_never_refused() {
+        let (db, dir) = db("unlimited");
+        db.set_user_limits("u", Some(SpendLimit::Unlimited.stored()), None)
+            .unwrap();
+        for kind in ["inference", "decision", "image", "voice", "audio"] {
+            for _ in 0..20 {
+                db.debit("u", 1.0, kind, None, 0)
+                    .unwrap()
+                    .unwrap_or_else(|r| panic!("{kind} refused with no limit: {r:?}"));
+            }
+        }
+        assert_eq!(db.credits("u", 0).unwrap().spent_today_usd, 100.0);
+        assert_eq!(db.credits("u", 0).unwrap().daily_cap_usd, None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A limit set by hand still bites, and every source counts against the same one: five
+    /// sources spending $1 each reach a $5 limit together, not one $5 limit apiece.
+    #[test]
+    fn a_hand_set_limit_counts_every_source_against_itself() {
+        let (db, dir) = db("limited");
+        db.set_user_limits("u", Some(SpendLimit::Daily(5.0).stored()), None)
+            .unwrap();
+        for kind in ["inference", "decision", "image", "voice", "audio"] {
+            db.debit("u", 1.0, kind, None, 0)
+                .unwrap()
+                .unwrap_or_else(|r| panic!("{kind} refused below the limit: {r:?}"));
+        }
+        let refused = db.debit("u", 1.0, "inference", None, 0).unwrap();
+        assert!(
+            matches!(refused, Err(super::DebitRefused::DailyCap { cap_usd, .. }) if cap_usd == 5.0),
+            "the sixth dollar is over the one limit: {refused:?}"
+        );
+        // Machine time is its own bucket and is not what the limit is about.
+        db.debit("u", 1.0, "machine", None, 0)
+            .unwrap()
+            .expect("machine time");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The breakdown the one ledger has to keep: who spent what, by source.
+    #[test]
+    fn the_ledger_keeps_a_breakdown_by_source() {
+        let (db, dir) = db("breakdown");
+        db.debit("u", 1.0, "inference", Some("gpt-5"), 0)
+            .unwrap()
+            .unwrap();
+        db.debit("u", 0.5, "decision", Some("jev-1.14"), 0)
+            .unwrap()
+            .unwrap();
+        db.debit("u", 0.25, "voice", Some("call-1"), 0)
+            .unwrap()
+            .unwrap();
+        let by_kind: Vec<(String, f64, i64)> = db
+            .credits("u", 0)
+            .expect("credits")
+            .today_by_kind
+            .into_iter()
+            .map(|k| (k.kind, k.usd, k.calls))
+            .collect();
+        assert_eq!(
+            by_kind,
+            vec![
+                ("inference".to_owned(), 1.0, 1),
+                ("decision".to_owned(), 0.5, 1),
+                ("voice".to_owned(), 0.25, 1),
+            ],
+            "the one ledger still says which source spent what, largest first"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// An account nobody has configured yet must not be the one that cannot spend.
+    #[test]
+    fn an_account_with_no_row_is_unlimited_not_frozen() {
+        let (db, dir) = db("norow");
+        assert!(db.user("u_never_seen").unwrap().is_none());
+        db.grant_credits("u_never_seen", 10.0, "test", "test")
+            .unwrap();
+        db.debit("u_never_seen", 9.0, "inference", None, 0)
+            .unwrap()
+            .expect("no row is no limit");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[cfg(test)]
 mod address_name_tests {
     use super::GithubIdentity;
     use crate::db::Db;
@@ -1393,7 +1540,9 @@ mod address_name_tests {
             avatar_url: None,
             name: Some("Const".into()),
         };
-        let (u, created) = db.upsert_github_user(&gh, 20.0).unwrap();
+        let (u, created) = db
+            .upsert_github_user(&gh, crate::credits::SpendLimit::Unlimited)
+            .unwrap();
         assert!(created);
         let (login, name, address, former) = db.user_address(&u.id).unwrap().unwrap();
         assert!(former.is_empty());
@@ -1414,7 +1563,9 @@ mod address_name_tests {
             "the old label is remembered for the boxes"
         );
         // Another GitHub sign-in keeps the user's choice.
-        let (_, _) = db.upsert_github_user(&gh, 20.0).unwrap();
+        let (_, _) = db
+            .upsert_github_user(&gh, crate::credits::SpendLimit::Unlimited)
+            .unwrap();
         let (_, _, address, _) = db.user_address(&u.id).unwrap().unwrap();
         assert_eq!(address.as_deref(), Some("Jacob"));
         // Clearing the name clears the address too; the source flips back only on a new name.
@@ -1457,7 +1608,7 @@ mod device_dedupe_tests {
                 avatar_url: None,
                 name: None,
             },
-            20.0,
+            crate::credits::SpendLimit::Unlimited,
         )
         .unwrap()
         .0

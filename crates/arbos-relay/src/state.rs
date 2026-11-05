@@ -80,7 +80,9 @@ pub struct Config {
     /// Credits a new GitHub account starts with (`ARBOS_DEFAULT_GRANT_USD`).
     pub default_grant_usd: f64,
     /// Soft per-user daily debit cap for new accounts (`ARBOS_DEFAULT_DAILY_CAP_USD`).
-    pub default_daily_cap_usd: f64,
+    /// The limit every new account starts with. One limit for the whole ledger; unlimited
+    /// unless `ARBOS_DEFAULT_DAILY_CAP_USD` names a positive number.
+    pub default_account_limit: crate::credits::SpendLimit,
     /// Relay-wide daily inference debit cap; reaching it trips the kill switch (`ARBOS_GLOBAL_DAILY_CAP_USD`).
     pub global_daily_cap_usd: f64,
     /// Relay-wide daily machine cost that only logs a warning (`ARBOS_GLOBAL_MACHINE_DAILY_CAP_USD`).
@@ -667,7 +669,7 @@ pub(crate) mod test_support {
             github_client_secret: Some("secret".into()),
             auth_redirects: Vec::new(),
             default_grant_usd: 100.0,
-            default_daily_cap_usd: 20.0,
+            default_account_limit: crate::credits::SpendLimit::Unlimited,
             global_daily_cap_usd: 500.0,
             global_machine_daily_cap_usd: 400.0,
             always_on: false,

@@ -15,7 +15,7 @@
 use std::time::Duration;
 
 use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
 use serde_json::json;
 
 use arbos_core::ids::now_ms;
@@ -30,6 +30,93 @@ use crate::state::{AppState, AuthMode};
 /// Debits below this are not worth a ledger row (and a metering tick on an idle box rounds to it).
 const MIN_DEBIT_USD: f64 = 0.000_001;
 const METER_PERIOD: Duration = Duration::from_secs(60);
+
+/// Spellings of "no limit" an operator may write in `ARBOS_DEFAULT_DAILY_CAP_USD`.
+const UNLIMITED_WORDS: &[&str] = &[
+    "none",
+    "off",
+    "no",
+    "unlimited",
+    "inf",
+    "infinite",
+    "infinity",
+];
+
+/// The one spend limit of one account, as configured.
+///
+/// Unlimited is a variant, never a number. A limit and the absence of a limit cannot be told
+/// apart inside one `f64`, and the failure is asymmetric: a `0.0` that reads as a zero limit
+/// stops every spend source at once, which is the opposite of what an unset variable means.
+/// This is the single ledger's only limit (Jacob, 2026-11-05: "In reality all spending should be
+/// in one cap not cap per app function"), so the mistake would be one line wide and fleet deep.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SpendLimit {
+    /// No daily limit. The default, and what an unset or unparseable variable means.
+    Unlimited,
+    /// Refuse once the UTC day's debits reach this many USD. Always positive and finite.
+    Daily(f64),
+}
+
+impl SpendLimit {
+    /// `ARBOS_DEFAULT_DAILY_CAP_USD`: unset, empty, a word from [`UNLIMITED_WORDS`], a
+    /// non-positive number or anything unparseable all mean [`SpendLimit::Unlimited`]. Only a
+    /// positive finite number limits anything, so no parse path can invent a zero limit.
+    pub fn from_env(var: &str) -> Self {
+        match std::env::var(var) {
+            Err(_) => Self::Unlimited,
+            Ok(raw) => Self::parse(&raw),
+        }
+    }
+
+    pub fn parse(raw: &str) -> Self {
+        let s = raw.trim();
+        if s.is_empty() || UNLIMITED_WORDS.iter().any(|w| s.eq_ignore_ascii_case(w)) {
+            return Self::Unlimited;
+        }
+        match s.parse::<f64>() {
+            Ok(v) if v.is_finite() && v > 0.0 => Self::Daily(v),
+            // `0`, negatives, `inf` and typos: never a limit of zero.
+            _ => Self::Unlimited,
+        }
+    }
+
+    /// The two account columns, `(spend_cap_usd, cap_unlimited)`. The number is meaningless
+    /// while the flag is set, so writing both together is the only way the row stays honest.
+    pub fn columns(self) -> (f64, i64) {
+        match self {
+            Self::Unlimited => (0.0, 1),
+            Self::Daily(v) => (v, 0),
+        }
+    }
+
+    /// How the limit is stored on the account row: `None` = unlimited.
+    pub fn stored(self) -> Option<f64> {
+        match self {
+            Self::Unlimited => None,
+            Self::Daily(v) => Some(v),
+        }
+    }
+
+    /// The limit as read back from an account row. The explicit `cap_unlimited` flag wins; a
+    /// negative or non-finite number is nonsense for an account and reads as unlimited. A stored
+    /// `0.0` is kept as `Daily(0.0)` on purpose: that is an admin freezing the account
+    /// (`PUT /admin/users/{id}/credits {"daily_cap_usd": 0}`), which is a different instruction
+    /// from `null`, and collapsing the two is the conflation this type exists to prevent.
+    pub fn from_row(spend_cap_usd: f64, cap_unlimited: bool) -> Self {
+        if cap_unlimited || !spend_cap_usd.is_finite() || spend_cap_usd < 0.0 {
+            return Self::Unlimited;
+        }
+        Self::Daily(spend_cap_usd)
+    }
+
+    /// Whether today's debits have used the limit up. Unlimited never has.
+    pub fn reached(self, spent_today_usd: f64) -> bool {
+        match self {
+            Self::Unlimited => false,
+            Self::Daily(v) => spent_today_usd >= v,
+        }
+    }
+}
 
 pub fn metered(state: &AppState) -> bool {
     state.cfg.auth_mode == AuthMode::Github
@@ -103,11 +190,11 @@ pub fn ensure_account(state: &AppState, user_id: &str) {
     if known {
         return;
     }
-    if let Err(e) =
-        state
-            .db
-            .set_user_limits(user_id, Some(Some(state.cfg.default_daily_cap_usd)), None)
-    {
+    if let Err(e) = state.db.set_user_limits(
+        user_id,
+        Some(state.cfg.default_account_limit.stored()),
+        None,
+    ) {
         tracing::warn!(error = %e, user = %user_id, "legacy account row");
         return;
     }
@@ -172,54 +259,11 @@ pub fn check(state: &AppState, user_id: &str) -> Result<(), DebitRefused> {
     }
 }
 
-/// A project's daily cap below zero means "no project cap" (the column is `REAL NOT NULL`, so
-/// the sentinel is a negative value; `PUT /admin/projects/{id}/spend-cap {"daily_cap_usd": null}`
-/// and the owner's `PATCH /projects/{id} {"spend_cap_daily": null}` store it).
+/// `projects.spend_cap_daily` is a `REAL NOT NULL`, so "no project cap" is a negative sentinel.
+/// Every project is written with it: a project is not a ledger, it spends its owner's account,
+/// and the account's single limit is the only thing that refuses (Jacob, 2026-11-05: "all
+/// spending should be in one cap not cap per app function").
 pub const PROJECT_CAP_UNLIMITED: f64 = -1.0;
-
-/// Pure rule for the per-project daily cap (Jacob, 2026-10-26: "Doug agent" hit its $25 project
-/// cap at 22:07 UTC while his *user* cap was unlimited). An owner without a user cap has no
-/// project caps either; a project stored with the unlimited sentinel has none; otherwise the
-/// usual `today >= cap`.
-pub fn project_cap_allows(cap: f64, owner_unlimited: bool, today_usd: f64) -> bool {
-    if owner_unlimited || cap < 0.0 {
-        return true;
-    }
-    today_usd < cap
-}
-
-/// The owner of `project_id` has no daily cap (`users.cap_unlimited`).
-pub fn owner_unlimited(state: &AppState, project_id: &str) -> bool {
-    state
-        .user_of(project_id)
-        .and_then(|u| state.db.user(&u).ok().flatten())
-        .is_some_and(|u| u.daily_cap_usd.is_none())
-}
-
-/// `Some(402 spend_cap)` when the project's own daily cap is spent; `None` when the call may go.
-pub fn project_cap_refusal(state: &AppState, project_id: &str) -> Option<Response> {
-    let p = state.db.project(project_id).ok().flatten()?;
-    let today = state
-        .db
-        .usage_since(project_id, start_of_utc_day_ms())
-        .map(|u| u.usd)
-        .unwrap_or(0.0);
-    if project_cap_allows(p.spend_cap_daily, owner_unlimited(state, project_id), today) {
-        return None;
-    }
-    let _ = state.db.enqueue_push(
-        project_id,
-        "spend_cap",
-        &json!({ "spend_today": today, "cap": p.spend_cap_daily }),
-    );
-    Some(
-        (
-            StatusCode::PAYMENT_REQUIRED,
-            json!({ "error": { "type": "spend_cap", "message": format!("daily spend cap ${:.2} reached", p.spend_cap_daily) } }).to_string(),
-        )
-            .into_response(),
-    )
-}
 
 /// Who pays for a call: the device's or box's user when the bearer has one, else the owner of
 /// the project the call names. `None` only for the admin on an unknown project.
@@ -410,26 +454,80 @@ mod tests {
 
     use super::*;
 
-    /// Jacob, 2026-10-26 22:07 UTC: an unlimited owner's agent was refused by its $25 project cap.
+    /// The one ledger's one limit. Jacob, 2026-11-05: "Increase our agent caps to infinity" and
+    /// "all spending should be in one cap not cap per app function". Both directions matter: an
+    /// unset or broken variable must never mean "spend nothing" (one bad parse would stop every
+    /// spend source at once), and a limit set by hand must still bite.
     #[test]
-    fn project_cap_follows_the_owner_and_the_sentinel() {
-        assert!(project_cap_allows(25.0, false, 24.99));
-        assert!(!project_cap_allows(25.0, false, 25.0));
-        assert!(!project_cap_allows(25.0, false, 25.24));
-        assert!(
-            project_cap_allows(25.0, true, 25.24),
-            "an unlimited owner has no project cap"
+    fn an_absent_limit_is_unlimited_and_a_set_one_still_bites() {
+        // Nothing an operator can leave out or mistype produces a limit.
+        for raw in [
+            "",
+            "   ",
+            "none",
+            "OFF",
+            "unlimited",
+            "Infinity",
+            "banana",
+            "0",
+            "0.0",
+            "-1",
+        ] {
+            assert_eq!(
+                SpendLimit::parse(raw),
+                SpendLimit::Unlimited,
+                "{raw:?} must not read as a limit"
+            );
+            assert!(
+                !SpendLimit::parse(raw).reached(1.0e9),
+                "{raw:?} must never stop a spend source"
+            );
+            assert_eq!(SpendLimit::parse(raw).stored(), None, "{raw:?}");
+        }
+        // A hand-set limit is kept exactly and still refuses at and past itself.
+        assert_eq!(SpendLimit::parse("12.5"), SpendLimit::Daily(12.5));
+        assert_eq!(SpendLimit::parse(" 12.5 "), SpendLimit::Daily(12.5));
+        assert_eq!(SpendLimit::parse("12.5").stored(), Some(12.5));
+        assert!(!SpendLimit::Daily(12.5).reached(12.49));
+        assert!(SpendLimit::Daily(12.5).reached(12.5));
+        assert!(SpendLimit::Daily(12.5).reached(99.0));
+    }
+
+    /// An account row carries the limit in two columns; the explicit flag is the one that means
+    /// unlimited, and a stored zero stays an admin freeze rather than becoming unlimited.
+    #[test]
+    fn an_account_row_never_turns_a_zero_into_unlimited() {
+        assert_eq!(SpendLimit::from_row(0.0, true), SpendLimit::Unlimited);
+        assert_eq!(SpendLimit::from_row(20.0, true), SpendLimit::Unlimited);
+        assert_eq!(SpendLimit::from_row(20.0, false), SpendLimit::Daily(20.0));
+        assert_eq!(
+            SpendLimit::from_row(0.0, false),
+            SpendLimit::Daily(0.0),
+            "a deliberate freeze is not the same instruction as no limit"
         );
-        assert!(
-            project_cap_allows(PROJECT_CAP_UNLIMITED, false, 1.0e6),
-            "sentinel = no cap"
+        assert!(SpendLimit::from_row(0.0, false).reached(0.0));
+        assert!(!SpendLimit::from_row(0.0, true).reached(0.0));
+        // Nonsense in the number column fails open rather than freezing the account.
+        assert_eq!(SpendLimit::from_row(-1.0, false), SpendLimit::Unlimited);
+        assert_eq!(SpendLimit::from_row(f64::NAN, false), SpendLimit::Unlimited);
+    }
+
+    /// The shipped default: no variable set anywhere means no limit.
+    #[test]
+    fn the_default_account_limit_is_unlimited() {
+        assert_eq!(
+            SpendLimit::from_env("ARBOS_SPEND_LIMIT_VAR_THAT_IS_NEVER_SET"),
+            SpendLimit::Unlimited
         );
-        assert!(project_cap_allows(-5.0, false, 1.0e6));
-        assert!(
-            !project_cap_allows(0.0, false, 0.0),
-            "a zero cap still blocks (not the sentinel)"
+        assert_eq!(
+            crate::state::test_support::test_state(AuthMode::Github)
+                .cfg
+                .default_account_limit,
+            SpendLimit::Unlimited,
+            "a relay booted with no cap variables caps nobody"
         );
     }
+
     use crate::auth::{resolve_checked, Refused};
     use crate::connectors::crypto::RelayKey;
     use crate::db::Sandbox;
@@ -448,7 +546,7 @@ mod tests {
                     avatar_url: None,
                     name: None,
                 },
-                state.cfg.default_daily_cap_usd,
+                state.cfg.default_account_limit,
             )
             .expect("user");
         if created {
@@ -665,7 +763,11 @@ mod tests {
         );
         let c = state.db.credits("u_mac", 0).unwrap();
         assert_eq!(c.balance_usd, state.cfg.default_grant_usd);
-        assert_eq!(c.daily_cap_usd, Some(state.cfg.default_daily_cap_usd));
+        assert_eq!(
+            c.daily_cap_usd,
+            state.cfg.default_account_limit.stored(),
+            "the default account carries the relay's one limit, unlimited unless configured"
+        );
         charge(&state, "u_mac", 1.0, "inference", None);
         assert_eq!(
             state.db.credits("u_mac", 0).unwrap().balance_usd,
