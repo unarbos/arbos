@@ -3,6 +3,8 @@
 #
 #   scripts/release/swift-gate-applies.sh decide     prints applies=true|false, and appends it to
 #                                                    $GITHUB_OUTPUT when that is set
+#   scripts/release/swift-gate-applies.sh verdict    exits non-zero unless this commit was tested,
+#                                                    reading the other jobs' results from the env
 #   scripts/release/swift-gate-applies.sh selftest   asserts the invariants this screen and
 #                                                    .github/workflows/swift-core-check.yml rely on
 #
@@ -170,6 +172,47 @@ decide() {
   return 0
 }
 
+# The one job in this workflow that reports success, and it does so only for a commit that was
+# tested. Everything it reads is a job result from the environment, so it has no opinion of its
+# own to be wrong about — it refuses whatever it cannot read as a verdict.
+#
+# Every unknown is a refusal. `decide` not succeeding means nobody established whether this commit
+# needs the macOS build, and an unestablished answer about a required gate is not a pass; an
+# `applies` value that is neither true nor false means the same thing one layer down.
+verdict() {
+  local d=${DECIDE_RESULT:-} a=${DECIDE_APPLIES:-} c=${CHECK_RESULT:-}
+
+  if [ "$d" != success ]; then
+    echo "The applicability screen did not answer (decide: ${d:-missing}), so whether this commit" \
+         "needs the macOS build is unknown, and an unknown answer about a required gate is not a" \
+         "pass. Read the \`decide\` job for why it could not say." >&2
+    exit 1
+  fi
+
+  case "$a" in
+    false)
+      echo "The Swift core check does not apply to this commit: its diff touches none of the gated" \
+           "paths, so there is nothing for the macOS job to test and nothing to wait for."
+      return 0 ;;
+    true) ;;
+    *)
+      echo "The screen succeeded but reported applies='${a:-}', which is neither true nor false," \
+           "so whether this commit needs the macOS build is unknown. Refusing rather than guessing." >&2
+      exit 1 ;;
+  esac
+
+  if [ "$c" = success ]; then
+    echo "The Swift core check applies to this commit and the macOS job passed on it."
+    return 0
+  fi
+
+  echo "The Swift core check applies to this commit — its diff touches a gated path — and the" \
+       "macOS job did not pass (check: ${c:-missing}). A skipped or cancelled build is not a" \
+       "failure, but it is not a verdict either, and this gate is required: nothing here tested" \
+       "this commit, so this run refuses rather than concluding success on its siblings." >&2
+  exit 1
+}
+
 # The invariants, asserted on every run rather than written down and hoped for. Each one is a way
 # the applying-but-unanswerable state comes back.
 selftest() {
@@ -254,6 +297,41 @@ selftest() {
     bad "the same-repo deferral is not on \`decide\` — a deferred run would conclude success with nothing built, which checks.sh reads as a pass"
   fi
 
+  # 8. The run must not be able to conclude without this screen refusing. `verdict` is the only job
+  #    that reports success, so it has to run in every case a run could otherwise conclude on its
+  #    siblings — and skip in the one case the run is meant to skip whole.
+  if printf '%s\n' "$body" | awk '/^  verdict:/{v=1;next} /^  [a-z_]+:/{v=0} v && /always\(\)/ && /needs\.decide\.result != .skipped./{found=1} END{exit !found}'; then
+    ok "the verdict job runs whenever a run could conclude on a skipped build, and skips only with the deferral"
+  else
+    bad "the verdict job is missing, does not use always(), or no longer defers with decide — a skipped macOS job would conclude the run success again"
+  fi
+
+  # 9. The verdict's truth table, exercised rather than described. Every row that is not a tested
+  #    commit must refuse, including the shapes that are nobody's fault: a cancelled build and a
+  #    screen that failed are not failures, and they are not verdicts either.
+  local rows want got desc d a c
+  rows='success|true|success|0|the gate applies and the build passed
+success|false|skipped|0|the gate does not apply, so there is nothing to test
+success|true|skipped|1|the gate applies and the build was skipped — the bug this job exists for
+success|true|failure|1|the gate applies and the build failed
+success|true|cancelled|1|the gate applies and the build was cancelled
+success|true||1|the gate applies and no build result reached this job
+success|||1|the screen reported no applies value at all
+success|maybe|success|1|the screen reported an applies value neither true nor false
+failure|true|success|1|the screen itself failed, so applicability is unknown
+skipped|false|skipped|1|the screen was skipped, so applicability is unknown'
+  while IFS='|' read -r d a c want desc; do
+    [ -n "$want" ] || continue
+    got=0
+    ( DECIDE_RESULT=$d DECIDE_APPLIES=$a CHECK_RESULT=$c verdict ) >/dev/null 2>&1 || got=$?
+    [ "$got" -ne 0 ] && got=1
+    if [ "$got" = "$want" ]; then
+      ok "verdict $([ "$want" = 0 ] && echo passes || echo refuses): $desc"
+    else
+      bad "verdict should $([ "$want" = 0 ] && echo pass || echo refuse) when $desc (decide=$d applies=$a check=$c) but exited $got"
+    fi
+  done <<< "$rows"
+
   echo
   if [ "$fail" -eq 0 ]; then echo "swift-gate-applies selftest: PASS"; else echo "swift-gate-applies selftest: FAIL"; fi
   return "$fail"
@@ -261,6 +339,7 @@ selftest() {
 
 case "${1:-}" in
   decide)   decide ;;
+  verdict)  verdict ;;
   selftest) selftest ;;
-  *) echo "usage: $0 decide|selftest" >&2; exit 64 ;;
+  *) echo "usage: $0 decide|verdict|selftest" >&2; exit 64 ;;
 esac
