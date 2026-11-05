@@ -52,6 +52,10 @@ Config comes from the environment (systemd EnvironmentFile=/etc/arbos/feedback.e
       its issue + label `deferred` + the comment, no agent (a product area intentionally off for now).
       "ios: <regex>" / "mac: <regex>" limits a rule to feedback aimed at that app.
   FEEDBACK_DEDUPE_DAYS (7), FEEDBACK_AGENT_TIMEOUT_MIN (75), FEEDBACK_SHIP_TIMEOUT_MIN (90)
+  FEEDBACK_STALL_CHANNEL (log): where the release-queue stall guard flags a frozen merge queue —
+      `log` posts nothing (log line + audit event only), `issue` adds one `release-queue-stalled` ops
+      issue per stall, `off` disables the detection. FEEDBACK_STALL_RELEASE_AFTER_MIN (20 on `issue`, else 5)
+      and FEEDBACK_STALL_GATE_AFTER_MIN (20): how long each stall shape must hold before it is flagged.
 
 Only the standard library plus `cryptography` (for the ES256 App Store Connect token).
 
@@ -159,6 +163,18 @@ def head_or(st: dict) -> str:
     return st.get("branch_head") or st.get("gated_head") or ""
 
 
+def gate_red_since(st: dict, head: str) -> str | None:
+    """When this item's gate last went red at `head`, or None when `head` has no red verdict. `rust_gate` is
+    the item's own verdict, `last_red` the batch verdict a bisect recorded against the head it judged."""
+    rg = st.get("rust_gate") or {}
+    if rg.get("head") == head and not rg.get("ok") and rg.get("verdict") in ("fail", "conflict"):
+        return rg.get("at")
+    last = st.get("last_red") or {}
+    if last.get("head") == head:
+        return last.get("at")
+    return None
+
+
 def touches_ios(files: list[str] | None) -> bool:
     return any(f.startswith(IOS_PATH_PREFIXES) or f == ".github/workflows/ios.yml" for f in files or [])
 
@@ -256,6 +272,15 @@ class Config:
     ios_gate_timeout_s: int
     rust_gate_ssh: str
     rust_gate_timeout_s: int
+    # The release-queue stall guard (watch_release_queue_stall). `channel` is off | log | issue: `log` (the
+    # default) writes the log line and the audit event and posts nothing, so landing the guard cannot comment
+    # anywhere; `issue` adds the one `release-queue-stalled` ops issue per stall. The two waits differ because
+    # the two detections differ in certainty: a concluded failed/cancelled release is conclusive, a red gate
+    # may be a flake somebody is already re-running. The release wait also rises with the channel (5 → 20 on
+    # `issue`) so that switching the channel on cannot leave the short wait behind by accident; see from_env.
+    stall_channel: str
+    stall_release_after_min: int
+    stall_gate_after_min: int
 
     @staticmethod
     def from_env() -> "Config":
@@ -307,6 +332,7 @@ class Config:
                     topics.append((int(num), pattern.strip()))
         p8_b64 = env.get("ASC_KEY_P8_B64", "")
         pem = base64.b64decode(p8_b64) if p8_b64 else b""
+        stall_channel = env.get("FEEDBACK_STALL_CHANNEL", "log").strip().lower()
         return Config(
             state_dir=state_dir,
             kill_file=Path(env.get("FEEDBACK_KILL_FILE", "/etc/arbos/feedback.disabled")),
@@ -344,6 +370,15 @@ class Config:
             rust_gate_timeout_s=int(env.get("RUST_GATE_TIMEOUT_S", "3600")),
             ship_timeout_min=int(env.get("FEEDBACK_SHIP_TIMEOUT_MIN", "90")),
             operator=env.get("FEEDBACK_OPERATOR", "bc-7eefe9bf"),
+            stall_channel=stall_channel,
+            # Owner decision 2026-10-30: the release stall waits 20 min once the guard FILES issues, not 5.
+            # release.yml's `*/15` cron backstop can take a quarter of an hour to START, so a 5-minute wait
+            # would have the first flags announce releases that go on to fix themselves — and a guard that
+            # cries wolf gets muted, which is worse than no guard. While nothing is posted an early log line
+            # is free, so 5 stands there. Setting the variable overrides both.
+            stall_release_after_min=int(env.get("FEEDBACK_STALL_RELEASE_AFTER_MIN")
+                                        or (20 if stall_channel == "issue" else 5)),
+            stall_gate_after_min=int(env.get("FEEDBACK_STALL_GATE_AFTER_MIN", "20")),
         )
 
 
@@ -723,6 +758,35 @@ class GitHub:
         stable = [r for r in rels if not r.get("prerelease") and not r.get("draft") and re.fullmatch(r"v\d+\.\d+\.\d+", r.get("tag_name") or "")]
         stable.sort(key=lambda r: r.get("created_at") or "", reverse=True)
         return stable[0] if stable else None
+
+    def published_release_tag(self) -> str | None:
+        """The tag GitHub serves as `/releases/latest` — the tag the stable appcast names.
+
+        The in-app stable feed is https://arbos.life/updates/mac/appcast.xml, which
+        scripts/deploy/refresh-mac-download.sh mirrors from this release's `appcast.xml` asset (and which the
+        app falls back off, to releases/latest/download/appcast.xml, via arbos_update::fetch::feed_urls). So
+        this one tag decides which version the stable channel offers, and reading it here asks GitHub the same
+        question the mirror asks — never the mirror's copy, which lags by up to 15 min."""
+        try:
+            return (self.repo_api("GET", "/releases/latest") or {}).get("tag_name") or None
+        except HttpError as e:
+            if e.status == 404:
+                return None  # a repository with no stable release yet
+            raise
+
+    def tag_release_runs(self, limit: int = 50) -> list[dict]:
+        """release.yml runs whose ref is a vX.Y.Z tag, highest version first (release.yml runs the tag ref with
+        event `push`; see its `on.push.tags`). The newest cut tag is the head of the release queue, so this is
+        the list the stall guard judges: one call, and it carries both the tag and the run's conclusion.
+
+        `event=push` keeps out the `workflow_run` runs on main and the `*/15` schedule backstop, but main's own
+        hotfix fast path is a push too, so the page is wide enough that a run of tag releases is not pushed off
+        it by a busy afternoon of hotfixes."""
+        q = urllib.parse.urlencode({"event": "push", "per_page": limit})
+        runs = self.repo_api("GET", f"/actions/workflows/release.yml/runs?{q}").get("workflow_runs", [])
+        tagged = [r for r in runs if re.fullmatch(r"v\d+\.\d+\.\d+", r.get("head_branch") or "")]
+        return sorted(tagged, key=lambda r: (tuple(int(p) for p in r["head_branch"][1:].split(".")),
+                                             r.get("run_started_at") or ""), reverse=True)
 
     def contains(self, ref: str, sha: str) -> bool:
         """True when `ref` (tag/branch/sha) already contains commit `sha`. Memoised per process (one tick):
@@ -4475,6 +4539,10 @@ class Loop:
         except Exception as e:  # noqa: BLE001
             log(f"main-red watch failed: {e}")
         try:
+            self.watch_release_queue_stall()
+        except Exception as e:  # noqa: BLE001
+            log(f"release-queue stall guard failed: {e}")
+        try:
             self.watch_deploys()
             self.note_canary_failure()
         except Exception as e:  # noqa: BLE001
@@ -4670,6 +4738,196 @@ class Loop:
         if changed:
             cur["main_red"] = alerts
             self.store.save_cursor(cur)
+
+    # ------------------------------------------------------------ the release-queue stall guard
+    #
+    # The merge hold (/usr/local/bin/arbos-release-serialize on the relay host, NOT in this repository) marks
+    # every gating item do-not-merge and clears the marker on one item per 2-minute tick, and only while no CI
+    # or Release run is in flight on main, the highest tag is fully published, and the item it released last has
+    # merged. It has no timeout anywhere. Two things therefore freeze every merge in the project until a human
+    # notices: a release that fails or is cancelled AFTER its tag is cut (the publication condition can never
+    # pass by itself), and a released item whose gate stays red (it never merges, so nothing behind it is ever
+    # released). On 2026-10-30 the queue was frozen for hours and nothing said so.
+    #
+    # This guard only flags. It never writes do_not_merge, never calls a release script, and never touches what
+    # the gate checks — failing closed is correct and is not what it is fixing; the silence is. Jacob approved
+    # it on 2026-10-30 ("Yes, add a guard that flags a stalled queue").
+    STALL_LABEL = "release-queue-stalled"
+
+    def publication_gaps(self, tag: str, rel: dict | None, published_tag: str | None) -> list[str]:
+        """What the merge hold is still waiting for on `tag`: a release object that is not a draft, an uploaded
+        disk image, and the stable appcast naming this version — the three things scripts/release/publish-release.sh
+        uploads together. Read from GitHub, which is what publish-release.sh writes and what the site mirror
+        copies from, so the guard and the publish path cannot disagree about what is published."""
+        if rel is None:
+            return ["there is no release object for the tag"]
+        gaps = []
+        if rel.get("draft"):
+            gaps.append("the release is still a draft")
+        names = [a.get("name") or "" for a in rel.get("assets") or []]
+        if not any(n.endswith(".dmg") for n in names):
+            gaps.append("no disk image (`.dmg`) is uploaded")
+        if "appcast.xml" not in names:
+            gaps.append("no `appcast.xml` is uploaded")
+        if published_tag != tag:
+            gaps.append(f"the stable appcast still names `{published_tag or 'nothing'}`")
+        return gaps
+
+    def stalled_release(self) -> dict | None:
+        """Shape one: the newest cut tag's Release run concluded failed or cancelled and the tag is not fully
+        published, so the hold's publication condition will never pass without a hand re-run.
+
+        A queued or in-progress tag release means the queue is still moving — that also covers release.yml's own
+        `*/15` cron backstop once it starts, so a release the backstop is about to retry is not called a stall."""
+        runs = self.gh.tag_release_runs()
+        if not runs:
+            return None
+        top = runs[0]  # highest tag; for one tag, its newest run — a successful hand re-run wins over the failure
+        tag = top["head_branch"]
+        # Only the head of the queue is judged. A retry of this tag that has not concluded is runs[0] itself, so
+        # a release still working is never called stalled; an older tag's run stuck queued for ever cannot blind
+        # the guard the way "any run anywhere is in flight" would.
+        if any(r["head_branch"] == tag and r.get("status") != "completed" for r in runs):
+            return None
+        if top.get("conclusion") not in ("failure", "cancelled"):
+            return None
+        published_tag = self.gh.published_release_tag()
+        rel = next((r for r in self.gh.releases() if (r.get("tag_name") or "") == tag), None)
+        gaps = self.publication_gaps(tag, rel, published_tag)
+        if not gaps:
+            return None  # the run died after publishing everything; the hold can move on by itself
+        since = top.get("updated_at") or top.get("run_started_at") or iso()
+        held = [f for f in self.store.items() if self.store.state(f).get("do_not_merge")]
+        errors = []
+        if top["conclusion"] == "failure":
+            with contextlib.suppress(HttpError):
+                errors = self.gh.run_error_lines(top["id"], limit=20)
+        body = (f"**The release queue is stalled.** `{tag}` was tagged, its Release run was "
+                f"**{top['conclusion']}** — {top['html_url']} — and the tag is not published: "
+                + "; ".join(gaps) + ".\n\n"
+                "The merge hold releases one gating item per tick only while the highest tag is fully published. "
+                "That condition cannot become true by itself after a failed or cancelled release, and the hold has "
+                f"no timeout, so **every merge in the project is blocked** until somebody re-runs the release by hand. "
+                f"{len(held)} item(s) are marked do-not-merge right now.\n\n"
+                + ("```\n" + "\n".join(errors) + "\n```\n\n" if errors else
+                   "_The run was cancelled, so it logged no error lines._\n\n" if top["conclusion"] == "cancelled" else
+                   "_No error lines could be captured; open the run._\n\n")
+                + "To clear it: re-run that Release run, or cut the release again. Read the run's log first — an "
+                "interrupted build, or anything about disk space or timeouts, is environmental until proven otherwise.\n\n"
+                "This guard only flags. It does not release anything, does not touch the hold, and does not change what "
+                "the gate checks. It closes this issue itself once the tag is published or a newer tag ships.")
+        return {"key": f"release:{tag}:{top['id']}", "since": since,
+                "summary": f"{tag} Release run {top['conclusion']} and the tag is not published ({'; '.join(gaps)})",
+                "title": f"release queue stalled: {tag} was tagged but its release {top['conclusion']}", "body": body}
+
+    def stalled_gate(self) -> dict | None:
+        """Shape two: the hold released one gating item (its do-not-merge marker is gone while the rest keep
+        theirs), that item's gate is red at its current head, so it will not merge — and the hold waits for it
+        to merge before it releases anybody else. Everything behind it waits with it."""
+        held, released = [], []
+        for fid in self.store.items():
+            st = self.store.state(fid)
+            if st.get("status") != "gating":
+                continue
+            (held if st.get("do_not_merge") else released).append((fid, st))
+        if not held or not released:
+            return None  # no hold in force, or it has released nobody yet (shape one covers a stuck publication)
+        for fid, st in released:
+            head = head_or(st)
+            red_at = gate_red_since(st, head) if head else None
+            if not red_at:
+                continue
+            issue = st.get("issue")
+            body = (f"**The release queue is stalled.** The merge hold released `{fid}` "
+                    + (f"(#{issue}) " if issue else "") + f"and its gate is red at `{head[:8]}` since {red_at}.\n\n"
+                    "The hold releases the next item only after the one it released last has left `gating`, meaning it "
+                    "merged. A red gate never merges, and the hold has no timeout, so this item and the "
+                    f"**{len(held)} item(s) behind it** wait indefinitely.\n\n"
+                    "To clear it: land the repair on that branch, or `park` the item back to its owner so the queue moves "
+                    "on. Read the gate's error lines first — a red run with no error lines is environmental until proven "
+                    "otherwise, and a flake only needs re-running.\n\n"
+                    "This guard only flags. It does not merge, release or park anything, does not touch the hold, and does "
+                    "not change what the gate checks. It closes this issue itself once the item merges or moves.")
+            return {"key": f"gate:{fid}:{head}", "since": red_at,
+                    "summary": f"{fid} was released by the hold but its gate is red at {head[:8]}; {len(held)} item(s) behind it",
+                    "title": f"release queue stalled: {fid} cannot merge, {len(held)} item(s) held behind it", "body": body}
+        return None
+
+    def watch_release_queue_stall(self) -> None:
+        """Flag a merge queue that cannot advance — once per stall, not once per 2-minute tick.
+
+        The cursor holds the open stall's identity per shape (the tag and run for a dead release, the item and
+        its gated head for a red gate). A tick whose identity is unchanged says nothing at all, so a stall that
+        lasts all afternoon costs one flag. An identity that changes under an open flag adds one comment; a stall
+        that clears closes the issue with how long it lasted.
+
+        `FEEDBACK_STALL_CHANNEL` decides where it goes, and defaults to `log` — the log line and the audit event
+        only — so landing this guard cannot post anywhere. `issue` adds the one ops issue per stall."""
+        if self.cfg.stall_channel == "off":
+            return
+        cur = self.store.cursor()
+        open_stalls: dict = cur.get("release_queue_stall") or {}
+        found: dict[str, dict] = {}
+        for shape, detect, wait in (("release", self.stalled_release, self.cfg.stall_release_after_min),
+                                    ("gate", self.stalled_gate, self.cfg.stall_gate_after_min)):
+            try:
+                stall = detect()
+            except HttpError as e:
+                log(f"stall guard: the {shape} check could not read GitHub (HTTP {e.status}); not judging it this tick")
+                found[shape] = open_stalls.get(shape) or {}  # unreadable is not recovered: keep an open flag open
+                continue
+            # A condition younger than its wait is not a stall yet: a release may be about to be retried, and a
+            # red gate may be a flake somebody is already re-running.
+            if stall and minutes_between(stall["since"], iso()) >= wait:
+                found[shape] = stall
+        changed = False
+        for shape in ("release", "gate"):
+            stall, prev = found.get(shape), open_stalls.get(shape)
+            if not stall:
+                if prev:
+                    self.clear_stall(shape, prev)
+                    open_stalls.pop(shape, None)
+                    changed = True
+                continue
+            if not stall.get("key") or (prev and prev.get("key") == stall["key"]):
+                continue  # already flagged (or unreadable this tick): silence is the point
+            open_stalls[shape] = self.flag_stall(shape, stall, prev)
+            changed = True
+        if changed:
+            cur["release_queue_stall"] = open_stalls
+            self.store.save_cursor(cur)
+
+    def flag_stall(self, shape: str, stall: dict, prev: dict | None) -> dict:
+        """Raise one stall. The log line and the audit event always happen; the ops issue only on `issue`."""
+        mins = minutes_between(stall["since"], iso())
+        rec = {"key": stall["key"], "since": stall["since"], "issue": (prev or {}).get("issue")}
+        self.store.event("main", "release_queue_stalled", shape=shape, key=stall["key"], stalled_min=mins,
+                         issue=rec["issue"], channel=self.cfg.stall_channel)
+        log(f"ALERT release queue stalled ({shape}): {stall['summary']} — {mins:.0f} min so far; no merge in the "
+            f"project can land until a human clears it")
+        if self.cfg.stall_channel != "issue":
+            return rec
+        try:
+            if rec["issue"]:
+                self.gh.comment(rec["issue"], f"Still stalled, now on something else: {stall['summary']}.")
+                return rec
+            self.gh.ensure_label(self.STALL_LABEL, "FBCA04", "The release queue cannot advance; no merge in the project can land")
+            issue = self.gh.create_issue(stall["title"], stall["body"], [self.STALL_LABEL])
+            rec["issue"] = issue["number"]
+            log(f"stall guard: filed #{issue['number']} for the {shape} stall")
+        except HttpError as e:
+            log(f"stall guard: could not file the {shape} stall (HTTP {e.status}); the log line and the event stand")
+        return rec
+
+    def clear_stall(self, shape: str, prev: dict) -> None:
+        mins = minutes_between(prev.get("since") or iso(), iso())
+        self.store.event("main", "release_queue_moving", shape=shape, key=prev.get("key"), stalled_min=mins)
+        log(f"stall guard: the release queue can advance again ({shape}); it was stalled for {mins:.0f} min")
+        if prev.get("issue"):
+            with contextlib.suppress(HttpError):
+                self.gh.close_issue(prev["issue"], "completed",
+                                    f"The release queue can advance again (stalled for {mins:.0f} min). The guard only "
+                                    "flagged it: nothing was released, bypassed or merged on its account.")
 
     def watch_track_comments(self) -> None:
         """Non-root registration for workers: a comment `track <feedback-id> bc-<owner>` on any issue (new since the
