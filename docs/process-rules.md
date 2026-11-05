@@ -173,6 +173,39 @@ exit code; `axbin/osascript` is a shim on `runner.sh`'s PATH that forwards every
 - After a reboot both runners are gone: start `ax-runner.sh` via `sudo launchctl asuser 502 sudo -u arbosgui …`
   from ssh and `runner.sh` via `open /Users/Shared/arbos-run/start-runner.command` (Terminal identity).
 
+## A test is named for the rule it defends, not the routes that implement it (2026-11-02)
+
+A test named after the routes it happens to cover measures something real the day it is written,
+and less of the rule every time the codebase grows — staying green throughout. This is a
+different failure from a check that measured nothing to begin with: there is no skipped test to
+notice, no failing assertion to chase, and no coverage tool that flags it, because the new route
+is covered by its own tests, just not against this rule. The evidence that the rule is still
+defended is a sentence in English that is still true.
+
+The instance: #2557 held ownerless skills against writes and pinned it with
+`a_stranger_can_neither_edit_nor_delete_an_ownerless_skill` — the two write routes that existed
+that day. #2605 added a third, `refile`, from a base cut before #2557. Both PRs green, merge
+textually clean, suite green in the merged tree, and in that tree a stranger could not edit or
+delete an ownerless skill but could take a copy of its text and become its recorded author.
+Found by merging `main` into the branch and running a probe, not by reading either diff.
+
+The same shape is why `people.rs`'s `only_own_agent_can_be_added_and_only_its_owner_removes_it`
+is the test at the centre of the 2026-11-02 `main` red: it is named for two operations, and it
+broke when those two operations diverged.
+
+- **Name the test for the invariant**, not for the handlers. "A row naming nobody is writable by
+  nobody" survives a new route; "neither edit nor delete" does not.
+- **Where a rule spans routes, enumerate them in code** and assert the rule against each, so that
+  adding a route without adding a case fails to compile or fails the loop — not silently.
+- **Where that is too heavy, say the limit in the doc comment**: name the closed set and the fact
+  that it is a set. That converts a silent decay into something the next PR's reader can act on.
+- **A green suite is not evidence that a rule survived a merge.** Two branches that are each
+  green against their own base can compose into a defect with no textual conflict. When a branch
+  adds a route, or its base predates a guard on the same table, merge the target in locally and
+  run before relying on either run.
+- Renaming a test is not churn. The name is load-bearing, and test names are the least-reviewed
+  lines in a diff.
+
 ## Standing rules that this does not change
 
 - One issue per release; a hotfix marker (`[hotfix]`) is for P0s only.
