@@ -7,7 +7,7 @@ use serde_json::Value;
 const MAX_CHARS: usize = 48;
 
 /// `mcp__arbos__web_search` → `web_search`: project tools reach pi under the MCP server prefix.
-fn bare_tool_name(tool_name: &str) -> &str {
+pub(crate) fn bare_tool_name(tool_name: &str) -> &str {
     tool_name
         .strip_prefix("mcp__")
         .and_then(|rest| rest.split_once("__"))

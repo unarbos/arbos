@@ -343,6 +343,23 @@ impl Db {
         })
     }
 
+    /// Live `agent:` rows in this chat whose Project belongs to `user_id`, oldest join first.
+    /// A person's agents sit in a people chat only because that person does — every attach
+    /// route asks a live member for a Project they own — so removing, banning or leaving takes
+    /// them along, and a stale row is the hole this query also audits.
+    pub fn agent_members_of_user(&self, chat_id: &str, user_id: &str) -> Result<Vec<String>> {
+        self.with(|c| {
+            let mut st = c.prepare(
+                "SELECT p.id FROM people_members m
+                 JOIN projects p ON m.member = 'agent:' || p.id
+                 WHERE m.chat_id = ?1 AND m.left_at IS NULL AND p.user_id = ?2
+                 ORDER BY m.joined_at, p.id",
+            )?;
+            let rows = st.query_map(params![chat_id, user_id], |r| r.get(0))?;
+            rows.collect()
+        })
+    }
+
     /// Clear a ban so the person can be added again. Does not re-add them.
     pub fn unban_member(&self, chat_id: &str, member: &str) -> Result<bool> {
         self.with(|c| {
@@ -1172,6 +1189,20 @@ impl Db {
                 |r| r.get::<_, i64>(0),
             )
             .map(|n| n > 0)
+        })
+    }
+
+    /// Has this project ever had a guest? Unlike [`Db::is_project_member`] this ignores
+    /// `left_at`, because a departure does not make a room's history the owner's: rows a guest
+    /// wrote while they were here are still there after they leave, and anything that asks "could
+    /// somebody other than the owner have written this?" has to count them.
+    pub fn project_ever_had_member(&self, project_id: &str) -> Result<bool> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT EXISTS (SELECT 1 FROM project_members WHERE project_id = ?1)",
+                params![project_id],
+                |r| r.get(0),
+            )
         })
     }
 

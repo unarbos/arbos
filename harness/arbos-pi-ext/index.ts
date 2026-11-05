@@ -70,6 +70,32 @@ const DETACHED_SHELL_HINT =
   "Detached processes are not started from a turn (nohup, setsid, disown, a trailing `&`, tmux, screen): that work is a job. Call start_job(title, brief, kind) with the whole instruction — every step, the waits, the exact file paths, what to report — and end the turn; the worker runs it with a status line, its result arrives as an [Arbos] job notice, and a later change goes through steer_job(job_id, text) (never kill + restart). Run short foreground commands here only.";
 
 /**
+ * A command in the main agent's own turn that kills a process by pid, name or pattern.
+ *
+ * Jacob's Test5 round 6, bug S: asked to cancel a running job the main agent ran `kill 14237`
+ * and told the user the job was cancelled. A signal to a pid is not a cancel — the job row stays
+ * `running`, the worker's tool call carries on, and its result and its file land in the chat
+ * later (1 401 seconds later, in that case). `stop_job(job_id)` is the cancel, and it answers
+ * with the job's state. Returns the offending fragment, or null.
+ */
+export function killsAProcess(toolName: string, input: Record<string, unknown>): string | null {
+  const text =
+    toolName === "bash" ? String(input?.command ?? "")
+    : toolName === "codemode" ? String(input?.code ?? "")
+    : "";
+  if (!text) return null;
+  // `kill`/`kill -9`/`killall`/`pkill`, as a command rather than inside a word (`killed.log`,
+  // `--killswitch`) or a sentence in an echo.
+  const re = /(^|[;&|(`'"]\s*|\bsudo\s+|\bxargs\s+|\bexec\s+|&&\s*|\|\|\s*)(kill|killall|pkill)\b/m;
+  const m = re.exec(text);
+  if (!m) return null;
+  return text.slice(Math.max(0, m.index - 40), m.index + m[0].length + 40).replace(/\s+/g, " ").trim();
+}
+
+const KILL_HINT =
+  "A signal is not a cancel. `stop_job(job_id)` is the only thing that cancels a job: it ends the worker's turn and its tool call, kills the processes the job started, marks the job `cancelled`, and answers with that state and with what it killed. Call list_jobs for the id, then stop_job(job_id) (or stop_job(\"all\")), and say \"cancelled\" only where the state it returns reads `cancelled`. If stop_job reports a pid it could NOT kill, a `kill` aimed at that pid is allowed — but only that one. For a process of your own that is not a job, let the command finish in the foreground instead.";
+
+/**
  * A `reply` text that announces more to come ("delivered in parts below", "table follows") is an
  * introduction, not the answer: the turn must go on with send_message. Mirrors
  * `agent::promises_parts` (proof run 1, 2026-10-26 01:0x UTC: the result turn routed `reply`
@@ -83,6 +109,9 @@ export function promisesMore(text: string): boolean {
 // Mirrors `arbos_core::approval::SHELL_TOOLS`; the classification itself happens in agentd.
 const SHELL_TOOLS = new Set(["bash", "shell", "run_command", "execute_command"]);
 const APPROVAL_POLL_MS = Number(process.env.ARBOS_APPROVAL_POLL_MS ?? 1500);
+// Fallback only: agentd sends the real cap as `waitMs` on the pending reply, because the card's
+// `expires_at` has to be the same number the waiter uses. Keeping a second copy of the default
+// here is what made a card advertise 24 hours and die at 14 minutes (Test5 round 5, bug R).
 const APPROVAL_WAIT_MS = Number(process.env.ARBOS_APPROVAL_WAIT_MS ?? 14 * 60 * 1000); // under the turn deadline
 // Code mode (D86): agentd sets ARBOS_CODE_MODE=on|off per pi spawn (flag file / box env, default off).
 const CODE_MODE = (process.env.ARBOS_CODE_MODE ?? "off").trim().toLowerCase() === "on";
@@ -278,6 +307,22 @@ export default function arbosPiExt(pi: ExtensionAPI) {
         audit({ kind: "detached_shell_refused", session: sessionId, tool: event.toolName, fragment: detached.slice(0, 160) });
         return { block: true, reason: `Refused (\`${detached.slice(0, 80)}\`): ${DETACHED_SHELL_HINT}` };
       }
+      const killing = killsAProcess(event.toolName, event.input as Record<string, unknown>);
+      if (killing) {
+        // One exception, and agentd is the only thing that can judge it: a pid a `stop_job` of
+        // this chat already reported it could not reap (Test5 round 10, bug Z — the job read
+        // `cancelled`, its loop kept writing, and refusing the kill left no way to stop it).
+        // Refused by default: no agentd, an unreachable one, or any other answer blocks.
+        const verdict = await hook("/hook/kill-allowed", {
+          session_id: sessionId,
+          command: String((event.input as { command?: unknown })?.command ?? (event.input as { code?: unknown })?.code ?? ""),
+        });
+        if (verdict?.ok !== true) {
+          audit({ kind: "kill_refused", session: sessionId, tool: event.toolName, fragment: killing.slice(0, 160) });
+          return { block: true, reason: `Refused (\`${killing.slice(0, 80)}\`): ${verdict?.error ?? KILL_HINT}` };
+        }
+        audit({ kind: "kill_allowed_leftover", session: sessionId, tool: event.toolName, fragment: killing.slice(0, 160) });
+      }
     }
     if (beforeRoute && relayTurn && event.toolName === "send_message") {
       // Speaking first in a relay turn is routing `reply`: record it and let the message out.
@@ -358,7 +403,8 @@ export default function arbosPiExt(pi: ExtensionAPI) {
     if (state === "allowed") return undefined;
     const approvalId = String(first.approvalId ?? "");
     audit({ kind: "approval_wait", session: sessionId, tool, call_id: callId, approval_id: approvalId, title: first.title ?? null });
-    const deadline = Date.now() + APPROVAL_WAIT_MS;
+    const waitMs = typeof first.waitMs === "number" && first.waitMs > 0 ? first.waitMs : APPROVAL_WAIT_MS;
+    const deadline = Date.now() + waitMs;
     let reason: string | undefined;
     while (state === "pending" && Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, APPROVAL_POLL_MS));
@@ -368,7 +414,19 @@ export default function arbosPiExt(pi: ExtensionAPI) {
         if (typeof cur.reason === "string") reason = cur.reason;
       }
     }
-    if (state === "pending") {
+    if (state === "pending" && first.park === true) {
+      // A main-session call: stop holding the chat's turn. The card stays answerable for its
+      // full deadline and agentd runs the call itself once it is approved, so this is a park
+      // rather than a failure. Holding the turn for the whole wait is Test5 round 5 bug R —
+      // fourteen minutes in which that chat could only answer from the quick lane.
+      const parked = await hook("/hook/approval-park", { approvalId });
+      if (parked?.ok && parked.parked === true) {
+        audit({ kind: "approval_parked", session: sessionId, tool, call_id: callId, approval_id: approvalId });
+        return { block: true, reason: String(parked.reason ?? "This needs the user's approval; nothing ran.") };
+      }
+      // Decided inside the grace, or already gone: fall through on the state agentd reports.
+      if (typeof parked?.state === "string") state = parked.state as ApprovalState;
+    } else if (state === "pending") {
       // Stopped waiting: agentd expires the card so the UI shows the timeout promptly.
       void hook("/hook/approval-abandon", { approvalId });
     }
@@ -557,7 +615,7 @@ export default function arbosPiExt(pi: ExtensionAPI) {
     promptSnippet: "start_job: run longer work beside the chat; its result arrives later as an [Arbos] job notice",
     parameters: Type.Object({
       title: Type.String({ description: "2-5 words, present tense, what the user sees while it runs (\"Searching for surf schools\")" }),
-      brief: Type.String({ description: "The exact instruction for the worker: what to find or build, for whom, the acceptance criterion, what to return (URLs and sources for research)" }),
+      brief: Type.String({ description: "The exact instruction for the worker: what to find or build, for whom, the acceptance criterion, what to return (URLs and sources for research). The job is already running beside the chat, so never tell the worker to detach anything (no nohup, setsid or trailing &) — its steps run in the foreground, and a process it detaches is one stop_job may not be able to kill." }),
       kind: Type.Union([Type.Literal("research"), Type.Literal("code"), Type.Literal("ops"), Type.Literal("other")]),
       touches: Type.Optional(Type.Union([Type.Array(Type.String()), Type.Null()], { description: "Resources the job changes: paths, 'git', 'routines', 'secret:<name>' (none for research)" })),
     }),
@@ -603,8 +661,8 @@ export default function arbosPiExt(pi: ExtensionAPI) {
   if (SESSION_ROLE === "main") pi.registerTool({
     name: "steer_job",
     label: "Steer job",
-    description: "Send a correction into a running job (\"only group lessons under $70\"). `job_id` from list_jobs, or \"latest\" for the newest running job. Ack to the user yourself in one line.",
-    promptSnippet: "steer_job: a mid-flight correction to a running job",
+    description: "Send a correction into a running job (\"only group lessons under $70\"). `job_id` from list_jobs, or \"latest\" for the newest running job. Call it as soon as the user corrects the work, including when the job has just posted its answer: within half a minute of that the correction replaces the file it posted instead of being refused. Ack to the user yourself in one line.",
+    promptSnippet: "steer_job: a correction to a running or just-finished job",
     parameters: Type.Object({
       job_id: Type.String({ description: "Job id, or \"latest\"" }),
       text: Type.String({ description: "The correction, as an instruction to the worker" }),
@@ -616,7 +674,12 @@ export default function arbosPiExt(pi: ExtensionAPI) {
       if (res && !res.ok) {
         return { content: [{ type: "text", text: `Not steered (${res.error ?? "unknown"}). Start a new job for it, or tell the user.` }], details: undefined };
       }
-      const job = (res as { job?: { job_id?: string; title?: string } } | undefined)?.job;
+      const job = (res as { job?: { job_id?: string; title?: string; state?: string; note?: string } } | undefined)?.job;
+      // The job had already posted its answer, so agentd marked that card superseded and sent
+      // the job again for the corrected one. Its own note says what to tell the user.
+      if (job?.state === "replacing") {
+        return { content: [{ type: "text", text: `Job ${job?.job_id ?? "?"} (${job?.title ?? ""}) had already posted; the correction replaces it. ${job?.note ?? ""}`.trim() }], details: undefined };
+      }
       return { content: [{ type: "text", text: `Steered job ${job?.job_id ?? "?"} (${job?.title ?? ""}). Tell the user in one line what changed, then end the turn.` }], details: undefined };
     },
   });
@@ -624,8 +687,8 @@ export default function arbosPiExt(pi: ExtensionAPI) {
   if (SESSION_ROLE === "main") pi.registerTool({
     name: "stop_job",
     label: "Stop job",
-    description: "Stop a running job: `job_id` from list_jobs, \"latest\" for the newest running job, or \"all\" for every job of this chat. Confirm to the user yourself in one line; no result will follow.",
-    promptSnippet: "stop_job: stop one job (id | latest) or all",
+    description: "Cancel a running job — the only way to cancel one; a kill or pkill on a pid leaves it running. `job_id` from list_jobs, \"latest\" for the newest running job, or \"all\" for every job of this chat. It ends the worker's turn and its in-flight tool call, and answers with each job's state. Tell the user it is cancelled only where that state reads `cancelled`; no result will follow from a cancelled job.",
+    promptSnippet: "stop_job: cancel one job (id | latest) or all; never a kill",
     parameters: Type.Object({
       job_id: Type.String({ description: "Job id, \"latest\" or \"all\"" }),
     }),
@@ -634,10 +697,12 @@ export default function arbosPiExt(pi: ExtensionAPI) {
     async execute(_toolCallId, params) {
       const res = await hook("/hook/stop_job", { session_id: sessionId, job_id: params.job_id });
       if (res && !res.ok) {
-        return { content: [{ type: "text", text: `Nothing stopped (${res.error ?? "unknown"}).` }], details: undefined };
+        return { content: [{ type: "text", text: `Nothing was cancelled (${res.error ?? "unknown"}). Do not tell the user anything stopped.` }], details: undefined };
       }
-      const stopped = ((res as { result?: { stopped?: string[] } } | undefined)?.result?.stopped) ?? [];
-      return { content: [{ type: "text", text: `Stopped: ${stopped.join(", ") || "nothing"}. Confirm to the user in one line.` }], details: undefined };
+      const result = (res as { result?: { stopped?: { job_id?: string; title?: string; state?: string }[]; note?: string } } | undefined)?.result;
+      const stopped = result?.stopped ?? [];
+      const states = stopped.map((j) => `${j.title ?? j.job_id} — state ${j.state ?? "unknown"}`).join("; ") || "nothing";
+      return { content: [{ type: "text", text: `${states}. ${result?.note ?? ""}`.trim() }], details: undefined };
     },
   });
 

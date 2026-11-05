@@ -40,7 +40,7 @@ CREATE TABLE IF NOT EXISTS projects (
   id TEXT PRIMARY KEY, name TEXT NOT NULL, icon TEXT NOT NULL DEFAULT '',
   instructions TEXT NOT NULL DEFAULT '', models TEXT NOT NULL DEFAULT '{}',
   state TEXT NOT NULL DEFAULT 'waking', created_at INTEGER NOT NULL, last_active_at INTEGER NOT NULL,
-  spend_cap_daily REAL NOT NULL DEFAULT 25.0,
+  spend_cap_daily REAL NOT NULL DEFAULT -1.0,
   project_token_hash TEXT
 );
 CREATE TABLE IF NOT EXISTS chats (
@@ -86,6 +86,26 @@ CREATE TABLE IF NOT EXISTS rows (
   PRIMARY KEY (room, seq)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS rows_batch ON rows(room, batch_id);
+-- Rows the relay could not decode as a Loro update, moved out of `rows` so that compaction can
+-- proceed. The bytes are kept, never served: `rooms::quarantine_undecodable_rows` moves a row here
+-- and the relay then checkpoints over its seq, which is the only way to reopen a room whose
+-- compaction has wedged.
+--
+-- This table is deliberately OUTSIDE every read path over `rows`, and that is what it is FOR, not an
+-- oversight to tidy up. In particular `rooms::checkpoint_covers_store` must never union it. The
+-- wedge this table exists to fix is caused by a row that cannot be imported into any snapshot being
+-- counted as missing from it, forever; a validation walk that reads quarantine re-imports exactly
+-- those bytes, fails again, and restores the original bug in full. "While we are here, we should
+-- validate against everything we have stored" is the one change that must not be made.
+--
+-- `batch_id` is carried, and uniquely indexed, for a reason that outlives this table's own purpose:
+-- see `Db::row_seq_for_batch`.
+CREATE TABLE IF NOT EXISTS quarantine (
+  room TEXT NOT NULL, seq INTEGER NOT NULL, device TEXT NOT NULL, batch_id TEXT NOT NULL,
+  bytes BLOB NOT NULL, created_at INTEGER NOT NULL, quarantined_at INTEGER NOT NULL,
+  PRIMARY KEY (room, seq)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS quarantine_batch ON quarantine(room, batch_id);
 CREATE TABLE IF NOT EXISTS checkpoints (
   room TEXT PRIMARY KEY, seq INTEGER NOT NULL, frontier BLOB NOT NULL, bytes BLOB NOT NULL,
   size INTEGER NOT NULL, created_at INTEGER NOT NULL
@@ -482,6 +502,59 @@ pub struct ChannelPairCode {
     pub expires_at: i64,
 }
 
+/// `AppState::allows` over a project-id column, as SQL: the projects a person owns plus the ones
+/// they were invited to (D72). `?1` is the user id. Same shape as `REACHABLE_SKILLS`.
+fn reachable_project(column: &str) -> String {
+    format!(
+        "EXISTS (SELECT 1 FROM projects p
+                  WHERE p.id = {column} AND p.deleted_at IS NULL
+                    AND (p.user_id = ?1
+                         OR EXISTS (SELECT 1 FROM project_members m
+                                     WHERE m.project_id = p.id AND m.user_id = ?1 AND m.left_at IS NULL)))"
+    )
+}
+
+/// Whose channel rows a query is for. Every channels listing takes one and binds its
+/// [`ChannelScope::key`] as `?1`, so the scope is part of the query rather than a filter over its
+/// answer and a `LIMIT` counts rows the caller may see.
+#[derive(Debug, Clone)]
+pub enum ChannelScope {
+    /// The admin token.
+    Everything,
+    /// One person's devices: the channels of the projects that person can reach.
+    Reachable(String),
+}
+
+impl ChannelScope {
+    /// A predicate over a project-id column of the row a query selects.
+    fn predicate(&self, project_column: &str) -> String {
+        match self {
+            Self::Everything => "?1 IS NULL".to_owned(),
+            Self::Reachable(_) => reachable_project(project_column),
+        }
+    }
+
+    /// A predicate over a `channel_outbox` row aliased `o`. An outbox row belongs to whoever owns
+    /// the binding it was sent for; a row with no binding (a pairing hint to an unbound sender) is
+    /// nobody's, so only the admin reads it.
+    fn outbox_predicate(&self) -> String {
+        match self {
+            Self::Everything => "?1 IS NULL".to_owned(),
+            Self::Reachable(_) => format!(
+                "EXISTS (SELECT 1 FROM channel_bindings b WHERE b.id = o.binding_id AND {})",
+                reachable_project("b.project_id")
+            ),
+        }
+    }
+
+    fn key(&self) -> Option<&str> {
+        match self {
+            Self::Everything => None,
+            Self::Reachable(user_id) => Some(user_id),
+        }
+    }
+}
+
 /// One credential in the vault (F8). `fields` is ciphertext from `connectors::crypto` over a JSON
 /// object (`{ "url", "username", "password" }` for a login, `{ "value" }` for a secret/api_key).
 /// Owned by one user: every read and write is scoped by `user_id`, and names are unique per user.
@@ -560,6 +633,7 @@ impl Db {
         c.execute_batch(SCHEMA)?;
         c.execute_batch(crate::outside::SCHEMA)?;
         c.execute_batch(crate::outside_log::SCHEMA)?;
+        c.execute_batch(crate::agent_link::SCHEMA)?;
         for m in crate::outside::MIGRATIONS {
             let _ = c.execute(m, []);
         }
@@ -647,6 +721,7 @@ impl Db {
         crate::db_people::migrate_people(&c);
         c.execute_batch(crate::db_people::PEOPLE_SCHEMA)?;
         Self::migrate_mono_avatar_defaults(&c)?;
+        Self::migrate_account_caps_to_unlimited(&c)?;
         c.execute_batch(crate::db_push::PUSH_SCHEMA)?;
         c.execute_batch(crate::push::store::OUTBOX_SCHEMA)?;
         c.execute_batch(crate::push::eligibility::LEVEL_SCHEMA)?;
@@ -753,6 +828,33 @@ impl Db {
     /// in thirteen stored `avatar_color = 'mono'` without anyone choosing it. Clear those once;
     /// NULL means "the (now always coloured) default" on every client. Later explicit `mono`
     /// picks stay: the `meta` flag makes this a one-shot.
+    /// Jacob, 2026-11-05: "Increase our agent caps to infinity", and all spending belongs in one
+    /// cap rather than one per app function. New accounts are unlimited; rows already carrying a
+    /// cap are lifted here, once. Two things are left alone on purpose: a `spend_cap_usd` of 0 is
+    /// an admin freezing an account (`PUT /admin/users/{id}/credits {"daily_cap_usd": 0}`), which
+    /// is an instruction, not a leftover default; and the per-project column, which nothing reads
+    /// any more. Guarded by `meta`, so an admin who sets a cap after this keeps it across restarts.
+    fn migrate_account_caps_to_unlimited(c: &Connection) -> Result<()> {
+        const KEY: &str = "account_caps_lifted";
+        let done: Option<String> = c
+            .query_row("SELECT value FROM meta WHERE key = ?1", params![KEY], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        if done.is_some() {
+            return Ok(());
+        }
+        c.execute(
+            "UPDATE users SET cap_unlimited = 1 WHERE cap_unlimited = 0 AND spend_cap_usd > 0",
+            [],
+        )?;
+        c.execute(
+            "INSERT INTO meta(key, value) VALUES (?1, '1') ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![KEY],
+        )?;
+        Ok(())
+    }
+
     fn migrate_mono_avatar_defaults(c: &Connection) -> Result<()> {
         const KEY: &str = "avatar_mono_defaults_cleared";
         let done: Option<String> = c
@@ -807,7 +909,7 @@ impl Db {
                    id TEXT PRIMARY KEY, name TEXT NOT NULL, icon TEXT NOT NULL DEFAULT '',
                    instructions TEXT NOT NULL DEFAULT '', models TEXT NOT NULL DEFAULT '{}',
                    state TEXT NOT NULL DEFAULT 'waking', created_at INTEGER NOT NULL, last_active_at INTEGER NOT NULL,
-                   spend_cap_daily REAL NOT NULL DEFAULT 25.0,
+                   spend_cap_daily REAL NOT NULL DEFAULT -1.0,
                    project_token_hash TEXT,
                    color TEXT NOT NULL DEFAULT '#8b7cf6',
                    user_id TEXT NOT NULL DEFAULT 'u_default',
@@ -857,7 +959,13 @@ impl Db {
         })
     }
 
-    /// Consume a pairing code and register a device. Returns the device id.
+    /// Consume a pairing code and register a device. Returns whether the code was good.
+    ///
+    /// The device joins [`crate::auth::LEGACY_USER`], which is what a paircode relay means by
+    /// "the account": the operator mints the codes, one relay serves one person, and `projects`
+    /// defaults to the same id. Written out rather than left to the column default, because
+    /// account-wide operations key on this column and the default made the choice invisible —
+    /// `sign_out_everywhere` reads it and ends every session that shares it.
     pub fn redeem_pairing_code(
         &self,
         code: &str,
@@ -875,8 +983,8 @@ impl Db {
                 return Ok(false);
             }
             c.execute(
-                "INSERT INTO devices(id, name, token_hash, created_at) VALUES (?1, ?2, ?3, ?4)",
-                params![device_id, name, token_hash, now],
+                "INSERT INTO devices(id, name, token_hash, user_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![device_id, name, token_hash, crate::auth::LEGACY_USER, now],
             )?;
             Ok(true)
         })
@@ -917,17 +1025,6 @@ impl Db {
     }
 
     // ---- projects and chats -------------------------------------------------------------------
-
-    /// Admin: a project's daily cap in USD, or the unlimited sentinel.
-    pub fn set_project_spend_cap(&self, id: &str, cap: f64) -> Result<bool> {
-        self.with(|c| {
-            c.execute(
-                "UPDATE projects SET spend_cap_daily = ?2 WHERE id = ?1",
-                params![id, cap],
-            )
-            .map(|n| n > 0)
-        })
-    }
 
     pub fn insert_project(&self, p: &Project) -> Result<()> {
         self.with(|c| {
@@ -982,6 +1079,22 @@ impl Db {
                     Self::PROJECT_COLS
                 ),
                 params![id_or_name],
+                Self::row_to_project,
+            )
+            .optional()
+        })
+    }
+
+    /// By id and nothing else. `project` also matches on `name`, which is fine for a path the
+    /// caller owns and wrong anywhere a hit tells the caller something about another owner.
+    pub fn project_by_id(&self, id: &str) -> Result<Option<Project>> {
+        self.with(|c| {
+            c.query_row(
+                &format!(
+                    "SELECT {} FROM projects WHERE id = ?1 AND deleted_at IS NULL",
+                    Self::PROJECT_COLS
+                ),
+                params![id],
                 Self::row_to_project,
             )
             .optional()
@@ -1752,12 +1865,28 @@ impl Db {
         })
     }
 
-    /// Seq of a stored batch id, if any — used to ACK a resent push as `dup` before the people
-    /// gates (so a reconnect storm does not burn the message rate limit).
+    /// Seq of a batch id this room has already taken, if any — used to ACK a resent push as `dup`
+    /// before the people gates (so a reconnect storm does not burn the message rate limit).
+    ///
+    /// Reads `rows` **and** `quarantine`, and that second read is load-bearing rather than
+    /// bookkeeping. Before quarantine existed, the deepest layer of this defence was not this query
+    /// at all: it was the `rows_batch` UNIQUE index, so even with every lookup wrong SQLite itself
+    /// refused the duplicate insert. A row moved to `quarantine` leaves that index, and since SQLite
+    /// cannot express a unique index spanning two tables, the database-level guarantee silently stops
+    /// covering those bytes — no error and no diagnostic. This lookup is therefore the *only*
+    /// remaining defence for a quarantined batch, where for a stored one it is the outer of two.
+    ///
+    /// What it protects is not only unbounded storage. A re-pushed batch that is not recognised is
+    /// appended at a **new seq** and broadcast to every socket in the room, and the box's sync
+    /// bookkeeping is keyed on seq, so it cannot recognise bytes arriving at a seq it has never
+    /// seen. Relaxing this check corrupts another component's state machine.
     pub fn row_seq_for_batch(&self, room: &str, batch_id: &str) -> Result<Option<i64>> {
         self.with(|c| {
             c.query_row(
-                "SELECT seq FROM rows WHERE room = ?1 AND batch_id = ?2",
+                "SELECT seq FROM rows WHERE room = ?1 AND batch_id = ?2
+                 UNION ALL
+                 SELECT seq FROM quarantine WHERE room = ?1 AND batch_id = ?2
+                 LIMIT 1",
                 params![room, batch_id],
                 |r| r.get(0),
             )
@@ -1775,8 +1904,18 @@ impl Db {
     ) -> Result<(i64, bool)> {
         let now = now_ms();
         self.with(|c| {
+            // Both tables, for the reason given on `row_seq_for_batch`: a quarantined row is no
+            // longer covered by the `rows_batch` unique index, so this query is all that stands
+            // between a replayed batch and a second seq for bytes the room already took.
             let existing: Option<i64> = c
-                .query_row("SELECT seq FROM rows WHERE room = ?1 AND batch_id = ?2", params![room, batch_id], |r| r.get(0))
+                .query_row(
+                    "SELECT seq FROM rows WHERE room = ?1 AND batch_id = ?2
+                     UNION ALL
+                     SELECT seq FROM quarantine WHERE room = ?1 AND batch_id = ?2
+                     LIMIT 1",
+                    params![room, batch_id],
+                    |r| r.get(0),
+                )
                 .optional()?;
             if let Some(seq) = existing {
                 return Ok((seq, true));
@@ -1820,6 +1959,55 @@ impl Db {
             )?;
             let rows = st.query_map(params![room, after, upto, limit], |r| {
                 Ok(Row { seq: r.get(0)?, device: r.get(1)?, batch_id: r.get(2)?, bytes: r.get(3)? })
+            })?;
+            rows.collect()
+        })
+    }
+
+    /// Move one row out of `rows` and into `quarantine`, keeping its seq and bytes. Returns false
+    /// when that seq is not in `rows` (already moved, or already covered by a checkpoint).
+    ///
+    /// A move, not a flag: every read path over `rows` — the catch-up walk, `room_health`,
+    /// `load_doc`, the row count and bytes in `room_state`, and the checkpoint validation walk — is
+    /// correct for the same single reason, that `put_checkpoint` has deleted everything at or below
+    /// the last checkpoint. Marking a row in place would break that one precondition for all of them
+    /// at once and leave six readers to patch; taking the row out of the table keeps every one of
+    /// them correct untouched.
+    pub fn quarantine_row(&self, room: &str, seq: i64) -> Result<bool> {
+        let now = now_ms();
+        self.with(|c| {
+            let tx = c.unchecked_transaction()?;
+            let moved = tx.execute(
+                "INSERT INTO quarantine(room, seq, device, batch_id, bytes, created_at, quarantined_at)
+                 SELECT room, seq, device, batch_id, bytes, created_at, ?3 FROM rows
+                 WHERE room = ?1 AND seq = ?2",
+                params![room, seq, now],
+            )?;
+            if moved == 0 {
+                tx.rollback()?;
+                return Ok(false);
+            }
+            tx.execute("DELETE FROM rows WHERE room = ?1 AND seq = ?2", params![room, seq])?;
+            tx.commit()?;
+            Ok(true)
+        })
+    }
+
+    /// Quarantined rows for a room, oldest first. For operator inspection and recovery: the bytes
+    /// are retained precisely because the relay's inability to decode them is not proof they are
+    /// garbage — a replica on a newer encode version may read what this binary cannot.
+    pub fn quarantined_rows(&self, room: &str) -> Result<Vec<Row>> {
+        self.with(|c| {
+            let mut st = c.prepare(
+                "SELECT seq, device, batch_id, bytes FROM quarantine WHERE room = ?1 ORDER BY seq",
+            )?;
+            let rows = st.query_map(params![room], |r| {
+                Ok(Row {
+                    seq: r.get(0)?,
+                    device: r.get(1)?,
+                    batch_id: r.get(2)?,
+                    bytes: r.get(3)?,
+                })
             })?;
             rows.collect()
         })
@@ -2420,6 +2608,15 @@ impl Db {
     const BINDING_COLS: &'static str =
         "id, platform, external_chat_id, external_user_id, project_id, chat_id, label, bound_at";
 
+    /// [`Self::BINDING_COLS`] for a query that aliases `channel_bindings` as `b`.
+    fn binding_cols_aliased() -> String {
+        Self::BINDING_COLS
+            .split(", ")
+            .map(|col| format!("b.{col}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
     fn row_to_binding(r: &rusqlite::Row<'_>) -> rusqlite::Result<ChannelBinding> {
         Ok(ChannelBinding {
             id: r.get(0)?,
@@ -2447,13 +2644,21 @@ impl Db {
         })
     }
 
-    /// The newest unused, unexpired code (so a client can show it again after a restart).
-    pub fn active_channel_pair_code(&self) -> Result<Option<ChannelPairCode>> {
+    /// The scope's newest unused, unexpired code (so a client can show it again after a restart).
+    pub fn active_channel_pair_code(
+        &self,
+        scope: &ChannelScope,
+    ) -> Result<Option<ChannelPairCode>> {
         self.with(|conn| {
             conn.query_row(
-                "SELECT code, project_id, chat_id, created_at, expires_at FROM channel_pair_codes
-                 WHERE used_at IS NULL AND expires_at > ?1 ORDER BY created_at DESC LIMIT 1",
-                params![now_ms()],
+                &format!(
+                    "SELECT c.code, c.project_id, c.chat_id, c.created_at, c.expires_at
+                     FROM channel_pair_codes c
+                     WHERE c.used_at IS NULL AND c.expires_at > ?2 AND ({})
+                     ORDER BY c.created_at DESC LIMIT 1",
+                    scope.predicate("c.project_id")
+                ),
+                params![scope.key(), now_ms()],
                 |r| {
                     Ok(ChannelPairCode {
                         code: r.get(0)?,
@@ -2545,13 +2750,14 @@ impl Db {
         })
     }
 
-    pub fn list_channel_bindings(&self) -> Result<Vec<ChannelBinding>> {
+    pub fn list_channel_bindings(&self, scope: &ChannelScope) -> Result<Vec<ChannelBinding>> {
         self.with(|conn| {
             let mut st = conn.prepare(&format!(
-                "SELECT {} FROM channel_bindings ORDER BY bound_at DESC",
-                Self::BINDING_COLS
+                "SELECT {} FROM channel_bindings b WHERE ({}) ORDER BY b.bound_at DESC",
+                Self::binding_cols_aliased(),
+                scope.predicate("b.project_id")
             ))?;
-            let rows = st.query_map([], Self::row_to_binding)?;
+            let rows = st.query_map(params![scope.key()], Self::row_to_binding)?;
             rows.collect()
         })
     }
@@ -2630,13 +2836,18 @@ impl Db {
         })
     }
 
-    pub fn channel_outbox(&self, limit: i64) -> Result<Vec<serde_json::Value>> {
+    pub fn channel_outbox(
+        &self,
+        scope: &ChannelScope,
+        limit: i64,
+    ) -> Result<Vec<serde_json::Value>> {
         self.with(|conn| {
-            let mut st = conn.prepare(
-                "SELECT id, platform, external_chat_id, text, request_id, status, detail, binding_id, created_at
-                 FROM channel_outbox ORDER BY id DESC LIMIT ?1",
-            )?;
-            let rows = st.query_map(params![limit], |r| {
+            let mut st = conn.prepare(&format!(
+                "SELECT o.id, o.platform, o.external_chat_id, o.text, o.request_id, o.status, o.detail, o.binding_id, o.created_at
+                 FROM channel_outbox o WHERE ({}) ORDER BY o.id DESC LIMIT ?2",
+                scope.outbox_predicate()
+            ))?;
+            let rows = st.query_map(params![scope.key(), limit], |r| {
                 Ok(serde_json::json!({
                     "id": r.get::<_, i64>(0)?, "platform": r.get::<_, String>(1)?, "externalChatId": r.get::<_, String>(2)?,
                     "text": r.get::<_, String>(3)?, "requestId": r.get::<_, String>(4)?, "status": r.get::<_, String>(5)?,
@@ -3730,7 +3941,7 @@ mod vault_scope_tests {
                 "CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT NOT NULL, user_id TEXT NOT NULL DEFAULT 'u_default',
                    icon TEXT NOT NULL DEFAULT '', instructions TEXT NOT NULL DEFAULT '', models TEXT NOT NULL DEFAULT '{}',
                    state TEXT NOT NULL DEFAULT 'waking', created_at INTEGER NOT NULL DEFAULT 0, last_active_at INTEGER NOT NULL DEFAULT 0,
-                   spend_cap_daily REAL NOT NULL DEFAULT 25.0, project_token_hash TEXT, color TEXT NOT NULL DEFAULT '#8b7cf6',
+                   spend_cap_daily REAL NOT NULL DEFAULT -1.0, project_token_hash TEXT, color TEXT NOT NULL DEFAULT '#8b7cf6',
                    workspace_state TEXT NOT NULL DEFAULT 'stopped', avatar TEXT, deleted_at INTEGER, avatar_color TEXT,
                    description TEXT NOT NULL DEFAULT '', primary_chat_id TEXT, avatar_color_index INTEGER,
                    avatar_leaf INTEGER, avatar_leaf_color INTEGER, image_key TEXT, avatar_version INTEGER NOT NULL DEFAULT 0);
@@ -3769,6 +3980,88 @@ mod vault_scope_tests {
         drop(db);
         let db = Db::open(&path).expect("reopen");
         assert_eq!(db.list_vault_items("bob").unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[cfg(test)]
+mod account_cap_migration_tests {
+    //! The one ledger's one limit, on an existing relay database.
+
+    use super::*;
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "arbos-caps-{tag}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    fn limit_of(db: &Db, id: &str) -> Option<f64> {
+        db.user(id).unwrap().unwrap().daily_cap_usd
+    }
+
+    /// Opening an existing database lifts the caps already on it, leaves a deliberate freeze
+    /// alone, and does not undo a cap an admin sets afterwards.
+    #[test]
+    fn opening_lifts_the_caps_already_on_the_rows() {
+        let dir = temp_dir("lift");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("relay.db");
+        let db = Db::open(&path).expect("open");
+        for (id, cap) in [("u_capped", 25.0), ("u_other", 20.0), ("u_frozen", 0.0)] {
+            db.set_user_limits(id, Some(Some(cap)), None).unwrap();
+        }
+        // Rewind to a relay database from before this migration: the rows carry their caps and
+        // the marker is not set yet, which is what the next boot of the live relay will meet.
+        db.with(|c| c.execute("DELETE FROM meta WHERE key = 'account_caps_lifted'", []))
+            .unwrap();
+        drop(db);
+
+        let db = Db::open(&path).expect("reopen");
+        assert_eq!(limit_of(&db, "u_capped"), None, "a default cap is lifted");
+        assert_eq!(limit_of(&db, "u_other"), None, "a default cap is lifted");
+        assert_eq!(
+            limit_of(&db, "u_frozen"),
+            Some(0.0),
+            "an admin freezing an account is an instruction, not a leftover default"
+        );
+
+        // A cap set after the lift survives the next boot: the migration runs once.
+        db.set_user_limits("u_capped", Some(Some(3.0)), None)
+            .unwrap();
+        drop(db);
+        let db = Db::open(&path).expect("reopen again");
+        assert_eq!(limit_of(&db, "u_capped"), Some(3.0));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A project is not a ledger: a row that names no cap is stored with the unlimited sentinel.
+    #[test]
+    fn a_project_row_defaults_to_no_cap_of_its_own() {
+        let dir = temp_dir("project");
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Db::open(&dir.join("relay.db")).expect("open");
+        db.with(|c| {
+            c.execute(
+                "INSERT INTO projects(id, name, user_id, created_at, last_active_at) VALUES ('p1', 'Home', 'u1', 0, 0)",
+                [],
+            )
+        })
+        .unwrap();
+        let cap: f64 = db
+            .with(|c| {
+                c.query_row(
+                    "SELECT spend_cap_daily FROM projects WHERE id = 'p1'",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(cap, crate::credits::PROJECT_CAP_UNLIMITED);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

@@ -52,6 +52,11 @@ pub async fn list_users(State(state): State<AppState>, principal: Principal) -> 
             "since": since,
             "sandbox_id": sb.as_ref().and_then(|s| s.sandbox_id.clone()),
             "snapshot": sb.as_ref().and_then(|s| s.snapshot.clone()),
+            // The `users.snapshot` pin, null when the user follows the default. An upgrade targets
+            // `pinned_snapshot ?? default`, so a box already on its pin is deliberately not rolling
+            // and the deploy worker must not count it as pending (see pending_boxes in
+            // scripts/deploy/arbos-deploy-worker).
+            "pinned_snapshot": state.db.user_snapshot(&u.id).ok().flatten(),
             "image_outdated": sb.as_ref().is_some_and(|s| crate::upgrade::image_outdated(&state, s)),
             "upgrade": crate::upgrade::status_json(&state, &u.id).await,
             "agentd": state.db.box_agentd(&u.id).ok().flatten().map(|a| json!({ "sha": a.sha, "version": a.version, "image": a.image, "seed_sha": a.seed_sha, "reported_at": a.reported_at })),
@@ -116,51 +121,6 @@ pub async fn set_credits(
 }
 
 #[derive(Deserialize)]
-pub struct ProjectCapBody {
-    /// Daily cap in USD; present-and-null means no project cap.
-    #[serde(default, deserialize_with = "deserialize_double_option")]
-    pub daily_cap_usd: Option<Option<f64>>,
-}
-
-/// `PUT /admin/projects/{id}/spend-cap {daily_cap_usd: number|null}`: the per-project daily cap
-/// (`projects.spend_cap_daily`), `null` = unlimited. Before this the only lever was an UPDATE on
-/// the relay DB (Jacob's 11 projects, 2026-10-26 22:15 UTC).
-pub async fn set_project_cap(
-    State(state): State<AppState>,
-    principal: Principal,
-    Path(id): Path<String>,
-    Json(b): Json<ProjectCapBody>,
-) -> Response {
-    if let Err(r) = admin_only(&principal) {
-        return *r;
-    }
-    let Some(cap) = b.daily_cap_usd else {
-        return api_error(
-            StatusCode::BAD_REQUEST,
-            "bad_request",
-            "daily_cap_usd (number or null) is required",
-        );
-    };
-    let stored = match cap {
-        Some(v) if v.is_finite() && v >= 0.0 => v,
-        Some(_) => {
-            return api_error(
-                StatusCode::BAD_REQUEST,
-                "bad_request",
-                "daily_cap_usd must be a non-negative number or null",
-            )
-        }
-        None => crate::credits::PROJECT_CAP_UNLIMITED,
-    };
-    match state.db.set_project_spend_cap(&id, stored) {
-        Ok(true) => Json(json!({ "id": id, "daily_cap_usd": cap, "unlimited": cap.is_none() }))
-            .into_response(),
-        Ok(false) => api_error(StatusCode::NOT_FOUND, "not_found", "no such project"),
-        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
-    }
-}
-
-#[derive(Deserialize)]
 pub struct TestUserBody {
     pub handle: String,
     #[serde(default)]
@@ -206,7 +166,7 @@ pub async fn create_test_user(
         &handle,
         b.name.as_deref(),
         b.avatar_url.as_deref(),
-        state.cfg.default_daily_cap_usd,
+        state.cfg.default_account_limit,
     ) {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
     }

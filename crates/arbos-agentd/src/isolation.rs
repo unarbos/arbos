@@ -22,6 +22,205 @@ pub struct RunAs {
     pub cgroup: Option<PathBuf>,
 }
 
+/// Where a harness child's descendants can be found again once the child itself is gone.
+///
+/// Killing a process does not kill its children on Linux, so a job's `bash` tool call outlives
+/// the worker that started it — detached or not (Test5 round 10, bug Z: pid 561 wrote all 40
+/// lines after the job read `cancelled`). Neither handle here is the child's pid: both name a
+/// set the kernel keeps for us, so a tree can be reaped after its root has died and its
+/// children have been reparented to PID 1.
+///
+/// Which one catches what, measured rather than assumed:
+///
+/// - **cgroup**: everything. Membership is inherited on fork and `setsid` does not change it.
+/// - **process group**: a plain child and `nohup … &` (neither leaves the group — `nohup` only
+///   ignores `SIGHUP`, and `&` starts no new group in a non-interactive shell), but not an
+///   explicit `setsid`.
+///
+/// So the cgroup is the container and the group is the fallback for a box with no isolation
+/// (a dev machine, or agentd not running as root). The fallback is knowingly incomplete, which
+/// is why [`ProcessTree::kill`] re-reads and reports survivors instead of assuming a clean kill.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProcessTree {
+    /// The child's own process group. `RpcChild` spawns with `process_group(0)`, so the child
+    /// leads a group of its own and a kill of it cannot reach agentd.
+    pub pgid: Option<u32>,
+    /// The child's cgroup leaf under the workspace cgroup, when isolation made one.
+    pub cgroup: Option<PathBuf>,
+}
+
+/// What a kill of a [`ProcessTree`] did, read back from the kernel afterwards rather than
+/// inferred from the signals sent.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Sweep {
+    /// Processes of the tree that were alive when the kill started.
+    pub found: usize,
+    /// How many of them are gone now.
+    pub killed: usize,
+    /// Pids still alive after the re-read. Empty is the only result that lets a caller say the
+    /// job's work really stopped.
+    pub survivors: Vec<u32>,
+}
+
+impl Sweep {
+    pub fn clean(&self) -> bool {
+        self.survivors.is_empty()
+    }
+}
+
+/// How long the kill waits for the kernel to reap what it signalled before reading back. A
+/// SIGKILL is not synchronous, so a re-read with no pause would report live pids that are
+/// already dying — the opposite of the honest answer this is here to give.
+const REAP_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
+const REAP_TRIES: usize = 20; // 2 s, inside the spec's five-second budget
+
+impl ProcessTree {
+    pub fn is_empty(&self) -> bool {
+        self.pgid.is_none() && self.cgroup.is_none()
+    }
+
+    /// Every live process of this tree: the cgroup's members and the process group's, together.
+    ///
+    /// Both are read, not whichever looks authoritative: on a box with isolation the cgroup is
+    /// the complete set, and the group adds nothing — but on one without it the cgroup is
+    /// `None` and the group is all there is.
+    pub fn members(&self) -> Vec<u32> {
+        let mut pids: Vec<u32> = Vec::new();
+        if let Some(dir) = &self.cgroup {
+            pids.extend(cgroup_procs(dir));
+        }
+        if let Some(pgid) = self.pgid {
+            pids.extend(procs_in_group(pgid));
+        }
+        let me = std::process::id();
+        pids.retain(|p| *p > 1 && *p != me && is_running(*p));
+        pids.sort_unstable();
+        pids.dedup();
+        pids
+    }
+
+    /// SIGKILL everything in the tree, then read the kernel back and report what is left.
+    ///
+    /// The read-back is the point. `stop_job` told the user a job was cancelled while its loop
+    /// kept writing; a cancel that cannot prove the work stopped must say so rather than repeat
+    /// that claim.
+    pub fn kill(&self) -> Sweep {
+        let found = self.members();
+        if found.is_empty() {
+            return Sweep::default();
+        }
+        // `cgroup.kill` (cgroup v2, Linux 5.14+) kills the whole subtree in one atomic write, so
+        // a process forked while we are enumerating cannot slip out between the read and the
+        // signal. Where it is missing, the enumerated kill below is the fallback.
+        if let Some(dir) = &self.cgroup {
+            let _ = std::fs::write(dir.join("cgroup.kill"), "1");
+        }
+        for pid in &found {
+            signal(*pid);
+        }
+        if let Some(pgid) = self.pgid {
+            // The group as a whole, which covers a child forked since the enumeration.
+            let _ = nix::sys::signal::killpg(
+                nix::unistd::Pid::from_raw(pgid as i32),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
+        let mut survivors = Vec::new();
+        for attempt in 0..REAP_TRIES {
+            std::thread::sleep(REAP_WAIT);
+            survivors = self.members();
+            if survivors.is_empty() {
+                break;
+            }
+            // Something forked after the first pass, or is still dying. Signal again.
+            if attempt < REAP_TRIES - 1 {
+                for pid in &survivors {
+                    signal(*pid);
+                }
+            }
+        }
+        Sweep {
+            found: found.len(),
+            killed: found.len().saturating_sub(survivors.len()),
+            survivors,
+        }
+    }
+}
+
+fn signal(pid: u32) {
+    if pid <= 1 || pid == std::process::id() {
+        return;
+    }
+    let _ = nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(pid as i32),
+        nix::sys::signal::Signal::SIGKILL,
+    );
+}
+
+/// Pids in `dir` and every cgroup below it. Recursive because a child that makes its own
+/// cgroups (a container runtime, a `systemd-run` that worked) would otherwise be invisible.
+pub fn cgroup_procs(dir: &Path) -> Vec<u32> {
+    let mut out: Vec<u32> = std::fs::read_to_string(dir.join("cgroup.procs"))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| l.trim().parse().ok())
+        .collect();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for e in entries.flatten() {
+            if e.path().is_dir() {
+                out.extend(cgroup_procs(&e.path()));
+            }
+        }
+    }
+    out
+}
+
+/// Is this pid a process that is still doing something?
+///
+/// A zombie is not. It has been killed and is waiting to be reaped by a parent that may itself
+/// be dead, and it keeps its `/proc` entry and its process group while it waits — so counting
+/// one as a survivor would make a cancel that worked perfectly report that it had failed.
+fn is_running(pid: u32) -> bool {
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return false; // gone between the read and here, which is the outcome we wanted
+    };
+    let Some(after) = stat.rsplit_once(')').map(|(_, rest)| rest) else {
+        return false;
+    };
+    // `Z` zombie, `X` dead.
+    !matches!(
+        after.split_whitespace().next(),
+        Some("Z") | Some("X") | None
+    )
+}
+
+/// Pids whose process group is `pgid`, from `/proc`.
+///
+/// `/proc/<pid>/stat` is `pid (comm) state ppid pgrp …` and `comm` may hold spaces and
+/// parentheses, so the fields are counted from the last `)` rather than split on whitespace.
+fn procs_in_group(pgid: u32) -> Vec<u32> {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for e in entries.flatten() {
+        let Ok(pid) = e.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        let Ok(stat) = std::fs::read_to_string(e.path().join("stat")) else {
+            continue;
+        };
+        let Some(after) = stat.rsplit_once(')').map(|(_, rest)| rest) else {
+            continue;
+        };
+        // After the comm: state, ppid, pgrp.
+        if after.split_whitespace().nth(2).and_then(|f| f.parse().ok()) == Some(pgid) {
+            out.push(pid);
+        }
+    }
+    out
+}
+
 #[derive(Debug, Clone)]
 pub struct Isolation {
     pub enabled: bool,
@@ -284,6 +483,50 @@ impl Isolation {
         }
     }
 
+    /// Put a freshly spawned harness child into a cgroup of its own under the workspace's, so
+    /// the processes of one worker can be told from another's and reaped on their own
+    /// (`ProcessTree`). Returns the leaf, or `None` when there is no cgroup to make one under.
+    ///
+    /// The leaf enables no controllers, and that is deliberate. cgroup v2 forbids a cgroup from
+    /// holding processes while its `subtree_control` is non-empty, so enabling anything here
+    /// would mean no process could stay in the workspace cgroup itself and every attach site
+    /// would have to move at once. The limits do not need it: `memory.max`, `pids.max` and
+    /// `cpu.weight` sit on the workspace cgroup and charge hierarchically, so a process in a
+    /// leaf is capped exactly as it was before.
+    pub fn attach_leaf(ra: &RunAs, name: &str, pid: u32) -> Option<PathBuf> {
+        let parent = ra.cgroup.as_ref()?;
+        let dir = parent.join(leaf_name(name));
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            tracing::debug!(error = %e, pid, dir = %dir.display(), "cgroup leaf not created");
+            Self::attach(ra, pid);
+            return None;
+        }
+        if let Err(e) = std::fs::write(dir.join("cgroup.procs"), pid.to_string()) {
+            tracing::debug!(error = %e, pid, dir = %dir.display(), "cgroup leaf attach");
+            // Better the shared workspace cgroup than no cgroup at all: the leftover sweep
+            // still finds the process there.
+            Self::attach(ra, pid);
+            let _ = std::fs::remove_dir(&dir);
+            return None;
+        }
+        Some(dir)
+    }
+
+    /// The leaf a worker's children are in, when it exists.
+    ///
+    /// Derived from the session id rather than remembered, so a cancel after an agentd restart
+    /// still finds the processes the dead agentd's worker left behind.
+    pub fn leaf_path(ra: &RunAs, name: &str) -> Option<PathBuf> {
+        let dir = ra.cgroup.as_ref()?.join(leaf_name(name));
+        dir.is_dir().then_some(dir)
+    }
+
+    /// Remove an empty leaf once its worker is gone. Best-effort: a leaf that still holds a
+    /// process refuses to go, which is the right outcome — the sweep wants to find it.
+    pub fn remove_leaf(dir: &Path) {
+        let _ = std::fs::remove_dir(dir);
+    }
+
     /// Invariant check (D70): workspace A must not read workspace B's folder. Runs a shell as A's
     /// user; `Ok(true)` = blocked as required.
     pub fn cross_read_blocked(a: &RunAs, b_work_dir: &Path) -> Result<bool> {
@@ -304,6 +547,17 @@ impl Isolation {
         let text = String::from_utf8_lossy(&out.stdout);
         Ok(!text.contains("LEAK"))
     }
+}
+
+/// A cgroup directory name for a session id: the id itself is already safe, but a name from
+/// anywhere else must not escape the workspace cgroup with `..` or a slash.
+fn leaf_name(name: &str) -> String {
+    let safe: String = name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .take(64)
+        .collect();
+    format!("w-{safe}")
 }
 
 fn lookup(user: &str) -> Option<(u32, u32)> {

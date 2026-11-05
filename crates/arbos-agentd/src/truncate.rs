@@ -45,6 +45,32 @@ pub fn clip_marked(text: &str, max: usize, message_id: &str, fetch: Option<&str>
     format!("{head}\n… [truncated: showing {max} of {n} chars{id}{how}]")
 }
 
+/// What a chat row may carry of a job's result before it is cut. A job can return pages; a row
+/// is read in a bubble on a phone.
+pub const CHAT_NOTICE_CHARS: usize = 1200;
+
+/// `text` cut to `max` chars for a person to read. The markers above name the tool call that
+/// returns the rest, which is no use to someone reading a bubble, so this one names both
+/// lengths and what they can do instead. Untouched when it fits; never silent.
+pub fn clip_for_chat(text: &str, max: usize) -> String {
+    let total = text.chars().count();
+    if total <= max {
+        return text.to_owned();
+    }
+    let head: String = text.chars().take(max).collect();
+    // Cut on a line break when one sits in the last quarter of the budget: a result cut
+    // mid-word reads as a damaged message rather than a shortened one.
+    let head = match head.rfind('\n') {
+        Some(i) if i * 4 >= head.len() * 3 => head[..i].to_owned(),
+        _ => head,
+    };
+    let head = head.trim_end();
+    format!(
+        "{head}\n\n… [cut here: {} of {total} characters. Ask me for the rest and I'll give you all of it.]",
+        head.chars().count()
+    )
+}
+
 /// Marker for a window that dropped its oldest `n` messages.
 pub fn omitted_marker(n: usize, chat_id: &str, oldest_shown_id: &str) -> String {
     let how = if oldest_shown_id.is_empty() {

@@ -26,6 +26,11 @@ use crate::state::AppState;
 const LLMS_TXT: &str = include_str!("../assets/llms.txt");
 /// The one-line installer, served at `/sidecar/install.sh`.
 const INSTALL_SH: &str = include_str!("../assets/sidecar-install.sh");
+/// The one-command ACP connect, served at `/acp/install.sh`: it finds or builds `arbos-acp`,
+/// asks for the key with the terminal echo off and starts the bridge. It lives beside the
+/// sidecar installer because this module already holds the texts an outside agent is handed or
+/// runs, and it needs the same canonical-relay rewrite.
+const ACP_INSTALL_SH: &str = include_str!("../assets/acp-install.sh");
 const CANONICAL_RELAY: &str = "https://relay.arbos.life";
 /// Most rows a wake event may carry as context.
 pub const CONTEXT_MAX: usize = 20;
@@ -244,6 +249,17 @@ pub async fn llms_txt(State(state): State<AppState>) -> Response {
 /// `GET /sidecar/install.sh` — `curl -fsSL …/sidecar/install.sh | sh -s -- …`.
 pub async fn install_sh(State(state): State<AppState>) -> Response {
     let body = INSTALL_SH.replace(CANONICAL_RELAY, &relay_of(&state));
+    shell_script(body)
+}
+
+/// `GET /acp/install.sh` — the whole connect:
+/// `curl -fsSL …/acp/install.sh | sh -s -- --cwd ~/your-project`.
+pub async fn acp_install_sh(State(state): State<AppState>) -> Response {
+    let body = ACP_INSTALL_SH.replace(CANONICAL_RELAY, &relay_of(&state));
+    shell_script(body)
+}
+
+fn shell_script(body: String) -> Response {
     (
         StatusCode::OK,
         [
@@ -271,6 +287,77 @@ mod tests {
         // The installer never echoes the key.
         assert!(!INSTALL_SH.contains("echo \"$KEY\""));
         assert!(!INSTALL_SH.contains("echo $KEY"));
+    }
+
+    /// The ACP connect is one command, and the script is the thing a sceptical agent reads
+    /// before running it — so the properties the connect instructions claim are asserted here
+    /// rather than described in a comment. The whole point of the script is that it both
+    /// obtains the bridge and starts it; a script that only installed would put us back at two
+    /// commands, which is what `exec` below is checking.
+    #[test]
+    fn the_acp_installer_is_one_command_and_relaxes_nothing() {
+        assert!(ACP_INSTALL_SH.starts_with("#!/bin/sh"));
+
+        // The one line that decides what the bridge is actually started with, asserted whole
+        // rather than searched for needles. Equality is the instrument here on purpose: a list
+        // of forbidden flags only catches the ones somebody thought of, and the flag that
+        // undoes this fix next year is the one not on the list. Anything added to the bridge's
+        // command line fails this, including a flag that does not exist yet.
+        let exec_line: Vec<&str> = ACP_INSTALL_SH
+            .lines()
+            .filter(|l| l.starts_with("exec "))
+            .collect();
+        assert_eq!(
+            exec_line,
+            vec![r#"exec "$bin" --relay "$RELAY" --cwd "$CWD" "$@""#],
+            "the installer must start the bridge — that is what makes it one command and not \
+             two — and must pass it nothing of its own beyond the relay and the project"
+        );
+
+        // The key is asked for with echo off and handed over in the environment, never in argv.
+        assert!(ACP_INSTALL_SH.contains("stty -echo"));
+        assert!(ACP_INSTALL_SH.contains("export ARBOS_AGENT_KEY"));
+        // A key on the installer's own command line is refused rather than accepted quietly.
+        assert!(ACP_INSTALL_SH.contains("--key|--key=*)"));
+
+        // The bypass has no business appearing anywhere in a connect script, in a flag or in a
+        // settings key, so this one is searched over the whole text rather than one line.
+        for never in [
+            "--allow-bypass-permissions",
+            "bypassPermissions",
+            "disableBypassPermissionsMode",
+        ] {
+            assert!(
+                !ACP_INSTALL_SH.contains(never),
+                "the installer mentions `{never}`; the connect must not touch the bypass at all"
+            );
+        }
+        // Positive control for the loop above: the same search does find a string the script
+        // genuinely contains, so three clean answers mean the needles were looked for.
+        assert!(ACP_INSTALL_SH.contains("--dry-run"));
+
+        // `--ref` exists so a change can be tried before it merges, which is the only way a
+        // real Claude Code can review this branch's bridge rather than the default branch's.
+        // It has to force the build: a stale binary on the machine would otherwise answer for
+        // the branch under test and the run would prove nothing about it.
+        assert!(ACP_INSTALL_SH.contains("--branch \"$GIT_REF\""));
+        assert!(
+            ACP_INSTALL_SH.contains("--force --git \"$REPO\" --branch"),
+            "--ref must rebuild rather than accept whatever is already installed"
+        );
+        // A dry run that builds first is not a dry run.
+        assert!(ACP_INSTALL_SH.contains("Would build arbos-acp from"));
+
+        // The two things the old four-step setup made people do, and this does not.
+        assert!(!ACP_INSTALL_SH.contains("npm install -g"));
+        assert!(
+            !ACP_INSTALL_SH.contains(".claude/settings.json\"")
+                && !ACP_INSTALL_SH.contains("> ~/.claude"),
+            "the connect must not write a settings file"
+        );
+        // It never installs a toolchain unasked: rustup is named as a URL to read, not piped.
+        assert!(!ACP_INSTALL_SH.contains("sh.rustup.rs"));
+        assert!(ACP_INSTALL_SH.contains("https://rustup.rs"));
     }
 
     /// A group with two people and the agent: the members endpoint names everyone with

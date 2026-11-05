@@ -14,6 +14,7 @@ use arbos_core::ids::{now_ms, ulid};
 use crate::agent::Agent;
 use crate::config::Config;
 use crate::mcp::{err_result, text_result};
+use crate::sync::DocHost;
 
 /// The relay accepts 64 MiB bodies; stay under it.
 const MAX_BYTES: u64 = 60 * 1024 * 1024;
@@ -165,18 +166,25 @@ pub struct Target {
     pub ask_id: Option<String>,
     /// The main turn is the poster (counts as its result).
     pub main_turn: bool,
+    /// The job this delivery belongs to, when it belongs to one: the worker's own job, or the
+    /// job whose answer the main turn is relaying. Files are deduplicated within it.
+    pub job_id: Option<String>,
 }
 
 pub(crate) async fn target(a: &Agent, session_id: Option<&str>) -> Option<Target> {
-    let worker_target = |chat_id: &str, row_id: &str, host_doc_ask: Option<String>| Target {
-        chat_id: chat_id.to_owned(),
-        ask_id: host_doc_ask.or_else(|| Some(row_id.to_owned())),
-        main_turn: false,
-    };
+    let worker_target =
+        |chat_id: &str, row_id: &str, (host_doc_ask, job_id): (Option<String>, Option<String>)| {
+            Target {
+                chat_id: chat_id.to_owned(),
+                ask_id: host_doc_ask.or_else(|| Some(row_id.to_owned())),
+                main_turn: false,
+                job_id,
+            }
+        };
     if let Some(sid) = session_id.filter(|s| !s.is_empty()) {
         if let Some((chat_id, row_id)) = a.subagent_msgs.lock().await.get(sid).cloned() {
-            let ask = row_in_reply_to(a, &chat_id, &row_id).await;
-            return Some(worker_target(&chat_id, &row_id, ask));
+            let row = worker_row(a, &chat_id, &row_id).await;
+            return Some(worker_target(&chat_id, &row_id, row));
         }
     }
     {
@@ -186,6 +194,7 @@ pub(crate) async fn target(a: &Agent, session_id: Option<&str>) -> Option<Target
                 chat_id: t.chat_id.clone(),
                 ask_id: Some(t.user_msg_id.clone()),
                 main_turn: true,
+                job_id: t.job_id.clone(),
             });
         }
     }
@@ -198,33 +207,64 @@ pub(crate) async fn target(a: &Agent, session_id: Option<&str>) -> Option<Target
         .cloned();
     match newest {
         Some((chat_id, row_id)) => {
-            let ask = row_in_reply_to(a, &chat_id, &row_id).await;
-            Some(worker_target(&chat_id, &row_id, ask))
+            let row = worker_row(a, &chat_id, &row_id).await;
+            Some(worker_target(&chat_id, &row_id, row))
         }
         None => None,
     }
 }
 
-/// `inReplyTo` of a row in `chat_id` (the ask a worker row answers), when the chat is open.
-async fn row_in_reply_to(a: &Agent, chat_id: &str, row_id: &str) -> Option<String> {
-    let host = a.sync.host(chat_id).await?;
+/// `inReplyTo` (the ask a worker row answers) and the id of the job the worker runs, read from
+/// the worker's own progress row. The room is opened if the idle close took it (#2367): without
+/// the job id the duplicate guard below cannot fire, so a closed room would both detach the card
+/// from its ask and put the same file in the chat twice (#2757).
+async fn worker_row(a: &Agent, chat_id: &str, row_id: &str) -> (Option<String>, Option<String>) {
+    let Ok(host) = a.room(chat_id).await else {
+        return (None, None);
+    };
     let h = host.lock().await;
-    h.doc
-        .message(row_id)?
+    let Some(row) = h.doc.message(row_id) else {
+        return (None, None);
+    };
+    let ask = row
         .rest
         .get("inReplyTo")
         .and_then(Value::as_str)
-        .map(str::to_owned)
+        .map(str::to_owned);
+    let job_id = row
+        .rest
+        .get("job")
+        .and_then(|j| j.get("id"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    (ask, job_id)
+}
+
+/// Row `msg_id` carries an attachment pointing at blob `key`: what makes a card real, both on
+/// the read-back after a write and when an older card is offered in place of a second one.
+fn row_holds_blob(h: &DocHost, msg_id: &str, key: &str) -> bool {
+    h.doc.message(msg_id).is_some_and(|m| {
+        m.parts.iter().any(|p| {
+            p.get("kind").and_then(Value::as_str) == Some("attachment")
+                && p.pointer("/attachment/ref").and_then(Value::as_str) == Some(key)
+        })
+    })
+}
+
+/// Content address of a blob: what the relay stores it under, and what tells "the same file
+/// again" apart from "the same name with new content".
+pub(crate) fn blob_key(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    hex::encode(sha2::Sha256::digest(bytes))
 }
 
 pub(crate) async fn upload(
     a: &Arc<Agent>,
     chat_id: &str,
     bytes: Vec<u8>,
+    key: &str,
     mime: &str,
-) -> anyhow::Result<String> {
-    use sha2::Digest;
-    let key = hex::encode(sha2::Sha256::digest(&bytes));
+) -> anyhow::Result<()> {
     // Same slot clients read: people chats live under `people:{chat}`, not the project id.
     let slot = a.blob_slot(chat_id);
     let r = a
@@ -238,7 +278,7 @@ pub(crate) async fn upload(
     if !r.status().is_success() {
         anyhow::bail!("relay refused the upload: HTTP {}", r.status());
     }
-    Ok(key)
+    Ok(())
 }
 
 /// Fetch `url` (https, ≤ `MAX_BYTES`) for `deliver_file(url=…)`: returns the bytes, the MIME type
@@ -322,6 +362,9 @@ pub struct Posted {
     pub chat_id: String,
     pub message_id: String,
     pub attachment: Value,
+    /// These bytes were already delivered earlier in the same job, so `message_id` is that
+    /// earlier row and nothing new was written.
+    pub duplicate: bool,
 }
 
 /// Source of a delivery: a file on the box, or bytes fetched from a URL.
@@ -402,13 +445,73 @@ pub async fn deliver(
         .unwrap_or(&name)
         .to_owned();
     let size = bytes.len() as u64;
-    let key = upload(a, &target.chat_id, bytes, &mime).await?;
+    let key = blob_key(&bytes);
     let attachment = json!({
         "name": name, "mime": mime, "ref": key, "bytes": size, "kind": kind, "title": title,
     });
-    let Some(host) = a.sync.host(&target.chat_id).await else {
-        anyhow::bail!("chat {} is not open on this box", target.chat_id);
-    };
+    // One job delivers through its worker, the fresh worker a failed attempt gets and the
+    // result turn that relays the answer, and each of them posted these same bytes again. The
+    // card is already in the chat: point at it instead of writing a second one.
+    if let Some(job_id) = target.job_id.as_deref() {
+        // Bug S: the cancelled Mersenne job put a file in the chat 23 minutes after the user
+        // stopped it. A cancelled job delivers nothing, whatever its worker still has in hand.
+        if a.job_is_cancelled(job_id) {
+            anyhow::bail!(
+                "this job was cancelled, so nothing more of it goes into the chat; the file was NOT posted"
+            );
+        }
+        // Bug AB: the worker posted the uncorrected CSV one second after the main lane steered
+        // the job with the user's correction. A worker's delivery waits here while a message of
+        // this chat is still being routed, and is refused outright while a correction is sitting
+        // unread in its session (`steer_gate.rs`). The main turn is not held: it is the lane that
+        // does the routing, so there is nothing for it to wait for.
+        if !target.main_turn {
+            let hold = a
+                .steer_gate
+                .hold(&target.chat_id, job_id, a.cfg.steer_hold())
+                .await;
+            if hold == crate::steer_gate::Hold::SteerFirst {
+                return Err(anyhow::Error::new(crate::steer_gate::SteerFirst));
+            }
+            // And again on the far side, the way `write_job_result` asks on both sides of its
+            // own wait: the hold is seconds long and the cancel that bug Z kills a job's
+            // processes for can land anywhere in it. The check above was made before the user
+            // stopped the job.
+            if a.job_is_cancelled(job_id) {
+                anyhow::bail!(
+                    "this job was cancelled while the file waited, so nothing more of it goes into the chat; the file was NOT posted"
+                );
+            }
+        }
+        if let Some(message_id) = a.job_file_posted(job_id, &key).await {
+            // Only a card that is still in the chat may stand in for this one; if it went, the
+            // honest answer is to write a new one.
+            let standing = match a.room(&target.chat_id).await {
+                Ok(host) => row_holds_blob(&*host.lock().await, &message_id, &key),
+                Err(_) => false,
+            };
+            if standing {
+                // The sentence that says the file is posted needs a read-back row from this
+                // turn (#2025); the card the model is pointed at is that row.
+                a.note_posted(&target.chat_id, &message_id).await;
+                tracing::info!(
+                    chat_id = %target.chat_id, job = job_id, %name, %message_id,
+                    "deliver_file: this job already put these bytes in the chat; not posted twice"
+                );
+                return Ok(Posted {
+                    chat_id: target.chat_id,
+                    message_id,
+                    attachment,
+                    duplicate: true,
+                });
+            }
+        }
+    }
+    upload(a, &target.chat_id, bytes, &key, &mime).await?;
+    let host = a
+        .room(&target.chat_id)
+        .await
+        .map_err(|e| anyhow::anyhow!("chat {} has no room on this box: {e}", target.chat_id))?;
     let msg_id = ulid();
     let caption = caption.map(str::trim).filter(|c| !c.is_empty());
     {
@@ -442,18 +545,15 @@ pub async fn deliver(
         h.doc
             .finish_message(&msg_id, arbos_core::doc::MessageStatus::Done);
         // Read it back: the row must hold the attachment, or this was not a delivery.
-        let ok = h.doc.message(&msg_id).is_some_and(|m| {
-            m.parts.iter().any(|p| {
-                p.get("kind").and_then(Value::as_str) == Some("attachment")
-                    && p.pointer("/attachment/ref").and_then(Value::as_str) == Some(key.as_str())
-            })
-        });
-        if !ok {
-            let _ = h.doc.delete_message(&msg_id);
+        if !row_holds_blob(&h, &msg_id, &key) {
+            crate::agent::retire_row(&h.doc, &msg_id);
             anyhow::bail!("the attachment row did not read back from the chat doc");
         }
     }
     a.note_posted(&target.chat_id, &msg_id).await;
+    if let Some(job_id) = target.job_id.as_deref() {
+        a.note_job_file(job_id, &key, &msg_id).await;
+    }
     if target.main_turn {
         if let Some(t) = a.turn.lock().await.as_mut() {
             t.attachments_posted.push(msg_id.clone());
@@ -477,6 +577,7 @@ pub async fn deliver(
         chat_id: target.chat_id,
         message_id: msg_id,
         attachment,
+        duplicate: false,
     })
 }
 
@@ -489,12 +590,19 @@ fn posted_result(p: &Posted, extra: Value) -> Value {
         "kind": p.attachment["kind"],
         "bytes": p.attachment["bytes"],
         "ref": p.attachment["ref"],
-        "note": if p.attachment["kind"] == "image" {
+        "note": if p.duplicate {
+            "This exact file is already in the chat from earlier in this job — the message id above is that card, and no second one was written. Refer to it; do not post it again. Change the file and it goes in as a new card."
+        } else if p.attachment["kind"] == "image" {
             "The picture is in the chat as its own message, inline for everyone. Say in one line what it shows; do not repeat the path."
         } else {
             "The file is in the chat as a card with a download button, visible to everyone. Say in one line what it contains; do not repeat the path."
         },
     });
+    if p.duplicate {
+        if let Some(o) = v.as_object_mut() {
+            o.insert("already_posted".to_owned(), json!(true));
+        }
+    }
     if let (Some(o), Some(e)) = (v.as_object_mut(), extra.as_object()) {
         for (k, val) in e {
             o.insert(k.clone(), val.clone());
@@ -527,6 +635,10 @@ pub async fn deliver_file(a: &Arc<Agent>, args: &Value) -> Value {
                 .to_string(),
             )
         }
+        // The steer gate's refusal is an instruction, not a failure to report: it says what to do
+        // with the correction waiting in this session. Passed through word for word rather than
+        // wrapped in "tell the user it could not be posted".
+        Err(e) if crate::steer_gate::is_steer_first(&e) => err_result(e.to_string()),
         Err(e) => err_result(format!(
             "NOT posted — the file is not in the chat: {e}. Tell the user plainly that it could not be posted; do not say it was."
         )),
@@ -624,6 +736,7 @@ pub async fn generate_image(a: &Arc<Agent>, args: &Value) -> Value {
 mod tests {
     use super::*;
     use crate::status::tests::test_agent;
+    use crate::sync::{DocHost, SharedHost};
 
     fn attachment_parts(m: &arbos_core::doc::MessageView) -> Vec<Value> {
         m.parts
@@ -631,6 +744,451 @@ mod tests {
             .filter(|p| p.get("kind").and_then(Value::as_str) == Some("attachment"))
             .cloned()
             .collect()
+    }
+
+    fn attachment_rows(h: &DocHost) -> usize {
+        h.doc
+            .messages()
+            .iter()
+            .filter(|m| !attachment_parts(m).is_empty())
+            .count()
+    }
+
+    /// A hidden worker progress row for `job_id`, registered under session `sid` the way
+    /// `spawn_subagent_task` registers a running worker.
+    async fn worker_session(
+        agent: &Arc<Agent>,
+        host: &SharedHost,
+        chat: &str,
+        ask: &str,
+        job_id: &str,
+        sid: &str,
+    ) {
+        let row = ulid();
+        {
+            let h = host.lock().await;
+            h.doc
+                .start_assistant_message(&row, ask, &agent.cfg.device_id);
+            h.doc.set_message_fields(
+                &row,
+                &[
+                    (
+                        "job",
+                        json!({ "id": job_id, "title": "Pricing the options", "kind": "research", "touches": [] }),
+                    ),
+                    ("worker", json!(true)),
+                    ("hidden", json!(true)),
+                ],
+            );
+        }
+        agent
+            .subagent_msgs
+            .lock()
+            .await
+            .insert(sid.to_owned(), (chat.to_owned(), row));
+    }
+
+    /// Test5 round 2, bug J: one ask, the same file in the chat twice. A job delivers through
+    /// its worker, through the fresh worker a failed attempt gets and again through the result
+    /// turn that relays the answer, and each of them posted the same bytes as a new card.
+    ///
+    /// The key is the job and the file's content hash: the same bytes again in the same job
+    /// answer with the card that is already there, a file the job wrote anew still goes in, and
+    /// another job is untouched.
+    #[tokio::test]
+    async fn a_job_puts_the_same_file_in_the_chat_once() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATATTACH0000000005";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let ask = ulid();
+        {
+            let h = host.lock().await;
+            h.doc
+                .append_user_message(
+                    &ask,
+                    "compare the plans and send me the sheet",
+                    "dev-mac",
+                    &arbos_core::doc::UserMessageOpts::default(),
+                )
+                .unwrap();
+        }
+        let job = "01TESTJOB00000000000000001";
+        let first = "01TESTWORKERSESSION0000010";
+        worker_session(&agent, &host, chat, &ask, job, first).await;
+        let dir = out_dir(&agent.cfg);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("plans.csv");
+        std::fs::write(&path, b"plan,price\nbasic,10\n").unwrap();
+
+        let posted = deliver_file(
+            &agent,
+            &json!({ "path": "out/plans.csv", "session_id": first }),
+        )
+        .await;
+        let r: Value =
+            serde_json::from_str(posted["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(r["posted"], json!(true));
+        assert!(r.get("already_posted").is_none(), "the first card is new");
+        let card = r["message_id"].as_str().unwrap().to_owned();
+        assert_eq!(attachment_rows(&*host.lock().await), 1);
+
+        // The same worker calls again, and the fresh worker the retry gives the job posts the
+        // file it found on disk: one card, and both calls point the model at it.
+        let retry = "01TESTWORKERSESSION0000011";
+        worker_session(&agent, &host, chat, &ask, job, retry).await;
+        for sid in [first, retry] {
+            let again = deliver_file(
+                &agent,
+                &json!({ "path": "out/plans.csv", "session_id": sid }),
+            )
+            .await;
+            let r: Value =
+                serde_json::from_str(again["content"][0]["text"].as_str().unwrap()).unwrap();
+            assert_eq!(
+                attachment_rows(&*host.lock().await),
+                1,
+                "session {sid} wrote a second card for the same file"
+            );
+            assert_eq!(r["posted"], json!(true), "the file IS in the chat");
+            assert_eq!(r["already_posted"], json!(true));
+            assert_eq!(
+                r["message_id"],
+                json!(card),
+                "the answer names the card that is already there"
+            );
+        }
+
+        // The result turn of the same job relays the answer and posts the file once more. The
+        // job ran for ten minutes, so the worker's card is older than the window a "posted"
+        // sentence is checked against (#2025).
+        for (_, at) in agent
+            .posted_ledger
+            .lock()
+            .await
+            .get_mut(chat)
+            .unwrap()
+            .iter_mut()
+        {
+            *at = now_ms() - 600_000;
+        }
+        let _busy = agent.test_hold_turn(chat).await;
+        agent.turn.lock().await.as_mut().unwrap().job_id = Some(job.to_owned());
+        let relayed = deliver_file(&agent, &json!({ "path": "out/plans.csv" })).await;
+        let r: Value =
+            serde_json::from_str(relayed["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(r["already_posted"], json!(true));
+        assert_eq!(r["message_id"], json!(card));
+        assert_eq!(
+            attachment_rows(&*host.lock().await),
+            1,
+            "the result turn wrote a second card for the file its worker already posted"
+        );
+        assert!(
+            agent
+                .turn
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .attachments_posted
+                .is_empty(),
+            "a card that was not written is not this turn's posted result"
+        );
+        // #2025 holds the other way too: the file really is in the chat, so the sentence that
+        // says so must still go out. Without this the fix would trade two cards for a refusal.
+        assert!(
+            agent
+                .hook_send_message("The plans file is posted above as a card.", None, None)
+                .await
+                .is_ok(),
+            "a duplicate that was suppressed still confirms the card in the chat"
+        );
+
+        // The job wrote the sheet again with the real numbers: that is a second, real delivery.
+        std::fs::write(&path, b"plan,price\nbasic,10\npro,30\n").unwrap();
+        let updated = deliver_file(
+            &agent,
+            &json!({ "path": "out/plans.csv", "session_id": first }),
+        )
+        .await;
+        let r: Value =
+            serde_json::from_str(updated["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert!(
+            r.get("already_posted").is_none(),
+            "a file whose content changed is a new delivery"
+        );
+        assert_ne!(r["message_id"], json!(card));
+        assert_eq!(attachment_rows(&*host.lock().await), 2);
+
+        // Another job answering another ask is not held back by what this one delivered.
+        std::fs::write(&path, b"plan,price\nbasic,10\n").unwrap();
+        let other = "01TESTWORKERSESSION0000012";
+        worker_session(
+            &agent,
+            &host,
+            chat,
+            &ask,
+            "01TESTJOB00000000000000002",
+            other,
+        )
+        .await;
+        let elsewhere = deliver_file(
+            &agent,
+            &json!({ "path": "out/plans.csv", "session_id": other }),
+        )
+        .await;
+        let r: Value =
+            serde_json::from_str(elsewhere["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert!(r.get("already_posted").is_none(), "another job delivers");
+        assert_eq!(attachment_rows(&*host.lock().await), 3);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// #2367 against #2757: closing an idle room must not undo "one file, one card". Every
+    /// closed-room branch of this path was dead code while a box held a room open for every
+    /// chat it had ever had; the idle close makes them reachable for the first time.
+    ///
+    /// The duplicate guard needs two things out of the doc — the job id on the worker's row and
+    /// the card that already holds the bytes — and a closed room used to answer "neither". The
+    /// job id went missing first, which skipped the guard entirely, and the file went into the
+    /// chat a second time.
+    #[tokio::test]
+    async fn a_closed_room_does_not_turn_one_file_into_two_cards() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATATTACH0000000009";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let ask = ulid();
+        {
+            let h = host.lock().await;
+            h.doc
+                .append_user_message(
+                    &ask,
+                    "price the plans and send me the sheet",
+                    "dev-mac",
+                    &arbos_core::doc::UserMessageOpts::default(),
+                )
+                .unwrap();
+        }
+        let job = "01TESTJOB00000000000000009";
+        let sid = "01TESTWORKERSESSION0000090";
+        worker_session(&agent, &host, chat, &ask, job, sid).await;
+        let dir = out_dir(&agent.cfg);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("plans.csv"), b"plan,price\nbasic,10\n").unwrap();
+
+        let first = deliver_file(
+            &agent,
+            &json!({ "path": "out/plans.csv", "session_id": sid }),
+        )
+        .await;
+        let r: Value = serde_json::from_str(first["content"][0]["text"].as_str().unwrap()).unwrap();
+        let card = r["message_id"].as_str().unwrap().to_owned();
+        assert_eq!(attachment_rows(&*host.lock().await), 1);
+        drop(host);
+
+        // Nobody touched the chat for its quiet window: the room persists itself and goes. This
+        // is the end state of the idle close — the doc is on disk, the host is gone.
+        agent
+            .sync
+            .persist(&agent.sync.host(chat).await.expect("open"))
+            .await
+            .unwrap();
+        agent.sync.test_close_cold(chat).await;
+        assert!(
+            !agent.sync.is_open(chat).await,
+            "the room is closed before the second delivery"
+        );
+
+        // The same job delivers the same bytes again, with its room closed.
+        let again = deliver_file(
+            &agent,
+            &json!({ "path": "out/plans.csv", "session_id": sid }),
+        )
+        .await;
+        let r: Value = serde_json::from_str(again["content"][0]["text"].as_str().unwrap()).unwrap();
+        let host = agent
+            .sync
+            .host(chat)
+            .await
+            .expect("the delivery reopened it");
+        assert_eq!(
+            attachment_rows(&*host.lock().await),
+            1,
+            "a closed room wrote a second card for a file the job had already posted"
+        );
+        assert_eq!(r["already_posted"], json!(true));
+        assert_eq!(
+            r["message_id"],
+            json!(card),
+            "the answer names the card that is already in the chat"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// #2367: a worker's file card keeps the ask it answers and the job it came from even when
+    /// the idle close took the room first. Both are read off the worker's own row in the doc, so
+    /// a closed room used to detach the card from the conversation it belongs to.
+    #[tokio::test]
+    async fn a_closed_room_keeps_a_worker_card_tied_to_its_ask_and_job() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATATTACH0000000010";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let ask = ulid();
+        {
+            let h = host.lock().await;
+            h.doc
+                .append_user_message(
+                    &ask,
+                    "draw me the logo",
+                    "dev-mac",
+                    &arbos_core::doc::UserMessageOpts::default(),
+                )
+                .unwrap();
+        }
+        let job = "01TESTJOB00000000000000010";
+        let sid = "01TESTWORKERSESSION0000100";
+        worker_session(&agent, &host, chat, &ask, job, sid).await;
+        let dir = out_dir(&agent.cfg);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("logo.png"), b"\x89PNG\r\n\x1a\nlogo").unwrap();
+        drop(host);
+
+        agent
+            .sync
+            .persist(&agent.sync.host(chat).await.expect("open"))
+            .await
+            .unwrap();
+        agent.sync.test_close_cold(chat).await;
+        assert!(!agent.sync.is_open(chat).await);
+
+        let posted = deliver_file(
+            &agent,
+            &json!({ "path": "out/logo.png", "session_id": sid }),
+        )
+        .await;
+        let r: Value =
+            serde_json::from_str(posted["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(r["posted"], json!(true));
+        let card_id = r["message_id"].as_str().unwrap().to_owned();
+
+        let host = agent
+            .sync
+            .host(chat)
+            .await
+            .expect("the delivery reopened it");
+        {
+            let h = host.lock().await;
+            let card = h.doc.message(&card_id).expect("the card is in the doc");
+            assert_eq!(
+                card.rest.get("inReplyTo").and_then(Value::as_str),
+                Some(ask.as_str()),
+                "a card delivered into a closed room lost the ask it answers"
+            );
+        }
+        // The job the card came from is recorded against its bytes, not written on the row —
+        // and that record is what the duplicate guard keys on, so losing it is how a closed
+        // room produced a second card.
+        assert_eq!(
+            agent
+                .job_file_posted(job, &blob_key(b"\x89PNG\r\n\x1a\nlogo"))
+                .await,
+            Some(card_id),
+            "a card delivered into a closed room lost its job"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Where #2367 meets #2751. Closing idle rooms made `deliver`'s read-back-failure branch
+    /// reachable for a chat whose room had been closed — before, the function bailed at the
+    /// room lookup and never got that far. That branch used to `delete_message` the row it had
+    /// just written, and agentd's rows carry no author the relay's push guard accepts, so the
+    /// removal comes back `not_yours` and parks every op queued behind it, replies included.
+    ///
+    /// Two honest limits on what this pins. The trigger is not reproducible: `row_holds_blob`
+    /// reads back the part `deliver` itself just added, so making it fail would need the
+    /// production path to lie. And the refusal itself lives in the relay, which this test does
+    /// not run. What it does cover is the state this change newly reaches — a room the idle
+    /// close took, reopened on demand by a write path — and the property the relay cares
+    /// about: the bytes leaving the box for that room carry no removal. The second half shows
+    /// the assertion has teeth, by taking the same row off the far side with a delete.
+    #[tokio::test]
+    async fn a_failed_delivery_in_a_reopened_room_pushes_no_removal() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATATTACH0000000011";
+        let ask = ulid();
+        {
+            let host = agent.sync.open_room(chat).await.unwrap();
+            let h = host.lock().await;
+            h.doc
+                .append_user_message(
+                    &ask,
+                    "post the plan",
+                    "dev-mac",
+                    &arbos_core::doc::UserMessageOpts::default(),
+                )
+                .unwrap();
+        }
+        agent
+            .sync
+            .persist(&agent.sync.host(chat).await.expect("open"))
+            .await
+            .unwrap();
+        agent.sync.test_close_cold(chat).await;
+        assert!(!agent.sync.is_open(chat).await, "the idle close took it");
+
+        // The write path reopens it, which is the whole of this PR's change here.
+        let host = agent.room(chat).await.expect("a write path reopens it");
+        let row = ulid();
+        let (mark, history, pushed) = {
+            let h = host.lock().await;
+            let mark = h.doc.oplog_vv();
+            // What the relay already holds for this room before the failed delivery.
+            let history = h.doc.export_updates_since(&loro::VersionVector::default());
+            h.doc
+                .start_assistant_message(&row, &ask, &agent.cfg.device_id);
+            h.doc
+                .finish_message(&row, arbos_core::doc::MessageStatus::Done);
+            // Exactly what the read-back-failure branch does with the row it wrote.
+            crate::agent::retire_row(&h.doc, &row);
+            (mark.clone(), history, h.doc.export_updates_since(&mark))
+        };
+
+        let mut far_side = arbos_core::doc::ChatDoc::new(Some(9), true);
+        far_side.import(&history).expect("the room's history");
+        let status = far_side
+            .import(&pushed)
+            .expect("the relay applies the batch");
+        assert!(
+            status.pending.is_none(),
+            "the batch did not apply on its own, so the room is jammed behind it"
+        );
+        let m = far_side
+            .message(&row)
+            .expect("no removal crossed the wire: the row is still on the far side");
+        assert_eq!(
+            m.rest.get("hidden").and_then(Value::as_bool),
+            Some(true),
+            "the row reached the relay unhidden, so both apps would draw the failed delivery"
+        );
+        assert_eq!(m.status.as_str(), "done", "and it arrives finished");
+
+        // Teeth: a delete of that same row does take it off the far side, which is what used
+        // to be offered to the relay here and what it refuses.
+        let deleted = {
+            let h = host.lock().await;
+            h.doc.delete_message(&row).unwrap();
+            h.doc.export_updates_since(&mark)
+        };
+        let mut other_side = arbos_core::doc::ChatDoc::new(Some(11), true);
+        other_side.import(&history).expect("the room's history");
+        other_side
+            .import(&deleted)
+            .expect("the bytes themselves are well formed");
+        assert!(
+            other_side.message(&row).is_none(),
+            "a delete left the row in place, so this test cannot tell the two apart"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// Jacob, 2026-10-26 (Affine, group chat): three logo deliveries landed on the job worker's

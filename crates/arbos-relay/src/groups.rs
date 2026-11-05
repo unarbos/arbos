@@ -16,7 +16,8 @@ use serde_json::{json, Value};
 use arbos_core::api::{GroupDto, GroupParticipantDto};
 use arbos_core::ids::{now_ms, ulid};
 
-use crate::api::{chat_dto, internal, resolve_project_id, ApiResult};
+use crate::agent_messages::grant_allows;
+use crate::api::{chat_dto, internal, lookup_project, no_such_project, project_for, ApiResult};
 use crate::auth::Principal;
 use crate::boxes;
 use crate::db::{Chat, Project};
@@ -36,20 +37,35 @@ fn forbidden() -> (StatusCode, String) {
     (StatusCode::FORBIDDEN, "not your project".into())
 }
 
-fn load_group(
+/// Open the group named by `{id}/{chat}` as this caller: the host's side (the host project's
+/// devices, its owner's box, a person the owner invited) or a participant's box (D70).
+///
+/// Everything a caller outside the group could tell apart is collapsed into one answer. The
+/// host may not exist, the chat may not exist, the chat may not be a group, or the caller may
+/// simply have nothing to do with it — all four are `no such project`, because the group
+/// routes took an id *or a name*, and the difference leaked which names were taken
+/// (reported 2026-11-02).
+fn open_group(
     state: &AppState,
-    project_id: &str,
+    principal: &Principal,
+    id: &str,
     chat_id: &str,
-) -> Result<Chat, (StatusCode, String)> {
-    let chat = state
-        .db
-        .chat(project_id, chat_id)
-        .map_err(internal)?
-        .ok_or((StatusCode::NOT_FOUND, "no such chat".to_owned()))?;
+) -> Result<(Project, Chat), (StatusCode, String)> {
+    let host = lookup_project(state, id)?;
+    let chat = state.db.chat(&host.id, chat_id).map_err(internal)?;
+    let inside = state.allows(principal, &host.id)
+        || (principal.is_box()
+            && chat.as_ref().is_some_and(|c| {
+                c.is_group() && c.participants.iter().any(|p| state.allows(principal, p))
+            }));
+    if !inside {
+        return Err(no_such_project());
+    }
+    let chat = chat.ok_or_else(no_such_project)?;
     if !chat.is_group() {
         return Err((StatusCode::CONFLICT, "not a group chat".into()));
     }
-    Ok(chat)
+    Ok((host, chat))
 }
 
 fn participant_details(state: &AppState, chat: &Chat) -> Vec<Value> {
@@ -96,22 +112,84 @@ pub(crate) async fn group_dto(state: &AppState, chat: &Chat) -> GroupDto {
     }
 }
 
-/// Resolve names or ids to project ids, dropping duplicates and the host.
+/// May a group hosted by `host` contain `candidate`?
+///
+/// Two ways in, and no third. The agent is the host owner's own, or its owner invited the host
+/// owner onto it. Or its owner has already said yes to hearing from this host, through the
+/// "Who may message X" grants that `agent_messages.rs` keeps — a group is agent-to-agent
+/// traffic, so that is the consent it needs, and it is the consent the product already has.
+///
+/// Asked of the host rather than of whoever is calling, so that one answer governs both who
+/// may be added and who the fan-out may reach.
+fn may_join(state: &AppState, host: &Project, candidate: &Project) -> bool {
+    candidate.user_id == host.user_id
+        || state
+            .db
+            .is_project_member(&candidate.id, &host.user_id)
+            .unwrap_or(false)
+        || grant_allows(state, candidate, host)
+}
+
+/// `may_join` for a participant id, for rosters that are already written down.
+fn roster_entry_ok(state: &AppState, host: &Project, participant: &str) -> bool {
+    state
+        .db
+        .project(participant)
+        .ok()
+        .flatten()
+        .is_some_and(|p| may_join(state, host, &p))
+}
+
+/// Resolve the names or ids the caller asked to add, dropping duplicates and the host.
+///
+/// An agent the caller may not add is reported as `unknown`, word for word, like a name nobody
+/// has taken — this is the hole the reporter walked through, so the refusal must not say which
+/// of the two happened.
 fn resolve_participants(
     state: &AppState,
-    host: &str,
+    host: &Project,
     raw: &[String],
 ) -> Result<Vec<String>, (StatusCode, String)> {
     let mut seen = BTreeSet::new();
     let mut out = Vec::new();
     for r in raw {
-        let id = resolve_project_id(state, r.trim())
-            .map_err(|_| bad(format!("unknown participant project {r:?}")))?;
-        if id != host && seen.insert(id.clone()) {
-            out.push(id);
+        let wanted = r.trim();
+        // The caller's own agents answer to their name first: two owners may both have a
+        // `Lium`, and the bare lookup hands back whichever was active last.
+        let found = match state
+            .db
+            .project_of_user_by_name(host.user_id.as_str(), wanted)
+            .map_err(internal)?
+        {
+            Some(p) => Some(p),
+            None => state.db.project(wanted).map_err(internal)?,
+        };
+        let candidate = found
+            .filter(|p| may_join(state, host, p))
+            .ok_or_else(|| bad(format!("unknown participant project {wanted:?}")))?;
+        if candidate.id != host.id && seen.insert(candidate.id.clone()) {
+            out.push(candidate.id);
         }
     }
     Ok(out)
+}
+
+/// Find one of the group's own participants by id or name. Nothing outside the roster is
+/// looked up, so naming a stranger's agent here reads exactly like naming nobody.
+fn in_roster(state: &AppState, chat: &Chat, wanted: &str) -> Option<String> {
+    let wanted = wanted.trim();
+    chat.participants
+        .iter()
+        .find(|p| {
+            p.as_str() == wanted
+                || state
+                    .db
+                    .project(p)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|x| x.name == wanted)
+        })
+        .cloned()
 }
 
 fn default_title(state: &AppState, others: &[String]) -> String {
@@ -142,20 +220,17 @@ pub async fn create_group(
     Path(id): Path<String>,
     Json(b): Json<CreateGroupBody>,
 ) -> ApiResult {
-    let host = resolve_project_id(&state, &id)?;
-    if !state.allows(&principal, &host) {
-        return Err(forbidden());
-    }
+    let host = project_for(&state, &principal, &id)?;
     let others = resolve_participants(&state, &host, &b.participants)?;
     if others.is_empty() {
         return Err(bad("a group needs at least one other participant project"));
     }
-    let mut participants = vec![host.clone()];
+    let mut participants = vec![host.id.clone()];
     participants.extend(others.iter().cloned());
-    let n = state.db.list_chats(&host).map_err(internal)?.len() as i64;
+    let n = state.db.list_chats(&host.id).map_err(internal)?.len() as i64;
     let chat = Chat {
         id: ulid(),
-        project_id: host.clone(),
+        project_id: host.id.clone(),
         title: b
             .title
             .filter(|t| !t.trim().is_empty())
@@ -178,19 +253,8 @@ pub async fn get_group(
     principal: Principal,
     Path((id, chat_id)): Path<(String, String)>,
 ) -> ApiResult {
-    let host = resolve_project_id(&state, &id)?;
-    state.matrix.touch_chat(&state, &chat_id, Some(&host));
-    let chat = load_group(&state, &host, &chat_id)?;
-    // A participant's box (D70: the box of a participant's user) may read the group it belongs to.
-    let allowed = state.allows(&principal, &host)
-        || (principal.is_box()
-            && chat
-                .participants
-                .iter()
-                .any(|p| state.allows(&principal, p)));
-    if !allowed {
-        return Err(forbidden());
-    }
+    let (host, chat) = open_group(&state, &principal, &id, &chat_id)?;
+    state.matrix.touch_chat(&state, &chat_id, Some(&host.id));
     Ok(Json(group_json(&state, &chat).await).into_response())
 }
 
@@ -211,13 +275,18 @@ pub async fn patch_group(
     Path((id, chat_id)): Path<(String, String)>,
     Json(b): Json<PatchGroupBody>,
 ) -> ApiResult {
-    let host = resolve_project_id(&state, &id)?;
-    if !state.allows(&principal, &host) {
-        return Err(forbidden());
-    }
-    let chat = load_group(&state, &host, &chat_id)?;
+    // The roster is the host's to change: a participant's box reads the group but does not
+    // bring anyone else into it.
+    let host = project_for(&state, &principal, &id)?;
+    let (_, chat) = open_group(&state, &principal, &host.id, &chat_id)?;
     let add = resolve_participants(&state, &host, &b.add)?;
-    let remove = resolve_participants(&state, &host, &b.remove)?;
+    // Removals are resolved against the roster only, so an agent whose owner has since
+    // withdrawn its grant can still be shown out.
+    let remove: Vec<String> = b
+        .remove
+        .iter()
+        .filter_map(|r| in_roster(&state, &chat, r))
+        .collect();
     let mut participants: Vec<String> = chat
         .participants
         .iter()
@@ -229,24 +298,24 @@ pub async fn patch_group(
             participants.push(p);
         }
     }
-    if participants.first() != Some(&host) {
-        participants.retain(|p| p != &host);
-        participants.insert(0, host.clone());
+    if participants.first() != Some(&host.id) {
+        participants.retain(|p| p != &host.id);
+        participants.insert(0, host.id.clone());
     }
     if participants.len() < 2 {
         return Err(bad("a group keeps at least one other participant project"));
     }
     state
         .db
-        .set_chat_participants(&host, &chat_id, &participants)
+        .set_chat_participants(&host.id, &chat_id, &participants)
         .map_err(internal)?;
     if let Some(t) = b.title.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
         state
             .db
-            .update_chat_title(&host, &chat_id, t)
+            .update_chat_title(&host.id, &chat_id, t)
             .map_err(internal)?;
     }
-    let chat = load_group(&state, &host, &chat_id)?;
+    let (_, chat) = open_group(&state, &principal, &host.id, &chat_id)?;
     Ok(Json(group_json(&state, &chat).await).into_response())
 }
 
@@ -338,13 +407,8 @@ pub async fn group_send(
     Path((id, chat_id)): Path<(String, String)>,
     Json(b): Json<GroupSendBody>,
 ) -> ApiResult {
-    let host_id = resolve_project_id(&state, &id)?;
-    let chat = load_group(&state, &host_id, &chat_id)?;
-    let host = state
-        .db
-        .project(&host_id)
-        .map_err(internal)?
-        .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
+    let (host, chat) = open_group(&state, &principal, &id, &chat_id)?;
+    let host_id = host.id.clone();
     let text = b.text.trim().to_owned();
     if text.is_empty() {
         return Err(bad("text required"));
@@ -357,16 +421,16 @@ pub async fn group_send(
     if !chat.participants.contains(&sender_project) {
         return Err(bad("sender is not a participant of this group"));
     }
-    // A box speaks only for its user's projects (D70: one box serves every project of a user);
-    // the user's messages are fanned out by the host box (or a device).
-    match (&principal, &sender) {
-        (Principal::Box { .. }, Sender::User) if !state.allows(&principal, &host_id) => {
-            return Err(forbidden())
-        }
-        (Principal::Box { .. }, Sender::Project(p)) if !state.allows(&principal, p) => {
-            return Err(forbidden())
-        }
-        (Principal::Box { .. }, _) | (Principal::Device { .. }, _) | (Principal::Admin, _) => {}
+    // Nobody puts words in anyone else's mouth. A box speaks only for its user's projects (D70:
+    // one box serves every project of a user) and the user's own line is the host side's to
+    // fan out. Devices were exempt from both until 2026-11-02, which let any signed-in device
+    // post into any group on the relay, as the host's user or as a participant agent.
+    let may_send = match &sender {
+        Sender::User => state.allows(&principal, &host_id),
+        Sender::Project(p) => state.allows(&principal, p),
+    };
+    if !may_send {
+        return Err(forbidden());
     }
     let trace_id = b.trace_id.clone().unwrap_or_else(ulid);
     let used = state
@@ -388,15 +452,11 @@ pub async fn group_send(
         Sender::User => None,
         Sender::Project(_) => state.db.project(&sender_project).map_err(internal)?,
     };
-    let to = match b.to.as_deref() {
-        Some(t) => {
-            let pid = resolve_project_id(&state, t)
-                .map_err(|_| bad(format!("unknown recipient project {t:?}")))?;
-            if !chat.participants.contains(&pid) {
-                return Err(bad("recipient is not a participant of this group"));
-            }
-            Some(pid)
-        }
+    let to = match b.to.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+        Some(t) => Some(
+            in_roster(&state, &chat, t)
+                .ok_or_else(|| bad("recipient is not a participant of this group"))?,
+        ),
         None => None,
     };
     let details = participant_details(&state, &chat);
@@ -441,6 +501,14 @@ pub async fn group_send(
     for r in recipients {
         if r == host_id {
             continue; // handled above
+        }
+        // The roster is asked again rather than trusted. A group written before the owner
+        // check existed can name an agent this host was never entitled to reach, and a grant
+        // can be withdrawn after the group was made; either way the fan-out stops here and
+        // the agent is not woken.
+        if !roster_entry_ok(&state, &host, &r) {
+            refused.push(json!({ "project": r, "reason": "consent" }));
+            continue;
         }
         match hop(depth, &trace, &r) {
             Ok(next) => {
@@ -493,14 +561,11 @@ pub async fn group_reply(
     Path((id, chat_id)): Path<(String, String)>,
     Json(b): Json<GroupReplyBody>,
 ) -> ApiResult {
-    let host_id = resolve_project_id(&state, &id)?;
-    let chat = load_group(&state, &host_id, &chat_id)?;
-    let host = state
-        .db
-        .project(&host_id)
-        .map_err(internal)?
-        .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
-    if principal.is_box() && !state.allows(&principal, &b.from_project_id) {
+    let (host, chat) = open_group(&state, &principal, &id, &chat_id)?;
+    let host_id = host.id.clone();
+    // The answer has to come from the agent it claims to come from. The `is_box()` guard this
+    // replaces let any signed-in device file a reply under any participant's name.
+    if !state.allows(&principal, &b.from_project_id) {
         return Err(forbidden());
     }
     if !chat.participants.contains(&b.from_project_id) {

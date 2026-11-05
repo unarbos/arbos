@@ -9,6 +9,7 @@
 set -u
 D=$(cd "$(dirname "$0")" && pwd); K=${MERGE_KIT:-/tmp/k}
 source "$D/opread.sh"
+source "$D/checks.sh"
 ALLOW=$(sed 's/#.*//' "$K/merge-allow" 2>/dev/null | tr -s ' \t\n' ' ' | sed 's/^ //; s/ $//')
 [ -n "$ALLOW" ] || { echo "REFUSED: no merge list at $K/merge-allow"; exit 2; }
 PR=$1; SHA=$2; FLAKE=""; OVER=""; PEND=""
@@ -61,6 +62,29 @@ while read -r id name; do
     *) echo "REFUSED: checks not terminal yet: run $id $name"; exit 2 ;; esac
 done <<< "$pend"
 
+# Every gate in checks.sh that applies to this head must be present and successful ON this head.
+# This runs before the GO because it is cheap and decisive, and there is no argument that waives it:
+# accept-red names a run whose result is to be ignored, and a gate with no result has no run to name.
+# That is deliberate. Rule 9 of the merge procedure already allows a red check only when "a run on the
+# identical head sha is green for that same check", which is exactly what PASS below means, so the
+# legitimate flake case needs no override and the illegitimate one must not have one.
+files=$(pr_files "$PR") || { echo "REFUSED: cannot read #$PR's changed files: ${files#BLOCKED:}"; exit 2; }
+[ -n "$files" ] || { echo "REFUSED: #$PR reports no changed files, so no gate can be judged"; exit 2; }
+require_gates "$SHA" "$files"; grc=$?
+case $grc in
+  1) echo "REFUSED: a required check has no successful run on the pinned head $SHA."
+     echo "  A skipped, cancelled, red or absent gate is not a pass. Get the gate green on this exact sha, then merge."; exit 2 ;;
+  2) echo "REFUSED: a required check could not be read for $SHA, so it is not inferred."; exit 2 ;;
+  # accept-pending= waives a pending check in the rollup; it does not reach a required gate. A gate
+  # still queued on a saturated macOS pool has no verdict, and waiting is the whole point of a gate.
+  3) echo "REFUSED: a required check is still running on $SHA. Wait for it; accept-pending does not cover a required gate."; exit 2 ;;
+esac
+# Non-success results that are not required are shown rather than silently dropped, because the bug
+# this block replaces was precisely that they printed nothing at all.
+skipped=$(gh pr view "$PR" -R $R --json statusCheckRollup --jq '.statusCheckRollup[]
+  | select((.conclusion // .state) as $c | ["SKIPPED","NEUTRAL"] | index($c)) | "      \(.name // .context) \(.conclusion // .state)"' | sort -u)
+[ -n "$skipped" ] && { echo "    not a verdict either way, and not required on this head:"; echo "$skipped"; }
+
 main0=$(main_head)
 [ ${#main0} -eq 40 ] || { echo "REFUSED: cannot read main's head before the GO check: ${main0:-empty answer}"; exit 2; }
 echo "    main before the GO check: ${main0:0:9}"
@@ -77,8 +101,10 @@ if [ -n "$OVER" ] && [[ "$v" == *": NO-GO — a loop item the timer can release 
 else
   case "$v" in *": GO —"*) ;; *) echo "NOT MERGED: verdict is not GO"; exit 3;; esac
 fi
-# Every non-passing check run must be named by run id in accept-red=<id>[,<id>] (rule 9 flake, or a
-# run that did not test this PR); anything else red, or a red check that cannot be traced to a run, stops the merge.
+# A second pass, over every other check the rollup reports. The required gates above decide whether the
+# checks that matter ran and passed; this one catches a red result in a check nobody thought to name,
+# and accept-red=<id>[,<id>] can waive it (rule 9 flake, or a run that did not test this PR).
+# It cannot waive a required gate: that refusal already happened, above, and took no arguments.
 red=$(gh pr view "$PR" -R $R --json statusCheckRollup --jq '.statusCheckRollup[]
   | select((.conclusion // .state) as $c | ["FAILURE","CANCELLED","TIMED_OUT","ACTION_REQUIRED","STARTUP_FAILURE","ERROR","STALE"] | index($c))
   | "\(((.detailsUrl // .targetUrl // "") | [capture("runs/(?<id>[0-9]+)").id] | first) // "untraceable") \(.name // .context) \(.conclusion // .state)"') || { echo "NOT MERGED: cannot read the check rollup"; exit 3; }

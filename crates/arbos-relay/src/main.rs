@@ -1,4 +1,8 @@
 mod admin;
+mod agent_link;
+mod agent_link_read;
+mod agent_link_stream;
+mod agent_link_write;
 mod agent_messages;
 mod api;
 mod api_error_layer;
@@ -37,6 +41,8 @@ mod fleet;
 mod gifs;
 mod goals;
 #[cfg(test)]
+mod group_access_tests;
+#[cfg(test)]
 mod group_name_tests;
 mod groups;
 mod image_sniff;
@@ -48,6 +54,8 @@ mod local;
 mod matrix;
 mod migrate;
 mod moderation;
+#[cfg(test)]
+mod module_lookup_tests;
 mod notices;
 mod notify;
 mod outside;
@@ -59,8 +67,14 @@ mod perf;
 mod pins;
 #[cfg(test)]
 mod preview_token_tests;
+#[cfg(test)]
+mod project_lookup_tests;
 mod proxy;
+mod proxy_trace;
+#[cfg(test)]
+mod proxy_trace_tests;
 mod push;
+mod push_guard;
 mod releases;
 mod restart;
 mod room_health;
@@ -78,9 +92,13 @@ mod state;
 mod stickers;
 mod unfurl;
 mod upgrade;
+#[cfg(test)]
+mod upgrade_box_fake;
 mod upgrade_carry;
 #[cfg(test)]
 mod upgrade_rollback_tests;
+#[cfg(test)]
+mod upgrade_room_tests;
 mod vault;
 mod vaults;
 mod voice;
@@ -291,16 +309,9 @@ async fn main() -> anyhow::Result<()> {
         auth_mode,
         github_client_id,
         github_client_secret,
-        auth_redirects: env_nonempty("ARBOS_AUTH_REDIRECTS")
-            .map(|s| {
-                s.split(',')
-                    .map(|p| p.trim().to_owned())
-                    .filter(|p| !p.is_empty())
-                    .collect()
-            })
-            .unwrap_or_default(),
+        auth_redirects: auth_redirects_from_env(),
         default_grant_usd: env_f64("ARBOS_DEFAULT_GRANT_USD", 100.0),
-        default_daily_cap_usd: env_f64("ARBOS_DEFAULT_DAILY_CAP_USD", 20.0),
+        default_account_limit: credits::SpendLimit::from_env("ARBOS_DEFAULT_DAILY_CAP_USD"),
         global_daily_cap_usd: env_f64("ARBOS_GLOBAL_DAILY_CAP_USD", 500.0),
         global_machine_daily_cap_usd: env_f64("ARBOS_GLOBAL_MACHINE_DAILY_CAP_USD", 400.0),
         always_on: match env_nonempty("ARBOS_ALWAYS_ON").as_deref() {
@@ -377,12 +388,14 @@ async fn main() -> anyhow::Result<()> {
         default_snapshot: Arc::new(std::sync::RwLock::new(String::new())),
         started_at: std::time::Instant::now(),
         restart: Arc::new(crate::state::RestartSignal::default()),
+        revocations: Arc::new(tokio::sync::watch::Sender::new(0)),
         voice_dispatched: Arc::new(Mutex::new(HashMap::new())),
         voice_worker: Arc::new(Mutex::new(None)),
         voice_inbox: crate::voice::VoiceInbox::default(),
         image_health: Arc::new(Mutex::new(None)),
         client_seen: Arc::new(std::sync::Mutex::new(HashMap::new())),
         matrix: matrix::Matrix::new(matrix::Config::from_env()?),
+        link_hub: Arc::new(agent_link_stream::LinkHub::load(&db)),
     };
     tracing::info!(auth_mode = auth_mode.as_str(), public_url = %state.cfg.public_url, "sign-in");
     people::rename_agents_that_shadow_people(&state);
@@ -443,6 +456,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/auth/token", post(signin::token))
         .route("/auth/refresh", post(signin::refresh))
         .route("/auth/logout", post(signin::logout))
+        .route(
+            "/auth/sign-out-everywhere",
+            post(signin::sign_out_everywhere),
+        )
         .route(
             "/auth/devices",
             get(signin::devices_list).post(export::mint_reader),
@@ -590,10 +607,6 @@ async fn main() -> anyhow::Result<()> {
             "/projects/{id}/voice",
             get(voice::get_agent_settings).put(voice::put_agent_settings),
         )
-        .route(
-            "/admin/users/{id}/voice",
-            axum::routing::put(voice::put_user_cap),
-        )
         .route("/voice/worker/hello", post(voice::worker_hello))
         .route("/voice/calls/{id}/inbox", get(voice::call_inbox))
         .route("/voices", get(voice::list_voices))
@@ -621,12 +634,51 @@ async fn main() -> anyhow::Result<()> {
         .route("/asp/socket", get(outside::socket))
         .route("/asp/files/{slot}/{key}", get(outside::file))
         .route("/asp/chats/{id}/messages", get(outside::history))
+        .route("/asp/approvals/{id}", get(outside::approval_read))
         .route("/asp/connect/{id}", get(outside::connect_page))
         // Sidecar support (#2189): members, and the public texts an agent is handed.
         .route("/asp/chats/{id}/members", get(outside_sidecar::members))
         .route("/llms.txt", get(outside_sidecar::llms_txt))
         .route("/agents/llms.txt", get(outside_sidecar::llms_txt))
         .route("/sidecar/install.sh", get(outside_sidecar::install_sh))
+        .route("/acp/install.sh", get(outside_sidecar::acp_install_sh))
+        // Agent access links. The owner side takes an ordinary device bearer; the
+        // `/agent-link/*` routes take a `LinkPrincipal` and are the only routes an `arbl_`
+        // token can reach, because Axum will not call a handler whose extractor does not
+        // resolve. Default-deny by construction rather than by allowlist.
+        .route(
+            "/me/agent-links",
+            get(agent_link::list).post(agent_link::mint),
+        )
+        .route("/me/agent-links/{id}", delete(agent_link::revoke))
+        .route("/me/agent-links/{id}/activity", get(agent_link::activity))
+        .route("/agent-link/open/{secret}", get(agent_link::open_sheet))
+        .route("/agent-link/me", get(agent_link::me))
+        // PR 3: what a link may read. Every one takes a `LinkPrincipal`, so an `arbl_` bearer
+        // reaches these and nothing else in the relay.
+        .route("/agent-link/chats", get(agent_link_read::chats))
+        .route("/agent-link/chats/{id}", get(agent_link_read::chat))
+        .route(
+            "/agent-link/chats/{id}/messages",
+            get(agent_link_read::messages).post(agent_link_write::send),
+        )
+        .route("/agent-link/agents", get(agent_link_read::agents))
+        .route(
+            "/agent-link/agents/{id}/log",
+            get(agent_link_read::agent_log),
+        )
+        .route("/agent-link/files/{slot}/{key}", get(agent_link_read::file))
+        .route("/agent-link/stream", get(agent_link_stream::stream))
+        // PR 5: what a `reply` link may write. A `read` link is refused by the handler, and the
+        // refusal is in the owner's activity log.
+        .route(
+            "/agent-link/chats/{id}/reactions",
+            post(agent_link_write::react),
+        )
+        .route(
+            "/agent-link/chats/{id}/typing",
+            post(agent_link_write::typing),
+        )
         // Session log (spec §13.3): the sidecar uploads, the owner reads.
         .route("/asp/log", post(outside_log::upload))
         .route("/outside-agents/{id}/log", get(outside_log::read))
@@ -822,10 +874,6 @@ async fn main() -> anyhow::Result<()> {
             axum::routing::put(admin::set_credits),
         )
         .route(
-            "/admin/projects/{id}/spend-cap",
-            axum::routing::put(admin::set_project_cap),
-        )
-        .route(
             "/admin/killswitch",
             get(admin::get_kill_switch).put(admin::set_kill_switch),
         )
@@ -881,6 +929,10 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/room/{project}/{chat}/checkpoint",
             get(rooms::get_checkpoint).post(rooms::post_checkpoint),
+        )
+        .route(
+            "/room/{project}/{chat}/repair",
+            post(rooms::post_room_repair),
         )
         .route("/room/{project}/{chat}/stats", get(rooms::room_stats))
         .route(
@@ -1098,6 +1150,31 @@ fn env_nonempty(name: &str) -> Option<String> {
         .ok()
         .map(|s| s.trim().to_owned())
         .filter(|s| !s.is_empty())
+}
+
+/// `ARBOS_AUTH_REDIRECTS`: the extra origins `/auth/github/start` may send the browser to.
+///
+/// Each entry has to name an origin (`https://arbos.life`), because that is how the relay
+/// compares it — scheme, host and port, never the start of the redirect. An entry that is not a
+/// URL with an origin would simply never match, so say so at start instead of letting sign-in
+/// fail later with a bare 400.
+fn auth_redirects_from_env() -> Vec<String> {
+    let Some(raw) = env_nonempty("ARBOS_AUTH_REDIRECTS") else {
+        return Vec::new();
+    };
+    raw.split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .inspect(|entry| {
+            if signin::origin_of(entry).is_none() {
+                tracing::warn!(
+                    entry = %entry,
+                    "ARBOS_AUTH_REDIRECTS: not an origin (want scheme://host[:port]); this entry allows nothing"
+                );
+            }
+        })
+        .map(str::to_owned)
+        .collect()
 }
 
 fn env_f64(name: &str, default: f64) -> f64 {

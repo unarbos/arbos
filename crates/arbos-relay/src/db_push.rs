@@ -39,6 +39,11 @@ CREATE TABLE IF NOT EXISTS chat_user_cursor (
   user_id TEXT NOT NULL, chat_id TEXT NOT NULL, seq INTEGER NOT NULL, at INTEGER NOT NULL,
   PRIMARY KEY (user_id, chat_id)
 );
+CREATE TABLE IF NOT EXISTS message_authors (
+  chat_id TEXT NOT NULL, message_id TEXT NOT NULL, sender TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (chat_id, message_id)
+);
 "#;
 
 /// Keep the event log a month deep; unread counts older than that are noise.
@@ -161,12 +166,17 @@ impl Db {
 
     /// Record one whole message. Returns its event id, or `None` when `(chat, message_id)` was
     /// already recorded (the same message announced twice is one notification).
+    ///
+    /// `sender` is the normalised author (`user:<id>` | `agent:<project>`) as the relay resolved
+    /// it from the announcing principal, and is kept in `message_authors` — see
+    /// [`Db::message_author`] for why that outlives the event row.
     pub fn insert_chat_event(
         &self,
         chat_id: &str,
         project_id: Option<&str>,
         message_id: &str,
         sender_user: Option<&str>,
+        sender: &str,
     ) -> Result<Option<i64>> {
         self.with(|c| {
             let now = now_ms();
@@ -175,11 +185,81 @@ impl Db {
                  VALUES (?1, ?2, ?3, ?4, ?5)",
                 params![chat_id, project_id, message_id, sender_user, now],
             )?;
+            // Written even when the event row is a duplicate: an announce that repeats still
+            // attests the same author, and the caller stops at the `None` above.
+            c.execute(
+                "INSERT OR IGNORE INTO message_authors(chat_id, message_id, sender, created_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![chat_id, message_id, sender, now],
+            )?;
             c.execute(
                 "DELETE FROM chat_events WHERE created_at < ?1",
                 params![now - EVENT_RETENTION_MS],
             )?;
             Ok((n > 0).then(|| c.last_insert_rowid()))
+        })
+    }
+
+    /// Who the relay saw write this message: `user:<id>` or `agent:<project>`, resolved from the
+    /// announcing principal rather than from the chat doc, which every member of the chat can
+    /// rewrite. `None` for a message the relay never saw announced — a system line, one written
+    /// by an app too old to announce, or one from before this record existed.
+    ///
+    /// Deliberately not pruned with `chat_events`: unread counts a month old are noise, but
+    /// "whose message is this" has to answer for as long as the message exists.
+    ///
+    /// A primary-key lookup, answerable at any time by any handler — not a by-product of the
+    /// push that recorded it. Two separate authority decisions read it after the fact (the
+    /// moderation route, and `secrets.rs`'s "save this" path, which otherwise takes the owner's
+    /// own-message test from a doc field the asker writes), so it is a general query by design.
+    pub fn message_author(&self, chat_id: &str, message_id: &str) -> Result<Option<String>> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT sender FROM message_authors WHERE chat_id = ?1 AND message_id = ?2",
+                params![chat_id, message_id],
+                |r| r.get(0),
+            )
+            .optional()
+        })
+    }
+
+    /// Record who wrote a message, from the socket that pushed the row carrying it.
+    ///
+    /// `INSERT OR IGNORE`, so the first attestation stands. The announce route reaches this
+    /// record too ([`Db::insert_chat_event`]), and the two can race for a message the client
+    /// announces and pushes at the same moment — but both resolve the author from the
+    /// authenticated principal, so a race between them agrees. What it stops is an announce
+    /// arriving *later*, for a message whose row the relay has already seen, and renaming it.
+    pub fn record_message_author(
+        &self,
+        chat_id: &str,
+        message_id: &str,
+        sender: &str,
+    ) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT OR IGNORE INTO message_authors(chat_id, message_id, sender, created_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![chat_id, message_id, sender, now_ms()],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Has the relay attested *any* message in this chat?
+    ///
+    /// [`Db::message_author`] returning `None` has two different meanings, and a caller
+    /// deciding authorisation has to tell them apart. In a chat the relay has attested
+    /// something in, `None` means "the relay never saw that message announced". In a chat it
+    /// has attested nothing in, `None` means "the record does not reach this chat" — every
+    /// message in it predates the record, so absence is not evidence about any one of them.
+    pub fn chat_has_authors(&self, chat_id: &str) -> Result<bool> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT EXISTS (SELECT 1 FROM message_authors WHERE chat_id = ?1)",
+                params![chat_id],
+                |r| r.get(0),
+            )
         })
     }
 

@@ -67,6 +67,16 @@ enum DebugHooks {
     /// `ARBOS_FIXTURE_MACHINE=near-limit`: the box report says disk 92 % and memory 88 % used
     /// (Settings › Machine's warning state on the rig).
     static var fixtureMachineNearLimit: Bool { value("ARBOS_FIXTURE_MACHINE") == "near-limit" }
+    /// `ARBOS_FIXTURE_MACHINE=waking`: the box starts waking and reaches awake 3 s in, so the
+    /// transcript's "Waking your machine…" banner is there when a chat opens and leaves while
+    /// it is on screen — the one thing a real launch does and the fixture's always-awake box
+    /// never did ([feedback iphone-blank-chat-on-open-2026-11-03]).
+    static var fixtureMachineWaking: Bool { value("ARBOS_FIXTURE_MACHINE") == "waking" }
+    /// `ARBOS_FIXTURE_ROWS_DELAY=<ms>`: every fixture chat starts with no rows and gets them
+    /// that many ms after launch. A chat opened inside that window is on screen when its rows
+    /// land — the shape of a real open over a slow link, and the one the always-ready fixture
+    /// could never make ([feedback iphone-blank-chat-on-open-2026-11-03]).
+    static var fixtureRowsDelayMs: Int? { value("ARBOS_FIXTURE_ROWS_DELAY").flatMap { Int($0) } }
     /// Tasks-chip rig (duplex §2.4): the first n of three background jobs open in the opened
     /// agent chat — 1 running with a step, 2 running with no step yet, 3 queued behind a lock.
     static var fixtureJobs: Int { min(3, value("ARBOS_FIXTURE_JOBS").flatMap { Int($0) } ?? 0) }
@@ -200,6 +210,12 @@ enum DebugHooks {
     /// "Launch week" with this many synthetic rows — mixed people / agent prose with
     /// markdown, relay system lines, replies, attachments.
     static var fixtureLongRows: Int? { value("ARBOS_FIXTURE_LONG_ROWS").flatMap { Int($0) } }
+    /// Perf baseline: pad the fixture chat list with this many DMs so it scrolls.
+    static var fixtureHomeRows: Int { value("ARBOS_FIXTURE_HOME_ROWS").flatMap { Int($0) } ?? 0 }
+    /// Perf baseline: this chat gets an agent answer streamed word by word, over and over.
+    static var fixtureStreamChat: String? { value("ARBOS_FIXTURE_STREAM") }
+    /// Perf baseline: `<chat>[,<chat>…]:<n>` — n timed opens from the chat list, in turn.
+    static var perfOpens: String? { value("ARBOS_PERF_OPENS") }
     /// Log frame pacing (dropped frames, worst frame, time over budget) and memory every
     /// 2 s to `com.unarbos.arbos.ios` / `perf` for the duration of the launch.
     static let perfLog: Bool = value("ARBOS_PERF_LOG") == "1"
@@ -255,10 +271,19 @@ enum DebugHooks {
         #if DEBUG
         let v = ProcessInfo.processInfo.environment[key] ?? ""
         return v.isEmpty ? nil : v
+        #elseif ARBOS_FIXTURE
+        let v = launchEnvironment[key] ?? ""
+        return v.isEmpty ? nil : v
         #else
         return nil
         #endif
     }
+
+    #if ARBOS_FIXTURE
+    /// Read once: a Release build measured for performance must not pay Debug's per-call
+    /// copy of the environment inside row bodies.
+    private static let launchEnvironment = ProcessInfo.processInfo.environment
+    #endif
 
     /// One line at boot naming the `ARBOS_` variables this process actually received.
     ///

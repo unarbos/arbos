@@ -273,17 +273,22 @@ extension AppModel {
             for i in list.indices where list[i].members.isEmpty {
                 if let prev = server(list[i].id) { list[i].members = prev.members }
             }
-            servers = list
+            // The 15 s poll: a write that changes nothing still publishes the whole model.
+            // `Server` is Equatable over every stored property, so a list that compares
+            // equal carries no change and this guard cannot swallow a real one.
+            // `rememberServersAvailable` stays unconditional — it is a store write, not a
+            // publish, and it is the only thing that persists the flag.
+            if list != servers { servers = list }
             reconcileArchivedServers(list)
-            serversAvailable = true
+            if !serversAvailable { serversAvailable = true }
             rememberServersAvailable(true)
             wantServerRosters()
             refreshChannelSenders()
             applyOpenServerHook()
         } catch let e as RelayError where e.status == 404 || e.status == 405 || e.status == 503 {
             // Relays without servers: nothing server-related.
-            servers = []
-            serversAvailable = false
+            if !servers.isEmpty { servers = [] }
+            if serversAvailable { serversAvailable = false }
             rememberServersAvailable(false)
         } catch {
             // Keep the last list; the loop tries again.
@@ -487,16 +492,48 @@ extension AppModel {
     }
 
     private func forgetServer(_ id: Id) {
-        if let s = server(id) {
-            for c in s.channels {
-                channelRows[c.id] = nil
-                caughtUp.remove(c.id)
-                channelAtStart.remove(c.id)
-            }
+        let channelIds = Set(server(id)?.channels.map(\.id) ?? [])
+        for c in channelIds {
+            channelRows[c] = nil
+            caughtUp.remove(c)
+            channelAtStart.remove(c)
         }
         servers.removeAll { $0.id == id }
-        if path.contains(where: { if case .server(let sid) = $0 { return sid == id } else { return false } }) {
-            path = []
+        // Every screen about this server goes, and the first one takes the rest with it:
+        // its channel list, one of its channels, and — since 2026-11-01 — the server's or
+        // a channel's own profile page, which is a pushed route rather than a sheet.
+        if let i = path.firstIndex(where: { route in
+            if case .server(let sid) = route, sid == id { return true }
+            if case .profile(.server(let sid)) = route, sid == id { return true }
+            return shows(channelIds: channelIds, route: route)
+        }) {
+            path.removeSubrange(i...)
+        }
+    }
+
+    /// A channel that is archived or deleted gives way to its server's channel list, from
+    /// whichever of its screens the user is on — the channel itself, or the channel's own
+    /// profile page, which is a pushed route since 2026-11-01 and can sit either over the
+    /// channel or straight on top of the channel list. The model owns this rather than the
+    /// page calling `dismiss()` afterwards: two navigations for one action pop twice.
+    private func leaveScreensAbout(_ channel: ServerChannel) {
+        guard let i = path.firstIndex(where: { shows(channelIds: [channel.id], route: $0) }) else { return }
+        path.removeSubrange(i...)
+        if !path.contains(.server(serverId: channel.serverId)) {
+            path.append(.server(serverId: channel.serverId))
+        }
+    }
+
+    /// Does this route show one of these channels — the channel itself, or its own page?
+    private func shows(channelIds: Set<Id>, route: Route) -> Bool {
+        switch route {
+        case .server: return false
+        case .chat(let chatId, _): return channelIds.contains(chatId)
+        case .profile(let target):
+            switch target {
+            case .channel(let channelId): return channelIds.contains(channelId)
+            case .user, .group, .agent, .server: return false
+            }
         }
     }
 
@@ -570,9 +607,7 @@ extension AppModel {
            let ci = servers[si].channels.firstIndex(where: { $0.id == channel.id }) {
             servers[si].channels[ci].archived = archived
         }
-        if archived, case .chat(let id, _)? = path.last, id == channel.id {
-            path = [.server(serverId: channel.serverId)]
-        }
+        if archived { leaveScreensAbout(channel) }
         do {
             try await relay.archiveChannel(serverId: channel.serverId, channelId: channel.id, archived: archived)
         } catch {
@@ -586,9 +621,7 @@ extension AppModel {
             try await relay.deleteChannel(serverId: channel.serverId, channelId: channel.id)
             channelRows[channel.id] = nil
             caughtUp.remove(channel.id)
-            if case .chat(let id, _)? = path.last, id == channel.id {
-                path = [.server(serverId: channel.serverId)]
-            }
+            leaveScreensAbout(channel)
             await refreshServers()
             return true
         } catch {

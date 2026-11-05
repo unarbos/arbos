@@ -257,8 +257,14 @@ if [[ -n "${APNS_KEY_P8:-}" ]]; then
   [[ -n "${APNS_KEY_ID:-}" ]] || echo "WARNING: APNS_KEY_ID is empty — set it in the vault item \"$APNS_ITEM\"; push stays off"
 fi
 # Where /auth/github/start may send the browser besides the apps' arbos:// scheme, loopback and the
-# relay's own origin (comma-separated prefixes). The site's "Sign in with GitHub" lands on
-# $SITE_URL/welcome, so the site is allowed by default; without it the relay answers 400 bad_redirect.
+# relay's own origin: a comma-separated list of ORIGINS — scheme://host[:port], no path. The relay
+# compares a sign-in redirect to each entry as a whole origin (scheme, host and port all equal), so
+# a redirect to any path on a listed origin is allowed and a host that merely starts with one is
+# not. Never write a bare host or a path here: an entry the relay cannot read as an origin matches
+# nothing, and it says so at start.
+# The site's "Sign in with GitHub" lands on $SITE_URL/welcome, so the site's origin is allowed by
+# default; without it the relay answers 400 bad_redirect. $SITE_URL is already an origin
+# (https://arbos.life); if you point ARBOS_SITE_URL at a path, only its origin counts here.
 : "${ARBOS_AUTH_REDIRECTS:=$SITE_URL}"
 [[ -n "${DAYTONA_API_KEY:-}" ]] || echo "WARNING: DAYTONA_API_KEY is empty — new projects will get process boxes"
 [[ -n "${OPENROUTER_API_KEY:-}${OPENAI_API_KEY:-}" ]] || echo "WARNING: no model provider key"

@@ -8381,6 +8381,32 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 refresh_devices(&shared).await;
             });
         }
+        ClientCommand::AgentLinksRefresh => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                refresh_agent_links(&shared).await;
+            });
+        }
+        ClientCommand::AgentLinkMint {
+            label,
+            scope,
+            ttl_hours,
+        } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                mint_agent_link(&shared, label, scope, ttl_hours).await;
+                refresh_agent_links(&shared).await;
+            });
+        }
+        ClientCommand::AgentLinkRevoke { id } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                if let Err(err) = shared.delete(&format!("/me/agent-links/{id}")).await {
+                    shared.fail("revoke that link", &err);
+                }
+                refresh_agent_links(&shared).await;
+            });
+        }
         ClientCommand::ProjectSecretsRefresh { project_id } => {
             let shared = shared.clone();
             tokio::spawn(async move {
@@ -9373,6 +9399,64 @@ async fn refresh_devices(shared: &Arc<Shared>) {
         Err(err) => Err(UserError::classify("load your devices", &err)),
     };
     let _ = shared.events.send(SyncEvent::Devices(result));
+}
+
+/// Settings → Agent access link (`GET /me/agent-links`): every agent token of
+/// the account, links and migrated reader tokens alike. No row carries a
+/// bearer or a URL, so nothing read here is a secret.
+async fn refresh_agent_links(shared: &Arc<Shared>) {
+    let result = match shared.get_json("/me/agent-links").await {
+        Ok(value) => {
+            serde_json::from_value::<Vec<crate::model::AgentLinkView>>(value).map_err(|e| {
+                UserError::from_text("load your agent links", format!("unexpected reply: {e}"))
+            })
+        }
+        Err(err) => Err(UserError::classify("load your agent links", &err)),
+    };
+    let _ = shared.events.send(SyncEvent::AgentLinks(result));
+}
+
+/// `POST /me/agent-links` — the one call that produces a URL. The answer is
+/// handed to the copy sheet and nowhere else: it is not logged, not cached and
+/// not written to disk, because the relay will never say it again.
+async fn mint_agent_link(shared: &Arc<Shared>, label: String, scope: &'static str, ttl_hours: i64) {
+    let body = serde_json::json!({
+        "label": label,
+        "scope": scope,
+        "ttl_hours": ttl_hours,
+    });
+    let result = match shared.post_json("/me/agent-links", body).await {
+        Ok(value) => match value.get("url").and_then(|u| u.as_str()) {
+            Some(url) => Ok(crate::model::AgentLinkReveal {
+                url: url.to_owned(),
+                // The relay echoes the label back, but an older one may send
+                // none or send it blank; either way the name we composed is
+                // the one the owner will see in the list.
+                label: value
+                    .get("label")
+                    .and_then(|l| l.as_str())
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty())
+                    .unwrap_or(&label)
+                    .to_owned(),
+                scope: value
+                    .get("scope")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or(scope)
+                    .to_owned(),
+                expires_in: crate::ui::agent_links::expiry_label(ttl_hours).to_owned(),
+                copied: false,
+            }),
+            // A 201 with no `url` is a relay that minted a link the owner can
+            // never hand over. Say so instead of opening an empty sheet.
+            None => Err(UserError::from_text(
+                "create an agent access link",
+                "the relay did not return a link to copy".to_owned(),
+            )),
+        },
+        Err(err) => Err(UserError::classify("create an agent access link", &err)),
+    };
+    let _ = shared.events.send(SyncEvent::AgentLinkMinted(result));
 }
 
 /// One agent's Secrets page (`GET /projects/{id}/secrets`).

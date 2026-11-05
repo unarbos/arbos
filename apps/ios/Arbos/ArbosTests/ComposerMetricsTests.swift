@@ -266,3 +266,35 @@ final class ComposerMetricsTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(Theme.pendingChipTrailing, 0)
     }
 }
+
+/// A closed chat frees its composer draft. The draft's callbacks capture the chat view,
+/// whose `@State` owns the draft; while they stayed set, every open leaked the draft and,
+/// through the view, that chat's rows and messages (about 4 MB a group open, Pass 3).
+@MainActor
+final class ComposerDraftLifetimeTests: XCTestCase {
+    private func settle() {
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+    }
+
+    func testAClosedChatFreesItsDraft() {
+        let model = AppModel()
+        settle()
+        let before = ComposerDraft.live
+        autoreleasepool {
+            let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+            let host = UIHostingController(rootView: AnyView(
+                ChatView(chatId: "draft-lifetime-chat", projectId: "draft-lifetime-project")
+                    .environmentObject(model).environment(\.theme, Theme.dark)))
+            window.rootViewController = host
+            window.makeKeyAndVisible()
+            settle()
+            XCTAssertGreaterThan(ComposerDraft.live, before, "the open chat holds a draft")
+            host.rootView = AnyView(EmptyView())
+            settle()
+            window.isHidden = true
+            window.rootViewController = nil
+        }
+        settle()
+        XCTAssertEqual(ComposerDraft.live, before, "the closed chat's draft is still alive")
+    }
+}
