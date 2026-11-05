@@ -65,7 +65,8 @@ CLI:  feedback_poller.py [run] | status | testers | set-cursor <ISO-8601>
       | requeue <id>… [--allow "<who confirmed>"] | prioritize <id>… | confirm <id> [note] | handoff <id> [label] | deployed <id> [note]
       | supersede <id> <by-id> [note]   (a shipped fix was reverted/regressed; <by-id> re-lands it and closes both issues when it ships)
       | track <id> <issue> "<comment>" [--handle <login>] [--owner <label>] [--target ios|mac]   (a hand-filed, handed-off item;
-        workers can do the same without root by commenting `track <id> bc-<owner>` on the issue)
+        workers can do the same without root by commenting `track <id> bc-<owner>` on the issue. Without --handle the
+        item is attributed to the filer — the --owner agent id, else `agent` — at normal tier, not to Jacob at priority)
       | leadtime [since-ISO] | memtree-cost [YYYY-MM-DD]   (audit numbers; memtree-cost asks GET /admin/usage/memory-tree, else relay.db as root)
       | gate-tree <sha-or-branch> <fid>…   (gate a hand-prepared integration tree as one run and land it whole)
       | gate-abort   (drop the active gate run without verdicts; every ready branch re-batches at its current head)
@@ -4484,6 +4485,10 @@ class Loop:
         except Exception as e:  # noqa: BLE001
             log(f"install watch failed: {e}")
         try:
+            self.watch_gating_landed()
+        except Exception as e:  # noqa: BLE001
+            log(f"gating-landed watch failed: {e}")
+        try:
             self.watch_handoffs()
         except Exception as e:  # noqa: BLE001
             log(f"handoff watch failed: {e}")
@@ -4507,6 +4512,14 @@ class Loop:
     # ---- handed-off items: a dedicated worker fixes them; the loop still tracks the landing -------
 
     TRACK_RE = re.compile(r"^\s*track\s+([A-Za-z0-9][A-Za-z0-9._-]{3,80})\s+(bc-[0-9a-f]{8}[0-9a-f-]*)", re.I | re.M)
+    FILER_RE = re.compile(r"^(bc-[0-9a-f]{8})", re.I)
+
+    @classmethod
+    def filer_key(cls, owner: str) -> str:
+        """Who filed a hand-filed item when `track` was given no --handle: the filing agent's id when the owner
+        label carries one, else plain `agent`. Never Jacob — he is attributed by his own handle."""
+        m = cls.FILER_RE.match((owner or "").strip())
+        return "@" + m.group(1).lower() if m else "agent"
 
     def register_tracked(self, fid: str, number: int, comment: str, owner: str, handle: str = "", target: str | None = None) -> dict | None:
         """A hand-filed issue becomes a handed-off loop item: the owner's commit tagged `[feedback <fid>]` (or a
@@ -4521,10 +4534,18 @@ class Loop:
                 "device_family": None, "app_platform": None, "bundle": None, "build": None, "build_id": None,
                 "locale": None, "screen_points": None, "screenshots": [], "forced_target": target, "raw": {}}
         (d / "submission.json").write_text(json.dumps(info, indent=2, ensure_ascii=False) + "\n")
-        tier = "priority" if handle.lower() in ("unconst", "jake") or not handle else self.tier(info)
+        # Attribution (2026-10-31). An explicit --handle still decides everything. Without one the item belongs to
+        # the FILER at normal tier: it used to default to tier `priority` and tester "Jacob (owner)", so every item
+        # an agent filed by hand was recorded as one of the owner's own priority reports.
+        if handle:
+            tier = "priority" if handle.lower() in ("unconst", "jake") else self.tier(info)
+            tester, tester_key = self.tester_label(info, tier), self.tester_key(info)
+        else:
+            tier, tester_key = "tester", self.filer_key(owner)
+            tester = tester_key
         st = {"id": fid, "created": info["created"], "status": "handed_off", "handed_off_to": owner, "handed_off_at": info["created"],
-              "track_commit": True, "tier": tier, "tester": "Jacob (owner)" if tier == "priority" and not handle else self.tester_label(info, tier),
-              "tester_key": self.tester_key(info) if handle else "jake@bittensor.com", "target": target or self.pick_target(info),
+              "track_commit": True, "tier": tier, "tester": tester,
+              "tester_key": tester_key, "target": target or self.pick_target(info),
               "issue": number, "issue_url": f"https://github.com/{self.cfg.github_repo}/issues/{number}"}
         self.store.save_state(fid, st)
         self.store.event(fid, "tracked", issue=number, owner=owner)
@@ -4902,6 +4923,55 @@ class Loop:
                 self.store.save_state(fid, st)
                 self.store.event(fid, "closed_externally", issue=st["issue"])
                 log(f"[{fid}] issue #{st['issue']} was closed on GitHub; leaving handed_off (no more commit probes)")
+
+    def watch_gating_landed(self) -> None:
+        """A `gating` item whose branch already reached main by some other route never leaves `gating`: only the
+        loop's own gate writes `pushed`, and for these it never ran. #2391 sat `gating` with its fix merged as
+        #2411 at 23:54Z and released in 0.6.373 minutes later, still listed as waiting for a gate.
+
+        Anything whose gated head is an ancestor of main is moved to `pushed`, which is where `merge_branch` puts
+        an item it finds already merged (its 204 path). Bookkeeping only: no merge, no GitHub write, no comment.
+        The existing build / deploy watches take it from `pushed` to `shipped` and talk to the issue there.
+
+        Cost: one compare per gating item, and only when main moved since that item was last checked. A squash
+        merge rewrites the commits, so it compares as `diverged` and is not detected here; `watch_handoffs` still
+        catches those by the `[feedback <id>]` tag."""
+        main_head = self.gh.branch_head("main") or ""
+        if not main_head:
+            return
+        for fid in self.store.items():
+            st = self.store.state(fid)
+            if st.get("status") != "gating" or st.get("commit") or not st.get("branch_head"):
+                continue
+            if st.get("landed_checked") == main_head:
+                continue
+            head = st["branch_head"]
+            try:
+                cmp = self.gh.compare("main", head)
+            except HttpError:
+                continue
+            st["landed_checked"] = main_head
+            if cmp.get("status") not in ("identical", "behind"):
+                self.store.save_state(fid, st)
+                continue
+            try:
+                landed = self.gh.commit(head)
+            except HttpError:
+                self.store.save_state(fid, st)
+                continue
+            files = [f["filename"] for f in landed.get("files", [])] or st.get("files") or []
+            # `do_not_merge` is left exactly as the operator set it: the hold refused a merge that has now happened
+            # elsewhere, so clearing it would erase why the item never merged here.
+            st.update(status="pushed", commit=head, commit_url=landed["html_url"],
+                      commit_message=landed["commit"]["message"].splitlines()[0], pushed_at=iso(), files=files,
+                      commit_date=landed["commit"]["committer"]["date"], landed_outside_gate=True,
+                      expects_ios=touches_ios(files),
+                      expects_ci=any(not f.startswith("apps/ios/") for f in files))
+            st.pop("gated_head", None)
+            self.store.save_state(fid, st)
+            self.store.event(fid, "landed_outside_gate", commit=head, files=files)
+            log(f"[{fid}] gated head {head[:8]} is already on main (merged outside the loop's gate); "
+                f"leaving gating → pushed, the builds take it from here")
 
     def watch_handoffs(self) -> None:
         """A handed-off item is picked up two ways: its owner pushes `feedback/<id>` (the loop gates and merges it
@@ -5511,7 +5581,8 @@ def main(argv: list[str]) -> int:
         # A handed-off item that never went through the loop (filed by hand): create it so the audit and
         # watch_handoffs follow the owner's `[feedback <id>]` commit to the builds and the fleet.
         if len(argv) < 5:
-            print("track <id> <issue-number> \"<comment>\" [--handle <login>] [--owner <label>]")
+            print("track <id> <issue-number> \"<comment>\" [--handle <login>] [--owner <label>]\n"
+                  "  without --handle the item is the filer's (the --owner agent id, else `agent`) at normal tier")
             return 2
         fid, number, comment = argv[2], int(argv[3]), argv[4]
         rest = argv[5:]
