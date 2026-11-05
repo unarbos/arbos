@@ -1297,6 +1297,10 @@ struct Message: Identifiable, Equatable {
     /// What the agent is doing right now ("Cloning RaoFoundation/subtensor"),
     /// written by the harness while the turn runs; the working line shows it.
     var activity: String? = nil
+    /// How far this message's attachments have uploaded, 0…1, while it waits in the outbox
+    /// (`AppModel.outboxProgress`). Never read out of a chat document: a posted row has
+    /// landed, and an outbox entry read back at launch comes back stopped, not sending.
+    var uploadProgress: Double? = nil
     /// Voice-call transcript line (`voice: true` / `source: "voice"` in the doc).
     /// Kept in the chat doc for agent context; the transcript UI does not render it.
     var voice: Bool = false
