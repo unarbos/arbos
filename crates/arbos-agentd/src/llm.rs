@@ -436,3 +436,54 @@ pub fn extract_return_contract(reply: &str) -> Option<Value> {
         .ok()
         .filter(|v| v.get("status").is_some())
 }
+
+/// The fields the "## Return contract" section of a worker's prompt asks for besides `status`.
+const CONTRACT_FIELDS: [&str; 6] = [
+    "summary",
+    "artifacts",
+    "acceptance",
+    "open_items",
+    "proposed_memory",
+    "questions",
+];
+
+/// Is this JSON a worker's return contract, rather than JSON a worker wrote for the user?
+///
+/// Deliberately narrower than [`extract_return_contract`]'s filter, because this one decides
+/// what to *remove* from a message a person reads: a `status` of exactly one of the four the
+/// contract defines, **and** at least one of the contract's own fields. An API body a worker was
+/// asked to show (`{"status": "ok", "data": …}`) matches neither half and stays in the message.
+fn is_return_contract(v: &Value) -> bool {
+    let Some(obj) = v.as_object() else {
+        return false;
+    };
+    obj.get("status")
+        .and_then(Value::as_str)
+        .is_some_and(|s| matches!(s, "done" | "blocked" | "partial" | "needs_input"))
+        && CONTRACT_FIELDS.iter().any(|f| obj.contains_key(*f))
+}
+
+/// `reply` with its trailing return contract removed — the human half of what a worker wrote.
+///
+/// Bug AC (Jacob, Test5 round 12): every path that posts a worker's final text into a chat goes
+/// through here, because the contract is machinery and the user is not reading JSON.
+///
+/// Only a contract-shaped block at the **end** of the reply is removed, which is where the
+/// prompt asks for it. A block with words after it is left alone: a worker explaining or quoting
+/// the contract shape writes exactly that, and nothing in the text tells the two apart.
+pub fn strip_return_contract(reply: &str) -> String {
+    let Some(start) = reply.rfind("```json") else {
+        return reply.to_owned();
+    };
+    let rest = &reply[start + 7..];
+    let Some(end) = rest.find("```") else {
+        return reply.to_owned();
+    };
+    if !rest[end + 3..].trim().is_empty() {
+        return reply.to_owned();
+    }
+    match serde_json::from_str::<Value>(rest[..end].trim()) {
+        Ok(v) if is_return_contract(&v) => reply[..start].trim_end().to_owned(),
+        _ => reply.to_owned(),
+    }
+}
