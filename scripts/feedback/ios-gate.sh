@@ -29,6 +29,47 @@ new_test_errors() {
   comm -23 <(printf '%s\n' "$1" | sed '/^$/d' | sort -u) <(printf '%s\n' "$2" | sed '/^$/d' | sort -u)
 }
 
+# build_errors <xcodebuild log> → why the app target did not compile, in the one shape that survives
+# the trip to the worker's issue. `rust-gate.sh status` forwards only "== " lines and lines already
+# shaped like a compiler diagnostic, so anything written in another shape is readable on the gate Mac
+# and nowhere else. Everything here is therefore "== " prefixed, which also keeps it in log order
+# directly under its own "== <config>: FAILS" heading instead of being hoisted into a separate block.
+#
+# Measured against the real transport on 2026-10-31, three ways the cause failed to arrive:
+#   - The fallback never travelled. The "-- <config> log tail --" below the grep existed for builds
+#     whose cause the grep cannot match, and every one of its lines was dropped. On a link failure the
+#     worker was shown `clang: error: linker command failed with exit code 1`, which names no cause,
+#     while `ld: framework 'ArbosFFI' not found` stayed on the Mac.
+#   - The cascade crowded out the rest. One renamed type reported at 30 use sites filled the 25-line
+#     window the poller posts and pushed the heading, and the one error that said what to do, out of
+#     the comment: 31 errors in the log, 2 distinct ones on the issue.
+#   - Every error was printed twice, once by the grep and again inside the tail under it.
+build_errors() {
+  local log=$1 errs over
+  # One entry per distinct "<file>: <message>", first-seen order, carrying how many sites repeat it.
+  # Line and column are dropped for the grouping, so a cascade collapses to the sentence that matters.
+  errs=$(grep -E "error: |^ld: |^Command .+ failed" "$log" 2>/dev/null | grep -v "warning:" \
+    | sed -E "s#/Users/[^/]*/arbos-gate/##g; s#^([^ ]+):[0-9]+:[0-9]+: #\1: #; s#: error: #: #" \
+    | awk '{ if (!($0 in n)) order[++k] = $0; n[$0]++ }
+           END { for (i = 1; i <= k; i++)
+                   printf "%s%s\n", order[i], (n[order[i]] > 1 ? "   (" n[order[i]] " sites)" : "") }')
+  if [[ -n "$errs" ]]; then
+    printf '%s\n' "$errs" | head -12 | cut -c1-300 | sed 's/^/== error: /'
+    over=$(( $(printf '%s\n' "$errs" | wc -l) - 12 ))
+    if (( over > 0 )); then
+      echo "== error: … and $over more distinct errors; the full log is on the gate Mac"
+    fi
+  else
+    # Nothing matched, so the tail is the only evidence there is and it has to reach the issue.
+    echo "== build failed with no error line this gate recognises; last lines of the log:"
+    tail -n 20 "$log" | sed -E "s#/Users/[^/]*/arbos-gate/##g" | cut -c1-300 | sed 's/^/== | /'
+  fi
+  # Never leave a false exit status behind: under `set -o pipefail` a function whose last command is a
+  # failed test poisons any pipeline it is read through, which is how a clean `rust-gate.sh status` once
+  # read as "Mac unreachable" (see the note on its own grep). The caller judges the build, not this.
+  return 0
+}
+
 # Run the whole ArbosTests suite (#1868, coordinator 2026-10-26 05:52) on ONE named simulator, parallel
 # off (docs/process-rules.md), reusing the .xctestrun that build-for-testing just produced: 217 tests run
 # in 4 s, ≈ 1 min wall. A test red on MAIN is not the branch's fault: the failing set of the base main
@@ -176,6 +217,38 @@ if [[ "${1:-}" == "selftest" ]]; then
     echo "selftest: failing-test parser WRONG — got: $(failing_tests "$tlog")"; rm -f "$tlog"; exit 1
   fi
   rm -f "$tlog"
+  # The app target's failure has to survive the trip, not merely be printed. `forwarded` is the filter
+  # from rust-gate.sh `status` — the only lines the poller ever sees — so these assertions fail if the
+  # transport is changed out from under them, which is how the cause went missing in the first place.
+  forwarded() { grep -E "^== |^(error|warning)(\[|:)|^\s+--> |^Diff in |^test .* FAILED|^failures:|panicked at|: error: |\*\* BUILD FAILED"; }
+  blog=$(mktemp -t ios-gate-build)
+  # A link failure: the only line the old grep kept names no cause, and the cause was in the tail.
+  printf '%s\n' "ld: warning: ignoring duplicate libraries: '-lc++'" \
+                 "ld: framework 'ArbosFFI' not found" \
+                 "clang: error: linker command failed with exit code 1 (use -v to see invocation)" \
+                 "** BUILD FAILED **" >"$blog"
+  if build_errors "$blog" | forwarded | grep -qF "ld: framework 'ArbosFFI' not found"; then
+    echo "selftest: a link failure's cause reaches the issue, not just 'linker command failed'"
+  else
+    echo "selftest: WRONG — the cause of a link failure is dropped in transport; the worker is told"
+    echo "          only that the linker failed. Got: $(build_errors "$blog" | forwarded | tr '\n' '|')"
+    rm -f "$blog"; exit 1
+  fi
+  # A renamed type reported at 30 use sites: the cascade must not crowd out the error that explains it.
+  : >"$blog"
+  for i in $(seq 1 30); do
+    echo "/Users/x/arbos-gate/apps/ios/Arbos/Views/ChatView.swift:$((100 + i)):24: error: cannot find 'MentionChipSpacing' in scope" >>"$blog"
+  done
+  echo "/Users/x/arbos-gate/apps/ios/Arbos/Theme/Spacing.swift:14:8: error: 'MentionChipSpacing' was renamed to 'MentionChipMetrics'" >>"$blog"
+  out=$(build_errors "$blog" | forwarded)
+  if [[ "$(wc -l <<< "$out")" -le 12 ]] && grep -qF "renamed to 'MentionChipMetrics'" <<< "$out" \
+     && grep -qF "(30 sites)" <<< "$out"; then
+    echo "selftest: a 31-error cascade collapses to its distinct causes and still fits the comment"
+  else
+    echo "selftest: WRONG — cascade not collapsed ($(wc -l <<< "$out") lines) or the explaining error"
+    echo "          was crowded out; the poller posts only the last 25 lines it is given"; rm -f "$blog"; exit 1
+  fi
+  rm -f "$blog"
   [[ -n "$(test_sim_udid)" ]] && echo "selftest: test simulator '$TEST_SIM_NAME' present ($(test_sim_udid))" || { echo "selftest: test simulator '$TEST_SIM_NAME' MISSING"; exit 1; }
   # The scheme must build the unit-test target in its Test action, or build-for-testing checks nothing.
   scheme=$HOME/arbos-gate/apps/ios/Arbos/Arbos.xcodeproj/xcshareddata/xcschemes/Arbos.xcscheme
@@ -307,11 +380,10 @@ for config in Release Debug; do
     CODE_SIGNING_ALLOWED=NO build >"$log" 2>&1
   crc=$?
   echo "== $config: $([ "$crc" -eq 0 ] && echo compiles || echo FAILS)"
-  grep -E "error:|BUILD (SUCCEEDED|FAILED)|note: (building|ArbosFFI)" "$log" | grep -v "warning:" | sed 's#/Users/[^/]*/arbos-gate/##' | head -40
-  if [[ "$crc" -ne 0 ]]; then
-    # Cargo spam from a runaway rebuild can bury the real error; show the tail too.
-    echo "-- $config log tail --"
-    tail -30 "$log" | sed 's#/Users/[^/]*/arbos-gate/##'
+  if [[ "$crc" -eq 0 ]]; then
+    grep -E "BUILD SUCCEEDED|note: (building|ArbosFFI)" "$log" | sed 's#/Users/[^/]*/arbos-gate/##' | head -40
+  else
+    build_errors "$log"
   fi
   rm -f "$log"
   if [[ "$crc" -eq 0 ]]; then
