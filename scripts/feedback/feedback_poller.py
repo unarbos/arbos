@@ -3,7 +3,9 @@
 
 Runs every 2 minutes from arbos-feedback-poller.timer (see install-feedback-loop.sh). One tick:
 
-  1. Stop at once when the kill file (/etc/arbos/feedback.disabled) exists.
+  1. Stop at once when the kill file (/etc/arbos/feedback.disabled) exists, or when GitHub refused the
+     loop's token in this or an earlier tick (<state>/credential-rejected, written once and said plainly:
+     an expired or revoked token stops the watch instead of being retried in silence every 2 minutes).
   2. List new screenshot feedback: TestFlight (App Store Connect betaFeedbackScreenshotSubmissions,
      every tester of every group), the Mac app's "Send feedback" sheet (relay GET /admin/feedback,
      every signed-in user), and synthetic items from <state>/inbox/.
@@ -375,6 +377,24 @@ def http(method: str, url: str, headers: dict[str, str] | None = None, data: byt
         raise HttpError(e.code, body, url, {k.lower(): v for k, v in e.headers.items()}) from None
 
 
+# A credential GitHub refuses is not a transient failure: every call in this tick and in every later tick
+# fails the same way until somebody replaces the token. The loop has four dozen HttpError handlers that skip
+# or retry, which is right for a 5xx and wrong here — the watch would keep its timer and poll nothing, so a
+# stalled loop would read as a quiet one (the dispatch token expires 2026-11-14). The GitHub client latches
+# on this instead and stops the watch. A 403 for the rate limit stays transient; the budget guard owns it.
+_AUTH_REASON_RE = re.compile(r"bad credentials|token (?:has )?expired|expired token|revoked|"
+                             r"not accessible by (?:integration|personal access token)|SAML enforcement", re.I)
+
+
+def credential_rejected(e: HttpError) -> bool:
+    """True when the failure is about the credential itself: a 401, or a 403 that names an auth reason."""
+    if e.status == 401:
+        return True
+    if e.status != 403 or "rate limit" in e.body.lower() or e.headers.get("x-ratelimit-remaining") == "0":
+        return False
+    return bool(_AUTH_REASON_RE.search(e.body))
+
+
 def http_json(method: str, url: str, **kw: Any) -> Any:
     status, _, body = http(method, url, **kw)
     if status == 204 or not body:
@@ -483,6 +503,7 @@ class GitHub:
         self.h = {"Authorization": f"Bearer {cfg.github_token}", "Accept": "application/vnd.github+json",
                   "X-GitHub-Api-Version": "2022-11-28"}
         self.etag_path = cfg.state_dir / "github-etags.json"
+        self.halt_file = cfg.state_dir / "credential-rejected"
         self.etags: dict[str, dict] = {}
         self.etags_dirty = False
         with contextlib.suppress(Exception):
@@ -509,6 +530,22 @@ class GitHub:
     BUDGET_FLOOR = 500
     ESSENTIAL = ("/merges", "/git/refs", "/git/commits", "/actions/workflows/ci.yml/dispatches")
 
+    def stop_if_rejected(self, e: HttpError, shape: str) -> None:
+        """A refused credential ends the tick here, loudly; the halt file keeps the next tick from polling with
+        the same dead token. Nothing of the token itself is logged or written — GitHub's own message is all."""
+        if not credential_rejected(e):
+            return
+        msg = ""
+        with contextlib.suppress(Exception):
+            msg = str(json.loads(e.body).get("message") or "")
+        what = f"HTTP {e.status}" + (f" ({msg})" if msg else "") + f" on {shape}"
+        log(f"CREDENTIAL REJECTED: GitHub refused the loop's GITHUB_TOKEN — {what}. THE WATCH HAS STOPPED: "
+            f"nothing is polled, gated, merged or announced from here on. Replace the token in the poller's "
+            f"environment and delete {self.halt_file} to start the watch again.")
+        with contextlib.suppress(OSError):
+            self.halt_file.write_text(f"{iso()} {what}\n")
+        raise SystemExit(1)
+
     def api(self, method: str, path: str, **kw: Any) -> Any:
         url = path if path.startswith("http") else f"{GITHUB_API}{path}"
         shape = f"{method} {self.endpoint_shape(url)}"
@@ -527,6 +564,7 @@ class GitHub:
                 status, headers, body = http(method, url, headers=self.h, **kw)
             except HttpError as e:
                 self.note_remaining(e.headers)
+                self.stop_if_rejected(e, shape)
                 raise
             self.note_remaining(headers)
             if low:
@@ -550,6 +588,7 @@ class GitHub:
             # 17:5x Oct 25: ~200 unlisted 404 branch probes per tick were the "external" PAT drain.
             row[0] += 1
             self.note_remaining(e.headers)
+            self.stop_if_rejected(e, shape)
             raise
         row[0] += 1
         self.note_remaining(headers)
@@ -4446,6 +4485,11 @@ class Loop:
         if self.cfg.kill_file.exists():
             log(f"kill file {self.cfg.kill_file} present; doing nothing")
             return 0
+        if self.gh.halt_file.exists():
+            log(f"THE WATCH IS STOPPED: GitHub refused the loop's GITHUB_TOKEN "
+                f"({self.gh.halt_file.read_text(errors='replace').strip()[:200]}). Nothing is polled, gated, merged "
+                f"or announced. Replace the token, then delete {self.gh.halt_file} to start the watch again.")
+            return 1
         self.intake()
         self.advance_all()
         try:
@@ -5264,6 +5308,9 @@ class Loop:
         print(f"cursor since={cur.get('since')} checked={cur.get('checked')} seen={len(cur.get('seen', []))}")
         print(f"launches today={self.store.launches_today()}/{self.cfg.max_per_day} last={self.store.last_launch()}")
         print(f"kill file: {'PRESENT' if self.cfg.kill_file.exists() else 'absent'} ({self.cfg.kill_file})")
+        if self.gh.halt_file.exists():
+            print(f"WATCH STOPPED — GitHub refused GITHUB_TOKEN: {self.gh.halt_file.read_text(errors='replace').strip()}"
+                  f" (replace the token, then delete {self.gh.halt_file})")
         gate = self.approval_state()
         held = [self.store.state(f) for f in self.store.items()]
         held = [h for h in held if h.get("status") == "awaiting_jacob" or (h.get("awaiting") and h.get("status") == "gating" and not h.get("approved_by_jacob"))]
