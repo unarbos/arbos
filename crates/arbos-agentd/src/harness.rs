@@ -92,6 +92,12 @@ pub trait HarnessAdapter: Send + Sync {
     async fn live_child_pids(&self) -> Vec<u32> {
         Vec::new()
     }
+    /// The process group this session's child leads, so a cancel can reap everything the child
+    /// spawned after the child itself is gone (bug Z). `None` for an adapter whose children are
+    /// not group leaders; the cancel then falls back to the cgroup alone.
+    async fn child_pgid(&self, _session_id: &str) -> Option<u32> {
+        None
+    }
 }
 
 /// Translate one pi/Prime RPC event into zero or more `AgentEvent`s.
@@ -218,6 +224,10 @@ impl RpcSessions {
             children: Mutex::new(HashMap::new()),
             streams: Mutex::new(HashMap::new()),
         }
+    }
+
+    async fn pgid(&self, session_id: &str) -> Option<u32> {
+        self.children.lock().await.get(session_id)?.tree().pgid
     }
 
     /// Pids of the children still running, for the workspace-leftover sweep.
@@ -603,6 +613,10 @@ impl HarnessAdapter for PrimeAdapter {
     async fn live_child_pids(&self) -> Vec<u32> {
         self.sessions.live_pids().await
     }
+
+    async fn child_pgid(&self, session_id: &str) -> Option<u32> {
+        self.sessions.pgid(session_id).await
+    }
 }
 
 // ---- PiAdapter ---------------------------------------------------------------------------------
@@ -906,6 +920,10 @@ impl HarnessAdapter for PiAdapter {
 
     async fn live_child_pids(&self) -> Vec<u32> {
         self.sessions.live_pids().await
+    }
+
+    async fn child_pgid(&self, session_id: &str) -> Option<u32> {
+        self.sessions.pgid(session_id).await
     }
 }
 
