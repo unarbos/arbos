@@ -1,18 +1,18 @@
 //! One copy of an agent's avatar everywhere (Jacob, 2026-10-25: "sometimes it shows its old
-//! pfp, sometimes the new one switches in"; a foreign agent drew the automatic leaf).
+//! pfp, sometimes the new one switches in"; a foreign agent drew the automatic disc).
 //!
 //! The store holds an agent's card in several places: the owner's `Project` record and an
 //! `AgentMember` copy on every people chat the agent sits on. A change used to move one copy
 //! (the one the change went through) and leave the rest; the resolver reads the open chat's
 //! roster first, so the bubble drew the old picture while the sidebar drew the new one, and a
 //! later roster refresh flipped them. Every write now goes through [`apply`], which lands the
-//! same facts — picture URL, leaf picks, the relay's `avatar_version` stamp — in every copy
+//! same facts — picture URL, disc colour, the relay's `avatar_version` stamp — in every copy
 //! and never rolls a copy back to an older stamp; [`reconcile`] runs after every fetch so the
 //! newest copy wins whatever order the answers arrived in.
 //!
 //! The picture URL is the relay's public route `/projects/{id}/avatar.jpg?v={version}` —
 //! readable by anyone who sees the agent (the `/blob/{project}/…` slot is the owner's and the
-//! guests' only, which is why a group member got 403 and the leaf), and a change is a new URL,
+//! guests' only, which is why a group member got 403 and the disc), and a change is a new URL,
 //! so the avatar cache (keyed by URL) never serves the old bytes.
 
 use crate::model::Project;
@@ -21,8 +21,7 @@ use crate::model::Project;
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Facts {
     pub image_url: Option<String>,
-    pub leaf: Option<u8>,
-    pub leaf_color: Option<u8>,
+    pub disc_color: Option<u8>,
     pub version: i64,
 }
 
@@ -49,8 +48,7 @@ pub fn copies(projects: &[Project], project_id: &str) -> Vec<Facts> {
         .filter(|p| !p.is_people() && p.id == project_id)
         .map(|p| Facts {
             image_url: p.image_url.clone(),
-            leaf: p.avatar_leaf,
-            leaf_color: p.avatar_leaf_color,
+            disc_color: p.avatar_disc_color,
             version: p.avatar_version,
         })
         .collect();
@@ -58,8 +56,7 @@ pub fn copies(projects: &[Project], project_id: &str) -> Vec<Facts> {
         for a in chat.agents.iter().filter(|a| a.project_id == project_id) {
             out.push(Facts {
                 image_url: a.image_url.clone(),
-                leaf: a.avatar_leaf,
-                leaf_color: a.avatar_leaf_color,
+                disc_color: a.avatar_disc_color,
                 version: a.avatar_version,
             });
         }
@@ -83,16 +80,14 @@ pub fn apply(projects: &mut [Project], project_id: &str, facts: &Facts, force: b
     for p in projects.iter_mut() {
         if !p.is_people() && p.id == project_id && (force || facts.version >= p.avatar_version) {
             p.image_url = facts.image_url.clone();
-            p.avatar_leaf = facts.leaf;
-            p.avatar_leaf_color = facts.leaf_color;
+            p.avatar_disc_color = facts.disc_color;
             p.avatar_version = facts.version;
         }
         if p.is_people() {
             for a in p.agents.iter_mut() {
                 if a.project_id == project_id && (force || facts.version >= a.avatar_version) {
                     a.image_url = facts.image_url.clone();
-                    a.avatar_leaf = facts.leaf;
-                    a.avatar_leaf_color = facts.leaf_color;
+                    a.avatar_disc_color = facts.disc_color;
                     a.avatar_version = facts.version;
                 }
             }
@@ -119,7 +114,7 @@ pub fn reconcile(projects: &mut [Project]) {
     }
 }
 
-/// The relay's `agent_profile_updated` push: the picture and the stamp land in place (the leaf
+/// The relay's `agent_profile_updated` push: the picture and the stamp land in place (the disc
 /// picks are kept until the re-read that follows); an older push changes nothing.
 pub fn apply_push(
     projects: &mut [Project],
@@ -134,8 +129,7 @@ pub fn apply_push(
     }
     let facts = Facts {
         image_url: picture_url(http_url, project_id, image_key, version),
-        leaf: base.leaf,
-        leaf_color: base.leaf_color,
+        disc_color: base.disc_color,
         version,
     };
     apply(projects, project_id, &facts, false);
@@ -164,8 +158,7 @@ mod tests {
         Project {
             id: id.into(),
             name: name.into(),
-            avatar_leaf: Some(4),
-            avatar_leaf_color: Some(1),
+            avatar_disc_color: Some(4),
             image_url: url.map(str::to_owned),
             avatar_version: version,
             ..Default::default()
@@ -178,8 +171,7 @@ mod tests {
             name: p.name.clone(),
             handle: Project::mention_slug(&p.name),
             owner_handle: "unarbos".into(),
-            avatar_leaf: p.avatar_leaf,
-            avatar_leaf_color: p.avatar_leaf_color,
+            avatar_disc_color: p.avatar_disc_color,
             image_url: p.image_url.clone(),
             avatar_version: p.avatar_version,
             ..Default::default()
@@ -231,8 +223,7 @@ mod tests {
             "01HEZ",
             &Facts {
                 image_url: new_url.clone(),
-                leaf: Some(4),
-                leaf_color: Some(1),
+                disc_color: Some(4),
                 version: 200,
             },
             true,
@@ -257,14 +248,13 @@ mod tests {
             "the roster copy was brought up"
         );
 
-        // Reset to the leaf (stamp 300): the picture is gone everywhere, the pick is drawn.
+        // Reset to the disc (stamp 300): the picture is gone everywhere, the pick is drawn.
         apply(
             &mut projects,
             "01HEZ",
             &Facts {
                 image_url: None,
-                leaf: Some(2),
-                leaf_color: Some(3),
+                disc_color: Some(2),
                 version: 300,
             },
             false,
@@ -273,8 +263,8 @@ mod tests {
         assert_eq!(h, None);
         assert_eq!(b.image_key, None);
         assert_eq!(p.image_key, None);
-        assert_eq!((b.leaf.leaf, b.leaf.color), (2, 3));
-        assert_eq!((p.leaf.leaf, p.leaf.color), (2, 3));
+        assert_eq!(b.disc_color, 2);
+        assert_eq!(p.disc_color, 2);
 
         // An older write (a late answer) cannot roll a copy back.
         apply(
@@ -282,8 +272,7 @@ mod tests {
             "01HEZ",
             &Facts {
                 image_url: new_url.clone(),
-                leaf: Some(4),
-                leaf_color: Some(1),
+                disc_color: Some(4),
                 version: 200,
             },
             false,
@@ -297,8 +286,7 @@ mod tests {
         let foreign = Project {
             id: "01FOR".into(),
             name: "Foreign".into(),
-            avatar_leaf: Some(7),
-            avatar_leaf_color: Some(2),
+            avatar_disc_color: Some(7),
             ..Default::default()
         };
         let mut projects = vec![
@@ -318,11 +306,7 @@ mod tests {
         assert_eq!(h, want);
         assert_eq!(b.image_key, want);
         assert_eq!(p.image_key, want);
-        assert_eq!(
-            (b.leaf.leaf, b.leaf.color),
-            (4, 1),
-            "leaf picks kept until the re-read"
-        );
+        assert_eq!(b.disc_color, 4, "disc colour kept until the re-read");
 
         // Older push: ignored.
         apply_push(
@@ -399,7 +383,7 @@ mod tests {
 #[cfg(test)]
 mod relaunch_tests {
     //! Jacob, 2026-10-26 (Mac v0.6.268): after relaunching, every surface drew the agent's
-    //! old picture — the leaf placeholder — because the cold launch's first picture fetch
+    //! old picture — the disc placeholder — because the cold launch's first picture fetch
     //! failed (network not up yet) and the URL was then marked done for the session, and
     //! because nothing persisted the pictures the last run had. The relaunch, headless:
     //! save the registry and the fetched pictures to a store → drop it (quit) → open it
@@ -418,8 +402,7 @@ mod relaunch_tests {
         Project {
             id: "01HEZ".into(),
             name: "Hezbola".into(),
-            avatar_leaf: Some(4),
-            avatar_leaf_color: Some(1),
+            avatar_disc_color: Some(4),
             image_url: url.map(str::to_owned),
             avatar_version: version,
             ..Default::default()
@@ -435,8 +418,7 @@ mod relaunch_tests {
                 project_id: p.id.clone(),
                 name: p.name.clone(),
                 handle: Project::mention_slug(&p.name),
-                avatar_leaf: p.avatar_leaf,
-                avatar_leaf_color: p.avatar_leaf_color,
+                avatar_disc_color: p.avatar_disc_color,
                 image_url: p.image_url.clone(),
                 avatar_version: p.avatar_version,
                 ..Default::default()
@@ -465,7 +447,7 @@ mod relaunch_tests {
             .map(|a| member_identity(chat, projects, a).image_key)
             .unwrap_or(None);
         // The activity row of a turn the box has not attributed yet (`sender: "agent"`,
-        // Jacob's "Reading 500" leaf): in a one-agent chat it is that agent.
+        // Jacob's "Reading 500" disc): in a one-agent chat it is that agent.
         let activity = agent_identity(chat, projects, "agent", None, None).image_key;
         vec![
             ("header / sidebar / hero / secrets picker", record),
@@ -547,8 +529,7 @@ mod relaunch_tests {
                 "01HEZ",
                 &Facts {
                     image_url: Some(url_b.clone()),
-                    leaf: Some(4),
-                    leaf_color: Some(1),
+                    disc_color: Some(4),
                     version: 200,
                 },
                 false,

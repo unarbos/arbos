@@ -156,7 +156,7 @@ pub fn sentence(typing: &[&str], working: &[&str], detail: Option<&str>, queued:
 
 /// Everyone typing or working in `chat_id`, newest first; `None` when the row
 /// has nothing to say. Pictures are the same ones the header pill and the
-/// rows use for that person / agent (D79 disc, D92 leaf, or the photo).
+/// rows use for that person / agent (D79 initials, D92 disc, or the photo).
 pub fn gather(state: &AppState, chat_id: &str, space: &Project, theme: &Theme) -> Option<Presence> {
     let now = crate::model::now_ms();
     let mut participants: Vec<Participant> = Vec::new();
@@ -525,11 +525,11 @@ mod text_tests {
 mod identity_tests {
     //! #1592: the presence row and the bubble disc ask one resolver with the same
     //! row, so a foreign agent (someone else's TestAgent in Arbonites) gets the
-    //! same picture and the same words on both — the roster's leaf and its display
+    //! same picture and the same words on both — the roster's disc and its display
     //! name, never a handle-seeded initials disc or the raw `@slug`.
     use super::*;
     use crate::model::{AgentMember, SpaceKind};
-    use crate::ui::avatars::{leaf, LeafPick};
+    use crate::ui::avatars::disc;
 
     fn roster_agent(id: &str, name: &str, image: Option<&str>) -> AgentMember {
         AgentMember {
@@ -537,8 +537,7 @@ mod identity_tests {
             name: name.into(),
             handle: Project::mention_slug(name),
             owner_handle: "sami".into(),
-            avatar_leaf: Some(5),
-            avatar_leaf_color: Some(2),
+            avatar_disc_color: Some(2),
             image_url: image.map(str::to_owned),
             avatar_version: 0,
             ..Default::default()
@@ -604,11 +603,7 @@ mod identity_tests {
         assert!(p.known, "the roster answered, not a fallback");
         assert_eq!(p.name, "TestAgent", "the display name, not the handle");
         assert_eq!(p.handle, "testagent");
-        assert_eq!(
-            p.leaf,
-            LeafPick { leaf: 5, color: 2 },
-            "the roster's leaf picks"
-        );
+        assert_eq!(p.disc_color, 2, "the roster's disc colour");
         assert_eq!(p.id, "01TEST", "seeded by the bare id");
     }
 
@@ -636,11 +631,14 @@ mod identity_tests {
         let b = bubble(&space, &[], &m);
         let p = presence(&space, &[], &m);
         assert_eq!(b.id, p.id);
-        assert_eq!(b.leaf, p.leaf, "both seed the leaf with the bare id");
-        assert_eq!(p.leaf, leaf::default_pick("01GHOST"));
+        assert_eq!(
+            b.disc_color, p.disc_color,
+            "both seed the colour with the bare id"
+        );
+        assert_eq!(p.disc_color, disc::default_color("01GHOST"));
         assert_ne!(
-            p.leaf,
-            leaf::default_pick("agent:01GHOST"),
+            p.disc_color,
+            disc::default_color("agent:01GHOST"),
             "the old presence fallback seeded with the prefixed sender"
         );
         assert_eq!(p.name, "Ghost Writer", "the row's own name, never `ghost`");

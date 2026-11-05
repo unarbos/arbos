@@ -29,7 +29,7 @@ pub const WINDOW_DRAG_SLOP: f32 = 4.0;
 
 /// The press that may become a window move. A global, not a per-render cell:
 /// element listeners belong to the frame that rendered them, and anything
-/// animating (a leaf avatar's sway, a streaming dot) re-renders every frame,
+/// animating (a streaming dot, a pulsing badge) re-renders every frame,
 /// so a cell created inside `window_drag()` lost the press between mouse-down
 /// and the first mouse-move and the window could not be dragged at all
 /// (v0.6.11x–v0.6.131, [feedback mac-window-drag-hotfix]).

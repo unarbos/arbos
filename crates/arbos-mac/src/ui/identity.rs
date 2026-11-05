@@ -17,7 +17,7 @@ pub const HEADER_GAP: f32 = 5.0;
 /// Picture → name in a list row — sidebar, members, people (Grok: 11–12 pt ink).
 pub const ROW_GAP: f32 = 10.0;
 
-/// A fixed `size` square for the picture. Whatever the picture does — a leaf's
+/// A fixed `size` square for the picture. Whatever the picture does — a disc's
 /// hover gust, a photo, a stacked badge hanging off the corner — the slot keeps
 /// its width, so the name's left edge is `slot right + gap` at every width.
 pub fn slot(size: f32, picture: impl IntoElement) -> Div {
@@ -69,12 +69,12 @@ mod tests {
     use super::*;
     use crate::ui::avatars;
 
-    /// Three picture kinds: a leaf disc (the hover kind, as in the header and
-    /// rows), an initials disc, and a photo-shaped box with a badge hanging off
-    /// its corner (the shared-project row).
+    /// Three picture kinds: a solid-colour disc (an agent's default, as in the
+    /// header and rows), an initials disc, and a photo-shaped box with a badge
+    /// hanging off its corner (the shared-project row).
     #[derive(Clone, Copy)]
     enum Picture {
-        Leaf,
+        Disc,
         Initials,
         PhotoWithBadge,
     }
@@ -96,10 +96,7 @@ mod tests {
         ) -> impl IntoElement {
             let size = self.size;
             let picture: AnyElement = match self.picture {
-                Picture::Leaf => {
-                    avatars::leaf_element(avatars::LeafPick { leaf: 3, color: 4 }, size)
-                        .into_any_element()
-                }
+                Picture::Disc => avatars::disc_element(4, size).into_any_element(),
                 Picture::Initials => div()
                     .size(px(size))
                     .flex_shrink_0()
@@ -147,7 +144,7 @@ mod tests {
 
     #[gpui::test]
     fn the_name_starts_at_the_slot_edge_plus_the_gap_at_every_width(cx: &mut TestAppContext) {
-        for picture in [Picture::Leaf, Picture::Initials, Picture::PhotoWithBadge] {
+        for picture in [Picture::Disc, Picture::Initials, Picture::PhotoWithBadge] {
             for (size, gap) in [(22.0, HEADER_GAP), (36.0, ROW_GAP)] {
                 for width in [60.0, 120.0, 200.0, 320.0, 600.0] {
                     for (name, subtitle) in [("Lium", None), (LONG, Some(LONG_SUB))] {

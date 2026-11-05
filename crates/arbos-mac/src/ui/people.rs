@@ -62,7 +62,7 @@ pub fn avatar(image: Option<Arc<RenderImage>>, person: &Person, size: f32, theme
     }
 }
 
-/// A shared agent's avatar, through the resolver (its picture, else its leaf).
+/// A shared agent's avatar, through the resolver (its picture, else its disc).
 pub fn agent_glyph(
     state: &AppState,
     chat: Option<&Project>,

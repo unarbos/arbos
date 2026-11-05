@@ -268,10 +268,6 @@ const ICONS: &[(&str, &str)] = &[
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
-        // D92 leaf avatars: `leaves/<slug>.svg` from the shared art in arbos-core.
-        if let Some(bytes) = crate::ui::avatars::leaf_asset_bytes(path) {
-            return Ok(Some(Cow::Borrowed(bytes)));
-        }
         // The link tiles' bundled brand marks (`brands/<slug>.svg`).
         if let Some(bytes) = crate::ui::link_tile::brand_asset_bytes(path) {
             return Ok(Some(Cow::Borrowed(bytes)));

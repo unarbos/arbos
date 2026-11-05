@@ -23,7 +23,7 @@ use gpui::{App, Entity, Hsla, RenderImage};
 
 use crate::app::{AppState, ProfilePage};
 use crate::model::{Person, Project};
-use crate::ui::avatars::{self, LeafPick};
+use crate::ui::avatars;
 use crate::ui::theme::Theme;
 
 /// The chip's geometry, Grok Bot's mention chip (Jacob's shot, Oct 23): the
@@ -249,8 +249,8 @@ pub enum Picture {
         top: Hsla,
         bottom: Hsla,
     },
-    /// D92 leaf disc.
-    Leaf(LeafPick),
+    /// D92 solid-colour disc.
+    Disc(u8),
     /// The neutral disc (Jacob, 2026-10-25): the name's first letter on plain grey.
     Neutral {
         name: String,
@@ -470,7 +470,7 @@ impl Mentions {
                             project_id: ident.id.clone(),
                         }),
                         name: ident.name.clone(),
-                        picture: identity_picture(s, &ident, theme),
+                        picture: identity_picture(s, &ident),
                         id: Some(format!("agent:{}", ident.id)),
                     },
                 );
@@ -501,16 +501,12 @@ impl Mentions {
             if slug.is_empty() {
                 continue;
             }
-            let picture = match (
-                avatars::leaf_avatars_on(),
-                server.avatar_leaf,
-                server.avatar_leaf_color,
-            ) {
-                (_, Some(avatars::leaf::NEUTRAL), _) => Picture::Neutral {
+            let picture = match server.avatar_disc_color {
+                Some(avatars::disc::NEUTRAL) => Picture::Neutral {
                     name: server.name.clone(),
                 },
-                (true, Some(leaf), Some(color)) => Picture::Leaf(LeafPick { leaf, color }),
-                _ => initials(
+                Some(color) => Picture::Disc(color),
+                None => initials(
                     &server.id,
                     &server.name,
                     server.avatar_color_index_effective,
@@ -801,10 +797,9 @@ pub fn agent_member_picture(
     s: &AppState,
     space: Option<&Project>,
     a: &crate::model::AgentMember,
-    theme: &Theme,
 ) -> Picture {
     let ident = avatars::member_identity(space, &s.projects, a);
-    identity_picture(s, &ident, theme)
+    identity_picture(s, &ident)
 }
 
 pub fn person_picture(s: &AppState, person: &Person, theme: &Theme) -> Picture {
@@ -819,9 +814,9 @@ pub fn person_picture(s: &AppState, person: &Person, theme: &Theme) -> Picture {
     }
 }
 
-/// The chip picture for a resolved agent: its uploaded picture, else its leaf (D92) or
-/// initials (D79) — the identity's own picks, never a guess from the handle.
-fn identity_picture(s: &AppState, a: &avatars::AgentIdentity, theme: &Theme) -> Picture {
+/// The chip picture for a resolved agent: its uploaded picture, else its disc (D92) —
+/// the identity's own pick, never a guess from the handle.
+fn identity_picture(s: &AppState, a: &avatars::AgentIdentity) -> Picture {
     if let Some(image) = a.image_key.as_deref().and_then(|url| s.avatar(url)) {
         return Picture::Image(image);
     }
@@ -830,37 +825,25 @@ fn identity_picture(s: &AppState, a: &avatars::AgentIdentity, theme: &Theme) -> 
             name: a.name.clone(),
         };
     }
-    if avatars::leaf_avatars_on() {
-        Picture::Leaf(a.leaf)
-    } else {
-        initials(&a.id, &a.name, Some(a.color_index), theme)
-    }
+    Picture::Disc(a.disc_color)
 }
 
 fn project_picture(s: &AppState, p: &Project, theme: &Theme) -> Picture {
     if let Some(image) = avatars::project_image(s, p) {
         return Picture::Image(image);
     }
-    if avatars::leaf::is_neutral(p.avatar_leaf) {
+    if avatars::disc::is_neutral(p.avatar_disc_color) {
         return Picture::Neutral {
             name: p.name.clone(),
         };
     }
     if p.is_people_group() {
-        return match (
-            avatars::leaf_avatars_on(),
-            p.avatar_leaf,
-            p.avatar_leaf_color,
-        ) {
-            (true, Some(leaf), Some(color)) => Picture::Leaf(LeafPick { leaf, color }),
-            _ => initials(&p.id, &p.name, p.avatar_color_index, theme),
+        return match p.avatar_disc_color {
+            Some(color) => Picture::Disc(color),
+            None => initials(&p.id, &p.name, p.avatar_color_index, theme),
         };
     }
-    if avatars::leaf_avatars_on() {
-        Picture::Leaf(avatars::project_leaf(p))
-    } else {
-        initials(&p.id, &p.name, p.avatar_color_index, theme)
-    }
+    Picture::Disc(avatars::disc_color(&p.id, p.avatar_disc_color))
 }
 
 #[cfg(test)]

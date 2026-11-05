@@ -1,5 +1,5 @@
 //! An agent's page on the shared profile pane (D93): one [`ProfilePane`]
-//! spec — hero (the plain leaf / photo with the owner's crayon, the name and
+//! spec — hero (the plain disc / photo with the owner's crayon, the name and
 //! the label, both edited in place), the tabs **Details** (Settings: model,
 //! reasoning, call voice) | **Library** (images, files, links from the
 //! agent's chats) | **Computer** (the agent's box). The same three tabs as the
@@ -13,7 +13,7 @@
 //! Grok Bot parity ([feedback info-pane-chrome-2026-10-24], Jacob 2026-10-24):
 //! no "Delete agent" button on the pane — deleting an agent is the sidebar
 //! row's menu (`sidebar::row_menu`, Delete, at once); the hero picture is the
-//! bare leaf, no pale disc behind it and no presence dot (presence stays on
+//! plain disc, with no presence dot on it (presence stays on
 //! the sidebar row); the top bar carries Grok's share disc (the invite sheet:
 //! let a person in on this agent) beside the close disc.
 
@@ -77,10 +77,9 @@ fn project_from_member(state: &crate::app::AppState, project_id: &str) -> Option
             avatar: a.avatar.clone(),
             avatar_color: a.avatar_color.clone(),
             avatar_color_index: a.avatar_color_index,
-            avatar_leaf: a.avatar_leaf,
-            avatar_leaf_color: a.avatar_leaf_color,
+            avatar_disc_color: a.avatar_disc_color,
             // The owner's picture travels with the roster copy; without it the hero drew the
-            // automatic leaf for every foreign agent (Jacob, 2026-10-25: "Hezbola").
+            // automatic disc for every foreign agent (Jacob, 2026-10-25: "Hezbola").
             image_url: a.image_url.clone(), // avatar-lint: allow (data copy, not a draw)
             avatar_version: a.avatar_version,
             description: a.description.clone(),
@@ -153,7 +152,7 @@ pub(super) fn page(
     let machine = state.machine.clone();
     let now = now_ms() as i64;
 
-    // D92 amendment: the uploaded / generated picture wins over the leaf (read while `state`
+    // D92 amendment: the uploaded / generated picture wins over the disc (read while `state`
     // is borrowed) — from the newest copy the store holds, like every other surface.
     let hero_image = avatars::project_image(state, &project);
     let newest_picture_url =
@@ -165,9 +164,9 @@ pub(super) fn page(
     // ----- hero ----------------------------------------------------------------
     // The shared pane hero: owned agents get the crayon on the picture (the
     // avatar-colour picker) and the inline name field; others are read-only.
-    // Plain, like Grok's bot mark: the leaf alone (no pastel disc), a photo
-    // when one was uploaded, and no machine dot — presence is the sidebar
-    // row's ([feedback info-pane-chrome-2026-10-24]).
+    // Plain, like Grok's bot mark: the solid disc, a photo when one was
+    // uploaded, and no machine dot — presence is the sidebar row's
+    // ([feedback info-pane-chrome-2026-10-24]).
     let picture = div()
         .size(px(HERO_AVATAR))
         .debug_selector(|| "agent-hero-picture".into())
@@ -183,7 +182,7 @@ pub(super) fn page(
                         .rounded_full()
                         .object_fit(gpui::ObjectFit::Cover),
                 ),
-            None => avatars::project_hero_bare(&project, HERO_AVATAR, &theme),
+            None => avatars::project_hero(&project, HERO_AVATAR, &theme),
         })
         .into_any_element();
     let p_pic = pid.clone();
@@ -193,7 +192,7 @@ pub(super) fn page(
         });
         Box::new(f) as HeroClick
     });
-    // Someone else's agent: its picture opens full-size in the media viewer (a leaf opens nothing).
+    // Someone else's agent: its picture opens full-size in the media viewer (a disc opens nothing).
     let view_click = (!mine).then_some(newest_picture_url).flatten().map(|url| {
         let name = project.name.clone();
         let f = cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {

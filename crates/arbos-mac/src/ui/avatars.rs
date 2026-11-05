@@ -3,19 +3,14 @@
 //! unless the agent's owner chose one (`avatar_color_index`), with white
 //! semibold initials (one or two letters) at 44.5 % of the diameter. A photo
 //! (GitHub avatar) always wins over initials — see [`crate::ui::people::avatar`].
+//! An agent without a photo draws a plain solid-colour circle instead (D92): see [`disc`].
 //! The brand mark is the only image left in the app; no character art.
 
-use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
+use std::hash::Hash;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
 
-use gpui::{
-    div, linear_color_stop, linear_gradient, point, prelude::*, px, radians, svg, Animation,
-    AnimationExt, AnyElement, Div, ElementId, FontWeight, Hsla, SharedString, Svg, Transformation,
-};
+use gpui::{div, linear_color_stop, linear_gradient, prelude::*, px, Div, FontWeight, Hsla};
 
 use crate::app::AppState;
 use crate::model::{AgentMember, Person, Project, Sender};
@@ -30,74 +25,62 @@ pub enum AvatarState {
     Reply,
 }
 
-pub use arbos_core::avatar::leaf::{self, LeafPick};
+pub use arbos_core::avatar::disc;
 
-use crate::ui::lottie;
 /// The palette, the index rule and the sender accent live in `arbos-core`
 /// (`avatar.rs`) so the iPhone draws the same colours through arbos-ffi.
 pub use arbos_core::avatar::{color_index, index_for, GRADIENTS, INITIALS_SCALE};
 use arbos_core::avatar::{Accent, Rgb};
 
-// ----- D92 leaf avatars ---------------------------------------------------------
+// ----- D92 solid-colour discs ---------------------------------------------------
 
-/// Remote flag `features.leaf_avatars` from `GET /me` (default on; the relay's
-/// `ARBOS_FEATURE_LEAF_AVATARS=0` is the kill switch). Process-wide so every
-/// avatar call site reads it without threading state through the views.
-static LEAF_AVATARS: AtomicBool = AtomicBool::new(true);
-
-pub fn set_leaf_avatars(on: bool) {
-    LEAF_AVATARS.store(on, Ordering::Relaxed);
+/// The disc colour an agent shows: the owner's pick, else the id's colour.
+pub fn disc_color(seed: &str, color_override: Option<u8>) -> u8 {
+    disc::color_for(seed, color_override)
 }
 
-pub fn leaf_avatars_on() -> bool {
-    LEAF_AVATARS.load(Ordering::Relaxed)
+/// Disc colour `index` as a fill.
+pub fn disc_fill(index: u8) -> Hsla {
+    let Rgb(r, g, b) = disc::fill(index);
+    rgb([r, g, b])
 }
 
-/// Remote flag `features.leaf_lottie` (default on): the leaves play their
-/// committed Lottie idle / gust files; off = the native sway and ruffle.
-static LEAF_LOTTIE: AtomicBool = AtomicBool::new(true);
-
-pub fn set_leaf_lottie(on: bool) {
-    LEAF_LOTTIE.store(on, Ordering::Relaxed);
-}
-
-pub fn leaf_lottie_on() -> bool {
-    LEAF_LOTTIE.load(Ordering::Relaxed)
-}
-
-/// The leaf and disc colour an agent shows: the owner's picks, else the id's cell.
-pub fn leaf_pick(seed: &str, leaf_override: Option<u8>, color_override: Option<u8>) -> LeafPick {
-    leaf::pick_for(seed, leaf_override, color_override)
+/// An agent's default picture: one plain filled circle, nothing on it.
+pub fn disc_element(color: u8, size: f32) -> Div {
+    div()
+        .debug_selector(|| "agent-disc".into())
+        .size(px(size))
+        .flex_shrink_0()
+        .flex_none()
+        .rounded_full()
+        .bg(disc_fill(color))
 }
 
 // ----- Neutral default (Jacob, 2026-10-25) -------------------------------------------
 
-/// The pair the Create sheets store when nothing was uploaded or generated: "no leaf".
-pub fn neutral_pick() -> LeafPick {
-    LeafPick {
-        leaf: leaf::NEUTRAL,
-        color: leaf::NEUTRAL,
-    }
+/// The value the Create sheets store when nothing was uploaded or generated: "no picture".
+pub fn neutral_pick() -> u8 {
+    disc::NEUTRAL
 }
 
 /// Neutral disc fill and letter ink for the appearance.
 pub fn neutral_colors(theme: &Theme) -> (Hsla, Hsla) {
     let (disc, ink) = match theme.appearance {
-        Appearance::Dark => leaf::NEUTRAL_DARK,
-        Appearance::Light => leaf::NEUTRAL_LIGHT,
+        Appearance::Dark => disc::NEUTRAL_DARK,
+        Appearance::Light => disc::NEUTRAL_LIGHT,
     };
     (rgb([disc.0, disc.1, disc.2]), rgb([ink.0, ink.1, ink.2]))
 }
 
-/// The neutral avatar: the name's first letter, semibold, on a plain grey disc (no gradient,
-/// no leaf). `name` empty = an empty disc (the Create sheet before a name is typed).
+/// The neutral avatar: the name's first letter, semibold, on a plain grey disc (no gradient).
+/// `name` empty = an empty disc (the Create sheet before a name is typed).
 pub fn neutral_element(name: &str, size: f32, theme: &Theme) -> Div {
     let (disc, ink) = neutral_colors(theme);
     let font = size * INITIALS_SCALE;
     let letter = if name.trim().is_empty() {
         String::new()
     } else {
-        leaf::initial(name)
+        disc::initial(name)
     };
     div()
         .size(px(size))
@@ -115,374 +98,33 @@ pub fn neutral_element(name: &str, size: f32, theme: &Theme) -> Div {
         .child(letter)
 }
 
-/// The leaf ink on disc colour `index`: the darker same hue (v2 rule).
-pub fn leaf_ink(index: u8) -> Hsla {
-    let Rgb(r, g, b) = leaf::COLORS[(index % leaf::COLOR_COUNT) as usize].ink;
-    rgb([r, g, b])
-}
-
-/// Disc colour `index`: the pastel of that hue.
-pub fn leaf_disc(index: u8) -> Hsla {
-    let Rgb(r, g, b) = leaf::COLORS[(index % leaf::COLOR_COUNT) as usize].rgb;
-    rgb([r, g, b])
-}
-
-/// Asset path of leaf shape `index` (served by `icons::Assets`).
-pub fn leaf_asset(index: u8) -> SharedString {
-    SharedString::from(format!(
-        "leaves/{}.svg",
-        leaf::LEAVES[(index % leaf::LEAF_COUNT) as usize].slug
-    ))
-}
-
-/// The SVG bytes behind a `leaves/<slug>.svg` asset path, for the asset source.
-pub fn leaf_asset_bytes(path: &str) -> Option<&'static [u8]> {
-    let slug = path.strip_prefix("leaves/")?.strip_suffix(".svg")?;
-    leaf::LEAVES
-        .iter()
-        .find(|l| l.slug == slug)
-        .map(|l| l.svg.as_bytes())
-}
-
-/// The leaf glyph alone (the hue's ink, `LEAF_SCALE` of `size`), optionally swayed:
-/// `angle` in radians about the stem, i.e. the bottom centre of the glyph.
-pub fn leaf_glyph(pick: LeafPick, size: f32, angle: f32) -> Svg {
-    leaf_glyph_inked(pick.leaf, size, angle, leaf_ink(pick.color))
-}
-
-/// The leaf glyph in any ink (the picker draws unselected leaves in a neutral grey).
-pub fn leaf_glyph_inked(leaf_index: u8, size: f32, angle: f32, ink: Hsla) -> Svg {
-    let side = size * leaf::LEAF_SCALE;
-    svg()
-        .path(leaf_asset(leaf_index))
-        .size(px(side))
-        .flex_shrink_0()
-        .text_color(ink)
-        .with_transformation(sway(leaf_index, side, angle))
-}
-
-/// Reduce Motion (macOS Accessibility), read once: no sway, no ruffle.
-fn reduce_motion() -> bool {
-    static REDUCE: OnceLock<bool> = OnceLock::new();
-    *REDUCE.get_or_init(crate::ui::motion::system_reduce_motion)
-}
-
-/// Hover state per leaf disc (`key` = who + where): hovered now, and a tick
-/// that advances on every hover start so the one-shot ruffle replays. One map
-/// for the reader and the writer (two function-local statics were two maps,
-/// so the ruffle never showed on the real build).
-static HOVER: OnceLock<Mutex<HashMap<u64, (bool, u64)>>> = OnceLock::new();
-
-fn hover_state(key: u64) -> (bool, u64) {
-    HOVER
-        .get_or_init(Default::default)
-        .lock()
-        .ok()
-        .and_then(|m| m.get(&key).copied())
-        .unwrap_or((false, 0))
-}
-
-fn set_hover_state(key: u64, hovered: bool) {
-    if let Ok(mut m) = HOVER.get_or_init(Default::default).lock() {
-        let e = m.entry(key).or_insert((false, 0));
-        if hovered && !e.0 {
-            e.1 += 1;
-        }
-        e.0 = hovered;
-    }
-}
-
-/// Rig: `ARBOS_LEAF_GUST=<project id or name>` holds that avatar hovered and
-/// loops its gust, as if the pointer kept arriving — the screenshot rigs cannot
-/// move the real pointer. Off unless the variable is set.
-fn rig_gust(seed: &str, name: &str, key: u64) {
-    static TARGET: OnceLock<Option<String>> = OnceLock::new();
-    let target = TARGET.get_or_init(|| std::env::var("ARBOS_LEAF_GUST").ok());
-    if target.as_deref() == Some(seed) || target.as_deref() == Some(name) {
-        RIG_GUST.store(true, Ordering::Relaxed);
-        set_hover_state(key, true);
-    }
-}
-
-/// Set once `rig_gust` matched: the gust animation repeats instead of playing once.
-static RIG_GUST: AtomicBool = AtomicBool::new(false);
-
-fn gust_animation(secs: f32) -> Animation {
-    let a = Animation::new(Duration::from_secs_f32(secs));
-    if RIG_GUST.load(Ordering::Relaxed) {
-        a.repeat()
-    } else {
-        a
-    }
-}
-
-pub fn leaf_hover_key(seed: &str, size: f32) -> u64 {
-    hover_key(seed, size)
-}
-
-fn hover_key(seed: &str, size: f32) -> u64 {
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    seed.hash(&mut h);
-    size.to_bits().hash(&mut h);
-    h.finish()
-}
-
-/// A rotation by `angle` radians about the leaf's stem pivot (from the
-/// manifest) for a glyph of `side` points. GPUI rotates about the glyph
-/// centre, so the pivot is restored with a translation of `p − R·p`.
-fn sway(leaf_index: u8, side: f32, angle: f32) -> Transformation {
-    let (pvx, pvy) = leaf::LEAVES[(leaf_index % leaf::LEAF_COUNT) as usize].pivot;
-    let (x, y) = ((pvx - 50.0) / 100.0 * side, (pvy - 50.0) / 100.0 * side);
-    let (sin, cos) = angle.sin_cos();
-    Transformation::rotate(radians(angle)).with_translation(point(
-        px(x - (x * cos - y * sin)),
-        px(y - (x * sin + y * cos)),
-    ))
-}
-
-fn disc(pick: LeafPick, size: f32) -> Div {
-    div()
-        .size(px(size))
-        .flex_shrink_0()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded_full()
-        .bg(leaf_disc(pick.color))
-}
-
-/// The leaf avatar disc at `size` points: a cream leaf on its autumn colour. Still.
-pub fn leaf_element(pick: LeafPick, size: f32) -> Div {
-    disc(pick, size).child(leaf_glyph(pick, size, 0.0))
-}
-
-/// One-shot hover gust: the leaf's committed gust Lottie while the flag is
-/// on (one play, settles on the rest pose), else the native spring (≈9° peak,
-/// settled in 1 s).
-fn ruffle_glyph(pick: LeafPick, size: f32, tick: u64, ink: Hsla) -> AnyElement {
-    if leaf_lottie_on() {
-        if let Some(comp) = lottie::composition(pick.leaf, lottie::Clip::Gust) {
-            let secs = lottie::duration_secs(&comp);
-            return div()
-                .size(px(size * leaf::LEAF_SCALE))
-                .flex_shrink_0()
-                .with_animation(
-                    ElementId::NamedInteger(
-                        SharedString::from(format!("leaf-lottie-gust-{}", pick.leaf)),
-                        tick,
-                    ),
-                    gust_animation(secs),
-                    move |el, t| {
-                        el.child(lottie::frame_element(
-                            comp.clone(),
-                            t,
-                            size * leaf::LEAF_SCALE,
-                            ink,
-                        ))
-                    },
-                )
-                .into_any_element();
-        }
-    }
-    let side = size * leaf::LEAF_SCALE;
-    leaf_glyph_inked(pick.leaf, size, 0.0, ink)
-        .with_animation(
-            ElementId::NamedInteger(
-                SharedString::from(format!("leaf-gust-{}-{}", pick.leaf, pick.color)),
-                tick,
-            ),
-            gust_animation(leaf::GUST_SECS),
-            move |el, t| {
-                el.with_transformation(sway(pick.leaf, side, leaf::gust_angle(t * leaf::GUST_SECS)))
-            },
-        )
-        .into_any_element()
-}
-
-/// Idle sway, profile hero only: the leaf's committed idle Lottie, looping
-/// (each leaf its own 2.3–2.8 s length), while the flag is on; else the
-/// native sway of a few degrees about the stem.
-fn sway_glyph(pick: LeafPick, size: f32, ink: Hsla) -> AnyElement {
-    if leaf_lottie_on() {
-        if let Some(comp) = lottie::composition(pick.leaf, lottie::Clip::Idle) {
-            let secs = lottie::duration_secs(&comp);
-            return div()
-                .size(px(size * leaf::LEAF_SCALE))
-                .flex_shrink_0()
-                .with_animation(
-                    ElementId::Name(SharedString::from(format!(
-                        "leaf-lottie-idle-{}",
-                        pick.leaf
-                    ))),
-                    Animation::new(Duration::from_secs_f32(secs)).repeat(),
-                    move |el, t| {
-                        el.child(lottie::frame_element(
-                            comp.clone(),
-                            t,
-                            size * leaf::LEAF_SCALE,
-                            ink,
-                        ))
-                    },
-                )
-                .into_any_element();
-        }
-    }
-    let side = size * leaf::LEAF_SCALE;
-    let period = leaf::LEAVES[(pick.leaf % leaf::LEAF_COUNT) as usize].idle_secs;
-    leaf_glyph_inked(pick.leaf, size, 0.0, ink)
-        .with_animation(
-            ElementId::Name(SharedString::from(format!(
-                "leaf-sway-{}-{}",
-                pick.leaf, pick.color
-            ))),
-            Animation::new(Duration::from_secs_f32(period)).repeat(),
-            move |el, t| {
-                el.with_transformation(sway(
-                    pick.leaf,
-                    side,
-                    leaf::idle_angle(pick.leaf, t * period),
-                ))
-            },
-        )
-        .into_any_element()
-}
-
-/// The leaf disc with the Mac hover ruffle (lists, chips, header): still until
-/// the pointer enters, one wobble, still again. Nothing moves under Reduce
-/// Motion or below 20 pt, where a wobble is noise.
-pub fn leaf_hover(pick: LeafPick, size: f32, key: u64) -> Div {
-    if reduce_motion() || size < 20.0 {
-        return leaf_element(pick, size);
-    }
-    let (hovered, tick) = hover_state(key);
-    let glyph = if hovered {
-        ruffle_glyph(pick, size, tick, leaf_ink(pick.color))
-    } else {
-        leaf_glyph(pick, size, 0.0).into_any_element()
-    };
-    disc(pick, size).child(
-        div()
-            .id(ElementId::NamedInteger("leaf-hover".into(), key))
-            .debug_selector(|| "leaf-hover".into())
-            .size_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .on_hover(move |is_hovered, window, _| {
-                set_hover_state(key, *is_hovered);
-                window.refresh();
-            })
-            .child(glyph),
-    )
-}
-
-/// The profile hero with no disc behind the leaf (Jacob, [feedback
-/// info-pane-chrome-2026-10-24]: "drop the pale disc behind the leaf", as
-/// Grok Bot's plain bot mark): the leaf alone, the same sway and ruffle. The
-/// ink is the hue's pastel on a dark pane and its darker ink on a light one,
-/// so the bare leaf reads on either (the dark ink on the dark pane did not).
-pub fn leaf_hero_bare(pick: LeafPick, size: f32, key: u64, theme: &Theme) -> Div {
-    let ink = if theme.is_light() {
-        leaf_ink(pick.color)
-    } else {
-        leaf_disc(pick.color)
-    };
-    let slot = div()
-        .size(px(size))
-        .flex_shrink_0()
-        .flex()
-        .items_center()
-        .justify_center();
-    leaf_hero_in(slot, pick, size, key, ink)
-}
-
-fn leaf_hero_in(container: Div, pick: LeafPick, size: f32, key: u64, ink: Hsla) -> Div {
-    if reduce_motion() {
-        return container.child(leaf_glyph_inked(pick.leaf, size, 0.0, ink));
-    }
-    let (hovered, tick) = hover_state(key);
-    let glyph = if hovered {
-        ruffle_glyph(pick, size, tick, ink)
-    } else {
-        sway_glyph(pick, size, ink)
-    };
-    container.child(
-        div()
-            .id(ElementId::NamedInteger("leaf-hero".into(), key))
-            .debug_selector(|| "leaf-hero".into())
-            .size_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .on_hover(move |is_hovered, window, _| {
-                set_hover_state(key, *is_hovered);
-                window.refresh();
-            })
-            .child(glyph),
-    )
-}
-
-/// An agent's avatar: the leaf (D92) while the flag is on, else the D79 disc — or the neutral
-/// initial when the agent was created with no leaf (Jacob, 2026-10-25).
-pub fn agent(
-    seed: &str,
-    name: &str,
-    color_index: Option<u8>,
-    leaf_override: Option<u8>,
-    leaf_color_override: Option<u8>,
-    size: f32,
-    theme: &Theme,
-) -> Div {
-    if leaf::is_neutral(leaf_override) {
+/// An agent's avatar: its solid disc (D92) — or the neutral initial when the agent was
+/// created with no picture (Jacob, 2026-10-25). `color_index` is the D79 index, kept for
+/// the people surfaces that still draw initials.
+pub fn agent(seed: &str, name: &str, disc_override: Option<u8>, size: f32, theme: &Theme) -> Div {
+    if disc::is_neutral(disc_override) {
         return neutral_element(name, size, theme);
     }
-    if leaf_avatars_on() {
-        let key = hover_key(seed, size);
-        rig_gust(seed, name, key);
-        leaf_hover(
-            leaf_pick(seed, leaf_override, leaf_color_override),
-            size,
-            key,
-        )
-    } else {
-        element(seed, name, color_index, size, theme)
-    }
+    disc_element(disc_color(seed, disc_override), size)
 }
 
-/// The agent pane's hero (Grok Bot's plain mark, [feedback
-/// info-pane-chrome-2026-10-24]): the swaying leaf with no disc behind it;
-/// the D79 initials disc stays when the leaf flag is off (initials need a fill).
-pub fn project_hero_bare(p: &Project, size: f32, theme: &Theme) -> Div {
-    if leaf::is_neutral(p.avatar_leaf) {
+/// The agent pane's hero: the same disc at hero size.
+pub fn project_hero(p: &Project, size: f32, theme: &Theme) -> Div {
+    if disc::is_neutral(p.avatar_disc_color) {
         return neutral_element(&p.name, size, theme);
     }
-    if leaf_avatars_on() && !p.is_people() {
-        leaf_hero_bare(project_leaf(p), size, hover_key(&p.id, size), theme)
-    } else {
-        element(&p.id, &p.name, p.avatar_color_index, size, theme)
+    if p.is_people() {
+        return element(&p.id, &p.name, p.avatar_color_index, size, theme);
     }
+    disc_element(disc_color(&p.id, p.avatar_disc_color), size)
 }
 
-/// The bubble-bar accent of an agent: its leaf disc colour (D92), else D79; a mid grey for a
-/// neutral agent.
-pub fn agent_accent(
-    seed: &str,
-    color_index: Option<u8>,
-    leaf_override: Option<u8>,
-    leaf_color_override: Option<u8>,
-    theme: &Theme,
-) -> Hsla {
-    if leaf::is_neutral(leaf_override) {
-        return accent_color(leaf::neutral_accent(), theme);
+/// The bubble-bar accent of an agent: its disc colour (D92); a mid grey for a neutral agent.
+pub fn agent_accent(seed: &str, disc_override: Option<u8>, theme: &Theme) -> Hsla {
+    if disc::is_neutral(disc_override) {
+        return accent_color(disc::neutral_accent(), theme);
     }
-    if leaf_avatars_on() {
-        accent_color(
-            leaf::accent(leaf_pick(seed, leaf_override, leaf_color_override)),
-            theme,
-        )
-    } else {
-        accent_fallback(seed, color_index, theme)
-    }
+    accent_color(disc::accent(disc_color(seed, disc_override)), theme)
 }
 
 fn rgb(c: [u8; 3]) -> Hsla {
@@ -579,8 +221,8 @@ pub fn element(seed: &str, name: &str, index: Option<u8>, size: f32, theme: &The
 
 /// A project's picture as every surface should draw it: the uploaded / generated picture of
 /// the newest copy the store holds (`sync::agent_avatar::newest`, decoded in `state.avatars`),
-/// else `project()` (the leaf / initials). The Secrets agent picker, member chips and the
-/// subagent glyph drew `project()` alone and showed the leaf next to a header that had the
+/// else `project()` (the disc / initials). The Secrets agent picker, member chips and the
+/// subagent glyph drew `project()` alone and showed the disc next to a header that had the
 /// picture (Jacob, 2026-10-26, Mac v0.6.268).
 pub fn project_in(state: &AppState, p: &Project, size: f32, theme: &Theme) -> Div {
     project_with(project_image(state, p), p, size, theme)
@@ -629,36 +271,21 @@ pub fn project_with(
     project(p, size, theme)
 }
 
-/// An agent (project): its id seeds the leaf and colour, the owner's picks override.
+/// An agent (project): its id gives the disc colour, the owner's pick overrides.
 /// A people space (DM / group) rides the same `Project` type: a group shows the
-/// leaf picked on its Create screen (D92 amendment) and otherwise, like a DM,
-/// its D79 initials — never an id-derived leaf.
+/// colour picked on its Create screen (D92 amendment) and otherwise, like a DM,
+/// its D79 initials — never an id-derived colour.
 pub fn project(p: &Project, size: f32, theme: &Theme) -> Div {
     if p.is_people() {
-        if leaf::is_neutral(p.avatar_leaf) {
+        if disc::is_neutral(p.avatar_disc_color) {
             return neutral_element(&p.name, size, theme);
         }
-        if let (true, Some(leaf), Some(color)) =
-            (leaf_avatars_on(), p.avatar_leaf, p.avatar_leaf_color)
-        {
-            return leaf_hover(LeafPick { leaf, color }, size, hover_key(&p.id, size));
+        if let Some(color) = p.avatar_disc_color {
+            return disc_element(color, size);
         }
         return element(&p.id, &p.name, p.avatar_color_index, size, theme);
     }
-    agent(
-        &p.id,
-        &p.name,
-        p.avatar_color_index,
-        p.avatar_leaf,
-        p.avatar_leaf_color,
-        size,
-        theme,
-    )
-}
-
-/// The agent's leaf pick (D92) for callers that animate it.
-pub fn project_leaf(p: &Project) -> LeafPick {
-    leaf_pick(&p.id, p.avatar_leaf, p.avatar_leaf_color)
+    agent(&p.id, &p.name, p.avatar_disc_color, size, theme)
 }
 
 // ----- One identity for every surface (#1592) --------------------------------------
@@ -673,8 +300,7 @@ fn member_card(a: &AgentMember) -> AgentCard {
         id: a.project_id.clone(),
         name: a.name.clone(),
         handle: a.handle.clone(),
-        leaf: a.avatar_leaf,
-        leaf_color: a.avatar_leaf_color,
+        disc_color: a.avatar_disc_color,
         color_index: a.avatar_color_index,
         image_key: a.image_url.clone(),
         avatar_version: a.avatar_version,
@@ -686,8 +312,7 @@ fn project_card(p: &Project) -> AgentCard {
         id: p.id.clone(),
         name: p.name.clone(),
         handle: Project::mention_slug(&p.name),
-        leaf: p.avatar_leaf,
-        leaf_color: p.avatar_leaf_color,
+        disc_color: p.avatar_disc_color,
         color_index: p.avatar_color_index,
         image_key: p.image_url.clone(),
         avatar_version: p.avatar_version,
@@ -736,9 +361,9 @@ pub fn agent_identity(
     // A live row the box has not attributed yet (`sender: "agent"`, no handle, no name —
     // the box's people-chat info was not loaded when the turn started, e.g. right after an
     // image roll) in a people chat with one agent: it is that agent. Jacob, 2026-10-26: Doug
-    // agent's "Reading 500" row drew a leaf seeded by the word "agent" while his finished
+    // agent's "Reading 500" row drew a disc seeded by the word "agent" while his finished
     // bubbles (attributed) had the photo. With several agents on the roster nothing is safe
-    // to assume, and the seeded leaf stays until the attribution lands.
+    // to assume, and the seeded disc stays until the attribution lands.
     let bare = arbos_core::avatar::identity::sender_id(sender).is_empty()
         || sender == "agent"
         || sender == "assistant";
@@ -788,7 +413,7 @@ pub fn member_picture(
 }
 
 /// The picture for an identity: the uploaded / generated image when the loader has it,
-/// else the leaf (D92) or the initials disc (D79) from the identity's own picks.
+/// else the solid disc (D92) from the identity's own pick.
 pub fn agent_picture(
     a: &AgentIdentity,
     image: Option<std::sync::Arc<gpui::RenderImage>>,
@@ -811,29 +436,13 @@ pub fn agent_picture(
     if a.neutral {
         return neutral_element(&a.name, size, theme);
     }
-    agent(
-        &a.id,
-        &a.name,
-        Some(a.color_index),
-        Some(a.leaf.leaf),
-        Some(a.leaf.color),
-        size,
-        theme,
-    )
+    agent(&a.id, &a.name, Some(a.disc_color), size, theme)
 }
 
 /// Who started a call / sits in it (users and agents).
 pub fn sender(s: &Sender, size: f32, theme: &Theme) -> Div {
     if s.kind == "agent" {
-        agent(
-            &s.id,
-            &s.display_name(),
-            s.avatar_color_index,
-            s.avatar_leaf,
-            s.avatar_leaf_color,
-            size,
-            theme,
-        )
+        agent(&s.id, &s.display_name(), s.avatar_disc_color, size, theme)
     } else {
         element(&s.id, &s.display_name(), s.avatar_color_index, size, theme)
     }
@@ -962,19 +571,17 @@ fn draw_initials(out: &mut image::RgbaImage, text: &str) {
 mod tests {
     use super::*;
 
-    /// Jacob, 2026-10-25: the stored neutral pair is told apart from the automatic leaf, and a
-    /// neutral identity never draws a leaf.
+    /// Jacob, 2026-10-25: the stored neutral value is told apart from the automatic colour,
+    /// and a neutral identity never draws a coloured disc.
     #[test]
     fn neutral_pick_is_the_core_value_and_identity_carries_it() {
-        let n = neutral_pick();
-        assert!(leaf::is_neutral(Some(n.leaf)));
-        assert!(!leaf::is_neutral(None));
+        assert!(disc::is_neutral(Some(neutral_pick())));
+        assert!(!disc::is_neutral(None));
         let card = AgentCard {
             id: "01N".into(),
             name: "Field notes".into(),
             handle: "field-notes".into(),
-            leaf: Some(leaf::NEUTRAL),
-            leaf_color: Some(leaf::NEUTRAL),
+            disc_color: Some(disc::NEUTRAL),
             color_index: None,
             image_key: None,
             avatar_version: 0,
@@ -988,7 +595,21 @@ mod tests {
             &[card],
         );
         assert!(who.neutral);
-        assert_eq!(leaf::initial(&who.name), "F");
+        assert_eq!(disc::initial(&who.name), "F");
+    }
+
+    /// Every agent without a picture gets one of the ten colours, stable for its id.
+    #[test]
+    fn a_disc_colour_is_stable_and_in_range() {
+        for i in 0..200 {
+            let id = format!("01M5AGENT{i:04}");
+            let c = disc_color(&id, None);
+            assert!(c < disc::COLOR_COUNT);
+            assert_eq!(c, disc_color(&id, None));
+        }
+        // A pinned colour wins; an out-of-range pin falls back to the id's colour.
+        assert_eq!(disc_color("01M5", Some(3)), 3);
+        assert_eq!(disc_color("01M5", Some(99)), disc_color("01M5", None));
     }
 
     #[test]

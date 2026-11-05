@@ -22,7 +22,7 @@ use crate::sign_in;
 use crate::sync::user_error::{ErrorClass, UserError};
 use crate::sync::{ClientCommand, PictureSource};
 use crate::ui::avatar_picker;
-use crate::ui::avatars::{self, leaf, LeafPick};
+use crate::ui::avatars::{self, disc};
 use crate::ui::back_swipe::{self, BackSwipe, BackTarget, Region};
 use crate::ui::blocked;
 use crate::ui::callview;
@@ -1740,12 +1740,12 @@ impl Shell {
         self.project_input.update(cx, |input, cx| input.clear(cx));
         let color = self.new_agent_color.take();
         // Jacob, 2026-10-25: the sheet's Upload / Generate pick travels with the create; the
-        // stored leaf pair is the neutral one, never an automatic leaf.
+        // stored disc colour is the neutral one, never an automatic colour.
         let picture = self.take_create_picture(cx);
         self.state.update(cx, |s, cx| {
             s.new_project_open = false;
             s.close_new_chat(cx);
-            s.create_project(name, color, Some(create_entity::stored_leaf()), picture, cx);
+            s.create_project(name, color, Some(create_entity::stored_disc()), picture, cx);
         });
         Composer::focus(&self.composer, window, cx);
     }
@@ -1823,7 +1823,7 @@ impl Shell {
     }
 
     /// The Create screen's action: agents create, groups go on to the member
-    /// picker (step 2) with the name + leaf kept as the draft, servers create.
+    /// picker (step 2) with the name + colour kept as the draft, servers create.
     pub(crate) fn submit_create(
         &mut self,
         kind: CreateKind,
@@ -1863,7 +1863,7 @@ impl Shell {
                 self.state.update(cx, |s, cx| {
                     s.new_group_draft = Some(crate::app::GroupDraft {
                         title: name,
-                        leaf: Some(create_entity::stored_leaf()),
+                        disc_color: Some(create_entity::stored_disc()),
                         picture,
                     });
                     s.open_new_group(cx);
@@ -1878,7 +1878,7 @@ impl Shell {
                 }
                 let picture = self.take_create_picture(cx);
                 self.state.update(cx, |s, cx| {
-                    s.create_server(name, Some(create_entity::stored_leaf()), picture, cx)
+                    s.create_server(name, Some(create_entity::stored_disc()), picture, cx)
                 });
             }
         }
@@ -1977,7 +1977,7 @@ impl Shell {
         self.state.update(cx, |s, cx| match &pk.target {
             avatar_picker::Target::Agent(_) => {
                 if pk.reset {
-                    s.set_avatar_leaf(id, None, None, cx);
+                    s.set_avatar_disc(id, None, cx);
                 } else {
                     match pk.tab {
                         avatar_picker::Tab::Bot => {
@@ -1985,14 +1985,9 @@ impl Shell {
                                 .projects
                                 .iter()
                                 .find(|p| p.id == id)
-                                .map(crate::ui::avatars::project_leaf)
-                                .unwrap_or_else(|| leaf::pick_for(&id, None, None));
-                            s.set_avatar_leaf(
-                                id,
-                                Some(pk.leaf.unwrap_or(current.leaf)),
-                                Some(pk.color.unwrap_or(current.color)),
-                                cx,
-                            );
+                                .map(|p| avatars::disc_color(&p.id, p.avatar_disc_color))
+                                .unwrap_or_else(|| disc::default_color(&id));
+                            s.set_avatar_disc(id, Some(pk.color.unwrap_or(current)), cx);
                         }
                         avatar_picker::Tab::Generate => {
                             if let Some((key, _)) = pk.generated {
@@ -2009,7 +2004,7 @@ impl Shell {
             }
             avatar_picker::Target::Group(_) => {
                 if pk.reset {
-                    s.set_group_leaf(id, None, cx);
+                    s.set_group_disc(id, None, cx);
                 } else {
                     match pk.tab {
                         avatar_picker::Tab::Bot => {
@@ -2017,16 +2012,9 @@ impl Shell {
                                 .projects
                                 .iter()
                                 .find(|p| p.id == id)
-                                .map(crate::ui::avatars::project_leaf)
-                                .unwrap_or_else(|| leaf::pick_for(&id, None, None));
-                            s.set_group_leaf(
-                                id,
-                                Some(LeafPick {
-                                    leaf: pk.leaf.unwrap_or(current.leaf),
-                                    color: pk.color.unwrap_or(current.color),
-                                }),
-                                cx,
-                            );
+                                .map(|p| avatars::disc_color(&p.id, p.avatar_disc_color))
+                                .unwrap_or_else(|| disc::default_color(&id));
+                            s.set_group_disc(id, Some(pk.color.unwrap_or(current)), cx);
                         }
                         avatar_picker::Tab::Upload => {
                             if let Some(path) = pk.upload {
@@ -2043,7 +2031,7 @@ impl Shell {
             }
             avatar_picker::Target::Server(_) => {
                 if pk.reset {
-                    s.set_server_leaf(id, None, cx);
+                    s.set_server_disc(id, None, cx);
                 } else {
                     match pk.tab {
                         avatar_picker::Tab::Bot => {
@@ -2051,21 +2039,9 @@ impl Shell {
                                 .servers
                                 .iter()
                                 .find(|x| x.id == id)
-                                .and_then(|x| {
-                                    Some(LeafPick {
-                                        leaf: x.avatar_leaf?,
-                                        color: x.avatar_leaf_color?,
-                                    })
-                                })
-                                .unwrap_or_else(|| leaf::pick_for(&id, None, None));
-                            s.set_server_leaf(
-                                id,
-                                Some(LeafPick {
-                                    leaf: pk.leaf.unwrap_or(current.leaf),
-                                    color: pk.color.unwrap_or(current.color),
-                                }),
-                                cx,
-                            );
+                                .and_then(|x| x.avatar_disc_color)
+                                .unwrap_or_else(|| disc::default_color(&id));
+                            s.set_server_disc(id, Some(pk.color.unwrap_or(current)), cx);
                         }
                         avatar_picker::Tab::Upload => {
                             if let Some(path) = pk.upload {
@@ -2330,7 +2306,7 @@ impl Shell {
         };
         self.state.update(cx, |s, cx| match sheet {
             ServerSheet::NewServer => {
-                s.create_server(text, Some(create_entity::stored_leaf()), picture, cx)
+                s.create_server(text, Some(create_entity::stored_disc()), picture, cx)
             }
             ServerSheet::JoinServer => s.join_server(text, cx),
             ServerSheet::NewChannel { server_id } => {
@@ -4135,7 +4111,7 @@ impl Shell {
             if let Some(person) = dm_partner {
                 hero = hero.child(people::avatar(person_image, person, 88.0, &theme));
             } else {
-                // D92 amendment: the uploaded / generated picture wins over the leaf / initials.
+                // D92 amendment: the uploaded / generated picture wins over the disc / initials.
                 let state = self.state.read(cx);
                 hero = hero.child(crate::ui::groups::picture(&space, state, 88.0, &theme));
             }

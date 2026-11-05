@@ -3386,7 +3386,7 @@ impl Composer {
                     name: a.name.trim().to_string(),
                     id: Some(format!("agent:{}", a.project_id)),
                     is_agent: true,
-                    picture: mention::agent_member_picture(state, Some(space), a, &theme),
+                    picture: mention::agent_member_picture(state, Some(space), a),
                     tag: None,
                     description: None,
                 },
@@ -3441,7 +3441,7 @@ impl Composer {
                 name: a.name.trim().to_string(),
                 id: Some(format!("agent:{}", a.project_id)),
                 is_agent: true,
-                picture: mention::agent_member_picture(state, Some(space), a, &theme),
+                picture: mention::agent_member_picture(state, Some(space), a),
                 tag: Some("the agent in this chat"),
                 description: None,
             });
@@ -3654,7 +3654,7 @@ fn mention_match(query: &str, handle: &str, name: &str) -> Option<search::Match>
     search::match_entity(name, handle, None, &search::normalize_query(query))
 }
 
-/// A picker row's picture as an element: photo, D79 initials, D92 leaf or the neutral disc.
+/// A picker row's picture as an element: photo, D79 initials, a D92 disc or the neutral disc.
 fn mention_picture(picture: &mention::Picture, size: f32, theme: &Theme) -> gpui::AnyElement {
     match picture {
         mention::Picture::Image(image) => img(crate::ui::picture_fit::fit(image, size))
@@ -3680,8 +3680,8 @@ fn mention_picture(picture: &mention::Picture, size: f32, theme: &Theme) -> gpui
             .text_color(gpui::white())
             .child(text.clone())
             .into_any_element(),
-        mention::Picture::Leaf(pick) => {
-            crate::ui::avatars::leaf_element(*pick, size).into_any_element()
+        mention::Picture::Disc(color) => {
+            crate::ui::avatars::disc_element(*color, size).into_any_element()
         }
         mention::Picture::Neutral { name } => {
             crate::ui::avatars::neutral_element(name, size, theme).into_any_element()

@@ -14,7 +14,7 @@ const GLYPH: f32 = 16.0;
 
 /// A space's picture everywhere it shows (row, pill, pane): the uploaded or generated image
 /// when it has one (a group's `PATCH /chats`, an agent's avatar picker — D92 amendment), else
-/// the agent's leaf or the D79 initials disc.
+/// the agent's solid disc or the D79 initials disc.
 pub fn picture(space: &Project, state: &AppState, size: f32, theme: &Theme) -> Div {
     let image = space.image_url.as_deref().and_then(|url| state.avatar(url));
     match image {
