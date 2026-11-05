@@ -219,6 +219,63 @@ fn carries_quote(message: &Message) -> bool {
         Role::System => false,
     }
 }
+/// The wash a reveal leaves on the message it landed on — a quote click, a
+/// Search-in-chat hit, a home-search result. Unchanged; only its shape moved.
+const REVEAL_WASH_ALPHA: f32 = 0.14;
+/// The wash layer's debug selector, so a headless render can measure it.
+pub const REVEAL_WASH_SELECTOR: &str = "reveal-wash";
+
+/// The coloured sliver on the left edge of a person's bubble, and of an agent's
+/// when it has an accent — `border_l_2()` at the two bubble sites below. The
+/// wash has to know it: GPUI lays an absolute child out against its parent's
+/// **padding** box, inside the border, so a wash that did not add it back sat
+/// 2 pt closer to the bubble on that one side than on the other three.
+/// `the_reveal_wash_clears_the_bubble_by_the_same_inset_on_every_side` measures
+/// all four gaps, so widening the sliver without widening this fails that case.
+const BUBBLE_SLIVER: f32 = 2.0;
+
+/// What the wash has to match about the bubble it lands on. A people, own or
+/// media bubble is rounded at both ends; a reply's blocks are one bubble, so
+/// only the first and last round. The sliver is the bubble's left border.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct BubbleFrame {
+    pub top: bool,
+    pub bottom: bool,
+    pub sliver: f32,
+}
+
+impl BubbleFrame {
+    /// A bubble rounded at both ends, carrying `sliver` on its left edge.
+    pub const fn both(sliver: f32) -> Self {
+        Self {
+            top: true,
+            bottom: true,
+            sliver,
+        }
+    }
+}
+
+/// The reveal wash, as a layer on the bubble's own box: clearing the bubble's
+/// visible edge by [`highlight::INSET`] at the sides and at whichever ends the
+/// bubble itself rounds, and rounded to [`BUBBLE_RADIUS`] plus that inset so it
+/// stays concentric with the bubble. It takes the radius from the bubble's own
+/// constant, so the two cannot drift. A middle block does not grow at the seam
+/// it shares with its neighbour, or the two washes would double there.
+fn reveal_wash(frame: BubbleFrame, theme: &Theme) -> Div {
+    let grown = px(-highlight::INSET);
+    let radius = px(BUBBLE_RADIUS + highlight::INSET);
+    div()
+        .debug_selector(|| REVEAL_WASH_SELECTOR.into())
+        .absolute()
+        .left(px(-(highlight::INSET + frame.sliver)))
+        .right(grown)
+        .top(if frame.top { grown } else { px(0.0) })
+        .bottom(if frame.bottom { grown } else { px(0.0) })
+        .when(frame.top, |el| el.rounded_t(radius))
+        .when(frame.bottom, |el| el.rounded_b(radius))
+        .bg(Theme::with_alpha(theme.accent, REVEAL_WASH_ALPHA))
+}
+
 /// Measured glyph-to-bubble, like the reference: the stamp's 13 pt line box
 /// carries ~4 pt of its own above and ~7 below the glyphs (measured).
 const STAMP_PAD_TOP: f32 = 20.0 - ROW_GAP_HALF - 4.0;
@@ -2003,12 +2060,24 @@ impl Transcript {
 
     /// Right-click → the message menu (Copy / Reply / Delete, `message_menu`).
     /// Control-click → copy the message text.
+    ///
+    /// Every bubble and media card in the transcript is built through here, so
+    /// this is also where a revealed message gets its wash ([`reveal_wash`]) —
+    /// on the bubble's box, not on the full-bleed row frame that used to carry
+    /// it. The layer goes on first, so it paints under the bubble's content.
     fn menu_target(
         &self,
         el: Stateful<Div>,
         message_id: &Id,
+        frame: BubbleFrame,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
+        let revealed =
+            self.state.read(cx).highlight_message.as_deref() == Some(message_id.as_str());
+        let el = el.relative().when(revealed, |el| {
+            let theme = Theme::of(cx).clone();
+            el.child(reveal_wash(frame, &theme))
+        });
         let Some(chat_id) = self.chat_id.clone() else {
             return el;
         };
@@ -2660,6 +2729,18 @@ impl Transcript {
             .menu_target(
                 div().id(SharedString::from(format!("{}#bubble", row_id))),
                 message_id,
+                // A reply's blocks are one bubble: only the first and last
+                // block round, and the wash follows them. An accented agent
+                // carries the sliver on every block of the run.
+                BubbleFrame {
+                    top: first,
+                    bottom: last,
+                    sliver: if agent_accent.is_some() {
+                        BUBBLE_SLIVER
+                    } else {
+                        0.0
+                    },
+                },
                 cx,
             )
             .debug_selector(|| "chat-bubble-assistant".into())
@@ -2918,6 +2999,8 @@ impl Transcript {
                     .menu_target(
                         div().id(SharedString::from(format!("{}#bubble", row.id))),
                         &row.message_id,
+                        // Someone else's bubble carries the sliver; my own does not.
+                        BubbleFrame::both(if from.is_some() { BUBBLE_SLIVER } else { 0.0 }),
                         cx,
                     )
                     // Someone else's bubble takes the people share of the lane beside
@@ -3361,6 +3444,7 @@ impl Transcript {
                     .menu_target(
                         div().id(SharedString::from(format!("{}#media", row.id))),
                         &row.message_id,
+                        BubbleFrame::both(0.0),
                         cx,
                     )
                     .child(attachments::card(
@@ -3640,8 +3724,6 @@ impl Transcript {
                 return div().w_full().h(px(BOTTOM_INSET)).into_any_element();
             }
         };
-        let highlighted =
-            self.state.read(cx).highlight_message.as_deref() == Some(row.message_id.as_str());
         let turn_start = self.is_turn_start(ix);
         let measure = Self::measure_into(&self.measured, Some(row_frame_id.clone()));
         div()
@@ -3650,11 +3732,10 @@ impl Transcript {
             .w_full()
             .child(measure)
             .child(
-                column_row(inner)
-                    .when(turn_start, |el| el.pt(px(TURN_GAP_EXTRA)))
-                    .when(highlighted, |el| {
-                        el.bg(Theme::with_alpha(theme.accent, 0.14))
-                    }),
+                // No reveal wash here: it belongs to the bubble's own box
+                // (`menu_target` → `reveal_wash`). On this frame it was a
+                // square band the full width of the pane.
+                column_row(inner).when(turn_start, |el| el.pt(px(TURN_GAP_EXTRA))),
             )
             .into_any_element()
     }
@@ -12557,6 +12638,73 @@ mod reply_in_dm_tests {
             )
         });
         assert!(!moved);
+    }
+
+    /// The wash a reveal leaves on a message was a square-cornered band the full
+    /// width of the pane while the bubble under it was rounded. It is now a
+    /// layer on the bubble's own box, clearing the bubble's visible edge by
+    /// `highlight::INSET` on every side — so it sits concentrically on the
+    /// bubble and is far narrower than the row frame that used to carry it.
+    ///
+    /// The old code painted the wash with `.bg()` on the row frame and drew no
+    /// element of its own, so the lookup below finds nothing against it. The
+    /// four gap assertions are what hold the sliver compensation honest: the
+    /// revealed message here is someone else's, so its bubble carries
+    /// `border_l_2()` and its left gap is the one that was wrong.
+    #[gpui::test]
+    fn the_reveal_wash_clears_the_bubble_by_the_same_inset_on_every_side(cx: &mut TestAppContext) {
+        let (_rt, state, shell, vcx) = mount(cx);
+        let quote = vcx
+            .debug_bounds("reply-quote-d1#user")
+            .expect("Sam's quote header is on screen");
+        vcx.simulate_click(centre(quote), Modifiers::default());
+        vcx.run_until_parked();
+        settle(&state, &shell, vcx);
+        assert_eq!(
+            state
+                .read_with(&*vcx, |s, _| s.highlight_message.clone())
+                .as_deref(),
+            Some(ORIGINAL),
+            "the click revealed the original, so a wash is owed"
+        );
+        let row_id = shell.read_with(&*vcx, |sh, cx| {
+            sh.transcript
+                .read(cx)
+                .rows
+                .iter()
+                .find(|r| r.message_id == ORIGINAL)
+                .map(|r| r.id.clone())
+                .expect("the original has a row in the group")
+        });
+        // A people chat draws my own bubble and someone else's under different
+        // selectors; which one `ORIGINAL` takes is not what this case is about.
+        let own: &'static str = format!("own-bubble#{row_id}").leak();
+        let theirs: &'static str = format!("person-bubble#{row_id}").leak();
+        let bubble = vcx
+            .debug_bounds(own)
+            .or_else(|| vcx.debug_bounds(theirs))
+            .unwrap_or_else(|| panic!("the revealed bubble is on screen as {own} or {theirs}"));
+        let wash = vcx
+            .debug_bounds(REVEAL_WASH_SELECTOR)
+            .expect("the revealed message carries a wash");
+        let column = vcx
+            .debug_bounds("chat-column")
+            .expect("the transcript column");
+        let f = |p: Pixels| -> f32 { p.into() };
+        let inset = crate::ui::highlight::INSET;
+        // All four, not just one: the left gap is the side that carries the
+        // sliver, and it was 2 pt while the other three were 4 pt.
+        assert_eq!(f(bubble.origin.x) - f(wash.origin.x), inset, "left");
+        assert_eq!(f(bubble.origin.y) - f(wash.origin.y), inset, "top");
+        assert_eq!(f(wash.right()) - f(bubble.right()), inset, "right");
+        assert_eq!(f(wash.bottom()) - f(bubble.bottom()), inset, "bottom");
+        // The defect itself: the band used to be the whole column's width.
+        assert!(
+            f(wash.size.width) < f(column.size.width),
+            "the wash is the bubble's box ({} pt), not a band across the column ({} pt)",
+            f(wash.size.width),
+            f(column.size.width)
+        );
     }
 }
 #[cfg(test)]
