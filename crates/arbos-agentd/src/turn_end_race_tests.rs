@@ -291,6 +291,19 @@ async fn a_message_sent_as_the_pi_child_dies_is_answered_and_the_finished_row_st
         errors.is_empty(),
         "no error row may be left behind, and none may name the errno: {errors:?}"
     );
+    // The place in the send order is only this test's to count while nothing else holds one.
+    // A job keeps its ask's place until its own task has answered, so a job running in this
+    // chat would make the next assertion read 1 for a reason that is not a bug. Nothing here
+    // starts one — the scripted child calls no tool, and the burst path needs a running user
+    // turn — and this says so out loud rather than leaving it to be rediscovered.
+    assert!(
+        agent
+            .store
+            .jobs_for_chat(chat)
+            .unwrap_or_default()
+            .is_empty(),
+        "no job runs in this chat, so the send order holds only what this test put there"
+    );
     assert_eq!(
         agent.send_order.waiting(chat),
         0,
@@ -359,6 +372,18 @@ async fn a_job_whose_worker_dies_with_the_main_pi_child_waits_for_it_and_keeps_t
     .await
     .expect("the job's first worker fails and the job is put back in the queue");
     assert_eq!(job.state, "queued", "the job is waiting for a fresh worker");
+
+    // The other side of the send-order contract, and the reason the lost-message re-run cannot
+    // reach this path: `start_job_for_send` took the ask's place in the chat's FIFO with it
+    // into the job's task, and answered the command, so `handle_command` returned `Ok` and the
+    // re-run — which only runs on a child error — was never reached. The place stays held
+    // until the job's own task posts the answer, which is why this test counts 1 here and why
+    // no test that runs a job may assert the send order is empty.
+    assert_eq!(
+        agent.send_order.waiting(chat),
+        1,
+        "the job holds its ask's place in the chat's send order until it answers"
+    );
 
     // 1. Nothing is started into the window, and the job is not given up on either.
     tokio::time::sleep(Duration::from_secs(3)).await;
@@ -456,6 +481,9 @@ async fn three_messages_at_a_turn_end_are_all_answered_with_no_failed_rows() {
     agent.test_set_pi(Some(dying), chat).await;
     let _supervisor = stand_in_supervisor(&agent, root.clone(), chat, SECOND_REPLY);
 
+    // An ask in the shape the replay used. It runs inline rather than as a job: the burst path
+    // needs a user turn to be running, and this chat has none, so nothing here takes a second
+    // place in the send order.
     let (_ask, ask_cmd) = send_cmd(&host, "run the sieve as a job").await;
     let _ = agent.handle_command(chat, ask_cmd).await;
 
