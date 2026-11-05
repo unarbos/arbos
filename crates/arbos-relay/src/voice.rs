@@ -1799,8 +1799,7 @@ mod inbox_tests {
                 members: vec!["user2".into()],
                 agent_ids: vec![bubble.clone()],
                 title: Some("Pizza".into()),
-                avatar_leaf: None,
-                avatar_leaf_color: None,
+                avatar_disc_color: None,
                 description: None,
             }),
         )

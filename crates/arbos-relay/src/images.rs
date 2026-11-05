@@ -1493,8 +1493,7 @@ mod avatar_generate_tests {
             Path(server.id.clone()),
             Json(crate::matrix::servers::PatchBody {
                 image_key: Some(json!(key)),
-                avatar_leaf: Some(None),
-                avatar_leaf_color: Some(None),
+                avatar_disc_color: Some(None),
                 ..serde_json::from_str("{}").unwrap()
             }),
         )

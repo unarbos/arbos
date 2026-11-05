@@ -308,11 +308,13 @@ impl Db {
     }
 
     /// D92 amendment: the server's leaf picture (`None` = none).
-    pub fn update_server_leaf(&self, id: &str, leaf: Option<(i64, i64)>) -> Result<()> {
+    /// `avatar_leaf_color` kept its column name from the leaf avatars this replaced; the
+    /// companion `avatar_leaf` shape column is dormant and nothing reads it.
+    pub fn update_server_disc_color(&self, id: &str, color: Option<i64>) -> Result<()> {
         self.with(|c| {
             c.execute(
-                "UPDATE servers SET avatar_leaf = ?2, avatar_leaf_color = ?3 WHERE id = ?1",
-                params![id, leaf.map(|l| l.0), leaf.map(|l| l.1)],
+                "UPDATE servers SET avatar_leaf_color = ?2 WHERE id = ?1",
+                params![id, color],
             )?;
             Ok(())
         })

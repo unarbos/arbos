@@ -761,8 +761,7 @@ fn fixture_sender() -> SenderDto {
         avatar_url: None,
         avatar_color_index: None,
         avatar_color_index_effective: 1,
-        avatar_leaf_effective: None,
-        avatar_leaf_color_effective: None,
+        avatar_disc_color_effective: None,
     }
 }
 
@@ -1299,8 +1298,7 @@ async fn create_project_accepts_avatar_color_index() {
             avatar_color: None,
             description: None,
             avatar_color_index: Some(4),
-            avatar_leaf: None,
-            avatar_leaf_color: None,
+            avatar_disc_color: None,
             source_project_id: None,
         }),
     )

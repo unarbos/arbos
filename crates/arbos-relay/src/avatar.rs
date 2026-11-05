@@ -7,7 +7,7 @@
 //! without either, the built-in list below is used; it equals the apps' manifest (2026-10-15),
 //! in manifest order.
 
-use arbos_core::avatar::leaf;
+use arbos_core::avatar::disc;
 use serde_json::{json, Value};
 
 pub const DEFAULT_SLUGS: &[&str] = &[
@@ -90,42 +90,30 @@ pub fn effective_color_index(stable_id: &str, override_index: Option<i64>) -> u8
     }
 }
 
-/// Leaf avatar (D92) in effect for a project: the owner's picks where valid, else the id's cell.
-pub fn effective_leaf(p: &crate::db::Project) -> leaf::LeafPick {
-    leaf::pick_for(
+/// Disc colour (D92) in effect for a project: the owner's pick where valid, else the id's
+/// colour. The pick lives in the `avatar_leaf_color` column, which kept its name from the leaf
+/// avatars this replaced: renaming it would rewrite the whole `projects` table and break any
+/// relay still running the previous binary, for no change in behaviour.
+pub fn effective_disc(p: &crate::db::Project) -> u8 {
+    disc::color_for(
         &p.id,
-        p.avatar_leaf.and_then(|v| u8::try_from(v).ok()),
         p.avatar_leaf_color.and_then(|v| u8::try_from(v).ok()),
     )
 }
 
-/// Validate `avatar_leaf` / `avatar_leaf_color` from a request body. Besides the leaf and
-/// hue indices, both accept [`leaf::NEUTRAL`] (255) — "no leaf": the Create sheets store it
-/// when nothing was uploaded or generated, and the clients draw the name's initial on a
-/// neutral disc (Jacob, 2026-10-25). `null` stays the automatic leaf.
-pub fn check_leaf_pick(
-    leaf_idx: Option<i64>,
-    color_idx: Option<i64>,
-) -> Result<(), (axum::http::StatusCode, String)> {
-    let neutral = i64::from(leaf::NEUTRAL);
-    if let Some(l) = leaf_idx {
-        if !(0..i64::from(leaf::LEAF_COUNT)).contains(&l) && l != neutral {
-            return Err((
-                axum::http::StatusCode::BAD_REQUEST,
-                format!(
-                    "avatar_leaf must be 0–{}, {neutral} (no leaf) or null",
-                    leaf::LEAF_COUNT - 1
-                ),
-            ));
-        }
-    }
+/// Validate `avatar_disc_color` from a request body. Besides the colour index it accepts
+/// [`disc::NEUTRAL`] (255) — "no picture": the Create sheets store it when nothing was uploaded
+/// or generated, and the clients draw the name's initial on a neutral grey disc (Jacob,
+/// 2026-10-25). `null` stays the automatic colour.
+pub fn check_disc_color(color_idx: Option<i64>) -> Result<(), (axum::http::StatusCode, String)> {
+    let neutral = i64::from(disc::NEUTRAL);
     if let Some(c) = color_idx {
-        if !(0..i64::from(leaf::COLOR_COUNT)).contains(&c) && c != neutral {
+        if !(0..i64::from(disc::COLOR_COUNT)).contains(&c) && c != neutral {
             return Err((
                 axum::http::StatusCode::BAD_REQUEST,
                 format!(
-                    "avatar_leaf_color must be 0–{}, {neutral} (no leaf) or null",
-                    leaf::COLOR_COUNT - 1
+                    "avatar_disc_color must be 0–{}, {neutral} (no picture) or null",
+                    disc::COLOR_COUNT - 1
                 ),
             ));
         }
@@ -133,27 +121,20 @@ pub fn check_leaf_pick(
     Ok(())
 }
 
-/// `GET /avatar-leaves` body: the D92 (v2) shapes, hues and index rule, so a site or a third
-/// client can draw the same leaf — a pastel disc (`hex`) with the darker same-hue leaf (`ink`).
-pub fn leaves_json() -> Value {
+/// `GET /avatar-discs` body: the D92 colours and index rule, so a site or a third client can
+/// draw the same plain circle.
+pub fn discs_json() -> Value {
     json!({
         "rule": {
-            "version": leaf::LEAF_RULE_VERSION,
+            "version": disc::DISC_RULE_VERSION,
             "hash": "fnv1a64(project_id)",
-            "leaf": "hash mod 16",
-            "color": "the leaf's default_color",
-            "render": "disc = colors[color].hex; leaf = colors[color].ink, path drawn edge to edge (it spans 71 of 100 units, centred), even-odd fill",
-            "override": "avatar_leaf 0–15, avatar_leaf_color 0–9 on PATCH /projects/{id}; null = automatic",
-            "neutral": "avatar_leaf = avatar_leaf_color = 255: no leaf — draw the name's first letter on a neutral disc (dark #3A3A3A / #E5E5E5, light #E6E6E6 / #4A4A4A); never an automatic leaf",
+            "color": "hash mod 10",
+            "render": "fill the circle with colors[color].hex; no glyph",
+            "override": "avatar_disc_color 0–9 on PATCH /projects/{id}; null = automatic",
+            "neutral": "avatar_disc_color = 255: no picture — draw the name's first letter on a neutral disc (dark #3A3A3A / #E5E5E5, light #E6E6E6 / #4A4A4A); never an automatic colour",
         },
-        "scale": leaf::LEAF_SCALE,
-        "leaves": leaf::LEAVES.iter().enumerate().map(|(i, l)| json!({
-            "index": i, "slug": l.slug, "name": l.name, "path": leaf::path_data(i as u8),
-            "pivot": [l.pivot.0, l.pivot.1], "idle_secs": l.idle_secs,
-            "default_color": l.default_color,
-        })).collect::<Vec<_>>(),
-        "colors": leaf::COLORS.iter().enumerate().map(|(i, c)| json!({
-            "index": i, "name": c.name, "hex": c.rgb.hex(), "ink": c.ink.hex(),
+        "colors": disc::COLORS.iter().enumerate().map(|(i, c)| json!({
+            "index": i, "name": c.name, "hex": c.rgb.hex(),
         })).collect::<Vec<_>>(),
     })
 }
@@ -363,20 +344,18 @@ mod initials_tests {
 mod tests {
     use super::*;
 
-    /// The Create sheets' "nothing picked" value (Jacob, 2026-10-25) is accepted on both
-    /// fields; the ranges and `null` are unchanged, and anything else is still a 400.
+    /// The Create sheets' "nothing picked" value (Jacob, 2026-10-25) is accepted; the range
+    /// and `null` are unchanged, and anything else is still a 400.
     #[test]
     fn neutral_pick_is_accepted_and_the_rest_still_validates() {
-        let n = i64::from(leaf::NEUTRAL);
-        assert!(check_leaf_pick(Some(n), Some(n)).is_ok());
-        assert!(check_leaf_pick(Some(n), None).is_ok());
-        assert!(check_leaf_pick(None, None).is_ok());
-        assert!(check_leaf_pick(Some(15), Some(9)).is_ok());
-        assert!(check_leaf_pick(Some(16), None).is_err());
-        assert!(check_leaf_pick(None, Some(10)).is_err());
-        assert!(check_leaf_pick(Some(254), None).is_err());
-        assert!(check_leaf_pick(Some(-1), None).is_err());
-        // The effective (automatic) leaf an older client falls back to stays in range.
+        let n = i64::from(disc::NEUTRAL);
+        assert!(check_disc_color(Some(n)).is_ok());
+        assert!(check_disc_color(None).is_ok());
+        assert!(check_disc_color(Some(9)).is_ok());
+        assert!(check_disc_color(Some(10)).is_err());
+        assert!(check_disc_color(Some(254)).is_err());
+        assert!(check_disc_color(Some(-1)).is_err());
+        // The effective (automatic) colour an older client falls back to stays in range.
         let p: crate::db::Project = serde_json::from_value(json!({
             "id": "01M5NEUTRAL", "name": "Field notes", "icon": "", "instructions": "",
             "models": {}, "state": "ready", "created_at": 0, "last_active_at": 0,
@@ -384,12 +363,37 @@ mod tests {
             "avatar_leaf": n, "avatar_leaf_color": n,
         }))
         .unwrap();
-        let e = effective_leaf(&p);
-        assert!(e.leaf < leaf::LEAF_COUNT && e.color < leaf::COLOR_COUNT);
-        assert!(leaves_json()["rule"]["neutral"]
+        assert!(effective_disc(&p) < disc::COLOR_COUNT);
+        assert!(discs_json()["rule"]["neutral"]
             .as_str()
             .unwrap()
             .contains("255"));
+    }
+
+    /// Every agent that has no pick draws a colour derived from its id alone, so the relay,
+    /// the Mac and the iPhone agree without a round trip.
+    #[test]
+    fn an_unpicked_agent_takes_its_ids_colour() {
+        let project = |id: &str, pick: Option<i64>| -> crate::db::Project {
+            serde_json::from_value(json!({
+                "id": id, "name": "A", "icon": "", "instructions": "",
+                "models": {}, "state": "ready", "created_at": 0, "last_active_at": 0,
+                "spend_cap_daily": 1.0, "color": "", "user_id": "u",
+                "workspace_state": "stopped", "avatar_leaf_color": pick,
+            }))
+            .unwrap()
+        };
+        assert_eq!(
+            effective_disc(&project("01M5AGENT", None)),
+            disc::default_color("01M5AGENT")
+        );
+        // A pinned colour is kept.
+        assert_eq!(effective_disc(&project("01M5AGENT", Some(4))), 4);
+        // An out-of-range pin from an older client falls back rather than failing.
+        assert_eq!(
+            effective_disc(&project("01M5AGENT", Some(99))),
+            disc::default_color("01M5AGENT")
+        );
     }
 
     #[test]

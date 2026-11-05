@@ -197,7 +197,7 @@ mod tests {
             avatar_url: None,
             user_id: Some("u1".into()),
             avatar_color_index: None,
-            leaf: None,
+            disc_color: None,
         }
     }
 
@@ -212,7 +212,7 @@ mod tests {
             avatar_url: None,
             user_id: None,
             avatar_color_index: None,
-            leaf: None,
+            disc_color: None,
         }
     }
 

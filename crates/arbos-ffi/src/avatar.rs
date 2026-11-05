@@ -1,7 +1,7 @@
 //! Avatar colours for Swift: the D79 index rule and the sender accent bar
 //! (`arbos_core::avatar`), so the iPhone draws the same hex as the Mac.
 
-use arbos_core::avatar::{self, identity, leaf};
+use arbos_core::avatar::{self, disc, identity};
 
 /// A sender accent in both appearances, as `#RRGGBB`.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -44,172 +44,48 @@ pub fn avatar_accent_version() -> u32 {
     avatar::ACCENT_VERSION
 }
 
-// ---- D92 leaf avatars --------------------------------------------------------------------------
+// ---- D92 solid-colour discs --------------------------------------------------------------------
 
-/// The leaf avatar in effect for an agent: shape 0–8 and disc colour 0–9.
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
-pub struct LeafPick {
-    pub leaf: u8,
-    pub color: u8,
-}
-
-impl From<leaf::LeafPick> for LeafPick {
-    fn from(p: leaf::LeafPick) -> Self {
-        Self {
-            leaf: p.leaf,
-            color: p.color,
-        }
-    }
-}
-
-/// One absolute outline command in the 100 × 100 leaf box. Fill even-odd.
-#[derive(Debug, Clone, PartialEq, uniffi::Enum)]
-pub enum LeafSegment {
-    MoveTo {
-        x: f32,
-        y: f32,
-    },
-    LineTo {
-        x: f32,
-        y: f32,
-    },
-    CubicTo {
-        x1: f32,
-        y1: f32,
-        x2: f32,
-        y2: f32,
-        x: f32,
-        y: f32,
-    },
-    Close,
-}
-
-impl From<&leaf::Segment> for LeafSegment {
-    fn from(s: &leaf::Segment) -> Self {
-        match *s {
-            leaf::Segment::MoveTo { x, y } => LeafSegment::MoveTo { x, y },
-            leaf::Segment::LineTo { x, y } => LeafSegment::LineTo { x, y },
-            leaf::Segment::CubicTo {
-                x1,
-                y1,
-                x2,
-                y2,
-                x,
-                y,
-            } => LeafSegment::CubicTo {
-                x1,
-                y1,
-                x2,
-                y2,
-                x,
-                y,
-            },
-            leaf::Segment::Close => LeafSegment::Close,
-        }
-    }
-}
-
-/// D92: the leaf and colour for an agent id, honouring the owner's picks.
+/// D92: the disc colour for an agent id, honouring the owner's pick.
 #[uniffi::export]
-pub fn leaf_pick(seed: String, leaf: Option<u8>, color: Option<u8>) -> LeafPick {
-    leaf::pick_for(&seed, leaf, color).into()
-}
-
-/// Number of leaf shapes.
-#[uniffi::export]
-pub fn leaf_count() -> u8 {
-    leaf::LEAF_COUNT
+pub fn disc_color(seed: String, color: Option<u8>) -> u8 {
+    disc::color_for(&seed, color)
 }
 
 /// Number of disc colours.
 #[uniffi::export]
-pub fn leaf_color_count() -> u8 {
-    leaf::COLOR_COUNT
-}
-
-/// Picker labels of the shapes, index order.
-#[uniffi::export]
-pub fn leaf_names() -> Vec<String> {
-    leaf::LEAVES.iter().map(|l| l.name.to_owned()).collect()
+pub fn disc_color_count() -> u8 {
+    disc::COLOR_COUNT
 }
 
 /// Picker labels of the colours, index order.
 #[uniffi::export]
-pub fn leaf_color_names() -> Vec<String> {
-    leaf::COLORS.iter().map(|c| c.name.to_owned()).collect()
+pub fn disc_color_names() -> Vec<String> {
+    disc::COLORS.iter().map(|c| c.name.to_owned()).collect()
 }
 
-/// Disc colour `index` (the pastel) as `#RRGGBB`.
+/// Disc colour `index` as `#RRGGBB`.
 #[uniffi::export]
-pub fn leaf_color_hex(index: u8) -> String {
-    leaf::COLORS[(index % leaf::COLOR_COUNT) as usize].rgb.hex()
+pub fn disc_color_hex(index: u8) -> String {
+    disc::fill(index).hex()
 }
 
-/// The leaf ink on disc colour `index` (the darker same hue) as `#RRGGBB`.
+/// The sentinel stored for "no picture": the name's initial on a neutral grey disc.
 #[uniffi::export]
-pub fn leaf_ink_hex(index: u8) -> String {
-    leaf::COLORS[(index % leaf::COLOR_COUNT) as usize].ink.hex()
+pub fn disc_neutral_index() -> u8 {
+    disc::NEUTRAL
 }
 
-/// The leaf's span as a share of the disc diameter.
+/// Bump of the index rule; clients refresh cached defaults when it moves.
 #[uniffi::export]
-pub fn leaf_scale() -> f32 {
-    leaf::LEAF_SCALE
+pub fn disc_rule_version() -> u32 {
+    disc::DISC_RULE_VERSION
 }
 
-/// The outline of shape `index` in the 100 × 100 box, absolute commands.
+/// The bubble-bar accent of an agent drawing its disc: the disc colour itself.
 #[uniffi::export]
-pub fn leaf_segments(index: u8) -> Vec<LeafSegment> {
-    leaf::segments(index).iter().map(Into::into).collect()
-}
-
-/// The stem pivot of shape `index` in the 100 × 100 box: `[x, y]`.
-#[uniffi::export]
-pub fn leaf_pivot(index: u8) -> Vec<f32> {
-    let p = leaf::LEAVES[(index % leaf::LEAF_COUNT) as usize].pivot;
-    vec![p.0, p.1]
-}
-
-/// Length of shape `index`'s idle sway loop, seconds (staggered per leaf).
-#[uniffi::export]
-pub fn leaf_idle_secs(index: u8) -> f32 {
-    leaf::LEAVES[(index % leaf::LEAF_COUNT) as usize].idle_secs
-}
-
-/// Idle sway angle at `t` seconds, radians.
-#[uniffi::export]
-pub fn leaf_idle_angle(index: u8, t: f32) -> f32 {
-    leaf::idle_angle(index, t)
-}
-
-/// Gust angle `t` seconds after it starts, radians; 0 outside `0..leaf_gust_secs()`.
-#[uniffi::export]
-pub fn leaf_gust_angle(t: f32) -> f32 {
-    leaf::gust_angle(t)
-}
-
-/// Length of the hover / activity gust, seconds.
-#[uniffi::export]
-pub fn leaf_gust_secs() -> f32 {
-    leaf::GUST_SECS
-}
-
-/// Shape `index`'s Lottie file (`gust` = the 1 s hover/activity gust, else the idle loop) as
-/// JSON text, for lottie-ios; transparent background, recolour keypath `**.leaf.Color`.
-#[uniffi::export]
-pub fn leaf_lottie_json(index: u8, gust: bool) -> String {
-    let l = &leaf::LEAVES[(index % leaf::LEAF_COUNT) as usize];
-    if gust {
-        l.gust_lottie.to_owned()
-    } else {
-        l.idle_lottie.to_owned()
-    }
-}
-
-/// The bubble-bar accent of a leaf agent: its disc colour.
-#[uniffi::export]
-pub fn leaf_accent(seed: String, leaf: Option<u8>, color: Option<u8>) -> AccentHex {
-    leaf::accent(leaf::pick_for(&seed, leaf, color)).into()
+pub fn disc_accent(seed: String, color: Option<u8>) -> AccentHex {
+    disc::accent(disc::color_for(&seed, color)).into()
 }
 
 // ---- One agent identity for every surface (#1592) ---------------------------------------------
@@ -220,8 +96,7 @@ pub struct AgentCard {
     pub id: String,
     pub name: String,
     pub handle: String,
-    pub leaf: Option<u8>,
-    pub leaf_color: Option<u8>,
+    pub disc_color: Option<u8>,
     pub color_index: Option<u8>,
     pub image_key: Option<String>,
     /// The relay's stamp of the last avatar change (`0` when the source has none); among
@@ -235,8 +110,7 @@ impl From<AgentCard> for identity::AgentCard {
             id: c.id,
             name: c.name,
             handle: c.handle,
-            leaf: c.leaf,
-            leaf_color: c.leaf_color,
+            disc_color: c.disc_color,
             color_index: c.color_index,
             image_key: c.image_key,
             avatar_version: c.avatar_version,
@@ -250,7 +124,9 @@ pub struct AgentIdentity {
     pub id: String,
     pub name: String,
     pub handle: String,
-    pub leaf: LeafPick,
+    pub disc_color: u8,
+    /// The card says "no picture": draw the name's initial on a neutral grey disc.
+    pub neutral: bool,
     pub color_index: u8,
     pub image_key: Option<String>,
     /// Stamp of the copy drawn; part of any picture cache key.
@@ -264,7 +140,8 @@ impl From<identity::AgentIdentity> for AgentIdentity {
             id: a.id,
             name: a.name,
             handle: a.handle,
-            leaf: a.leaf.into(),
+            disc_color: a.disc_color,
+            neutral: a.neutral,
             color_index: a.color_index,
             image_key: a.image_key,
             avatar_version: a.avatar_version,
@@ -276,7 +153,7 @@ impl From<identity::AgentIdentity> for AgentIdentity {
 /// Which card a row is drawn from: `sender` (`agent:<id>` / `project:<id>` / bare id), the
 /// row's `senderHandle` and `senderName`, against `cards` in the caller's order (the open
 /// chat's roster, then my projects, then other rosters). Never fails: an unknown agent gets
-/// the id-seeded leaf and the row's own name.
+/// the id-seeded disc and the row's own name.
 #[uniffi::export]
 pub fn resolve_agent(
     sender: String,
