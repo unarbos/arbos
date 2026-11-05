@@ -557,6 +557,19 @@ enum ChatHeaderGlass {
         let m = material(surface: surface, liquidGlassAvailable: liquidGlassAvailable)
         return PillGlass(material: m, clear: m != .solid, tinted: false)
     }
+
+    /// The transcript's floating chips — the scroll-to-bottom chevron and the "New messages"
+    /// pill — on Glass ([feedback composer-glass-regression-2026-10-30], Jacob: the chevron
+    /// "hides the bubble's right edge entirely"). They sit over bubbles like the composer's
+    /// pills do, so they take the same clear glass.
+    ///
+    /// Dark only: the light appearance keeps its solid `field` chip until Jacob signs the
+    /// light glass off, and Matte is solid on both appearances.
+    static func transcriptChipGlass(surface: Surface, isDark: Bool,
+                                    liquidGlassAvailable: Bool = liquidGlassAvailable) -> PillGlass {
+        guard isDark else { return PillGlass(material: .solid, clear: false, tinted: false) }
+        return pillGlass(surface: surface, liquidGlassAvailable: liquidGlassAvailable)
+    }
 }
 
 /// The glass behind a header control: one shape, three materials.
@@ -896,6 +909,27 @@ struct PillSurface<S: InsettableShape>: View {
             ComposerRim(shape: shape)
         } else {
             let glass = ChatHeaderGlass.pillGlass(surface: .glass)
+            HeaderGlassBackground(shape: shape, material: glass.material, tinted: glass.tinted, clear: glass.clear)
+        }
+    }
+}
+
+/// A floating chip over the transcript (the scroll-to-bottom chevron, the "New messages"
+/// pill): the clear glass of `ChatHeaderGlass.transcriptChipGlass` where that spec grants it,
+/// the solid `field` disc with its 1 pt rim everywhere else. The glass path takes the family
+/// rim (`ComposerRim`, inside `HeaderGlassBackground`) instead, as the composer's pills do.
+struct TranscriptChipSurface<S: InsettableShape>: View {
+    @Environment(\.theme) private var theme
+    let shape: S
+
+    var body: some View {
+        let glass = ChatHeaderGlass.transcriptChipGlass(surface: theme.surface, isDark: theme.isDark)
+        if glass.material == .solid {
+            ZStack {
+                shape.fill(theme.field)
+                shape.strokeBorder(theme.fieldBorder, lineWidth: 1)
+            }
+        } else {
             HeaderGlassBackground(shape: shape, material: glass.material, tinted: glass.tinted, clear: glass.clear)
         }
     }
