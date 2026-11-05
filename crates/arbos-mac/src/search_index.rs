@@ -464,4 +464,26 @@ mod tests {
         assert_eq!(ix.messages(&normalize_query("ZOE"), 5).len(), 1);
         assert_eq!(ix.messages(&normalize_query("resume"), 5).len(), 1);
     }
+
+    /// Measured 2026-11-05: typing "Strasse" found "Treffen in der Straße"
+    /// with the Mac's in-chat search and nothing app-wide. Both halves fold
+    /// through `arbos_core::search::fold`, so what one finds the other finds.
+    #[test]
+    fn app_wide_finds_what_in_chat_search_finds() {
+        for (typed, body) in [
+            ("Strasse", "Treffen in der Straße"),
+            ("Oyvind", "ping Øyvind about it"),
+        ] {
+            let mut ix = SearchIndex::default();
+            ix.replace_chat("c", &[msg("m", 1, Role::User, body)], &Names);
+            let q = normalize_query(typed);
+            assert!(
+                !crate::chat_search::hit_ranges(body, &q).is_empty(),
+                "in-chat: {typed:?} in {body:?}"
+            );
+            let hits = ix.messages(&q, 5);
+            assert_eq!(hits.len(), 1, "app-wide: {typed:?} in {body:?}");
+            assert!(hits[0].snippet.contains(body), "{}", hits[0].snippet);
+        }
+    }
 }

@@ -608,6 +608,49 @@ mod tests {
         );
     }
 
+    /// A snippet folds the body the way `normalize_query` folds the query:
+    /// through `arbos_core::search::fold`, hand-mapped letters included.
+    /// Measured 2026-11-05: the app-wide palette could not find "Strasse" in
+    /// "Treffen in der Straße" because this folding skipped `ß` → `ss` while
+    /// the query had it, so the index matched and the snippet did not.
+    #[test]
+    fn snippets_fold_the_hand_mapped_letters() {
+        for (typed, body) in [
+            ("Strasse", "Treffen in der Straße"),
+            ("Oyvind", "ping Øyvind about it"),
+            ("aero", "the Ærø ferry leaves at six"),
+            ("oeuvre", "her œuvre is online now"),
+            ("lukasz", "Łukasz replied this morning"),
+            ("duro", "Đuro signed the lease"),
+            ("isik", "ışık means light"),
+            ("ss", "ẞ is the capital one"),
+        ] {
+            let q = normalize_query(typed);
+            assert!(
+                snippet(body, &q).is_some(),
+                "typed {typed:?} (folded {q:?}) in {body:?}"
+            );
+        }
+    }
+
+    /// `ß` → `ss` makes the folded text longer than the original, so every
+    /// offset the snippet window uses has to come back through the origin map.
+    /// A window computed on folded offsets would start one char late here.
+    #[test]
+    fn a_fold_that_grows_keeps_the_window_on_the_match() {
+        let q = normalize_query("Strasse");
+        assert_eq!(
+            snippet("Wir treffen uns in der Straße vor dem Haus", &q).as_deref(),
+            Some("…reffen uns in der Straße vor dem Haus")
+        );
+        // `Æ` → `ae` grows before the match too: a window on folded offsets
+        // would start one char later, on "s Treffen".
+        assert_eq!(
+            snippet("Ærø bestätigt das Treffen in der Straße heute", &q).as_deref(),
+            Some("…as Treffen in der Straße heute")
+        );
+    }
+
     #[test]
     fn snippets_cut_around_the_match() {
         let long = "one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty twenty-one twenty-two";
