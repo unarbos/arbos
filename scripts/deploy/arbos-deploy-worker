@@ -48,10 +48,18 @@ DEPLOY_ENV=/etc/arbos/deploy.env
 KILL_FILE=/etc/arbos/deploy.disabled
 # Disk guard (#1890): below DISK_LOW_GB free on the state volume no image build starts (a build + its
 # docker layers is ~4 GB each; 22 stale tags held 85 GB on 2026-10-26 when the host hit 94–99 %); the
-# request stays queued and is picked up when space is back. Every tick also prunes the agent image
-# tags this worker produced down to IMAGE_TAGS_KEEP (the deployed one, the default, and the newest few).
+# request stays queued and is picked up when space is back. Every tick also looks at the agent image
+# tags this worker produced beyond IMAGE_TAGS_KEEP (the deployed one, the default, and the newest few).
 DISK_LOW_GB="${ARBOS_DISK_LOW_GB:-40}"
 IMAGE_TAGS_KEEP="${ARBOS_IMAGE_TAGS_KEEP:-4}"
+# Removing an image tag is a DELETE, so the prune is OFF unless someone turns it on, and the shipped
+# default must stay 0 (2026-11-05). With no configuration present the tick names every tag it would
+# remove and removes none, which is also how the operator gets the list to decide from — the names,
+# not a count. `$STATE/agentd.image-tags-unpruned` always holds the current list; the log line repeats
+# only when that list changes, because this runs once a minute. Turn it on with IMAGE_TAG_PRUNE=1 in
+# /etc/arbos/deploy.env (sourced below) or ARBOS_IMAGE_TAG_PRUNE=1 in the environment.
+IMAGE_TAG_PRUNE="${ARBOS_IMAGE_TAG_PRUNE:-0}"
+image_tag_prune_enabled() { [[ "$IMAGE_TAG_PRUNE" == 1 ]]; }
 disk_free_gb() { df --output=avail -BG "$STATE" 2>/dev/null | tail -n 1 | tr -d ' G'; }
 disk_low() { local f; f="$(disk_free_gb)"; [[ -n "$f" ]] && (( f < DISK_LOW_GB )); }
 HOOK="${ARBOS_DEPLOY_HOOK:-/usr/local/bin/arbos-deploy-hook}"
@@ -1456,17 +1464,36 @@ continue_roll_if_due() {
 }
 
 # Local docker image tags of our agent image, newest first by version; keep the ones a container runs,
-# the relay default, and the IMAGE_TAGS_KEEP newest. ~3.8 GB each.
+# the relay default, and the IMAGE_TAGS_KEEP newest. ~3.8 GB each. Deletes nothing unless
+# IMAGE_TAG_PRUNE=1; see the knob above for why the default is off.
 prune_agent_image_tags() {
-  local repo="ghcr.io/unarbos/arbos/arbos-agent" in_use tag n=0
-  in_use="$(docker ps -a --format '{{.Image}}' 2>/dev/null | grep -F "$repo:" | sed "s#^$repo:##" | sort -u | tr '\n' ' ')"
-  in_use="$in_use $(secret_from "$RELAY_ENV" ARBOS_DAYTONA_SNAPSHOT 2>/dev/null | sed 's/^arbos-agent-//')"
+  local repo="ghcr.io/unarbos/arbos/arbos-agent" in_use tag n=0 listed
+  local -a spare=()
+  # `|| true` on both: with `set -o pipefail` a grep that matches nothing fails the whole pipeline, and
+  # this assignment would then end the TICK, not just the prune — no container using the image is an
+  # ordinary state, not an error. Same shape as the no-marker grep that ended every tick on Oct 23.
+  in_use="$(docker ps -a --format '{{.Image}}' 2>/dev/null | grep -F "$repo:" | sed "s#^$repo:##" | sort -u | tr '\n' ' ' || true)"
+  in_use="$in_use $(secret_from "$RELAY_ENV" ARBOS_DAYTONA_SNAPSHOT 2>/dev/null | sed 's/^arbos-agent-//' || true)"
   while read -r tag; do
     [[ -n "$tag" ]] || continue
     case " $in_use " in *" $tag "*) continue ;; esac
+    spare+=("$tag")
+  done < <(docker images --format '{{.Tag}}' "$repo" 2>/dev/null | grep -E '^0\.[0-9]+\.[0-9]+$' | sort -t. -k3 -rn | tail -n "+$((IMAGE_TAGS_KEEP + 1))")
+  (( ${#spare[@]} )) || { rm -f "$STATE/agentd.image-tags-unpruned"; return 0; }
+  if ! image_tag_prune_enabled; then
+    # Name every tag, every time the set changes: this list is what a decision to enable the prune is
+    # made from, so a count would not do. The file carries the same list for reading at any moment.
+    listed="$(cat "$STATE/agentd.image-tags-unpruned" 2>/dev/null || true)"
+    printf '%s\n' "${spare[@]}" > "$STATE/agentd.image-tags-unpruned"
+    [[ "$listed" == "$(printf '%s\n' "${spare[@]}")" ]] \
+      || log "agentd: image tag prune is OFF (IMAGE_TAG_PRUNE=$IMAGE_TAG_PRUNE); ${#spare[@]} spare tag(s) kept, none removed: ${spare[*]}; $(disk_free_gb) GB free"
+    return 0
+  fi
+  rm -f "$STATE/agentd.image-tags-unpruned"
+  for tag in "${spare[@]}"; do
     if dry; then log "dry-run: would remove image tag $repo:$tag"; continue; fi
     docker rmi "$repo:$tag" >/dev/null 2>&1 && n=$((n + 1))
-  done < <(docker images --format '{{.Tag}}' "$repo" 2>/dev/null | grep -E '^0\.[0-9]+\.[0-9]+$' | sort -t. -k3 -rn | tail -n "+$((IMAGE_TAGS_KEEP + 1))")
+  done
   (( n > 0 )) && log "agentd: pruned $n old agent image tag(s); $(disk_free_gb) GB free"
   return 0
 }
@@ -1511,6 +1538,11 @@ tick() {
 
 status() {
   echo "disk    $(disk_free_gb) GB free on $STATE (image builds pause below ${DISK_LOW_GB} GB)$(disk_low && echo '  ** LOW **')"
+  if image_tag_prune_enabled; then
+    echo "prune   image tag prune ON (IMAGE_TAG_PRUNE=1); tags beyond the newest ${IMAGE_TAGS_KEEP} are removed each tick"
+  else
+    echo "prune   image tag prune OFF; spare tags are kept and listed: $(tr '\n' ' ' < "$STATE/agentd.image-tags-unpruned" 2>/dev/null || echo none)"
+  fi
   echo "relay   deployed $(deployed_sha relay)"
   echo "voice   deployed $(deployed_sha voice)"
   echo "agentd  deployed $(deployed_sha agentd) (default snapshot $(secret_from "$RELAY_ENV" ARBOS_DAYTONA_SNAPSHOT 2>/dev/null || echo ?))"
@@ -1600,8 +1632,50 @@ selftest() {
   users='[{"id":"gh_8","machine":{"state":"awake","sandbox_id":"s4","snapshot":"new","pinned_snapshot":"new","upgrade":{"in_progress":false}}}]'
   [[ -z "$(pending_boxes new all)" ]] || { echo "selftest: a box on the target must not be pending" >&2; return 1; }
   hold_cases "$h"
+  image_tag_prune_cases "$h/prune"
   echo "selftest ok"
 }
+
+# The image tag prune removes nothing unless it is switched on. Three parts, because the obvious test —
+# "the off path deletes nothing" — would still pass if someone shipped the default as ON, and would also
+# pass if the function stopped working altogether. So: the shipped default is pinned, the off path is
+# shown to delete nothing while still naming every tag, and the on path is shown to delete, which is what
+# makes the first two mean anything. `docker` is a stub on PATH that records every call it is given.
+image_tag_prune_cases() {
+  local d="$1" calls="$1/docker-calls" out
+  mkdir -p "$d/bin"
+  cat > "$d/bin/docker" <<'STUB'
+#!/usr/bin/env bash
+echo "$*" >> "$DOCKER_CALLS"
+[[ "$1" == images ]] && printf '%s\n' 0.1.190 0.1.189 0.1.188 0.1.187 0.1.186 0.1.185
+exit 0
+STUB
+  chmod +x "$d/bin/docker"
+  # 1. The shipped default is OFF, read out of this file rather than out of the running environment,
+  # which a developer's ARBOS_IMAGE_TAG_PRUNE could otherwise mask. Removing a tag is a delete and
+  # needs a decision; it must never arrive as a default.
+  grep -qE '^IMAGE_TAG_PRUNE="\$\{ARBOS_IMAGE_TAG_PRUNE:-0\}"' "${BASH_SOURCE[0]}" \
+    || { echo "selftest: the shipped IMAGE_TAG_PRUNE default is not 0 — the prune deletes images, so off is the only safe default" >&2; return 1; }
+  STATE="$d"; LOG="$d/log"
+  # 2. Off: no deletion, and the log names every spare tag rather than counting them.
+  : > "$calls"
+  out="$(DOCKER_CALLS="$calls" PATH="$d/bin:$PATH" IMAGE_TAG_PRUNE=0 prune_agent_image_tags)"
+  [[ "$(rmi_calls "$calls")" == 0 ]] \
+    || { echo "selftest: the prune made $(rmi_calls "$calls") rmi call(s) with IMAGE_TAG_PRUNE=0; it must remove nothing" >&2; return 1; }
+  [[ "$out" == *0.1.186* && "$out" == *0.1.185* ]] \
+    || { echo "selftest: the disabled prune must name every spare tag it would remove; it logged: $out" >&2; return 1; }
+  [[ "$(tr '\n' ' ' < "$d/agentd.image-tags-unpruned")" == "0.1.186 0.1.185 " ]] \
+    || { echo "selftest: the disabled prune must leave the spare tags in agentd.image-tags-unpruned" >&2; return 1; }
+  # 3. On: it really does delete, so parts 1 and 2 are pinning behaviour and not a broken function.
+  : > "$calls"
+  DOCKER_CALLS="$calls" PATH="$d/bin:$PATH" IMAGE_TAG_PRUNE=1 prune_agent_image_tags > /dev/null
+  [[ "$(rmi_calls "$calls")" == 2 ]] \
+    || { echo "selftest: with IMAGE_TAG_PRUNE=1 the prune must remove the 2 spare tags; it made $(rmi_calls "$calls") rmi call(s)" >&2; return 1; }
+  [[ ! -f "$d/agentd.image-tags-unpruned" ]] \
+    || { echo "selftest: an enabled prune must not leave a kept-tag list behind" >&2; return 1; }
+}
+# grep -c prints 0 and exits 1 when it matches nothing, so the count needs the `|| true` to survive set -e.
+rmi_calls() { grep -c '^rmi ' "$1" 2>/dev/null || true; }
 
 # The agentd hold lifts by hand only. Every case runs the REAL gate — the top of `roll_image` — against a
 # scratch repo and a scratch state directory, with `resolve` standing in for the first step after the gate:
