@@ -2529,6 +2529,37 @@ impl Agent {
         Ok(())
     }
 
+    /// How long a send whose pi child went away waits for a live one before giving up (bug V).
+    ///
+    /// The supervisor polls every two seconds, and `respawn_pi` boots the child and then waits
+    /// up to thirty for its first `get_state`, so a shorter bound would report a loss the box
+    /// was in the middle of repairing. Round 7's box needed two goes — "pi main child is gone;
+    /// respawning" at 00:09:37.128 and again at 00:09:41.583 — before one stuck, and that is
+    /// the case this has to clear rather than the happy one.
+    pub(crate) const PI_RESPAWN_WAIT: Duration = Duration::from_secs(45);
+
+    /// Wait for a *live* main pi child.
+    ///
+    /// [`Agent::pi`] waits for the slot to be filled, which a child that has already exited
+    /// satisfies — it is only emptied for the moment `respawn_pi` holds it. That is the handle
+    /// bug V's lost message was written to, and the write failed with `EPIPE`. This waits for a
+    /// child that can actually take a prompt.
+    pub(crate) async fn wait_for_live_pi(&self, bound: Duration) -> bool {
+        // The supervisor sits on a two-second sleep that also wakes on this.
+        self.pi_wake.notify_one();
+        let deadline = tokio::time::Instant::now() + bound;
+        loop {
+            if self.pi.lock().await.as_ref().is_some_and(|c| c.is_alive()) {
+                return true;
+            }
+            if self.shutting_down.load(Ordering::SeqCst) || tokio::time::Instant::now() >= deadline
+            {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
     /// Wait briefly for the supervisor to respawn pi (it polls every 2 s). A send that
     /// lands between death and respawn must not permanently Fail with no assistant bubble.
     async fn pi(&self) -> Result<Arc<RpcChild>> {
@@ -2815,6 +2846,34 @@ impl Agent {
             }
             (other, _) => Err(anyhow!("unknown command kind {other}")),
         };
+        // Bug V (Jacob, Test5 round 7, r7correct run 2). The main pi child died between the
+        // previous turn ending and this prompt reaching it, so the write to its closed stdin
+        // failed with `EPIPE` and the user's correction never got to the model. A box losing a
+        // process is not an answer to a message, and it is not a refusal of one either: the
+        // send keeps the place it already holds at the head of its chat's FIFO — `ticket`
+        // above is alive for the whole of this function, so `await_send_order` lets the re-run
+        // straight back through — and goes again on a live child.
+        //
+        // Once, and only while nothing has answered the message. A send that spoke before the
+        // child went has its answer in the chat already and must never be run twice. A box that
+        // has no child in the slot at all never had one to lose, so it has nothing to wait for
+        // and is told straight away.
+        let rerun = match &res {
+            Err(e)
+                if matches!(cmd.kind.as_str(), "send" | "answer")
+                    && is_child_error(&e.to_string()) =>
+            {
+                self.pi.lock().await.is_some() && !self.message_answered(&host, &cmd).await
+            }
+            _ => false,
+        };
+        let res = match res {
+            Err(first) if rerun => {
+                self.rerun_send_after_respawn(chat_id, &host, &cmd, &first.to_string())
+                    .await
+            }
+            other => other,
+        };
         let leave_taken = match (&res, people_msg_id.as_deref()) {
             (Ok(()), Some(msg_id)) => self.people_shared_send_open(chat_id, &host, msg_id).await,
             _ => false,
@@ -2842,14 +2901,14 @@ impl Agent {
                         .and_then(Value::as_str)
                         .unwrap_or("");
                     if !user_msg.is_empty() {
-                        let has_reply = h.doc.messages().iter().any(|m| {
-                            m.role == "assistant"
-                                && m.rest.get("inReplyTo").and_then(Value::as_str) == Some(user_msg)
-                                && m.status != "cancelled"
-                        });
                         // A failed steer still has the live turn's assistant row; only surface a
                         // new error bubble when nothing is answering this user message.
-                        if !has_reply {
+                        if !h
+                            .doc
+                            .messages()
+                            .iter()
+                            .any(|m| answers_message(m, user_msg))
+                        {
                             let id = ulid();
                             h.doc
                                 .start_assistant_message(&id, user_msg, &self.cfg.device_id);
@@ -2863,6 +2922,68 @@ impl Agent {
             }
         }
         res
+    }
+
+    /// Does anything in the chat already answer this command's user message?
+    ///
+    /// The same read the failed-send error row makes above, asked before a re-run instead of
+    /// before an error bubble: a message that has its answer must not be sent to the model a
+    /// second time, whatever went wrong after the answer.
+    async fn message_answered(&self, host: &SharedHost, cmd: &CommandView) -> bool {
+        let user_msg = cmd
+            .payload
+            .get("messageId")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        if user_msg.is_empty() {
+            // Nothing to run again: treat it as answered so the error stands.
+            return true;
+        }
+        let h = host.lock().await;
+        h.doc
+            .messages()
+            .iter()
+            .any(|m| answers_message(m, &user_msg))
+    }
+
+    /// Run a send again that lost the main pi child before it reached the model (bug V).
+    ///
+    /// The message keeps the place `handle_command` already gave it in the chat's send order:
+    /// its [`crate::send_order::SendTicket`] is held for the whole of that function, so by the
+    /// time this runs the message *is* the head of its chat's FIFO and the claim it took is
+    /// still its own. `await_send_order` inside `handle_send` therefore lets the re-run
+    /// straight through, and a message that arrived during the loss still waits behind it.
+    /// That is the head insertion the fix asks for, made out of `send_order`'s own primitives
+    /// rather than a second queue beside them.
+    ///
+    /// Once. A box that cannot keep a pi child up for one prompt has a worse problem than this
+    /// message, and the user is better served by the plain line than by a silent retry loop.
+    async fn rerun_send_after_respawn(
+        self: &Arc<Self>,
+        chat_id: &str,
+        host: &SharedHost,
+        cmd: &CommandView,
+        first_error: &str,
+    ) -> Result<()> {
+        if !self.wait_for_live_pi(Self::PI_RESPAWN_WAIT).await {
+            tracing::warn!(
+                chat_id,
+                error = first_error,
+                "the send lost the pi child and no live one came back; the user is told"
+            );
+            return Err(anyhow!("{first_error}"));
+        }
+        tracing::warn!(
+            chat_id,
+            error = first_error,
+            "the send lost the pi child before any answer; re-running it at the head of the chat's send order"
+        );
+        self.append_audit(
+            "send_rerun_after_pi_loss",
+            json!({ "chat_id": chat_id, "command_id": cmd.id, "error": first_error }),
+        );
+        self.handle_send(chat_id, host, cmd).await
     }
 
     /// Abort the turn running in `chat_id` (people chat removal, voice-call cancel).
@@ -3227,6 +3348,10 @@ impl Agent {
             .steer(&sid, text)
             .await
             .map_err(|e| format!("steer failed: {e}"))?;
+        // On the job row as well as in the worker's session. The session dies with its worker;
+        // the job does not, and both of the things that can carry it on — a fresh worker and
+        // the inline fallback — used to go back to the uncorrected brief (bug V).
+        let _ = self.store.append_job_steer(&job.id, text);
         let _ = self
             .store
             .set_job_step(&job.id, "Taking your correction into account");
@@ -4184,6 +4309,29 @@ impl Agent {
                     )
                     .await;
                     tracing::warn!(job = %j.id, error = %e, attempt = j.attempt, "job worker failed; fresh worker");
+                    // Bug V: whatever takes the main pi child takes worker children with it.
+                    // Round 7's job lost both of its workers inside that window — 00:09:50.965
+                    // and 00:09:59.584, with respawns logged at 00:09:37.128 and 00:09:41.583 —
+                    // because the fresh one was started straight into the squeeze that had just
+                    // killed the last. A live main child is the box's own readiness signal and
+                    // the cheapest one there is: waiting for it costs nothing when the box is
+                    // well, and it is the difference between a second worker and the inline
+                    // fallback when it is not.
+                    if !me.wait_for_live_pi(Agent::PI_RESPAWN_WAIT).await {
+                        tracing::warn!(job = %j.id, "fresh worker starts with no live main pi child");
+                    }
+                    // The user's corrections outlive the worker they were spoken to.
+                    let brief = format!(
+                        "{brief}{}",
+                        job_steers_note(
+                            &me.store
+                                .job(&j.id)
+                                .ok()
+                                .flatten()
+                                .map(|r| r.steers)
+                                .unwrap_or_default()
+                        )
+                    );
                     me.spawn_subagent_task(
                         &chat,
                         &host2,
@@ -4194,7 +4342,7 @@ impl Agent {
                             j.id[j.id.len().saturating_sub(4)..].to_lowercase()
                         ),
                         purpose.clone(),
-                        brief.clone(),
+                        brief,
                         Some(Harness::Pi),
                         false,
                         false,
@@ -5236,10 +5384,63 @@ impl Agent {
             TurnKind::ApprovalOutcome { .. } => "approval_outcome",
             TurnKind::JobFallback { .. } => "job_fallback",
         };
+        // Bug V (Jacob, Test5 round 7): the main pi child can go away on either side of a
+        // turn's work, and the two cases owe the user opposite things.
+        //
+        // * It went *after* the turn had spoken. The words are in the chat and the job it
+        //   started is running; losing the model process afterwards says nothing about any of
+        //   that, so the row keeps its `done`. Run 2's act turn was flipped to `error` here
+        //   165 ms after it had acked.
+        // * It went *before* the turn said anything. Then nothing was answered and nothing was
+        //   refused, so this row is not a verdict on the message at all: it is retired below
+        //   and `handle_command` runs the send again on its own place in the chat's queue.
+        let lost_child = result
+            .as_ref()
+            .err()
+            .is_some_and(|e| is_child_error(&e.to_string()));
+        let spoke = answer_delivered(&turn);
         let (mut final_status, err_text) = match &result {
             Ok(()) => (MessageStatus::Done, None),
+            Err(e) if lost_child && spoke => {
+                tracing::warn!(chat_id, error = %e, "the pi child went after this turn had answered; its row keeps `done`");
+                (MessageStatus::Done, None)
+            }
             Err(e) => (MessageStatus::Error, Some(e.to_string())),
         };
+        if lost_child && !spoke && !turn.stopped {
+            // No error bubble and no `route none · 0 ms` turn recorded against the message:
+            // neither is something that happened to it. The message is still owed an answer and
+            // still holds the head of its chat's queue, so the send is re-run from there.
+            {
+                let h = host.lock().await;
+                h.doc.set_activity(&assistant_msg_id, None);
+                retire_row(&h.doc, &assistant_msg_id);
+                retire_wordless_rows(&h.doc, &turn.rows_opened, &assistant_msg_id);
+            }
+            self.refresh_job_activity(chat_id).await;
+            let detail = result
+                .as_ref()
+                .err()
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            let _ = self.store.t3_append(
+                chat_id,
+                None,
+                Some(chat_id),
+                "pi_child_lost",
+                Some("system"),
+                &format!("the main pi child went before this turn reached the model ({detail}); the send is re-run"),
+                Some(&json!({ "message_id": assistant_msg_id, "user_message_id": user_msg_id })),
+            );
+            let _ = self.post_timing("pi_child_lost", 1, Some(turn_kind)).await;
+            tracing::warn!(chat_id, user_msg_id, error = %detail, "the pi child went before this turn reached the model; row retired, send re-run");
+            return Ok(TurnOutcome {
+                assistant_msg_id,
+                route_name: "pi_child_lost",
+                turn,
+                result,
+            });
+        }
         // The model call failed and the user got no answer: say so in the bubble, never a blank
         // row (feedback lium-empty-reply-2026-10-21). A partial answer before the failure stays.
         let model_failed = turn
@@ -5808,14 +6009,13 @@ impl Agent {
                 .map(|m| m.text())
                 .unwrap_or_default()
         };
-        let brief = self
-            .store
-            .job(&job.id)
-            .ok()
-            .flatten()
-            .map(|r| r.brief)
-            .unwrap_or_default();
-        let prompt = job_fallback_prompt(job, user_msg_id, &ask, &brief, error, partial);
+        let row = self.store.job(&job.id).ok().flatten();
+        let brief = row.as_ref().map(|r| r.brief.clone()).unwrap_or_default();
+        // Bug V: the fallback used to run the brief as it was written, which in r7correct run 2
+        // meant squaring the numbers the user had already asked to be cubed. A correction the
+        // user sent is the instruction now; the brief is what it was before them.
+        let steers = row.map(|r| r.steers).unwrap_or_default();
+        let prompt = job_fallback_prompt(job, user_msg_id, &ask, &brief, &steers, error, partial);
         tracing::warn!(chat_id, job = %job.id, error, "job out of workers; main agent does the work inline");
         let _ = self.store.t3_append(
             chat_id,
@@ -10258,6 +10458,14 @@ pub(crate) fn looks_imperative(text: &str) -> bool {
 
 /// An error from the pi child's plumbing (`RpcChild`): a call that timed out, a child that
 /// exited before answering, closed stdin, or no child at all.
+///
+/// The last two shapes are bug V's (Jacob, Test5 round 7, r7correct run 2). A child that has
+/// already gone fails the *write* rather than the call, and `RpcChild::call` passes the errno
+/// up untouched, so what the user read in the chat was "Broken pipe (os error 32)". The turn
+/// loop words the same event as "pi main child exited mid-turn" when it sees the child go while
+/// it is listening. Both are the box losing a process and neither is a judgement on the
+/// message, which is why they belong with the rest: every caller of this either writes
+/// [`CHILD_ERROR_LINE`] or re-runs the send.
 pub(crate) fn is_child_error(text: &str) -> bool {
     text.starts_with("child ")
         && (text.contains(" timed out on ")
@@ -10265,6 +10473,34 @@ pub(crate) fn is_child_error(text: &str) -> bool {
             || text.contains(" dropped response ")
             || text.contains(" stdin closed"))
         || text.contains("pi main agent not running")
+        || text.contains("pi main child exited mid-turn")
+        || text.contains("Broken pipe")
+}
+
+/// Is `m` an assistant row the user can read that answers `user_msg`?
+///
+/// Hidden rows do not count. A row the lost-child path retired shows the user nothing, so a
+/// message whose only row is that one is still unanswered — which is exactly the state the
+/// re-run needs to recognise, and the state the failed-send error bubble should recognise too.
+pub(crate) fn answers_message(m: &MessageView, user_msg: &str) -> bool {
+    m.role == "assistant"
+        && m.rest.get("inReplyTo").and_then(Value::as_str) == Some(user_msg)
+        && m.status != "cancelled"
+        && m.rest.get("hidden").and_then(Value::as_bool) != Some(true)
+}
+
+/// This turn already put its answer in front of the user: prose, an acknowledgement, a progress
+/// note or a posted file.
+///
+/// Bug V's second half. The act turn of r7correct run 2 had acked at 00:09:35.298 and started
+/// its job; 165 ms later the main pi child went away and the turn loop reported it, and that
+/// error rewrote the finished row to `error`. What happens to the model process afterwards says
+/// nothing about words the chat already holds, so a turn that got this far keeps its `done`.
+pub(crate) fn answer_delivered(t: &TurnState) -> bool {
+    !t.streamed_text.trim().is_empty()
+        || !t.ack_text.trim().is_empty()
+        || !t.attachments_posted.is_empty()
+        || t.progress_texts.iter().any(|p| !p.trim().is_empty())
 }
 
 pub(crate) fn chat_recap(
@@ -11489,12 +11725,39 @@ fn sentence_promises_a_time(sentence: &str) -> bool {
     false
 }
 
+/// The corrections a job has been given since it started, as a block for whoever takes the work
+/// on next — a fresh worker, or the inline fallback turn. Empty when there are none.
+///
+/// Bug V (Jacob, Test5 round 7, r7correct run 2). A `steer_job` goes into the worker's live pi
+/// session and nowhere else, so it dies with that worker. The job's fallback then did the ask
+/// from the brief as first written — it posted the n² table the user had already corrected to
+/// n³ — and said nothing about having dropped the correction. The correction is the
+/// instruction; the brief above it is what the instruction was before.
+pub(crate) fn job_steers_note(steers: &[String]) -> String {
+    let steers: Vec<&str> = steers
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if steers.is_empty() {
+        return String::new();
+    }
+    let mut p = String::from(
+        "\nThe user corrected this work while it ran, in this order. These override the brief above wherever they disagree with it, and the answer you deliver must follow them:\n",
+    );
+    for (n, s) in steers.iter().enumerate() {
+        p.push_str(&format!("{}. {s}\n", n + 1));
+    }
+    p
+}
+
 /// The prompt of a `TurnKind::JobFallback` turn: the job is gone, do the ask here and now.
 pub(crate) fn job_fallback_prompt(
     job: &JobSpec,
     user_msg_id: &str,
     ask: &str,
     brief: &str,
+    steers: &[String],
     error: &str,
     partial: &str,
 ) -> String {
@@ -11511,6 +11774,7 @@ pub(crate) fn job_fallback_prompt(
             brief.trim()
         ));
     }
+    p.push_str(&job_steers_note(steers));
     let partial = crate::truncate::clip_marked(partial.trim(), 4000, "", None);
     if !partial.is_empty() {
         p.push_str(&format!(
@@ -11746,6 +12010,30 @@ impl Agent {
     /// Test seam: give the held turn a live assistant row to write into.
     pub(crate) async fn test_open_row(&self, host: &SharedHost, t: &mut TurnState) {
         self.open_row(host, t, "result").await;
+    }
+
+    /// Test seam: put a main pi child in the slot (or empty it), the way `respawn_pi` and the
+    /// supervisor do. A box with no pi binary cannot start one for itself, so bug V's tests
+    /// stand a scripted child in for it.
+    pub(crate) async fn test_set_pi(&self, child: Option<Arc<RpcChild>>, chat_id: &str) {
+        self.pi_ready.store(
+            child.as_ref().is_some_and(|c| c.is_alive()),
+            Ordering::SeqCst,
+        );
+        *self.pi.lock().await = child;
+        *self.current_chat.lock().await = Some(chat_id.to_owned());
+    }
+
+    /// Test seam: is there a main pi child that could take a prompt right now?
+    pub(crate) async fn test_pi_is_live(&self) -> bool {
+        self.pi.lock().await.as_ref().is_some_and(|c| c.is_alive())
+    }
+
+    /// Test seam: record a `steer_job` correction on the job row, as `hook_steer_job` does once
+    /// the worker's session has taken it. The hook itself needs a live worker session, which a
+    /// box with no pi binary cannot have.
+    pub(crate) fn test_note_job_steer(&self, job_id: &str, text: &str) {
+        let _ = self.store.append_job_steer(job_id, text);
     }
 
     /// Test seam: the end-of-turn text writers (staged prose, then the route's reply text).
@@ -12297,6 +12585,7 @@ mod tests {
             "m-ask",
             "Find me a restaurant in San Jose",
             "Find 5-6 well-rated restaurants in San José.",
+            &[],
             "worker ended without output (no reply, no tool call)",
             "",
         );
@@ -12307,9 +12596,27 @@ mod tests {
         assert!(p.contains("Do not call start_job"));
         assert!(p.contains("do not ask whether to try again"));
         assert!(!p.contains("What the last worker had written"));
-        let p2 = job_fallback_prompt(&job, "m-ask", "", "", "child exited", "Soda Tapia — ");
+        assert!(!p.contains("corrected this work while it ran"));
+        let p2 = job_fallback_prompt(&job, "m-ask", "", "", &[], "child exited", "Soda Tapia — ");
         assert!(p2.contains("(see the brief)"));
         assert!(p2.contains("Soda Tapia"));
+        // Bug V: a correction the user sent while the job ran is the instruction the fallback
+        // follows, and the brief it overrides is still shown above it.
+        let steered = job_fallback_prompt(
+            &job,
+            "m-ask",
+            "Find me a restaurant in San Jose",
+            "Find 5-6 well-rated restaurants in San José.",
+            &["only places under $20".to_owned()],
+            "child exited",
+            "",
+        );
+        assert!(
+            steered.contains("corrected this work while it ran"),
+            "{steered}"
+        );
+        assert!(steered.contains("1. only places under $20"), "{steered}");
+        assert!(steered.contains("override the brief above"), "{steered}");
         // The retry budget: one fresh worker, then inline.
         assert_eq!(JOB_WORKER_RETRIES, 1);
         let e: anyhow::Error = JobWorkerFailed {
@@ -12442,6 +12749,7 @@ mod tests {
             error: None,
             delivered_key: None,
             restarts: 0,
+            steers: vec![],
         };
         assert!(job_restart_allowed(&row("research", &[]), "p"));
         // edits ask first (no standing grant for edits exists yet)
