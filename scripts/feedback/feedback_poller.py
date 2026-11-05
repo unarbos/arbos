@@ -154,6 +154,35 @@ def iso(t: dt.datetime | None = None) -> str:
 # switch in AppModel.swift until the handler branch landed. The client-core crates feed the same package.
 IOS_PATH_PREFIXES = ("apps/ios/", "packages/ArbosFFI/", "crates/arbos-core/", "crates/arbos-client/", "crates/arbos-ffi/")
 
+# Failed-run lines that mean Apple refused to sign or upload because of the developer account, not the code: no
+# commit can turn the lane green, only the Account Holder accepting the agreement (developer.apple.com/account)
+# and a re-run. #2248 (2026-10-29) was read as a code failure because its issue said "no error lines captured".
+APPLE_ACCOUNT_BLOCKERS = (
+    (re.compile(r"PLA Update available|Program License Agreement|REQUIRED_AGREEMENTS_MISSING_OR_EXPIRED"
+                r"|required agreements? (is|are) missing or (has|have) expired", re.I),
+     "Apple's Program License Agreement has an update the Account Holder has not accepted"),
+    (re.compile(r'No signing certificate "iOS Distribution" found', re.I),
+     "Apple cloud signing returned no iOS Distribution certificate"),
+)
+APPLE_ACCOUNT_LABEL = "apple-account"
+JOB_LOG_UNREADABLE = "job log unreadable"
+
+
+def apple_account_blockers(lines: list[str]) -> list[str]:
+    """The Apple-account reasons in a failed run's error lines; empty for an ordinary failure."""
+    return [reason for pattern, reason in APPLE_ACCOUNT_BLOCKERS if any(pattern.search(line) for line in lines)]
+
+
+def apple_account_note(reasons: list[str], workflow: str) -> str:
+    return ("**Not a code failure — Apple's developer account.** " + "; ".join(reasons) + ". No commit can turn this "
+            "green: the Account Holder accepts the updated agreement at https://developer.apple.com/account (and any "
+            f"pending one in App Store Connect → Business), then `{workflow}` is re-run on main.")
+
+
+def has_log_lines(lines: list[str]) -> bool:
+    """True when at least one job log was read (step names alone come from the jobs API)."""
+    return any(not line.startswith(("step failed:", JOB_LOG_UNREADABLE)) for line in lines)
+
 
 def head_or(st: dict) -> str:
     return st.get("branch_head") or st.get("gated_head") or ""
@@ -765,18 +794,20 @@ class GitHub:
         for job in jobs:
             if job.get("conclusion") != "failure":
                 continue
-            try:
-                status, hdrs, body = http("GET", f"{GITHUB_API}/repos/{self.repo}/actions/jobs/{job['id']}/logs",
-                                          headers=self.h, timeout=120)
-            except HttpError:
-                continue
-            text = body.decode(errors="replace")
             # The failed step's name first: a step that fails without the word "error" (the typeshare freshness
             # check prints a diff — #2028 09:33, #2032 19:44 Oct 27 — showed as "no error lines" and the item was
-            # restored as if the runner had hiccuped) is named here and its diff lines are kept.
+            # restored as if the runner had hiccuped) is named here and its diff lines are kept. The name comes
+            # from the jobs API, so it is kept even when the log itself cannot be read yet.
             for step in job.get("steps") or []:
                 if step.get("conclusion") == "failure":
                     lines.append(f"step failed: {step.get('name')}")
+            try:
+                status, hdrs, body = http("GET", f"{GITHUB_API}/repos/{self.repo}/actions/jobs/{job['id']}/logs",
+                                          headers=self.h, timeout=120)
+            except HttpError as e:
+                lines.append(f"{JOB_LOG_UNREADABLE} (HTTP {e.status}): {job.get('name')}")
+                continue
+            text = body.decode(errors="replace")
             in_diff = False
             for line in text.splitlines():
                 line = re.sub(r"^\S+\s", "", line)  # strip the timestamp column
@@ -4624,7 +4655,9 @@ class Loop:
     def watch_main_red(self) -> None:
         """A failed CI / iOS run on main is announced within a tick: a GitHub issue labelled `main-red` ("main is red:
         <workflow> at <sha>") with the run link and the error lines, one per failing sha; it is closed with a note the
-        moment a later run of that workflow on main is green. The audit reads the events."""
+        moment a later run of that workflow on main is green. The audit reads the events. A red caused by Apple's
+        developer account (APPLE_ACCOUNT_BLOCKERS) is titled and labelled `apple-account` and says no commit can fix
+        it; a run whose job log was not readable yet is re-read for MAIN_RED_LOG_TRIES ticks."""
         cur = self.store.cursor()
         alerts: dict = cur.get("main_red") or {}
         changed = False
@@ -4640,22 +4673,51 @@ class Loop:
             latest = done[0]
             cur_alert = alerts.get(name)
             if latest["conclusion"] == "failure":
+                sha8 = latest["head_sha"][:8]
                 if cur_alert and cur_alert.get("sha") == latest["head_sha"]:
+                    if cur_alert.get("logs") or cur_alert.get("log_tries", 0) >= self.MAIN_RED_LOG_TRIES:
+                        continue
+                    # No job log was readable when this sha was announced: read it again for a few ticks, so the
+                    # issue gets its error lines and its kind instead of "no error lines captured".
+                    errors = self.gh.run_error_lines(latest["id"], limit=30)
+                    cur_alert["log_tries"] = cur_alert.get("log_tries", 0) + 1
+                    if has_log_lines(errors):
+                        cur_alert["logs"] = True
+                        note = self.main_red_kind(cur_alert, errors, wf)
+                        with contextlib.suppress(HttpError):
+                            self.gh.comment(cur_alert["issue"], (note + "\n\n" if note else "")
+                                            + f"Error lines of {latest['html_url']} (the job log was not readable when "
+                                            f"`{sha8}` was announced):\n\n```\n" + "\n".join(errors) + "\n```")
+                    changed = True
                     continue
                 errors = self.gh.run_error_lines(latest["id"], limit=30)
-                body = (f"**main is red**: `{name}` failed on `{latest['head_sha'][:8]}` — {latest['html_url']}\n\n```\n"
-                        + "\n".join(errors or ["(no error lines captured; open the run)"]) + "\n```\n\n"
-                        "Every Mac/iPhone release waits on this. The loop keeps gating branches against the current (red) main; "
-                        "whoever lands the repair, tag it or push it through the gate — this issue closes itself when main is green again.")
                 self.gh.ensure_label("main-red", "B60205", "A workflow on main is failing; releases are blocked")
                 if cur_alert and cur_alert.get("issue"):
+                    alert = {"sha": latest["head_sha"], "issue": cur_alert["issue"], "since": cur_alert.get("since") or iso(),
+                             "kind": cur_alert.get("kind"), "logs": has_log_lines(errors)}
+                    note = self.main_red_kind(alert, errors, wf)
                     with contextlib.suppress(HttpError):
-                        self.gh.comment(cur_alert["issue"], f"Still red at a newer commit: `{latest['head_sha'][:8]}` — {latest['html_url']}")
-                    alerts[name] = {"sha": latest["head_sha"], "issue": cur_alert["issue"], "since": cur_alert.get("since") or iso()}
+                        self.gh.comment(cur_alert["issue"], f"Still red at a newer commit: `{sha8}` — {latest['html_url']}"
+                                        + (f"\n\n{note}" if note else ""))
+                    alerts[name] = alert
                 else:
-                    issue = self.gh.create_issue(f"main is red: {name} failing at {latest['head_sha'][:8]}", body, ["main-red"])
-                    alerts[name] = {"sha": latest["head_sha"], "issue": issue["number"], "since": iso()}
-                    log(f"main-red: {name} failed at {latest['head_sha'][:8]} → #{issue['number']}")
+                    reasons = apple_account_blockers(errors)
+                    labels = ["main-red"]
+                    if reasons:
+                        self.gh.ensure_label(APPLE_ACCOUNT_LABEL, "5319E7", self.APPLE_ACCOUNT_LABEL_TEXT)
+                        labels.append(APPLE_ACCOUNT_LABEL)
+                    body = ((apple_account_note(reasons, wf) + "\n\n" if reasons else "")
+                            + f"**main is red**: `{name}` failed on `{sha8}` — {latest['html_url']}\n\n```\n"
+                            + "\n".join(errors or ["(no error lines captured; open the run)"]) + "\n```\n\n"
+                            "Every Mac/iPhone release waits on this. The loop keeps gating branches against the current (red) main; "
+                            "whoever lands the repair, tag it or push it through the gate — this issue closes itself when main is green again.")
+                    title = (f"main is red: {name} blocked by Apple's developer account at {sha8}" if reasons
+                             else f"main is red: {name} failing at {sha8}")
+                    issue = self.gh.create_issue(title, body, labels)
+                    alerts[name] = {"sha": latest["head_sha"], "issue": issue["number"], "since": iso(),
+                                    "kind": (APPLE_ACCOUNT_LABEL if reasons else "code") if has_log_lines(errors) else None,
+                                    "logs": has_log_lines(errors)}
+                    log(f"main-red: {name} failed at {sha8} → #{issue['number']}" + (" (Apple account)" if reasons else ""))
                 self.store.event("main", "main_red", workflow=name, sha=latest["head_sha"], run=latest["html_url"], issue=alerts[name]["issue"])
                 changed = True
             elif cur_alert:
@@ -4670,6 +4732,30 @@ class Loop:
         if changed:
             cur["main_red"] = alerts
             self.store.save_cursor(cur)
+
+    MAIN_RED_LOG_TRIES = 5
+    APPLE_ACCOUNT_LABEL_TEXT = "Apple's developer account blocks signing or upload; not a code failure"
+
+    def main_red_kind(self, alert: dict, errors: list[str], wf: str) -> str:
+        """Sets alert["kind"] (apple-account or code) from a run's error lines and labels the alert's issue to match.
+        Returns the paragraph that tells the reader when the kind changed, else ""."""
+        if not has_log_lines(errors):
+            return ""
+        reasons = apple_account_blockers(errors)
+        kind = APPLE_ACCOUNT_LABEL if reasons else "code"
+        was, alert["kind"] = alert.get("kind"), kind
+        if kind == was:
+            return ""
+        if reasons:
+            self.gh.ensure_label(APPLE_ACCOUNT_LABEL, "5319E7", self.APPLE_ACCOUNT_LABEL_TEXT)
+            with contextlib.suppress(HttpError):
+                self.gh.set_labels(alert["issue"], [APPLE_ACCOUNT_LABEL], [])
+            return apple_account_note(reasons, wf)
+        if was == APPLE_ACCOUNT_LABEL:
+            with contextlib.suppress(HttpError):
+                self.gh.set_labels(alert["issue"], [], [APPLE_ACCOUNT_LABEL])
+            return "**Now a code failure**: this run has none of the Apple-account errors; open it for the failing step."
+        return ""
 
     def watch_track_comments(self) -> None:
         """Non-root registration for workers: a comment `track <feedback-id> bc-<owner>` on any issue (new since the
