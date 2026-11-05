@@ -111,6 +111,10 @@ CREATE TABLE IF NOT EXISTS jobs (
 );
 "#;
 
+/// The step of a job the user stopped, in the same plain words as every other step the working
+/// row and `list_jobs` show.
+pub const CANCELLED_STEP: &str = "Cancelled";
+
 /// One background job (duplex design §2.3). States: `queued` (waiting for a slot), `running`,
 /// `done`, `failed`, `cancelled`, `interrupted` (the box restarted under it).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -146,10 +150,15 @@ impl JobRow {
         matches!(self.state.as_str(), "queued" | "running")
     }
 
-    /// Seconds since the job started (or was created while queued).
+    /// How long the job ran: up to `ended_at` once it has one, else up to now.
+    ///
+    /// A job that has ended has a fixed figure. Test5 round 7, bug X: this was `now` in every
+    /// state, so a cancelled job's time went on growing — 80 s in one reading and 194 s in the
+    /// next, for job `01M6N1TRC0NWER66QV8XCHEX6T`, which was stopped 37 s in.
     pub fn elapsed_s(&self) -> i64 {
         let from = self.started_at.unwrap_or(self.created_at);
-        (now_ms() - from).max(0) / 1000
+        let to = self.ended_at.unwrap_or_else(now_ms);
+        (to - from).max(0) / 1000
     }
 }
 
@@ -659,16 +668,26 @@ impl Store {
         })
     }
 
-    /// Move a job to `state`; `running` stamps `started_at`, a final state stamps `ended_at`.
+    /// Move a job to `state`; `running` stamps `started_at`, a final state stamps `ended_at`,
+    /// and a job put back in the queue for a fresh worker loses the `ended_at` of the attempt
+    /// that failed — it has not ended, and `elapsed_s` reads that stamp.
+    ///
+    /// A cancel also writes the step, because a cancelled job's worker is gone and writes no
+    /// more steps: the line it was last on ("Reading >") would otherwise stand for ever as what
+    /// the job is doing (bug X).
     pub fn set_job_state(&self, id: &str, state: &str, error: Option<&str>) -> Result<()> {
         let now = now_ms();
         self.with(|c| {
             c.execute(
                 "UPDATE jobs SET state = ?2, error = COALESCE(?3, error),
                     started_at = CASE WHEN ?2 = 'running' AND started_at IS NULL THEN ?4 ELSE started_at END,
-                    ended_at = CASE WHEN ?2 IN ('done','failed','cancelled','interrupted') THEN ?4 ELSE ended_at END
+                    ended_at = CASE WHEN ?2 IN ('done','failed','cancelled','interrupted') THEN ?4
+                                    WHEN ?2 IN ('queued','running') THEN NULL
+                                    ELSE ended_at END,
+                    last_step = CASE WHEN ?2 = 'cancelled' THEN ?5 ELSE last_step END,
+                    last_step_at = CASE WHEN ?2 = 'cancelled' THEN ?4 ELSE last_step_at END
                  WHERE id = ?1",
-                params![id, state, error, now],
+                params![id, state, error, now, CANCELLED_STEP],
             )
             .map(|_| ())
         })
@@ -1625,5 +1644,124 @@ mod tests {
         assert!(s.contains("[REDACTED:openrouter-key]"));
         assert!(s.contains("Authorization: Bearer [REDACTED:bearer]"));
         assert!(s.contains("OPENAI_API_KEY=[REDACTED:env]"));
+    }
+
+    fn job_store() -> Store {
+        let dir = std::env::temp_dir().join(format!("arbos-store-{}", ulid()));
+        Store::open(&dir.join("state.sqlite")).unwrap()
+    }
+
+    /// A job running since a moment ago, on the step its worker last reported.
+    fn running_job(store: &Store, id: &str) {
+        store
+            .insert_job(
+                id,
+                "chat-1",
+                "ask-1",
+                "Sieving to 3e9",
+                "ops",
+                "Run the segmented sieve to 3e9 and report the count.",
+                &[],
+            )
+            .unwrap();
+        store.set_job_state(id, "running", None).unwrap();
+        store.set_job_step(id, "Reading >").unwrap();
+    }
+
+    /// Move every stamp of a job row `by_ms` into the past, which is what a reading of the same
+    /// row that much later sees.
+    fn age_job(store: &Store, id: &str, by_ms: i64) {
+        store
+            .with(|c| {
+                c.execute(
+                    "UPDATE jobs SET created_at = created_at - ?2, started_at = started_at - ?2,
+                        ended_at = ended_at - ?2, last_step_at = last_step_at - ?2
+                     WHERE id = ?1",
+                    params![id, by_ms],
+                )
+                .map(|_| ())
+            })
+            .unwrap();
+    }
+
+    /// Test5 round 7, bug X: a job cancelled 37 s in reported 80 s of elapsed time in one
+    /// reading and 194 s in the next, and its step still read the line its worker died on.
+    ///
+    /// The figure has to be *stable*, not merely right once. The reading taken straight after
+    /// the cancel was already correct with the bug in place, so the row is read again as if
+    /// 55 s and then ten more minutes had passed.
+    #[test]
+    fn a_cancelled_job_holds_its_elapsed_time_and_reads_cancelled() {
+        let store = job_store();
+        running_job(&store, "job-x");
+        age_job(&store, "job-x", 5_000);
+        store
+            .set_job_state("job-x", "cancelled", Some("stopped by the user"))
+            .unwrap();
+
+        let at_cancel = store.job("job-x").unwrap().unwrap();
+        assert_eq!(at_cancel.state, "cancelled");
+        assert_eq!(at_cancel.last_step, "Cancelled");
+        assert!(at_cancel.ended_at.is_some(), "no ended_at: {at_cancel:?}");
+        assert!(
+            (3..=7).contains(&at_cancel.elapsed_s()),
+            "5 s ± 2 at the cancel, got {} s",
+            at_cancel.elapsed_s()
+        );
+
+        for later_ms in [55_000, 600_000] {
+            age_job(&store, "job-x", later_ms);
+            let row = store.job("job-x").unwrap().unwrap();
+            assert!(
+                (3..=7).contains(&row.elapsed_s()),
+                "elapsed grew to {} s when the row was read {later_ms} ms later",
+                row.elapsed_s()
+            );
+            assert_eq!(row.last_step, "Cancelled");
+        }
+    }
+
+    /// `done` and `failed` are reached from the worker's own completion path and never went
+    /// through a cancel, so they are their own case. Their step is the worker's last real line:
+    /// only a cancel, which leaves no worker to write one, has the state stand in for it.
+    #[test]
+    fn a_done_or_failed_job_holds_its_elapsed_time() {
+        for state in ["done", "failed"] {
+            let store = job_store();
+            running_job(&store, "job-x");
+            age_job(&store, "job-x", 12_000);
+            store.set_job_state("job-x", state, None).unwrap();
+            age_job(&store, "job-x", 600_000);
+            let row = store.job("job-x").unwrap().unwrap();
+            assert!(
+                (10..=14).contains(&row.elapsed_s()),
+                "{state} job read ten minutes on: {} s",
+                row.elapsed_s()
+            );
+            assert_eq!(row.last_step, "Reading >");
+        }
+    }
+
+    /// A failed attempt stamps `ended_at`, and a job put back in the queue for a fresh worker
+    /// has not ended: its time counts on instead of freezing at the attempt that died.
+    #[test]
+    fn a_requeued_job_counts_on() {
+        let store = job_store();
+        running_job(&store, "job-x");
+        age_job(&store, "job-x", 8_000);
+        store
+            .set_job_state("job-x", "failed", Some("child exited"))
+            .unwrap();
+        store.set_job_state("job-x", "queued", None).unwrap();
+        let row = store.job("job-x").unwrap().unwrap();
+        assert_eq!(row.ended_at, None, "a requeued job has not ended: {row:?}");
+
+        age_job(&store, "job-x", 30_000);
+        let row = store.job("job-x").unwrap().unwrap();
+        assert!(
+            row.elapsed_s() >= 38,
+            "an open job counts on: {} s",
+            row.elapsed_s()
+        );
     }
 }
