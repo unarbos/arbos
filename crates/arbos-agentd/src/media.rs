@@ -1098,6 +1098,99 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// Where #2367 meets #2751. Closing idle rooms made `deliver`'s read-back-failure branch
+    /// reachable for a chat whose room had been closed — before, the function bailed at the
+    /// room lookup and never got that far. That branch used to `delete_message` the row it had
+    /// just written, and agentd's rows carry no author the relay's push guard accepts, so the
+    /// removal comes back `not_yours` and parks every op queued behind it, replies included.
+    ///
+    /// Two honest limits on what this pins. The trigger is not reproducible: `row_holds_blob`
+    /// reads back the part `deliver` itself just added, so making it fail would need the
+    /// production path to lie. And the refusal itself lives in the relay, which this test does
+    /// not run. What it does cover is the state this change newly reaches — a room the idle
+    /// close took, reopened on demand by a write path — and the property the relay cares
+    /// about: the bytes leaving the box for that room carry no removal. The second half shows
+    /// the assertion has teeth, by taking the same row off the far side with a delete.
+    #[tokio::test]
+    async fn a_failed_delivery_in_a_reopened_room_pushes_no_removal() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATATTACH0000000011";
+        let ask = ulid();
+        {
+            let host = agent.sync.open_room(chat).await.unwrap();
+            let h = host.lock().await;
+            h.doc
+                .append_user_message(
+                    &ask,
+                    "post the plan",
+                    "dev-mac",
+                    &arbos_core::doc::UserMessageOpts::default(),
+                )
+                .unwrap();
+        }
+        agent
+            .sync
+            .persist(&agent.sync.host(chat).await.expect("open"))
+            .await
+            .unwrap();
+        agent.sync.close_room(chat).await;
+        assert!(!agent.sync.is_open(chat).await, "the idle close took it");
+
+        // The write path reopens it, which is the whole of this PR's change here.
+        let host = agent.room(chat).await.expect("a write path reopens it");
+        let row = ulid();
+        let (mark, history, pushed) = {
+            let h = host.lock().await;
+            let mark = h.doc.oplog_vv();
+            // What the relay already holds for this room before the failed delivery.
+            let history = h.doc.export_updates_since(&loro::VersionVector::default());
+            h.doc
+                .start_assistant_message(&row, &ask, &agent.cfg.device_id);
+            h.doc
+                .finish_message(&row, arbos_core::doc::MessageStatus::Done);
+            // Exactly what the read-back-failure branch does with the row it wrote.
+            crate::agent::retire_row(&h.doc, &row);
+            (mark.clone(), history, h.doc.export_updates_since(&mark))
+        };
+
+        let mut far_side = arbos_core::doc::ChatDoc::new(Some(9), true);
+        far_side.import(&history).expect("the room's history");
+        let status = far_side
+            .import(&pushed)
+            .expect("the relay applies the batch");
+        assert!(
+            status.pending.is_none(),
+            "the batch did not apply on its own, so the room is jammed behind it"
+        );
+        let m = far_side
+            .message(&row)
+            .expect("no removal crossed the wire: the row is still on the far side");
+        assert_eq!(
+            m.rest.get("hidden").and_then(Value::as_bool),
+            Some(true),
+            "the row reached the relay unhidden, so both apps would draw the failed delivery"
+        );
+        assert_eq!(m.status.as_str(), "done", "and it arrives finished");
+
+        // Teeth: a delete of that same row does take it off the far side, which is what used
+        // to be offered to the relay here and what it refuses.
+        let deleted = {
+            let h = host.lock().await;
+            h.doc.delete_message(&row).unwrap();
+            h.doc.export_updates_since(&mark)
+        };
+        let mut other_side = arbos_core::doc::ChatDoc::new(Some(11), true);
+        other_side.import(&history).expect("the room's history");
+        other_side
+            .import(&deleted)
+            .expect("the bytes themselves are well formed");
+        assert!(
+            other_side.message(&row).is_none(),
+            "a delete left the row in place, so this test cannot tell the two apart"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// Jacob, 2026-10-26 (Affine, group chat): three logo deliveries landed on the job worker's
     /// `hidden` row, which both clients skip, while the agent said "I've posted the logo". A
     /// worker's file now lands as its own visible message under the ask, and the tool answers
