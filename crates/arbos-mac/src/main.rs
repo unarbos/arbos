@@ -17,6 +17,7 @@ mod search;
 mod search_index;
 mod sign_in;
 mod sync;
+mod timezone;
 mod ui;
 mod update;
 

@@ -63,6 +63,8 @@ impl Shell {
         let device = state.device_id.clone();
         let show_details = state.show_details;
         let account = state.account.clone();
+        // Settings → Bot → Timezone is pinned per account (`crate::timezone`).
+        let me_id = state.me_id();
         let account_image = account.as_ref().and_then(|a| state.avatar(&a.avatar_url));
         let profile_tab = state.profile_tab;
         let notify_on = state.notifier.enabled;
@@ -1782,6 +1784,19 @@ impl Shell {
                 this.open_settings_page(SettingsPage::ThisMac, window, cx)
             }))
             .into_any_element()]));
+            // Bot: how the agents answer. Timezone is the zone every agent is told the user is
+            // in, so "what time is it" is answered on their clock and not on the box's UTC.
+            body.push(Section::Title("Bot".into()));
+            let tz_row = crate::ui::tzpick::row(self, &me_id, &theme, cx);
+            body.push(if self.timezone_pick {
+                Section::Reveal {
+                    rows: vec![tz_row],
+                    open: 0,
+                }
+            } else {
+                Section::Card(vec![tz_row])
+            });
+            body.push(Section::Footnote(crate::timezone::footnote(&me_id).into()));
             // Machine · Updates.
             body.push(Section::Card(vec![
                 page_row(

@@ -185,7 +185,11 @@ final class AppModel: ObservableObject {
     /// Self-serve sign-in (GitHub). `tokens` is the JWT pair; `credentials`
     /// mirrors its access token so every existing call path keeps working.
     @Published private(set) var tokens: AuthTokens?
-    @Published private(set) var user: AuthUser?
+    @Published private(set) var user: AuthUser? {
+        // Settings → Bot → Timezone is pinned per account, and the send path reads it without
+        // a model to ask, so the account id is mirrored onto the setting as it changes.
+        didSet { TimeZoneSetting.account = user?.id ?? "" }
+    }
     #if DEBUG || ARBOS_FIXTURE
     /// Fixture only: the signed-in user (D79 initials, `myUserId` for reactions).
     func setFixtureUser(_ who: AuthUser) { user = who }

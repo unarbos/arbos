@@ -4979,7 +4979,8 @@ async fn send_message(
                 None
             },
             answers_question_id: answer.as_ref().map(|(qid, _)| qid.clone()),
-            tz: arbos_core::doc::device_time_zone(),
+            // Settings → Bot → Timezone when this account pinned one, else this Mac's own zone.
+            tz: crate::timezone::effective(&shared.me_id()),
         };
         let payload = match &answer {
             Some((qid, value)) => {

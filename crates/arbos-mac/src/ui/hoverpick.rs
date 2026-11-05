@@ -21,7 +21,7 @@ use crate::ui::theme::{Theme, TEXT_SMALL, TEXT_TINY};
 use crate::ui::voicepicker;
 
 /// How tall the model / voice lists may grow before they scroll.
-const LIST_MAX_HEIGHT: f32 = 260.0;
+pub(crate) const LIST_MAX_HEIGHT: f32 = 260.0;
 /// The dropped-down list's corners; its rows' highlight is concentric.
 pub(crate) const LIST_RADIUS: f32 = 10.0;
 
@@ -222,7 +222,7 @@ fn model_names(models: &[String], current: Option<&str>, query: &str) -> Vec<Str
     names
 }
 
-fn list_frame(id: &'static str, theme: &Theme) -> Stateful<Div> {
+pub(crate) fn list_frame(id: &'static str, theme: &Theme) -> Stateful<Div> {
     div()
         .id(id)
         .flex()
@@ -236,7 +236,7 @@ fn list_frame(id: &'static str, theme: &Theme) -> Stateful<Div> {
         .overflow_hidden()
 }
 
-fn item(
+pub(crate) fn item(
     id: ElementId,
     label: impl Into<SharedString>,
     selected: bool,

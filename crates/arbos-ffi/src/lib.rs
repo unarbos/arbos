@@ -525,6 +525,11 @@ pub struct UserMessageOptsRecord {
     /// snapshot, stored on the row as `replyRef` (core `ReplyRef`).
     #[uniffi(default = None)]
     pub reply_ref: Option<ReplyRefRecord>,
+    /// Settings → Bot → Timezone: the zone this account pinned by hand. It stands in for the
+    /// phone's own zone on the row's `tz`, which is what tells the agent the user's moment.
+    /// `None` means auto-detect, and the phone's zone is used.
+    #[uniffi(default = None)]
+    pub tz_override: Option<String>,
 }
 
 /// A cross-chat reply reference (maps to core `doc::ReplyRef`).
@@ -568,8 +573,13 @@ impl From<UserMessageOptsRecord> for doc::UserMessageOpts {
             sender_name: r.sender_name,
             sender_avatar: r.sender_avatar,
             answers_question_id: None,
-            // The phone's zone, found on the Rust side so the Swift record is unchanged.
-            tz: doc::device_time_zone(),
+            // Settings → Bot → Timezone when this account pinned one, else the phone's own
+            // zone, found on the Rust side so most of the Swift record is unchanged.
+            tz: r
+                .tz_override
+                .map(|z| z.trim().to_owned())
+                .filter(|z| !z.is_empty())
+                .or_else(doc::device_time_zone),
         }
     }
 }
@@ -1132,12 +1142,15 @@ mod tests {
                     sender_handle: "unconst".into(),
                     text: "Testing reply in dm".into(),
                 }),
+                tz_override: Some("Europe/London".into()),
             },
         )
         .unwrap();
         doc.commit();
         assert_eq!(doc.message_count(), 1);
         let row: Value = serde_json::from_str(&doc.read_message_json(0).unwrap()).unwrap();
+        // Settings → Bot → Timezone beats the phone's own zone on the row the agent reads.
+        assert_eq!(row["tz"], "Europe/London");
         assert_eq!(row["forwardedFrom"], "Sam Rivera");
         assert_eq!(row["replyRef"]["chatId"], "01SRC");
         assert_eq!(row["replyRef"]["messageId"], "01ORIG");
