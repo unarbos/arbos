@@ -296,6 +296,16 @@ async fn approval_abandon(
     Json(a.abandon_approval(id).await).into_response()
 }
 
+/// The main session stopped blocking on a card and its turn is ending; the card stays
+/// answerable and the decision resumes the work (`Agent::park_approval`).
+async fn approval_park(State(a): State<S>, headers: HeaderMap, Json(b): Json<Value>) -> Response {
+    if authed(&a, &headers).is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let id = b.get("approvalId").and_then(Value::as_str).unwrap_or("");
+    Json(a.park_approval(id).await).into_response()
+}
+
 async fn deny(State(a): State<S>, headers: HeaderMap, Json(b): Json<Value>) -> Response {
     if authed(&a, &headers).is_none() {
         return StatusCode::UNAUTHORIZED.into_response();
@@ -488,6 +498,7 @@ pub fn router(agent: Arc<Agent>) -> Router {
         .route("/hook/approval", post(approval))
         .route("/hook/approval-status", post(approval_status))
         .route("/hook/approval-abandon", post(approval_abandon))
+        .route("/hook/approval-park", post(approval_park))
         .route("/hook/deny", post(deny))
         .route("/hook/handle", post(handle))
         .route("/hook/handle-path", post(handle_path))
