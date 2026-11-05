@@ -189,6 +189,87 @@ impl Agent {
         .to_string())
     }
 
+    /// A worker's `send_message(text)` with no `to`: a note in the chat its job runs beside,
+    /// posted as its own finished row.
+    ///
+    /// Jacob, Test5 round 6 (bug T, r6cardjob): the user asked a job to post a note naming the
+    /// approval card it was waiting on. Its script called `mcp__arbos__send_message` — the only
+    /// text surface a script has — and read back "send_message is available to the main agent
+    /// only". The job stopped there, the card was never raised, and the user got nothing. Two
+    /// walls, one behind the other: the path was shut, and the sentence that shut it named no
+    /// other way through (`refusal_for` now names one).
+    ///
+    /// `post_to_this_chat_from_turn` cannot serve a worker. It posts into the running turn's own
+    /// row, and a job runs beside the chat with no turn of its own; the main turn that started
+    /// it ended long before. So the chat comes from this worker's job row, and the words become
+    /// a standalone finished row rather than text appended to somebody else's.
+    ///
+    /// The room is reopened first, for the reason `post_to_this_chat_from_turn` reopens it: a
+    /// shut room has no host, writing into one fails with "no room for this chat", and #2395
+    /// makes rooms really close. `Agent::room` is host-or-`open_room` and runs outside every
+    /// lock, before the writer takes one.
+    pub async fn post_to_job_chat(
+        self: &Arc<Self>,
+        session_id: &str,
+        text: &str,
+    ) -> Result<String> {
+        let session_id = session_id.trim();
+        if session_id.is_empty() {
+            return Err(anyhow!(
+                "send_message with no `to` posts in the chat of the job you run, and this session did not say which it is"
+            ));
+        }
+        let Some(job) = self.store.job_for_subagent(session_id).ok().flatten() else {
+            return Err(anyhow!(
+                "send_message with no `to` posts in the chat of the job you run, and this session runs no job; report back and let the main agent speak for the Project"
+            ));
+        };
+        // The same backstop and the same configured limit the turn surfaces apply (D19, and
+        // `config::chat_text_max`): one chat is one set of rules, however the words reach it.
+        let text = crate::store::redact(&crate::agent::ProseFilter::clean_prose(text.trim()));
+        let text = text.trim();
+        if text.is_empty() {
+            return Err(anyhow!("nothing to send"));
+        }
+        let chars = text.chars().count();
+        if let Some(max) = self.cfg.chat_text_max() {
+            if chars > max {
+                return Err(anyhow!(crate::agent::chat_text_over_limit(chars, max)));
+            }
+        }
+        // No clock in the box measures how much longer the work takes, so a note that says it is
+        // refused here exactly as it is on the turn surfaces (Test5 T7).
+        if crate::agent::promises_a_time(text) {
+            return Err(anyhow!(crate::agent::TIME_PROMISE_REFUSAL));
+        }
+        let host = self.room(&job.chat_id).await?;
+        self.post_chat_line(
+            &host,
+            &job.chat_id,
+            &job.ask_message_id,
+            &format!("job:{}:note:{}", job.id, ulid()),
+            text,
+        )
+        .await;
+        let _ = self.store.t3_append(
+            &job.chat_id,
+            Some(session_id),
+            Some(&job.chat_id),
+            "job_note",
+            Some("assistant"),
+            text,
+            Some(&json!({ "job_id": job.id, "chat_id": job.chat_id })),
+        );
+        self.audit(json!({
+            "ts": now_ms(), "kind": "job_note", "job_id": job.id, "chat_id": job.chat_id,
+            "subagent_id": session_id, "chars": chars,
+        }));
+        Ok(json!({ "status": "posted", "chars": chars,
+            "note": "Posted in this chat as its own row. Do not repeat it; your words reach the user only through this call and your final result.",
+        })
+        .to_string())
+    }
+
     /// Deliver `text` to agent `to` through the relay and write the hand-off row in the chat
     /// whose turn is running.
     pub async fn agent_send_from_turn(self: &Arc<Self>, to: &str, text: &str) -> Result<String> {
@@ -867,6 +948,109 @@ mod tests {
                 .collect()
         };
         assert_eq!(posted, vec!["One message, as asked.".to_owned()]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Bug T, Test5 round 6 (r6cardjob, agentd 0.1.193): the user asked a job to post a note
+    /// naming the approval card it was waiting on. The job's script called
+    /// `mcp__arbos__send_message` and read back "send_message is available to the main agent
+    /// only". It stopped there: no note, no card, and nothing in the chat for the user.
+    ///
+    /// The behaviour, as the user would state it: a job that posts three progress notes
+    /// mid-run puts three rows in its chat, before its result. No turn runs while it does —
+    /// the main turn that started the job ended long before the worker spoke.
+    #[tokio::test]
+    async fn a_job_posts_three_progress_notes_as_three_rows_before_its_result() {
+        let (agent, root) = crate::status::tests::test_agent().await;
+        let chat = "01TESTCHATJOBPROGRESS00001";
+        let ask = "01TESTASKJOBPROGRESS000001";
+        let job_id = "01TESTJOBPROGRESS00000001";
+        let worker = "01TESTWORKERPROGRESS00001";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        {
+            let h = host.lock().await;
+            h.doc
+                .append_user_message(
+                    ask,
+                    "Raise the card to delete the stale branches, and tell me which card you are waiting on.",
+                    "dev-mac",
+                    &Default::default(),
+                )
+                .unwrap();
+        }
+        agent
+            .store
+            .insert_subagent(
+                worker,
+                "job-raising-the-card-0001",
+                "raise the card",
+                "pi",
+                chat,
+            )
+            .unwrap();
+        agent
+            .store
+            .insert_job(
+                job_id,
+                chat,
+                ask,
+                "Raising the card",
+                "ops",
+                "Raise the approval card for the branch delete and name it in the chat.",
+                &[],
+            )
+            .unwrap();
+        agent.store.set_job_subagent(job_id, worker).unwrap();
+        assert!(
+            agent.turn.lock().await.is_none(),
+            "a job runs beside the chat: there is no turn to post into"
+        );
+
+        let notes = [
+            "Cloned the repository and listed 12 stale branches.",
+            "Card raised: \"Delete 12 stale branches\" — that is the one I am waiting on.",
+            "Approved. Deleting them now.",
+        ];
+        for note in notes {
+            let answer = agent
+                .post_to_job_chat(worker, note)
+                .await
+                .expect("a job posts in the chat it runs beside");
+            assert!(answer.contains("\"status\":\"posted\""), "{answer}");
+        }
+        // The result lands after them, as the finished job's own row does.
+        let result = "Done: 12 branches deleted.";
+        agent
+            .post_chat_line(&host, chat, ask, &format!("job:{job_id}:result"), result)
+            .await;
+
+        let rows: Vec<String> = {
+            let h = host.lock().await;
+            h.doc
+                .messages()
+                .into_iter()
+                .filter(|m| m.role == "assistant" && m.has_visible_content())
+                .map(|m| m.text())
+                .collect()
+        };
+        assert_eq!(
+            rows,
+            vec![
+                notes[0].to_owned(),
+                notes[1].to_owned(),
+                notes[2].to_owned(),
+                result.to_owned(),
+            ],
+            "three notes, each its own row, then the result"
+        );
+
+        // A session that runs no job is still the D69 case: it reports back, and the refusal
+        // says so rather than leaving it to guess.
+        let orphan = agent
+            .post_to_job_chat("01TESTWORKERNOJOB00000001", "anything")
+            .await
+            .expect_err("a session with no job has no chat of its own");
+        assert!(orphan.to_string().contains("runs no job"), "{orphan}");
         let _ = std::fs::remove_dir_all(&root);
     }
 

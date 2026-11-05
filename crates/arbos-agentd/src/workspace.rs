@@ -899,7 +899,13 @@ pub fn seed_state(cfg: &Config) -> Result<()> {
     )?;
     // Project tools reach the main agent through codemode only: 14 direct schemas cost ~4k prefix tokens (D68).
     // The bearer is expanded by pi from the per-role env (main vs subagent token, D69).
-    let mcp = json!({ "mcpServers": { "arbos": { "url": cfg.mcp_url(), "headers": { "Authorization": "Bearer ${ARBOS_MCP_TOKEN}" }, "exposure": "codemode" } } });
+    //
+    // `X-Arbos-Session` carries `ARBOS_SESSION_ID`, which `harness::PiAdapter::envs` sets for
+    // every pi child and which is the worker's subagent id. The bearer names a role and nothing
+    // finer — one subagent token is shared by every worker on the box — so without this header a
+    // job's `send_message` has no way to say which chat it runs beside (bug T). pi resolves
+    // `${VAR}` in any header value from the child's own environment.
+    let mcp = json!({ "mcpServers": { "arbos": { "url": cfg.mcp_url(), "headers": { "Authorization": "Bearer ${ARBOS_MCP_TOKEN}", "X-Arbos-Session": "${ARBOS_SESSION_ID}" }, "exposure": "codemode" } } });
     std::fs::write(
         cfg.pi_dir().join("mcp.json"),
         serde_json::to_string_pretty(&mcp)?,

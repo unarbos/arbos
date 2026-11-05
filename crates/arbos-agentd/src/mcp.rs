@@ -40,7 +40,7 @@ fn send_message_description(chat_text_max: Option<usize>) -> String {
         Some(max) => format!("One message holds at most {max} characters on this box; over that the call is refused and names the limit."),
         None => "There is no size limit: one call posts the whole thing, however long — a 1,500-row markdown table goes in one message. Never split an answer because you believe a limit exists, and never tell the user one does.".to_owned(),
     };
-    format!("Message another agent, or post to this chat. `to` = its name, @handle or id (your owner's agents; another owner's only when they allowed it). The text lands in that agent's own chat and its reply comes back to you here — never write `@name …` as a bubble in this chat to reach them. Inside a group chat, omit `to` to speak to the other agents in the group. Without `to` outside a group, the text is posted in this chat for the user, as its own bubble. {size}")
+    format!("Message another agent, or post to this chat. The words go in `text` (`message` is accepted as the same field). `to` = its name, @handle or id (your owner's agents; another owner's only when they allowed it). The text lands in that agent's own chat and its reply comes back to you here — never write `@name …` as a bubble in this chat to reach them. Inside a group chat, omit `to` to speak to the other agents in the group. Without `to` outside a group, the text is posted in this chat for the user, as its own bubble — this is how a job posts a progress note in the chat it runs beside, and the only way its words are shown before its result. {size}")
 }
 
 fn tools(chat_text_max: Option<usize>) -> Value {
@@ -74,7 +74,7 @@ fn tools(chat_text_max: Option<usize>) -> Value {
         { "name": "recall", "description": "Read a note saved with remember.", "inputSchema": { "type": "object", "properties": { "name": { "type": "string" } }, "required": ["name"] } },
         { "name": "projects_list", "description": "List the user's other Projects (name, state).", "inputSchema": { "type": "object", "properties": {} } },
         { "name": "send_message", "description": send_message_description(chat_text_max),
-          "inputSchema": { "type": "object", "properties": { "to": { "type": "string", "description": "Agent name, @handle or id" }, "text": { "type": "string" } }, "required": ["text"] } },
+          "inputSchema": { "type": "object", "properties": { "to": { "type": "string", "description": "Agent name, @handle or id" }, "text": { "type": "string", "description": "The words to post or send" }, "message": { "type": "string", "description": "Alias of `text`, accepted so a call does not fail on the field name" } } } },
         { "name": "ask_user", "description": "Ask the user one question and wait; the answer arrives as the next message. Pass `widget` for a typed answer (choice, multi_select, text, date, form).",
           "inputSchema": { "type": "object", "properties": { "question": { "type": "string" }, "widget": widget_schema() }, "required": ["question"] } },
         { "name": "spawn_subagent", "description": "Hand a task to a new subagent (Prime by default). Prefer for long or research-heavy work.",
@@ -159,14 +159,44 @@ fn role_for_token(configured: &str, derived: &str, headers: &HeaderMap) -> Optio
 /// still accepted from older sessions.
 const MAIN_ONLY_TOOLS: &[&str] = &["send_message", "group_send", "projects_send"];
 
-/// `Some(reason)` when `role` may not call `tool`.
-pub fn refusal_for(role: SessionRole, tool: &str) -> Option<String> {
+/// `Some(reason)` when `role` may not call `tool` addressed at `to`.
+///
+/// `send_message` is two tools under one name. With `to` it speaks to another Project, which
+/// stays the main agent's alone (D69). Without `to` it posts a bubble in the caller's own chat,
+/// which is not a cross-project surface at all — refusing that is bug T of Test5 round 6
+/// (r6cardjob): a job asked to name the approval card it waited on called
+/// `mcp__arbos__send_message`, was told the tool belonged to the main agent, and stopped. The
+/// user was told nothing, by anyone.
+///
+/// The refusal that remains names the open door, so a model that hits the wall is not left to
+/// guess that the same tool answers without `to`.
+pub fn refusal_for(role: SessionRole, tool: &str, to: Option<&str>) -> Option<String> {
     match role {
         SessionRole::Main => None,
-        SessionRole::Subagent => MAIN_ONLY_TOOLS
-            .contains(&tool)
-            .then(|| format!("{tool} is available to the main agent only; report back and let it speak for the Project")),
+        SessionRole::Subagent => {
+            let addressed = to.map(str::trim).is_some_and(|t| !t.is_empty());
+            (MAIN_ONLY_TOOLS.contains(&tool) && addressed).then(|| {
+                format!(
+                    "{tool} with `to` reaches another Project and is available to the main agent only; report back and let it speak for the Project. To post in your own chat — a progress note, the card you are waiting on — call {tool} with `text` and no `to`."
+                )
+            })
+        }
     }
+}
+
+/// The pi session a request belongs to (`X-Arbos-Session`, written into `mcp.json` by
+/// `workspace::seed_state` and filled from the child's `ARBOS_SESSION_ID`). For a worker it is
+/// the subagent id, which is how a job's `send_message` finds the chat it runs beside; the main
+/// session needs none, because it has the running turn.
+const SESSION_HEADER: &str = "x-arbos-session";
+
+fn session_of(headers: &HeaderMap) -> String {
+    headers
+        .get(SESSION_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .trim()
+        .to_owned()
 }
 
 pub(crate) fn text_result(text: impl Into<String>) -> Value {
@@ -198,7 +228,13 @@ fn clip(s: &str, max: usize) -> String {
     )
 }
 
-async fn call_tool(a: &Arc<Agent>, name: &str, args: &Value) -> Value {
+async fn call_tool(
+    a: &Arc<Agent>,
+    name: &str,
+    args: &Value,
+    role: SessionRole,
+    session: &str,
+) -> Value {
     let s = |k: &str| args.get(k).and_then(Value::as_str).map(str::to_owned);
     let chat_for_scratch = a
         .turn
@@ -689,13 +725,28 @@ async fn call_tool(a: &Arc<Agent>, name: &str, args: &Value) -> Value {
             Err(e) => err_result(e),
         },
         "send_message" | "group_send" | "projects_send" => {
-            let text = s("text").unwrap_or_default();
+            // `message` is the field name every other chat API uses, so it is the one a model
+            // reaches for first — the r6cardjob call spent its only attempt on it. Accepting it
+            // as an alias costs one line; the refusal below still names `text`, so the canonical
+            // field is what gets learned rather than quietly replaced.
+            let text = s("text").or_else(|| s("message")).unwrap_or_default();
             let to = s("to")
                 .map(|t| t.trim().to_owned())
                 .filter(|t| !t.is_empty());
-            match a.send_message_from_turn(to.as_deref(), &text).await {
-                Ok(t) => text_result(t),
-                Err(e) => err_result(e),
+            if text.trim().is_empty() {
+                err_result("text required: put the words in `text` (`message` is accepted as the same field)")
+            } else {
+                // `to` is the main agent's alone and `refusal_for` has already refused it for a
+                // worker, so a worker reaching here is posting in its own chat. It has no turn
+                // to post into: its chat is the one its job runs beside.
+                let posted = match role {
+                    SessionRole::Main => a.send_message_from_turn(to.as_deref(), &text).await,
+                    SessionRole::Subagent => a.post_to_job_chat(session, &text).await,
+                };
+                match posted {
+                    Ok(t) => text_result(t),
+                    Err(e) => err_result(e),
+                }
             }
         }
         "ask_user" => {
@@ -966,12 +1017,13 @@ async fn mcp(State(a): State<S>, headers: HeaderMap, Json(req): Json<Value>) -> 
         "tools/call" => {
             let name = params.get("name").and_then(Value::as_str).unwrap_or("");
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
-            match refusal_for(role, name) {
+            let to = args.get("to").and_then(Value::as_str);
+            match refusal_for(role, name, to) {
                 Some(reason) => {
                     tracing::info!(tool = name, ?role, "mcp: refused for role");
                     err_result(reason)
                 }
-                None => call_tool(&a, name, &args).await,
+                None => call_tool(&a, name, &args, role, &session_of(&headers)).await,
             }
         }
         _ => return Json(json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32601, "message": format!("unknown method {method}") } })).into_response(),
@@ -1075,7 +1127,14 @@ mod tests {
             chars >= 51_000,
             "the round-5 table was 51,372 chars; this one is {chars}"
         );
-        let out = call_tool(&agent, "send_message", &json!({ "text": table })).await;
+        let out = call_tool(
+            &agent,
+            "send_message",
+            &json!({ "text": table }),
+            SessionRole::Main,
+            "",
+        )
+        .await;
         assert!(out.get("isError").is_none(), "the table was refused: {out}");
 
         let rows: Vec<arbos_core::doc::MessageView> = {
@@ -1108,6 +1167,8 @@ mod tests {
             &agent,
             "chat_messages",
             &json!({ "chat_id": chat, "message_id": rows[0].id }),
+            SessionRole::Main,
+            "",
         )
         .await;
         assert!(fetched.get("isError").is_none(), "{fetched}");
@@ -1160,16 +1221,165 @@ mod tests {
         assert_eq!(spec["description"], json!(capped));
     }
 
-    /// D69: a subagent-role session may not speak for the Project to other Projects.
+    /// D69: a subagent-role session may not speak for the Project to other Projects. What it may
+    /// do is post in its own chat, which is the same tool without `to` (bug T) — and the refusal
+    /// of the cross-project form says so, because a sentence that only closes a door leaves the
+    /// model to guess that the open one exists.
     #[test]
-    fn subagent_cannot_reach_other_projects() {
-        assert!(refusal_for(SessionRole::Subagent, "send_message").is_some());
-        assert!(refusal_for(SessionRole::Subagent, "group_send").is_some());
-        assert!(refusal_for(SessionRole::Subagent, "projects_send").is_some());
-        assert!(refusal_for(SessionRole::Subagent, "history_search").is_none());
-        assert!(refusal_for(SessionRole::Main, "send_message").is_none());
-        assert!(refusal_for(SessionRole::Main, "group_send").is_none());
-        assert!(refusal_for(SessionRole::Main, "projects_send").is_none());
+    fn subagent_cannot_reach_other_projects_but_may_post_in_its_own_chat() {
+        for tool in ["send_message", "group_send", "projects_send"] {
+            let refused = refusal_for(SessionRole::Subagent, tool, Some("lane-b"))
+                .unwrap_or_else(|| panic!("{tool} with `to` is the main agent's"));
+            assert!(
+                refused.contains("with `text` and no `to`"),
+                "the refusal must name the path that is open: {refused}"
+            );
+            assert!(
+                refusal_for(SessionRole::Subagent, tool, None).is_none(),
+                "{tool} with no `to` posts in this chat and is open to a worker"
+            );
+            assert!(
+                refusal_for(SessionRole::Subagent, tool, Some("  ")).is_none(),
+                "a blank `to` is no `to`"
+            );
+            assert!(refusal_for(SessionRole::Main, tool, Some("lane-b")).is_none());
+        }
+        assert!(refusal_for(SessionRole::Subagent, "history_search", None).is_none());
+    }
+
+    /// The r6cardjob call, replayed through the surface it was made on. A job's script reached
+    /// `mcp__arbos__send_message` with a `message` argument and got two walls: the field name
+    /// was wrong, and the tool was the main agent's. Both are gone — the alias lands, the words
+    /// are in the job's chat, and a call with neither field is told which one to use.
+    #[tokio::test]
+    async fn a_jobs_script_posts_through_the_mcp_tool_with_either_field_name() {
+        let (agent, root) = crate::status::tests::test_agent().await;
+        let chat = "01TESTCHATMCPJOBNOTE000001";
+        let ask = "01TESTASKMCPJOBNOTE0000001";
+        let worker = "01TESTWORKERMCPJOBNOTE0001";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        {
+            let h = host.lock().await;
+            h.doc
+                .append_user_message(
+                    ask,
+                    "Name the card you wait on.",
+                    "dev-mac",
+                    &Default::default(),
+                )
+                .unwrap();
+        }
+        agent
+            .store
+            .insert_subagent(
+                worker,
+                "job-name-the-card-0001",
+                "name the card",
+                "pi",
+                chat,
+            )
+            .unwrap();
+        agent
+            .store
+            .insert_job(
+                "01TESTJOBMCPJOBNOTE0000001",
+                chat,
+                ask,
+                "Naming the card",
+                "ops",
+                "Raise the card and name it in the chat.",
+                &[],
+            )
+            .unwrap();
+        agent
+            .store
+            .set_job_subagent("01TESTJOBMCPJOBNOTE0000001", worker)
+            .unwrap();
+
+        let note = "Waiting on the card \"Delete 12 stale branches\".";
+        let out = call_tool(
+            &agent,
+            "send_message",
+            &json!({ "message": note }),
+            SessionRole::Subagent,
+            worker,
+        )
+        .await;
+        assert!(out.get("isError").is_none(), "the call was refused: {out}");
+
+        let rows: Vec<String> = {
+            let h = host.lock().await;
+            h.doc
+                .messages()
+                .into_iter()
+                .filter(|m| m.role == "assistant" && m.has_visible_content())
+                .map(|m| m.text())
+                .collect()
+        };
+        assert_eq!(rows, vec![note.to_owned()], "the note is in the job's chat");
+
+        let empty = call_tool(
+            &agent,
+            "send_message",
+            &json!({}),
+            SessionRole::Subagent,
+            worker,
+        )
+        .await;
+        let said = empty["content"][0]["text"].as_str().unwrap_or_default();
+        assert_eq!(empty["isError"], json!(true), "{empty}");
+        assert!(
+            said.contains("put the words in `text`"),
+            "the refusal must name the field: {said}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The session header is the only thing that tells this server which worker is calling: one
+    /// subagent token is shared by every worker on the box, so without it a job's note has no
+    /// chat to go to. pi fills it from `ARBOS_SESSION_ID`, which `PiAdapter::envs` always sets.
+    #[test]
+    fn the_mcp_config_asks_pi_for_the_session_id() {
+        let root = std::env::temp_dir().join(format!("arbos-mcpcfg-{}", arbos_core::ids::ulid()));
+        let bx = crate::config::BoxConfig {
+            user_id: Some("u-test".into()),
+            relay_url: "http://127.0.0.1:1".into(),
+            box_token: "test-token".into(),
+            mcp_token: "test-mcp".into(),
+            work_root: root.clone(),
+            bind: "127.0.0.1".into(),
+            port: 0,
+            local_box: true,
+            pi_bin: "/nonexistent/pi".into(),
+            prime_bin: "/nonexistent/prime-agent".into(),
+            claude_bin: "/nonexistent/claude".into(),
+            pi_ext_override: None,
+            device_id: "box:test".into(),
+            default_talking_model: "mock-talking".into(),
+            default_subagent_model: "mock-sub".into(),
+            legacy_project_id: None,
+        };
+        let cfg = bx.workspace(
+            &json!({ "id": "01TESTPROJECTMCPCONFIG0000", "name": "Doug" }),
+            0,
+        );
+        crate::workspace::seed_state(&cfg).expect("seed");
+        let written: Value = serde_json::from_str(
+            &std::fs::read_to_string(cfg.pi_dir().join("mcp.json")).expect("mcp.json"),
+        )
+        .expect("mcp.json is json");
+        let headers = &written["mcpServers"]["arbos"]["headers"];
+        assert_eq!(headers["Authorization"], json!("Bearer ${ARBOS_MCP_TOKEN}"));
+        assert_eq!(headers["X-Arbos-Session"], json!("${ARBOS_SESSION_ID}"));
+        assert_eq!(
+            crate::harness::PiAdapter::envs(&cfg, "01TESTWORKERENVSESSION0001", "subagent")
+                .into_iter()
+                .find(|(k, _)| k == "ARBOS_SESSION_ID")
+                .map(|(_, v)| v),
+            Some("01TESTWORKERENVSESSION0001".to_owned()),
+            "the header resolves from this env var, so every pi child must carry it"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     fn auth(value: &str) -> HeaderMap {
