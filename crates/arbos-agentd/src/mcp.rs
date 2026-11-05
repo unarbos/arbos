@@ -233,7 +233,12 @@ pub(crate) async fn caller_for(
                 };
             }
             crate::routines::Caller {
-                chat_id: a.store.subagent(session).ok().flatten().and_then(|s| s.chat_id),
+                chat_id: a
+                    .store
+                    .subagent(session)
+                    .ok()
+                    .flatten()
+                    .and_then(|s| s.chat_id),
                 job_id: None,
             }
         }

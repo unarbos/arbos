@@ -191,11 +191,12 @@ pub async fn call_tool(agent: &Arc<Agent>, name: &str, args: &Value, caller: &Ca
         },
         "routines_create" => match create_body(args, caller) {
             Err(e) => err_result(e),
-            Ok(body) => match relay_routines_json(agent, reqwest::Method::POST, "", Some(body)).await
-            {
-                Ok(v) => text_result(v.to_string()),
-                Err(e) => err_result(e),
-            },
+            Ok(body) => {
+                match relay_routines_json(agent, reqwest::Method::POST, "", Some(body)).await {
+                    Ok(v) => text_result(v.to_string()),
+                    Err(e) => err_result(e),
+                }
+            }
         },
         "routines_update" => {
             let id = s("id").unwrap_or_default();
@@ -615,7 +616,8 @@ mod tests {
         });
         let body = create_body(&args, &caller).expect("a cron routine is a real schedule");
         assert_eq!(
-            body["chatId"], json!(CHAT),
+            body["chatId"],
+            json!(CHAT),
             "the routine must be stored against the job's chat, not left for the relay to guess"
         );
 
