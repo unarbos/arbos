@@ -65,7 +65,7 @@ final class ChatSearchCloseTests: XCTestCase {
             return XCTFail("closeSearch / openSearchResult not found")
         }
         let body = String(src[start.lowerBound..<end.lowerBound])
-        for line in ["showSearch = false", "searchText = \"\"", "searchFocused = false", "windowSkipEnd = 0", "windowCount = min(max(windowCount, Self.windowInitial), Self.windowMax)"] {
+        for line in ["showSearch = false", "searchText = \"\"", "searchFocused = false", "windowSkipEnd = 0", "reached.reset()"] {
             XCTAssertTrue(body.contains(line), "closeSearch must do: \(line)")
         }
         XCTAssertTrue(src.contains("accessibilityIdentifier(\"chat-search-no-matches\")"), "zero hits say so instead of a blank transcript")
