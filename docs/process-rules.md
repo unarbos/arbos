@@ -183,3 +183,4 @@ exit code; `axbin/osascript` is a shim on `runner.sh`'s PATH that forwards every
 Runbook (how the loop implements this): the project store's `docs/feedback-loop.md`.
 
 <!-- Measurement harness for PR #2776: a no-op edit so the pull request has a diff. Not for merge. -->
+<!-- Re-run marker after a transient apt.llvm.org fetch failure. Not for merge. -->
