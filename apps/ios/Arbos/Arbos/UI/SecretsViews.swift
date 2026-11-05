@@ -647,6 +647,7 @@ struct SecretPage: View {
             if let p = model.project(a.projectId) {
                 AgentAvatar(project: p, theme: theme, size: SettingsRow.tile, still: true)
             } else {
+                // avatar-lint: allow (an agent with no project record: no picture to resolve)
                 InitialsAvatar(name: a.name, handle: a.name, id: a.projectId, override: nil, size: SettingsRow.tile)
             }
             VStack(alignment: .leading, spacing: 2) {
@@ -1414,6 +1415,7 @@ struct VaultPage: View {
                             if let p = model.project(a.projectId) {
                                 AgentAvatar(project: p, theme: theme, size: SettingsRow.tile, still: true)
                             } else {
+                                // avatar-lint: allow (an agent with no project record: no picture to resolve)
                                 InitialsAvatar(name: a.name, handle: a.name, id: a.projectId, override: nil, size: SettingsRow.tile)
                             }
                             VStack(alignment: .leading, spacing: 2) {

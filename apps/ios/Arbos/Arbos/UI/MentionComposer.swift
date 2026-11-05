@@ -534,12 +534,14 @@ struct MentionTextView: UIViewRepresentable {
                 if let p = parent.agentProject(member) {
                     picture = AnyView(AgentAvatar(project: p, theme: theme, size: MentionTable.picture, still: true))
                 } else {
+                    // avatar-lint: allow (an agent with no project record: no picture to resolve)
                     picture = AnyView(InitialsAvatar(name: member.name ?? member.handle, handle: member.handle, id: member.id, size: MentionTable.picture))
                 }
             case .member(let member):
                 picture = AnyView(PersonAvatar(url: member.avatarUrl, handle: member.handle, size: MentionTable.picture, name: member.name, id: member.id, colorIndex: member.avatarColorIndex))
             case .collective(let c):
                 // The same disc the bubble chip and the Mac draw: initials of `here` / `agents`.
+                // avatar-lint: allow (@here / @agents is nobody: there is no picture of a collective)
                 picture = AnyView(InitialsAvatar(name: c.handle, handle: c.handle, id: c.handle, size: MentionTable.picture))
             }
             let view = HStack(spacing: 4) {

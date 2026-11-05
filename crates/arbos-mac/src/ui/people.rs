@@ -58,6 +58,7 @@ pub fn avatar(image: Option<Arc<RenderImage>>, person: &Person, size: f32, theme
                 .object_fit(gpui::ObjectFit::Cover),
         ),
         // D79: Telegram-style initials on the id's gradient.
+        // avatar-lint: allow (this function IS the person resolver: the picture branch is above)
         None => crate::ui::avatars::person(person, size, theme),
     }
 }

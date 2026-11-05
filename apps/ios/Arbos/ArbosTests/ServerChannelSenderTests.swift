@@ -35,6 +35,27 @@ final class ServerChannelSenderTests: XCTestCase {
         return m
     }
 
+    /// The same roster, one field over. The typing row only searched the open chat's roster, so
+    /// a channel member typing got `url: nil` and drew a letter while their bubble beside it had
+    /// the photo ([feedback avatar-letter-fallbacks-2026-11-05]). This is what the row's
+    /// `PersonAvatar` receives: a URL, or nothing.
+    func testAHandleResolvesAPictureThroughTheServerRoster() {
+        let m = model(members: [scout()])
+        XCTAssertEqual(m.personAvatarURL(handle: "A"), "https://relay.test/a/scout.png",
+                       "the picture the bubble draws, for the row that only has a handle")
+        XCTAssertEqual(m.personAvatarURL(handle: "a"), "https://relay.test/a/scout.png",
+                       "GitHub logins are case-insensitive")
+        XCTAssertNil(m.personAvatarURL(handle: "nobody"), "no record, no picture")
+    }
+
+    /// An empty string is not a URL: `PersonAvatar` would treat it as a picture and ask the cache
+    /// for "", so the lookup hands back nil and the row draws the initial honestly.
+    func testAnEmptyPictureIsNoPicture() {
+        let m = model(members: [ServerMember(id: "test_01NOPIC", handle: "B", name: "Bee", avatarUrl: "",
+                                             role: "member", joinedAt: 0)])
+        XCTAssertNil(m.personAvatarURL(handle: "B"))
+    }
+
     func testAMemberRowRendersTheDisplayNameNotTheHandle() {
         let m = model(members: [scout()])
         // The `.other` bubble labels its sender through `personName(handle:)` — the server's

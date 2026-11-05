@@ -2999,9 +2999,11 @@ struct ChannelProfileView: View {
         AnyView(Button {
             model.showProfile(.server(serverId: server.id), in: profileHost)
         } label: {
+            // Through the resolver like every other server row (the pane header a few
+            // hundred lines up, the home list, search): this one drew the initial even for a
+            // server with an uploaded picture ([feedback avatar-letter-fallbacks-2026-11-05]).
             PaneRow(leading: .avatar(AnyView(
-                InitialsAvatar(name: server.name, handle: nil, id: server.id,
-                               override: server.avatarColorIndex, size: PaneKit.avatar)
+                ServerAvatar(server: server, size: PaneKit.avatar)
             )), title: server.name, subtitle: "Server", chevron: true)
         }.buttonStyle(.plain))
     }

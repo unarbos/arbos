@@ -321,6 +321,7 @@ struct ServerAvatar: View {
         } else if let pick = server.leafPick, flag.on {
             LeafAvatar(pick: pick, size: size)
         } else {
+            // avatar-lint: allow (ServerAvatar's own fallback: its picture branch is above)
             InitialsAvatar(name: server.name, handle: nil, id: server.id, override: server.avatarColorIndex, size: size)
         }
     }

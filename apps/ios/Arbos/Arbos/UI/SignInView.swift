@@ -23,6 +23,7 @@ struct SignInView: View {
     private func scatteredTrees(in size: CGSize) -> some View {
         ZStack {
             ForEach(Array(Self.scatter.enumerated()), id: \.offset) { _, spot in
+                // avatar-lint: allow (decorative letters on the sign-in screen, not a person)
                 InitialsAvatar(initials: spot.letter, colorIndex: spot.color, size: 64)
                     .position(x: size.width * spot.x, y: size.height * spot.y)
             }

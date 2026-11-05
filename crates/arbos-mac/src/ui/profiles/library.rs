@@ -757,6 +757,7 @@ fn sender_picture(sender: &Sender, state: &AppState, theme: &Theme) -> AnyElemen
         }
         Sender::Agent(pid) => match state.project(pid) {
             Some(p) => avatars::project_in(state, p, CARD_AVATAR, theme).into_any_element(),
+            // avatar-lint: allow (an agent with no project record: no picture to resolve)
             None => avatars::element(pid, "Agent", None, CARD_AVATAR, theme).into_any_element(),
         },
         Sender::Me => {
@@ -774,6 +775,7 @@ fn sender_picture(sender: &Sender, state: &AppState, theme: &Theme) -> AnyElemen
             match me {
                 Some(p) => people::avatar(state.avatar(&p.avatar_url), &p, CARD_AVATAR, theme)
                     .into_any_element(),
+                // avatar-lint: allow (no account loaded yet: my own picture is not known)
                 None => avatars::element("me", "You", None, CARD_AVATAR, theme).into_any_element(),
             }
         }

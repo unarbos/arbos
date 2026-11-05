@@ -3100,6 +3100,19 @@ impl SecretDirector {
             .filter(|n| !n.trim().is_empty())
             .unwrap_or_else(|| self.handle.clone())
     }
+
+    /// The person this row is about, so the row draws them the way every other person row
+    /// does (`ui::people::avatar`: the photo, else the initials disc) — the iPhone's
+    /// mirror of this row already did.
+    pub fn as_person(&self) -> Person {
+        Person {
+            id: self.user_id.clone(),
+            handle: self.handle.clone(),
+            name: self.name.clone().filter(|n| !n.trim().is_empty()),
+            avatar_url: self.avatar_url.clone().unwrap_or_default(),
+            ..Person::default()
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

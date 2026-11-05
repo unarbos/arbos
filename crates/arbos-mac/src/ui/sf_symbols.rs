@@ -174,6 +174,9 @@ pub const FALLBACKS: &[(&str, &str)] = &[
     ("nosign", "nosign"),
     ("magnifyingglass", "search"),
     ("person.fill", "person"),
+    // `Secret::glyph` asks for the bare name for a login secret, so a debug build
+    // tripped the registration assert on Settings → Secrets.
+    ("person", "person"),
     ("ellipsis", "ellipsis"),
     ("sidebar.left", "sidebar-left"),
     ("chevron.left", "chevron-left"),

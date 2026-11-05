@@ -81,6 +81,17 @@ and a 250 GB volume (five leftover 13 GB test-simulator clones took it from 60 t
 - The stamp is the only truth: a newer known version never loses to a cached or older copy; at
   equal stamps the caller's order holds (chat roster, my records, other rosters). While a picture
   loads, the disc is the neutral initial — never an older picture, never the leaf.
+- **The person side too (2026-11-05).** The drawers with no picture branch at all — Mac
+  `avatars::element` / `person` / `sender`, iPhone `InitialsAvatar` — are part of the resolver and
+  the lint covers them. A surface that reaches one directly can only ever draw a letter, and
+  nothing later corrects it: that is how the "From Affinity" search tag, the typing row and the
+  Mac's Secrets People row each drew an initial for someone whose photo the client already held.
+  A site holding only a handle asks the one lookup — Mac `AppState::person_by_handle`, iPhone
+  `AppModel.personAvatarURL(handle:)` (me, every chat roster, every server roster, the directory,
+  handles compared without case) — rather than settling for no URL.
+- Every `avatar-lint: allow` states why, because the reason is the audit: the marker means *no
+  picture of this subject can be found*, not *this site has not been looked at*. The marker counts
+  on the call's line, the line after it, or the line before.
 
 ## No Simulator.app on the gate Mac (2026-10-28 21:40 UTC)
 
