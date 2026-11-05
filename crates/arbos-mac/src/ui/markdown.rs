@@ -1,13 +1,12 @@
 //! The Mac's view of the shared chat Markdown parser
 //! (`arbos_core::markdown`, [feedback chat-markdown-mac-2026-10-27]): the same
 //! blocks and inline runs the iPhone renders, plus what only this renderer
-//! needs — typeset math runs, the named link's icon cell, URL wrap hints, and
-//! the chart card as one more block kind.
+//! needs — typeset math runs, the named link's icon cell, and the chart card
+//! as one more block kind.
 
 use arbos_core::markdown as core;
 
 use super::math;
-use super::urlwrap;
 use crate::model::LinkPreview;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -230,9 +229,6 @@ pub fn inline_spans(text: &str) -> Vec<Span> {
         for (k, r) in runs[i..end].iter().enumerate() {
             let text = if k == 0 && icon.is_some() {
                 format!("{LINK_ICON_CELL}{}", r.text)
-            } else if label_is_url(&label) {
-                // An address as the label wraps like a bare URL.
-                urlwrap::breakable(&r.text)
             } else {
                 r.text.clone()
             };
