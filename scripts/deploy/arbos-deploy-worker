@@ -133,18 +133,28 @@ record_failure() {
 
 # Image-roll hold (2026-10-24 01:1x): three images in a row (0.1.101/102/103) failed the busy-reply canary on
 # the same bad agentd commit; every new merge burned another image. After a canary failure the lane is HELD:
-# no agentd roll starts until an operator lifts it (`arbos-deploy-worker hold-agentd off`). The hold file
+# no agentd roll starts until an operator lifts it with `arbos-deploy-worker hold-agentd off`. The hold file
 # names the failing image and sha.
 #
-# The hold lifts BY HAND ONLY (2026-11-05). It used to lift itself: `agentd_hold_release_if_fixed` ran at the
-# top of every `roll_image` and deleted the hold file as soon as any commit on main since the hold carried
-# `[canary-fix]` in its subject and touched `crates/arbos-agentd/` or `image/`. The next tick then built
-# main's head and rolled it to every box outside `agentd.skip`, with no person in the loop. A commit subject
-# is author-controlled text, reviewed as prose and never as deploy authority, so that made one line of a
-# commit message enough to open the lane on 56 production boxes. The scan is kept, because the operator who
-# landed the fix still wants to hear that it arrived, but it only warns: `agentd_hold_note_candidate_fix`
-# writes a log line and an event and touches nothing. The hold file is deleted in exactly one place now —
-# the `hold-agentd off` command an operator types.
+# THE HOLD LIFTS BY HAND ONLY, and the auto-lift is gone rather than downgraded (2026-11-05).
+# `agentd_hold_release_if_fixed` used to run at the top of every roll_image — so once a minute — and delete
+# the hold file as soon as a commit on main since the hold both matched
+# `git log --format='%H %s' … | grep -i 'canary-fix\]'` and touched crates/arbos-agentd/ or image/. The next
+# tick then built main's head and rolled it to every box outside agentd.skip, with no person in the loop.
+# Three things were wrong with it, and the third is why nothing replaces it:
+#   1. A commit subject is author-controlled text. It is reviewed as prose and never as deploy authority, so
+#      one line of a commit message decided whether 56 production boxes moved.
+#   2. The pattern was much wider than the tag it documented. No leading bracket and case-insensitive, so
+#      `Revert "…" [Canary-Fix]` and `drop the canary-fix] hack` armed it exactly as well as `[canary-fix]`.
+#   3. It has already rolled an unapproved image. At 01:19:29 on Oct 24, 6903de6f0 introduced the hold and
+#      the auto-lift; at 01:30 the auto-lift fired on that same commit's own subject and rolled 0.1.105
+#      without the fix; at 01:37:20, 8dbf5d19c added the agentd-path condition. That remedy also silently
+#      WIDENED the text match, dropping the `\[` the original pattern had. So the one recorded use of the
+#      automation was a wrong one, and narrowing the trigger has already been tried as the answer.
+# A warning in its place would have to fire on that same unreliable pattern to be worth anything, which
+# makes it noise standing next to a safety gate — and an operator is told the lane is held anyway, by the
+# hold file, by `status`, and by roll_image's own "roll skipped — lane held" line every minute. `rm -f` on
+# the hold file now exists in exactly one place in this script: the `hold-agentd off` command.
 agentd_hold_file() { echo "$STATE/agentd.hold"; }
 agentd_held() { [[ -f "$(agentd_hold_file)" ]]; }
 hold_agentd() {
@@ -152,23 +162,6 @@ hold_agentd() {
   printf 'sha=%s\nimage=%s\nat=%s\nreason=%s\n' "$1" "$2" "$(date -u +%FT%TZ)" "$3" > "$(agentd_hold_file)"
   event agentd "$1" roll_held "image $2: $3 — agentd rolls held until an operator lifts the hold"
   log "agentd: HOLD — $3 (image $2); no further images until 'arbos-deploy-worker hold-agentd off'"
-}
-agentd_hold_note_candidate_fix() {
-  # Report-only, and it must stay that way: no write and no delete of the hold file belongs in here.
-  # A commit is a CANDIDATE fix when it (a) carries the tag in its subject and (b) touches agentd code. A
-  # commit that merely mentions the tag in prose (01:30 Oct 24: the hold feature's own commit, which rolled
-  # 0.1.105 without the fix) is not even that.
-  agentd_held || return 0
-  local held_sha c
-  held_sha="$(sed -n 's/^sha=//p' "$(agentd_hold_file)" | head -1)"
-  while read -r c; do
-    [[ -n "$c" ]] || continue
-    if git -C "$REPO" diff-tree --no-commit-id --name-only -r "$c" 2>/dev/null | grep -qE '^(crates/arbos-agentd/|image/)'; then
-      log "agentd: WARNING — candidate canary-fix commit ${c:0:9} is on main and touches agentd code, but the hold STAYS; an operator runs 'arbos-deploy-worker hold-agentd off' to lift it"
-      event agentd "$c" roll_hold_candidate_fix "candidate canary-fix commit ${c:0:9} landed; the hold is kept, an operator lifts it by hand"
-      return 0
-    fi
-  done < <(git -C "$REPO" log --format='%H %s' "${held_sha:-HEAD~50}..origin/main" 2>/dev/null | grep -i 'canary-fix\]' | cut -d' ' -f1)
 }
 
 # Lane collision (2026-10-29 00:13): the 0.1.180 canary busy-reply smoke ran while the relay lane restarted
@@ -1041,7 +1034,6 @@ roll_image() {
   need_root
   local sha="$1" version tag t0 st waited=0 image snapshot
   ensure_repo
-  agentd_hold_note_candidate_fix
   if agentd_held; then
     log "agentd: roll of $1 skipped — lane held ($(sed -n 's/^reason=//p' "$(agentd_hold_file)" | head -1)); only 'arbos-deploy-worker hold-agentd off' lifts it"
     exit 0
@@ -1611,41 +1603,75 @@ selftest() {
   echo "selftest ok"
 }
 
-# The agentd hold lifts by hand only. Both cases run the real gate — the top of `roll_image` — against a
+# The agentd hold lifts by hand only. Every case runs the REAL gate — the top of `roll_image` — against a
 # scratch repo and a scratch state directory, with `resolve` standing in for the first step after the gate:
 # the roll reaching it is what "the roll proceeded" means. Nothing here needs root, the network, or the host.
+#
+# The subjects below are all commits the old auto-lift accepted, not just the documented tag. Its match was
+# `grep -i 'canary-fix\]'` over commit SUBJECTS, with no leading bracket and no case sensitivity, so a revert
+# and a passing mention armed it exactly as well as `[canary-fix]` did. A case list of one literal tag would
+# pass against a fix that only stopped the literal tag, which is most of the hole left open.
+HOLD_SUBJECTS='fix(agentd): the busy reply lands [canary-fix]
+Revert "fix(agentd): the busy reply lands" [Canary-Fix]
+agentd: drop the canary-fix] hack from the smoke output'
 hold_cases() {
-  local h="$1" held_sha
-  STATE="$h"; REPO="$h/repo"; LOG="$h/log"; EVENTS="$h/events.jsonl"
+  local h="$1" subject n=0
+  need_root() { :; }
+  ensure_repo() { :; }
+  resolve() { : > "$STATE/roll-proceeded"; return 1; }
+  while IFS= read -r subject; do
+    [[ -n "$subject" ]] || continue
+    n=$((n + 1))
+    hold_scratch "$h/case$n" "$subject"
+    ( roll_image "$HOLD_HELD_SHA" ) > /dev/null 2>&1 || true
+    [[ -f "$(agentd_hold_file)" ]] \
+      || { echo "selftest: the commit subject '$subject' deleted the agentd hold — the gate released itself" >&2; return 1; }
+    [[ ! -f "$STATE/roll-proceeded" ]] \
+      || { echo "selftest: the agentd roll proceeded past a standing hold after the commit subject '$subject'" >&2; return 1; }
+  done <<< "$HOLD_SUBJECTS"
+  # A subject with no closing bracket never matched even the old pattern, so it is the control: if this one
+  # ever starts behaving differently from the three above, the case list has stopped describing the gate.
+  hold_scratch "$h/control" "wip(agentd): starting a [canary-fix for tomorrow"
+  ( roll_image "$HOLD_HELD_SHA" ) > /dev/null 2>&1 || true
+  [[ -f "$(agentd_hold_file)" ]] || { echo "selftest: an unmatched subject deleted the agentd hold" >&2; return 1; }
+  # And the gate is not welded shut: the operator's own command still opens the lane, and the roll then runs.
+  ARBOS_DEPLOY_STATE="$STATE" ARBOS_DEPLOY_EVENTS="$EVENTS" bash "${BASH_SOURCE[0]}" hold-agentd off > /dev/null
+  [[ ! -f "$(agentd_hold_file)" ]] || { echo "selftest: 'hold-agentd off' left the hold in place" >&2; return 1; }
+  ( roll_image "$HOLD_HELD_SHA" ) > /dev/null 2>&1 || true
+  [[ -f "$STATE/roll-proceeded" ]] \
+    || { echo "selftest: with the hold lifted by hand the roll must proceed" >&2; return 1; }
+  # Exactly one line in this script may delete the hold file, and it is the operator's `hold-agentd off`.
+  # This is the one assertion the cases above cannot make: a scan that notices a commit and keeps the flag
+  # passes every state assertion, so only counting the delete sites can tell "the lane opens by hand alone"
+  # from "something automatic is allowed near the flag again".
+  local removals
+  removals="$(grep -cE 'rm -f "(\$\(agentd_hold_file\)|\$STATE/agentd\.hold)"' "${BASH_SOURCE[0]}")"
+  [[ "$removals" == 1 ]] \
+    || { echo "selftest: $removals lines in this script delete the agentd hold file; only 'hold-agentd off' may" >&2; return 1; }
+}
+
+# hold_scratch <dir> <subject>: a held agentd lane in <dir>, whose main carries one commit with that subject
+# touching the agentd crate — the path half of the old auto-lift's test, so only the subject varies between
+# cases. Points STATE, REPO, LOG and EVENTS at <dir> and sets HOLD_HELD_SHA to the held commit.
+# commit.gpgsign is forced off: a developer whose global config signs commits would otherwise pay an
+# ssh-keygen per commit here, or fail outright without a key, for signatures nothing in the test reads.
+hold_scratch() {
+  STATE="$1"; REPO="$1/repo"; LOG="$1/log"; EVENTS="$1/events.jsonl"
   mkdir -p "$REPO/crates/arbos-agentd"
   git -C "$REPO" init -q
   echo v1 > "$REPO/crates/arbos-agentd/main.rs"
   git -C "$REPO" add -A
-  git -C "$REPO" -c user.name=t -c user.email=t@t commit -q -m "agentd: the commit whose image failed the canary"
-  held_sha="$(git -C "$REPO" rev-parse HEAD)"
+  hold_commit "agentd: the commit whose image failed the canary"
+  HOLD_HELD_SHA="$(git -C "$REPO" rev-parse HEAD)"
   git -C "$REPO" update-ref refs/remotes/origin/main HEAD
-  hold_agentd "$held_sha" 0.1.200 "canary failed on image 0.1.200" > /dev/null
-  # The strongest trigger the old auto-lift accepted: the tag in the subject AND a change under the agentd
-  # crate. It must now leave the hold alone.
+  hold_agentd "$HOLD_HELD_SHA" 0.1.200 "canary failed on image 0.1.200" > /dev/null
   echo v2 > "$REPO/crates/arbos-agentd/main.rs"
   git -C "$REPO" add -A
-  git -C "$REPO" -c user.name=t -c user.email=t@t commit -q -m "fix(agentd): the busy reply lands [canary-fix]"
+  hold_commit "$2"
   git -C "$REPO" update-ref refs/remotes/origin/main HEAD
-  need_root() { :; }
-  ensure_repo() { :; }
-  resolve() { : > "$STATE/roll-proceeded"; return 1; }
-  rm -f "$STATE/roll-proceeded"
-  ( roll_image "$held_sha" ) > /dev/null 2>&1 || true
-  [[ -f "$(agentd_hold_file)" ]] \
-    || { echo "selftest: a [canary-fix] commit on main deleted the agentd hold — the gate released itself" >&2; return 1; }
-  [[ ! -f "$STATE/roll-proceeded" ]] \
-    || { echo "selftest: the agentd roll proceeded past a standing hold after a [canary-fix] commit" >&2; return 1; }
-  # And the gate is not welded shut: the operator's command still opens the lane, and the roll then runs.
-  ARBOS_DEPLOY_STATE="$h" ARBOS_DEPLOY_EVENTS="$EVENTS" bash "${BASH_SOURCE[0]}" hold-agentd off > /dev/null
-  [[ ! -f "$(agentd_hold_file)" ]] || { echo "selftest: 'hold-agentd off' left the hold in place" >&2; return 1; }
-  ( roll_image "$held_sha" ) > /dev/null 2>&1 || true
-  [[ -f "$STATE/roll-proceeded" ]] \
-    || { echo "selftest: with the hold lifted by hand the roll must proceed" >&2; return 1; }
+}
+hold_commit() {
+  git -C "$REPO" -c user.name=t -c user.email=t@t -c commit.gpgsign=false commit -q -m "$1"
 }
 
 case "${1:-}" in
