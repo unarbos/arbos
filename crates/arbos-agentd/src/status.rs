@@ -2100,6 +2100,107 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// #2770 retires every row a turn opened and left wordless. The queued notice is a row the
+    /// box writes during a turn, so it has to be shown not to be swept — otherwise the notice
+    /// #2761 exists to post would vanish again, and silently.
+    ///
+    /// Three grounds, and the test leans on the first two rather than on reading the predicate.
+    /// Its id never enters `rows_opened`, because only `open_row` and the turn driver's own
+    /// `TurnState` literal push there and `post_chat_line` is neither. It is never wordless,
+    /// because its text goes in before it is finished. And there is no window in between: the
+    /// row is built under one `host` lock, which is the same lock every caller of
+    /// `retire_wordless_rows` holds, so no sweep can observe it half-written.
+    #[tokio::test]
+    async fn the_queued_notice_survives_the_wordless_sweep() {
+        use crate::agent::{retire_wordless_rows, JobSpec};
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATQUEUEDSWEEP00001";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        let holder = JobSpec {
+            id: "job-holder".into(),
+            title: "Building NYC taxi Flask app".into(),
+            kind: "code".into(),
+            brief: "Build a small Flask app in taxi_app/ serving the stats.".into(),
+            touches: vec!["path:/".into(), "git".into()],
+            attempt: 0,
+        };
+        agent
+            .store
+            .insert_job(
+                &holder.id,
+                chat,
+                "m-busy",
+                &holder.title,
+                "code",
+                &holder.brief,
+                &holder.touches,
+            )
+            .unwrap();
+        assert!(!agent.acquire_job_locks(&holder).await.is_empty());
+        agent
+            .hook_start_job(
+                "Analyzing pandas repository",
+                "Blobless clone pandas and write out/pandas_commits.csv.",
+                "code",
+                vec![],
+            )
+            .await
+            .unwrap();
+        // The notice row, found the way a client would: by the delivery key it carries.
+        let notice = {
+            let h = host.lock().await;
+            h.doc
+                .messages()
+                .into_iter()
+                .find(|m| {
+                    m.rest
+                        .get("deliveryKey")
+                        .and_then(Value::as_str)
+                        .is_some_and(|k| k.starts_with("job:") && k.ends_with(":queued"))
+                })
+                .expect("the queued notice was posted")
+        };
+        assert!(
+            notice.text().contains("is queued behind"),
+            "the row carries its words from the start: {:?}",
+            notice.text()
+        );
+        let (rows_opened, trailing) = {
+            let tl = agent.turn.lock().await;
+            let t = tl.as_ref().unwrap();
+            (t.rows_opened.clone(), t.assistant_msg_id.clone())
+        };
+        // Ground one: the sweep never sees this row, because only `open_row` enrols rows.
+        assert!(
+            !rows_opened.contains(&notice.id),
+            "the notice is not one of the turn's opened rows: {rows_opened:?}"
+        );
+        // Ground two: handed to the sweep anyway, it is kept — so enrolling it later, by
+        // routing the notice through `open_row`, would still not lose it.
+        let forced: Vec<String> = vec![notice.id.clone()];
+        assert_eq!(
+            {
+                let h = host.lock().await;
+                retire_wordless_rows(&h.doc, &forced, &trailing)
+            },
+            0,
+            "the notice is not wordless, so the sweep leaves it alone"
+        );
+        {
+            let h = host.lock().await;
+            let after = h.doc.message(&notice.id).unwrap();
+            assert_ne!(
+                after.rest.get("hidden").and_then(Value::as_bool),
+                Some(true),
+                "the notice is still in the chat"
+            );
+            assert!(after.text().contains("is queued behind"));
+        }
+        agent.release_job_locks("job-holder").await;
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// The other half of the same rule: a job that waits for nothing says nothing, so an ordinary
     /// start is not narrated twice.
     #[tokio::test]
