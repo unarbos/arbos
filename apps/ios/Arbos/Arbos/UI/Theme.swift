@@ -102,6 +102,9 @@ struct Theme: Equatable {
     let userCodeChip: Color
 
     static let bubbleRadius: CGFloat = 20
+    /// The bubble's outline — its fill, its clip and the shape the long-press menu
+    /// previews it with, from one value so they cannot drift apart.
+    static var bubbleShape: RoundedRectangle { RoundedRectangle(cornerRadius: bubbleRadius, style: .continuous) }
     static let bubbleHPad: CGFloat = 14
     static let bubbleVPad: CGFloat = 11
     /// 17 pt SF Pro renders a 20.3 pt line in SwiftUI; Grok shows UIKit's 22 pt body pitch.

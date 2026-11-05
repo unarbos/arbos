@@ -1652,8 +1652,9 @@ struct RowView: View, Equatable {
                 }
                 .padding(.horizontal, linkOnly ? LinkPreviewCard.bubbleInset : Theme.bubbleHPad)
                 .padding(.vertical, linkOnly ? LinkPreviewCard.bubbleInset : Theme.bubbleVPad)
-                .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleUser))
+                .background(Theme.bubbleShape.fill(theme.bubbleUser))
                 .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: true) }
+                .bubbleMenuPreview()
                 .frame(maxWidth: maxBubble, alignment: .trailing)
                 .opacity(delivery.opacity)
                 .accessibilityIdentifier("own-bubble-\(delivery)")
@@ -1701,9 +1702,10 @@ struct RowView: View, Equatable {
                 }
                 .padding(.horizontal, Theme.bubbleHPad)
                 .padding(.vertical, Theme.bubbleVPad)
-                .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
+                .background(Theme.bubbleShape.fill(theme.bubbleAssistant))
                 .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: false) }
                 .modifier(LiveSenderBar(url: avatar, seed: model.personId(handle: handle) ?? handle))
+                .bubbleMenuPreview()
                 .frame(maxWidth: maxBubble - Theme.memberLane(composerInset: composerInset), alignment: .leading)
                 Spacer(minLength: 0)
             }
@@ -1769,8 +1771,9 @@ struct RowView: View, Equatable {
                 }
                 .padding(.horizontal, Theme.bubbleHPad)
                 .padding(.vertical, Theme.bubbleVPad)
-                .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
+                .background(Theme.bubbleShape.fill(theme.bubbleAssistant))
                 .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: false) }
+                .bubbleMenuPreview()
                 .background {
                     // D82: while the first-login terminal morphs into this bubble it
                     // needs the bubble's exact frame; only the greeting row reports.
@@ -1832,8 +1835,9 @@ struct RowView: View, Equatable {
             }
             .padding(.horizontal, Theme.bubbleHPad)
             .padding(.vertical, Theme.bubbleVPad)
-            .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.card))
-            .overlay(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).strokeBorder(theme.separator, lineWidth: 1))
+            .background(Theme.bubbleShape.fill(theme.card))
+            .overlay(Theme.bubbleShape.strokeBorder(theme.separator, lineWidth: 1))
+            .bubbleMenuPreview()
             .accessibilityLabel("\(lead)\(name)")
             .accessibilityIdentifier("secret-ghost")
             if mine {
@@ -2194,14 +2198,16 @@ struct RowView: View, Equatable {
             content
                 .padding(.horizontal, Theme.bubbleHPad)
                 .padding(.vertical, Theme.bubbleVPad)
-                .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
+                .background(Theme.bubbleShape.fill(theme.bubbleAssistant))
                 .senderBar(LeafArt.accent(agent, dark: theme.isDark))
+                .bubbleMenuPreview()
         } else {
             content
                 .padding(.horizontal, Theme.bubbleHPad)
                 .padding(.vertical, Theme.bubbleVPad)
-                .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
+                .background(Theme.bubbleShape.fill(theme.bubbleAssistant))
                 .modifier(LiveSenderBar(url: nil, seed: agent.id, override: agent.effectiveAvatarColorIndex))
+                .bubbleMenuPreview()
         }
     }
 
@@ -3291,7 +3297,8 @@ struct ImageBubble: View {
             }
         }
         .background(fill)
-        .clipShape(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous))
+        .clipShape(Theme.bubbleShape)
+        .bubbleMenuPreview()
         .accessibilityIdentifier("photo-bubble")
         .task(id: item.cacheKey) { await load() }
         .onAppear { animate = stillFrame != nil }
@@ -3765,7 +3772,8 @@ struct FileCard: View {
                     .accessibilityLabel("Description")
             }
         }
-        .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(fromUser ? theme.bubbleUser : theme.bubbleAssistant))
+        .background(Theme.bubbleShape.fill(fromUser ? theme.bubbleUser : theme.bubbleAssistant))
+        .bubbleMenuPreview()
         .fullScreenCover(item: $viewer) { v in
             MediaViewer(album: v.items, index: v.index, onClose: { viewer = nil })
                 .environmentObject(model)
@@ -3824,9 +3832,10 @@ struct VoiceMemoBubble: View {
             }
             .padding(.horizontal, Theme.bubbleHPad)
             .padding(.vertical, Theme.bubbleVPad)
-            .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(fromUser ? theme.bubbleUser : theme.bubbleAssistant))
+            .background(Theme.bubbleShape.fill(fromUser ? theme.bubbleUser : theme.bubbleAssistant))
         }
         .buttonStyle(.plain)
+        .bubbleMenuPreview()
         .disabled(blobRef == nil)
         .onAppear {
             if let ref = blobRef, let url = model.blobURL(projectId: projectId, key: ref) {
