@@ -1127,7 +1127,9 @@ impl std::error::Error for JobWorkerFailed {}
 /// A worker that settles with no words, no tool call and no error did no work at all (a crash
 /// before the first model call: the unwritable session dir of 2026-10-25); it is a failure, not
 /// an empty success. A cancel is not retried, nor is the 60-minute cap (the next run would hit
-/// it again); a `blocked` return contract is the worker's own answer and is delivered as is.
+/// it again), nor a card of this job that expired unanswered (a fresh worker would raise the
+/// same card for the same user to ignore); a `blocked` return contract is the worker's own
+/// answer and is delivered as is.
 pub(crate) fn worker_failure(
     done_err: Option<&str>,
     text: &str,
@@ -1137,6 +1139,9 @@ pub(crate) fn worker_failure(
     match done_err {
         Some(e) if e.contains("aborted") => Some((e.to_owned(), false)),
         Some(e) if e.contains("exceeded 60 minutes") => Some((e.to_owned(), false)),
+        Some(e) if e.contains(crate::approval::APPROVAL_EXPIRED_ERROR) => {
+            Some((e.to_owned(), false))
+        }
         Some(e) => Some((e.to_owned(), true)),
         None if text.trim().is_empty() && tool_calls == 0 => Some((
             "worker ended without output (no reply, no tool call)".to_owned(),
@@ -8552,6 +8557,12 @@ impl Agent {
                 AgentEvent::ToolCall { id, name, input } => {
                     tool_calls += 1;
                     sub_tool_inputs.insert(id.clone(), input.clone());
+                    // A file this job is about to create is a file it may delete again without
+                    // a card (`crate::approval::note_job_write`); the call has not run yet, so
+                    // a path that is not there now is one this job makes.
+                    if let Some(j) = &job {
+                        self.note_job_write(&j.id, &name, &input).await;
+                    }
                     let label = step_label(&name, &input);
                     let _ = self
                         .store
@@ -8685,6 +8696,16 @@ impl Agent {
             .and_then(|c| c.get("status"))
             .and_then(Value::as_str)
             .map(str::to_owned);
+        // A card of this job expired unanswered, so the job was stopped there. That reason
+        // outranks whatever the stopped worker reported: it is what the row, the job's state
+        // and the result turn say, and `worker_failure` never retries it.
+        if job
+            .as_ref()
+            .and_then(|j| self.store.job(&j.id).ok().flatten())
+            .is_some_and(|row| crate::approval::stopped_by_expired_approval(&row))
+        {
+            done_err = Some(crate::approval::APPROVAL_EXPIRED_ERROR.to_owned());
+        }
         // A worker that settled with nothing — no words, no tool call, no error — did no work
         // (2026-10-25: pi died on its first session write and settled clean); that is a
         // failure to retry, never an empty "done" the main agent has to explain away.

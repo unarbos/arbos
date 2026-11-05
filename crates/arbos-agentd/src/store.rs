@@ -697,6 +697,22 @@ impl Store {
         })
     }
 
+    /// The job a worker session runs, newest first: what a card raised by that session belongs
+    /// to. A job keeps its row across a fresh worker, so this is the job, not the attempt.
+    pub fn job_for_subagent(&self, subagent_id: &str) -> Result<Option<JobRow>> {
+        self.with(|c| {
+            c.query_row(
+                &format!(
+                    "SELECT {} FROM jobs WHERE subagent_id = ?1 ORDER BY created_at DESC LIMIT 1",
+                    Self::JOB_COLS
+                ),
+                params![subagent_id],
+                Self::row_to_job,
+            )
+            .optional()
+        })
+    }
+
     /// Jobs of one chat, newest first.
     pub fn jobs_for_chat(&self, chat_id: &str) -> Result<Vec<JobRow>> {
         self.with(|c| {

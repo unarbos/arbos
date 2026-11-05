@@ -400,8 +400,9 @@ fn regex(pattern: &str) -> Option<regex_lite::Regex> {
 }
 
 /// `cwd` + `target` as a normalized absolute path (`.`/`..` folded). `~` and `$HOME` resolve
-/// nowhere we classify, so they come back as-is and classify as `Anywhere`.
-fn resolve_path(cwd: &str, target: &str) -> String {
+/// nowhere we classify, so they come back as-is and classify as `Anywhere`. Public so a caller
+/// that records paths for `PathFacts::created_here` spells them the way the matcher reads them.
+pub fn resolve_path(cwd: &str, target: &str) -> String {
     let t = target.trim_matches(|c| c == '"' || c == '\'');
     if t.starts_with('~') || t.starts_with('$') {
         return t.to_owned();
@@ -519,6 +520,48 @@ fn unwrap_head<'a>(
     }
 }
 
+/// The target of the redirect `words[i]` opens — `> f`, `>> f`, `2>f`, `&>> f` — or `None` when
+/// that word is no redirect. `2>&1` and `/dev/*` name no file to keep.
+fn redirect_at<'a>(words: &[&'a str], i: usize) -> Option<&'a str> {
+    let w = *words.get(i)?;
+    let gt = w.find('>')?;
+    let (fd, rest) = w.split_at(gt);
+    if !(fd.is_empty() || fd == "&" || fd.chars().all(|c| c.is_ascii_digit())) {
+        return None;
+    }
+    let rest = rest.trim_start_matches('>');
+    let target = if rest.is_empty() {
+        *words.get(i + 1)?
+    } else {
+        rest
+    };
+    (!target.is_empty() && !target.starts_with('&') && !target.starts_with("/dev/"))
+        .then_some(target)
+}
+
+/// The paths `command` writes by redirect, resolved from `cwd` with a leading `cd` / `pushd`
+/// honoured. No deletion rule reads these: they are for a caller that records which files a run
+/// produced, so it can tell its own outputs from what it found (`PathFacts::created_here`).
+pub fn redirect_targets(cwd: &str, command: &str) -> Vec<String> {
+    let mut cwd = cwd.to_owned();
+    let mut out = Vec::new();
+    for cmd in simple_commands(command) {
+        let words: Vec<&str> = cmd.iter().map(String::as_str).collect();
+        if matches!(words.first(), Some(&"cd") | Some(&"pushd")) {
+            if let Some(dir) = words.iter().skip(1).find(|w| !w.starts_with('-')) {
+                cwd = resolve_path(&cwd, dir);
+            }
+            continue;
+        }
+        for i in 0..words.len() {
+            if let Some(t) = redirect_at(&words, i) {
+                out.push(resolve_path(&cwd, t));
+            }
+        }
+    }
+    out
+}
+
 /// The paths a `find` walks: every argument before the first expression word (`-name`, `!`,
 /// `(`, …). None given means `.`.
 fn find_paths<'a>(words: &[&'a str]) -> Vec<&'a str> {
@@ -589,13 +632,57 @@ fn bare_truncate_target<'a>(words: &[&'a str]) -> Option<&'a str> {
 /// `rsync --delete` act on the repository / destination; `mv … /dev/null` on its sources;
 /// Python `os.remove`/`shutil.rmtree` cannot be read statically and count as anywhere.
 pub fn delete_targets(command: &str) -> Option<PathClass> {
-    delete_targets_with(command, &|_| true)
+    delete_targets_with(command, PathFacts::assumed())
 }
 
-/// Whether a path on the box is an existing, non-empty file. agentd passes a real `stat`; the
-/// pure form (`delete_targets`) assumes yes. Only the truncation idioms consult it: `: > f` on
-/// a file that does not exist (or is empty) creates it and deletes nothing (#1719).
+/// One yes/no question about one absolute path, answered by the box. agentd passes a real
+/// look at the box; the pure forms pass a constant (`PathFacts::assumed`).
 pub type FileHasContent<'a> = &'a dyn Fn(&str) -> bool;
+
+/// What the box knows about the paths a command names. Both answers are about one absolute,
+/// normalized path (`resolve_path`), and both default to the cautious side — a card too many,
+/// never one too few:
+///
+/// - `has_content`: an existing, non-empty file? Only the truncation idioms ask. `: > f` on a
+///   file that does not exist, or is empty, creates it and deletes nothing (#1719).
+/// - `created_here`: did the job making this call create this exact path itself? A job deleting
+///   a file it wrote in this same run destroys nothing the user had, so that target raises no
+///   card. Exact paths only: no parent, prefix or glob ever matches, so a job that made
+///   `/work/out/report.md` still gets a card for `rm -rf /work/out`.
+#[derive(Clone, Copy)]
+pub struct PathFacts<'a> {
+    pub has_content: FileHasContent<'a>,
+    pub created_here: FileHasContent<'a>,
+}
+
+fn path_exists(_: &str) -> bool {
+    true
+}
+
+fn created_by_nobody(_: &str) -> bool {
+    false
+}
+
+impl PathFacts<'static> {
+    /// No box to ask: every path exists with content and nothing was created by the caller.
+    pub fn assumed() -> Self {
+        PathFacts {
+            has_content: &path_exists,
+            created_here: &created_by_nobody,
+        }
+    }
+}
+
+impl<'a> PathFacts<'a> {
+    /// A real `stat` for #1719, with no caller's own writes exempt — the view every gate that
+    /// cannot name one job uses.
+    pub fn with_content(has_content: FileHasContent<'a>) -> Self {
+        PathFacts {
+            has_content,
+            created_here: &created_by_nobody,
+        }
+    }
+}
 
 /// Words of a non-existence guard in the same command: `[ ! -e f ]`, `[ ! -f f ]`,
 /// `[[ ! -e f ]]`, `test ! -e f`, `test ! -f f` — the path that must be absent.
@@ -623,8 +710,10 @@ fn parent_dir(path: &str) -> &str {
 
 /// `delete_targets` with a real view of the box: truncation idioms count as deletes only when
 /// the file exists with content, is not guarded by `[ ! -e f ]` / `test ! -e f` in the same
-/// command, and its parent is not created by a `mkdir -p` in the same command.
-pub fn delete_targets_with(command: &str, has_content: FileHasContent<'_>) -> Option<PathClass> {
+/// command, and its parent is not created by a `mkdir -p` in the same command. A named target
+/// the caller created itself (`PathFacts::created_here`) contributes no class; the widest of
+/// what is left still decides, so one pre-existing target keeps the card.
+pub fn delete_targets_with(command: &str, facts: PathFacts<'_>) -> Option<PathClass> {
     let mut cwd = WORKSPACE_ROOT.to_owned();
     let mut widest: Option<PathClass> = None;
     let mut pipeline_paths: Vec<String> = Vec::new();
@@ -666,7 +755,11 @@ pub fn delete_targets_with(command: &str, has_content: FileHasContent<'_>) -> Op
         let rest: Vec<&str> = words.collect();
         let classify_all = |widest: &mut Option<PathClass>, targets: &[String]| {
             for t in targets {
-                note(widest, classify_path(&resolve_path(&cwd, t)));
+                let path = resolve_path(&cwd, t);
+                if (facts.created_here)(&path) {
+                    continue;
+                }
+                note(widest, classify_path(&path));
             }
         };
         match head {
@@ -854,7 +947,10 @@ pub fn delete_targets_with(command: &str, has_content: FileHasContent<'_>) -> Op
         if made_dirs.iter().any(|d| *d == parent_dir(&path)) {
             continue;
         }
-        if !has_content(&path) {
+        if (facts.created_here)(&path) {
+            continue;
+        }
+        if !(facts.has_content)(&path) {
             continue;
         }
         note(&mut widest, classify_path(&path));
@@ -881,12 +977,12 @@ pub fn rm_targets(command: &str) -> Option<(PathClass, bool)> {
 /// card carries the path class so a standing grant can cover it (#1544, #1712). The regex
 /// rules (force-push, DROP TABLE, cloud deletes, …) follow.
 pub fn classify_shell(command: &str) -> Option<RiskMatch> {
-    classify_shell_with(command, &|_| true)
+    classify_shell_with(command, PathFacts::assumed())
 }
 
-/// `classify_shell` with the box's view of which files exist with content (#1719).
-pub fn classify_shell_with(command: &str, has_content: FileHasContent<'_>) -> Option<RiskMatch> {
-    if let Some(class) = delete_targets_with(command, has_content) {
+/// `classify_shell` with the box's view of the paths it names (#1719, `PathFacts`).
+pub fn classify_shell_with(command: &str, facts: PathFacts<'_>) -> Option<RiskMatch> {
+    if let Some(class) = delete_targets_with(command, facts) {
         if class != PathClass::Scratch {
             return Some(RiskMatch {
                 class: FILE_DELETE,
@@ -933,16 +1029,12 @@ fn connector_subject(args: &Value) -> Option<String> {
 /// Flag a tool call (name + JSON args) that is on the risky list. Reads, searches, drafts and
 /// box-local edits return `None`.
 pub fn classify_tool(tool: &str, args: &Value) -> Option<RiskMatch> {
-    classify_tool_with(tool, args, &|_| true)
+    classify_tool_with(tool, args, PathFacts::assumed())
 }
 
-/// `classify_tool` with the box's view of which files exist with content (#1719): agentd,
-/// which runs on the box, passes a `stat`.
-pub fn classify_tool_with(
-    tool: &str,
-    args: &Value,
-    has_content: FileHasContent<'_>,
-) -> Option<RiskMatch> {
+/// `classify_tool` with the box's view of the paths it names (`PathFacts`): agentd, which runs
+/// on the box, passes a `stat` and the list of paths the calling job wrote itself.
+pub fn classify_tool_with(tool: &str, args: &Value, facts: PathFacts<'_>) -> Option<RiskMatch> {
     if NOT_RISKY_TOOLS.contains(&tool) {
         return None;
     }
@@ -952,7 +1044,7 @@ pub fn classify_tool_with(
             .or_else(|| args.get("cmd"))
             .and_then(Value::as_str)
             .unwrap_or("");
-        return classify_shell_with(cmd, has_content);
+        return classify_shell_with(cmd, facts);
     }
     let is_connector = tool == "connector_call";
     let connector_subject = if is_connector {
@@ -1308,22 +1400,111 @@ mod tests {
             "cp /dev/null /work/p/app.log",
         ] {
             assert_eq!(
-                classify_shell_with(cmd, &missing),
+                classify_shell_with(cmd, PathFacts::with_content(&missing)),
                 None,
                 "{cmd} on a missing file"
             );
         }
         let present = |p: &str| p == "/work/p/app.log";
         assert_eq!(
-            classify_shell_with(": > /work/p/app.log", &present).and_then(|h| h.path_class),
+            classify_shell_with(": > /work/p/app.log", PathFacts::with_content(&present))
+                .and_then(|h| h.path_class),
             Some(Workspace)
         );
-        assert_eq!(classify_shell_with(": > /work/p/other.log", &present), None);
+        assert_eq!(
+            classify_shell_with(": > /work/p/other.log", PathFacts::with_content(&present)),
+            None
+        );
         // The view never softens a real delete.
         assert_eq!(
-            classify_shell_with("rm -rf /work/p/build", &missing).and_then(|h| h.path_class),
+            classify_shell_with("rm -rf /work/p/build", PathFacts::with_content(&missing))
+                .and_then(|h| h.path_class),
             Some(Workspace)
         );
+    }
+
+    /// A job deleting a file it wrote itself raises no card, and the exemption reaches nothing
+    /// else: only the exact absolute paths the caller names as its own, never their parent,
+    /// their prefix, a glob over them, or a second target beside them.
+    #[test]
+    fn a_path_the_caller_created_is_exempt_and_nothing_near_it_is() {
+        let mine = |p: &str| matches!(p, "/work/p/out/report.md" | "/work/p/out/data.csv");
+        let facts = PathFacts {
+            has_content: &|_| true,
+            created_here: &mine,
+        };
+        let class = |cmd: &str| classify_shell_with(cmd, facts).and_then(|h| h.path_class);
+        // Its own files, named exactly: no card, one at a time or together, and for the
+        // truncation idioms too.
+        assert_eq!(class("rm -f /work/p/out/report.md"), None);
+        assert_eq!(
+            class("rm -f /work/p/out/report.md /work/p/out/data.csv"),
+            None
+        );
+        assert_eq!(class("cd /work/p/out && rm -f report.md"), None);
+        assert_eq!(class("mv /work/p/out/report.md /dev/null"), None);
+        // T8's first trigger: emptying its own output through a `>` redirect. The same idiom on
+        // a file it did not write still cards, which is what makes the exemption the reason.
+        assert_eq!(class(": > /work/p/out/report.md"), None);
+        assert_eq!(
+            class(": > /work/p/out/notes.md"),
+            Some(PathClass::Workspace)
+        );
+        assert_eq!(
+            classify_shell_with(": > /work/p/out/report.md", PathFacts::assumed())
+                .and_then(|h| h.path_class),
+            Some(PathClass::Workspace)
+        );
+        // Everything around them still cards: the parent folder, a sibling it did not write, a
+        // glob that would match its file, a directory walk, and a tree-wide git delete.
+        assert_eq!(class("rm -rf /work/p/out"), Some(PathClass::Workspace));
+        assert_eq!(
+            class("rm -f /work/p/out/report.md /work/p/out/notes.md"),
+            Some(PathClass::Workspace)
+        );
+        assert_eq!(
+            class("rm -f /work/p/out/*.md"),
+            Some(PathClass::Workspace),
+            "a glob is not an exact path"
+        );
+        assert_eq!(
+            class("find /work/p/out -name 'report.md' -delete"),
+            Some(PathClass::Workspace)
+        );
+        assert_eq!(class("git clean -fdx"), Some(PathClass::Workspace));
+        assert_eq!(
+            class("rm -rf /etc/report.md"),
+            Some(PathClass::Anywhere),
+            "same file name outside what it wrote"
+        );
+        // No list of its own writes: the same commands card, as they did before.
+        let none = PathFacts::assumed();
+        assert_eq!(
+            classify_shell_with("rm -f /work/p/out/report.md", none).and_then(|h| h.path_class),
+            Some(PathClass::Workspace)
+        );
+    }
+
+    /// The files a command writes by redirect, which a caller records as the run's own outputs:
+    /// every redirect form, a leading `cd` honoured, and nothing that names no file.
+    #[test]
+    fn redirect_targets_are_the_files_a_command_writes() {
+        let t = |cmd: &str| redirect_targets("/work/p", cmd);
+        assert_eq!(
+            t("curl -sS https://x/y > out/taxi_app_curl.txt"),
+            ["/work/p/out/taxi_app_curl.txt"]
+        );
+        assert_eq!(t("python app.py >>logs/app.log"), ["/work/p/logs/app.log"]);
+        assert_eq!(t("make 2> build.err"), ["/work/p/build.err"]);
+        assert_eq!(t("make &> build.log"), ["/work/p/build.log"]);
+        assert_eq!(t("cd out && zip -r - . > app.zip"), ["/work/p/out/app.zip"]);
+        assert_eq!(
+            t("python app.py > out/a.txt 2> out/b.txt"),
+            ["/work/p/out/a.txt", "/work/p/out/b.txt"]
+        );
+        assert_eq!(t("ls | tee out/list.txt"), [] as [&str; 0]);
+        assert_eq!(t("make > /dev/null 2>&1"), [] as [&str; 0]);
+        assert_eq!(t("echo '3 > 2' && grep -r 'a>b' src/"), [] as [&str; 0]);
     }
 
     /// A standing grant covers its class and every narrower one, for its chat or all chats.
