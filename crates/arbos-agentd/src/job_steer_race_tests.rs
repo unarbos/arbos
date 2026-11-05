@@ -613,6 +613,84 @@ async fn a_steer_for_a_job_that_finished_long_ago_is_still_refused() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// **The hold does not stack with the send order (bug AA's lane).** Asked of the real code,
+/// because this is the one way a hold on delivery could cost minutes rather than seconds.
+///
+/// Nothing is held inside a send-order place: a worker's delivery never joins the chat's queue,
+/// so while a file waits the queue is empty, and the next message is its own turn at once rather
+/// than 20 s behind this file. And the lanes AA moved — the receipt `start_job` posts for a
+/// forced ask, and the result row `write_job_result` writes directly — are main-lane writes, so
+/// the gate is not on their path at all; the main-turn delivery here stands for them, and goes
+/// out while a correction of the same chat is still being routed.
+///
+/// Both assertions discriminate. A hold taken while a ticket is held leaves `waiting` at one and
+/// puts the later message behind it; a hold that forgot to exempt the main turn makes the second
+/// delivery wait out the cap.
+#[tokio::test]
+async fn a_held_delivery_takes_no_place_in_the_chats_send_order() {
+    let (agent, root) = test_agent().await;
+    let host = agent.sync.open_room(CHAT8).await.unwrap();
+    hold_for(&agent, HOLD_MS);
+    a_job_in(&agent, &host, CHAT8, JOB8, WORKER8, ASK8, ROW8).await;
+
+    let correction = ulid();
+    let routing = agent.steer_gate.routing(CHAT8, &correction);
+    let held = a_file(&agent, "coupling.csv", "rank,name\n1,a\n");
+    let delivery = {
+        let agent = agent.clone();
+        tokio::spawn(async move { worker_delivers_as(&agent, WORKER8, &held).await })
+    };
+    tokio::time::sleep(Duration::from_millis(HOLD_MS / 4)).await;
+    assert!(!delivery.is_finished(), "the file is not being held");
+
+    // The file is waiting, and the chat's queue knows nothing about it.
+    assert_eq!(
+        agent.send_order.waiting(CHAT8),
+        0,
+        "a held delivery is holding a place in the send order, so every later message now waits \
+         behind it as well as behind its own turn"
+    );
+
+    // So the next message is answerable the moment it arrives: the hold adds nothing to the two
+    // minutes of `SEND_ORDER_WAIT` it could have been added to.
+    let later = ulid();
+    let _ticket = agent
+        .send_order
+        .join(CHAT8, &later)
+        .expect("a fresh message takes a place");
+    assert!(
+        agent.send_order.is_turn(CHAT8, &later),
+        "the later message is queued behind the held file"
+    );
+    tokio::time::timeout(
+        Duration::from_millis(HOLD_MS / 4),
+        agent.await_send_order(CHAT8, &later, "test"),
+    )
+    .await
+    .expect("waiting for this message's turn outlasted the file it should not be waiting for");
+
+    // And the main lane posts into the same chat while the correction is still unrouted, which is
+    // what AA's receipt and result rows do. The turn carries the job, so this is the main lane
+    // relaying that job's answer — the one main-lane delivery the gate could have caught.
+    let _busy = agent.test_hold_turn_for(CHAT8, &later).await;
+    agent.turn.lock().await.as_mut().unwrap().job_id = Some(JOB8.to_owned());
+    let main = a_file(&agent, "receipt.csv", "rank,name\n1,b\n");
+    let posted = tokio::time::timeout(
+        Duration::from_millis(HOLD_MS / 2),
+        crate::media::deliver_file(&agent, &json!({ "path": main })),
+    )
+    .await
+    .expect("the main lane's own post was held by the gate")
+    .clone();
+    assert!(posted.get("isError").is_none(), "{posted}");
+
+    drop(routing);
+    let _ = tokio::time::timeout(Duration::from_millis(HOLD_MS * 10), delivery)
+        .await
+        .expect("the worker's file never arrived");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// Same shape as [`a_running_job`], for the tests that need their own chat.
 #[allow(clippy::too_many_arguments)]
 async fn a_job_in(
@@ -694,6 +772,12 @@ const JOB5: &str = "01TESTJOBSTEERRACE00000005";
 const WORKER5: &str = "01TESTWORKERSTEERRACE00005";
 const ASK5: &str = "01TESTASKJOBSTEERRACE00005";
 const ROW5: &str = "01TESTROWJOBSTEERWORKER005";
+
+const CHAT8: &str = "01TESTCHATJOBSTEERRACE0008";
+const JOB8: &str = "01TESTJOBSTEERRACE00000008";
+const WORKER8: &str = "01TESTWORKERSTEERRACE00008";
+const ASK8: &str = "01TESTASKJOBSTEERRACE00008";
+const ROW8: &str = "01TESTROWJOBSTEERWORKER008";
 
 const CHAT7: &str = "01TESTCHATJOBSTEERRACE0007";
 const JOB7: &str = "01TESTJOBSTEERRACE00000007";

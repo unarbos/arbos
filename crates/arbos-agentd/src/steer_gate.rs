@@ -30,10 +30,15 @@
 //! whose queue signal never comes posts on its next attempt. The failure mode of this whole
 //! module is the old behaviour, never silence.
 //!
-//! **No coupling with the send-order gate (`send_order.rs`).** The surfaces held here —
-//! `media::deliver` and `chart::post` from a *worker* — take no send-order ticket and wait on no
-//! `wait_turn`, so this hold cannot stack onto [`crate::send_order::SEND_ORDER_WAIT`]. A job's
-//! prose result, which does wait there, is not held here at all.
+//! **No coupling with the send-order gate (`send_order.rs`), re-checked against bug AA's fix
+//! (#2791).** The surfaces held here — `media::deliver` and `chart::post` from a *worker* — take
+//! no send-order ticket and wait on no `wait_turn`, so this hold cannot stack onto
+//! [`crate::send_order::SEND_ORDER_WAIT`]: a held file holds no place, so it delays no later
+//! message, and it waits behind no place, so no message delays it. The two lanes AA moved are on
+//! the other side of that line. The receipt `start_job` posts for a forced ask and the result row
+//! `write_job_result` writes directly are both main-lane writes, and the main turn is exempt from
+//! the hold because it is the lane that does the routing. `job_steer_race_tests` asks the code
+//! rather than trusting the reading.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
