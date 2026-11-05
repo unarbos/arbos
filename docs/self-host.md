@@ -139,6 +139,17 @@ While no production snapshot is registered, point the relay at the dev image ins
 
 ## 8. Updates
 
+**Connector owners (one-time, relays that had connectors before 2026-11).** Connectors used to
+belong to the whole relay, so the first upgrade past this adds an owner to every connector and
+its tokens. A relay with one user has one possible owner, so its connectors are attributed to
+that user and keep working. On a relay with two or more users nothing in the old rows says whose
+account each one is, so the migration leaves them unattributed instead of guessing, and an
+unattributed connector is listed to nobody and refuses every call: the user reconnects in
+Settings → Connectors, or an admin names the owner. `GET /admin/connectors/unowned` lists them
+and `PUT /admin/connectors/{id}/owner` with `{"userId": "…"}` assigns one (an already-owned
+connector is never moved). Beeper polling through Harness Comms needs exactly one owned
+`harness_comms` connector; with none or with two it stops and logs why.
+
 Self-built relays update by rebuilding. The Mac app updates itself from the appcast of the channel it was built on (`ARBOS_UPDATE_CHANNEL=stable|edge`, `ARBOS_UPDATE_FEED=<url>` to point at your own feed, `ARBOS_UPDATE_DISABLE=1` to turn it off). `scripts/bundle-mac.sh` builds a universal `dist/Arbos.app`, the DMG and the updater tarball, signing and notarizing when the credentials are present and saying what it skipped otherwise.
 
 ## 9. Calls (LiveKit)

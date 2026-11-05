@@ -19,6 +19,7 @@ mod boxes;
 mod browser;
 mod calls;
 mod channels;
+mod connector_owner_tests;
 mod connectors;
 mod credits;
 mod daytona;
@@ -1027,6 +1028,11 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/connectors/{provider}/connect", post(connectors::connect))
         .route("/connectors/{id}", delete(connectors::disconnect))
+        .route("/admin/connectors/unowned", get(connectors::admin_unowned))
+        .route(
+            "/admin/connectors/{id}/owner",
+            put(connectors::admin_set_owner),
+        )
         .route("/channels", get(channels::overview))
         .route("/channels/pair/new", post(channels::pair_new))
         .route("/channels/bindings", get(channels::list_bindings))
