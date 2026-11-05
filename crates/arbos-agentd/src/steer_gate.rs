@@ -59,6 +59,25 @@
 //! the hold because it is the lane that does the routing. `job_steer_race_tests` asks the code
 //! rather than trusting the reading.
 //!
+//! **What the main-turn exemption does and does not cover.** It is about the *routing mark* only:
+//! a main turn cannot wait for its own routing to finish, so [`SteerGate::hold`] must not hold a
+//! main-lane write behind a mark that write is itself responsible for releasing. It says nothing
+//! about whether the user has corrected the ask. Those are two different questions that happen to
+//! live in one function — "is this chat mid-routing", which a main turn must skip, and "is there a
+//! correction this answer predates", which every surface must ask however it is written. Reading
+//! the exemption as covering both is what left the two text paths with no correction check at
+//! all: `write_job_result` and `run_result_turn` asked only about cancellation on both sides of
+//! their `await_send_order`, and the answer composed before a correction went out unchanged.
+//!
+//! **The text answers ask through the job row, not through these counts.** By the time either of
+//! them runs, `run_subagent` has set the job row to its final state and called
+//! [`SteerGate::forget_job`] — the worker is gone, so there is nothing left for the counts to
+//! gate. What they compare instead is `JobRow::steers` before and after their wait: a count, not
+//! an emptiness test, because `steers` also holds the corrections the worker already applied.
+//! [`SteerGate::answering`] is the one fact this module keeps for them, and it is read by the
+//! *inbound* side, to tell a finished job whose answer is still withdrawable from one whose answer
+//! the user is already reading.
+//!
 //! **A cancel inside the hold (bug Z's lane, #2790).** Nothing here outlives the job it holds for
 //! and nothing here needs the job to exist. [`RouteMark`]'s `Drop` is owned by `handle_command`
 //! and keyed by chat and message, so a job dying under a held delivery cannot strand a mark;
@@ -147,6 +166,12 @@ struct Mark {
 struct State {
     marks: Vec<Mark>,
     jobs: HashMap<String, JobSteers>,
+    /// Writers of a job's answer row that have not written it yet, per job id.
+    ///
+    /// Its own map rather than a field of [`JobSteers`] because [`SteerGate::forget_job`] clears
+    /// that one, and it is cleared *before* either text path runs — so a count living there
+    /// would be wiped by the very ordering this exists to describe.
+    answering: HashMap<String, u32>,
 }
 
 /// The per-chat routing marks and per-job correction counts. One per box; `Agent` holds it.
@@ -201,6 +226,31 @@ impl SteerGate {
     /// a row per job it has ever run.
     pub(crate) fn forget_job(&self, job_id: &str) {
         self.lock().jobs.remove(job_id);
+    }
+
+    /// Say that an answer for `job_id` is written but not yet in the chat, until the guard drops.
+    ///
+    /// Taken by the two text paths — `write_job_result` and `run_result_turn` — around the wait
+    /// each of them spends in the chat's send order, which is up to
+    /// [`crate::send_order::SEND_ORDER_WAIT`]. Both run after `run_subagent` has set the job row
+    /// to `done` and called [`Self::forget_job`], so to the steer path the job looks closed while
+    /// the thing the user is about to correct has not been written yet. This is the fact that
+    /// tells the two apart, and without it `steer_job_in` refuses the correction as "is done".
+    ///
+    /// Released before the row is written, never after: once the answer is in the chat the
+    /// correction is `replace_just_posted_job`'s case, and accepting it here as well would answer
+    /// one ask twice.
+    pub(crate) fn answering(self: &Arc<Self>, job_id: &str) -> AnswerMark {
+        *self.lock().answering.entry(job_id.to_owned()).or_default() += 1;
+        AnswerMark {
+            gate: self.clone(),
+            job_id: job_id.to_owned(),
+        }
+    }
+
+    /// Is an answer for `job_id` composed but not yet in the chat?
+    pub(crate) fn answer_pending(&self, job_id: &str) -> bool {
+        self.lock().answering.contains_key(job_id)
     }
 
     /// Is a correction of `job_id` sitting unread right now? Asked without waiting.
@@ -338,6 +388,30 @@ impl Drop for RouteMark {
     }
 }
 
+/// One job's answer, from the moment it is composed until its row exists or is abandoned.
+///
+/// Dropping it on any path — the answer posted, the answer withheld, an error, a panic unwinding
+/// the task — ends the window, so a writer that failed cannot leave a finished job looking
+/// correctable for the rest of the box's life.
+pub(crate) struct AnswerMark {
+    gate: Arc<SteerGate>,
+    job_id: String,
+}
+
+impl Drop for AnswerMark {
+    fn drop(&mut self) {
+        let mut s = self.gate.lock();
+        if let Some(n) = s.answering.get_mut(&self.job_id) {
+            // Saturating because this runs while a panic may already be unwinding, and an
+            // arithmetic panic in a `Drop` on that path aborts the process.
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                s.answering.remove(&self.job_id);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -372,6 +446,47 @@ mod tests {
             Hold::Clear
         );
         assert!(t0.elapsed() < Duration::from_millis(500), "it waited");
+    }
+
+    /// **A pending answer survives `forget_job`, and that is the whole point of it.**
+    ///
+    /// `run_subagent` forgets a job the moment its worker is done, which is *before* either text
+    /// path writes that job's answer. So a pending-answer flag kept beside the steer counts would
+    /// be wiped by the very ordering it exists to describe, and `steer_job_in` would go back to
+    /// refusing the correction as "is done". Easy to undo by moving one field; this is the test
+    /// that notices.
+    #[tokio::test]
+    async fn a_pending_answer_outlives_the_job_being_forgotten() {
+        let gate = Arc::new(SteerGate::default());
+        assert!(!gate.answer_pending(JOB), "nothing is answering yet");
+
+        let answering = gate.answering(JOB);
+        gate.steer_delivered(JOB);
+        gate.forget_job(JOB);
+        assert!(
+            gate.answer_pending(JOB),
+            "the answer still in the chat's send order was forgotten with its worker, so the \
+             correction for it will be refused as 'is done'"
+        );
+
+        drop(answering);
+        assert!(
+            !gate.answer_pending(JOB),
+            "the mark outlived the writer that took it, so this job stays correctable for ever"
+        );
+    }
+
+    /// Two writers for one job release it once, not twice: the count comes back to zero only when
+    /// the last of them is done.
+    #[tokio::test]
+    async fn the_last_answer_writer_is_the_one_that_clears_it() {
+        let gate = Arc::new(SteerGate::default());
+        let first = gate.answering(JOB);
+        let second = gate.answering(JOB);
+        drop(first);
+        assert!(gate.answer_pending(JOB), "one writer is still holding it");
+        drop(second);
+        assert!(!gate.answer_pending(JOB));
     }
 
     /// The mark expires at the cap, whether or not anything releases it, and the wait is bounded

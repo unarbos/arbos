@@ -32,6 +32,7 @@ use arbos_core::ids::{now_ms, ulid};
 use serde_json::{json, Value};
 
 use crate::agent::Agent;
+use crate::send_order::SEND_ORDER_WAIT;
 use crate::status::tests::test_agent;
 use crate::steer_gate::Hold;
 use crate::sync::SharedHost;
@@ -1008,6 +1009,282 @@ async fn a_correction_after_a_running_jobs_file_supersedes_that_card() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// **The text-answer cousin of bug AB, on the 120-second path.** `write_job_result` is how a job
+/// the user asked for in words answers that ask (bug AA moved it off the relay turn). It asks
+/// whether the job was **cancelled** on both sides of its `await_send_order` — "this is the last
+/// moment the question can be asked before the row exists" — and never once asks whether the user
+/// **corrected** it. That wait is up to `SEND_ORDER_WAIT`, two minutes, which makes this the
+/// widest window of the whole family: the gate on `media::deliver` covered seconds.
+///
+/// [`a_steer_for_a_job_that_just_posted_replaces_the_file_instead_of_failing`] is the file half of
+/// the same moment. This is the half with nothing in the chat yet, and it needs both things the
+/// file half needed:
+///
+/// 1. **The correction has to be taken at all.** By the time the answer is in the wait, the
+///    worker has finished, so `run_subagent` has already set the job row to `done` and called
+///    `steer_gate::forget_job`. `steer_job_in` then refuses every non-running job unless
+///    `replace_just_posted_job` claims it, and that asks `job_last_file` for a card to supersede.
+///    A text answer has no card, so the correction was refused outright — "steer a running job,
+///    or start a new one" — and nothing recorded it. That is why a far-side re-check **alone**
+///    would be a no-op here: there is no correction on the row for it to find.
+/// 2. **The stale answer must not post.** With the correction taken, the answer that was composed
+///    before it is the squared one the user has already asked to be cubed.
+///
+/// Both are asserted, and in that order: the row first, because the row is what the user sees.
+#[tokio::test]
+async fn a_correction_inside_the_answers_send_order_wait_is_not_answered_with_the_stale_text() {
+    let (agent, root) = test_agent().await;
+    let host = agent.sync.open_room(CHAT13).await.unwrap();
+    a_finished_job_in(&agent, &host, CHAT13, JOB13, WORKER13, ASK13, ROW13).await;
+
+    // An older message holds the head of this chat's queue, so the answer parks in
+    // `await_send_order` exactly as it does in production rather than walking straight through.
+    let older = ulid();
+    let holding = agent
+        .send_order
+        .join(CHAT13, &older)
+        .expect("the older message");
+    assert!(
+        agent
+            .send_order
+            .wait_turn(CHAT13, &older, SEND_ORDER_WAIT)
+            .await
+    );
+    let ticket = agent.send_order.join(CHAT13, ASK13).expect("the job's ask");
+    assert_eq!(agent.send_order.ahead(CHAT13, ASK13), 1);
+
+    // The answer the worker produced before the user corrected it. The place travels with it and
+    // is released when it is posted or withheld, as `start_job_for_send` leaves it.
+    let answering = {
+        let agent = agent.clone();
+        let host = host.clone();
+        tokio::spawn(async move {
+            let r = agent
+                .write_job_result(
+                    CHAT13,
+                    &host,
+                    ASK13,
+                    "ask-rate-table",
+                    "done",
+                    "Squared: 1, 4, 9, 16.",
+                    None,
+                )
+                .await;
+            drop(ticket);
+            r
+        })
+    };
+    // **The answer is parked in the wait, not still in its model call.** This is the ordering the
+    // test turns on, and "nothing is in the chat yet" cannot establish it — a writer that has not
+    // reached the wait has also written no row. `wait_turn` polls, so a rising ask count under a
+    // head it cannot have is the writer asking for its turn.
+    let asked = agent.send_order.turn_asks(CHAT13);
+    assert!(
+        wait_until(Duration::from_secs(10), || agent
+            .send_order
+            .turn_asks(CHAT13)
+            > asked + 1)
+        .await,
+        "the answer never reached its wait, so a correction landing now would be testing the \
+         window before the gate rather than the one after it"
+    );
+    assert_eq!(
+        job_answers_to(&host, ASK13).await,
+        Vec::<String>::new(),
+        "the answer was posted before the correction, so this test proves nothing"
+    );
+
+    // "cube them, not square" — inside the wait, which is the window nothing looked at.
+    let steered = agent
+        .test_steer_job_from(CHAT13, JOB13, "cube them, not square")
+        .await;
+
+    drop(holding);
+    answering
+        .await
+        .expect("the answer task")
+        .expect("a withheld answer is not a failure");
+
+    assert_eq!(
+        job_answers_to(&host, ASK13).await,
+        Vec::<String>::new(),
+        "the squared answer went into the chat after the user had asked for cubes"
+    );
+    let steered =
+        steered.expect("a correction for an answer still in the queue is taken, not refused");
+    assert_eq!(
+        steered["state"], "replacing",
+        "the correction came back as a failure: {steered}"
+    );
+    assert_eq!(
+        steered.get("superseded_message_id"),
+        None,
+        "nothing was in the chat to supersede, so nothing may be reported as replaced: {steered}"
+    );
+
+    // And the job is open again carrying the correction, so the worker it goes back to runs the
+    // corrected ask rather than the brief as first written (the bug V rule). `queued` or
+    // `running` both say reopened — which of the two depends on whether the fresh worker has
+    // been picked up yet, which is not what this test is about.
+    let row = agent.store.job(JOB13).unwrap().unwrap();
+    assert!(row.is_open(), "the job did not reopen: {}", row.state);
+    assert!(
+        row.steers.iter().any(|s| s.contains("cube them")),
+        "the correction is not on the job row: {:?}",
+        row.steers
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The same window on the other text path. A job the **model** started answers through
+/// `run_result_turn`, a relay turn, and that one has its own `await_send_order` with its own
+/// cancel check on both sides and no correction check either.
+///
+/// A relay turn needs a live main agent to write the prose, which a test box has not got, so what
+/// is asserted is the **row** — the thing the user would have seen either way, and the same
+/// assertion [`crate::job_cancel_tests`] uses for this path's cancel window.
+#[tokio::test]
+async fn a_correction_inside_a_relay_result_turns_wait_delivers_nothing_stale() {
+    let (agent, root) = test_agent().await;
+    let host = agent.sync.open_room(CHAT14).await.unwrap();
+    a_finished_job_in(&agent, &host, CHAT14, JOB14, WORKER14, ASK14, ROW14).await;
+    let spec = crate::agent::JobSpec {
+        id: JOB14.to_owned(),
+        title: "Building a table".to_owned(),
+        kind: "other".to_owned(),
+        brief: "Write a CSV.".to_owned(),
+        touches: Vec::new(),
+        attempt: 0,
+    };
+
+    let older = ulid();
+    let holding = agent
+        .send_order
+        .join(CHAT14, &older)
+        .expect("the older message");
+    assert!(
+        agent
+            .send_order
+            .wait_turn(CHAT14, &older, SEND_ORDER_WAIT)
+            .await
+    );
+    let ticket = agent.send_order.join(CHAT14, ASK14).expect("the job's ask");
+
+    let before = visible_assistant_rows(&host);
+    let relaying = {
+        let agent = agent.clone();
+        let host = host.clone();
+        tokio::spawn(async move {
+            let r = agent
+                .run_result_turn(
+                    CHAT14,
+                    &host,
+                    ASK14,
+                    &crate::agent::ResultDelivery {
+                        subagent_id: WORKER14,
+                        name: "job-a-table",
+                        status: "done",
+                        total_ms: 1_000,
+                        raw: "Squared: 1, 4, 9, 16.",
+                        result: "Squared: 1, 4, 9, 16.",
+                        error: None,
+                        job: Some(&spec),
+                    },
+                )
+                .await;
+            drop(ticket);
+            r
+        })
+    };
+    // Parked in the wait rather than still building its prompt, for the same reason and read the
+    // same way as in the test above.
+    let asked = agent.send_order.turn_asks(CHAT14);
+    assert!(
+        wait_until(Duration::from_secs(10), || agent
+            .send_order
+            .turn_asks(CHAT14)
+            > asked + 1)
+        .await,
+        "the result turn never reached its wait, so this measures the window before the gate"
+    );
+    assert_eq!(
+        visible_assistant_rows(&host),
+        before,
+        "the result turn delivered before the correction, so this test proves nothing"
+    );
+
+    let steered = agent
+        .test_steer_job_from(CHAT14, JOB14, "cube them, not square")
+        .await;
+
+    drop(holding);
+    let _ = relaying.await.expect("the relay task");
+
+    assert_eq!(
+        visible_assistant_rows(&host),
+        before,
+        "the stale result turn ran and left a row in the chat after the user's correction"
+    );
+    steered.expect("a correction for a result turn still in the queue is taken, not refused");
+    let row = agent.store.job(JOB14).unwrap().unwrap();
+    assert!(row.is_open(), "the job did not reopen: {}", row.state);
+    assert!(
+        row.steers.iter().any(|s| s.contains("cube them")),
+        "the correction is not on the job row: {:?}",
+        row.steers
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// [`a_job_in`], then finished the way `run_subagent` finishes one: the row goes to `done` and
+/// the steer gate forgets the job, because its worker is gone.
+///
+/// That ordering is the whole reason the two text paths are exposed — both of them run *after*
+/// this point, so neither can read the gate and both see a job the steer path calls closed.
+#[allow(clippy::too_many_arguments)]
+async fn a_finished_job_in(
+    agent: &Arc<Agent>,
+    host: &SharedHost,
+    chat: &str,
+    job: &str,
+    worker: &str,
+    ask: &str,
+    row: &str,
+) {
+    a_job_in(agent, host, chat, job, worker, ask, row).await;
+    agent.store.set_job_state(job, "done", None).unwrap();
+    agent.steer_gate.forget_job(job);
+}
+
+/// The answer bubbles a job wrote in reply to `msg_id`: `decision: "job"` is what
+/// `write_job_result` stamps on the one row it posts. The worker's own hidden progress row
+/// replies to the same message and is not one.
+async fn job_answers_to(host: &SharedHost, msg_id: &str) -> Vec<String> {
+    let h = host.lock().await;
+    h.doc
+        .messages()
+        .into_iter()
+        .filter(|m| {
+            m.rest.get("inReplyTo").and_then(Value::as_str) == Some(msg_id)
+                && m.rest.get("decision").and_then(Value::as_str) == Some("job")
+        })
+        .map(|m| m.id)
+        .collect()
+}
+
+/// Every assistant row the user can see, which is what a relay turn leaves behind when it runs.
+fn visible_assistant_rows(host: &SharedHost) -> Vec<String> {
+    let h = host.try_lock().expect("host free");
+    h.doc
+        .messages()
+        .into_iter()
+        .filter(|m| {
+            m.role == "assistant" && m.rest.get("hidden").and_then(Value::as_bool) != Some(true)
+        })
+        .map(|m| m.id)
+        .collect()
+}
+
 /// Same shape as [`a_running_job`], for the tests that need their own chat.
 #[allow(clippy::too_many_arguments)]
 async fn a_job_in(
@@ -1125,6 +1402,18 @@ const JOB12: &str = "01TESTJOBSTEERRACE00000012";
 const WORKER12: &str = "01TESTWORKERSTEERRACE00012";
 const ASK12: &str = "01TESTASKJOBSTEERRACE00012";
 const ROW12: &str = "01TESTROWJOBSTEERWORKER012";
+
+const CHAT13: &str = "01TESTCHATJOBSTEERRACE0013";
+const JOB13: &str = "01TESTJOBSTEERRACE00000013";
+const WORKER13: &str = "01TESTWORKERSTEERRACE00013";
+const ASK13: &str = "01TESTASKJOBSTEERRACE00013";
+const ROW13: &str = "01TESTROWJOBSTEERWORKER013";
+
+const CHAT14: &str = "01TESTCHATJOBSTEERRACE0014";
+const JOB14: &str = "01TESTJOBSTEERRACE00000014";
+const WORKER14: &str = "01TESTWORKERSTEERRACE00014";
+const ASK14: &str = "01TESTASKJOBSTEERRACE00014";
+const ROW14: &str = "01TESTROWJOBSTEERWORKER014";
 
 const CHAT6: &str = "01TESTCHATJOBSTEERRACE0006";
 const JOB6: &str = "01TESTJOBSTEERRACE00000006";
