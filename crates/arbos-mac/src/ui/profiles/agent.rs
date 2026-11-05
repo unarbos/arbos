@@ -1435,3 +1435,160 @@ mod run_by_tests {
         assert!(w > 60.0 && w <= 340.0 - 64.0, "hugging its text: {w}");
     }
 }
+
+/// A newly created agent has no chat and no message yet. Its picture must still be settable from
+/// its pane — the owner should never have to talk to an agent first to give it a face.
+#[cfg(test)]
+mod before_any_conversation_tests {
+    use futures::future::BoxFuture;
+    use gpui::{
+        point, prelude::*, Bounds, Entity, Modifiers, Pixels, TestAppContext, VisualTestContext,
+    };
+    use tokio::sync::mpsc;
+
+    use crate::app::{AppState, ProfilePage};
+    use crate::model::Project;
+    use crate::sync::{ClientCommand, SyncEvent, SyncSource};
+    use crate::ui::avatar_picker::Tab;
+    use crate::ui::motion::PulseClock;
+    use crate::ui::shell::Shell;
+    use crate::ui::theme::Theme;
+
+    const AGENT: &str = "p-just-created";
+
+    struct Idle;
+
+    impl SyncSource for Idle {
+        fn name(&self) -> &'static str {
+            "idle"
+        }
+
+        fn run(
+            self: Box<Self>,
+            _events: mpsc::UnboundedSender<SyncEvent>,
+            _commands: mpsc::UnboundedReceiver<ClientCommand>,
+        ) -> BoxFuture<'static, anyhow::Result<()>> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    /// My own agent, straight out of the Create sheet: no picture, no chat, no message.
+    fn just_created() -> Project {
+        Project {
+            id: AGENT.into(),
+            name: "Pepper".into(),
+            shared: false,
+            ..Default::default()
+        }
+    }
+
+    fn centre(b: Bounds<Pixels>) -> gpui::Point<Pixels> {
+        point(b.left() + b.size.width / 2.0, b.top() + b.size.height / 2.0)
+    }
+
+    fn settle(shell: &Entity<Shell>, vcx: &mut VisualTestContext) {
+        for _ in 0..3 {
+            shell.update(vcx, |_, cx| cx.notify());
+            vcx.run_until_parked();
+        }
+    }
+
+    /// Headless: the pane of an agent with no conversation draws the editable hero, the hero
+    /// opens the avatar picker, and its "Set avatar" goes live as soon as a picture is picked.
+    #[gpui::test]
+    fn the_picture_can_be_set_with_no_chat_and_no_message(cx: &mut TestAppContext) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio");
+        let handle = rt.handle().clone();
+        cx.update(|cx| {
+            gpui_tokio::init_from_handle(cx, handle);
+            cx.set_global(Theme::dark(crate::ui::theme::Surface::Matte));
+            if !cx.has_global::<PulseClock>() {
+                PulseClock::init(cx);
+            }
+        });
+        let state = cx.new(|cx| AppState::new(Box::new(Idle), cx));
+        state.update(cx, |s, cx| {
+            s.apply(SyncEvent::Projects(vec![just_created()]), cx);
+            s.open_profile(
+                ProfilePage::Agent {
+                    project_id: AGENT.into(),
+                },
+                cx,
+            );
+        });
+        let (shell, vcx) = cx.add_window_view(|window, cx| Shell::new(state.clone(), window, cx));
+        vcx.run_until_parked();
+        settle(&shell, vcx);
+
+        // The precondition the tester's report turns on: nothing has been said to this agent.
+        state.read_with(vcx, |s, _| {
+            assert!(s.tabs(AGENT).is_empty(), "no chat yet");
+            assert!(s.primary_chat(AGENT).is_none(), "and so no chat to open");
+        });
+
+        let hero = vcx
+            .debug_bounds("profile-avatar")
+            .expect("the hero picture is drawn for an agent with no conversation");
+        assert!(
+            vcx.debug_bounds("avatar-card").is_none(),
+            "the picker is closed to begin with"
+        );
+        vcx.simulate_click(centre(hero), Modifiers::default());
+        settle(&shell, vcx);
+        assert!(
+            vcx.debug_bounds("avatar-card").is_some(),
+            "the hero opens the avatar picker"
+        );
+
+        // The Upload tab, then its pick as the file panel hands it over.
+        let upload_tab = vcx
+            .debug_bounds("avatar-tab-upload")
+            .expect("the Upload tab is offered");
+        vcx.simulate_click(centre(upload_tab), Modifiers::default());
+        settle(&shell, vcx);
+        shell.read_with(vcx, |this, _| {
+            let pk = this.avatar_picker.as_ref().expect("picker open");
+            assert_eq!(pk.tab, Tab::Upload, "the Upload tab took the click");
+            assert!(!pk.dirty(), "nothing picked yet, so Set is inert");
+        });
+        shell.update(vcx, |this, cx| {
+            let pk = this.avatar_picker.as_mut().expect("picker open");
+            pk.upload = Some(std::path::PathBuf::from("/tmp/pepper.png"));
+            pk.reset = false;
+            cx.notify();
+        });
+        settle(&shell, vcx);
+
+        assert!(
+            vcx.debug_bounds("avatar-upload-preview").is_some()
+                || vcx.debug_bounds("avatar-set").is_some(),
+            "the picked file previews in the sheet"
+        );
+        shell.read_with(vcx, |this, _| {
+            let pk = this.avatar_picker.as_ref().expect("picker open");
+            assert!(pk.dirty(), "Set avatar is live for an agent with no chat");
+            assert_eq!(pk.target.id().map(String::as_str), Some(AGENT));
+            assert!(matches!(
+                pk.draft_picture(),
+                Some(crate::sync::DraftPicture::File(_))
+            ));
+        });
+
+        // The press itself: the sheet closes, which is what sends the picture (`set_avatar`).
+        let set = vcx.debug_bounds("avatar-set").expect("Set avatar");
+        vcx.simulate_click(centre(set), Modifiers::default());
+        settle(&shell, vcx);
+        shell.read_with(vcx, |this, _| {
+            assert!(this.avatar_picker.is_none(), "the press applied and closed");
+        });
+        state.read_with(vcx, |s, _| {
+            assert!(
+                s.tabs(AGENT).is_empty(),
+                "and it still took no conversation"
+            );
+        });
+    }
+}
