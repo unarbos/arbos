@@ -386,6 +386,150 @@ else
   bad "range_gate has no NOTASKED arm that continues, so a gate that cannot be asked refuses the merge again — the defect this change removes"
 fi
 
+# 14. stack_class — every chain shape stack_chain can emit, and the class it has
+#     to take. UNKNOWN is a real row here for the same reason it is in case 1.
+echo "stack_class — every chain shape stack_chain can emit:"
+while IFS='|' read -r want pr line; do
+  [ -n "$want" ] || continue
+  got=$(stack_class "$line" "$pr")
+  if [ "$got" = "$want" ]; then ok "$want"
+  else bad "expected $want, got $got, for pr=$pr chain: $line"; fi
+done <<'CASES'
+SELF|2739|2739 
+ROOT|2733|2733 2731 
+ROOT|2606|2606 2602 2597 2554 
+UNRESOLVED|2678|2678 UNRESOLVED:cursor/agentd-live-instructions-and-tree-mode-6461
+CYCLE|2001|2001 2002 CYCLE
+DEPTH|2001|2001 2002 DEPTH
+BLOCKED|2733|BLOCKED reading the base of #2733: HTTP 403
+UNKNOWN|2733|
+CASES
+
+# 15. Which stack classes refuse on their own. The pass set is the small one,
+#     and it is the one to state: only a pull request based on main, or one
+#     whose whole chain was walked, has a reading that covers what reaches main.
+echo "stack_refuses — only a walked chain or a main base may pass:"
+for c in SELF ROOT UNRESOLVED CYCLE DEPTH UNKNOWN; do
+  if stack_refuses "$c"; then got=refuses; else got=passes; fi
+  case "$c" in SELF | ROOT) want=passes ;; *) want=refuses ;; esac
+  if [ "$got" = "$want" ]; then ok "$c $got"
+  else bad "$c $got, expected $want"; fi
+done
+# BLOCKED is deliberately outside that set: it must not be a plain refusal,
+# because its caller reports it as BLOCKED and sends the reader to the failed
+# read. If it ever joins the refusing set, an unreadable base starts looking
+# like a stack problem.
+if stack_refuses BLOCKED; then
+  bad "BLOCKED refuses via stack_refuses, so an unreadable base would be reported as a stack verdict instead of as a failed read"
+else
+  ok "BLOCKED is not a plain refusal — the caller reports it as BLOCKED"
+fi
+
+# 16. The three wording defects this file now guards, asserted as behaviour of
+#     checks() rather than as prose. Each one let a reading overstate itself.
+echo "checks() must say what it did not read:"
+cbody=$(body checks)
+
+# (a) The one-argument form must REFUSE on an open pull request's head, and the
+#     discriminator needs BOTH halves. `state == open` alone matches a closed
+#     pull request that once contained the commit; `head.sha` alone matches a
+#     sha that is merely in a branch.
+dbody=$(body open_pr_headed_by)
+if printf '%s\n' "$cbody" | grep -q 'open_pr_headed_by'; then
+  ok "the one-argument path asks whether the sha heads an open pull request"
+else
+  bad "checks() no longer calls open_pr_headed_by, so the one-argument form reads the first-parent diff of a pull request head again"
+fi
+if printf '%s\n' "$dbody" | grep -q 'state==\\"open\\"' && printf '%s\n' "$dbody" | grep -q 'head.sha'; then
+  ok "the discriminator tests both .state == open and .head.sha == sha"
+else
+  bad "open_pr_headed_by has lost half its discriminator — one half alone matches pull requests whose one-argument reading is fine"
+fi
+
+# (b) The 300-file cap. verdict() has guarded it since it was written; this path
+#     did not, which made the operator subcommand the laxer of the two readers.
+#
+#     Tested by calling it, not by grepping for it. The first version of this
+#     case asserted that "300" appeared in checks(), and a mutation that
+#     deleted the comparison outright survived it — the digits live on in the
+#     BLOCKED message. A case that cannot fail is worse than no case, because
+#     it is counted.
+for n in 299 300 301; do
+  gen=$(seq 1 "$n" | sed 's/$/.rs/')
+  if files_capped "$gen"; then got=capped; else got=readable; fi
+  case "$n" in 299) want=readable ;; *) want=capped ;; esac
+  if [ "$got" = "$want" ]; then ok "$n files read as $got"
+  else bad "$n files read as $got, expected $want — the cap is off by one or gone"; fi
+done
+if printf '%s\n' "$cbody" | grep -q 'files_capped'; then
+  ok "checks() guards GitHub's 300-file listing cap"
+else
+  bad "checks() no longer guards the 300-file cap, so a commit at the cap can read as 'no gate applies'"
+fi
+
+# (c) SATISFIED must distinguish "every gate passed" from "no gate applied".
+#     The old single sentence claimed a successful run in both cases, which is
+#     how a head with all of CI queued read as satisfied.
+vac=$(result_line 0 0)
+real=$(result_line 0 2)
+case "$vac" in
+  *"successful run"*) bad "the vacuous pass still claims a successful run, which is the sentence that let a head with all of CI queued read as satisfied" ;;
+  *VACUOUSLY*)        ok "a reading where no gate applied says so instead of claiming a successful run" ;;
+  *)                  bad "rc=0 with no gate applied does not distinguish itself from a real pass: $vac" ;;
+esac
+case "$real" in
+  *"2 of them"*) ok "a real pass names how many gates it actually read" ;;
+  *)             bad "a real pass does not say how many gates applied, so it cannot be told from a vacuous one: $real" ;;
+esac
+for r in "$vac" "$real"; do
+  case "$r" in
+    *ci.yml*) ;;
+    *) bad "a rc=0 result line does not mention that ci.yml is not among the gates read: $r"; continue ;;
+  esac
+done
+case "$vac$real" in *ci.yml*ci.yml*) ok "both rc=0 result lines say CI is not among the gates they read" ;; esac
+# An unrecognised code must not become a pass. This is the same UNKNOWN row as
+# case 1 and case 14, in the one place a reader actually acts on.
+case "$(result_line 9 0)" in
+  *SATISFIED*) bad "an unrecognised result code reads as SATISFIED" ;;
+  BLOCKED*)    ok "an unrecognised result code is BLOCKED, not a pass" ;;
+  *)           bad "an unrecognised result code produces something other than BLOCKED: $(result_line 9 0)" ;;
+esac
+for pair in "1 REFUSE" "2 BLOCKED" "3 WAIT"; do
+  set -- $pair
+  case "$(result_line "$1" 0)" in
+    "$2"*) ok "rc=$1 reads as $2" ;;
+    *)     bad "rc=$1 does not read as $2: $(result_line "$1" 0)" ;;
+  esac
+done
+if printf '%s\n' "$cbody" | grep -q 'result_line'; then
+  ok "checks() prints its result through result_line"
+else
+  bad "checks() builds its own result text, so the cases above test a function nothing calls"
+fi
+# GATES_APPLIED is what makes (c) possible, and it must be reset per call or a
+# second reading inherits the first one's count.
+rbody=$(sed -n '/^require_gates() {/,/^}/p' "$D/checks.sh" | nocomment)
+if printf '%s\n' "$rbody" | grep -q 'GATES_APPLIED=0'; then
+  ok "require_gates resets GATES_APPLIED, so one reading cannot inherit another's count"
+else
+  bad "GATES_APPLIED is never reset, so a vacuous reading after a real one reports the wrong count"
+fi
+if [ "$(printf '%s\n' "$rbody" | grep -c 'GATES_APPLIED=\$((GATES_APPLIED + 1))')" -eq 1 ]; then
+  ok "GATES_APPLIED is incremented in exactly one place, on the path where a gate applies"
+else
+  bad "GATES_APPLIED is incremented in $(printf '%s\n' "$rbody" | grep -c 'GATES_APPLIED=\$((GATES_APPLIED + 1))') places — any second one counts a gate that did not apply"
+fi
+
+# (d) The stack reading must go THROUGH the classifier. A caller-side `case` on
+#     the chain text is the drift this kit has already paid for once, in the two
+#     verdict() callers that had to agree and did not.
+if printf '%s\n' "$cbody" | grep -q 'stack_refuses' && printf '%s\n' "$cbody" | grep -q 'stack_class'; then
+  ok "checks() classifies the chain through stack_class/stack_refuses"
+else
+  bad "checks() branches on the chain text itself, so the classifier and the caller can disagree about which shapes refuse"
+fi
+
 # The suite must pass with an EMPTY environment, because CI has one and a
 # developer does not. This is the only case that tests the suite itself, and it
 # exists because case 10 passed here and failed in CI: a shell that has run
