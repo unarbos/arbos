@@ -143,7 +143,83 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      # rust-cache keys on every workspace Cargo.toml as well as Cargo.lock, but with
+      # `cache-workspace-crates: false` (its default, which this job keeps) the entry holds only
+      # *dependency* artifacts. Those are decided by the external dependency set and the compiler,
+      # so a manifest-only edit — adding a dev-dependency that Cargo.lock already pins, say — asks
+      # for a key nothing has ever written while the bytes it wants sit under the old one.
+      #
+      # The surplus key is unreachable, not merely cold. A `push` run on a feature branch saves
+      # into that branch's cache scope, and a `pull_request` run's scope is `refs/pull/N/merge`,
+      # which may read only the base branch and the default branch. Measured 2026-11-05: job
+      # 127046588316 (pull_request, b6d15de20) asked for `v0-rust-rust-Linux-x64-368c5654-09582842`
+      # while an entry under exactly that key existed on `refs/heads/cursor/one-fifo-per-chat-…`.
+      # It could not see it, and fell back to the main-scoped `…-5277baa8` with `full match: false`.
+      #
+      # A near miss is not a cheap miss here. On anything but a full match rust-cache runs
+      # `cleanTargetDir(target, [], true)`, which deletes every artifact older than a week — most
+      # of the dependency build. Same branch, same restored bytes: 2151 s on the push that missed,
+      # 354 s on the next push that matched.
+      #
+      # So key on what the entry actually holds. `source`/`checksum` are the lines Cargo.lock gives
+      # external packages; a workspace crate has neither, which keeps the continuous-delivery
+      # version bump (0.6.n → 0.6.n+1, rewriting a dozen `version =` lines) out of the key. Over
+      # the last 600 commits on main, rust-cache's key changed 20 times and this one changes twice.
+      #
+      # This cannot turn a wrong build green. The key only chooses which bytes to restore; cargo
+      # chooses what to reuse. Every artifact carries a fingerprint over the compiler, RUSTFLAGS,
+      # profile, features and dependency versions, and `--locked` refuses to build at all when the
+      # resolved graph disagrees with Cargo.lock. Anything that does not match is recompiled, and
+      # `-D warnings` applies to whatever is recompiled. A key that is too loose costs rebuild
+      # time, never a verdict.
+      - name: Cache key for the dependency build
+        id: cache-key
+        run: |
+          set -euo pipefail
+          rustc -vV
+          # The key is only as good as this grep. If Cargo.lock ever stops spelling external
+          # packages this way, say so here rather than hashing an empty string forever.
+          lines=$(grep -cE '^(source|checksum) = ' Cargo.lock)
+          if [ "$lines" -lt 100 ]; then
+            echo "::error title=Cache key::Cargo.lock yielded $lines source/checksum lines, too few to be the dependency set. The cache key no longer tracks what it caches."
+            exit 1
+          fi
+          echo "$lines external dependency lines in Cargo.lock"
+          deps=$(grep -E '^(source|checksum) = ' Cargo.lock | sha256sum | cut -c1-16)
+          # `rust-toolchain.toml` says `channel = "stable"`, so the file alone pins no compiler.
+          # `rustc -vV` carries the release and its commit hash. `.cargo/config.toml` does not
+          # exist today, but it is where a `[build] rustflags` would go, and an entry saved under
+          # one set of flags must not answer for another.
+          rust=$( { rustc -vV; cat rust-toolchain.toml; echo "RUSTFLAGS=${RUSTFLAGS:-}"; cat .cargo/config.toml 2>/dev/null || true; } | sha256sum | cut -c1-16)
+          echo "deps=$deps" >> "$GITHUB_OUTPUT"
+          echo "rust=$rust" >> "$GITHUB_OUTPUT"
       - uses: Swatinem/rust-cache@v2
+        id: rust-cache
+        with:
+          add-rust-environment-hash-key: false
+          key: ${{ steps.cache-key.outputs.rust }}-${{ steps.cache-key.outputs.deps }}
+      # With the environment hash off, rust-cache's restore key equals its cache key, so it has no
+      # prefix left to fall back on — and its own fallback was the destructive one described above.
+      # When the dependency set really does change, start from the newest entry built by this same
+      # compiler instead of from nothing; cargo rebuilds the crates that moved and keeps the rest.
+      # This runs only when rust-cache restored nothing, so target/ is empty and no second archive
+      # is ever unpacked alongside the first — this job already runs close to the small fleet's
+      # disk limit. rust-cache's save step prunes whatever cargo did not use.
+      - name: Fall back to the newest cache for this compiler
+        if: steps.rust-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/.crates.toml
+            ~/.cargo/.crates2.json
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          # No entry is named by the bare prefix, so the lookup always falls to `restore-keys`,
+          # which takes the most recent entry that shares the compiler.
+          key: v0-rust-${{ steps.cache-key.outputs.rust }}-
+          restore-keys: v0-rust-${{ steps.cache-key.outputs.rust }}-
       - name: Linux libraries for arbos-mac (GPUI)
         run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb-xkb-dev libasound2-dev libssl-dev libgl1-mesa-dev libfontconfig-dev libstdc++-14-dev libglib2.0-dev
       # Calls v1: the `livekit` crate links a prebuilt libwebrtc whose hermetic libc++
