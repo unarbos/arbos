@@ -120,6 +120,16 @@ final class MessageSlideToPickUITests: XCTestCase {
 
     private func centre(_ r: CGRect) -> CGPoint { CGPoint(x: r.midX, y: r.midY) }
 
+    /// One continuous touch: down on the bubble, hold past the 0.35 s long press, drag
+    /// slowly to `to`, hold there, lift. The slow velocity and the hold matter — the
+    /// default drag moves and lifts in one burst, which a gesture that is meant to be
+    /// *followed* can miss, and then the test would fail for the wrong reason.
+    private func slide(_ app: XCUIApplication, from bubble: XCUIElement, to target: CGPoint) {
+        bubble.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            .press(forDuration: 0.8, thenDragTo: point(app, target), withVelocity: .slow,
+                   thenHoldForDuration: 0.5)
+    }
+
     // MARK: - The deliverable
 
     /// Hold the bubble, slide up onto 🔥 and lift, all in one touch: a 🔥 chip appears.
@@ -131,8 +141,7 @@ final class MessageSlideToPickUITests: XCTestCase {
         let g = group(app, bubble)
         shot("reaction-1-before")
 
-        bubble.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
-            .press(forDuration: 0.8, thenDragTo: point(app, centre(g.fire)))
+        slide(app, from: bubble, to: centre(g.fire))
 
         assertGone(capsule(app), "the overlay closed on the pick")
         let fire = chip(app, "🔥")
@@ -152,8 +161,7 @@ final class MessageSlideToPickUITests: XCTestCase {
         let g = group(app, bubble)
         shot("menu-1-before")
 
-        bubble.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
-            .press(forDuration: 0.8, thenDragTo: point(app, centre(g.copy)))
+        slide(app, from: bubble, to: centre(g.copy))
 
         assertGone(capsule(app), "the overlay closed, so Copy was picked by the lift")
         shot("menu-2-after")
@@ -171,8 +179,7 @@ final class MessageSlideToPickUITests: XCTestCase {
         let empty = clear(app, g, bubble.frame)
         shot("empty-1-before")
 
-        bubble.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
-            .press(forDuration: 0.8, thenDragTo: point(app, empty))
+        slide(app, from: bubble, to: empty)
 
         XCTAssertTrue(capsule(app).waitForExistence(timeout: settle), "the overlay is still up, nothing was picked")
         shot("empty-2-after")
