@@ -199,6 +199,47 @@ fn session_of(headers: &HeaderMap) -> String {
         .to_owned()
 }
 
+/// Which chat a chat-scoped call belongs to, and the job behind it when a worker is calling.
+///
+/// The main agent is in its turn's chat. A worker is never in that turn: a job runs beside the
+/// chat, the turn that started it ended long before, and `Agent::turn` holds the one turn state
+/// of the box's main agent — so reading it for a worker would hand a job whatever chat the main
+/// agent happens to be answering in. Bug W of Test5 round 7 is the quiet version of that: with
+/// no turn at all the hint was the literal `"shared"`, and the routine went to the project's
+/// main chat.
+///
+/// An unknown worker session (an older pi child that sends no header) resolves to no chat, which
+/// is the behaviour this replaced: the relay still picks. It never borrows the main agent's turn.
+pub(crate) async fn caller_for(
+    a: &Arc<Agent>,
+    role: SessionRole,
+    session: &str,
+) -> crate::routines::Caller {
+    match role {
+        SessionRole::Main => crate::routines::Caller {
+            chat_id: a.turn.lock().await.as_ref().map(|t| t.chat_id.clone()),
+            job_id: None,
+        },
+        SessionRole::Subagent => {
+            if session.is_empty() {
+                return crate::routines::Caller::default();
+            }
+            // The job row first, so `job_id` is set for the refusal; a worker running no job
+            // still has the chat it was spawned for.
+            if let Some(job) = a.store.job_for_subagent(session).ok().flatten() {
+                return crate::routines::Caller {
+                    chat_id: Some(job.chat_id),
+                    job_id: Some(job.id),
+                };
+            }
+            crate::routines::Caller {
+                chat_id: a.store.subagent(session).ok().flatten().and_then(|s| s.chat_id),
+                job_id: None,
+            }
+        }
+    }
+}
+
 pub(crate) fn text_result(text: impl Into<String>) -> Value {
     json!({ "content": [{ "type": "text", "text": text.into() }] })
 }
@@ -938,7 +979,8 @@ async fn call_tool(
         "free_space" => crate::disk::free_space_tool(a, args).await,
         "browser_fill" => crate::vault::browser_fill(a, args, &chat_for_scratch).await,
         "routines_list" | "routines_create" | "routines_update" | "routines_delete" => {
-            crate::routines::call_tool(a, name, args, &chat_for_scratch).await
+            let caller = caller_for(a, role, session).await;
+            crate::routines::call_tool(a, name, args, &caller).await
         }
         "goals_list" | "goals_create" | "goals_update" | "goals_log" | "goals_delete" => {
             crate::goals::call_tool(a, name, args, &chat_for_scratch).await

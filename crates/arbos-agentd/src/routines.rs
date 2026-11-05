@@ -29,7 +29,7 @@ pub fn tool_specs() -> Vec<Value> {
         }),
         json!({
             "name": "routines_create",
-            "description": "Schedule a routine that will message this chat later. Use for reminders and recurring jobs. trigger: {kind:\"cron\", expr, tz?} (five-field cron, e.g. \"0 9 * * 1-5\"), {kind:\"once\", in_seconds} or {kind:\"once\", at} (unix ms), {kind:\"webhook\"}, or {kind:\"event\", event}. prompt is what you will be asked to do when it fires (write it as an instruction to yourself, e.g. \"Tell the user: time is up.\"). Defaults to the current chat.",
+            "description": "Schedule a routine that will message a chat later. Use for reminders and recurring jobs. trigger: {kind:\"cron\", expr, tz?} (five-field cron, e.g. \"0 9 * * 1-5\"), {kind:\"once\", in_seconds} or {kind:\"once\", at} (unix ms), {kind:\"webhook\"}, or {kind:\"event\", event}. prompt is what you will be asked to do when it fires (write it as an instruction to yourself, e.g. \"Tell the user: time is up.\"). Defaults to the chat you are in: inside a job, the chat that job runs beside. A routine is a schedule, not a messaging path — to say something now, use `send_message` with no `to`; from inside a job a `once` trigger under 60 seconds is refused.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -70,6 +70,82 @@ pub fn tool_specs() -> Vec<Value> {
     ]
 }
 
+/// Who asked for a routine: the chat the call belongs to, and the job when the caller is a
+/// worker running inside one.
+///
+/// The main agent always calls from a running turn, so its chat is that turn's. A worker never
+/// does: a job runs beside the chat and the turn that started it ended long before. That is why
+/// `chat_id` cannot come from `Agent::turn` for a worker — there is one turn state for the box's
+/// main agent, so reading it would hand a job whatever chat the main agent happens to be
+/// answering in, which is how W landed three notes in the project's main chat.
+#[derive(Debug, Default, Clone)]
+pub struct Caller {
+    pub chat_id: Option<String>,
+    pub job_id: Option<String>,
+}
+
+/// Shortest `once` delay that is a schedule rather than a note said the slow way.
+const ONCE_MIN_SECONDS: i64 = 60;
+
+/// How a job posts a note instead, named exactly as `prompts/router.md` names it. One mechanism
+/// keeps one name here: W happened because two shipped strings disagreed about what a job could
+/// do, so a refusal that invents a third name for the open path would rebuild the same trap.
+pub const NOTE_PATH: &str = "`send_message` with no `to`";
+
+/// The delay of a `once` trigger, when this trigger is one.
+fn once_in_seconds(trigger: &Value) -> Option<i64> {
+    if trigger.get("kind").and_then(Value::as_str) != Some("once") {
+        return None;
+    }
+    trigger.get("in_seconds").and_then(Value::as_i64)
+}
+
+/// The relay body for `routines_create`, or the refusal that stops the call.
+///
+/// Jacob, Test5 round 7 (bug W, r7note): a job asked to post a note after each step created
+/// three `once` routines with `in_seconds: 1`. They ran in the project's main chat rather than
+/// the job's, after the job's own final row, and out of order (step 3, then 1, then 2).
+///
+/// Two separate faults, both answered here. The chat was lost because `chat_id` was left to the
+/// relay: a worker has no turn, so the hint reaching this tool was the literal `"shared"`, this
+/// function's predecessor filtered that out, and `chatId: null` travelled all the way to the
+/// relay, which defaults to the project's main chat. And a one-second `once` trigger is not a
+/// schedule at all — it is a progress note routed through the scheduler, which is why the three
+/// notes raced and lost their order.
+fn create_body(args: &Value, caller: &Caller) -> Result<Value, String> {
+    let s = |k: &str| args.get(k).and_then(Value::as_str).map(str::to_owned);
+    let name = s("name").unwrap_or_default();
+    let prompt = s("prompt").unwrap_or_default();
+    let Some(trigger) = args.get("trigger").cloned() else {
+        return Err("trigger is required".into());
+    };
+    if name.trim().is_empty() || prompt.trim().is_empty() {
+        return Err("name and prompt are required".into());
+    }
+    // A job reaching for the scheduler to make text appear: send it to the path that posts now,
+    // in its own chat, in order. The router prompt tells the main agent the same thing in the
+    // same words, so the brief and the refusal cannot disagree.
+    if let (Some(job_id), Some(secs)) = (caller.job_id.as_deref(), once_in_seconds(&trigger)) {
+        if secs < ONCE_MIN_SECONDS {
+            return Err(format!(
+                "a routine is a schedule, not a messaging path: {secs}s from now is a progress note, and job {job_id} posts its own with {NOTE_PATH} — at once, in the chat it runs beside, in the order you send them. Routines are for a check-in {ONCE_MIN_SECONDS} seconds or more away."
+            ));
+        }
+    }
+    // The caller's own chat, not the relay's default. An explicit `chat_id` still wins: asking
+    // for another chat is a real request, and only the unstated case was ever wrong.
+    let chat_id = s("chat_id")
+        .filter(|c| !c.trim().is_empty())
+        .or_else(|| caller.chat_id.clone());
+    Ok(json!({
+        "name": name.trim(),
+        "prompt": prompt.trim(),
+        "trigger": trigger,
+        "chatId": chat_id,
+        "enabled": args.get("enabled").and_then(Value::as_bool).unwrap_or(true),
+    }))
+}
+
 fn routines_path(agent: &Agent, suffix: &str) -> String {
     format!(
         "{}/projects/{}/routines{}",
@@ -106,38 +182,21 @@ async fn relay_routines_json(
 }
 
 /// Dispatch `routines_*` MCP tools.
-pub async fn call_tool(agent: &Arc<Agent>, name: &str, args: &Value, chat_hint: &str) -> Value {
+pub async fn call_tool(agent: &Arc<Agent>, name: &str, args: &Value, caller: &Caller) -> Value {
     let s = |k: &str| args.get(k).and_then(Value::as_str).map(str::to_owned);
     match name {
         "routines_list" => match relay_routines_json(agent, reqwest::Method::GET, "", None).await {
             Ok(v) => text_result(v.to_string()),
             Err(e) => err_result(e),
         },
-        "routines_create" => {
-            let name = s("name").unwrap_or_default();
-            let prompt = s("prompt").unwrap_or_default();
-            let Some(trigger) = args.get("trigger").cloned() else {
-                return err_result("trigger is required");
-            };
-            if name.trim().is_empty() || prompt.trim().is_empty() {
-                return err_result("name and prompt are required");
-            }
-            let chat_id = s("chat_id").filter(|c| !c.is_empty()).or_else(|| {
-                let hint = chat_hint.trim();
-                (!hint.is_empty() && hint != "shared").then(|| hint.to_owned())
-            });
-            let body = json!({
-                "name": name.trim(),
-                "prompt": prompt.trim(),
-                "trigger": trigger,
-                "chatId": chat_id,
-                "enabled": args.get("enabled").and_then(Value::as_bool).unwrap_or(true),
-            });
-            match relay_routines_json(agent, reqwest::Method::POST, "", Some(body)).await {
+        "routines_create" => match create_body(args, caller) {
+            Err(e) => err_result(e),
+            Ok(body) => match relay_routines_json(agent, reqwest::Method::POST, "", Some(body)).await
+            {
                 Ok(v) => text_result(v.to_string()),
                 Err(e) => err_result(e),
-            }
-        }
+            },
+        },
         "routines_update" => {
             let id = s("id").unwrap_or_default();
             if id.trim().is_empty() {
@@ -495,5 +554,144 @@ impl Agent {
             h.doc
                 .append_system_note(&ulid(), sender, &text, &self.cfg.device_id);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mcp::{caller_for, SessionRole};
+
+    const CHAT: &str = "01TESTCHATROUTINECALLER001";
+    const ASK: &str = "01TESTASKROUTINECALLER0001";
+    const JOB: &str = "01TESTJOBROUTINECALLER0001";
+    const WORKER: &str = "01TESTWORKERROUTINECALL001";
+
+    /// An agent holding one job in `CHAT`, run by `WORKER` — the r7note shape.
+    async fn agent_with_a_job() -> (Arc<Agent>, std::path::PathBuf) {
+        let (agent, root) = crate::status::tests::test_agent().await;
+        agent
+            .store
+            .insert_subagent(WORKER, "job-three-step-pipeline-0001", "run it", "pi", CHAT)
+            .unwrap();
+        agent
+            .store
+            .insert_job(
+                JOB,
+                CHAT,
+                ASK,
+                "Running the pipeline",
+                "ops",
+                "Run the three steps and post a note after each.",
+                &[],
+            )
+            .unwrap();
+        agent.store.set_job_subagent(JOB, WORKER).unwrap();
+        (agent, root)
+    }
+
+    /// Bug W, Test5 round 7 (r7note, agentd 0.1.193): a job asked to post a note after each step
+    /// created three `once` routines, and all three were stored against the project's main chat
+    /// `01M6KTFT1XBKB5GBA89NBKVWRC` rather than the chat the job ran in. The user watched the
+    /// wrong chat for notes that never came to theirs.
+    ///
+    /// The chat was never sent. A worker has no turn of its own, so the hint reaching this tool
+    /// was the literal `"shared"`, the body builder filtered that out, and `chatId: null`
+    /// travelled all the way to the relay — which defaults to the project's main chat. A routine
+    /// now belongs to the chat its caller is in, which for a worker is the chat its job runs
+    /// beside.
+    #[tokio::test]
+    async fn a_routine_belongs_to_the_chat_its_caller_is_in() {
+        let (agent, root) = agent_with_a_job().await;
+
+        let caller = caller_for(&agent, SessionRole::Subagent, WORKER).await;
+        assert_eq!(caller.chat_id.as_deref(), Some(CHAT));
+        assert_eq!(caller.job_id.as_deref(), Some(JOB));
+
+        let args = json!({
+            "name": "Morning check",
+            "prompt": "Tell the user: the pipeline is still running.",
+            "trigger": { "kind": "cron", "expr": "0 9 * * 1-5" },
+        });
+        let body = create_body(&args, &caller).expect("a cron routine is a real schedule");
+        assert_eq!(
+            body["chatId"], json!(CHAT),
+            "the routine must be stored against the job's chat, not left for the relay to guess"
+        );
+
+        // `Agent::turn` is the one turn state of the box's main agent. A worker must never read
+        // it: a job runs beside the chat and the turn that started it ended long before, so
+        // borrowing it would send a job's routine to whatever chat the main agent is answering
+        // in — the same bug with a different wrong chat.
+        let _held = agent.test_hold_turn("01TESTOTHERCHATMAIN000001").await;
+        let while_main_is_busy = caller_for(&agent, SessionRole::Subagent, WORKER).await;
+        assert_eq!(
+            while_main_is_busy.chat_id.as_deref(),
+            Some(CHAT),
+            "a worker's chat is its job's, never the main agent's running turn"
+        );
+
+        // The main agent is in its turn's chat, which is what it always was.
+        let main = caller_for(&agent, SessionRole::Main, "").await;
+        assert_eq!(main.chat_id.as_deref(), Some("01TESTOTHERCHATMAIN000001"));
+        assert_eq!(main.job_id, None);
+
+        // An explicit chat still wins: asking for another chat is a real request, and only the
+        // unstated case was ever wrong.
+        let mut named = args.clone();
+        named["chat_id"] = json!("01TESTCHATASKEDFORBYNAME01");
+        assert_eq!(
+            create_body(&named, &caller).unwrap()["chatId"],
+            json!("01TESTCHATASKEDFORBYNAME01")
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The other half of W: the three routines were `once` triggers one second away, which is not
+    /// a schedule at all but a progress note routed through the scheduler. That is why they fired
+    /// after the job's own final row and out of order — step 3, then 1, then 2. Same-second
+    /// one-shots have no ordering guarantee, and nothing was ever going to give them one.
+    ///
+    /// A job asking for one is now refused and told where the words really go. The refusal names
+    /// the mechanism in the words `prompts/router.md` uses, asserted below: W happened because
+    /// two shipped strings disagreed about what a job could do, so a refusal inventing a third
+    /// name for the open path would rebuild the trap it is closing.
+    #[tokio::test]
+    async fn a_job_cannot_use_a_one_shot_routine_as_a_progress_note() {
+        let (agent, root) = agent_with_a_job().await;
+        let caller = caller_for(&agent, SessionRole::Subagent, WORKER).await;
+
+        let note = |secs: i64| {
+            json!({
+                "name": "STEP1",
+                "prompt": "Tell the user: step 1 of 3 finished.",
+                "trigger": { "kind": "once", "in_seconds": secs },
+            })
+        };
+        let refused = create_body(&note(1), &caller)
+            .expect_err("a one-second one-shot from a job is a progress note");
+        assert!(
+            refused.contains("a routine is a schedule, not a messaging path"),
+            "{refused}"
+        );
+        assert!(
+            refused.contains(NOTE_PATH),
+            "the refusal must name the path that is open: {refused}"
+        );
+        assert!(
+            crate::agent::ROUTER_PROMPT.contains("A routine is a schedule, not a messaging path")
+                && crate::agent::ROUTER_PROMPT.contains(NOTE_PATH),
+            "the prompt and the refusal must name one mechanism in the same words"
+        );
+
+        // A floor, not a ban: a real check-in a minute out is still a routine.
+        assert_eq!(
+            create_body(&note(ONCE_MIN_SECONDS), &caller).unwrap()["chatId"],
+            json!(CHAT)
+        );
+        // And the main agent is untouched: "remind me in ten seconds" is its own chat's business.
+        let main = caller_for(&agent, SessionRole::Main, "").await;
+        assert!(create_body(&note(1), &main).is_ok());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
