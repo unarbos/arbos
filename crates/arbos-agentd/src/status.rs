@@ -2614,6 +2614,134 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Test5 round 4 (2026-11-04, agentd 0.1.193): during the thirty-message burst six assistant
+    /// rows sat on the relay finished `done` with nothing in them (19:13:55 → 19:14:15). #2749
+    /// only judges the row a turn *ends* on, so a row the turn opened and then moved on from —
+    /// merged into another, or superseded while the burst queued behind it — was neither filled
+    /// nor hidden. Every row the turn opened is swept now, not only the last.
+    ///
+    /// Each one is retired, never deleted, for the reason in [`crate::agent::retire_row`]: the
+    /// relay refuses a removal it cannot attribute to the pusher, and a refused op holds every
+    /// op queued behind it, replies included.
+    #[tokio::test]
+    async fn every_wordless_row_the_turn_left_behind_is_retired() {
+        use crate::agent::{retire_wordless_rows, trim_wordless_result_row};
+        use crate::config::SendTool;
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATQUICKREPLY000024";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            t.ack_text.clear();
+            t.activity = None;
+            t.send_tool = SendTool::On;
+            // Opened, finished, and walked away from with nothing written into it.
+            agent.test_open_row(&host, t).await;
+            let empty = t.assistant_msg_id.clone();
+            // The same, but carrying tool detail the Details drawer reads and the
+            // transcript does not: still nothing the user sees.
+            agent.test_open_row(&host, t).await;
+            let with_detail = t.assistant_msg_id.clone();
+            {
+                let h = host.lock().await;
+                h.doc.finish_message(&empty, MessageStatus::Done);
+                h.doc.add_tool_part(
+                    &with_detail,
+                    "c1",
+                    "bash",
+                    &json!({"command": "ls"}),
+                    "a b",
+                    None,
+                    Some(3),
+                    false,
+                );
+                // `with_detail` is deliberately left streaming: the other shape of an
+                // abandoned row, which the sweep has to finish as well as hide.
+            }
+            agent.test_open_row(&host, t).await;
+        }
+        agent
+            .hook_send_message("Sorted: 1, 2, 3, 5, 8.", None, None)
+            .await
+            .unwrap();
+        let (rows_opened, trailing) = {
+            let tl = agent.turn.lock().await;
+            let t = tl.as_ref().unwrap();
+            (t.rows_opened.clone(), t.assistant_msg_id.clone())
+        };
+        assert_eq!(
+            rows_opened.len(),
+            4,
+            "three opened by hand, one more by the bubble"
+        );
+        assert_eq!(
+            rows_opened.last().map(String::as_str),
+            Some(trailing.as_str()),
+            "a turn only ever ends on the last row it opened"
+        );
+        {
+            let h = host.lock().await;
+            // The round-4 symptom, before the sweep runs: neither row is hidden and neither
+            // has anything on it for a client to draw. The first is the shape the report
+            // counted — finished `done` and empty.
+            for id in &rows_opened[..2] {
+                let m = h.doc.message(id).unwrap();
+                assert!(m.rest.get("hidden").is_none());
+                assert!(!m.has_visible_content());
+            }
+            assert_eq!(h.doc.message(&rows_opened[0]).unwrap().status, "done");
+            assert_eq!(h.doc.message(&rows_opened[1]).unwrap().status, "streaming");
+            h.doc.finish_message(&trailing, MessageStatus::Done);
+            assert_eq!(trim_wordless_result_row(&h.doc, &trailing), "hidden_empty");
+            assert_eq!(
+                retire_wordless_rows(&h.doc, &rows_opened, &trailing),
+                2,
+                "both rows the turn left behind, the empty one and the tool-detail one"
+            );
+            for id in &rows_opened[..2] {
+                let m = h.doc.message(id).expect("the row survives the sweep");
+                assert_eq!(
+                    m.rest.get("hidden").and_then(Value::as_bool),
+                    Some(true),
+                    "a row the turn abandoned is hidden"
+                );
+                assert!(!m.has_visible_content());
+                // Finished too, including the one abandoned mid-stream: a hidden row left
+                // streaming still feeds the iPhone's working line, which scans `status`
+                // parts for `working` / `step` on streaming rows inside a fifteen-minute
+                // window.
+                assert_eq!(m.status.as_str(), "done");
+            }
+            let bubble = h.doc.message(&rows_opened[2]).unwrap();
+            assert!(
+                bubble.rest.get("hidden").is_none(),
+                "the row that holds the answer is not swept"
+            );
+            assert_eq!(bubble.text().trim(), "Sorted: 1, 2, 3, 5, 8.");
+            assert_eq!(
+                retire_wordless_rows(&h.doc, &rows_opened, &trailing),
+                0,
+                "a row already hidden is not written a second time"
+            );
+        }
+        let rows = reply_rows(&host, "m-busy");
+        assert_eq!(
+            rows.len(),
+            4,
+            "retired, never deleted: a removal the relay cannot attribute to the box is \
+             refused `not_yours`, and a refused op holds the whole push queue behind it"
+        );
+        let visible: Vec<_> = rows
+            .iter()
+            .filter(|m| m.rest.get("hidden").and_then(Value::as_bool) != Some(true))
+            .collect();
+        assert_eq!(visible.len(), 1, "the answer, and no empty 'done' rows");
+        assert_eq!(visible[0].text().trim(), "Sorted: 1, 2, 3, 5, 8.");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// Bubble in Arbonites (2026-10-28 21:50 UTC, agentd 0.6.338): `route reply` with a first
     /// line, then `send_message` parts. The first part was appended to the first line's row and
     /// the bubble read "…never became a reply for him.Bob was up. When I messaged him…".
