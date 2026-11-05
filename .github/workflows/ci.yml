@@ -187,8 +187,10 @@ jobs:
           echo "$lines external dependency lines in Cargo.lock"
           deps=$(grep -E '^(source|checksum) = ' Cargo.lock | sha256sum | cut -c1-16)
           # `rust-toolchain.toml` says `channel = "stable"`, so the file alone pins no compiler.
-          # `rustc -vV` carries the release and its commit hash.
-          rust=$( { rustc -vV; cat rust-toolchain.toml; echo "RUSTFLAGS=${RUSTFLAGS:-}"; } | sha256sum | cut -c1-16)
+          # `rustc -vV` carries the release and its commit hash. `.cargo/config.toml` does not
+          # exist today, but it is where a `[build] rustflags` would go, and an entry saved under
+          # one set of flags must not answer for another.
+          rust=$( { rustc -vV; cat rust-toolchain.toml; echo "RUSTFLAGS=${RUSTFLAGS:-}"; cat .cargo/config.toml 2>/dev/null || true; } | sha256sum | cut -c1-16)
           echo "deps=$deps" >> "$GITHUB_OUTPUT"
           echo "rust=$rust" >> "$GITHUB_OUTPUT"
       - uses: Swatinem/rust-cache@v2
