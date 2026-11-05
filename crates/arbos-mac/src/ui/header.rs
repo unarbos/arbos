@@ -253,9 +253,14 @@ pub fn render(
 /// mac-header-pill-glass-matte-2026-10-26]), a 2 pt accent ring while its
 /// right pane is open (mockups b, f; parity review 2026-10-20). `pr` is the
 /// right pad (tighter when a "+" follows the name).
+///
+/// It floats over the transcript, so it blocks hover for the rows behind it
+/// ([feedback mac-header-pill-hover-2026-10-30]: the row under the pill showed
+/// its time and hover rail) but lets the wheel through to scroll the list.
 pub(crate) fn pill_frame(theme: &Theme, pane_open: bool, pr: f32) -> Stateful<Div> {
     let pill = div()
         .id("header-title")
+        .block_mouse_except_scroll()
         .flex()
         .items_center()
         .h(px(metrics::PILL_HEIGHT))
@@ -421,6 +426,8 @@ fn sidebar_toggle(shell: &Shell, theme: &Theme, cx: &mut Context<Shell>) -> AnyE
     // The header's material ([feedback mac-header-glass-2026-10-25]): frosted
     // glass on both surfaces, like the pill beside it.
     let disc = glass::header_surface(disc, theme)
+        // Over the transcript like the pill: no hover for the rows behind.
+        .block_mouse_except_scroll()
         // The bar is a window-drag region; a control is not part of it.
         .on_mouse_down(
             gpui::MouseButton::Left,
