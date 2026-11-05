@@ -1,0 +1,86 @@
+# Opaque theme fills that predate scripts/glass-lint.sh (#2801's defect class).
+#
+# Each line is `count<TAB>file<TAB>source line`: how many times that exact line appears in that
+# file. Line numbers are left out so the file survives edits above a site. Regenerate with
+# `./scripts/glass-lint.sh --write-baseline` and commit the shrinkage with the change that earned
+# it; `git diff` on this file is the sweep's progress.
+#
+# This is a DEBT LIST, NOT AN APPROVAL. A site here has not been judged for Glass. A site that is
+# deliberately opaque belongs at the paint site with `// glass-lint: allow (<why>)` instead, where
+# the next reader will see the reason.
+1	crates/arbos-mac/src/ui/agent_picker.rs	.bg(theme.field)
+1	crates/arbos-mac/src/ui/agent_picker.rs	highlight::over(theme.surface_2, highlight::fills(theme).pressed)
+2	crates/arbos-mac/src/ui/attachments.rs	.bg(theme.bubble_assistant)
+1	crates/arbos-mac/src/ui/attachments.rs	.bg(theme.surface_2),
+1	crates/arbos-mac/src/ui/blocked.rs	.bg(theme.field)
+1	crates/arbos-mac/src/ui/blocked.rs	.bg(theme.surface_2)
+1	crates/arbos-mac/src/ui/callview.rs	.bg(theme.surface_2)
+1	crates/arbos-mac/src/ui/channels.rs	.bg(theme.surface_2)
+2	crates/arbos-mac/src/ui/chart_card.rs	.bg(theme.code_bg)
+2	crates/arbos-mac/src/ui/composer.rs	.bg(theme.bubble_assistant)
+1	crates/arbos-mac/src/ui/composer.rs	.bg(theme.field)
+1	crates/arbos-mac/src/ui/composer.rs	.bg(theme.surface_1)
+1	crates/arbos-mac/src/ui/composer.rs	.bg(theme.surface_2)
+1	crates/arbos-mac/src/ui/composer.rs	.bg(theme.surface_2);
+1	crates/arbos-mac/src/ui/composer.rs	.map(|el| highlight::washed(el, theme.surface_2, &theme))
+1	crates/arbos-mac/src/ui/composer/fun.rs	.bg(if on { theme.primary } else { theme.surface_2 })
+1	crates/arbos-mac/src/ui/composer/fun.rs	.bg(theme.field)
+2	crates/arbos-mac/src/ui/composer/fun.rs	.bg(theme.surface_2)
+1	crates/arbos-mac/src/ui/composer/fun.rs	.bg(theme.surface_2),
+2	crates/arbos-mac/src/ui/composer/fun.rs	.when(on, |el| el.bg(theme.surface_2))
+1	crates/arbos-mac/src/ui/connect_agent.rs	.bg(theme.field)
+2	crates/arbos-mac/src/ui/connectors.rs	.bg(theme.surface_2)
+1	crates/arbos-mac/src/ui/create_entity.rs	cancel_bg: theme.field,
+1	crates/arbos-mac/src/ui/create_entity.rs	create_bg: theme.field,
+1	crates/arbos-mac/src/ui/dropzone.rs	.bg(theme.pane_card)
+1	crates/arbos-mac/src/ui/error_note.rs	.bg(theme.code_bg)
+3	crates/arbos-mac/src/ui/error_note.rs	.bg(theme.surface_2)
+2	crates/arbos-mac/src/ui/feedback.rs	.bg(theme.surface_1)
+1	crates/arbos-mac/src/ui/feedback.rs	return base.text_color(theme.text_faint).bg(theme.surface_1);
+1	crates/arbos-mac/src/ui/glass.rs	.bg(theme.surface_1)
+1	crates/arbos-mac/src/ui/glass.rs	.map(|el| highlight::washed(el, theme.field, theme))
+1	crates/arbos-mac/src/ui/header.rs	.bg(theme.bubble_assistant)
+2	crates/arbos-mac/src/ui/header.rs	.bg(theme.field)
+1	crates/arbos-mac/src/ui/link_card.rs	super::highlight::washed(card, theme.code_bg, theme).on_click(move |_, window, cx| {
+1	crates/arbos-mac/src/ui/local.rs	.bg(if on { theme.accent } else { theme.surface_2 })
+1	crates/arbos-mac/src/ui/local.rs	.bg(if on { theme.bg } else { theme.text_muted })
+1	crates/arbos-mac/src/ui/local.rs	.bg(theme.surface_2)
+1	crates/arbos-mac/src/ui/onboarding.rs	.bg(theme.field)
+1	crates/arbos-mac/src/ui/onboarding.rs	let surface = theme.bubble_assistant;
+1	crates/arbos-mac/src/ui/palette.rs	.bg(theme.surface_2)
+1	crates/arbos-mac/src/ui/palette.rs	.child(div().size(px(AVATAR)).rounded_full().bg(theme.surface_2))
+1	crates/arbos-mac/src/ui/people.rs	.bg(theme.field)
+1	crates/arbos-mac/src/ui/people.rs	.bg(theme.surface_2)
+1	crates/arbos-mac/src/ui/presence.rs	.bg(theme.field)
+1	crates/arbos-mac/src/ui/rail.rs	.bg(theme.pane_card)
+1	crates/arbos-mac/src/ui/rail.rs	let ring = highlight::over(theme.sidebar, tile_fill);
+1	crates/arbos-mac/src/ui/reactions.rs	.bg(theme.field)
+2	crates/arbos-mac/src/ui/routines.rs	.bg(theme.surface_1)
+2	crates/arbos-mac/src/ui/routines.rs	.bg(theme.surface_2)
+1	crates/arbos-mac/src/ui/secrets.rs	.bg(if on { theme.primary } else { theme.field })
+3	crates/arbos-mac/src/ui/secrets.rs	.bg(theme.field)
+1	crates/arbos-mac/src/ui/secrets.rs	.bg(theme.field);
+1	crates/arbos-mac/src/ui/secrets.rs	.map(|el| highlight::washed(el, theme.field, theme))
+1	crates/arbos-mac/src/ui/secrets.rs	glass::group(theme).bg(theme.pane_card)
+1	crates/arbos-mac/src/ui/servers.rs	.bg(theme.field)
+1	crates/arbos-mac/src/ui/shell.rs	.bg(theme.code_bg)
+1	crates/arbos-mac/src/ui/shell.rs	.bg(theme.field)
+3	crates/arbos-mac/src/ui/shell.rs	.bg(theme.surface_2)
+1	crates/arbos-mac/src/ui/sidebar.rs	.bg(theme.bg)
+1	crates/arbos-mac/src/ui/sidebar.rs	.bg(theme.bubble_assistant)
+1	crates/arbos-mac/src/ui/sidebar.rs	.bg(theme.field)
+2	crates/arbos-mac/src/ui/sidebar.rs	.bg(theme.surface_2)
+1	crates/arbos-mac/src/ui/skills.rs	.bg(theme.surface_2)
+1	crates/arbos-mac/src/ui/skills.rs	.child(div().size(px(14.0)).rounded_full().bg(theme.bg)),
+1	crates/arbos-mac/src/ui/skills.rs	.map(|el| highlight::washed(el, theme.surface_2, &theme))
+1	crates/arbos-mac/src/ui/tasks.rs	.map(|el| highlight::washed(el, theme.surface_2, theme))
+2	crates/arbos-mac/src/ui/transcript.rs	.bg(theme.bubble)
+2	crates/arbos-mac/src/ui/transcript.rs	.bg(theme.bubble_assistant)
+1	crates/arbos-mac/src/ui/transcript.rs	.bg(theme.code_bg)
+1	crates/arbos-mac/src/ui/transcript.rs	.bg(theme.surface_2)
+1	crates/arbos-mac/src/ui/transcript.rs	b.bg(theme.surface_2)
+1	crates/arbos-mac/src/ui/transcript.rs	let mut head_row = div().flex().bg(theme.code_bg);
+1	crates/arbos-mac/src/ui/widgets.rs	badge: theme.bubble_assistant,
+1	crates/arbos-mac/src/ui/widgets.rs	hairline: theme.bubble_assistant,
+1	crates/arbos-mac/src/ui/widgets.rs	inner: theme.bg,
+2	crates/arbos-mac/src/ui/widgets.rs	outer: theme.bubble_assistant,
