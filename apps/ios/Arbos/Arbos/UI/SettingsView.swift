@@ -1616,8 +1616,13 @@ struct ProfileEditView: View {
         busy = true
         error = nil
         defer { busy = false }
-        if let msg = await model.updateProfile(name: name, handle: handle) {
-            error = UserError.refused("save your profile", msg)
+        // Onboarding's save is guarded: it writes only to an account this sign-in created.
+        // Settings' save is an edit the user asked for and always writes.
+        let refusal = onboarding
+            ? await model.completeProfileSetup(name: name, handle: handle)
+            : await model.updateProfile(name: name, handle: handle)
+        if let refusal {
+            error = UserError.refused("save your profile", refusal)
             return
         }
         dismiss()
