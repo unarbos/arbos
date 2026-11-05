@@ -153,7 +153,9 @@ pub(crate) fn people_cap(slot_width: f32) -> f32 {
 /// 2026-11-05, [feedback time-dividers-2026-11-05]). The rule is the iPhone's
 /// too; the Mac used to measure its hour from the last stamp it drew, so a chat
 /// with messages minutes apart grew one every hour mid-conversation.
-pub use arbos_core::transcript::{shows_divider, DIVIDER_GAP_MS};
+pub use arbos_core::transcript::shows_divider;
+#[cfg(test)]
+use arbos_core::transcript::DIVIDER_GAP_MS;
 
 /// The reader's offset from UTC in seconds, for the day half of the rule.
 /// Taken from the system zone each build, so a transcript left open across a

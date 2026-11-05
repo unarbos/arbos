@@ -7174,20 +7174,23 @@ fn quiet_day_fixture() -> bool {
 }
 
 /// `ARBOS_FIXTURE_QUIET_DAY=1`: the DM with Sam as one quiet evening — fourteen
-/// messages six to twenty-two minutes apart, running from before last midnight
-/// to after it. The rig for the time-divider pair ([feedback
+/// messages six to twenty-two minutes apart, running from before a midnight to
+/// after it. The rig for the time-divider pair ([feedback
 /// time-dividers-2026-11-05]): the old rule put a centred stamp through this
 /// conversation every hour, though it never pauses for an hour, and put none at
 /// the day change; the rule draws one at the day change and nowhere else.
 ///
-/// The times are built from the reader's own midnight, so the day change is
-/// real in whatever zone the shot is taken in.
+/// The times are built from **yesterday's** local midnight, so the day change
+/// is real in whatever zone the shot is taken in and the whole evening is in
+/// the past whatever hour the rig runs at.
 fn seed_quiet_day(doc: &ChatDoc) {
-    use chrono::{Local, TimeZone};
+    use chrono::{Days, Local, TimeZone};
     let midnight = Local
         .from_local_datetime(
             &Local::now()
                 .date_naive()
+                .checked_sub_days(Days::new(1))
+                .expect("yesterday")
                 .and_hms_opt(0, 0, 0)
                 .expect("midnight"),
         )
