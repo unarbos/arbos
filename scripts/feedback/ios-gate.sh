@@ -3,7 +3,8 @@
 #   ios-gate.sh <branch> <sha>
 # Fetches the branch into ~/arbos-gate (its own clone, never the audit clone), checks out <sha>
 # detached, and builds the iPhone app twice (Release, then Debug; generic simulator, no signing). Prints the
-# compiler errors; exit 0 = both compile, 1 = one does not, 2 = infrastructure trouble (fetch/checkout).
+# compiler errors; exit 0 = both compile, 1 = one does not, 2 = infrastructure trouble (fetch/checkout, or
+# the simulator never launched the app — no test ran, so the run has no verdict either way).
 set -uo pipefail
 
 # The embedded ArbosFFI framework is current when it carries the metadata symbol of the newest struct
@@ -41,6 +42,27 @@ BASELINE_DIR="$HOME/arbos-gate/.test-baseline"
 failing_tests() {
   grep -E "^Test Case '-\[ArbosTests\.[A-Za-z0-9_]+ [A-Za-z0-9_]+\]' failed" "$1" 2>/dev/null \
     | sed -E "s/^Test Case '-\[ArbosTests\.([A-Za-z0-9_]+) ([A-Za-z0-9_]+)\]' failed.*/\1\/\2/" | sort -u
+}
+
+# The simulator's own launch timeouts, in the three wordings measured on this project's runs: the cold-start
+# case ("launch progress"), Xcode 27 ("launching application via Xcode") and iOS 26.2 ("background
+# assertion"). A deleted simulator clone ("No matching device … in set") is a different fault and is
+# deliberately not matched here.
+LAUNCH_TIMEOUT_RE='Failed to get launch progress|Timed out while (requesting launch progress|launching application via Xcode|acquiring background assertion)'
+
+# launch_timed_out <xcodebuild log> → 0 when the run died waiting for the app to come up and no test case of
+# its own reported a failure. Not one test ran, so the log says nothing about anybody's code: it is the rig,
+# and it is neither a pass nor a red.
+launch_timed_out() {
+  grep -qE "$LAUNCH_TIMEOUT_RE" "$1" 2>/dev/null || return 1
+  [[ -z "$(failing_tests "$1")" ]]
+}
+
+# launch_timeout_lines <xcodebuild log> → the matching lines, `== ` prefixed so `rust-gate.sh status`
+# forwards them. The explicit return keeps a no-match grep from ending the function non-zero.
+launch_timeout_lines() {
+  grep -E "$LAUNCH_TIMEOUT_RE" "$1" 2>/dev/null | head -n 3 | cut -c1-200 | sed 's/^/== tests: /'
+  return 0
 }
 
 test_sim_udid() {
@@ -85,7 +107,7 @@ TEST_RUN_MAX_S="${TEST_RUN_MAX_S:-900}"
 # baseline_for <main sha> → prints the cached failing set of main at that head, computing it once:
 # checks out the base in the gate tree, build-for-testing into the Debug derived data, runs the suite.
 baseline_for() {
-  local base="$1" f="$BASELINE_DIR/$1" cur blog
+  local base="$1" f="$BASELINE_DIR/$1" cur blog noverdict=""
   mkdir -p "$BASELINE_DIR"
   if [[ -f "$f" ]]; then cat "$f"; return 0; fi
   cur=$(git -C "$ROOT" rev-parse HEAD)
@@ -95,7 +117,14 @@ baseline_for() {
           -destination 'generic/platform=iOS Simulator' -derivedDataPath "$HOME/arbos-gate-dd-Debug" \
           CODE_SIGNING_ALLOWED=NO build-for-testing >/dev/null 2>&1 ); then
       run_suite "$HOME/arbos-gate-dd-Debug" "$blog" || true
-      failing_tests "$blog" >"$f"
+      if launch_timed_out "$blog"; then
+        # Main's own suite never ran. Caching an empty failing set for this head would make every test that
+        # is red on main read as the branch's regression, so a launch that timed out on MAIN would fail the
+        # next branch gated against it. A measurement that did not happen is not a measurement: cache nothing.
+        noverdict=1
+      else
+        failing_tests "$blog" >"$f"
+      fi
     else
       # Main itself does not compile its tests (or the tree's xcframework does not fit it): no baseline —
       # the caller does not blame the branch; the compile check above already reports main's breakage.
@@ -106,6 +135,7 @@ baseline_for() {
     ls -t "$BASELINE_DIR" 2>/dev/null | tail -n +13 | while read -r old; do rm -f "$BASELINE_DIR/$old"; done
   fi
   rm -f "$blog"
+  [[ -z "$noverdict" ]] || { echo "__noverdict__"; return 0; }
   cat "$f" 2>/dev/null
 }
 
@@ -118,6 +148,15 @@ run_unit_tests() {
   if [[ "$trc" -eq 0 && -z "$fails" ]]; then
     echo "== tests: $(grep -oE 'Executed [0-9]+ tests' "$log" | tail -n 1 | tr -d '\n') pass ($(( $(date +%s) - t0 )) s)"
     rm -f "$log"; return 0
+  fi
+  if launch_timed_out "$log"; then
+    # The simulator never got the app up, so not one test case ran: the rig failed, not the branch. It is not
+    # a pass either — the branch still has no test verdict — so the half exits 2 (infrastructure) and the
+    # poller re-runs it, instead of merging it or sending the author a follow-up about their change.
+    echo "== tests: NO VERDICT — the simulator did not launch the app, so no test case ran (rc=$trc)."
+    launch_timeout_lines "$log"
+    echo "== tests: NO VERDICT — nothing was tested: neither a pass nor a failure of the branch. Re-run the gate."
+    rm -f "$log"; return 2
   fi
   if [[ -z "$fails" ]]; then
     # xcodebuild failed without a single failing test case: simulator / infrastructure trouble, not the branch.
@@ -132,6 +171,11 @@ run_unit_tests() {
   if grep -qx "__unavailable__" <<< "$baseline"; then
     echo "== tests: $(printf '%s\n' "$fails" | grep -c .) failing test(s) but main (${base:0:8}) cannot run its own suite — no baseline, not blamed: $(printf '%s' "$fails" | tr '\n' ' ')"
     rm -f "$log"; return 0
+  fi
+  if grep -qx "__noverdict__" <<< "$baseline"; then
+    echo "== tests: NO VERDICT — main (${base:0:8}) could not be measured: its own suite did not launch the app."
+    echo "== tests: NO VERDICT — whether these $(printf '%s\n' "$fails" | grep -c .) failing test(s) are red on main too is unknown, so the branch is not blamed. Re-run the gate: $(printf '%s' "$fails" | tr '\n' ' ')"
+    rm -f "$log"; return 2
   fi
   new=$(comm -23 <(printf '%s\n' "$fails") <(printf '%s\n' "$baseline" | sed '/^$/d' | sort -u))
   if [[ -z "$new" ]]; then
@@ -350,7 +394,8 @@ if [[ "$rc" -eq 0 ]]; then
   trc=$?
   if [[ "$trc" -eq 0 ]]; then
     echo "== tests: compile"
-    run_unit_tests || rc=1
+    # 1 = the branch's failing test; 2 = the rig never ran the suite, which is no verdict and not a merge.
+    run_unit_tests || rc=$?
   else
     echo "== tests: FAIL to compile (ArbosTests)"
     branch_errs=$(test_error_set "$log")
