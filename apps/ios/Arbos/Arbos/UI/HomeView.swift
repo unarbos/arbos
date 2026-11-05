@@ -360,7 +360,7 @@ struct HomeView: View {
         case .people(let chat):
             let pinned = model.isHomePinned(peopleChatId: chat.id)
             Button { model.open(peopleChat: chat) } label: {
-                PeopleRow(chat: chat, preview: entry.hit.reason ?? peoplePreview(chat), time: timeLabel(ms: peopleActivity(chat)),
+                PeopleRow(chat: chat, preview: entry.hit.reason ?? HomeView.peoplePreview(chat, in: model), time: timeLabel(ms: peopleActivity(chat)),
                           unread: model.peopleUnread.contains(chat.id) || model.unreadCount(for: chat) > 0,
                           streaming: model.isStreaming(chat.id),
                           count: model.unreadCount(for: chat), me: model.user?.id,
@@ -975,17 +975,38 @@ struct HomeView: View {
         max(c.lastActivityAt, model.messages(of: c.id).last?.createdAt ?? 0)
     }
 
-    private func peoplePreview(_ c: PeopleChat) -> String {
-        // Skip group deletion audits (hidden in the chat; Activity only) so the
-        // home row matches what you see when you open the conversation.
+    /// The one builder behind every people row's preview line — Home's list and the
+    /// Hidden chats list both call it, so the line can only ever be composed one way.
+    /// It used to be written out twice, and the copies drifted: the block filter of
+    /// [feedback blocked-state-ios-2026-10-26] reached the hidden list alone, and the
+    /// `@handle` rule had to be stated in both.
+    ///
+    /// Skips group deletion audits (hidden in the chat; Activity only) and rows hidden
+    /// for me (someone I blocked), so a row matches what opening the chat shows.
+    static func peoplePreview(_ c: PeopleChat, in model: AppModel) -> String {
         guard let m = model.messages(of: c.id).last(where: {
-            !$0.voice && !$0.plainText.isEmpty && !GroupActivity.isAuditLine($0.plainText)
+            !$0.voice && !$0.plainText.isEmpty
+                && !model.hidesMessage($0, chatId: c.id)
+                && !GroupActivity.isAuditLine($0.plainText)
         }) else {
             return c.pending ? "Invited · opens when they sign in" : "Say hi"
         }
         let line = m.plainText.split(separator: "\n").first.map(String.init) ?? ""
-        let who = m.sender == model.myUserId ? "You" : (m.senderHandle.map { "@\($0)" } ?? "")
+        let who = previewWho(group: c.isGroup, mine: m.sender == model.myUserId,
+                             sender: m.sender, handle: m.senderHandle)
         return (who.isEmpty ? "" : who + ": ") + HomeView.plain(line)
+    }
+
+    /// The label before a people row's preview text: "You" for my own line, `@handle`
+    /// for anyone else — but not for the other person of a 1:1 chat, whom the row's own
+    /// header already names. Labelling them there printed the handle twice, "Affinity @Z"
+    /// over "@Z: hahahaha" ([feedback doubled-sender-prefix-2026-10-30], seen again
+    /// 2026-11-05). A group row is headed by the group and carries no handle, and an
+    /// agent in a 1:1 chat is not the person the header names, so both keep their label.
+    static func previewWho(group: Bool, mine: Bool, sender: String, handle: String?) -> String {
+        if mine { return "You" }
+        if !group, sender.hasPrefix("user:") { return "" }
+        return handle.map { "@\($0)" } ?? ""
     }
 
     /// Newest message with prose (or an open question) across the project's chats.
@@ -1203,7 +1224,7 @@ struct HiddenChatsView: View {
                         }
                     case .people(let chat):
                         Button { model.open(peopleChat: chat) } label: {
-                            PeopleRow(chat: chat, preview: HiddenChatsView.peoplePreview(chat, in: model), time: "",
+                            PeopleRow(chat: chat, preview: HomeView.peoplePreview(chat, in: model), time: "",
                                       unread: false, count: 0, me: model.user?.id)
                         }
                         .buttonStyle(.borderless)
@@ -1300,20 +1321,6 @@ struct HiddenChatsView: View {
         return (m.role == .user ? "You: " : "") + HomeView.plain(line)
     }
 
-    static func peoplePreview(_ c: PeopleChat, in model: AppModel) -> String {
-        // A row hidden for me (someone I blocked) never previews. Deletion
-        // audits stay out too — same filter as the open chat (Transcript).
-        guard let m = model.messages(of: c.id).last(where: {
-            !$0.voice && !$0.plainText.isEmpty
-                && !model.hidesMessage($0, chatId: c.id)
-                && !GroupActivity.isAuditLine($0.plainText)
-        }) else {
-            return c.pending ? "Invited · opens when they sign in" : "Say hi"
-        }
-        let line = m.plainText.split(separator: "\n").first.map(String.init) ?? ""
-        let who = m.sender == model.myUserId ? "You" : (m.senderHandle.map { "@\($0)" } ?? "")
-        return (who.isEmpty ? "" : who + ": ") + HomeView.plain(line)
-    }
 }
 
 struct AgentRow: View {
