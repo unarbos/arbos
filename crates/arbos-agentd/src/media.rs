@@ -451,6 +451,13 @@ pub async fn deliver(
     // result turn that relays the answer, and each of them posted these same bytes again. The
     // card is already in the chat: point at it instead of writing a second one.
     if let Some(job_id) = target.job_id.as_deref() {
+        // Bug S: the cancelled Mersenne job put a file in the chat 23 minutes after the user
+        // stopped it. A cancelled job delivers nothing, whatever its worker still has in hand.
+        if a.job_is_cancelled(job_id) {
+            anyhow::bail!(
+                "this job was cancelled, so nothing more of it goes into the chat; the file was NOT posted"
+            );
+        }
         if let Some(message_id) = a.job_file_posted(job_id, &key).await {
             // Only a card that is still in the chat may stand in for this one; if it went, the
             // honest answer is to write a new one.

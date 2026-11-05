@@ -70,6 +70,32 @@ const DETACHED_SHELL_HINT =
   "Detached processes are not started from a turn (nohup, setsid, disown, a trailing `&`, tmux, screen): that work is a job. Call start_job(title, brief, kind) with the whole instruction — every step, the waits, the exact file paths, what to report — and end the turn; the worker runs it with a status line, its result arrives as an [Arbos] job notice, and a later change goes through steer_job(job_id, text) (never kill + restart). Run short foreground commands here only.";
 
 /**
+ * A command in the main agent's own turn that kills a process by pid, name or pattern.
+ *
+ * Jacob's Test5 round 6, bug S: asked to cancel a running job the main agent ran `kill 14237`
+ * and told the user the job was cancelled. A signal to a pid is not a cancel — the job row stays
+ * `running`, the worker's tool call carries on, and its result and its file land in the chat
+ * later (1 401 seconds later, in that case). `stop_job(job_id)` is the cancel, and it answers
+ * with the job's state. Returns the offending fragment, or null.
+ */
+export function killsAProcess(toolName: string, input: Record<string, unknown>): string | null {
+  const text =
+    toolName === "bash" ? String(input?.command ?? "")
+    : toolName === "codemode" ? String(input?.code ?? "")
+    : "";
+  if (!text) return null;
+  // `kill`/`kill -9`/`killall`/`pkill`, as a command rather than inside a word (`killed.log`,
+  // `--killswitch`) or a sentence in an echo.
+  const re = /(^|[;&|(`'"]\s*|\bsudo\s+|\bxargs\s+|\bexec\s+|&&\s*|\|\|\s*)(kill|killall|pkill)\b/m;
+  const m = re.exec(text);
+  if (!m) return null;
+  return text.slice(Math.max(0, m.index - 40), m.index + m[0].length + 40).replace(/\s+/g, " ").trim();
+}
+
+const KILL_HINT =
+  "A signal is not a cancel. `stop_job(job_id)` is the only thing that cancels a job: it ends the worker's turn and its tool call, marks the job `cancelled`, and answers with that state — a `kill` leaves the job running and its result still arrives in the chat later. Call list_jobs for the id, then stop_job(job_id) (or stop_job(\"all\")), and say \"cancelled\" only where the state it returns reads `cancelled`. For a process of your own that is not a job, let the command finish in the foreground instead.";
+
+/**
  * A `reply` text that announces more to come ("delivered in parts below", "table follows") is an
  * introduction, not the answer: the turn must go on with send_message. Mirrors
  * `agent::promises_parts` (proof run 1, 2026-10-26 01:0x UTC: the result turn routed `reply`
@@ -280,6 +306,11 @@ export default function arbosPiExt(pi: ExtensionAPI) {
       if (detached) {
         audit({ kind: "detached_shell_refused", session: sessionId, tool: event.toolName, fragment: detached.slice(0, 160) });
         return { block: true, reason: `Refused (\`${detached.slice(0, 80)}\`): ${DETACHED_SHELL_HINT}` };
+      }
+      const killing = killsAProcess(event.toolName, event.input as Record<string, unknown>);
+      if (killing) {
+        audit({ kind: "kill_refused", session: sessionId, tool: event.toolName, fragment: killing.slice(0, 160) });
+        return { block: true, reason: `Refused (\`${killing.slice(0, 80)}\`): ${KILL_HINT}` };
       }
     }
     if (beforeRoute && relayTurn && event.toolName === "send_message") {
@@ -640,8 +671,8 @@ export default function arbosPiExt(pi: ExtensionAPI) {
   if (SESSION_ROLE === "main") pi.registerTool({
     name: "stop_job",
     label: "Stop job",
-    description: "Stop a running job: `job_id` from list_jobs, \"latest\" for the newest running job, or \"all\" for every job of this chat. Confirm to the user yourself in one line; no result will follow.",
-    promptSnippet: "stop_job: stop one job (id | latest) or all",
+    description: "Cancel a running job — the only way to cancel one; a kill or pkill on a pid leaves it running. `job_id` from list_jobs, \"latest\" for the newest running job, or \"all\" for every job of this chat. It ends the worker's turn and its in-flight tool call, and answers with each job's state. Tell the user it is cancelled only where that state reads `cancelled`; no result will follow from a cancelled job.",
+    promptSnippet: "stop_job: cancel one job (id | latest) or all; never a kill",
     parameters: Type.Object({
       job_id: Type.String({ description: "Job id, \"latest\" or \"all\"" }),
     }),
@@ -650,10 +681,12 @@ export default function arbosPiExt(pi: ExtensionAPI) {
     async execute(_toolCallId, params) {
       const res = await hook("/hook/stop_job", { session_id: sessionId, job_id: params.job_id });
       if (res && !res.ok) {
-        return { content: [{ type: "text", text: `Nothing stopped (${res.error ?? "unknown"}).` }], details: undefined };
+        return { content: [{ type: "text", text: `Nothing was cancelled (${res.error ?? "unknown"}). Do not tell the user anything stopped.` }], details: undefined };
       }
-      const stopped = ((res as { result?: { stopped?: string[] } } | undefined)?.result?.stopped) ?? [];
-      return { content: [{ type: "text", text: `Stopped: ${stopped.join(", ") || "nothing"}. Confirm to the user in one line.` }], details: undefined };
+      const result = (res as { result?: { stopped?: { job_id?: string; title?: string; state?: string }[]; note?: string } } | undefined)?.result;
+      const stopped = result?.stopped ?? [];
+      const states = stopped.map((j) => `${j.title ?? j.job_id} — state ${j.state ?? "unknown"}`).join("; ") || "nothing";
+      return { content: [{ type: "text", text: `${states}. ${result?.note ?? ""}`.trim() }], details: undefined };
     },
   });
 

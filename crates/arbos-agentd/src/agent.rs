@@ -1082,6 +1082,63 @@ pub struct JobSpec {
     pub attempt: u8,
 }
 
+/// One job [`Agent::stop_jobs`] ended, with the state read back out of the store afterwards.
+///
+/// Every sentence that tells the user a job is cancelled is built from `state`. Jacob's Test5
+/// round 6, bug S: the main agent ran `kill 14237`, said "the Mersenne job is cancelled and no
+/// longer running", and the job ran on for another 1 401 seconds. Issuing a command is not a
+/// cancel; a state of `cancelled` is.
+#[derive(Debug, Clone)]
+pub(crate) struct StoppedJob {
+    pub id: String,
+    pub title: String,
+    /// The job row's state after the stop: `cancelled` when the stop landed.
+    pub state: String,
+}
+
+impl StoppedJob {
+    fn cancelled(&self) -> bool {
+        self.state == "cancelled"
+    }
+}
+
+/// The line the chat gets when the user's stop ended one or more jobs. It names the state the
+/// store holds now, because that — and not the fact that a stop was issued — is what makes
+/// "cancelled" a true thing to say (bug S).
+pub(crate) fn stop_line(stopped: &[StoppedJob]) -> String {
+    let titles = stopped
+        .iter()
+        .map(|s| s.title.to_lowercase())
+        .collect::<Vec<_>>()
+        .join(", ");
+    if let Some(open) = stopped.iter().find(|s| !s.cancelled()) {
+        return format!(
+            "Stopped: {titles}. “{}” still reads {}, so I cannot tell you it is cancelled.",
+            open.title.to_lowercase(),
+            open.state
+        );
+    }
+    if stopped.len() == 1 {
+        format!("Stopped: {titles}. Its state is cancelled now, so nothing more arrives from it.")
+    } else {
+        format!(
+            "Stopped: {titles}. Their state is cancelled now, so nothing more arrives from them."
+        )
+    }
+}
+
+/// What [`Agent::settle_cancelled_job`] needs to close a worker down whose job the user
+/// cancelled while it was still working.
+#[derive(Clone, Copy)]
+struct CancelledWorker<'a> {
+    subagent_id: &'a str,
+    /// The worker's own progress row, which is retired rather than written into.
+    msg_id: &'a str,
+    job_id: &'a str,
+    harness: Harness,
+    total_ms: i64,
+}
+
 /// What a finished job or hand-off gives its relay turn.
 #[derive(Clone, Copy)]
 pub(crate) struct ResultDelivery<'a> {
@@ -2620,6 +2677,14 @@ impl Agent {
         // answers it has posted the row. The main session keeps the ticket for the rest of this
         // function; an ask that runs as a job takes it below and keeps it until its own answer
         // is posted, so a job that finishes early cannot answer in front of an older message.
+        //
+        // **`stop` is deliberately absent from this list, and must stay absent.** A cancel may
+        // not queue behind the burst it is cancelling: it is the answer to the user asking for
+        // the work to end, the one thing in the chat that must not wait on the work. Give it a
+        // ticket and a cancel sent into a thirty-message burst is taken only after those
+        // messages are answered — the user watches the job they just stopped keep running, which
+        // is bug S with a queue in front of it. `write_stop_line` waits for no ticket either,
+        // for the same reason.
         let mut ticket = match cmd.kind.as_str() {
             "send" | "answer" => cmd
                 .payload
@@ -2894,52 +2959,65 @@ impl Agent {
     /// `stop` from the Stop button (no job) halts the running turn **and** every job of the chat
     /// (duplex D7); `stop { jobId }` from the chip halts that job only.
     async fn handle_stop_cmd(self: &Arc<Self>, chat_id: &str, cmd: &CommandView) -> Result<()> {
+        let anchor = cmd
+            .payload
+            .get("messageId")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
         if let Some(job_id) = cmd.payload.get("jobId").and_then(Value::as_str) {
             let stopped = self.stop_jobs(chat_id, Some(job_id)).await;
             tracing::info!(chat_id, job_id, stopped = stopped.len(), "stop: one job");
+            // The chip stopped a job and said nothing, so whether it worked was unknowable from
+            // the chat. One line, and it names the state the job row holds now (bug S).
+            self.write_stop_line(chat_id, &anchor, &stopped).await;
             return Ok(());
         }
         let turn = self.handle_stop(chat_id).await;
         let stopped = self.stop_jobs(chat_id, None).await;
-        if !stopped.is_empty() {
-            let line = format!(
-                "Stopped: {}.",
-                stopped
-                    .iter()
-                    .map(|t| t.to_lowercase())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-            if let Some(host) = self.sync.host(chat_id).await {
-                let h = host.lock().await;
-                let id = ulid();
-                let anchor = cmd
-                    .payload
-                    .get("messageId")
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
-                h.doc
-                    .start_assistant_message(&id, anchor, &self.cfg.device_id);
-                if let Some(attr) = self.people_reply_fields(chat_id) {
-                    h.doc.set_message_fields(&id, &attr.fields);
-                }
-                if let Some(p) = h.doc.add_text_part(&id, "text") {
-                    h.doc.append_text(&id, &p, &line);
-                }
-                h.doc.finish_message(&id, MessageStatus::Done);
-            }
-        }
+        self.write_stop_line(chat_id, &anchor, &stopped).await;
         turn
     }
 
+    /// The one plain line the chat gets for a stop that ended jobs, anchored to the message the
+    /// stop came with.
+    ///
+    /// It takes no place in the chat's send order (bug O) and waits for none: a `stop` command
+    /// joins no queue, so the cancel lands however long the chat's burst is, and this line is the
+    /// user's only proof that it did. Held behind a queue it could be two minutes late, which is
+    /// the silence the valve in `send_order.rs` exists to avoid.
+    async fn write_stop_line(&self, chat_id: &str, anchor: &str, stopped: &[StoppedJob]) {
+        if stopped.is_empty() {
+            return;
+        }
+        let line = stop_line(stopped);
+        let Ok(host) = self.room(chat_id).await else {
+            return;
+        };
+        let h = host.lock().await;
+        let id = ulid();
+        h.doc
+            .start_assistant_message(&id, anchor, &self.cfg.device_id);
+        if let Some(attr) = self.people_reply_fields(chat_id) {
+            h.doc.set_message_fields(&id, &attr.fields);
+        }
+        if let Some(p) = h.doc.add_text_part(&id, "text") {
+            h.doc.append_text(&id, &p, &line);
+        }
+        h.doc.finish_message(&id, MessageStatus::Done);
+    }
+
     /// Cancel running or queued jobs of `chat_id` — one when `only` names it, else all. Returns
-    /// the titles stopped. The job's own task sees the abort, marks it cancelled, frees its locks
-    /// and refreshes the status line; no result turn runs for a cancelled job.
+    /// one [`StoppedJob`] per job, each carrying the state read back after the stop.
+    ///
+    /// The job is marked `cancelled`, its worker's turn and in-flight tool call are ended, its
+    /// locks are freed, its live rows are retired and the status line is refreshed. No result
+    /// turn runs for a cancelled job and nothing it produces afterwards reaches the chat.
     pub(crate) async fn stop_jobs(
         self: &Arc<Self>,
         chat_id: &str,
         only: Option<&str>,
-    ) -> Vec<String> {
+    ) -> Vec<StoppedJob> {
         let mut stopped = Vec::new();
         for j in self.store.jobs_for_chat(chat_id).unwrap_or_default() {
             if !j.is_open() || only.is_some_and(|id| id != j.id) {
@@ -2949,26 +3027,174 @@ impl Agent {
                 .store
                 .set_job_state(&j.id, "cancelled", Some("stopped by the user"));
             if let Some(sid) = &j.subagent_id {
-                if let Ok(Some(row)) = self.store.subagent(sid) {
-                    let h = match row.harness.as_str() {
-                        "pi" => Harness::Pi,
-                        "claude_code" => Harness::ClaudeCode,
-                        _ => Harness::Prime,
-                    };
-                    let adapter = self.adapter(h);
-                    if let Err(e) = adapter.cancel(sid).await {
-                        tracing::debug!(job = %j.id, error = %e, "cancel: falling back to stop");
-                        let _ = adapter.stop(sid).await;
-                    }
-                }
+                self.end_cancelled_worker(&j.id, sid).await;
             }
             self.release_job_locks(&j.id).await;
-            stopped.push(j.title.clone());
+            self.retire_live_job_rows(chat_id, &j.id).await;
+            let state = self
+                .store
+                .job(&j.id)
+                .ok()
+                .flatten()
+                .map(|row| row.state)
+                .unwrap_or_else(|| "unknown".to_owned());
+            tracing::info!(job = %j.id, %state, "job cancelled");
+            stopped.push(StoppedJob {
+                id: j.id.clone(),
+                title: j.title.clone(),
+                state,
+            });
         }
         if !stopped.is_empty() {
             self.refresh_job_activity(chat_id).await;
         }
         stopped
+    }
+
+    /// End the worker of a job that was just cancelled: abort its turn, then close its harness
+    /// child so any in-flight tool call dies with it.
+    ///
+    /// The abort alone is not enough, and that is the second half of bug S. A worker's tool call
+    /// can be a whole program — the Mersenne job's was `for i<70: bash 'sleep 20; tail -1 log'`
+    /// under a 1 500 000 ms `timeout_ms` — and the harness acknowledges the abort while that
+    /// program keeps running inside it. A cancelled job gets no result turn and is never resumed,
+    /// so there is nothing its child is kept alive for.
+    async fn end_cancelled_worker(&self, job_id: &str, sid: &str) {
+        let Ok(Some(row)) = self.store.subagent(sid) else {
+            return;
+        };
+        let adapter = self.adapter(match row.harness.as_str() {
+            "pi" => Harness::Pi,
+            "claude_code" => Harness::ClaudeCode,
+            _ => Harness::Prime,
+        });
+        if let Err(e) = adapter.cancel(sid).await {
+            tracing::debug!(job = %job_id, error = %e, "cancel: the abort did not land");
+        }
+        if let Err(e) = adapter.stop(sid).await {
+            tracing::warn!(job = %job_id, error = %e, "cancel: the worker's child did not close");
+        }
+        let _ = self.store.set_subagent_status(sid, "idle");
+        let _ = self.store.set_subagent_last_status(sid, "cancelled");
+    }
+
+    /// Retire the rows a cancelled job still has open: its hidden worker row and anything else
+    /// of its own still streaming. A row it settled before the cancel is history and stays.
+    ///
+    /// [`retire_row`] and never `delete_message`: the relay refuses to remove a row whose author
+    /// it did not record and a refused op blocks the whole push queue behind it.
+    ///
+    /// Through [`Agent::room`] rather than `sync.host`, so this cannot be a no-op on a chat whose
+    /// room went cold. Those rows are in the persisted doc either way, and the next writer to
+    /// want the chat reopens it — a job's own progress note does exactly that — and would find
+    /// them still streaming. Retiring on the handle the hub hands out means that reopen is this
+    /// same room, already settled, instead of a second one racing this one.
+    async fn retire_live_job_rows(&self, chat_id: &str, job_id: &str) {
+        let Ok(host) = self.room(chat_id).await else {
+            return;
+        };
+        let h = host.lock().await;
+        for m in h.doc.messages() {
+            if m.role != "assistant"
+                || m.rest.pointer("/job/id").and_then(Value::as_str) != Some(job_id)
+            {
+                continue;
+            }
+            if m.status != MessageStatus::Streaming.as_str()
+                && m.rest.get("hidden").and_then(Value::as_bool) != Some(true)
+            {
+                continue;
+            }
+            h.doc.set_activity(&m.id, None);
+            retire_row(&h.doc, &m.id);
+        }
+    }
+
+    /// Was this job cancelled? The one question every late writer asks before it puts anything
+    /// in the chat (bug S: a cancelled job posted a result and a file 23 minutes afterwards).
+    pub(crate) fn job_is_cancelled(&self, job_id: &str) -> bool {
+        self.store
+            .job(job_id)
+            .ok()
+            .flatten()
+            .is_some_and(|row| row.state == "cancelled")
+    }
+
+    /// The job of `chat_id` that answers `ask_message_id` and reads `cancelled`, if there is one.
+    ///
+    /// The question [`Self::job_is_cancelled`] asks, for a writer that holds the ask rather than
+    /// the job id. [`Self::write_job_result`] is the one that needs it: its answer belongs to a
+    /// message, and the job behind that message can be cancelled while the answer waits in the
+    /// chat's send order.
+    pub(crate) fn cancelled_job_for_ask(
+        &self,
+        chat_id: &str,
+        ask_message_id: &str,
+    ) -> Option<String> {
+        self.store
+            .jobs_for_chat(chat_id)
+            .unwrap_or_default()
+            .into_iter()
+            .find(|j| j.ask_message_id == ask_message_id && j.state == "cancelled")
+            .map(|j| j.id)
+    }
+
+    /// The title of a job of `chat_id` that is still `queued` or `running`, for the guard that
+    /// refuses a reply reporting a cancel the job rows do not agree with.
+    pub(crate) fn open_job_title(&self, chat_id: &str) -> Option<String> {
+        self.store
+            .jobs_for_chat(chat_id)
+            .unwrap_or_default()
+            .into_iter()
+            .find(|j| j.is_open())
+            .map(|j| j.title)
+    }
+
+    /// Close the books on a worker whose job was cancelled under it: its row is retired, its
+    /// output is kept in its own thread for the record and nothing of it reaches the chat.
+    async fn settle_cancelled_job(
+        self: &Arc<Self>,
+        chat_id: &str,
+        host: &SharedHost,
+        w: CancelledWorker<'_>,
+    ) {
+        let CancelledWorker {
+            subagent_id,
+            msg_id,
+            job_id,
+            harness,
+            total_ms,
+        } = w;
+        self.subagent_msgs.lock().await.remove(subagent_id);
+        {
+            let h = host.lock().await;
+            h.doc.set_activity(msg_id, None);
+            retire_row(&h.doc, msg_id);
+        }
+        let _ = self.store.set_subagent_status(subagent_id, "idle");
+        let _ = self
+            .store
+            .set_subagent_last_status(subagent_id, "cancelled");
+        self.release_job_locks(job_id).await;
+        self.refresh_job_activity(chat_id).await;
+        let _ = self.store.t3_append(
+            chat_id,
+            None,
+            Some(chat_id),
+            "job_cancelled",
+            Some("system"),
+            "the worker settled after the job was cancelled; its output was not delivered",
+            Some(&json!({ "job_id": job_id, "subagent_id": subagent_id, "total_ms": total_ms })),
+        );
+        // Undelivered is not unrecorded: the worker's own session stays searchable, so the next
+        // turn can say what the job had got to when the user stopped it.
+        self.index_session_history(subagent_id, harness).await;
+        tracing::info!(
+            job = %job_id,
+            subagent = %subagent_id,
+            total_ms,
+            "cancelled job settled; nothing delivered"
+        );
     }
 
     /// `steer_job(job_id | "latest", text)` from the main turn: the words go into the running
@@ -3028,6 +3254,10 @@ impl Agent {
     }
 
     /// `stop_job(job_id | "latest" | "all")` from the main turn.
+    ///
+    /// Answers with each job's state as the store reads it after the stop, so the sentence the
+    /// model then writes rests on that state. Bug S: `kill 14237` told the model nothing about
+    /// the job, and it reported a cancel anyway.
     pub async fn hook_stop_job(self: &Arc<Self>, job_id: &str) -> Result<Value, String> {
         let chat_id = {
             let tl = self.turn.lock().await;
@@ -3042,9 +3272,21 @@ impl Agent {
             self.stop_jobs(&chat_id, Some(&job.id)).await
         };
         if stopped.is_empty() {
-            return Err("no running job matched".into());
+            return Err("no running job matched; list_jobs shows what is open in this chat".into());
         }
-        Ok(json!({ "stopped": stopped }))
+        let all_cancelled = stopped.iter().all(StoppedJob::cancelled);
+        Ok(json!({
+            "stopped": stopped
+                .iter()
+                .map(|s| json!({ "job_id": s.id, "title": s.title, "state": s.state }))
+                .collect::<Vec<_>>(),
+            "all_cancelled": all_cancelled,
+            "note": if all_cancelled {
+                "Every job above reads `cancelled` in its own row: its worker is closed, its tool call is dead and no result or file will arrive from it. Say it is cancelled in one line and end the turn."
+            } else {
+                "At least one job above does NOT read `cancelled`. Do not tell the user it stopped: say which one is still open, call stop_job again for it, and only then report a cancel."
+            },
+        }))
     }
 
     /// A job of this chat by id, or the newest running one for `latest` / an empty id
@@ -5392,7 +5634,12 @@ impl Agent {
     /// A finished subagent never speaks to the user directly: its raw output stays hidden and the
     /// main agent writes the update in prose, as a follow-up turn in the same chat (demo review
     /// item 1). Runs on a relay slot, so it lands after whatever the user is doing right now.
-    async fn run_result_turn(
+    ///
+    /// This turn *is* the answer for a job the user asked for in words (`forced_job.rs`), which
+    /// is why the cancel is asked about here and not only in `write_job_result`: that one is
+    /// reached for `ask-…` subagents alone (`is_job_name`), so a forced job's only answer is
+    /// this one. See the two checks below for which moments they cover.
+    pub(crate) async fn run_result_turn(
         self: &Arc<Self>,
         chat_id: &str,
         host: &SharedHost,
@@ -5409,6 +5656,13 @@ impl Agent {
             error,
             job,
         } = *d;
+        // Cancelled before any of this was built (bug S). `run_subagent` checks too, but it
+        // checks on its way here and a cancel can land afterwards; nothing below is worth doing
+        // for a job that will deliver nothing, and the chat's place is freed sooner for it.
+        if let Some(j) = job.filter(|j| self.job_is_cancelled(&j.id)) {
+            tracing::info!(chat_id, job = %j.id, "the job was cancelled before its result turn; nothing delivered");
+            return Ok(());
+        }
         let ask = {
             let h = host.lock().await;
             h.doc
@@ -5495,6 +5749,15 @@ impl Agent {
         // and `place` returns `None`.
         self.await_send_order(chat_id, user_msg_id, "job_result")
             .await;
+        // And on the far side of that wait, which is the window nothing else covers: every
+        // cancel check before this one ran before the wait, and the wait is up to
+        // `SEND_ORDER_WAIT` long, so without this a job cancelled while its answer queued would
+        // have that answer delivered in full up to two minutes later — bug S, on the one path a
+        // forced job answers through.
+        if let Some(j) = job.filter(|j| self.job_is_cancelled(&j.id)) {
+            tracing::info!(chat_id, job = %j.id, "the job was cancelled while its result turn waited its turn; nothing delivered");
+            return Ok(());
+        }
         let Some(outcome) = self
             .drive_relay_turn(chat_id, host, user_msg_id, &prompt, kind, None)
             .await?
@@ -7173,6 +7436,26 @@ impl Agent {
                 return Err(POSTED_CLAIM_REFUSAL.into());
             }
         }
+        // Bug S: a sentence that reports a cancel is sent only when the job rows agree. While
+        // one still reads `running` or `queued`, the claim is about a command that was issued,
+        // not about work that stopped.
+        if claims_work_stopped(text) {
+            let chat_id = {
+                let tl = self.turn.lock().await;
+                match tl.as_ref() {
+                    Some(t) => t.chat_id.clone(),
+                    None => return Err("no turn is running".into()),
+                }
+            };
+            if let Some(open) = self.open_job_title(&chat_id) {
+                tracing::warn!(chat_id = %chat_id, job = %open, "send_message claimed a cancel with a job still open; refused");
+                self.append_audit(
+                    "cancel_claim_refused",
+                    json!({ "chat_id": chat_id, "surface": "send_message", "open_job": open, "text": text.chars().take(200).collect::<String>() }),
+                );
+                return Err(CANCEL_CLAIM_REFUSAL.into());
+            }
+        }
         let mut tl = self.turn.lock().await;
         let Some(t) = tl.as_mut() else {
             return Err("no turn is running".into());
@@ -7565,12 +7848,25 @@ impl Agent {
                 ValidRoute::Reply { reply: Some(text) } => Some(text.as_str()),
                 _ => None,
             };
-            if [reply, args.get("ack").and_then(Value::as_str)]
+            let ack = args.get("ack").and_then(Value::as_str);
+            if [reply, ack]
                 .into_iter()
                 .flatten()
                 .any(promises_a_time)
             {
                 return Err(TIME_PROMISE_REFUSAL.to_owned());
+            }
+            // Bug S: "the Mersenne job is cancelled and no longer running" was the turn's reply
+            // text, so the refusal has to cover the reply and the ack, not `send_message` alone.
+            if [reply, ack]
+                .into_iter()
+                .flatten()
+                .any(claims_work_stopped)
+            {
+                if let Some(open) = self.open_job_title(&t.chat_id) {
+                    tracing::warn!(chat_id = %t.chat_id, job = %open, "route claimed a cancel with a job still open; refused");
+                    return Err(CANCEL_CLAIM_REFUSAL.to_owned());
+                }
             }
             Ok(r)
         });
@@ -9027,6 +9323,26 @@ impl Agent {
         }
         self.post_activity(chat_id, None);
         let total_ms = t0.elapsed().as_millis() as i64;
+        // The user cancelled this job while the worker was still working. Whatever it produced
+        // after that is not delivered: no parts on its row, no result turn, no file card. Bug S:
+        // job 01M6MVENYJDXMKW8T8YCBWB2VC posted a result and a file 23 minutes past the cancel.
+        // The check sits here, ahead of every writer below, because each of them is a way into
+        // the chat.
+        if let Some(j) = job.as_ref().filter(|j| self.job_is_cancelled(&j.id)) {
+            self.settle_cancelled_job(
+                chat_id,
+                host,
+                CancelledWorker {
+                    subagent_id: &subagent_id,
+                    msg_id: &msg_id,
+                    job_id: &j.id,
+                    harness,
+                    total_ms,
+                },
+            )
+            .await;
+            return Ok(());
+        }
         let contract = extract_return_contract(&text);
         let contract_status = contract
             .as_ref()
@@ -9509,7 +9825,22 @@ impl Agent {
         // (bug O). A job that overtook an older message waits here, after its own model call, so
         // the hold costs nothing once the older answer is posted. A job whose ask is not queued
         // — the model's own `start_job`, or an ask already answered — is not held at all.
+        // Asked on both sides of that wait, because the wait is up to two minutes long and a
+        // cancel can land anywhere in it (bug S). Here, so a cancelled answer does not sit at
+        // the head of its chat's queue holding every message behind it for a row it will never
+        // write; the wait would be spent to reach a `return` either way.
+        if let Some(job_id) = self.cancelled_job_for_ask(chat_id, in_reply_to) {
+            tracing::info!(chat_id, job = %job_id, "the job was cancelled before its answer took its turn; not posted");
+            return Ok(());
+        }
         self.await_send_order(chat_id, in_reply_to, "job").await;
+        // And again on the far side: the worker had already finished, so the check in
+        // `run_subagent` ran before the cancel and caught nothing, and this is the last moment
+        // the question can be asked before the row exists.
+        if let Some(job_id) = self.cancelled_job_for_ask(chat_id, in_reply_to) {
+            tracing::info!(chat_id, job = %job_id, "the job was cancelled while its answer waited its turn; not posted");
+            return Ok(());
+        }
         // This task resolved its handle before the job ran, which is minutes ago and a wait ago.
         let host = &self.room_for_reply(chat_id, host).await;
         let row_id = ulid();
@@ -10849,6 +11180,97 @@ pub(crate) fn claims_posted(text: &str) -> bool {
     claims.iter().any(|c| t.contains(c))
 }
 
+/// What the model is told when it reports a cancel while a job of the chat is still open
+/// (Jacob's Test5 round 6, bug S).
+pub(crate) const CANCEL_CLAIM_REFUSAL: &str = "Not sent: this says the work is cancelled or no longer running, and a job of this chat still reads `running` or `queued`. A `kill` on a pid, a `pkill`, or any other command you ran does NOT cancel a job — only `stop_job(job_id)` does, and it answers with the state of each job it touched. Call `stop_job(job_id)` (or `stop_job(\"all\")`), read the `state` it returns, and say \"cancelled\" only where that state is `cancelled`. Until then tell the user what is still running, by name.";
+
+/// Does this bubble tell the user that the work is stopped? Matches the shape bug S shipped
+/// ("the Mersenne job is cancelled and no longer running"), its first-person variants and the
+/// bare "killed it"; a future tense ("I'll cancel it"), a question ("shall I cancel it?") or a
+/// negation ("it is not cancelled") is not a claim.
+///
+/// The object has to be the work: cancelling a booking, a subscription or a meeting is ordinary
+/// chat, and this guard runs whenever a job is open, not only when one is being stopped.
+pub(crate) fn claims_work_stopped(text: &str) -> bool {
+    let t = text.to_ascii_lowercase();
+    if [
+        "not cancelled",
+        "not been cancelled",
+        "could not cancel",
+        "couldn't cancel",
+        "did not cancel",
+        "didn't cancel",
+        "not stopped",
+        "not been stopped",
+        "still running",
+        "is running",
+        "shall i",
+        "should i",
+        "want me to",
+        "i'll cancel",
+        "i will cancel",
+        "i'll stop",
+        "i will stop",
+        "cancelling it now",
+        "stopping it now",
+    ]
+    .iter()
+    .any(|n| t.contains(n))
+    {
+        return false;
+    }
+    let work = [
+        "job",
+        "task",
+        "run",
+        "work",
+        "search",
+        "build",
+        "script",
+        "benchmark",
+        "process",
+        "it is",
+        "it's",
+        "that's",
+        "that is",
+    ];
+    if !work.iter().any(|w| t.contains(w)) {
+        return false;
+    }
+    [
+        "is cancelled",
+        "is canceled",
+        "are cancelled",
+        "was cancelled",
+        "been cancelled",
+        "now cancelled",
+        "i cancelled",
+        "i canceled",
+        "i've cancelled",
+        "i have cancelled",
+        "cancelled it",
+        "cancelled the",
+        "is stopped",
+        "was stopped",
+        "been stopped",
+        "i stopped",
+        "i've stopped",
+        "i have stopped",
+        "stopped it",
+        "stopped the",
+        "killed it",
+        "killed the",
+        "i killed",
+        "no longer running",
+        "not running any",
+        "longer active",
+        "has been terminated",
+        "is terminated",
+    ]
+    .iter()
+    .any(|c| t.contains(c))
+}
+
 /// What the model is told when a bubble, a reply or an ack puts a clock on the finish (Jacob,
 /// Test5 T7, round 1 and round 2). It names the answer that is wanted, because "ETA?" is a fair
 /// question the turn still has to answer — with progress, not a number.
@@ -11294,7 +11716,7 @@ pub fn base_system_prompt_with(code_mode: bool, jobs: bool) -> String {
 
 /// Duplex step 2 (`docs/duplex-agent-design.md` §2.3): work that takes more than a few seconds
 /// is a job the main agent starts and then steps away from; the chat stays open for the user.
-pub const JOBS_SECTION: &str = "## Jobs: longer work runs beside the chat\n\nAnything over about ten seconds — research across pages, a comparison of options or prices, a build, a test run, a long script, a report — is a **job**, never work inside your turn. Route `act`, post one short acknowledgement with `send_message` naming the first step (\"Looking up the top-rated surf schools around Santa Teresa and their prices now.\"), call `start_job(title, brief, kind)`, end the turn. `title`: two to five words, present tense — the status line the user watches (\"Searching for surf schools\"). `brief`: the exact instruction for the worker — what to find or build, for whom, the acceptance criterion, what to return (a comparison: each item with its page URL, the compared facts, sources, what could not be checked). `kind`: `research`, `code`, `ops` or `other`. The result returns later as an `[Arbos] Job … finished` message: deliver it then with `send_message` (parts for a comparison, `reply_to` the user's message) as your own work. Up to three jobs run per chat; meanwhile answer every new message in a short turn, never start the same work twice (the working set lists jobs in flight), answer \"how is it going?\" from `list_jobs`. `route new`/`wake` stay for a long-lived named thread; `act` is for what you finish in a few tool calls.\n\nA correction while a job runs (\"only schools under $70\") is a steer: bind it to the job it names (title words, the ask it quotes), else the newest running job, call `steer_job(job_id, text)` and ack in one line naming the job. \"Stop\" / \"cancel that\" → `stop_job(job_id)`, or `stop_job(\"all\")` when several run and none is named; confirm in one line. A steer matching no running job becomes a new job; say so.";
+pub const JOBS_SECTION: &str = "## Jobs: longer work runs beside the chat\n\nAnything over about ten seconds — research across pages, a comparison of options or prices, a build, a test run, a long script, a report — is a **job**, never work inside your turn. Route `act`, post one short acknowledgement with `send_message` naming the first step (\"Looking up the top-rated surf schools around Santa Teresa and their prices now.\"), call `start_job(title, brief, kind)`, end the turn. `title`: two to five words, present tense — the status line the user watches (\"Searching for surf schools\"). `brief`: the exact instruction for the worker — what to find or build, for whom, the acceptance criterion, what to return (a comparison: each item with its page URL, the compared facts, sources, what could not be checked). `kind`: `research`, `code`, `ops` or `other`. The result returns later as an `[Arbos] Job … finished` message: deliver it then with `send_message` (parts for a comparison, `reply_to` the user's message) as your own work. Up to three jobs run per chat; meanwhile answer every new message in a short turn, never start the same work twice (the working set lists jobs in flight), answer \"how is it going?\" from `list_jobs`. `route new`/`wake` stay for a long-lived named thread; `act` is for what you finish in a few tool calls.\n\nA correction while a job runs (\"only schools under $70\") is a steer: bind it to the job it names (title words, the ask it quotes), else the newest running job, call `steer_job(job_id, text)` and ack in one line naming the job. \"Stop\" / \"cancel that\" → `stop_job(job_id)`, or `stop_job(\"all\")` when several run and none is named — the only cancel there is, never a `kill`, and you confirm in one line from the `state` it answers with. A steer matching no running job becomes a new job; say so.";
 
 #[cfg(test)]
 impl Agent {

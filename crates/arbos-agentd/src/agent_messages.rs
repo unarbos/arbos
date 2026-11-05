@@ -224,6 +224,17 @@ impl Agent {
                 "send_message with no `to` posts in the chat of the job you run, and this session runs no job; report back and let the main agent speak for the Project"
             ));
         };
+        // A cancelled job is done speaking (bug S). This is a writer in its own right — the
+        // words come from the worker's script and reach the chat without passing anything in
+        // `run_subagent` — so it asks about the cancel itself rather than inheriting a check
+        // made around the result. Asked before `Agent::room` below, so a cancelled job does not
+        // reopen a cold room either: the one the cancel retired its rows in stays the one the
+        // hub has.
+        if self.job_is_cancelled(&job.id) {
+            return Err(anyhow!(
+                "this job was cancelled, so nothing more of it goes into the chat; the note was NOT posted. Stop working and end your turn."
+            ));
+        }
         // The same backstop and the same configured limit the turn surfaces apply (D19, and
         // `config::chat_text_max`): one chat is one set of rules, however the words reach it.
         let text = crate::store::redact(&crate::agent::ProseFilter::clean_prose(text.trim()));
