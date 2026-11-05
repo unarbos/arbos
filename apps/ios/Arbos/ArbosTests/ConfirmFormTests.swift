@@ -64,7 +64,7 @@ final class ConfirmFormTests: XCTestCase {
             }
         }
         XCTAssertTrue(offenders.isEmpty, "A confirm is a centred alert (`.confirm(ConfirmSpec(…), isPresented:)`, Confirm.swift). Keep `.confirmationDialog` only on the control it belongs to, marked `// confirm: anchored`:\n" + offenders.joined(separator: "\n"))
-        XCTAssertEqual(anchored, 3, "the three row menus (mute durations, a member's actions, a connector's Disconnect) — update this count when one moves")
+        XCTAssertEqual(anchored, 2, "the two row menus (mute durations, a connector's Disconnect) — update this count when one moves")
     }
 
     /// No hand-built two-button alert either: an `.alert(` whose buttons are an action and a
