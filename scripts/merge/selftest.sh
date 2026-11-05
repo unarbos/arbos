@@ -937,5 +937,86 @@ else
 fi
 
 echo
+echo "mergeability — UNKNOWN is resolved, and a merged PR is not retried:"
+# 12e. UNKNOWN is "not computed yet", not "not mergeable". The case that matters is the one a careful
+# lane hits: the field is invalidated when the commit's check state changes, so it is reliably cold at
+# the exact moment checks go green and the lane becomes eligible. A single read therefore refuses the
+# lanes that arrive on time. These cases assert the BEHAVIOUR of each branch, not its wording, and in
+# particular that the merged branch costs ONE state read and no re-reads — an unconditional re-read
+# would spend the whole bound re-learning that a merged PR is merged.
+mg_src=$(sed -n '/^mergeability() {/,/^}/p' "$D/merge-window.sh")
+if [ -z "$mg_src" ]; then
+  bad "no mergeability() in merge-window.sh — it was renamed or removed, and case 12e is testing nothing"
+else
+  eval "$mg_src"
+  R=owner/repo
+  sleep() { :; }   # the shipped bound is 4 waits of 3s; the test asserts the logic, not the clock
+  # The stub's state lives in FILES, not variables. Every `x=$(gh ...)` in the function under test is
+  # a command substitution, which forks — so a counter or a queue held in a shell variable is updated
+  # in the child and lost, leaving the stub answering its first reply forever and the call count at
+  # zero. That mistake makes a broken function look correct here, which is the one thing this file
+  # must never do.
+  mgq=$(mktemp); mgc=$(mktemp)
+  # Replies are popped in order; the LAST reply is sticky, which is how a field that never computes
+  # is modelled without writing out one line per re-read.
+  mg_run() { printf '%s\n' "$1" | tr '|' '\n' >"$mgq"; : >"$mgc"; }
+  gh() {
+    echo x >>"$mgc"
+    local a; a=$(head -1 "$mgq")
+    [ "$(wc -l <"$mgq")" -le 1 ] || { sed -i 1d "$mgq"; }
+    printf '%s\n' "$a"
+  }
+  mg_calls() { wc -l <"$mgc" | tr -d ' '; }
+
+  mg_run 'MERGEABLE false'
+  out=$(mergeability 7); c=$(mg_calls)
+  { [ "$out" = "MERGEABLE false" ] && [ "$c" -eq 1 ]; } \
+    && ok "a field that is already computed is returned on one read, with no re-read" \
+    || bad "an already-computed field took $c read(s) and returned '$out'"
+
+  mg_run 'UNKNOWN false|UNKNOWN false|MERGEABLE false'
+  out=$(mergeability 7)
+  [ "$out" = "MERGEABLE false" ] \
+    && ok "a cold field that warms up is reported as MERGEABLE, not refused" \
+    || bad "a cold field that warms up was reported as '$out' — this is the refusal that hits a lane arriving the instant CI goes green"
+
+  mg_run 'UNKNOWN false|MERGED 2026-11-05T21:56:55Z b6d19c2cda2f543e555e65a492c703cbb8eec32d'
+  out=$(mergeability 7); c=$(mg_calls)
+  case "$out" in
+    *"ALREADY MERGED"*b6d19c2cda2f543e555e65a492c703cbb8eec32d*)
+      [ "$c" -eq 2 ] \
+        && ok "a merged PR is named with its merge sha after one state read, with no re-read" \
+        || bad "a merged PR cost $c reads — the state discriminator is not ahead of the bound, so the retry budget is spent re-learning that it is merged" ;;
+    *) bad "a merged PR reported '$out' — it must name the landing, since no re-read can ever change UNKNOWN on a merged PR" ;;
+  esac
+
+  mg_run 'UNKNOWN false|CLOSED - -'
+  out=$(mergeability 7)
+  case "$out" in
+    *CLOSED*) ok "a closed, unmerged PR is reported as closed rather than re-read" ;;
+    *) bad "a closed PR reported '$out'" ;;
+  esac
+
+  mg_run 'UNKNOWN false|OPEN - -|UNKNOWN false'
+  out=$(mergeability 7); c=$(mg_calls)
+  case "$out" in
+    *UNKNOWN*)
+      [ "$c" -le 7 ] \
+        && ok "a field that never computes is bounded and still refuses, inferring nothing" \
+        || bad "the re-read is unbounded: $c reads" ;;
+    *) bad "a field that never computes reported '$out', which infers an answer that was never given" ;;
+  esac
+
+  gh() { return 1; }
+  out=$(mergeability 7)
+  case "$out" in
+    UNREADABLE*) ok "a failed read is UNREADABLE and cannot pass the gate" ;;
+    *) bad "a failed read reported '$out' — gh writes an error body to stdout, so a read that is not checked for a non-zero exit can be mistaken for an answer" ;;
+  esac
+  unset -f gh sleep mg_run mg_calls
+  rm -f "$mgq" "$mgc"
+fi
+
+echo
 if [ "$fail" -eq 0 ]; then echo "selftest: PASS"; else echo "selftest: FAIL"; fi
 exit "$fail"
