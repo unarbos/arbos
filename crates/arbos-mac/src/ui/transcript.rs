@@ -37,6 +37,7 @@ use crate::ui::mention::{self, Mentions};
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
 use crate::ui::profile_target;
+use crate::ui::reveal::RevealInset;
 use crate::ui::secret_card::SecretOfferCard;
 use crate::ui::select::{BubbleAt, BubbleSelectable, LinkIcons, Selectable, Span, TextSelection};
 use crate::ui::sf_symbols;
@@ -167,10 +168,10 @@ pub const RUN_WINDOW_MS: u64 = 2 * 60 * 1000;
 pub(crate) const ROW_GAP_HALF: f32 = 3.0;
 pub(crate) const TURN_GAP_EXTRA: f32 = 20.0 - 2.0 * ROW_GAP_HALF;
 /// The gap between two bubbles of one run, and the gap a new run opens — the
-/// numbers the rhythm tests pin.
+/// numbers the rhythm tests pin. `TURN_GAP` is also the air a revealed hit
+/// keeps under the header (`REVEAL_TOP_INSET`).
 #[cfg(test)]
 pub(crate) const RUN_GAP: f32 = 2.0 * ROW_GAP_HALF;
-#[cfg(test)]
 pub(crate) const TURN_GAP: f32 = TURN_GAP_EXTRA + 2.0 * ROW_GAP_HALF;
 
 /// The tail of the sender run the row builder is in: who spoke last and when
@@ -271,6 +272,16 @@ pub const SENDER_LANE: f32 = AVATAR_COLUMN_INSET + SENDER_DISC + SENDER_DISC_GAP
 const HOVER_FADE_MS: f32 = 150.0;
 /// The fade band under the floating header (one number for every chat kind).
 pub const HEADER_FADE_BAND: f32 = crate::ui::header::metrics::FADE_BAND;
+/// Where a reveal brings a message to rest: its row's top edge this far below
+/// the transcript's own top edge.
+///
+/// The chat pane's reading of the shared rule in [`crate::ui::reveal`] — the
+/// band the floating header fades the list out over, plus the gap the transcript
+/// already opens between two speakers. Both terms are read from where they live,
+/// so a header that changes size carries the inset with it. Any other list a
+/// reveal lands in states its own two terms through `reveal::top_inset` rather
+/// than reaching for this one.
+pub const REVEAL_TOP_INSET: f32 = crate::ui::reveal::top_inset(HEADER_FADE_BAND, TURN_GAP);
 /// How long the hover copy glyph stays a checkmark after a successful copy.
 const COPY_FEEDBACK_MS: u64 = 2_000;
 /// Ignore pointer noise until a click-drag travels this far before it is a
@@ -885,6 +896,8 @@ pub struct Transcript {
     pub(crate) rows_laid_out: u64,
     /// Reveal request (`AppState::reveal_nonce`) we already scrolled for.
     revealed: Option<u64>,
+    /// The row a reveal still owes its [`REVEAL_TOP_INSET`] to.
+    reveal_inset: crate::ui::reveal::RevealInset,
     spring: StickSpring,
     /// Set by the scroll callback; the next frame re-pins when the user
     /// stopped within `STICK_THRESHOLD_PX` of the end.
@@ -990,6 +1003,7 @@ impl Transcript {
             arrived_at: None,
             rows_laid_out: 0,
             revealed: None,
+            reveal_inset: RevealInset::default(),
             spring: StickSpring::default(),
             repin_check_pending: false,
             hover: HoverFade::default(),
@@ -1759,6 +1773,7 @@ impl Transcript {
         let state = self.state.read(cx);
         let Some((chat, msg)) = state.reveal_message.clone() else {
             self.revealed = None;
+            self.reveal_inset.clear();
             return;
         };
         let nonce = state.reveal_nonce;
@@ -1774,10 +1789,23 @@ impl Transcript {
             return;
         };
         self.pinned_to_bottom = false;
+        // The row to the top of the pane, then `REVEAL_TOP_INSET` back down it
+        // from inside the list's own prepaint (`RevealInset::row_request`).
+        //
+        // `offset_in_item` cannot carry the inset, however much it looks like
+        // the field for it. A negative one does anchor the row below the
+        // viewport's top edge — the list's own `scroll_by` says so — but it
+        // renders nothing above the row it anchors: `layout_items` only walks
+        // into earlier rows when the ones from the scroll top down fail to fill
+        // the viewport, and a negative offset makes them appear to fill more of
+        // it, not less. The reveal would land in a blank strip under the header
+        // instead of in the conversation, which is a worse artefact than the dim
+        // row it replaces.
         self.list.scroll_to(gpui::ListOffset {
             item_ix: ix,
             offset_in_item: px(0.0),
         });
+        self.reveal_inset.owed(ix);
         self.revealed = Some(nonce);
         cx.notify();
     }
@@ -3644,11 +3672,13 @@ impl Transcript {
             self.state.read(cx).highlight_message.as_deref() == Some(row.message_id.as_str());
         let turn_start = self.is_turn_start(ix);
         let measure = Self::measure_into(&self.measured, Some(row_frame_id.clone()));
+        let inset = self.reveal_inset.row_request(ix, REVEAL_TOP_INSET);
         div()
             .id(SharedString::from(format!("{row_frame_id}#frame")))
             .relative()
             .w_full()
             .child(measure)
+            .when_some(inset, |el, inset| el.child(inset))
             .child(
                 column_row(inner)
                     .when(turn_start, |el| el.pt(px(TURN_GAP_EXTRA)))
@@ -9125,6 +9155,92 @@ mod transcript_smoke_tests {
         assert!(
             !cue,
             "a nearby jump glides; the landing cue is for the long way"
+        );
+    }
+
+    /// A reveal brings its message to rest clear of the floating header's fade
+    /// band. Every jump into a transcript shares one path — a home-search or
+    /// palette hit, Search-in-chat stepping, a channel-message notification, a
+    /// reply quote click, all through `Transcript::reveal_hit` — and that path
+    /// used to land the row at the pane's top edge, inside the band, so the
+    /// message the reader had just asked for was the faintest on screen.
+    ///
+    /// What this pins is the position against the band rather than a number of
+    /// its own: the row's top edge sits `REVEAL_TOP_INSET` (the band plus one
+    /// turn gap) below the pane's top edge, with the message before it drawn in
+    /// that space — not the blank strip a negative `offset_in_item` leaves.
+    #[gpui::test]
+    fn a_revealed_hit_rests_clear_of_the_headers_fade_band(cx: &mut TestAppContext) {
+        const ROWS: usize = 160;
+        let t = 1_700_000_000_000u64;
+        let messages: Vec<Message> = (0..ROWS)
+            .map(|i| {
+                let role = if i % 2 == 0 { "user" } else { "assistant" };
+                message(
+                    &format!("m{i}"),
+                    role,
+                    &format!("history line {i} — lorem ipsum dolor sit amet, consectetur"),
+                    t + i as u64 * 1_000,
+                )
+            })
+            .collect();
+        let (_rt, state, transcript) = mount_with(cx, messages);
+        let (_host, vcx) = cx.add_window_view(|_, _| Host {
+            transcript: transcript.clone(),
+        });
+        vcx.run_until_parked();
+
+        // How far down the pane the list drew a message's row, or `None` when
+        // that message is off screen.
+        let landing = |vcx: &gpui::VisualTestContext, message_id: &str| -> Option<f32> {
+            transcript.read_with(vcx, |t, _| {
+                let m = t.measured.borrow();
+                let row = t.rows.iter().find(|r| r.message_id == message_id)?;
+                let bounds = m.rows.get(&row.id)?;
+                Some(f32::from(bounds.top() - m.viewport.top()))
+            })
+        };
+        // What the palette, Search-in-chat and a quote click all do to the state.
+        let reveal = |vcx: &mut gpui::VisualTestContext, message_id: &str| {
+            transcript.update(vcx, |t, _| t.measured.borrow_mut().rows.clear());
+            state.update(vcx, |s, cx| {
+                s.reveal_message = Some(("c1".into(), message_id.into()));
+                s.reveal_nonce += 1;
+                cx.notify();
+            });
+            vcx.run_until_parked();
+        };
+
+        // A hit in the middle of the history, with chat above it and below it.
+        reveal(vcx, "m80");
+        let inset = landing(vcx, "m80").expect("the revealed row is on screen");
+        assert!(
+            (inset - REVEAL_TOP_INSET).abs() < 0.5,
+            "the revealed row rests {inset} pt down the pane, not {REVEAL_TOP_INSET}"
+        );
+        assert!(
+            inset > HEADER_FADE_BAND,
+            "…so it is clear of the {HEADER_FADE_BAND} pt fade band, where it used to land"
+        );
+        assert!(
+            landing(vcx, "m79").is_some_and(|above| above < inset),
+            "the message before the hit fills the space above it"
+        );
+
+        // The first message in a chat has next to nothing above it to scroll:
+        // the walk runs out of rows and clamps at the very top, which is where
+        // a reveal landed before the inset — no blank band, nothing worse.
+        reveal(vcx, "m0");
+        let top = transcript.read_with(&*vcx, |t, _| t.list.logical_scroll_top());
+        assert_eq!(
+            (top.item_ix, f32::from(top.offset_in_item)),
+            (0, 0.0),
+            "nothing above the first message to give it the inset"
+        );
+        let first = landing(vcx, "m0").expect("the first message is on screen");
+        assert!(
+            (0.0..REVEAL_TOP_INSET).contains(&first),
+            "it takes what little sits above it ({first} pt) and no more"
         );
     }
 
