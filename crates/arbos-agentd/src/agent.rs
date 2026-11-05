@@ -2204,18 +2204,24 @@ impl Agent {
 
     /// The room to write a reply into, for a lane that resolved its handle before waiting.
     ///
-    /// **Requirement on every caller that closes a room: a room dropped because it is *cold* —
-    /// a cap, an idle sweep, anything meaning "we may want this chat again" — must leave
-    /// `DocHost::closed` false. Only leaving a chat for good may set it.**
+    /// **Requirement on every closer: a room dropped because it is *cold* — a cap, an idle
+    /// sweep, anything meaning "we may want this chat again" — records nothing against the
+    /// chat. Only leaving a chat for good records it ([`SyncHub::may_open`]).**
     ///
-    /// That is the condition this function is correct under, not a remark about how the code
-    /// happens to behave today, and it is worth stating because both ways of getting it wrong
-    /// have already been bugs. Reopen a chat the agent was *removed* from and the box redials a
-    /// room the relay answers 403 to, every 16 s, until it restarts (#1440). Decline to reopen
-    /// a room that was merely cold and the reply is written into a `ChatDoc` nothing pushes —
-    /// invisible to the user and to every gate we have. `closed` is the only thing that tells
-    /// those apart, so `reply_dropped_closed_room` below is what the requirement costs when it
-    /// is broken: at least the loss is loud and countable instead of silent.
+    /// That is the condition this function is correct under, not a remark about how today's
+    /// closers happen to behave, which is what makes a future closer's violation a bug against
+    /// a stated rule rather than a surprise. Both ways of getting it wrong have already been
+    /// bugs. Reopen a chat the agent was *removed* from and the box redials a room the relay
+    /// answers 403 to, every 16 s, until it restarts (#1440). Decline to reopen a room that was
+    /// merely cold and the reply is written into a `ChatDoc` nothing pushes — invisible to the
+    /// user and to every gate we have. So `reply_dropped_closed_room` below is what a broken
+    /// requirement costs: at least the loss is loud and countable instead of silent.
+    ///
+    /// The record is the hub's and is keyed on the chat, not a flag on the handle. A flag can
+    /// only be read by a caller already holding a host, and most writers resolve fresh; worse,
+    /// it goes stale. A chat left, re-added, and then dropped cold leaves the handle this lane
+    /// carries still marked from the removal, so reading it would decline a chat the agent is a
+    /// live member of — which is `a_reply_through_a_stale_handle_survives_a_rejoin_and_a_cold_drop`.
     ///
     /// Why any of this is needed: a `SharedHost` is resolved once and then carried — into a
     /// spawned job task, or across `await_send_order` and `turn_lock`. The hub can drop the room
@@ -2225,16 +2231,17 @@ impl Agent {
         if let Some(live) = self.sync.host(chat_id).await {
             return live;
         }
-        // Gone from the hub and marked closed: by the requirement above, a chat the agent was
-        // removed from. The reply goes where it was always going to go, which is nowhere — said
-        // out loud and counted, because if that requirement is ever broken this line is all that
-        // stands between a dropped reply and silence.
-        if held.lock().await.closed {
+        // Gone from the hub, and the hub says this box may not open it again: by the
+        // requirement above, a chat the agent was removed from. The reply goes where it was
+        // always going to go, which is nowhere — said out loud and counted, because if that
+        // requirement is ever broken this line is all that stands between a dropped reply and
+        // silence.
+        if !self.sync.may_open(chat_id).await {
             tracing::warn!(
                 chat_id,
-                "the chat's room is closed, so this reply is written where nothing will push it; \
-                 if the room was closed for being cold rather than left for good, that is the \
-                 bug — a cold drop must leave `closed` false"
+                "the chat's room is closed and this box may not open it again, so this reply is \
+                 written where nothing will push it; if the room was dropped for being cold \
+                 rather than left for good, that is the bug — a cold drop must record nothing"
             );
             let _ = self
                 .post_timing("reply_dropped_closed_room", 1, Some("send_order"))
