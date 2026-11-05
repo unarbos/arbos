@@ -62,7 +62,8 @@ origin.txt (where it came from, shown as the issue's Source). `inject` writes on
 CLI:  feedback_poller.py [run] | status | testers | set-cursor <ISO-8601>
       | inject <image|-> "<comment>" [ios|mac] [--handle <login>] [--origin "<text>"] [--email <tester email, grouping only>]
                [--note "<owner decision / scope>"] [--id <slug used as the feedback id>]
-      | requeue <id>… [--allow "<who confirmed>"] | prioritize <id>… | confirm <id> [note] | handoff <id> [label] | deployed <id> [note]
+      | requeue <id>… [--allow "<who confirmed>"] [--discard-branch]   (refused while feedback/<id> exists unless --discard-branch)
+      | prioritize <id>… | confirm <id> [note] | handoff <id> <owner> | deployed <id> [note]
       | supersede <id> <by-id> [note]   (a shipped fix was reverted/regressed; <by-id> re-lands it and closes both issues when it ships)
       | track <id> <issue> "<comment>" [--handle <login>] [--owner <label>] [--target ios|mac]   (a hand-filed, handed-off item;
         workers can do the same without root by commenting `track <id> bc-<owner>` on the issue)
@@ -5418,6 +5419,32 @@ def main(argv: list[str]) -> int:
             i = ids.index("--allow")
             allow = ids[i + 1] if i + 1 < len(ids) else "operator"
             del ids[i:i + 2]
+        discard = "--discard-branch" in ids
+        ids = [a for a in ids if a != "--discard-branch"]
+        # A requeue deletes `feedback/<id>` so the new agent starts from main, and a live branch can hold an owner's
+        # work: it goes only with --discard-branch. Judged on the live branch, not `branch_head`: a merged item keeps
+        # `branch_head` after the merge deleted its branch, and requeueing a regressed fix must still work.
+        # Every id is checked before any is touched, so a refusal leaves the whole batch as it was.
+        heads: dict[str, str | None] = {}
+        refused: list[str] = []
+        for fid in ids:
+            st = store.state(fid)
+            if not st:
+                continue
+            try:
+                heads[fid] = loop.gh.branch_head(f"feedback/{fid}")
+            except HttpError as e:
+                refused.append(f"{fid}: refused — could not check whether feedback/{fid} exists (HTTP {e.status}); nothing deleted")
+                continue
+            if heads[fid] and not discard:
+                owner = f", owner {st['handed_off_to']}" if st.get("handed_off_to") else ""
+                refused.append(f"{fid}: refused — requeue would delete feedback/{fid} at {heads[fid][:9]} ({st.get('status')}{owner}). "
+                               f"If the owner is gone, `retire {fid} <note>` ends the item and keeps the branch; to requeue and "
+                               "discard the branch, add --discard-branch")
+        if refused:
+            print("\n".join(refused))
+            print("nothing requeued")
+            return 2
         for fid in ids:
             st = store.state(fid)
             if not st:
@@ -5433,7 +5460,7 @@ def main(argv: list[str]) -> int:
             st = {**keep, "status": "queued", "retries": 0, "tier": tier, "tester": loop.tester_label(info, tier),
                   "tester_key": loop.tester_key(info), "target": loop.pick_target(info)}
             store.save_state(fid, st)
-            store.event(fid, "requeued", tier=tier, tester=st["tester"])
+            store.event(fid, "requeued", tier=tier, tester=st["tester"], discarded_branch_head=heads.get(fid))
             loop.gh.delete_branch(f"feedback/{fid}")  # a fresh agent starts its branch from main again
             if st.get("issue"):
                 with contextlib.suppress(HttpError):
@@ -5442,7 +5469,7 @@ def main(argv: list[str]) -> int:
                     else:
                         loop.gh.comment(st["issue"], "Requeued by the operator; a new agent run follows.")
                     loop.gh.set_labels(st["issue"], [], ["needs-human", "fixed-on-main", "shipped", "shipped-unverified", "no-change"])
-            print(f"{fid}: queued ({tier}, {st['tester']})")
+            print(f"{fid}: queued ({tier}, {st['tester']})" + (f"; branch feedback/{fid} at {heads[fid][:9]} discarded" if heads.get(fid) else ""))
         return 0
     if cmd == "supersede":
         # `supersede <id> <by-id> [note]`: a shipped fix was reverted or regressed and <by-id> re-lands it. The
@@ -5679,6 +5706,14 @@ def main(argv: list[str]) -> int:
     if cmd == "handoff":
         # A dedicated worker owns this item: cancel the agent run, stop tracking, label the issue.
         store = Store(cfg)
+        if len(argv) < 4 or not argv[3].strip():
+            # The label below doubles as the owner, so without an owner the default label became one (#959's
+            # handed_off_to "in-progress", 2026-10-16). A missing owner is a typo; nothing is touched.
+            fid = argv[2] if len(argv) > 2 else ""
+            st = store.state(fid) if fid else {}
+            print(f"{fid or '<id>'}: refused — handoff needs an owner: `handoff <id> bc-<agent id>` (or a workstream label)"
+                  + (f"; the item stays {st.get('status')}" + (f", owner {st['handed_off_to']}" if st.get("handed_off_to") else "") if st else ""))
+            return 2
         loop = Loop(cfg)
         fid, label = argv[2], (argv[3] if len(argv) > 3 else "in-progress")
         st = store.state(fid)
