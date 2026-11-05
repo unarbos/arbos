@@ -103,6 +103,29 @@ impl Pusher {
         }
     }
 
+    /// Is `sender` the mark of a row this socket wrote and the relay could never attribute?
+    ///
+    /// Exactly one thing writes the bare string `agent`: `ChatDoc::start_assistant_message`,
+    /// which is how a box opens every assistant row. That spelling has no `agent:` prefix, so
+    /// [`Self::owns`] matched nothing, [`Self::attribution`] returned `None`, and the relay
+    /// recorded **no author at all** — after which it refused the box's own later removal of
+    /// the row as `not_yours`, forever. On Jacob's box on 2026-11-04 one such removal was
+    /// refused 231 times, and the reply queued behind it never arrived.
+    ///
+    /// This is deliberately a test on what the row says, not on the record being silent.
+    /// "No record" would also match every row written before `message_authors` existed, and
+    /// that set includes people's rows — letting a box delete those is the laundering this
+    /// guard exists to prevent. The bare `agent` spelling cannot reach them: a person's row
+    /// carries `user` or `user:<id>`, a notice carries `system`, and an attributed agent row
+    /// carries `agent:<project_id>`. Nothing else in `doc.rs` writes bare `agent` outside
+    /// tests and fixtures.
+    ///
+    /// It is also self-limiting. Boxes now sign their rows `agent:<project_id>`, so the rows
+    /// this arm forgives are the ones already written by older boxes, and no new ones join.
+    fn wrote_unattributed(&self, sender: Option<&str>) -> bool {
+        matches!(self, Self::BoxOf(_)) && sender == Some("agent")
+    }
+
     /// The author to record for a row this socket introduced, where the relay can name one.
     fn attribution(&self, state: &AppState, sender: Option<&str>) -> Option<String> {
         match self {
@@ -167,9 +190,9 @@ pub fn check_push(
     // Resolved once, and only when something actually needs it: it reads the chat's roster.
     let moderates = || moderation::moderates(state, principal, project_id, chat_id);
 
-    for id in &changes.removed {
+    for (id, was) in &changes.removed {
         let mine = author_of(id).is_some_and(|a| me.owns(state, &a));
-        if !mine && !moderates() {
+        if !mine && !me.wrote_unattributed(was.as_deref()) && !moderates() {
             return PushCheck::Refuse {
                 code: "not_yours",
                 detail: format!(
@@ -206,7 +229,7 @@ pub fn check_push(
     // message as far as the record is concerned: the id already has an author, so the
     // `(Some(a), s)` arm reads it as a heal of attested history and attests nothing new.
     for (id, _) in &changes.inserted {
-        if changes.ids_after.iter().filter(|x| *x == id).count() > 1 {
+        if changes.ids_after.iter().filter(|(x, _)| x == id).count() > 1 {
             return PushCheck::Refuse {
                 code: "duplicate_id",
                 detail: format!(
@@ -371,9 +394,9 @@ mod tests {
         // afterwards, which is what says this is a new message rather than a heal.
         let mut c = as_alice();
         c.ids_after = vec![
-            "m_alice".to_owned(),
-            "m_bob".to_owned(),
-            "m_alice".to_owned(),
+            ("m_alice".to_owned(), None),
+            ("m_bob".to_owned(), None),
+            ("m_alice".to_owned(), None),
         ];
         assert!(refused(&check_push(
             &state,
@@ -406,7 +429,7 @@ mod tests {
         // The heal this must not break: Alice's row is *missing* from the list, so putting it
         // back leaves one of it. That is the shape every real heal has.
         let mut c = as_alice();
-        c.ids_after = vec!["m_alice".to_owned(), "m_bob".to_owned()];
+        c.ids_after = vec![("m_alice".to_owned(), None), ("m_bob".to_owned(), None)];
         assert_eq!(
             kind(&check_push(
                 &state,
@@ -426,10 +449,10 @@ mod tests {
     #[test]
     fn a_push_cannot_delete_a_message_the_relay_attests_to_someone_else() {
         let state = test_state(AuthMode::Github);
-        let (chat, _alice, _bob, alice_dev, bob_dev) = chat_with_two(&state);
+        let (chat, alice, bob, alice_dev, bob_dev) = chat_with_two(&state);
 
         let mut c = changes();
-        c.removed = vec!["m_alice".to_owned()];
+        c.removed = vec![("m_alice".to_owned(), Some(format!("user:{alice}")))];
         assert!(
             refused(&check_push(
                 &state,
@@ -444,7 +467,7 @@ mod tests {
 
         // His own is his to delete, and the owner moderates anyone's.
         let mut c = changes();
-        c.removed = vec!["m_bob".to_owned()];
+        c.removed = vec![("m_bob".to_owned(), Some(format!("user:{bob}")))];
         assert_eq!(
             kind(&check_push(
                 &state,
@@ -457,7 +480,7 @@ mod tests {
             Some(false)
         );
         let mut c = changes();
-        c.removed = vec!["m_bob".to_owned()];
+        c.removed = vec![("m_bob".to_owned(), Some(format!("user:{bob}")))];
         assert!(!refused(&check_push(
             &state,
             &alice_dev,
@@ -465,6 +488,88 @@ mod tests {
             &chat,
             false,
             &c
+        )));
+    }
+
+    /// Recovery, and the reason this arm exists.
+    ///
+    /// A box's own assistant row written by an older agentd carries the bare sender `agent`,
+    /// which the relay could never attribute — so it holds no author for the row and used to
+    /// refuse the box's own removal of it as `not_yours`. The box cannot skip a refused batch
+    /// (Loro needs its ops gap-free), so it re-offered the same batch forever and everything
+    /// written after the removal — the reply a person was waiting for — went with it. Jacob's
+    /// box, 2026-11-04: 231 refusals, and the reply never arrived.
+    ///
+    /// Letting the box retire its own unattributable row is what lets that batch through, and
+    /// with it every op queued behind it.
+    #[test]
+    fn a_box_may_retire_its_own_row_that_the_relay_could_never_attribute() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _alice_dev) = person(&state, 301);
+        let project = "proj_jam".to_owned();
+        state
+            .db
+            .insert_project(&crate::db::Project {
+                id: project.clone(),
+                name: "Arbos".into(),
+                icon: "R".into(),
+                instructions: String::new(),
+                models: serde_json::json!({}),
+                state: "hibernated_light".into(),
+                created_at: 1_700_000_000_000,
+                last_active_at: 1_700_000_000_000,
+                spend_cap_daily: 25.0,
+                color: "#000".into(),
+                user_id: alice.clone(),
+                workspace_state: "stopped".into(),
+                avatar: None,
+                avatar_color: None,
+                description: String::new(),
+                primary_chat_id: None,
+                avatar_color_index: None,
+                avatar_leaf: None,
+                avatar_leaf_color: None,
+                image_key: None,
+                avatar_version: 0,
+            })
+            .unwrap();
+        let chat = format!("chat_{project}");
+        let the_box = Principal::Box {
+            user_id: alice.clone(),
+        };
+
+        // The removal the relay used to refuse, and the reply queued in the same batch.
+        let mut c = changes();
+        c.removed = vec![("m_wordless".to_owned(), Some("agent".to_owned()))];
+        c.inserted = vec![("m_reply".to_owned(), Some(format!("agent:{project}")))];
+        c.ids_after = vec![("m_reply".to_owned(), None)];
+        assert!(
+            !refused(&check_push(&state, &the_box, &project, &chat, false, &c)),
+            "the reply is still stuck behind the box's own unattributable row"
+        );
+
+        // The limit of it. A person's row is not a box's to delete, whether or not the relay
+        // ever recorded an author for it — and rows predating `message_authors` have none.
+        for sender in [
+            Some(format!("user:{alice}")),
+            Some("system".to_owned()),
+            None,
+        ] {
+            let mut c = changes();
+            c.removed = vec![("m_theirs".to_owned(), sender.clone())];
+            assert!(
+                refused(&check_push(&state, &the_box, &project, &chat, false, &c)),
+                "a box deleted a row sent as {sender:?}"
+            );
+        }
+
+        // And it is the box's privilege, not everyone's: a person's device pushing the same
+        // removal is refused exactly as before.
+        let (_bob, bob_dev) = person(&state, 302);
+        let mut c = changes();
+        c.removed = vec![("m_wordless".to_owned(), Some("agent".to_owned()))];
+        assert!(refused(&check_push(
+            &state, &bob_dev, &project, &chat, false, &c
         )));
     }
 

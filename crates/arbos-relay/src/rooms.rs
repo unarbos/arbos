@@ -49,7 +49,7 @@ fn build_room_doc(state: &AppState, room_name: &str) -> anyhow::Result<crate::st
             break;
         }
     }
-    let message_ids = doc.message_ids();
+    let message_ids = doc.message_identities();
     Ok(crate::state::RoomDocCache {
         key: (st.head, st.floor),
         doc,
@@ -100,7 +100,7 @@ fn advance_room_doc(
         // A mirror that may have drifted is worse than a slow one: an id out of place would
         // make a later push's deletion name the wrong message. Pay the sweep instead.
         cached.message_ids = if changes.unreadable {
-            cached.doc.message_ids()
+            cached.doc.message_identities()
         } else {
             changes.ids_after
         };
@@ -3308,5 +3308,215 @@ mod oversized_push_tests {
             ),
             Err(e) => panic!("the link died instead of answering: {e}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod jam_recovery_tests {
+    //! End to end for the jam that cost live replies (#2751): a box's own assistant row written
+    //! by an older agentd carries the bare sender `agent`, which the relay could never
+    //! attribute — so it held no author and refused the box's own removal of the row.
+    //!
+    //! The box cannot skip a refused batch, because Loro needs its ops gap-free, so the refused
+    //! removal held every op written behind it. This asserts the end the owner asked for, and
+    //! not the gate in front of it: the queued reply is *in the room's stored doc* afterwards.
+
+    use axum::routing::get;
+    use axum::Router;
+    use futures::{SinkExt, StreamExt};
+    use serde_json::json;
+    use std::net::SocketAddr;
+    use std::time::Duration;
+    use tokio_tungstenite::tungstenite::Message as TMsg;
+
+    use arbos_core::auth::hash;
+    use arbos_core::doc::{ChatDoc, MessageStatus};
+    use arbos_core::ids::{now_ms, ulid};
+    use arbos_core::wire::{Frame, FrameType};
+
+    use crate::db::{Chat, Sandbox};
+    use crate::people::tests_support::{person, project_of};
+    use crate::state::test_support::test_state;
+    use crate::state::{AppState, AuthMode};
+
+    async fn serve(state: AppState) -> SocketAddr {
+        let app = Router::new()
+            .route("/room/{project}/{chat}", get(super::ws_room))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        addr
+    }
+
+    /// A box of `user`'s, and the raw token it dials with.
+    fn box_token(state: &AppState, user: &str) -> String {
+        let token = format!("box_{}", ulid().to_ascii_lowercase());
+        state
+            .db
+            .upsert_box(&Sandbox {
+                user_id: user.to_owned(),
+                provider: "local".into(),
+                sandbox_id: Some(ulid()),
+                daytona_state: None,
+                device_id: String::new(),
+                box_token_hash: hash(&token),
+                mcp_token: ulid(),
+                snapshot: None,
+                last_started_at: None,
+                last_stopped_at: None,
+                last_seen_at: None,
+                box_url: None,
+                preview_token: None,
+                local_pid: None,
+                migrated_from: Vec::new(),
+            })
+            .unwrap();
+        token
+    }
+
+    fn new_chat(state: &AppState, project: &str) -> String {
+        let chat = ulid();
+        state
+            .db
+            .insert_chat(&Chat {
+                id: chat.clone(),
+                project_id: project.to_owned(),
+                title: "t".into(),
+                is_pinned: false,
+                position: 0,
+                created_at: now_ms(),
+                doc_epoch: 1,
+                kind: "chat".into(),
+                participants: Vec::new(),
+                forked_from: None,
+            })
+            .unwrap();
+        chat
+    }
+
+    async fn push(addr: SocketAddr, room: &str, token: &str, batch: &str, bytes: Vec<u8>) -> Frame {
+        let url = format!("ws://{addr}/room/{room}?token={token}");
+        let (ws, _) = tokio_tungstenite::connect_async(url).await.unwrap();
+        let (mut sink, mut stream) = ws.split();
+        sink.send(TMsg::Binary(
+            Frame::new(
+                FrameType::Hello,
+                json!({
+                    "cursor": 0,
+                    "device": "box:test",
+                    "room": room,
+                    "proto": arbos_core::PROTO_VERSION
+                }),
+                bytes::Bytes::new(),
+            )
+            .encode(),
+        ))
+        .await
+        .unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let decode = |m: TMsg| match m {
+            TMsg::Binary(b) => Frame::decode(b).ok().flatten(),
+            _ => None,
+        };
+        loop {
+            let m = tokio::time::timeout_at(deadline, stream.next())
+                .await
+                .expect("relay answers")
+                .unwrap()
+                .unwrap();
+            let Some(f) = decode(m) else { continue };
+            match f.ty {
+                FrameType::State => {
+                    sink.send(TMsg::Binary(
+                        Frame::new(
+                            FrameType::RowsReq,
+                            json!({ "after": 0, "excludeOwn": false }),
+                            bytes::Bytes::new(),
+                        )
+                        .encode(),
+                    ))
+                    .await
+                    .unwrap();
+                }
+                FrameType::RowsDone => break,
+                _ => {}
+            }
+        }
+        sink.send(TMsg::Binary(
+            Frame::new(
+                FrameType::Push,
+                json!({ "batchId": batch }),
+                bytes::Bytes::from(bytes),
+            )
+            .encode(),
+        ))
+        .await
+        .unwrap();
+        loop {
+            let m = tokio::time::timeout_at(deadline, stream.next())
+                .await
+                .expect("ack or error")
+                .unwrap()
+                .unwrap();
+            if let Some(f) = decode(m) {
+                if matches!(f.ty, FrameType::Ack | FrameType::Error) {
+                    return f;
+                }
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_reply_queued_behind_a_refused_removal_reaches_the_rooms_stored_doc() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 1);
+        let project = project_of(&state, &alice, "Jam");
+        let chat = new_chat(&state, &project);
+        let room = format!("{project}/{chat}");
+        let token = box_token(&state, &alice);
+        let addr = serve(state.clone()).await;
+
+        // An older agentd's assistant row: the bare sender the relay can never attribute.
+        let doc = ChatDoc::new(Some(7), false);
+        let base = doc.oplog_vv();
+        doc.init_meta("c", "p", 1);
+        doc.start_assistant_message("m_wordless", "", "box:test");
+        doc.finish_message("m_wordless", MessageStatus::Done);
+        let first = doc.export_updates_since(&base);
+        let f = push(addr, &room, &token, &ulid(), first).await;
+        assert_eq!(f.ty, FrameType::Ack, "the row itself was never the problem");
+
+        // The batch that used to jam: the box retires its own row, and the reply a person is
+        // waiting for is written after it, so it rides in the same batch.
+        let mark = doc.oplog_vv();
+        doc.delete_message("m_wordless").unwrap();
+        doc.append_user_message(
+            "m_reply",
+            "the answer",
+            "box:test",
+            &arbos_core::doc::UserMessageOpts::default(),
+        )
+        .unwrap();
+        let second = doc.export_updates_since(&mark);
+        let f = push(addr, &room, &token, &ulid(), second).await;
+        assert_eq!(
+            f.ty,
+            FrameType::Ack,
+            "the relay refused the batch: {}",
+            f.header
+        );
+
+        // The assertion nobody has to reason about: the reply is in the room's stored doc,
+        // rebuilt from the rows the relay kept, not merely un-refused on the way in.
+        let stored = super::build_room_doc(&state, &room).expect("rebuild");
+        assert!(
+            stored.doc.message("m_reply").is_some(),
+            "the reply never reached the room's stored doc"
+        );
+        assert!(
+            stored.doc.message("m_wordless").is_none(),
+            "and the row the box retired is gone"
+        );
     }
 }
