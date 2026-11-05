@@ -18,6 +18,7 @@ uniffi::setup_scaffolding!();
 
 pub mod avatar;
 pub mod chart;
+pub mod chat_search;
 pub mod highlight;
 pub mod markdown;
 pub mod matrix;
