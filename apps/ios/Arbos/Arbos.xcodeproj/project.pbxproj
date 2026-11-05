@@ -182,6 +182,8 @@
 		A1680000000000000000A031 /* PaneCardGlassTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1680000000000000000A030 /* PaneCardGlassTests.swift */; };
 		A1F6000000000000000000C2 /* ChatSearchShortcut.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F6000000000000000000C1 /* ChatSearchShortcut.swift */; };
 		A1F6000000000000000000CA /* ChatSearchSenderPin.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F6000000000000000000C9 /* ChatSearchSenderPin.swift */; };
+		A1F6000000000000000000CE /* ChatSearchField.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F6000000000000000000CD /* ChatSearchField.swift */; };
+		A1F6000000000000000000D0 /* ChatSearchChip.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F6000000000000000000CF /* ChatSearchChip.swift */; };
 		A1F6000000000000000000CC /* ChatSearchSenderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F6000000000000000000CB /* ChatSearchSenderTests.swift */; };
 		A1F6000000000000000000C4 /* ChatSearchShortcutTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F6000000000000000000C3 /* ChatSearchShortcutTests.swift */; };
 		A1F6000000000000000000C6 /* ChatSearchCloseTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F6000000000000000000C5 /* ChatSearchCloseTests.swift */; };
@@ -441,6 +443,8 @@
 		A1680000000000000000A030 /* PaneCardGlassTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneCardGlassTests.swift; sourceTree = "<group>"; };
 		A1F6000000000000000000C1 /* ChatSearchShortcut.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatSearchShortcut.swift; sourceTree = "<group>"; };
 		A1F6000000000000000000C9 /* ChatSearchSenderPin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatSearchSenderPin.swift; sourceTree = "<group>"; };
+		A1F6000000000000000000CD /* ChatSearchField.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatSearchField.swift; sourceTree = "<group>"; };
+		A1F6000000000000000000CF /* ChatSearchChip.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatSearchChip.swift; sourceTree = "<group>"; };
 		A1F6000000000000000000CB /* ChatSearchSenderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatSearchSenderTests.swift; sourceTree = "<group>"; };
 		A1F6000000000000000000C3 /* ChatSearchShortcutTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatSearchShortcutTests.swift; sourceTree = "<group>"; };
 		A1F6000000000000000000C5 /* ChatSearchCloseTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatSearchCloseTests.swift; sourceTree = "<group>"; };
@@ -685,6 +689,8 @@
 				A11B0000000000000000A001 /* LibraryList.swift */,
 				A15EC9000000000000000001 /* AgentPicker.swift */,
 				A1B5EA00000000000000A007 /* GlobalSearchView.swift */,
+				A1F6000000000000000000CD /* ChatSearchField.swift */,
+				A1F6000000000000000000CF /* ChatSearchChip.swift */,
 			);
 			path = UI;
 			sourceTree = "<group>";
@@ -1001,6 +1007,8 @@
 				A15E00000000000000000002 /* HomeSearch.swift in Sources */,
 				A1F6000000000000000000C2 /* ChatSearchShortcut.swift in Sources */,
 				A1F6000000000000000000CA /* ChatSearchSenderPin.swift in Sources */,
+				A1F6000000000000000000CE /* ChatSearchField.swift in Sources */,
+				A1F6000000000000000000D0 /* ChatSearchChip.swift in Sources */,
 				A1B5EA00000000000000A004 /* SearchIndex.swift in Sources */,
 				A1B5EA00000000000000A002 /* GlobalSearch.swift in Sources */,
 				A1A9D0000000000000000002 /* AgentIdentity.swift in Sources */,

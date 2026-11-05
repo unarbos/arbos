@@ -340,9 +340,18 @@ struct ChatSession: View {
     /// own close-on-tap steps aside ([feedback iphone-search-close-2026-10-28]).
     @State private var searchResultTapped: Id?
     @State private var searchText = ""
+    /// Search-in-chat pinned to one sender ("From Sam Rivera", the Mac's chip):
+    /// their messages only, ANDed with the keyword when there is one. Jacob
+    /// 2026-10-26 asked to find things in a chat "by key word, user name etc."
+    /// and this phone had only the keyword.
+    @State private var searchSender: ChatSearchSender?
     /// Group chats: pick members to call, or call everyone.
     @State private var showGroupCallPicker = false
-    @FocusState private var searchFocused: Bool
+    /// The field is a `UITextField` (`ChatSearchField`), so that ⌫ on an empty
+    /// field can reach the chip; its first responder follows this both ways,
+    /// the way the composer's does. Every `searchFocused = …` below is unchanged
+    /// by that — only `.focused($…)` went away.
+    @State private var searchFocused = false
     @ObservedObject private var calls = CallManager.shared
     /// iMessage-style: drag the transcript left to peek message times (0…`RowView.timeRevealWidth`).
     /// Driven by the transcript's swipe recognizer (`TranscriptSwipeHost`).
@@ -699,12 +708,13 @@ struct ChatSession: View {
     /// back where a fresh open would show them (a window that slid while the filter was on
     /// was measured against the filtered list; [feedback iphone-search-close-2026-10-28]).
     private func closeSearch(scrollToTail: Bool = true) {
-        guard showSearch || !searchText.isEmpty || searchFocused else { return }
+        guard showSearch || !searchText.isEmpty || searchSender != nil || searchFocused else { return }
         var t = Transaction()
         t.disablesAnimations = true
         withTransaction(t) {
             showSearch = false
             searchText = ""
+            searchSender = nil
             windowSkipEnd = 0
             windowCount = min(max(windowCount, Self.windowInitial), Self.windowMax)
         }
@@ -735,6 +745,65 @@ struct ChatSession: View {
         searchResultTapped = messageId
         closeSearch(scrollToTail: false)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { revealQuoted(messageId) }
+    }
+
+    /// Everyone who posted in the loaded rows, one entry each, in the order they
+    /// first appear — the pool a typed name is offered from. The display name
+    /// comes from `MediaAlbum.senderName`, this app's one answer to "what do we
+    /// call this message's sender", so the chip cannot name someone differently
+    /// from the media viewer or a bubble.
+    private var searchSenders: [ChatSearchSender] {
+        ChatSearchSenderPin.posted(rows.compactMap { row in
+            guard let m = messageById[row.messageId] else { return nil }
+            return ChatSearchSender(
+                key: m.sender,
+                name: MediaAlbum.senderName(m) { model.project($0)?.name },
+                handle: m.senderHandle ?? "",
+                avatarUrl: m.senderAvatar)
+        })
+    }
+
+    /// The sender the typed text names, offered as a chip. `nil` once one is
+    /// pinned: the shared rules close the offer, so a chip is changed by
+    /// removing it and never by typing over it.
+    private var searchOffer: ChatSearchSender? {
+        guard showSearch else { return nil }
+        return ChatSearchSenderPin.offer(typed: searchText, in: searchSenders, pinned: searchSender)
+    }
+
+    /// The sender key a row's message carries (`user:<id>`, `agent:<id>`), which
+    /// is what the filter compares — never the name on the chip.
+    private func m_senderKey(_ row: Row) -> String {
+        messageById[row.messageId]?.sender ?? ""
+    }
+
+    /// Pin the offered sender: the results become theirs, and the typed name has
+    /// done its job so the field is cleared for a keyword to narrow them with.
+    private func pinSearchSender(_ sender: ChatSearchSender) {
+        withAnimation(.easeOut(duration: 0.18)) {
+            searchSender = sender
+            searchText = ""
+        }
+        searchFocused = true
+    }
+
+    /// Take the chip off. The filter goes with it — the rows it was holding stop
+    /// being hits in the same step, so no filter outlives its chip — and the
+    /// field keeps the keyboard, as it does on the Mac.
+    private func unpinSearchSender() {
+        withAnimation(.easeOut(duration: 0.18)) { searchSender = nil }
+        searchFocused = true
+    }
+
+    /// ⌫ reached the bar because the field had nothing to delete for
+    /// (`ChatSearchField`): the decision is `ChatSearchBackspace`'s, so this and
+    /// the Mac cannot disagree about when the key is the chip's. `false` hands
+    /// the key back to the field rather than swallowing it.
+    private func searchBackspace() -> Bool {
+        guard ChatSearchBackspace.apply(fieldEmpty: searchText.isEmpty,
+                                        pinned: searchSender != nil) == .unpinSender else { return false }
+        unpinSearchSender()
+        return true
     }
 
     /// Hardware-keyboard keys for the bar ([feedback iphone-chat-search-cmd-f-2026-10-26]).
@@ -1231,11 +1300,22 @@ struct ChatSession: View {
                 if showSearch {
                     HStack(spacing: 8) {
                         Image(systemName: "magnifyingglass").font(.system(size: Controls.glyph, weight: .medium)).foregroundStyle(theme.muted)
-                        TextField("", text: $searchText, prompt: Text("Search in chat").foregroundStyle(theme.placeholder))
-                            .font(theme.font(Theme.body)).foregroundStyle(theme.text)
-                            .focused($searchFocused)
-                            .autocorrectionDisabled()
-                            .accessibilityIdentifier("chat-search-field")
+                        // The pinned sender, ahead of the field like the Mac's:
+                        // tapping it removes the filter, and so does ⌫ with the
+                        // caret in an empty field.
+                        if let pinned = searchSender {
+                            ChatSearchPinnedChip(sender: pinned) { unpinSearchSender() }
+                        }
+                        ChatSearchField(text: $searchText, isFocused: $searchFocused,
+                                        placeholder: "Search in chat", theme: theme,
+                                        onDeleteBackwardEmpty: { searchBackspace() })
+                        // The sender a typed name offers; a tap pins it. Nothing
+                        // is offered once one is pinned, which is the Mac's
+                        // behaviour and an open question, so it is asked in the
+                        // shared rules rather than decided here.
+                        if let offer = searchOffer {
+                            ChatSearchOfferChip(sender: offer) { pinSearchSender(offer) }
+                        }
                         // The ✕ ([feedback iphone-search-close-2026-10-28], Jacob: "the x button
                         // doesn't work"): the glyph alone was the hit target — 17 pt beside a
                         // 48 pt field, so a near miss refocused the field instead. The whole
