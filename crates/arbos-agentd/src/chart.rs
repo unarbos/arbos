@@ -129,6 +129,25 @@ pub async fn post(
         .room(&target.chat_id)
         .await
         .map_err(|e| anyhow::anyhow!("chat {} has no room on this box: {e}", target.chat_id))?;
+    // Bug AB on the far side, as in `media::deliver`: the gate above decided before the picture
+    // was rendered, before it was uploaded and before this task queued for the room lock, and
+    // the row below is the only thing the user sees. This window is the longer of the two,
+    // because `picture_png` runs inside it.
+    let steer_gated = target.job_id.as_deref().filter(|_| !target.main_turn);
+    if let Some(job_id) = steer_gated {
+        let hold = a
+            .steer_gate
+            .hold(&target.chat_id, job_id, a.cfg.steer_hold())
+            .await;
+        if hold == crate::steer_gate::Hold::SteerFirst {
+            anyhow::bail!(crate::steer_gate::SteerFirst);
+        }
+        if a.job_is_cancelled(job_id) {
+            anyhow::bail!(
+                "this job was cancelled while the chart waited, so nothing more of it goes into the chat; the chart was NOT posted"
+            );
+        }
+    }
     let msg_id = ulid();
     let att_id = ulid();
     let chart_id = ulid();
@@ -168,6 +187,10 @@ pub async fn post(
     });
     {
         let h = host.lock().await;
+        // The last moment before the row exists; the wait for this lock is part of the window.
+        if steer_gated.is_some_and(|job_id| a.steer_gate.steer_first_now(job_id)) {
+            anyhow::bail!(crate::steer_gate::SteerFirst);
+        }
         let ask = reply_to
             .map(str::trim)
             .filter(|r| !r.is_empty() && h.doc.message(r).is_some())

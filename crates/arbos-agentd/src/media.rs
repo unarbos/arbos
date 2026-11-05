@@ -512,10 +512,35 @@ pub async fn deliver(
         .room(&target.chat_id)
         .await
         .map_err(|e| anyhow::anyhow!("chat {} has no room on this box: {e}", target.chat_id))?;
+    // Bug AB on the far side of the upload (round 12, `r12race`). The gate above decided before
+    // the bytes went to the relay and before this task queued for the room lock below, and the
+    // row is the only thing the user sees — so a correction that arrived in between was decided
+    // against by a look that could not have seen it. Asked again here, and again under the lock
+    // where awaiting is not allowed, as `steer_gate.rs` sets out.
+    let steer_gated = target.job_id.as_deref().filter(|_| !target.main_turn);
+    if let Some(job_id) = steer_gated {
+        let hold = a
+            .steer_gate
+            .hold(&target.chat_id, job_id, a.cfg.steer_hold())
+            .await;
+        if hold == crate::steer_gate::Hold::SteerFirst {
+            return Err(anyhow::Error::new(crate::steer_gate::SteerFirst));
+        }
+        if a.job_is_cancelled(job_id) {
+            anyhow::bail!(
+                "this job was cancelled while the file waited, so nothing more of it goes into the chat; the file was NOT posted"
+            );
+        }
+    }
     let msg_id = ulid();
     let caption = caption.map(str::trim).filter(|c| !c.is_empty());
     {
         let h = host.lock().await;
+        // The last moment the question can be asked before the row exists. The wait for this
+        // lock is itself part of the window: the routing lane holds it to write its own rows.
+        if steer_gated.is_some_and(|job_id| a.steer_gate.steer_first_now(job_id)) {
+            return Err(anyhow::Error::new(crate::steer_gate::SteerFirst));
+        }
         let ask = reply_to
             .map(str::trim)
             .filter(|r| !r.is_empty() && h.doc.message(r).is_some())
