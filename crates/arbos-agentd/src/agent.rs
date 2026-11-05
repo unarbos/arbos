@@ -6707,7 +6707,16 @@ impl Agent {
             "Continue this task the main agent started and could not finish quickly; the user has already seen a one-line acknowledgement.\n\nUser request: {user_text}\n\nPlan: {plan}\n\nDone so far:\n{transcript}\n\nFinish it and return the answer the user should read. For a comparison or research: each item with its page URL, the compared facts, the sources you used and what could not be checked. Do not repeat the acknowledgement."
         );
         match self
-            .start_job(chat_id, host, user_msg_id, &title, &brief, kind, Vec::new())
+            .start_job(
+                chat_id,
+                host,
+                user_msg_id,
+                &title,
+                &brief,
+                kind,
+                Vec::new(),
+                crate::forced_job::forces_a_job(user_text),
+            )
             .await
         {
             Ok(v) => {
@@ -6870,12 +6879,39 @@ impl Agent {
         let Some(host) = self.sync.host(&chat_id).await else {
             return Err("no room for this chat".into());
         };
-        self.start_job(&chat_id, &host, &user_msg_id, &title, brief, kind, touches)
-            .await
+        // The same signal the burst path reads (`forced_job.rs`), read from the ask itself: a
+        // job the user asked for in words must not meet the per-chat cap in one path and pass
+        // it in the other.
+        let forced = {
+            let h = host.lock().await;
+            h.doc
+                .message(&user_msg_id)
+                .map(|m| m.text())
+                .is_some_and(|t| crate::forced_job::forces_a_job(&t))
+        };
+        self.start_job(
+            &chat_id,
+            &host,
+            &user_msg_id,
+            &title,
+            brief,
+            kind,
+            touches,
+            forced,
+        )
+        .await
     }
 
     /// Start a job for `user_msg_id` in `chat_id` (the `start_job` tool and the step-4 act→job
     /// conversion share this): caps, the row, the worker task. Returns `{job_id, title, state}`.
+    ///
+    /// `forced` = the user's own words asked for a background job (`forced_job.rs`). Such a job
+    /// passes the per-chat cap. That cap bounds how much work the *model* may put in one chat
+    /// off its own judgement; it was never a promise that a person's fourth explicit request is
+    /// refused (bug U: four forced asks two seconds apart, and the third-and-fourth refusal
+    /// would read as the agent ignoring them). The per-agent cap still holds for every job, and
+    /// a job over the per-chat cap only holds a row until a worker slot frees, so what the cap
+    /// really guards — workers — is bounded either way.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn start_job(
         self: &Arc<Self>,
@@ -6886,6 +6922,7 @@ impl Agent {
         brief: &str,
         kind: &str,
         touches: Vec<String>,
+        forced: bool,
     ) -> Result<Value, String> {
         let title = title.to_owned();
         let open_here = self
@@ -6898,10 +6935,18 @@ impl Agent {
         let open_all = self.store.open_jobs().unwrap_or_default().len();
         let cap_chat = crate::config::job_max_per_chat();
         let cap_agent = crate::config::job_max_per_agent();
-        if open_here >= cap_chat {
+        if open_here >= cap_chat && !forced {
             return Err(format!(
                 "{open_here} jobs already run in this chat (cap {cap_chat}); fold this into one of them or wait for one to finish, and tell the user"
             ));
+        }
+        if open_here >= cap_chat {
+            tracing::info!(
+                chat_id,
+                open_here,
+                cap_chat,
+                "the user asked for this job in words; it passes the per-chat cap"
+            );
         }
         if open_all >= cap_agent {
             return Err(format!(
@@ -8225,6 +8270,16 @@ impl Agent {
         if from_voice || from_routine || user_text.trim().is_empty() {
             return Ok(false);
         }
+        // The ask below is not a job, whatever this function is called: it is a subagent that
+        // writes its answer straight into the chat, with no job row, no job id and nothing
+        // `list_jobs`, `steer_job` or `stop_job` can name. When the user's own words say the
+        // work must run as a background job and not inline, that is the wrong shape (bug U), so
+        // the forced ask starts a real job here instead.
+        if crate::forced_job::forces_a_job(&user_text) {
+            return self
+                .start_forced_job(chat_id, host, &user_msg_id, &user_text)
+                .await;
+        }
         let cap = self
             .job_cap
             .lock()
@@ -8263,27 +8318,7 @@ impl Agent {
             }
         );
         let purpose: String = words.join(" ").chars().take(140).collect();
-        let recent = self
-            .store
-            .t3_thread(chat_id, None, None, 12)
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|r| r.kind == "user" || r.kind == "assistant")
-            .map(|r| {
-                format!(
-                    "- {}: {}",
-                    r.role.unwrap_or_default(),
-                    r.text
-                        .split_whitespace()
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                        .chars()
-                        .take(240)
-                        .collect::<String>()
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+        let recent = self.recent_turns_for_brief(chat_id);
         let mut prelude = String::new();
         if let Some(p) = self.people_turn_context(chat_id, host, &user_msg_id).await {
             prelude = p;
@@ -8363,6 +8398,87 @@ impl Agent {
             drop(ticket);
         });
         Ok(true)
+    }
+
+    /// A message that arrived mid-turn and says in its own words that the work is a background
+    /// job, not inline work (`forced_job.rs`): start the job the user asked for, here, without
+    /// the main session. Returns `Ok(true)` when the job is running or queued.
+    ///
+    /// The title and the brief come from the user's words, as they do for the step-4 act→job
+    /// conversion ([`Agent::convert_act_turn_to_job`]); the kind is `other`, because nothing
+    /// here knows whether the work is research, code or ops, and `other` is the kind that takes
+    /// no path or git lock on a guess.
+    ///
+    /// `Ok(false)` means no job was started — jobs are off on this box, or the per-agent cap is
+    /// full. The ask then queues for the main session exactly as it did before, which is the one
+    /// path left that can still make it a job and can tell the user in words why it could not.
+    async fn start_forced_job(
+        self: &Arc<Self>,
+        chat_id: &str,
+        host: &SharedHost,
+        user_msg_id: &str,
+        user_text: &str,
+    ) -> Result<bool> {
+        let recent = self.recent_turns_for_brief(chat_id);
+        let title = crate::forced_job::title_for(user_text);
+        let brief = format!(
+            "The user sent this message while you were busy with another request in the same chat, and asked for it to run as a background job rather than inside that turn.\n\nMessage: {user_text}\n\nRecent turns in this chat:\n{recent}\n\nDo what the message asks and return the answer the user should read: plain prose, no process narration, no mention of other requests."
+        );
+        match self
+            .start_job(
+                chat_id,
+                host,
+                user_msg_id,
+                &title,
+                &brief,
+                "other",
+                Vec::new(),
+                true,
+            )
+            .await
+        {
+            Ok(v) => {
+                tracing::info!(
+                    chat_id,
+                    job = %v["job_id"],
+                    %title,
+                    "the message asked for a background job; one started beside the running turn"
+                );
+                Ok(true)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    chat_id,
+                    error = %e,
+                    "the message asked for a background job and none could start; it queues for the main session"
+                );
+                Ok(false)
+            }
+        }
+    }
+
+    /// The last turns of a chat, one short line each, for a job brief written without the model.
+    fn recent_turns_for_brief(&self, chat_id: &str) -> String {
+        self.store
+            .t3_thread(chat_id, None, None, 12)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| r.kind == "user" || r.kind == "assistant")
+            .map(|r| {
+                format!(
+                    "- {}: {}",
+                    r.role.unwrap_or_default(),
+                    r.text
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                        .chars()
+                        .take(240)
+                        .collect::<String>()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     #[allow(clippy::too_many_arguments)]

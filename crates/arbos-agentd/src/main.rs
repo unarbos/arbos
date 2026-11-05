@@ -13,6 +13,9 @@ mod cross_workspace_auth_tests;
 mod disk;
 mod eval;
 mod feedback;
+mod forced_job;
+#[cfg(test)]
+mod forced_job_tests;
 mod goals;
 mod groups;
 mod handoff;
