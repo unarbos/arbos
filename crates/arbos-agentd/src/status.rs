@@ -1110,10 +1110,27 @@ pub(crate) mod tests {
     /// logged it before every stalled message of `r11burst`.
     pub(crate) const EMPTY_STATUS_ASK: &str = "what is going on with the empty one?";
 
+    /// The unmet acceptance criterion round 12's worker wrote, as it sits in the notes a
+    /// job-result call carries (`job_background_claim_tests.rs`, bug AD). A call whose notes hold
+    /// it is answered below with the sentence the real talking model wrote from it.
+    pub(crate) const AD_UNMET_BACKGROUND_CRITERION: &str =
+        "\"criterion\": \"background job\", \"met\": false";
+
+    /// Round 12's final post, as the talking model wrote it: the result, and then the unmet
+    /// criterion restated to the user as a description of what happened.
+    pub(crate) const AD_MODEL_ANSWER: &str = "All four steps finished: 1,200 rows parsed, 1,196 normalised, and the summary table is written to summary.csv. One thing to flag: the four steps ran in the foreground, not as a background job.";
+
     async fn mock_quick(axum::Json(body): axum::Json<Value>) -> axum::response::Response {
         use axum::response::IntoResponse;
         tokio::time::sleep(Duration::from_millis(300)).await;
         let user = body["messages"][1]["content"].as_str().unwrap_or("");
+        if user.contains(AD_UNMET_BACKGROUND_CRITERION) {
+            return axum::Json(json!({
+                "choices": [{ "message": { "role": "assistant", "content": AD_MODEL_ANSWER }, "finish_reason": "stop" }],
+                "usage": { "prompt_tokens": 900, "completion_tokens": 40 }
+            }))
+            .into_response();
+        }
         // Opus 5.5 (Jacob, Test5, 2026-11-04): the endpoint rejects `reasoning {enabled:false}`
         // outright, and serves the answer only when the flag is absent.
         if user.contains(REASONING_MANDATORY_ASK) {
