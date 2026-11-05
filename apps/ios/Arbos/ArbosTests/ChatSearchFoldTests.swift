@@ -81,8 +81,13 @@ final class ChatSearchFoldTests: XCTestCase {
                       "the keyword is folded in one place")
         XCTAssertTrue(src.contains("keyword.isEmpty || HomeSearch.fold(text).contains(keyword)"),
                       "both halves of the comparison go through the same fold")
-        XCTAssertTrue(src.contains("return rows.filter { Self.searchMatches(m_text($0), keyword: q) }"),
-                      "the row filter calls it")
+        // The filter now asks the shared rules whether a row hits, since the
+        // keyword is only half of it ([feedback search-in-chat-mac-2026-10-26]
+        // — "key word, user name etc."). What this assertion is for is
+        // unchanged: the keyword's verdict on a body is still `searchMatches`
+        // and still folded, so no second comparison crept into the filter.
+        XCTAssertTrue(src.contains("keywordInText: Self.searchMatches(m_text($0), keyword: q)"),
+                      "the row filter gets the keyword's verdict from it")
         XCTAssertTrue(src.contains("showSearch && !Self.searchKeyword(searchText).isEmpty"),
                       "the hit wash and the filter read the same keyword")
     }

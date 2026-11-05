@@ -14807,11 +14807,8 @@ impl AppState {
     /// The sender the typed text names, offered as a chip while none is pinned.
     pub fn chat_search_offer(&self) -> Option<chat_search::Sender> {
         let search = self.chat_search.as_ref()?;
-        if search.query.sender.is_some() {
-            return None;
-        }
         let senders = chat_search::senders(&self.chat_search_rows(&search.chat_id));
-        chat_search::offer_sender(&search.typed, &senders).cloned()
+        chat_search::offer_sender(&search.typed, &senders, search.query.sender.as_ref()).cloned()
     }
 
     /// Enter / › (+1), ⇧Enter / ‹ (−1), ⌘G / ⇧⌘G: move the cursor, reveal the

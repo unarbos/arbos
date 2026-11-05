@@ -5,7 +5,7 @@
 //! count says, and which bytes of a rendered text to mark.
 //!
 //! A query is a keyword (folded like every other search in the app —
-//! `arbos_core::search::fold`) and an optional pinned sender; a message hits
+//! [`crate::search::fold`]) and an optional pinned sender; a message hits
 //! when it is from that sender AND its text contains the keyword (an empty
 //! keyword with a pinned sender = all of that sender's messages). Hits keep
 //! the transcript's order (1 = the oldest loaded) like Find; the cursor starts
@@ -13,15 +13,19 @@
 //! loaded hit asks for older rows when the chat may have some
 //! ([`Step::PageOlder`]). While typing, a name or @handle that matches someone
 //! in the chat is offered as a sender chip (the shared matcher of #1918,
-//! `arbos_core::search::match_entity`); ⇥ or a click pins it.
+//! [`crate::search::match_entity`]); ⇥ or a click pins it.
 //!
-//! The view lives in `ui::chat_search`; the state in `AppState::chat_search`.
+//! Both clients read these rules from here, so neither can drift from the
+//! other: the Mac re-exports the module as `crate::chat_search` (its view is
+//! `ui::chat_search`, its state `AppState::chat_search`), and the iPhone reaches
+//! it through `arbos-ffi`.
 
 use std::ops::Range;
 
-use arbos_core::search::{fold, match_entity, normalize_query, Match};
+use crate::search::{fold, match_entity, normalize_query, Match};
 
-use crate::model::Id;
+/// A message id — the clients' own `Id`, which is a `String` on both.
+type Id = String;
 
 /// Someone who posted in the chat: the chip's name and handle, and the key
 /// a message's sender is compared by.
@@ -66,16 +70,43 @@ impl Query {
     }
 
     pub fn hits_row(&self, row: &Row) -> bool {
-        if self.is_empty() {
+        row_hits(
+            &self.keyword,
+            self.sender.as_ref().map(|s| s.key.as_str()),
+            &row.sender.key,
+            || fold(&row.text).contains(&self.keyword),
+        )
+    }
+}
+
+/// Does one row hit, given the keyword's own verdict on its text?
+///
+/// The composition is the rule: a pinned sender ANDs with the keyword, an empty
+/// query hits nothing, and a pinned sender with an empty keyword takes every one
+/// of that sender's messages. A sender is compared by `key` — `user:<id>`,
+/// `agent:<id>`, a handle — so that half never folds text at all.
+///
+/// `keyword_in_text` is "the folded keyword occurs in this row's folded text",
+/// left to the caller because the two clients fold message bodies differently
+/// and deliberately: the Mac uses [`crate::search::fold`] (through
+/// [`Query::hits_row`]), the iPhone uses Foundation's folding, which is also
+/// width-insensitive. It is a closure, so a row the sender already rejected
+/// never pays for the fold.
+pub fn row_hits(
+    keyword: &str,
+    sender_key: Option<&str>,
+    row_sender_key: &str,
+    keyword_in_text: impl FnOnce() -> bool,
+) -> bool {
+    if keyword.is_empty() && sender_key.is_none() {
+        return false;
+    }
+    if let Some(key) = sender_key {
+        if row_sender_key != key {
             return false;
         }
-        if let Some(s) = &self.sender {
-            if row.sender.key != s.key {
-                return false;
-            }
-        }
-        self.keyword.is_empty() || fold(&row.text).contains(&self.keyword)
     }
+    keyword.is_empty() || keyword_in_text()
 }
 
 /// The typed text as a keyword: folded and trimmed, inner whitespace kept
@@ -95,10 +126,16 @@ pub fn hits(rows: &[Row], query: &Query) -> Vec<Id> {
 
 /// Everyone who posted, in first-appearance order, one entry per key.
 pub fn senders(rows: &[Row]) -> Vec<Sender> {
+    first_by_key(rows.iter().map(|r| r.sender.clone()))
+}
+
+/// One entry per `key`, in first-appearance order: the chip list's order, for a
+/// client that has its rows' senders without this module's [`Row`].
+pub fn first_by_key(senders: impl IntoIterator<Item = Sender>) -> Vec<Sender> {
     let mut out: Vec<Sender> = Vec::new();
-    for r in rows {
-        if !out.iter().any(|s| s.key == r.sender.key) {
-            out.push(r.sender.clone());
+    for s in senders {
+        if !out.iter().any(|seen| seen.key == s.key) {
+            out.push(s);
         }
     }
     out
@@ -107,7 +144,19 @@ pub fn senders(rows: &[Row]) -> Vec<Sender> {
 /// The sender the typed text names, if any: best match by the shared
 /// matcher's order (exact > prefix > word-start, name before handle). Only
 /// while no sender is pinned yet and something is typed.
-pub fn offer_sender<'a>(typed: &str, senders: &'a [Sender]) -> Option<&'a Sender> {
+///
+/// `pinned` closes the offer entirely: with a sender already pinned there is
+/// no offer however the typed text reads, so the only way to change one is to
+/// remove the chip. Whether typing should swap it instead is an open question,
+/// and it is asked here so that neither client can answer it on its own.
+pub fn offer_sender<'a>(
+    typed: &str,
+    senders: &'a [Sender],
+    pinned: Option<&Sender>,
+) -> Option<&'a Sender> {
+    if pinned.is_some() {
+        return None;
+    }
     let q = normalize_query(typed);
     if q.is_empty() {
         return None;
@@ -322,30 +371,98 @@ mod tests {
         assert_eq!(all.len(), 3, "one entry per sender, first appearance order");
         assert_eq!(all[0].name, "Jacob Steeves");
         assert_eq!(
-            offer_sender("aff", &all).map(|s| s.name.as_str()),
+            offer_sender("aff", &all, None).map(|s| s.name.as_str()),
             Some("Affine")
         );
         assert_eq!(
-            offer_sender("@sam", &all).map(|s| s.name.as_str()),
+            offer_sender("@sam", &all, None).map(|s| s.name.as_str()),
             Some("Sam Rivera")
         );
         assert_eq!(
-            offer_sender("rivera", &all).map(|s| s.name.as_str()),
+            offer_sender("rivera", &all, None).map(|s| s.name.as_str()),
             Some("Sam Rivera"),
             "word start"
         );
         assert_eq!(
-            offer_sender("Jacob S", &all).map(|s| s.handle.as_str()),
+            offer_sender("Jacob S", &all, None).map(|s| s.handle.as_str()),
             Some("unarbos")
         );
-        assert_eq!(offer_sender("canvas", &all), None);
-        assert_eq!(offer_sender("", &all), None);
+        assert_eq!(offer_sender("canvas", &all, None), None);
+        assert_eq!(offer_sender("", &all, None), None);
+        // Nothing is offered once a sender is pinned, whatever is typed: the
+        // only way to change one is to remove the chip. Jacob has not ruled on
+        // whether typing should swap it, so both clients ask here and neither
+        // can answer it differently.
+        assert_eq!(
+            offer_sender("aff", &all, Some(&all[2])),
+            None,
+            "a pinned sender is not swapped by typing another name"
+        );
         // A whole name beats a handle prefix of someone else: "sam" is Sam's
         // handle exactly, not a prefix of anything on Jacob.
         assert_eq!(
-            offer_sender("sam", &all).map(|s| s.name.as_str()),
+            offer_sender("sam", &all, None).map(|s| s.name.as_str()),
             Some("Sam Rivera")
         );
+    }
+
+    /// The composition — a pinned sender ANDs with the keyword, and a pinned
+    /// sender with an empty keyword takes all of that sender's messages — is
+    /// one rule, usable by a client whose text folding is its own.
+    #[test]
+    fn the_sender_and_the_keyword_compose_in_one_place_whatever_folds_the_text() {
+        // Nothing to search for: not a hit however the text folds.
+        assert!(!row_hits("", None, "user:sam", || true));
+        // A keyword alone: the caller's verdict on the text decides.
+        assert!(row_hits("canvas", None, "user:sam", || true));
+        assert!(!row_hits("canvas", None, "user:sam", || false));
+        // A pinned sender alone: every one of that sender's rows, no keyword.
+        assert!(row_hits("", Some("user:sam"), "user:sam", || false));
+        assert!(!row_hits("", Some("user:sam"), "user:me", || true));
+        // Both: AND.
+        assert!(row_hits("canvas", Some("user:sam"), "user:sam", || true));
+        assert!(!row_hits("canvas", Some("user:sam"), "user:sam", || false));
+        assert!(!row_hits("canvas", Some("user:sam"), "user:me", || true));
+        // The sender is compared by key, never by what it shows.
+        assert!(!row_hits("", Some("user:sam"), "Sam Rivera", || true));
+        // A row the sender already rejected never has its text folded.
+        let mut asked = false;
+        assert!(!row_hits("canvas", Some("user:sam"), "user:me", || {
+            asked = true;
+            true
+        }));
+        assert!(!asked, "the wrong sender decides before the text is folded");
+    }
+
+    /// The Mac's own predicate is that composition with the core's fold put in,
+    /// so there is one rule and not two that happen to agree today.
+    #[test]
+    fn hits_row_is_the_shared_composition_with_the_cores_fold() {
+        let rows = rows();
+        let affine = senders(&rows)
+            .into_iter()
+            .find(|s| s.name == "Affine")
+            .expect("Affine posted");
+        for q in [
+            Query::new("export", Some(affine.clone())),
+            Query::new("", Some(affine.clone())),
+            Query::new("canvas", None),
+            Query::default(),
+        ] {
+            for r in &rows {
+                assert_eq!(
+                    q.hits_row(r),
+                    row_hits(
+                        &q.keyword,
+                        q.sender.as_ref().map(|s| s.key.as_str()),
+                        &r.sender.key,
+                        || fold(&r.text).contains(&q.keyword)
+                    ),
+                    "{} under {q:?}",
+                    r.id
+                );
+            }
+        }
     }
 
     #[test]
