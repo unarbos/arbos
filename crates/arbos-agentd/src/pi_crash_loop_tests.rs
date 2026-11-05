@@ -38,7 +38,7 @@ use arbos_core::doc::{CommandView, UserMessageOpts};
 use arbos_core::ids::{now_ms, ulid};
 use serde_json::{json, Value};
 
-use crate::agent::Agent;
+use crate::agent::{Agent, PI_RESTARTING_LINE};
 use crate::status::tests::{test_agent, test_agent_with_pi};
 use crate::sync::SharedHost;
 
@@ -63,15 +63,54 @@ struct Stub {
 /// response, short enough that the tests are quick.
 const STUB_LIFE_MS: u64 = 150;
 
+/// What the scripted child does. Written beside the script as JSON, so every start reads the
+/// same brief and a test does not have to count positional arguments.
+#[derive(Clone, Copy)]
+struct StubCfg {
+    /// This many starts answer `get_state`, write the audit line and then exit 9.
+    die_for: i64,
+    /// Every start dies that way.
+    forever: bool,
+    /// The first start dies inside its prompt instead, after streaming its words: bug V's race.
+    race: bool,
+    /// How long a dying start holds ready before it goes.
+    life_ms: u64,
+    /// After this many prompts, the start refuses every `switch_session` with "already
+    /// processing" — a child left believing a run is still streaming (bug Y, phase two). 0 never.
+    wedge_after_prompts: i64,
+    /// The wedge applies to every start, not only the first.
+    wedge_every_start: bool,
+    /// `get_state` answers `success: false`: a child that is up and cannot serve.
+    bad_state: bool,
+}
+
+impl Default for StubCfg {
+    fn default() -> Self {
+        Self {
+            die_for: 0,
+            forever: false,
+            race: false,
+            life_ms: STUB_LIFE_MS,
+            wedge_after_prompts: 0,
+            wedge_every_start: false,
+            bad_state: false,
+        }
+    }
+}
+
 fn stub(die_for: i64, forever: bool) -> Stub {
-    stub_with(die_for, forever, false, STUB_LIFE_MS)
+    stub_cfg(StubCfg {
+        die_for,
+        forever,
+        ..StubCfg::default()
+    })
 }
 
 /// `race` makes the first start die in the middle of its prompt, after it has streamed its
 /// words and before it settles — bug V's turn-end race, which is what started bug Y.
 /// `life_ms` is how long a dying child stays ready: past one supervisor tick, and the loop finds
 /// it alive and idle, which is the window Test5's park caught a doomed child in.
-fn stub_with(die_for: i64, forever: bool, race: bool, life_ms: u64) -> Stub {
+fn stub_cfg(cfg: StubCfg) -> Stub {
     let dir = std::env::temp_dir().join(format!("arbos-pi-stub-{}", ulid()));
     std::fs::create_dir_all(&dir).unwrap();
     let script = dir.join("stub-pi.py");
@@ -80,10 +119,11 @@ fn stub_with(die_for: i64, forever: bool, race: bool, life_ms: u64) -> Stub {
         r#"import json, os, sys, time
 
 here = os.path.dirname(os.path.abspath(__file__))
-die_for = int(sys.argv[1])
-forever = sys.argv[2] == "1"
-race = sys.argv[3] == "1"
-life_s = float(sys.argv[4]) / 1000.0
+cfg = json.load(open(os.path.join(here, "cfg.json")))
+die_for = cfg["die_for"]
+forever = cfg["forever"]
+race = cfg["race"]
+life_s = cfg["life_ms"] / 1000.0
 
 # Which start is this? The counter lives beside the script, so a respawn sees the last one.
 counter = os.path.join(here, "starts")
@@ -120,6 +160,11 @@ def audit(kind):
 # The first start of a race run serves its prompt and dies inside it instead of at boot.
 mid_turn = race and n == 1
 dying = (forever or n <= die_for) and not mid_turn
+# A child that can wedge: after `wedge_after_prompts` prompts it believes a run is still
+# streaming and refuses every session switch, exactly as a stale run makes pi refuse one.
+can_wedge = cfg["wedge_after_prompts"] > 0 and (cfg["wedge_every_start"] or n == 1)
+prompts_served = 0
+wedged = False
 
 for line in sys.stdin:
     try:
@@ -129,8 +174,19 @@ for line in sys.stdin:
     t = c.get("type")
     r = {"type": "response", "id": c.get("id"), "command": t, "success": True}
     if t == "get_state":
-        r["data"] = {"isStreaming": False}
+        if cfg["bad_state"]:
+            r["success"] = False
+            r["error"] = "session state unavailable"
+        else:
+            r["data"] = {"isStreaming": wedged}
+    if t == "switch_session" and wedged:
+        r["success"] = False
+        r["error"] = "already processing a request"
     out(r)
+    if t == "prompt" and can_wedge:
+        prompts_served += 1
+        if prompts_served >= cfg["wedge_after_prompts"]:
+            wedged = True
     if t == "get_state":
         # The extension loads after the process can serve RPC; Test5's audit line is the only
         # trace four thousand of these children left.
@@ -159,15 +215,24 @@ for line in sys.stdin:
 "#,
     )
     .unwrap();
+    std::fs::write(
+        dir.join("cfg.json"),
+        json!({
+            "die_for": cfg.die_for,
+            "forever": cfg.forever,
+            "race": cfg.race,
+            "life_ms": cfg.life_ms,
+            "wedge_after_prompts": cfg.wedge_after_prompts,
+            "wedge_every_start": cfg.wedge_every_start,
+            "bad_state": cfg.bad_state,
+        })
+        .to_string(),
+    )
+    .unwrap();
     let launcher = dir.join("stub-pi");
     std::fs::write(
         &launcher,
-        format!(
-            "#!/bin/sh\nexec python3 {} {die_for} {} {} {life_ms} \"$@\"\n",
-            script.display(),
-            if forever { 1 } else { 0 },
-            if race { 1 } else { 0 }
-        ),
+        format!("#!/bin/sh\nexec python3 {} \"$@\"\n", script.display()),
     )
     .unwrap();
     #[cfg(unix)]
@@ -274,12 +339,17 @@ async fn visible_answers(host: &SharedHost, user_msg: &str) -> Vec<(String, Stri
         .collect()
 }
 
-/// Every error part in the chat, as `code: text`. Test5's 25 messages left one each.
+/// Every error part the user can see, as `code: text`. Test5's 25 messages left one each.
+///
+/// Hidden rows are skipped, because neither client draws them: a failed attempt the box then
+/// re-ran and answered is retired, and what matters is that the chat the user reads has the
+/// answer in it and no "send it again" above it.
 async fn error_parts(host: &SharedHost) -> Vec<String> {
     let h = host.lock().await;
     h.doc
         .messages()
         .into_iter()
+        .filter(|m| m.rest.get("hidden").and_then(Value::as_bool) != Some(true))
         .flat_map(|m| m.parts.clone())
         .filter(|p| p.get("kind").and_then(Value::as_str) == Some("error"))
         .map(|p| {
@@ -497,7 +567,11 @@ async fn a_child_that_never_works_is_reported_degraded_and_every_message_is_answ
 async fn a_child_that_dies_young_is_never_parked_and_the_box_says_it_is_degraded() {
     // Each child outlives a supervisor tick, so the loop does find it alive and idle. Without
     // that the park branch is never even reached and this test proves nothing about parking.
-    let s = stub_with(0, true, false, 2_500);
+    let s = stub_cfg(StubCfg {
+        forever: true,
+        life_ms: 2_500,
+        ..StubCfg::default()
+    });
     let (agent, _root) = test_agent_with_pi(&s.bin).await;
     fast_backoff(&agent);
     let chat = "01TESTCHATPICRASHLOOP0003";
@@ -563,7 +637,11 @@ async fn a_child_that_dies_young_is_never_parked_and_the_box_says_it_is_degraded
 /// fix does not touch.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_turn_end_race_does_not_start_a_crash_loop_and_the_correction_lands() {
-    let s = stub_with(3, false, true, STUB_LIFE_MS);
+    let s = stub_cfg(StubCfg {
+        die_for: 3,
+        race: true,
+        ..StubCfg::default()
+    });
     let (agent, _root) = test_agent_with_pi(&s.bin).await;
     fast_backoff(&agent);
     let chat = "01TESTCHATPICRASHLOOP0004";
@@ -713,6 +791,233 @@ async fn a_box_with_no_ready_child_for_two_minutes_is_not_healthy() {
         Agent::PI_UNHEALTHY_AFTER_MS,
         120_000,
         "the threshold the relay's restart path inherits"
+    );
+}
+
+/// Phase two, the burst: a job start and three messages inside two seconds, all answered.
+///
+/// **What the burst is and is not.** Round 9's 04:35 burst is the traffic that exposed the
+/// wedge, and a job start is load-bearing in the mechanism — a job runs its turn in its own
+/// chat, so it moves the main child's session, and every message after it needs a switch back.
+/// But the state that made the switch fail was created earlier, by the 04:29 `route=act` turn
+/// that ended with `pi_ready` false. This test pins "a job start plus three quick sends is
+/// handled correctly", which is worth pinning on its own; it is not evidence that the burst
+/// caused the outage, and the production fix does not depend on it having done so.
+///
+/// The job's turn is stood in for by a turn in a second chat, which is what a job's own chat is
+/// from the main child's point of view: the thing that leaves `current_chat` pointing elsewhere.
+/// Starting a real job would bring in the worker, its approval card and its delivery path, none
+/// of which this fix touches.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_job_start_and_three_quick_messages_are_all_answered_and_the_child_never_wedges() {
+    // The first child serves its own chat, then the job's, and is then stuck believing a run is
+    // streaming — so every switch back is refused, which is phase two exactly.
+    let s = stub_cfg(StubCfg {
+        wedge_after_prompts: 2,
+        ..StubCfg::default()
+    });
+    let (agent, _root) = test_agent_with_pi(&s.bin).await;
+    fast_backoff(&agent);
+    let chat = "01TESTCHATPICRASHLOOP0005";
+    let job_chat = "01TESTCHATPICRASHLOOP0006";
+    for c in [chat, job_chat] {
+        agent
+            .store
+            .upsert_chat(c, "burst", false, now_ms())
+            .unwrap();
+    }
+    let host = agent.sync.open_room(chat).await.unwrap();
+    let job_host = agent.sync.open_room(job_chat).await.unwrap();
+    agent.start_pi(chat).await.expect("the first child boots");
+
+    // A turn in the user's chat, so the child has served one prompt and the session is this chat.
+    let (first, first_cmd) = send_cmd(&host, "what is the box doing?").await;
+    agent
+        .handle_command(chat, first_cmd)
+        .await
+        .expect("answered");
+
+    // The job's own turn: the child serves it, and is stuck from here.
+    let (job_msg, job_cmd) = send_cmd(&job_host, "start the nightly export").await;
+    let _ = agent.handle_command(job_chat, job_cmd).await;
+
+    // The burst: three sends inside two seconds, each needing the session switched back.
+    let mut burst = Vec::new();
+    for text in [
+        "make it CSV, not JSON",
+        "how long will that take?",
+        "and what is the box's disk at?",
+    ] {
+        let (id, cmd) = send_cmd(&host, text).await;
+        let a = agent.clone();
+        burst.push((
+            id,
+            tokio::spawn(async move { a.handle_command(chat, cmd).await }),
+        ));
+    }
+    let started = Instant::now();
+    for (_, task) in &mut burst {
+        let _ = task.await.unwrap();
+    }
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "the three sends have to land inside two seconds to be the burst: {:?}",
+        started.elapsed()
+    );
+
+    // And the fourth, two minutes later in the round 9 timeline.
+    let (fourth, fourth_cmd) = send_cmd(&host, "still there?").await;
+    let _ = agent.handle_command(chat, fourth_cmd).await;
+
+    // Every message is answered, including the ones the wedge swallowed.
+    for (what, id) in [
+        ("the first turn", &first),
+        ("the job", &job_msg),
+        ("the correction", &burst[0].0),
+        ("the first question", &burst[1].0),
+        ("the second question", &burst[2].0),
+        ("the message two minutes later", &fourth),
+    ] {
+        let h = match what == "the job" {
+            true => &job_host,
+            false => &host,
+        };
+        let id = id.clone();
+        wait_until(&format!("{what} was answered"), || {
+            let (h, id) = (h.clone(), id.clone());
+            async move {
+                visible_answers(&h, &id)
+                    .await
+                    .iter()
+                    .any(|(_, t)| !t.is_empty() && t != PI_RESTARTING_LINE)
+            }
+        })
+        .await;
+    }
+    for (what, h) in [("the chat", &host), ("the job's chat", &job_host)] {
+        let errors = error_parts(h).await;
+        assert!(errors.is_empty(), "{what} carries no error row: {errors:?}");
+    }
+
+    // The invariant that actually matters: the box never settles into "sends fail and readiness
+    // reads true". One more message proves it, because a wedged child failed every one of them.
+    let (last, last_cmd) = send_cmd(&host, "one more").await;
+    agent
+        .handle_command(chat, last_cmd)
+        .await
+        .expect("a box that is not wedged answers the next message");
+    assert!(
+        !visible_answers(&host, &last).await.is_empty(),
+        "and the answer is in the chat"
+    );
+    assert_eq!(
+        agent
+            .pi_send_failures
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "no run of failures is still open"
+    );
+    assert!(
+        agent.is_healthy(),
+        "a box that answered every message is well"
+    );
+}
+
+/// Phase two, the health half: a child that is up and cannot serve is not a healthy box.
+///
+/// Two ways for a child to be up and useless, and today's `pi_ready || pi_parked` calls both of
+/// them well. The first is the one that kept Test5 reporting health for two and a half hours:
+/// `respawn_pi` read only the transport of the boot `get_state`, never the `success` in the
+/// body, so a child that answered badly was recorded ready. The second is a run of sends that
+/// all fail before the router — `route=none`, no tool call — which nothing counted at all.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_child_that_cannot_serve_is_reported_degraded_and_never_reads_ready() {
+    let s = stub_cfg(StubCfg {
+        bad_state: true,
+        ..StubCfg::default()
+    });
+    let (agent, _root) = test_agent_with_pi(&s.bin).await;
+    fast_backoff(&agent);
+    let chat = "01TESTCHATPICRASHLOOP0007";
+    agent
+        .store
+        .upsert_chat(chat, "bad state", false, now_ms())
+        .unwrap();
+    let _host = agent.sync.open_room(chat).await.unwrap();
+    // The boot has to fail on the body: the process is up and its pipes are fine.
+    let boot = agent.start_pi(chat).await;
+    assert!(
+        boot.is_err(),
+        "a child that answers get_state with success: false has not booted"
+    );
+    assert!(
+        !agent.pi_ready.load(std::sync::atomic::Ordering::SeqCst),
+        "and it is never recorded ready"
+    );
+
+    // The supervisor keeps trying, each attempt fails the same way, and the box says so.
+    let a = agent.clone();
+    wait_until("the box reported itself degraded", || {
+        let a = a.clone();
+        async move { a.pi_degraded.load(std::sync::atomic::Ordering::SeqCst) }
+    })
+    .await;
+    assert!(
+        !agent.is_healthy(),
+        "a box with no child that can answer is not healthy"
+    );
+    let said = audit_lines(&agent, "agent_degraded");
+    assert!(
+        said.iter()
+            .any(|v| v.get("state").and_then(Value::as_str) == Some("degraded")),
+        "and it is written down durably, not only in a warn ring: {said:?}"
+    );
+
+    // The second way in: a run of sends that fail before the router. Driven directly, because
+    // three real failing turns measure the turn machinery rather than the counting.
+    let (clean, _root2) = test_agent().await;
+    assert!(
+        clean.is_healthy(),
+        "a box nobody has asked anything is well"
+    );
+    for i in 1..Agent::PI_SEND_FAILURES_DEGRADED {
+        clean
+            .note_send_outcome(chat, &Err(anyhow::anyhow!("switch_session: refused")))
+            .await;
+        assert!(
+            clean.is_healthy(),
+            "{i} failures is a bad turn, not a broken box"
+        );
+    }
+    clean
+        .note_send_outcome(chat, &Err(anyhow::anyhow!("switch_session: refused")))
+        .await;
+    assert!(
+        !clean.is_healthy(),
+        "{} sends in a row that failed before the router is a box that cannot answer",
+        Agent::PI_SEND_FAILURES_DEGRADED
+    );
+    let failed = audit_lines(&clean, "pi_send_failed");
+    assert_eq!(
+        failed.len() as u32,
+        Agent::PI_SEND_FAILURES_DEGRADED,
+        "every one of them is written down, with its error text"
+    );
+    assert!(
+        failed
+            .iter()
+            .all(|v| v.get("error").and_then(Value::as_str) == Some("switch_session: refused")),
+        "and the text says what failed, so one occurrence is diagnosable: {failed:?}"
+    );
+
+    // One send that works ends the run: a bad turn must not accumulate towards degraded forever.
+    clean.note_send_outcome(chat, &Ok(())).await;
+    assert_eq!(
+        clean
+            .pi_send_failures
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "the count is a run of failures, not a lifetime total"
     );
 }
 

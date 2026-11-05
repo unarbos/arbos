@@ -1803,6 +1803,10 @@ pub struct Agent {
     pub(crate) pi_owed_sends: Mutex<Vec<(String, CommandView)>>,
     /// A drain is already running, so a later supervisor tick does not start a second one.
     pi_draining: AtomicBool,
+    /// Sends that failed in a row, reset by the first one that works (bug Y, phase two). Test5
+    /// failed every send for thirty minutes while reporting itself healthy, because nothing
+    /// counted them and nothing drew a conclusion from them.
+    pub(crate) pi_send_failures: std::sync::atomic::AtomicU32,
     /// agentd stopped listening to a pi run before pi settled it (a Prompt call that timed out,
     /// a relay turn cut short, a turn deadline): pi may still be running it, and would reject
     /// the next plain prompt with "Agent is already processing" (#2073, Doug 2026-10-27). The
@@ -2004,6 +2008,7 @@ impl Agent {
             pi_supervisor_tick_ms: std::sync::atomic::AtomicU64::new(0),
             pi_owed_sends: Mutex::new(Vec::new()),
             pi_draining: AtomicBool::new(false),
+            pi_send_failures: std::sync::atomic::AtomicU32::new(0),
             pi_run_orphaned: AtomicBool::new(false),
             pi_model: Mutex::new(None),
             compaction_floor: std::sync::Mutex::new(HashMap::new()),
@@ -2364,32 +2369,40 @@ impl Agent {
                 },
                 Duration::from_secs(30),
             )
-            .await?;
-        if !state.success {
-            return Err(anyhow!("pi get_state failed: {:?}", state.error));
-        }
-        tracing::info!(ms = t0.elapsed().as_millis() as i64, "pi main agent ready");
-        self.watch_pi_child(&child);
-        *self.pi.lock().await = Some(child);
-        *self.pi_model.lock().await = Some(talking_model.clone());
-        *self.current_chat.lock().await = Some(initial_chat.to_owned());
-        self.note_pi_ready();
-        self.store.upsert_session(
-            initial_chat,
-            None,
-            Some(&session.display().to_string()),
-            &self.cfg.work_dir.display().to_string(),
-            &talking_model,
-            "pi",
-            "main",
-        )?;
-        let _ = self
-            .post_timing("pi_boot_ms", t0.elapsed().as_millis() as i64, None)
             .await;
-        // The extension writes an `extension_loaded` audit line on load.
-        if let Ok(s) = std::fs::read_to_string(self.cfg.audit_path()) {
-            if s.contains("\"extension_loaded\"") {
-                self.ext_loaded.store(true, Ordering::SeqCst);
+        // A boot that fails is still a box that needs a supervisor (bug Y). This used to return
+        // here, before the loop below was spawned, so an agent whose first child answered badly
+        // had nothing retrying it and nothing reporting it: no respawn, no backoff, no degraded
+        // report, and `is_healthy` still reading the startup defaults.
+        let boot_failed = match &state {
+            Ok(s) if s.success => None,
+            Ok(s) => Some(format!("pi get_state failed: {:?}", s.error)),
+            Err(e) => Some(e.to_string()),
+        };
+        if boot_failed.is_none() {
+            tracing::info!(ms = t0.elapsed().as_millis() as i64, "pi main agent ready");
+            self.watch_pi_child(&child);
+            *self.pi.lock().await = Some(child.clone());
+            *self.pi_model.lock().await = Some(talking_model.clone());
+            *self.current_chat.lock().await = Some(initial_chat.to_owned());
+            self.note_pi_ready();
+            self.store.upsert_session(
+                initial_chat,
+                None,
+                Some(&session.display().to_string()),
+                &self.cfg.work_dir.display().to_string(),
+                &talking_model,
+                "pi",
+                "main",
+            )?;
+            let _ = self
+                .post_timing("pi_boot_ms", t0.elapsed().as_millis() as i64, None)
+                .await;
+            // The extension writes an `extension_loaded` audit line on load.
+            if let Ok(s) = std::fs::read_to_string(self.cfg.audit_path()) {
+                if s.contains("\"extension_loaded\"") {
+                    self.ext_loaded.store(true, Ordering::SeqCst);
+                }
             }
         }
         // Supervise: respawn on exit (sandbox-image.md §3.3).
@@ -2484,6 +2497,15 @@ impl Agent {
                 }
             }
         });
+        if let Some(why) = boot_failed {
+            // Said, then handed to the loop above: the slot stays empty, so its respawn branch
+            // picks this up with the backoff and the five-death escalation.
+            self.report_pi_child_exit(&child, "boot").await;
+            child.shutdown().await;
+            self.note_pi_not_ready();
+            self.pi_wake.notify_one();
+            return Err(anyhow!("{why}"));
+        }
         Ok(())
     }
 
@@ -2982,10 +3004,15 @@ impl Agent {
     /// True while a respawn holds the slot, while the box has reported itself degraded, and
     /// whenever it has had no ready child since one last worked. False on a box that never
     /// started pi at all, which has nothing to wait for.
+    ///
+    /// The clock is read as "is it running", not "how long has it run". `now_ms()` has
+    /// millisecond resolution, so a send that fails in the same millisecond as the child was
+    /// taken away reads zero elapsed — and in a burst that is the send that was in flight when
+    /// it happened, which is precisely the one that must not be handed an error row.
     pub(crate) fn pi_restarting(&self) -> bool {
         self.pi_respawning.load(Ordering::SeqCst)
             || self.pi_degraded.load(Ordering::SeqCst)
-            || self.pi_unready_for_ms() > 0
+            || self.pi_unready_since_ms.load(Ordering::SeqCst) != 0
     }
 
     /// Wait for a main pi child that is alive *and* has answered its boot `get_state`.
@@ -3047,7 +3074,7 @@ impl Agent {
         }
     }
 
-    async fn ensure_chat_session(&self, chat_id: &str) -> Result<()> {
+    async fn ensure_chat_session(self: &Arc<Self>, chat_id: &str) -> Result<()> {
         if self.current_chat.lock().await.as_deref() == Some(chat_id) {
             return Ok(());
         }
@@ -3086,14 +3113,42 @@ impl Agent {
         Ok(())
     }
 
-    async fn switch_session_to(&self, chat_id: &str, path: &std::path::Path) -> Result<()> {
+    async fn switch_session_to(
+        self: &Arc<Self>,
+        chat_id: &str,
+        path: &std::path::Path,
+    ) -> Result<()> {
         let pi = self.pi().await?;
         let t0 = Instant::now();
-        pi.call_ok(RpcCommand::SwitchSession {
-            id: pi.next_id("sw"),
-            session_path: path.display().to_string(),
-        })
-        .await?;
+        // Read the answer, not just the transport (bug Y, phase two). This call runs before the
+        // router, so a child that answers it with `success: false` fails the turn with no route
+        // and no tool call — and `current_chat` is only set below, on success, so the next send
+        // tries the same switch and fails the same way. Test5 round 9 spent thirty minutes in
+        // exactly that state: every send an immediate `route=none` error, the child alive, the
+        // readiness flag true and the box reporting itself well. A child that answers and says
+        // no is a child that cannot serve this chat, and is retired on the spot.
+        let answered = pi
+            .call(RpcCommand::SwitchSession {
+                id: pi.next_id("sw"),
+                session_path: path.display().to_string(),
+            })
+            .await;
+        match answered {
+            Ok(r) if r.success => {}
+            Ok(r) => {
+                let why = r.error.unwrap_or_default();
+                // A full disk is not the child's fault, and retiring children over it would
+                // turn one ENOSPC into an endless respawn. The disk line already tells the
+                // user what to do (`user_error_line` -> `disk::friendly`).
+                if crate::disk::is_enospc(&why) {
+                    return Err(anyhow!("switch_session: {why}"));
+                }
+                self.retire_unserviceable_pi_child(&pi, &format!("switch_session refused: {why}"))
+                    .await;
+                return Err(anyhow!("{PI_RETIRED_ERR} switch_session refused: {why}"));
+            }
+            Err(e) => return Err(e),
+        }
         tracing::info!(
             chat_id,
             ms = t0.elapsed().as_millis() as i64,
@@ -3111,6 +3166,149 @@ impl Agent {
             "main",
         )?;
         Ok(())
+    }
+
+    /// Consecutive failed sends before the box stops calling itself well.
+    ///
+    /// Three, not five: a send failure is a user watching an error row appear, where a child
+    /// death is a process the box can replace without anyone noticing. Test5 round 9 produced
+    /// five in the first burst and then one every five minutes for half an hour.
+    pub(crate) const PI_SEND_FAILURES_DEGRADED: u32 = 3;
+
+    /// How long the probe waits for a child to say it is alive and well.
+    const PI_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+
+    /// Record how a send went, and act on a failure instead of only showing it.
+    ///
+    /// Bug Y, phase two. Every send failure was a row in the chat and nothing else: no event, no
+    /// probe, no conclusion. The box erred identically for thirty minutes because nothing was
+    /// counting, so nothing could notice that the count was not going down.
+    pub(crate) async fn note_send_outcome(self: &Arc<Self>, chat_id: &str, res: &Result<()>) {
+        let Err(e) = res else {
+            if self.pi_send_failures.swap(0, Ordering::SeqCst) > 0 {
+                tracing::warn!(chat_id, "a send worked again; the failure run is over");
+            }
+            return;
+        };
+        let error = e.to_string();
+        let failures = self.pi_send_failures.fetch_add(1, Ordering::SeqCst) + 1;
+        // Warn-level and durably audited, so one occurrence is diagnosable: the warn ring is a
+        // single 500-entry buffer for the whole box and a busy agent overwrites it in minutes.
+        tracing::warn!(chat_id, failures, error, "a send failed");
+        self.append_audit(
+            "pi_send_failed",
+            json!({
+                "chat_id": chat_id,
+                "failures": failures,
+                "error": error,
+                "pi_ready": self.pi_ready.load(Ordering::SeqCst),
+            }),
+        );
+        if failures >= Self::PI_SEND_FAILURES_DEGRADED {
+            self.report_send_failure_degraded(chat_id, failures, &error)
+                .await;
+        }
+        // The child may be fine and the failure the model's or a tool's; ask it rather than
+        // assume either way. A child that cannot answer this is a child no send will reach.
+        self.verify_pi_serves(chat_id).await;
+    }
+
+    /// Say that the box cannot answer, by the same route the crash loop uses.
+    async fn report_send_failure_degraded(
+        self: &Arc<Self>,
+        chat_id: &str,
+        failures: u32,
+        error: &str,
+    ) {
+        if self.pi_degraded.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        tracing::warn!(
+            chat_id,
+            failures,
+            error,
+            "the box has failed every recent send; it reports itself degraded"
+        );
+        self.append_audit(
+            "agent_degraded",
+            json!({
+                "state": "degraded",
+                "chat_id": chat_id,
+                "reason": "sends_failing",
+                "failures": failures,
+                "error": error,
+            }),
+        );
+        self.report_agent_state("degraded").await;
+    }
+
+    /// Ask the live child whether it can still serve, and retire it when it cannot.
+    ///
+    /// The probe is `get_state`, which is what every boot already uses, and the bar is the one
+    /// `start_pi` sets and `respawn_pi` used not to: the answer has to say `success: true`.
+    async fn verify_pi_serves(self: &Arc<Self>, chat_id: &str) {
+        let Some(pi) = self.pi.lock().await.clone() else {
+            return;
+        };
+        if !pi.is_alive() {
+            // Already gone: the supervisor's respawn branch owns this one.
+            return;
+        }
+        let probed = pi
+            .call_timeout(
+                RpcCommand::GetState {
+                    id: pi.next_id("probe"),
+                },
+                Self::PI_PROBE_TIMEOUT,
+            )
+            .await;
+        let bad = match &probed {
+            Ok(r) if r.success => None,
+            Ok(r) => Some(format!(
+                "probe answered success: false: {}",
+                r.error.clone().unwrap_or_default()
+            )),
+            Err(e) => Some(format!("probe failed: {e}")),
+        };
+        match bad {
+            None => tracing::debug!(
+                chat_id,
+                "the child answered the probe; the send failure was not its"
+            ),
+            Some(why) => self.retire_unserviceable_pi_child(&pi, &why).await,
+        }
+    }
+
+    /// Take a child that cannot serve out of the slot so the supervisor replaces it.
+    ///
+    /// Shutting it down rather than reporting it separately is deliberate: `is_alive` goes false,
+    /// and the respawn branch the crash-loop work already covers picks it up with the backoff,
+    /// the exit report and the five-death escalation. A session file the child keeps refusing
+    /// therefore becomes five deaths, which rotates that file — which is the right answer to it.
+    async fn retire_unserviceable_pi_child(self: &Arc<Self>, pi: &Arc<RpcChild>, why: &str) {
+        let retired = {
+            let mut slot = self.pi.lock().await;
+            match slot.as_ref().map(|c| c.pid()) == Some(pi.pid()) {
+                true => slot.take(),
+                false => None,
+            }
+        };
+        let Some(child) = retired else {
+            // A respawn already replaced it, or another send got here first.
+            return;
+        };
+        tracing::warn!(
+            pid = ?child.pid(),
+            why,
+            "the main pi child answered and refused; retiring it for a fresh one"
+        );
+        self.append_audit(
+            "pi_child_unserviceable",
+            json!({ "pid": child.pid(), "why": why }),
+        );
+        self.note_pi_not_ready();
+        child.shutdown().await;
+        self.pi_wake.notify_one();
     }
 
     // ---- commands -----------------------------------------------------------------------------
@@ -3345,6 +3543,9 @@ impl Agent {
             }
             other => other,
         };
+        if matches!(cmd.kind.as_str(), "send" | "answer") {
+            self.note_send_outcome(chat_id, &res).await;
+        }
         let leave_taken = match (&res, people_msg_id.as_deref()) {
             (Ok(()), Some(msg_id)) => self.people_shared_send_open(chat_id, &host, msg_id).await,
             _ => false,
@@ -3373,12 +3574,13 @@ impl Agent {
                         .unwrap_or("");
                     if !user_msg.is_empty() {
                         // A failed steer still has the live turn's assistant row; only surface a
-                        // new error bubble when nothing is answering this user message.
+                        // new error bubble when nothing at all is under this user message —
+                        // including a row that failed, which is a row the user can already see.
                         if !h
                             .doc
                             .messages()
                             .iter()
-                            .any(|m| answers_message(m, user_msg))
+                            .any(|m| replies_to_message(m, user_msg))
                         {
                             let id = ulid();
                             h.doc
@@ -3454,6 +3656,10 @@ impl Agent {
             "send_rerun_after_pi_loss",
             json!({ "chat_id": chat_id, "command_id": cmd.id, "error": first_error }),
         );
+        // The failed attempt left a row saying the agent restarted and to send the message
+        // again. The box is about to send it again itself, so that row stops being true the
+        // moment this re-run starts; leaving it would put "try again" above the answer.
+        self.retire_failed_rows(host, cmd).await;
         // The re-run can lose a child too: in a crash loop the box has one for a second or so at
         // a time, and bug Y's box was in exactly that state for two and a half hours. Losing the
         // second child is no more this message's fault than losing the first, so it is told and
@@ -3464,6 +3670,19 @@ impl Agent {
                 self.owe_send_while_restarting(chat_id, host, cmd).await
             }
             other => other,
+        }
+    }
+
+    /// Hide the rows a failed attempt at this message left behind.
+    async fn retire_failed_rows(&self, host: &SharedHost, cmd: &CommandView) {
+        let Some(user_msg) = cmd.payload.get("messageId").and_then(Value::as_str) else {
+            return;
+        };
+        let h = host.lock().await;
+        for m in h.doc.messages() {
+            if replies_to_message(&m, user_msg) && m.status == "error" {
+                h.doc.set_message_fields(&m.id, &[("hidden", json!(true))]);
+            }
         }
     }
 
@@ -11117,7 +11336,15 @@ pub(crate) fn looks_imperative(text: &str) -> bool {
 /// it is listening. Both are the box losing a process and neither is a judgement on the
 /// message, which is why they belong with the rest: every caller of this either writes
 /// [`CHILD_ERROR_LINE`] or re-runs the send.
+/// Prefix on the error from a send whose child was retired for refusing to serve (bug Y,
+/// phase two). It marks the one case where the box took the child away mid-send, which is a
+/// restart like any other from the message's point of view: it is owed an answer, not an errno.
+pub(crate) const PI_RETIRED_ERR: &str = "pi child retired:";
+
 pub(crate) fn is_child_error(text: &str) -> bool {
+    if text.starts_with(PI_RETIRED_ERR) {
+        return true;
+    }
     text.starts_with("child ")
         && (text.contains(" timed out on ")
             || text.contains(" exited before answering ")
@@ -11132,21 +11359,33 @@ pub(crate) fn is_child_error(text: &str) -> bool {
 /// that row from an answer (bug Y).
 pub(crate) const RESTARTING_ROW_FIELD: &str = "agentRestarting";
 
-/// Is `m` an assistant row the user can read that answers `user_msg`?
+/// Is `m` an assistant row the user can see at all in reply to `user_msg`?
 ///
 /// Hidden rows do not count. A row the lost-child path retired shows the user nothing, so a
-/// message whose only row is that one is still unanswered — which is exactly the state the
-/// re-run needs to recognise, and the state the failed-send error bubble should recognise too.
-///
-/// Nor does the line that says the agent is restarting. It is a row the user reads, and it is
-/// deliberately not hidden, but it promises an answer rather than being one — if it counted,
-/// the box would keep the message, tell the user it would pick it up, and then decide on its
-/// way back that the promise had already been kept.
-pub(crate) fn answers_message(m: &MessageView, user_msg: &str) -> bool {
+/// message whose only row is that one still has nothing under it — which is the state the
+/// failed-send error bubble has to recognise, or the user gets two.
+pub(crate) fn replies_to_message(m: &MessageView, user_msg: &str) -> bool {
     m.role == "assistant"
         && m.rest.get("inReplyTo").and_then(Value::as_str) == Some(user_msg)
         && m.status != "cancelled"
         && m.rest.get("hidden").and_then(Value::as_bool) != Some(true)
+}
+
+/// Is `m` a row that actually answers `user_msg`?
+///
+/// Narrower than [`replies_to_message`], and the difference is what decides whether a lost
+/// message is run again. A row that failed is a reply the user can see and is not an answer:
+/// the turn stopped before the router and said so. Counting it is how the burst in round 9 kept
+/// its error row — the re-run looked, found the row the failure had just written, and concluded
+/// the message had been dealt with.
+///
+/// Nor does the line that says the agent is restarting count. It is deliberately not hidden,
+/// but it promises an answer rather than being one — if it counted, the box would keep the
+/// message, tell the user it would pick it up, and then decide on its way back that the promise
+/// had already been kept.
+pub(crate) fn answers_message(m: &MessageView, user_msg: &str) -> bool {
+    replies_to_message(m, user_msg)
+        && m.status != "error"
         && m.rest.get(RESTARTING_ROW_FIELD).and_then(Value::as_bool) != Some(true)
 }
 
