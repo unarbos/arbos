@@ -4421,6 +4421,48 @@ impl Agent {
             .map(|j| j.id)
     }
 
+    /// What the box knows for certain about the work behind `ask_message_id`: it ran as a
+    /// background job, with this id, and it posted this many progress notes in the chat. `None`
+    /// when the ask has no job row.
+    ///
+    /// Bug AD, Test5 round 12 (see `job_backgrounded.rs`): the model that writes a job's answer
+    /// was told nothing about the job it is answering for, so the only thing in its context that
+    /// spoke to backgrounding was an acceptance criterion the worker had written off the brief's
+    /// "run each step in the foreground" instruction and scored unmet. It restated that to the
+    /// user as what had happened. The fact was two lookups away the whole time, which is the
+    /// defect: a writer inferring from text what the store holds as a row.
+    pub(crate) fn job_backgrounding_note(
+        &self,
+        chat_id: &str,
+        ask_message_id: &str,
+    ) -> Option<String> {
+        let job = self
+            .store
+            .jobs_for_chat(chat_id)
+            .unwrap_or_default()
+            .into_iter()
+            .find(|j| j.ask_message_id == ask_message_id)?;
+        let notes = self
+            .store
+            .t3_thread_in_order(chat_id, 500)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(r, src)| {
+                r.kind == "job_note"
+                    && src
+                        .as_ref()
+                        .and_then(|s| s.get("job_id"))
+                        .and_then(Value::as_str)
+                        == Some(job.id.as_str())
+            })
+            .count();
+        Some(format!(
+            "What the box records about this work, which overrides anything the notes below suggest: it ran as a background job beside the chat (job {}, {notes} progress note{} posted in this chat). Never tell the user it ran in the foreground, that it was not backgrounded, or that it was not a background job, and do not mention jobs, workers, backgrounding or the foreground at all. An instruction in the notes about running steps in the foreground or not detaching them is about how the worker ran its own steps inside that job; it says nothing about whether this work was backgrounded.",
+            job.id,
+            if notes == 1 { "" } else { "s" },
+        ))
+    }
+
     /// The title of a job of `chat_id` that is still `queued` or `running`, for the guard that
     /// refuses a reply reporting a cancel the job rows do not agree with.
     pub(crate) fn open_job_title(&self, chat_id: &str) -> Option<String> {
@@ -11691,7 +11733,7 @@ impl Agent {
         let address = self.owner_address_note(chat_id, host, in_reply_to).await;
         let (talking_model, _) = self.live_models().await;
         let system = format!(
-            "{} You answer a message the user sent while you were busy with something else; the work for it is done (notes below). Write the answer the user should read, like a colleague in chat: what they asked for, what came out, what is open. First person; short when the answer is short; a plain GitHub-flavoured markdown table (header row, `| --- |` separator row, rows starting and ending with `|`, no code fence) with `[Name](https://…)` links when it compares several items, and then one line offering a concrete next step. Never mention a side task, helper, subagent, tool, command, model or that you were busy. If the notes hold no answer, say plainly what you could not do.{}",
+            "{} You answer a message the user sent while you were busy with something else; the work for it is done (notes below). Write the answer the user should read, like a colleague in chat: what they asked for, what came out, what is open. First person; short when the answer is short; a plain GitHub-flavoured markdown table (header row, `| --- |` separator row, rows starting and ending with `|`, no code fence) with `[Name](https://…)` links when it compares several items, and then one line offering a concrete next step. Never mention a side task, helper, subagent, tool, command, model or that you were busy. An acceptance criterion in the notes is the worker's own self-check against its instructions, not a finding about the user's request: an unmet one is never restated to the user as a description of what happened. If the notes hold no answer, say plainly what you could not do.{}",
             // The agent's live name (#1431), not the one the box booted with: a renamed agent
             // must introduce itself as its new self in this bubble too.
             match self.name().trim() {
@@ -11707,12 +11749,25 @@ impl Agent {
             Some(&format!("history_search {{\"query\": \"<a phrase from the notes>\", \"thread_id\": \"{chat_id}\"}}")),
         );
         let user = format!(
-            "The user's message: {}\n\nStatus of the work: {status}{}\n\nNotes from the work (for you only):\n<<<\n{}\n>>>",
+            "The user's message: {}\n\nStatus of the work: {status}{}{}\n\nNotes from the work (for you only):\n<<<\n{}\n>>>",
             if ask.trim().is_empty() { "(see the notes)" } else { ask.trim() },
             error.map(|e| format!("\nIt ended with an error: {e}")).unwrap_or_default(),
+            // Read from the job row rather than left to be worked out from the notes (bug AD).
+            self.job_backgrounding_note(chat_id, in_reply_to)
+                .map(|n| format!("\n\n{n}"))
+                .unwrap_or_default(),
             if raw_trim.trim().is_empty() { "(nothing was written)" } else { raw_trim.trim() }
         );
         let llm = self.llm.with_purpose("job-result");
+        // What is posted when the model writes nothing, or nothing that survives the strip below:
+        // the worker's own words for finished work, a plain line otherwise.
+        let fallback = || {
+            if status == "done" && !raw_trim.trim().is_empty() {
+                ProseFilter::clean_prose(raw_trim.trim())
+            } else {
+                "I couldn't finish that one. Ask me again in a moment.".to_owned()
+            }
+        };
         let text = match tokio::time::timeout(
             Duration::from_secs(30),
             llm.complete(&talking_model, &system, &user, 400),
@@ -11731,12 +11786,22 @@ impl Agent {
                     "job result call gave nothing; plain line"
                 );
                 let _ = other;
-                if status == "done" && !raw_trim.trim().is_empty() {
-                    ProseFilter::clean_prose(raw_trim.trim())
-                } else {
-                    "I couldn't finish that one. Ask me again in a moment.".to_owned()
-                }
+                fallback()
             }
+        };
+        // Bug AD. Every caller of this function is delivering work that ran beside the chat, so a
+        // sentence telling the user it was not a background job is false whatever wrote it. The
+        // prompt above says so; this is what makes it impossible rather than unlikely.
+        let text = match crate::job_backgrounded::strip_denials(&text) {
+            kept if kept.trim().is_empty() => {
+                tracing::warn!(
+                    chat_id,
+                    name,
+                    "the job result denied this job's own backgrounding and nothing else; the worker's own words are posted instead"
+                );
+                crate::job_backgrounded::strip_denials(&fallback())
+            }
+            kept => kept,
         };
         let text = crate::store::redact(&text);
         // The answer is written; where it lands in the chat is the chat's send order to decide
