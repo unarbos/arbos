@@ -14,10 +14,14 @@
 //!   forwards tool calls and transcript rows over it and waits for results, the same shape as
 //!   the `arbos-local` helper link (`local.rs`).
 //!
-//! Cost rails: voice has no cap of its own. It charges the caller's account like any other
-//! spend source, so the rails are that account's credits and single daily limit, plus the global
-//! kill switch. `CALL_MAX_MINUTES` still ends a call, as a resource bound, not a budget. Owner
-//! setting per agent: chattiness
+//! Cost rails: voice has no limit of its own, and the one it spends against is cost-based
+//! (Jacob, 2026-11-05: "all limits should be cost based"). The worker reports usage every
+//! `ARBOS_VOICE_USAGE_EVERY_S` (30 s) to `POST /voice/calls/{id}/usage`, which debits the
+//! difference into the caller's account ledger there and then and answers `caps.stop`; the
+//! worker leaves the call on any stop. So a call is ended by the account's credits, its one
+//! daily limit or the kill switch, mid-call, within one reporting interval of the money
+//! running out. `CALL_LEAK_GUARD_MINUTES` is not a budget: it is the leak guard for a call
+//! nobody is on any more, set far above any real call. Owner setting per agent: chattiness
 //! (`quiet` | `balanced` | `chatty`), wake name and `vision_enabled` (may the agent see cameras),
 //! `GET/PUT /projects/{id}/voice`.
 //!
@@ -58,8 +62,11 @@ const TOOL_WAIT: Duration = Duration::from_secs(240);
 /// The context pack is cheap; a slow box must not delay the agent's first words.
 const CONTEXT_WAIT: Duration = Duration::from_secs(4);
 const FRAME_MAX_BYTES: usize = 4 * 1024 * 1024;
-/// Hard stop on one call with an agent in it (spec §6).
-pub const CALL_MAX_MINUTES: i64 = 60;
+/// Leak guard, not a budget: the ceiling that catches a call whose room or socket is stuck
+/// after everyone has gone, so a wedged call cannot bill forever. A call's cost is bounded by
+/// the account's own limit, charged every reporting interval, so this sits far above any real
+/// call (6 h) and should never be what ends one.
+pub const CALL_LEAK_GUARD_MINUTES: i64 = 360;
 
 /// Voice configuration from the environment.
 #[derive(Debug, Clone)]
@@ -851,7 +858,7 @@ fn caps_json(state: &AppState, payer: &str, call_id: &str, project_id: &str) -> 
     json!({
         "call_spent_usd": call_usd,
         "daily_spent_usd": spent,
-        "call_max_minutes": CALL_MAX_MINUTES,
+        "call_leak_guard_minutes": CALL_LEAK_GUARD_MINUTES,
         "metered": crate::credits::metered(state),
         "stop": stops_for(state, payer).err(),
     })
@@ -1480,7 +1487,7 @@ pub fn admin_json(state: &AppState) -> Value {
         "model": state.voice.model,
         "default_voice": state.voice.default_voice,
         "voices": voice_catalogue(state).len(),
-        "call_max_minutes": CALL_MAX_MINUTES,
+        "call_leak_guard_minutes": CALL_LEAK_GUARD_MINUTES,
         "boxes_linked": state.voice_conns.try_lock().map(|c| c.len()).unwrap_or(0),
         "vision": {
             "today": { "minutes": (vision_minutes_today * 100.0).round() / 100.0, "usd": vision_usd_today, "frames": frames_today },
@@ -1488,6 +1495,84 @@ pub fn admin_json(state: &AppState) -> Value {
         },
         "recent": recent,
     })
+}
+
+#[cfg(test)]
+mod cost_stop_tests {
+    //! What ends a call is the account's one cost-based limit, charged as the call runs. The
+    //! regression to guard: the mid-call charge must never end an unlimited account's call.
+
+    use crate::credits::SpendLimit;
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    use super::stops_for;
+
+    /// A long, expensive call on an unlimited account keeps going. Every pass of the worker's
+    /// usage loop asks this, so a limit that read an unset value as zero would hang up on the
+    /// first report instead of never.
+    #[test]
+    fn an_unlimited_account_is_never_hung_up_on() {
+        let state = test_state(AuthMode::Github);
+        state.db.set_kill_switch(&Default::default()).unwrap();
+        state
+            .db
+            .grant_credits("u_voice", 1000.0, "test", "test")
+            .unwrap();
+        state
+            .db
+            .set_user_limits("u_voice", Some(SpendLimit::Unlimited.stored()), None)
+            .unwrap();
+        // Two hours of voice at the going rate, charged report by report as the call ran.
+        for _ in 0..240 {
+            state
+                .db
+                .debit("u_voice", 0.25, "voice", Some("call:c1"), 0)
+                .unwrap()
+                .expect("an unlimited account is charged, never refused");
+        }
+        assert_eq!(
+            stops_for(&state, "u_voice"),
+            Ok(()),
+            "no limit means no reason to leave the call"
+        );
+    }
+
+    /// A limit set by hand does end the call, and voice counts against the same one limit as
+    /// every other source rather than one of its own.
+    #[test]
+    fn a_hand_set_limit_ends_the_call_mid_way() {
+        let state = test_state(AuthMode::Github);
+        state.db.set_kill_switch(&Default::default()).unwrap();
+        state
+            .db
+            .grant_credits("u_voice", 1000.0, "test", "test")
+            .unwrap();
+        state
+            .db
+            .set_user_limits("u_voice", Some(SpendLimit::Daily(2.0).stored()), None)
+            .unwrap();
+        state
+            .db
+            .debit("u_voice", 1.0, "inference", None, 0)
+            .unwrap()
+            .expect("under the limit");
+        assert_eq!(
+            stops_for(&state, "u_voice"),
+            Ok(()),
+            "half spent, the call carries on"
+        );
+        state
+            .db
+            .debit("u_voice", 1.0, "voice", Some("call:c1"), 0)
+            .unwrap()
+            .expect("still under at the moment of charging");
+        assert_eq!(
+            stops_for(&state, "u_voice"),
+            Err("daily_cap"),
+            "the account's limit ends the call, reached by voice and inference together"
+        );
+    }
 }
 
 #[cfg(test)]

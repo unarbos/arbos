@@ -390,15 +390,6 @@ pub async fn generations(
 
 // ---- avatar generation (D92 amendment: the avatar picker's Generate tab) --------------------
 
-/// Pictures the picker may generate per project per UTC day (`ARBOS_AVATAR_GEN_DAILY`, default 20):
-/// one `gpt-image-1` square at low quality is $0.011, so a day of taps costs cents.
-fn avatar_gen_daily_cap() -> i64 {
-    std::env::var("ARBOS_AVATAR_GEN_DAILY")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(20)
-}
-
 /// Models tried in order for an avatar (`ARBOS_AVATAR_GEN_MODELS`, comma-separated, overrides).
 /// Production hits api.openai.com directly with the relay's `OPENAI_API_KEY`; on 2026-10-24
 /// that key listed `gpt-image-1` in `/models` but `/images/generations` answered 400 "The model
@@ -586,7 +577,7 @@ pub struct AvatarTarget {
 /// prompt, through the relay's OpenAI key, stored in the project's blob slot and **not yet set**:
 /// the answer is `{image_key}` for the picker's preview, and "Set avatar" makes it the picture via
 /// `PATCH /projects/{id} {image_key}`. Metered like `/proxy/v1/images/generations` (usage row,
-/// credits against the owner's account ledger) plus a per-target daily count cap. `ARBOS_IMAGE_MOCK=1`
+/// credits against the owner's account ledger), with no count cap of its own. `ARBOS_IMAGE_MOCK=1`
 /// answers with the labelled placeholder.
 pub async fn avatar_generate(
     State(state): State<AppState>,
@@ -867,16 +858,6 @@ async fn generate_into(state: &AppState, target: AvatarTarget, prompt: &str) -> 
         .db
         .usage_count_since(&target.meter_id, "openai-images", "avatar:", since)
         .unwrap_or(0);
-    if made_today >= avatar_gen_daily_cap() {
-        return avatar_error(
-            StatusCode::TOO_MANY_REQUESTS,
-            "avatar_gen_cap",
-            format!(
-                "{} generated pictures today is the limit; try again tomorrow or upload one",
-                avatar_gen_daily_cap()
-            ),
-        );
-    }
     let models = avatar_gen_models();
     let mut model = format!("avatar:{}", models[0]);
     let t0 = Instant::now();
@@ -1069,7 +1050,6 @@ async fn generate_into(state: &AppState, target: AvatarTarget, prompt: &str) -> 
         "model": model.trim_start_matches("avatar:"),
         "mock": state.cfg.image_mock,
         "made_today": made_today + 1,
-        "daily_cap": avatar_gen_daily_cap(),
     }))
     .into_response()
 }
