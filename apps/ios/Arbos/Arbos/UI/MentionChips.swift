@@ -362,12 +362,12 @@ final class MentionTable {
     }
 
     /// `inline` prose with every known `@Name` run drawn as a chip.
-    func text(_ attr: AttributedString, link: Color, pill: Color, lineHeight: CGFloat) -> Text {
+    func text(_ attr: AttributedString, link: Color, pill: Color, lineHeight: CGFloat, dark: Bool) -> Text {
         let plain = String(attr.characters)
         let chips = find(in: plain)
         // The prose between chips still gets its link icons (LinkIcons.text).
         let icons = LinkIcons.shared
-        guard !chips.isEmpty else { return icons.text(attr, lineHeight: lineHeight) }
+        guard !chips.isEmpty else { return icons.text(attr, lineHeight: lineHeight, dark: dark) }
         var out = Text("")
         var cursor = attr.startIndex
         for (index, (range, entry)) in chips.enumerated() {
@@ -376,7 +376,7 @@ final class MentionTable {
             let hiOff = plain.distance(from: plain.startIndex, to: range.upperBound)
             let lo = attr.characters.index(attr.startIndex, offsetBy: loOff)
             let hi = attr.characters.index(attr.startIndex, offsetBy: hiOff)
-            out = out + icons.text(AttributedString(attr[cursor..<lo]), lineHeight: lineHeight)
+            out = out + icons.text(AttributedString(attr[cursor..<lo]), lineHeight: lineHeight, dark: dark)
             // The name run: accent, a link `ChatView` routes to the pane.
             var name = AttributedString(attr[attr.index(afterCharacter: lo)..<hi])
             name.swiftUI.foregroundColor = link
@@ -409,21 +409,22 @@ final class MentionTable {
             }
             cursor = hi
         }
-        out = out + icons.text(AttributedString(attr[cursor..<attr.endIndex]), lineHeight: lineHeight)
+        out = out + icons.text(AttributedString(attr[cursor..<attr.endIndex]), lineHeight: lineHeight, dark: dark)
         return out
     }
 }
 
 extension Markdown {
     /// `inline(...)` as a `Text`, with mention chips when `mentions` knows the handles and the
-    /// site icon before every named link (`LinkIcons`).
+    /// site icon before every named link (`LinkIcons`). `dark` is the appearance those icons sit
+    /// on, which decides whether a transparent mark takes a fill behind it.
     @MainActor
-    static func inlineText(_ text: String, color: Color, link: Color, codeChip: Color, mentions: MentionTable?) -> Text {
+    static func inlineText(_ text: String, color: Color, link: Color, codeChip: Color, mentions: MentionTable?, dark: Bool) -> Text {
         guard let mentions, !mentions.isEmpty else {
-            return LinkIcons.shared.text(inline(text, color: color, link: link, codeChip: codeChip), lineHeight: Theme.body * 1.2)
+            return LinkIcons.shared.text(inline(text, color: color, link: link, codeChip: codeChip), lineHeight: Theme.body * 1.2, dark: dark)
         }
         let attr = inline(mentions.display(text), color: color, link: link, codeChip: codeChip)
-        return mentions.text(attr, link: link, pill: link.opacity(0.14), lineHeight: Theme.body * 1.2)
+        return mentions.text(attr, link: link, pill: link.opacity(0.14), lineHeight: Theme.body * 1.2, dark: dark)
     }
 }
 
