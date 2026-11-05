@@ -703,8 +703,8 @@ impl BubbleSelectable {
 /// bytes), what it shows and where a click goes.
 pub struct Chip {
     pub range: Range<usize>,
-    /// Bytes of the picture cell at the start of the run (`@` or `@` + hair space).
-    pub cell: usize,
+    /// How the run divides up: the pad cells and the picture cell.
+    pub text: mention::ChipText,
     pub mention: Rc<Mention>,
     pub mentions: Rc<Mentions>,
     /// The accent the pill is tinted with (see [`mention::pill_color`]).
@@ -745,16 +745,12 @@ impl BubbleSelectable {
         let mut chips = Vec::with_capacity(found.len());
         let mut runs = runs;
         for (range, mention) in found {
-            let cell = if text[range.clone()].starts_with(mention::CELL) {
-                mention::CELL.len()
-            } else {
-                1
-            };
-            runs = chip_runs(runs, range.clone(), cell, accent);
+            let chip_text = mention::chip_text(&text[range.clone()]);
+            runs = chip_runs(runs, range.clone(), chip_text.cell, accent);
             chips.push(Chip {
                 key: (self.at.key.clone(), at + range.start..at + range.end),
                 range,
-                cell,
+                text: chip_text,
                 mention,
                 mentions: self.mentions.clone(),
                 accent,
@@ -1369,19 +1365,33 @@ fn chip_at<'a>(
         .find(|c| c.clickable() && c.range.contains(&ix))
 }
 
-/// The chip's pill: one rounded quad per line fragment the `@Name` run
-/// occupies, `PILL_PAD_X` wider than the glyphs on each side and
-/// `PILL_PAD_Y` taller above and below the line box. Painted before the text.
+/// The chip's pill: one rounded quad per line fragment the chip's run
+/// occupies, `PILL_PAD_Y` taller than the line box above and below.
+///
+/// Across the line the pill stays inside the run, because the run reserves a
+/// [`mention::PAD`] cell at each end for it; only an end with no pad cell
+/// falls back to the painted `PILL_PAD_X` inset. A wrapped chip takes its
+/// leading inset on the first fragment and its trailing one on the last, so
+/// neither half reaches past the edge of its line. Painted before the text.
 fn paint_chip_pill(layout: &TextLayout, chip: &Chip, color: Hsla, window: &mut Window) {
-    for (start, end, top) in chip_fragments(layout, &chip.range) {
+    let fragments = chip_fragments(layout, &chip.range);
+    let last = fragments.len().saturating_sub(1);
+    for (i, (start, end, top)) in fragments.into_iter().enumerate() {
         let line_h = layout.line_height();
+        let lead = if i == 0 && chip.text.lead == 0 {
+            px(mention::PILL_PAD_X)
+        } else {
+            px(0.0)
+        };
+        let trail = if i == last && chip.text.tail == 0 {
+            px(mention::PILL_PAD_X)
+        } else {
+            px(0.0)
+        };
         let bounds = Bounds::new(
-            point(
-                start - px(mention::PILL_PAD_X),
-                top - px(mention::PILL_PAD_Y),
-            ),
+            point(start - lead, top - px(mention::PILL_PAD_Y)),
             size(
-                end - start + px(mention::PILL_PAD_X * 2.0),
+                end - start + lead + trail,
                 line_h + px(mention::PILL_PAD_Y * 2.0),
             ),
         );
@@ -1453,10 +1463,10 @@ thread_local! {
 }
 
 fn paint_chip_picture(layout: &TextLayout, chip: &Chip, window: &mut Window, cx: &mut App) {
-    let Some(at) = layout.position_for_index(chip.range.start) else {
+    let Some(at) = layout.position_for_index(chip.range.start + chip.text.lead) else {
         return;
     };
-    let Some(after_at) = layout.position_for_index(chip.range.start + chip.cell) else {
+    let Some(after_at) = layout.position_for_index(chip.range.start + chip.text.cell) else {
         return;
     };
     if after_at.y != at.y {
@@ -2438,6 +2448,7 @@ mod tests {
         selection: Entity<TextSelection>,
         mentions: Rc<Mentions>,
         text: SharedString,
+        width: f32,
     }
 
     impl gpui::Render for ChipLine {
@@ -2447,17 +2458,21 @@ mod tests {
             cx: &mut gpui::Context<Self>,
         ) -> impl gpui::IntoElement {
             use crate::ui::theme::{CHAT_BODY, CHAT_LINE_HEIGHT};
-            use gpui::{div, ParentElement as _, Styled as _};
+            use gpui::{div, InteractiveElement as _, ParentElement as _, Styled as _};
             let text = self.text.clone();
             let selectable = Selectable::new(&self.selection, Hsla::default(), cx)
                 .with_mentions(self.mentions.clone(), gpui::blue());
             let bubble = selectable.bubble("m1", text.clone());
             div()
-                .w(px(480.0))
+                .w(px(self.width))
                 .p(px(20.0))
                 .text_size(px(CHAT_BODY))
                 .line_height(px(CHAT_LINE_HEIGHT))
-                .child(bubble.text(0, text.clone(), vec![run(text.len())]))
+                .child(
+                    div()
+                        .debug_selector(|| "chip-line".into())
+                        .child(bubble.text(0, text.clone(), vec![run(text.len())])),
+                )
         }
     }
 
@@ -2477,6 +2492,7 @@ mod tests {
             selection: cx.new(TextSelection::new),
             mentions,
             text,
+            width: 480.0,
         });
         vcx.run_until_parked();
         // Every frame paints again; one copy of each is the snapshot.
@@ -2509,11 +2525,16 @@ mod tests {
             );
         };
         let mid_y = |b: &Bounds<Pixels>| b.origin.y + b.size.height / 2.0;
-        let pad = px(mention::PILL_PAD_X);
         for ((pill, (start, end), (top, line_h)), (disc, name_x)) in pills.iter().zip(&discs) {
-            close(disc.left() - pill.left(), pad, "inset before the picture");
-            close(pill.right() - *end, pad, "inset after the name");
-            close(pill.left(), *start - pad, "the pill starts at the chip");
+            // Scout, 2026-10-30: the pill used to be painted `PILL_PAD_X` past
+            // the run on each side, over the word beside it. It now stays
+            // inside the run, whose pad cells are its inset.
+            close(pill.left(), *start, "the pill starts at the chip's run");
+            close(pill.right(), *end, "the pill ends at the chip's run");
+            assert!(
+                disc.left() > pill.left(),
+                "the pad cell holds the picture clear of the pill's edge"
+            );
             assert!(
                 f32::from(*name_x - disc.right()) >= mention::PICTURE_GAP - 0.01,
                 "the disc keeps its gap to the name"
@@ -2533,6 +2554,71 @@ mod tests {
                 disc.size.height <= px(mention::PICTURE),
                 "the disc is at most the picture size"
             );
+        }
+    }
+
+    /// The pills a bubble `width` wide paints (one copy each) and the text
+    /// column they have to stay inside.
+    fn painted_pills(
+        cx: &mut gpui::TestAppContext,
+        text: SharedString,
+        mentions: Rc<Mentions>,
+        width: f32,
+    ) -> (Vec<Bounds<Pixels>>, Bounds<Pixels>) {
+        PAINTED_CHIPS.with(|p| p.borrow_mut().clear());
+        let (_view, vcx) = cx.add_window_view(|_, cx| ChipLine {
+            selection: cx.new(TextSelection::new),
+            mentions,
+            text,
+            width,
+        });
+        vcx.run_until_parked();
+        let mut out: Vec<Bounds<Pixels>> = Vec::new();
+        for p in PAINTED_CHIPS.with(|p| p.borrow().clone()) {
+            if let PaintedChip::Pill { bounds, .. } = p {
+                if !out.contains(&bounds) {
+                    out.push(bounds);
+                }
+            }
+        }
+        (out, vcx.debug_bounds("chip-line").expect("text drawn"))
+    }
+
+    /// Scout, 2026-10-30: the spacing has to hold through a soft wrap, and the
+    /// [`mention::PAD`] cells are what make it hold. Because the inset is part
+    /// of the chip's own run, the pill never reaches past the run — so a chip
+    /// at the start of a wrapped line begins at the text margin with its inset
+    /// inside it, and one at the end of a line stops at the margin.
+    ///
+    /// Before the fix the pill was painted `PILL_PAD_X` outside the run at each
+    /// end, so either of those chips hung into the margin: the stray gap in the
+    /// report. Swept over every bubble width, no pill may leave the column.
+    #[gpui::test]
+    fn no_pill_hangs_into_the_margin_at_any_wrap_width(cx: &mut gpui::TestAppContext) {
+        use std::cell::RefCell;
+        let opened = Rc::new(RefCell::new(Vec::new()));
+        let mentions = chip_table(&opened);
+        let plain = "@comms one two @comms three four @comms five six @comms";
+        let text: SharedString = mentions.display(plain).into();
+        assert_eq!(mentions.find(&text).len(), 4, "four chips to wrap");
+        for step in 0..60 {
+            let width = 200.0 + step as f32 * 8.0;
+            let (pills, column) = painted_pills(cx, text.clone(), mentions.clone(), width);
+            assert!(!pills.is_empty(), "width {width}: chips painted");
+            for pill in pills {
+                assert!(
+                    f32::from(pill.left() - column.left()) > -0.01,
+                    "width {width}: a pill starts {:?} before the column at {:?}",
+                    column.left() - pill.left(),
+                    column.left()
+                );
+                assert!(
+                    f32::from(column.right() - pill.right()) > -0.01,
+                    "width {width}: a pill ends {:?} past the column at {:?}",
+                    pill.right() - column.right(),
+                    column.right()
+                );
+            }
         }
     }
 

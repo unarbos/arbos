@@ -49,11 +49,22 @@ final class MentionTable {
     /// the pill, the `picture` pt disc, `gap` before the name (#1533); the pill
     /// rises `padY` over the name's glyph box and the disc sits on its centre.
     nonisolated static let picture: CGFloat = 16
-    nonisolated static let padX: CGFloat = 4
+    /// The inset inside each end of the pill: ⅓ em of the name's face.
+    ///
+    /// The Mac reserves the same share as a three-per-em space in the text
+    /// itself ([feedback mention-chip-spacing-2026-10-30]); taking it from the
+    /// type size here rather than from a fixed 4 pt is what makes a chip sit in
+    /// its line the same way on both platforms, since the two faces are set at
+    /// different sizes.
+    nonisolated static var padX: CGFloat { nameFont.pointSize / 3 }
     nonisolated static let gap: CGFloat = 3
-    nonisolated static let capWidth: CGFloat = padX + picture + gap
+    nonisolated static var capWidth: CGFloat { padX + picture + gap }
     nonisolated static let padY: CGFloat = 2
     nonisolated static let radius: CGFloat = 7
+    /// Keeps the picture, the name and the trailing inset on one line: a line
+    /// that broke between them left the pill hanging `capWidth` off the start
+    /// of the next line. Zero width, no break on either side (U+2060).
+    nonisolated static let joiner = "\u{2060}"
     /// The name's face: the pill's height and centre come from it.
     nonisolated static let nameFont = UIFont.systemFont(ofSize: Theme.body, weight: .medium)
     /// The glyph box's centre above the baseline.
@@ -377,8 +388,11 @@ final class MentionTable {
             let lo = attr.characters.index(attr.startIndex, offsetBy: loOff)
             let hi = attr.characters.index(attr.startIndex, offsetBy: hiOff)
             out = out + icons.text(AttributedString(attr[cursor..<lo]), lineHeight: lineHeight)
-            // The name run: accent, a link `ChatView` routes to the pane.
-            var name = AttributedString(attr[attr.index(afterCharacter: lo)..<hi])
+            // The name run: accent, a link `ChatView` routes to the pane. The
+            // joiners glue the caps to it so the chip wraps whole.
+            var name = AttributedString(Self.joiner)
+            name += AttributedString(attr[attr.index(afterCharacter: lo)..<hi])
+            name += AttributedString(Self.joiner)
             name.swiftUI.foregroundColor = link
             name.underlineStyle = nil
             name.link = Self.url(for: entry.target)

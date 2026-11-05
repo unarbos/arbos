@@ -27,9 +27,12 @@ use crate::ui::avatars::{self, LeafPick};
 use crate::ui::theme::Theme;
 
 /// The chip's geometry, Grok Bot's mention chip (Jacob's shot, Oct 23): the
-/// pill hugs the text line with `PILL_PAD_X` on each side and `PILL_PAD_Y`
+/// pill hugs the text line with [`PAD`] inside each end and `PILL_PAD_Y`
 /// above and below the glyph box; the picture is a disc `PICTURE` tall
 /// centred in the `@` glyph's cell.
+///
+/// `PILL_PAD_X` is the fallback inset, painted outside the run, for the rare
+/// chip that carries no [`PAD`] cell.
 pub const PILL_PAD_X: f32 = 4.0;
 pub const PILL_PAD_Y: f32 = 1.0;
 pub const PILL_RADIUS: f32 = 6.0;
@@ -43,6 +46,18 @@ pub const PICTURE_GAP: f32 = 3.0;
 /// a smaller disc at smaller sizes. Copies carry it as a thin space; `find`
 /// expects it.
 pub const CELL: &str = "@\u{2004}";
+/// The chip's own padding, reserved in the text at each end of the run: the
+/// same three-per-em space the picture cell uses, so it is ⅓ em of whatever
+/// face the line is set in rather than a fixed number of points.
+///
+/// Why it is text and not paint ([feedback mention-chip-spacing-2026-10-30],
+/// Scout: "no gap between the chip and the word before it"): the pill used to
+/// be painted `PILL_PAD_X` outside the run on each side, and at chat body size
+/// a word space is narrower than that, so the pill sat on the neighbouring
+/// word. With the padding inside the run the pill never leaves the chip's own
+/// advance, and the gap to the next word is the face's word space — the same
+/// gap any two words get, before and after a soft wrap alike.
+pub const PAD: &str = "\u{2004}";
 
 /// The pill's accent alpha at rest, under the pointer and while pressed
 /// (Jacob, Oct 24: a chip must look clickable — brighter under the hand,
@@ -609,9 +624,15 @@ impl Mentions {
             if starts_token && handle_len > 0 {
                 let handle = &from_at[1..1 + handle_len];
                 if let Some(m) = self.by_handle.get(&handle.to_lowercase()) {
+                    rest = &from_at[1 + handle_len..];
+                    if pads_against(before.chars().last()) {
+                        out.push_str(PAD);
+                    }
                     out.push_str(CELL);
                     out.push_str(&m.name);
-                    rest = &from_at[1 + handle_len..];
+                    if pads_against(rest.chars().next()) {
+                        out.push_str(PAD);
+                    }
                     continue;
                 }
             }
@@ -622,7 +643,8 @@ impl Mentions {
         out
     }
 
-    /// The `@Name` runs in a displayed text (byte ranges include the `@`).
+    /// The `@Name` runs in a displayed text: the byte range covers the `@`,
+    /// the name and whichever [`PAD`] cells the rewrite reserved around them.
     pub fn find(&self, text: &str) -> Vec<(Range<usize>, Rc<Mention>)> {
         let mut out = Vec::new();
         if self.names.is_empty() {
@@ -656,8 +678,20 @@ impl Mentions {
                 .flatten();
             match hit {
                 Some((name, m)) => {
-                    out.push((at..at + cell + name.len(), m.clone()));
-                    i = at + cell + name.len();
+                    // The pad cells belong to the chip, so the pill covers them
+                    // instead of the word beside it. A pad already taken by the
+                    // previous chip's trailing cell is not taken twice.
+                    let start = if at >= i + PAD.len() && text[..at].ends_with(PAD) {
+                        at - PAD.len()
+                    } else {
+                        at
+                    };
+                    let mut end = at + cell + name.len();
+                    if text[end..].starts_with(PAD) {
+                        end += PAD.len();
+                    }
+                    out.push((start..end, m.clone()));
+                    i = end;
                 }
                 None => i = at + 1,
             }
@@ -763,6 +797,56 @@ fn sorted_names(order: &[Rc<Mention>]) -> Vec<(String, Rc<Mention>)> {
     names.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then_with(|| a.0.cmp(&b.0)));
     names.dedup_by(|a, b| a.0 == b.0);
     names
+}
+
+/// How one chip's run divides up, in bytes from the start of the run: the
+/// leading [`PAD`] cell, everything before the name (that pad plus the picture
+/// cell) and the trailing pad. A pad is missing where [`pads_against`] refused
+/// it; there the pill falls back to its painted [`PILL_PAD_X`] inset.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChipText {
+    pub lead: usize,
+    /// Where the name starts.
+    pub cell: usize,
+    pub tail: usize,
+}
+
+/// Read a chip's run (the text [`Mentions::find`] gave a range for).
+pub fn chip_text(run: &str) -> ChipText {
+    let lead = if run.starts_with(PAD) { PAD.len() } else { 0 };
+    let picture = if run[lead..].starts_with(CELL) {
+        CELL.len()
+    } else {
+        1
+    };
+    let cell = lead + picture;
+    let tail = if run.len() > cell && run.ends_with(PAD) {
+        PAD.len()
+    } else {
+        0
+    };
+    ChipText { lead, cell, tail }
+}
+
+/// Whether a [`PAD`] cell may sit against `c` (the character on that side of
+/// the mention, or `None` at the edge of the text).
+///
+/// gpui's line wrapper opens a break at a non-word character whose neighbour
+/// is not a word character, so a pad dropped in front of a closing `!`, `?`
+/// or `)` would let the line break there and leave that mark alone at the
+/// start of the next line. Against a word character, a space or the end of
+/// the text a pad adds no break the text did not already have.
+fn pads_against(c: Option<char>) -> bool {
+    match c {
+        None => true,
+        Some(c) => c.is_whitespace() || wraps_as_word(c),
+    }
+}
+
+/// The characters gpui's `LineWrapper` keeps inside a word.
+fn wraps_as_word(c: char) -> bool {
+    const INSIDE_A_WORD: &str = "-_.'’‘$%@#^~,=:;";
+    c.is_alphanumeric() || INSIDE_A_WORD.contains(c)
 }
 
 /// `[A-Za-z0-9_.-]+` with trailing `.`/`-` punctuation left out of the handle.
@@ -895,6 +979,12 @@ pub(crate) mod tests {
         )
     }
 
+    /// A chip's run as `display` writes it: the picture cell and the name
+    /// between the pill's two pad cells.
+    fn chip(name: &str) -> String {
+        format!("{PAD}{CELL}{name}{PAD}")
+    }
+
     fn four() -> Rc<Mentions> {
         mentions(&[
             (
@@ -935,7 +1025,13 @@ pub(crate) mod tests {
         let text = m.display("ask @comms, @sam, @launch-week and @Launch-Crew.");
         assert_eq!(
             text,
-            format!("ask {CELL}Comms, {CELL}Sam Rivera, {CELL}Launch week and {CELL}Launch Crew.")
+            format!(
+                "ask {}, {}, {} and {}.",
+                chip("Comms"),
+                chip("Sam Rivera"),
+                chip("Launch week"),
+                chip("Launch Crew")
+            )
         );
         let chips = m.find(&text);
         let pages: Vec<&ProfilePage> = chips.iter().filter_map(|(_, m)| m.page.as_ref()).collect();
@@ -944,9 +1040,10 @@ pub(crate) mod tests {
         assert!(matches!(pages[1], ProfilePage::User { handle, .. } if handle == "sam"));
         assert!(matches!(pages[2], ProfilePage::Group { space_id } if space_id == "g-lw"));
         assert!(matches!(pages[3], ProfilePage::Server { server_id } if server_id == "s-lc"));
-        // Each range covers "@" + the display name, and nothing else.
+        // Each range covers the pad cells, the `@` and the display name, and
+        // nothing else — the pill is painted over exactly that run.
         for (range, mention) in &chips {
-            assert_eq!(&text[range.clone()], format!("{CELL}{}", mention.name));
+            assert_eq!(&text[range.clone()], chip(&mention.name));
         }
     }
 
@@ -984,7 +1081,10 @@ pub(crate) mod tests {
             |_, _| {},
         );
         let text = m.display("ping @here and @agents please");
-        assert_eq!(text, format!("ping {CELL}here and {CELL}agents please"));
+        assert_eq!(
+            text,
+            format!("ping {} and {} please", chip("here"), chip("agents"))
+        );
         let chips = m.find(&text);
         assert_eq!(chips.len(), 2);
         assert!(chips[0].1.page.is_none());
@@ -1010,13 +1110,89 @@ pub(crate) mod tests {
     #[test]
     fn trailing_punctuation_and_case_do_not_matter() {
         let m = four();
+        // A pad cell goes only where it cannot open a new line break: beside a
+        // bracket or a `!` the pill keeps its painted inset instead.
         assert_eq!(m.display("(@Comms)."), format!("({CELL}Comms)."));
-        assert_eq!(m.display("@sam."), format!("{CELL}Sam Rivera."));
-        assert_eq!(m.display("@SAM!"), format!("{CELL}Sam Rivera!"));
+        assert_eq!(m.display("@sam."), format!("{PAD}{CELL}Sam Rivera{PAD}."));
+        assert_eq!(m.display("@SAM!"), format!("{PAD}{CELL}Sam Rivera!"));
         // Typed by hand, no hair space: still a chip.
         let chips = m.find("@Sam Rivera!");
         assert_eq!(chips.len(), 1);
         assert_eq!(chips[0].0, 0.."@Sam Rivera".len());
+    }
+
+    /// Scout, 2026-10-30: the pill was painted `PILL_PAD_X` outside the run on
+    /// each side, and a word space is narrower than that at chat body size, so
+    /// the chip sat on the word before it. Every chip the rewrite writes now
+    /// carries its own padding, inside the run the pill is painted over.
+    #[test]
+    fn a_chip_reserves_its_padding_in_the_text_on_both_sides() {
+        let m = four();
+        let text = m.display("ask @comms and @sam about it");
+        assert_eq!(
+            text,
+            format!("ask {} and {} about it", chip("Comms"), chip("Sam Rivera"))
+        );
+        let chips = m.find(&text);
+        assert_eq!(chips.len(), 2);
+        for (range, mention) in &chips {
+            let run = &text[range.clone()];
+            let parts = chip_text(run);
+            assert_eq!(parts.lead, PAD.len(), "a pad cell before the picture");
+            assert_eq!(parts.tail, PAD.len(), "a pad cell after the name");
+            assert_eq!(&run[parts.cell..run.len() - parts.tail], mention.name);
+            // A full word space is left between the pill and its neighbour.
+            assert!(text[..range.start].ends_with(' '));
+            assert!(text[range.end..].starts_with(' '));
+        }
+    }
+
+    /// Two chips in a row: each keeps its own padding and neither claims the
+    /// other's pad cell, so the pills cannot touch.
+    #[test]
+    fn two_chips_in_a_row_each_keep_their_own_padding() {
+        let m = four();
+        let text = m.display("@comms @sam ship it");
+        assert_eq!(
+            text,
+            format!("{} {} ship it", chip("Comms"), chip("Sam Rivera"))
+        );
+        let chips = m.find(&text);
+        assert_eq!(chips.len(), 2);
+        assert_eq!(&text[chips[0].0.clone()], chip("Comms"));
+        assert_eq!(&text[chips[1].0.clone()], chip("Sam Rivera"));
+        assert_eq!(&text[chips[0].0.end..chips[1].0.start], " ");
+    }
+
+    /// A chip the rewrite could not pad keeps the painted inset: `chip_text`
+    /// reports no pad cell, and the pill painter falls back to `PILL_PAD_X`.
+    #[test]
+    fn chip_text_reads_the_pads_a_chip_carries() {
+        assert_eq!(
+            chip_text(&format!("{PAD}{CELL}Comms{PAD}")),
+            ChipText {
+                lead: PAD.len(),
+                cell: PAD.len() + CELL.len(),
+                tail: PAD.len(),
+            }
+        );
+        assert_eq!(
+            chip_text(&format!("{CELL}Comms")),
+            ChipText {
+                lead: 0,
+                cell: CELL.len(),
+                tail: 0,
+            }
+        );
+        // Hand-typed `@Name`: the `@` alone is the picture cell.
+        assert_eq!(
+            chip_text("@Sam Rivera"),
+            ChipText {
+                lead: 0,
+                cell: 1,
+                tail: 0,
+            }
+        );
     }
 
     #[test]
@@ -1038,11 +1214,14 @@ pub(crate) mod tests {
             ),
         ]);
         let text = m.display("@launch-week and @launch");
-        assert_eq!(text, format!("{CELL}Launch week and {CELL}Launch"));
+        assert_eq!(
+            text,
+            format!("{} and {}", chip("Launch week"), chip("Launch"))
+        );
         let chips = m.find(&text);
         assert_eq!(chips.len(), 2);
-        assert_eq!(&text[chips[0].0.clone()], format!("{CELL}Launch week"));
-        assert_eq!(&text[chips[1].0.clone()], format!("{CELL}Launch"));
+        assert_eq!(&text[chips[0].0.clone()], chip("Launch week"));
+        assert_eq!(&text[chips[1].0.clone()], chip("Launch"));
     }
 
     /// Affinity, 2026-10-29: `@A` (Scout, a chat member with a photo) drew as

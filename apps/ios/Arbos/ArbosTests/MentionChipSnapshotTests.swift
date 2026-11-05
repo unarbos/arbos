@@ -33,12 +33,65 @@ final class MentionChipSnapshotTests: XCTestCase {
         try assertOnePill(pill, in: shot)
     }
 
+    /// [feedback mention-chip-spacing-2026-10-30] (Scout: the chip "has no gap
+    /// between it and the word before it"): the pill is the chip's own box, so
+    /// what stands between it and its neighbours is the line's word space.
+    /// Measured here as clear pixels, on both sides.
+    func testAChipKeepsAClearGapFromTheWordsOnEitherSide() throws {
+        guard #available(iOS 18.0, *) else { throw XCTSkip("the pill renderer needs iOS 18") }
+        let shot = try render("ask @comms about it", name: "mention-chip-gaps")
+        let pill = try XCTUnwrap(pillBoxes(in: shot).first)
+        let before = try XCTUnwrap(gap(leftOf: pill, in: shot), "a word before the chip")
+        let after = try XCTUnwrap(gap(rightOf: pill, in: shot), "a word after the chip")
+        for (side, clear) in [("before", before), ("after", after)] {
+            XCTAssertGreaterThan(clear, 2, "the pill stands clear of the word \(side) it")
+            XCTAssertLessThan(clear, Theme.body / 2, "a word space, not a hole, \(side) the chip")
+        }
+        // Both sides get the same inset and the same word space, so what is
+        // left to differ is the side bearing of the letter next to it.
+        XCTAssertEqual(before, after, accuracy: 2, "the same gap on both sides")
+    }
+
+    /// A chip wraps whole. When the line broke between the picture and the
+    /// name, the pill was laid out a whole cap width off the left of the next
+    /// line; the width sweep walks the break through the chip.
+    func testAChipNeverWrapsAwayFromItsPicture() throws {
+        guard #available(iOS 18.0, *) else { throw XCTSkip("the pill renderer needs iOS 18") }
+        for width in stride(from: 140.0, through: 320.0, by: 10.0) {
+            let shot = try render("the embargo lifts when @comms says so",
+                                  name: "mention-chip-wrap-\(Int(width))", width: width, attach: false)
+            let pills = pillBoxes(in: shot)
+            XCTAssertEqual(pills.count, 1, "one pill at \(width) pt")
+            guard let pill = pills.first else { continue }
+            XCTAssertGreaterThan(CGFloat(pill.minX) / scale, 12 - 1, "the pill starts inside the padding at \(width) pt")
+            try assertOnePill(pill, in: shot)
+        }
+    }
+
     // MARK: Measuring
 
     /// The marker regions at least half a pill tall: the counters of letters such as "o" on the
     /// pill are marker colour too, but closed off from it by the glyph.
     private func pillBoxes(in shot: Bitmap) -> [Box] {
         shot.components(near: marker).filter { CGFloat($0.height) / scale > MentionTable.pillHeight / 2 }
+    }
+
+    /// Clear points between the pill and the nearest ink on its own rows, or
+    /// nil when nothing else is drawn on that side. The pill's antialiased rim
+    /// and the ground are both `isPillOrGround`, so neither counts as ink.
+    private func gap(leftOf pill: Box, in shot: Bitmap) -> CGFloat? {
+        gap(from: pill, in: shot, columns: stride(from: pill.minX - 1, through: 0, by: -1), edge: pill.minX)
+    }
+
+    private func gap(rightOf pill: Box, in shot: Bitmap) -> CGFloat? {
+        gap(from: pill, in: shot, columns: stride(from: pill.maxX + 1, to: shot.width, by: 1), edge: pill.maxX)
+    }
+
+    private func gap<Columns: Sequence<Int>>(from pill: Box, in shot: Bitmap, columns: Columns, edge: Int) -> CGFloat? {
+        for x in columns where (pill.minY...pill.maxY).contains(where: { !shot.at(x, $0).isPillOrGround }) {
+            return CGFloat(abs(x - edge) - 1) / scale
+        }
+        return nil
     }
 
     private func assertOnePill(_ pill: Box, in shot: Bitmap, file: StaticString = #filePath, line: UInt = #line) throws {
@@ -70,7 +123,7 @@ final class MentionChipSnapshotTests: XCTestCase {
     }
 
     @available(iOS 18.0, *)
-    private func render(_ message: String, name: String, width: CGFloat = 360) throws -> Bitmap {
+    private func render(_ message: String, name: String, width: CGFloat = 360, attach: Bool = true) throws -> Bitmap {
         let model = AppModel()
         model.loadFixture()
         let table = MentionTable(model: model, theme: Theme.dark)
@@ -87,10 +140,12 @@ final class MentionChipSnapshotTests: XCTestCase {
         let renderer = ImageRenderer(content: view)
         renderer.scale = scale
         let image = try XCTUnwrap(renderer.uiImage, "rendered")
-        let attachment = XCTAttachment(image: image)
-        attachment.name = name
-        attachment.lifetime = .keepAlways
-        add(attachment)
+        if attach {
+            let attachment = XCTAttachment(image: image)
+            attachment.name = name
+            attachment.lifetime = .keepAlways
+            add(attachment)
+        }
         return try Bitmap(image)
     }
 }
