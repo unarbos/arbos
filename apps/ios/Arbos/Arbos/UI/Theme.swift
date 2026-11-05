@@ -193,6 +193,21 @@ struct Theme: Equatable {
     static let pendingRemoveHit: CGFloat = 24
     static let pendingRemoveGlyph: CGFloat = 10
     static let pendingChipTrailing: CGFloat = 10 - (pendingRemoveHit - pendingRemoveGlyph) / 2
+    /// Search-in-chat's pinned-sender chip ("From Sam Rivera"): a control inside
+    /// the 48 pt bar, so it takes the family's in-bar size like the sheet's
+    /// confirm pill, with its picture inset inside that the way an avatar sits
+    /// inside a title pill.
+    static let searchChipHeight: CGFloat = Controls.sheetAction
+    static let searchChipAvatar: CGFloat = 24
+    static let searchChipGap: CGFloat = 6
+    static let searchChipLeading: CGFloat = (searchChipHeight - searchChipAvatar) / 2
+    static let searchChipTrailing: CGFloat = 10
+    /// The whole chip removes the sender (the Mac's chip is one click), so its
+    /// tap target is the bar's full height rather than the capsule's.
+    static let searchChipHit: CGFloat = Controls.height
+    /// A long display name truncates instead of squeezing the field off the bar
+    /// — the one place the phone cannot copy the Mac, whose bar is 520 pt wide.
+    static let searchChipMaxLabel: CGFloat = 120
     /// Mic glyph box (Grok's filled mic has no base bar; drawn by `MicGlyph`): 36 × 49 px.
     static let micGlyphWidth: CGFloat = 12
     static let micGlyphHeight: CGFloat = 49 / 3

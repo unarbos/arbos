@@ -67,15 +67,19 @@ pub fn chat_search_senders(senders: Vec<ChatSearchSender>) -> Vec<ChatSearchSend
 /// matcher (exact > prefix > word-start, display name before @handle). `None`
 /// while nothing is typed, or when no one in the chat is named that.
 ///
-/// The Mac offers nothing once a sender is pinned, so the only way to change one
-/// is to remove the chip; a caller that has pinned a sender does not ask.
+/// With `pinned` set there is no offer at all, however the typed text reads:
+/// the only way to change a pinned sender is to remove the chip. That is the
+/// Mac's behaviour and the question of whether typing should swap it instead is
+/// open, so it is asked in the shared rules and not answered here.
 #[uniffi::export]
 pub fn chat_search_offer(
     typed: String,
     senders: Vec<ChatSearchSender>,
+    pinned: Option<ChatSearchSender>,
 ) -> Option<ChatSearchSender> {
     let pool: Vec<chat_search::Sender> = senders.into_iter().map(Into::into).collect();
-    chat_search::offer_sender(&typed, &pool)
+    let pinned: Option<chat_search::Sender> = pinned.map(Into::into);
+    chat_search::offer_sender(&typed, &pool, pinned.as_ref())
         .cloned()
         .map(Into::into)
 }
@@ -141,7 +145,7 @@ mod tests {
     fn a_typed_name_or_handle_offers_one_sender_through_the_shared_matcher() {
         let who = chat_search_senders(posted());
         let offered =
-            |typed: &str| chat_search_offer(typed.to_owned(), who.clone()).map(|s| s.name);
+            |typed: &str| chat_search_offer(typed.to_owned(), who.clone(), None).map(|s| s.name);
         assert_eq!(offered("aff").as_deref(), Some("Affine"));
         assert_eq!(offered("@sam").as_deref(), Some("Sam Rivera"));
         assert_eq!(
@@ -153,13 +157,19 @@ mod tests {
         // Diacritics fold on a name the way they do everywhere else.
         let zoe = vec![sender("user:z", "Zoë Álvarez", "zoe")];
         assert_eq!(
-            chat_search_offer("zoe alv".to_owned(), zoe).map(|s| s.key),
+            chat_search_offer("zoe alv".to_owned(), zoe, None).map(|s| s.key),
             Some("user:z".to_owned())
         );
         // A word nobody is named is not an offer, and neither is nothing typed.
         assert_eq!(offered("canvas"), None);
         assert_eq!(offered(""), None);
         assert_eq!(offered("   "), None);
+        // Nothing is offered once a sender is pinned, so the chip cannot be
+        // swapped by typing — the Mac's behaviour, asked in the shared rules.
+        assert_eq!(
+            chat_search_offer("aff".to_owned(), who.clone(), Some(who[2].clone())),
+            None
+        );
     }
 
     /// The composition, reached through the FFI: AND with a keyword, every row

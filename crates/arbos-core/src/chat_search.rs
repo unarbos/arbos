@@ -144,7 +144,19 @@ pub fn first_by_key(senders: impl IntoIterator<Item = Sender>) -> Vec<Sender> {
 /// The sender the typed text names, if any: best match by the shared
 /// matcher's order (exact > prefix > word-start, name before handle). Only
 /// while no sender is pinned yet and something is typed.
-pub fn offer_sender<'a>(typed: &str, senders: &'a [Sender]) -> Option<&'a Sender> {
+///
+/// `pinned` closes the offer entirely: with a sender already pinned there is
+/// no offer however the typed text reads, so the only way to change one is to
+/// remove the chip. Whether typing should swap it instead is an open question,
+/// and it is asked here so that neither client can answer it on its own.
+pub fn offer_sender<'a>(
+    typed: &str,
+    senders: &'a [Sender],
+    pinned: Option<&Sender>,
+) -> Option<&'a Sender> {
+    if pinned.is_some() {
+        return None;
+    }
     let q = normalize_query(typed);
     if q.is_empty() {
         return None;
@@ -359,28 +371,37 @@ mod tests {
         assert_eq!(all.len(), 3, "one entry per sender, first appearance order");
         assert_eq!(all[0].name, "Jacob Steeves");
         assert_eq!(
-            offer_sender("aff", &all).map(|s| s.name.as_str()),
+            offer_sender("aff", &all, None).map(|s| s.name.as_str()),
             Some("Affine")
         );
         assert_eq!(
-            offer_sender("@sam", &all).map(|s| s.name.as_str()),
+            offer_sender("@sam", &all, None).map(|s| s.name.as_str()),
             Some("Sam Rivera")
         );
         assert_eq!(
-            offer_sender("rivera", &all).map(|s| s.name.as_str()),
+            offer_sender("rivera", &all, None).map(|s| s.name.as_str()),
             Some("Sam Rivera"),
             "word start"
         );
         assert_eq!(
-            offer_sender("Jacob S", &all).map(|s| s.handle.as_str()),
+            offer_sender("Jacob S", &all, None).map(|s| s.handle.as_str()),
             Some("unarbos")
         );
-        assert_eq!(offer_sender("canvas", &all), None);
-        assert_eq!(offer_sender("", &all), None);
+        assert_eq!(offer_sender("canvas", &all, None), None);
+        assert_eq!(offer_sender("", &all, None), None);
+        // Nothing is offered once a sender is pinned, whatever is typed: the
+        // only way to change one is to remove the chip. Jacob has not ruled on
+        // whether typing should swap it, so both clients ask here and neither
+        // can answer it differently.
+        assert_eq!(
+            offer_sender("aff", &all, Some(&all[2])),
+            None,
+            "a pinned sender is not swapped by typing another name"
+        );
         // A whole name beats a handle prefix of someone else: "sam" is Sam's
         // handle exactly, not a prefix of anything on Jacob.
         assert_eq!(
-            offer_sender("sam", &all).map(|s| s.name.as_str()),
+            offer_sender("sam", &all, None).map(|s| s.name.as_str()),
             Some("Sam Rivera")
         );
     }
