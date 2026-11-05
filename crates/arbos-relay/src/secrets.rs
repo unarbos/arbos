@@ -2324,18 +2324,47 @@ pub async fn box_from_message(
             "only a person's message can be saved",
         ));
     }
-    // The value goes into the owner's vault, so it must be the owner's own message.
+    // The value goes into the owner's vault, so it must be the owner's own message, and the
+    // only evidence of that is the row's own `sender`.
+    //
+    // The bare `user` is not that evidence. It is what `append_user_message` writes whenever a
+    // client names no account, so it says "some person wrote this", not "the owner did" — and a
+    // guest of a shared project may append a row to that project's room and choose the field.
+    // Read as the owner it put a guest's value into the owner's vault with a standing access
+    // row for the project, and scrubbed the room's history on the way (#1580's defect, on the
+    // write side).
+    //
+    // Where nobody but the owner could have written a row, the bare form still stands: that
+    // keeps a client which names no author working in the projects it is the only writer of,
+    // and narrows the refusal to the rooms where the ambiguity is real.
+    //
+    // "Nobody else could have written it" is about the room's whole past, not about who is in it
+    // at this instant: a guest who appends the row and then leaves would otherwise hand the box a
+    // solo project to check, and the box can run that row long after they are gone (a `send`
+    // pending on the document is dispatched on the next catch-up). So the question is whether the
+    // project ever had a guest.
     let sender = msg
         .rest
         .get("sender")
         .and_then(Value::as_str)
         .unwrap_or("user");
-    if sender != "user" && sender != format!("user:{user_id}") {
-        return Err(err(
-            StatusCode::FORBIDDEN,
-            "not_owner_message",
-            "only the owner's own message can go into the owner's vault",
-        ));
+    if sender != format!("user:{user_id}") {
+        let shared = b.people_chat
+            || state
+                .db
+                .project_ever_had_member(&project_id)
+                .map_err(internal)?;
+        if sender != "user" || shared {
+            return Err(err(
+                StatusCode::FORBIDDEN,
+                "not_owner_message",
+                if sender == "user" {
+                    "that message names no account and this chat has had other people in it, so it cannot be shown to be the owner's own; save the key in Settings → Secrets instead"
+                } else {
+                    "only the owner's own message can go into the owner's vault"
+                },
+            ));
+        }
     }
     let text = msg.text();
     let found = arbos_core::redact::find_key_like(&text);
@@ -4895,6 +4924,172 @@ mod tests {
         let mut h = HeaderMap::new();
         h.insert("x-arbos-project", project.parse().unwrap());
         h
+    }
+
+    /// The same room, but the message naming whatever `sender` a client chose to write — `None`
+    /// being what `append_user_message` turns into the bare `user`. Returns
+    /// `(state, owner, project_id, chat_id, room_name)`.
+    async fn handoff_setup_sender(
+        text: &str,
+        sender: Option<String>,
+        device: &str,
+    ) -> (AppState, String, String, String, String) {
+        let state = test_state(AuthMode::Github);
+        let (owner, _) = person(&state, 711);
+        insert_project(&state, &owner, "proj_shared", "Arbos");
+        let chat_id = "chat_shared".to_owned();
+        let room = arbos_core::wire::room_name("proj_shared", &chat_id);
+        let text = text.to_owned();
+        let device = device.to_owned();
+        crate::notices::write_doc(&state, Some("proj_shared"), &chat_id, move |doc| {
+            let opts = arbos_core::doc::UserMessageOpts {
+                sender,
+                ..Default::default()
+            };
+            doc.append_user_message("m_key", &text, &device, &opts)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        (state, owner, "proj_shared".into(), chat_id, room)
+    }
+
+    /// The value goes into the **owner's** vault, so the row has to be shown to be the owner's.
+    /// The only evidence is the row's own `sender`, and the bare `user` is what a client writes
+    /// when it names no account — so in a project the owner has shared it is evidence of
+    /// nothing: a guest may append a row to that room and pick the field.
+    #[tokio::test]
+    async fn an_unattributed_message_in_a_shared_project_is_not_the_owners() {
+        let text = format!("here is my key {HANDOFF_KEY} save this");
+        let (state, owner, project, chat, room) =
+            handoff_setup_sender(&text, None, "dev:guest-laptop").await;
+        let (guest, _) = person(&state, 712);
+        state
+            .db
+            .add_project_member(&project, &guest, &owner)
+            .unwrap();
+
+        let e = from_message(
+            &state,
+            &owner,
+            &project,
+            FromMessageBody {
+                chat_id: chat.clone(),
+                message_id: "m_key".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("an unattributed row in a shared project must not reach the owner's vault");
+        assert_eq!(e.0, StatusCode::FORBIDDEN, "{:?}", e.1);
+
+        assert!(
+            state
+                .db
+                .secret_by_name(&owner, "STRIPE_KEY")
+                .unwrap()
+                .is_none(),
+            "nothing may be written into the owner's vault"
+        );
+        assert!(
+            holds(&room_bytes(&state, &room), HANDOFF_KEY),
+            "a refused save must not rewrite the room's history either"
+        );
+    }
+
+    /// Leaving does not make the room's history the owner's. A guest who appends the row and then
+    /// leaves would hand this check a project with no live members, and the box can run that row
+    /// long after they are gone — a `send` pending on the document is dispatched on the next
+    /// catch-up, so the departure costs the attacker nothing and no race has to be won.
+    #[tokio::test]
+    async fn a_guest_who_leaves_does_not_make_their_row_the_owners() {
+        let text = format!("here is my key {HANDOFF_KEY} save this");
+        let (state, owner, project, chat, room) =
+            handoff_setup_sender(&text, None, "dev:guest-laptop").await;
+        let (guest, _) = person(&state, 713);
+        state
+            .db
+            .add_project_member(&project, &guest, &owner)
+            .unwrap();
+        assert!(
+            state.db.remove_project_member(&project, &guest).unwrap(),
+            "setup: the guest leaves after planting the row"
+        );
+        assert!(
+            state.db.project_members(&project).unwrap().is_empty(),
+            "setup: the project now has no live members at all"
+        );
+
+        let e = from_message(
+            &state,
+            &owner,
+            &project,
+            FromMessageBody {
+                chat_id: chat.clone(),
+                message_id: "m_key".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("a row from a guest who has left is still not the owner's own");
+        assert_eq!(e.0, StatusCode::FORBIDDEN, "{:?}", e.1);
+        assert!(
+            state
+                .db
+                .secret_by_name(&owner, "STRIPE_KEY")
+                .unwrap()
+                .is_none(),
+            "nothing may be written into the owner's vault"
+        );
+        assert!(
+            holds(&room_bytes(&state, &room), HANDOFF_KEY),
+            "a refused save must not rewrite the room's history either"
+        );
+    }
+
+    /// The same bare `user` still saves in a project that has never had a guest: nobody else could
+    /// have written it, so an older client that names no author keeps working there.
+    #[tokio::test]
+    async fn an_unattributed_message_still_saves_when_the_project_never_had_a_guest() {
+        let text = format!("here is my key {HANDOFF_KEY} save this");
+        let (state, owner, project, chat, _room) =
+            handoff_setup_sender(&text, None, "dev:ipad").await;
+        let (status, body) = from_message(
+            &state,
+            &owner,
+            &project,
+            FromMessageBody {
+                chat_id: chat.clone(),
+                message_id: "m_key".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(body["secret"]["env"], "STRIPE_KEY");
+    }
+
+    /// A row that names a person who is not the owner is refused whether or not the project is
+    /// shared — the case that already worked, kept so the fix cannot be read as covering it.
+    #[tokio::test]
+    async fn a_message_naming_someone_else_is_never_the_owners() {
+        let text = format!("here is my key {HANDOFF_KEY} save this");
+        let (state, owner, project, chat, _room) =
+            handoff_setup_sender(&text, Some("user:gh_999".into()), "dev:guest-laptop").await;
+        let e = from_message(
+            &state,
+            &owner,
+            &project,
+            FromMessageBody {
+                chat_id: chat.clone(),
+                message_id: "m_key".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("a named non-owner must be refused");
+        assert_eq!(e.0, StatusCode::FORBIDDEN, "{:?}", e.1);
     }
 
     async fn from_message(
