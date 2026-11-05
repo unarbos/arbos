@@ -847,6 +847,9 @@ struct ChatSession: View {
     @State private var actionsRow: Row?
     /// The composer had the keyboard up when the bubble was pressed (`openActions`).
     @State private var actionsRestoresKeyboard = false
+    /// The thumb that opened the overlay, while it is still down, so it can slide onto
+    /// an item and lift to pick it (`MessageRowGestures` → `MessageActionsOverlay`).
+    @State private var actionsSlide: MessageActionsSlide = .idle
     @State private var mentionQuery: String?
     /// Chip-picked addressees in a people chat: `agent:…` and/or `user:…` member ids.
     /// Empty means no chip: agent-only DMs may still infer the last agent; human-peer DMs stay
@@ -1390,6 +1393,7 @@ struct ChatSession: View {
                                                 // Reply in DM only in people groups — not in a
                                                 // DM or 1:1 agent chat you're already in (#1871).
                                                 inPrivateChat: people?.isGroup != true),
+                        slide: actionsSlide,
                         onReact: { emoji in
                             // One toggle per overlay: a second report of the same pick
                             // (the emoji keyboard reports an insert twice, or a cell tapped
@@ -3098,6 +3102,7 @@ struct ChatSession: View {
         composerFocused = false
         searchFocused = false
         PerfSignpost.begin(.messageMenu)
+        actionsSlide = .idle
         withAnimation(.easeOut(duration: 0.18)) { actionsRow = row }
     }
 
@@ -3107,6 +3112,7 @@ struct ChatSession: View {
     private func closeActions(after item: MessageMenuItem? = nil) {
         let restore = MessageActionsKeyboard.restoresFocus(wasFocused: actionsRestoresKeyboard, after: item)
         actionsRestoresKeyboard = false
+        actionsSlide = .idle
         withAnimation(.easeOut(duration: 0.15)) { actionsRow = nil }
         if restore { composerFocused = true }
     }
@@ -4479,6 +4485,7 @@ extension ChatSession {
                     actionsRowId == row.id || revealingRowId == row.id ? [row.id: anchor] : [:]
                 }
                 .messageRowGestures(isMessage: reply, onLongPress: { openActions(row) },
+                                    onSlide: { actionsSlide = $0 },
                                     onDoubleTap: {
                                         model.toggleReaction(chatId: chatId, messageId: row.messageId, emoji: "❤️")
                                     },

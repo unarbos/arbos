@@ -62,6 +62,17 @@ struct RowFrameKey: PreferenceKey {
     }
 }
 
+/// Where the thumb that opened the menu is, while it is still down
+/// (feedback iphone-bubble-menu-slide-to-pick-2026-11-05). Points are in `.global`
+/// space, because the gesture reporting them belongs to the transcript row, not to
+/// the overlay — see `MessageRowGestures` for why it cannot belong to the overlay.
+enum MessageActionsSlide: Equatable {
+    /// No thumb down: the menu was opened and released, and is being used by tapping.
+    case idle
+    case moved(CGPoint)
+    case lifted(CGPoint)
+}
+
 struct MessageActionsOverlay<Bubble: View>: View {
     @Environment(\.theme) private var theme
     let row: Row
@@ -75,12 +86,17 @@ struct MessageActionsOverlay<Bubble: View>: View {
     /// Emoji I already hold on this message (tinted in the capsule).
     let held: Set<String>
     let items: [MessageMenuItem]
+    /// The thumb still down from the long press, if it is (`MessageRowGestures`).
+    var slide: MessageActionsSlide = .idle
     let onReact: (String) -> Void
     let onMenu: (MessageMenuItem) -> Void
     let onDismiss: () -> Void
     @ViewBuilder let bubble: () -> Bubble
 
     @State private var pickOpen = false
+    /// What the sliding thumb is over now. Highlighted exactly as a finger resting on
+    /// that cell or row highlights it, so sliding between items feels like hovering.
+    @State private var highlight: MessageActionsPick = .nothing
     /// The bubble's frame when the press landed. The composer's keyboard goes down as
     /// the overlay opens and the transcript reflows under the blur; the held bubble
     /// stays where the finger is (iMessage) instead of following that reflow.
@@ -106,6 +122,9 @@ struct MessageActionsOverlay<Bubble: View>: View {
                 safeBottom: safeBottom,
                 keyboardInset: keyboard.inset(overlayFrame: geo.frame(in: .global))
             ))
+            let surfaces = MessageActionsSurfaces.compute(layout: layout, width: width, menuWidth: menuWidth,
+                                                          items: items, mine: mine)
+            let overlayOrigin = geo.frame(in: .global).origin
             ZStack(alignment: .topLeading) {
                 Rectangle()
                     .fill(.ultraThinMaterial)
@@ -129,6 +148,7 @@ struct MessageActionsOverlay<Bubble: View>: View {
             }
             .animation(.easeOut(duration: 0.2), value: layout)
             .onAppear { if pressedFrame == nil { pressedFrame = frame } }
+            .onChange(of: slide) { _, now in follow(now, surfaces: surfaces, origin: overlayOrigin) }
         }
         .ignoresSafeArea()
         .overlay {
@@ -140,6 +160,36 @@ struct MessageActionsOverlay<Bubble: View>: View {
             }
         }
         .transition(.opacity)
+    }
+
+    /// The thumb that opened the menu, still down. Each sample is resolved against the
+    /// group's own geometry — the same rects the menu hit-tests taps against — and
+    /// highlights whatever is under it, so sliding between items feels like hovering.
+    ///
+    /// A lift that is not on an item does nothing at all and leaves the overlay open,
+    /// which is exactly what a long press and a release do today. The two alternatives
+    /// are both worse: guessing at the nearest item picks something the thumb was only
+    /// passing over, and closing on any release would take away the press-then-tap the
+    /// menu has always supported.
+    private func follow(_ now: MessageActionsSlide, surfaces: MessageActionsSurfaces, origin: CGPoint) {
+        func local(_ p: CGPoint) -> CGPoint { CGPoint(x: p.x - origin.x, y: p.y - origin.y) }
+        switch now {
+        case .idle:
+            highlight = .nothing
+        case .moved(let p):
+            let next = surfaces.pick(at: local(p))
+            guard next != highlight else { return }
+            highlight = next
+            if next != .nothing { Haptics.pick() }
+        case .lifted(let p):
+            highlight = .nothing
+            switch surfaces.pick(at: local(p)) {
+            case .reaction(let emoji): onReact(emoji)
+            case .morePicker: pickOpen = true
+            case .menu(let item): onMenu(item)
+            case .nothing: break
+            }
+        }
     }
 
     // Every cell and every menu row is tappable over its WHOLE rect (feedback
@@ -161,7 +211,7 @@ struct MessageActionsOverlay<Bubble: View>: View {
                         .background(Circle().fill(held.contains(where: { MessageReaction.sameBase($0, emoji) }) ? theme.accent.opacity(0.22) : Color.clear))
                         .contentShape(Rectangle())
                 }
-                .buttonStyle(CapsuleCellButtonStyle(pressed: theme.text.opacity(0.1)))
+                .buttonStyle(CapsuleCellButtonStyle(pressed: theme.text.opacity(0.1), highlighted: highlight == .reaction(emoji)))
                 .accessibilityLabel("React \(emoji)")
             }
             Button {
@@ -179,7 +229,7 @@ struct MessageActionsOverlay<Bubble: View>: View {
                 .frame(width: ReactionCapsule.cell, height: ReactionCapsule.cell)
                 .contentShape(Rectangle())
             }
-            .buttonStyle(CapsuleCellButtonStyle(pressed: theme.text.opacity(0.1)))
+            .buttonStyle(CapsuleCellButtonStyle(pressed: theme.text.opacity(0.1), highlighted: highlight == .morePicker))
             .accessibilityLabel("More emoji")
         }
         .padding(ReactionCapsule.padding)
@@ -223,7 +273,8 @@ struct MessageActionsOverlay<Bubble: View>: View {
                     }
                     .contentShape(Rectangle())
                 }
-                .buttonStyle(MenuRowButtonStyle(pressed: theme.text.opacity(0.08), bandAbove: row.bandAbove))
+                .buttonStyle(MenuRowButtonStyle(pressed: theme.text.opacity(0.08), bandAbove: row.bandAbove,
+                                                highlighted: highlight == .menu(row.item)))
                 .accessibilityIdentifier("message-menu-\(row.item.label.lowercased().replacingOccurrences(of: " ", with: "-"))")
             }
         }
@@ -255,29 +306,34 @@ struct MessageActionsOverlay<Bubble: View>: View {
 }
 
 /// A menu row's pressed state: the label row tints, the destructive band above it does not.
+/// A thumb sliding over the row gets the same tint as one resting on it (`highlighted`).
 struct MenuRowButtonStyle: ButtonStyle {
     let pressed: Color
     let bandAbove: CGFloat
+    var highlighted = false
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .background(alignment: .bottom) {
-                if configuration.isPressed {
+                if configuration.isPressed || highlighted {
                     Rectangle().fill(pressed).frame(height: MessageActionsMenuRows.rowHeight)
                 }
             }
     }
 }
 
-/// A capsule cell's pressed state: a soft disc under the emoji.
+/// A capsule cell's pressed state: a soft disc under the emoji. A thumb sliding onto
+/// the cell gets the same disc and the same lift as one resting on it (`highlighted`).
 struct CapsuleCellButtonStyle: ButtonStyle {
     let pressed: Color
+    var highlighted = false
 
     func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .background(Circle().fill(configuration.isPressed ? pressed : Color.clear))
-            .scaleEffect(configuration.isPressed ? 1.12 : 1)
-            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+        let on = configuration.isPressed || highlighted
+        return configuration.label
+            .background(Circle().fill(on ? pressed : Color.clear))
+            .scaleEffect(on ? 1.12 : 1)
+            .animation(.easeOut(duration: 0.12), value: on)
     }
 }
 
@@ -385,21 +441,62 @@ final class EmojiTextField: UITextField {
     override var textInputContextIdentifier: String? { "arbos.reaction.emoji" }
 }
 
-extension View {
-    /// A message bubble: long-press → actions overlay; double-tap → ❤️ reaction.
-    /// Any other row (date / system / channel line) keeps a plain Copy context menu.
-    @ViewBuilder
-    func messageRowGestures(isMessage: Bool, onLongPress: @escaping () -> Void,
-                            onDoubleTap: @escaping () -> Void,
-                            onCopyMenu: @escaping (MessageMenuItem) -> Void) -> some View {
-        if isMessage {
+/// The long press and the slide out of it are **one** gesture, sequenced, so the
+/// samples that arrive after the menu opens land on a recogniser that is already
+/// receiving this touch (feedback iphone-bubble-menu-slide-to-pick-2026-11-05).
+///
+/// Nothing else can receive it. UIKit routes a touch to the view it hit-tested when
+/// the finger went *down*, and the overlay is added afterwards, as a sibling, while
+/// the finger is still on the bubble — so the capsule's cells and the menu's rows are
+/// not on this touch's delivery path, and a tracker placed on them would never be
+/// called however it was written. The bubble's own gesture is the one place
+/// guaranteed to be on that path, because it is the gesture whose long press opened
+/// the menu: the menu cannot exist unless this recogniser already holds the touch.
+///
+/// Nothing claims earlier and no threshold moves. The first stage is the same 0.35 s
+/// `LongPressGesture` and `onLongPress` still fires the moment it succeeds; the
+/// second takes a `minimumDistance` of 0, so it adds no threshold of its own. The fix
+/// is acting on samples that were already arriving and being thrown away.
+private struct MessageRowGestures: ViewModifier {
+    let onLongPress: () -> Void
+    let onSlide: (MessageActionsSlide) -> Void
+    let onDoubleTap: () -> Void
+
+    /// The long press has already fired for the touch that is still down.
+    @State private var open = false
+    /// …and it opened the menu rather than reading a chart value, so its slide counts.
+    @State private var tracking = false
+
+    func body(content: Content) -> some View {
+        content
             // simultaneous so the chat ScrollView keeps vertical pans that start
             // on a bubble; exclusive onLongPressGesture eats the scroll
             // ([feedback app-01M5Q1N6C1HAKHC6P2XPEWMRSS]).
             // A hold on a chart plot reads a value instead (`ChartTouch`).
-            simultaneousGesture(
+            .simultaneousGesture(
                 LongPressGesture(minimumDuration: 0.35)
-                    .onEnded { _ in if !ChartTouch.holding { onLongPress() } },
+                    .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .global))
+                    .onChanged { value in
+                        guard case .second(true, let drag) = value else { return }
+                        if !open {
+                            open = true
+                            tracking = !ChartTouch.holding
+                            if tracking { onLongPress() }
+                            // The overlay is not on screen until the next pass, and it
+                            // only sees a slide that *changes* after it appears — so the
+                            // sample that opened it is deliberately not reported.
+                            return
+                        }
+                        guard tracking, let drag else { return }
+                        onSlide(.moved(drag.location))
+                    }
+                    .onEnded { value in
+                        let slid = tracking
+                        open = false
+                        tracking = false
+                        guard slid, case .second(true, let drag) = value, let drag else { return }
+                        onSlide(.lifted(drag.location))
+                    },
                 enabled: ChatGestures.longPress
             )
             // Double-tap toggles a heart under the bubble (Telegram / iMessage;
@@ -408,6 +505,20 @@ extension View {
                 TapGesture(count: 2)
                     .onEnded { onDoubleTap() }
             )
+    }
+}
+
+extension View {
+    /// A message bubble: long-press → actions overlay, with the thumb free to stay down
+    /// and slide onto an item (`onSlide`); double-tap → ❤️ reaction. Any other row
+    /// (date / system / channel line) keeps a plain Copy context menu.
+    @ViewBuilder
+    func messageRowGestures(isMessage: Bool, onLongPress: @escaping () -> Void,
+                            onSlide: @escaping (MessageActionsSlide) -> Void,
+                            onDoubleTap: @escaping () -> Void,
+                            onCopyMenu: @escaping (MessageMenuItem) -> Void) -> some View {
+        if isMessage {
+            modifier(MessageRowGestures(onLongPress: onLongPress, onSlide: onSlide, onDoubleTap: onDoubleTap))
         } else {
             contextMenu { MessageMenuContent(items: MessageMenu.copyOnly, action: onCopyMenu) }
         }
