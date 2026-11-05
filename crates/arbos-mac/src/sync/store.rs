@@ -36,6 +36,10 @@ pub const KEY_ARCHIVE_MIGRATED: &str = "archive_migrated";
 /// My sidebar pins (row keys, top first) as the relay last confirmed them — shown at launch
 /// before `GET /me/pins` answers ([feedback sidebar-pinning-mac-2026-10-28]).
 pub const KEY_PINS: &str = "pins";
+/// Sends with pictures or videos whose uploads have not landed. They are in no chat
+/// document — the write waits for the uploads — so this is the only record of them, and it
+/// is what puts them back in the chat after a quit ([feedback caption-sent-without-media]).
+pub const KEY_OUTBOX: &str = "outbox";
 /// `avatar:<url>` → the picture's bytes. The URL carries the picture's version
 /// (`…/avatar.jpg?v=<stamp>`, `/avatars/<user>.jpg?v=…`), so a changed picture is a new key
 /// and a cached one can never be stale; keys no current URL names are pruned with the registry.

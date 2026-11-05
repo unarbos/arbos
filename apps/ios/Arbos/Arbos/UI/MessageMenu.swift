@@ -65,14 +65,19 @@ enum MessageMenu {
         items(forMessage: forMessage, canEdit: false, canDelete: true, hasReplies: false)
     }
 
+    /// A message still in the outbox: nobody else has it, so Reply, Forward, Reply in DM,
+    /// View thread and Edit have nothing to act on. Copy the words you typed, or Delete it.
+    static let unsent: [MessageMenuItem] = [.copy, .delete]
+
     /// View thread when `hasReplies`; Edit only on the user's own text; Delete only
     /// when the relay would allow it (`MessageDeleteRule.mayDelete`); Remove preview only on a
     /// message that shows a link card (`hasPreview`) the user may delete. Reply in DM is
     /// for group chats only — omit it in a private / 1:1 chat (`inPrivateChat`).
     static func items(forMessage: Bool, canEdit: Bool = false, canDelete: Bool = true,
                       hasReplies: Bool = false, hasPreview: Bool = false,
-                      inPrivateChat: Bool = false) -> [MessageMenuItem] {
+                      inPrivateChat: Bool = false, unsent: Bool = false) -> [MessageMenuItem] {
         guard forMessage else { return copyOnly }
+        if unsent { return Self.unsent }
         var out: [MessageMenuItem] = [.copy, .reply]
         if hasReplies { out.append(.viewThread) }
         out.append(.forward)
