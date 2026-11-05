@@ -107,7 +107,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   title TEXT NOT NULL, kind TEXT NOT NULL, brief TEXT NOT NULL, touches TEXT NOT NULL DEFAULT '[]',
   state TEXT NOT NULL, last_step TEXT NOT NULL DEFAULT '', last_step_at INTEGER,
   created_at INTEGER NOT NULL, started_at INTEGER, ended_at INTEGER, error TEXT,
-  delivered_key TEXT, restarts INTEGER NOT NULL DEFAULT 0
+  delivered_key TEXT, restarts INTEGER NOT NULL DEFAULT 0, steers TEXT NOT NULL DEFAULT '[]'
 );
 "#;
 
@@ -132,6 +132,13 @@ pub struct JobRow {
     pub error: Option<String>,
     pub delivered_key: Option<String>,
     pub restarts: i64,
+    /// Every `steer_job` correction this job has been given, oldest first.
+    ///
+    /// A steer is delivered into the worker's live pi session, which dies with that worker. The
+    /// job outlives it — a fresh worker, or the inline fallback — and each of those used to run
+    /// the brief the user had already corrected (bug V, Jacob's Test5 round 7). Kept on the job
+    /// row because that is the thing with the longer life.
+    pub steers: Vec<String>,
 }
 
 impl JobRow {
@@ -284,6 +291,16 @@ impl Store {
             .any(|n| n == "widget");
         if !has_widget {
             c.execute_batch("ALTER TABLE asks ADD COLUMN widget TEXT")?;
+        }
+        // Additive migration: the corrections a job was steered with (bug V), which outlive
+        // the worker session they were delivered to.
+        let has_steers: bool = c
+            .prepare("PRAGMA table_info(jobs)")?
+            .query_map([], |r| r.get::<_, String>(1))?
+            .filter_map(Result::ok)
+            .any(|n| n == "steers");
+        if !has_steers {
+            c.execute_batch("ALTER TABLE jobs ADD COLUMN steers TEXT NOT NULL DEFAULT '[]'")?;
         }
         Ok(Self(Arc::new(Mutex::new(c))))
     }
@@ -586,7 +603,7 @@ impl Store {
 
     // ---- jobs (duplex design §2.3) ------------------------------------------------------------
 
-    const JOB_COLS: &'static str = "id, chat_id, ask_message_id, subagent_id, title, kind, brief, touches, state, last_step, last_step_at, created_at, started_at, ended_at, error, delivered_key, restarts";
+    const JOB_COLS: &'static str = "id, chat_id, ask_message_id, subagent_id, title, kind, brief, touches, state, last_step, last_step_at, created_at, started_at, ended_at, error, delivered_key, restarts, steers";
 
     fn row_to_job(r: &rusqlite::Row<'_>) -> rusqlite::Result<JobRow> {
         Ok(JobRow {
@@ -607,6 +624,7 @@ impl Store {
             error: r.get(14)?,
             delivered_key: r.get(15)?,
             restarts: r.get(16)?,
+            steers: serde_json::from_str(&r.get::<_, String>(17)?).unwrap_or_default(),
         })
     }
 
@@ -671,6 +689,19 @@ impl Store {
             c.execute(
                 "UPDATE jobs SET delivered_key = ?2 WHERE id = ?1",
                 params![id, key],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// Record a `steer_job` correction on the job row, so a fresh worker or the inline fallback
+    /// still has it after the session it was delivered to is gone (bug V).
+    pub fn append_job_steer(&self, id: &str, text: &str) -> Result<()> {
+        let text = redact(text);
+        self.with(|c| {
+            c.execute(
+                "UPDATE jobs SET steers = json_insert(steers, '$[#]', ?2) WHERE id = ?1",
+                params![id, text],
             )
             .map(|_| ())
         })

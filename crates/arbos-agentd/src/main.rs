@@ -58,6 +58,8 @@ mod store;
 mod sync;
 mod tree;
 mod truncate;
+#[cfg(test)]
+mod turn_end_race_tests;
 mod vault;
 mod voice;
 mod web;
