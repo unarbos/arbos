@@ -46,8 +46,14 @@ use crate::status::tests::test_agent;
 
 const CHAT: &str = "01TESTCHATJOBREPARENT00001";
 const JOB: &str = "01TESTJOBREPARENTTICK13001";
-const WORKER: &str = "01TESTWORKERJOBREPARENT001";
 const ASK: &str = "01TESTASKJOBREPARENT000001";
+
+/// A worker id per test, because the mark is read out of the box's process table and that is
+/// one namespace for the whole suite. Two tests sharing a mark would each find the other's
+/// processes and report them as survivors of its own job — a flake, and one that would look
+/// exactly like the bug.
+const WORKER_Z: &str = "01TESTWORKERREPARENTKILL01";
+const WORKER_AE: &str = "01TESTWORKERREPARENTNAME01";
 
 /// The cancel's budget: within five seconds nothing of the job is alive and its log stops
 /// growing.
@@ -83,7 +89,7 @@ struct Worker {
 }
 
 impl Worker {
-    fn start(dir: &Path) -> Self {
+    fn start(dir: &Path, mark: &str) -> Self {
         let log = dir.join("tick13.log");
         let pid_file = dir.join("tick13.pid");
         let loop_body = format!(
@@ -101,7 +107,7 @@ impl Worker {
         let mut cmd = Command::new("bash");
         cmd.arg("-c")
             .arg(&script)
-            .env(WORKER_MARK_ENV, WORKER)
+            .env(WORKER_MARK_ENV, mark)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
@@ -217,7 +223,7 @@ fn alive(pid: u32) -> bool {
 
 /// The job as `run_subagent` leaves one, with the worker's session recorded as the box records
 /// it.
-async fn a_running_job(agent: &std::sync::Arc<Agent>, worker: &Worker) {
+async fn a_running_job(agent: &std::sync::Arc<Agent>, worker: &Worker, sid: &str) {
     let host = agent.sync.open_room(CHAT).await.unwrap();
     {
         let h = host.lock().await;
@@ -244,11 +250,11 @@ async fn a_running_job(agent: &std::sync::Arc<Agent>, worker: &Worker) {
         .unwrap();
     agent
         .store
-        .insert_subagent(WORKER, "job-tick13", "run the ticker", "pi", CHAT)
+        .insert_subagent(sid, "job-tick13", "run the ticker", "pi", CHAT)
         .unwrap();
-    agent.store.set_job_subagent(JOB, WORKER).unwrap();
+    agent.store.set_job_subagent(JOB, sid).unwrap();
     agent.store.set_job_state(JOB, "running", None).unwrap();
-    agent.note_worker_pgid(WORKER, worker.leader).await;
+    agent.note_worker_pgid(sid, worker.leader).await;
 }
 
 /// **Bug Z.** The cancel reaches a tree the job backgrounded, orphaned and regrouped.
@@ -259,9 +265,9 @@ async fn a_running_job(agent: &std::sync::Arc<Agent>, worker: &Worker) {
 #[tokio::test]
 async fn cancelling_a_job_kills_the_backgrounded_tree_it_orphaned() {
     let (agent, root) = test_agent().await;
-    let worker = Worker::start(&root);
+    let worker = Worker::start(&root, WORKER_Z);
     worker.assert_is_round_13_shape();
-    a_running_job(&agent, &worker).await;
+    a_running_job(&agent, &worker, WORKER_Z).await;
 
     let t0 = Instant::now();
     let stopped = agent.stop_jobs(CHAT, Some(JOB)).await;
@@ -325,9 +331,9 @@ async fn cancelling_a_job_kills_the_backgrounded_tree_it_orphaned() {
 #[tokio::test]
 async fn a_process_the_cancel_could_not_reap_is_named_by_pid() {
     let (agent, root) = test_agent().await;
-    let worker = Worker::start(&root);
-    a_running_job(&agent, &worker).await;
-    let mut escapee = Escapee::start(&root);
+    let worker = Worker::start(&root, WORKER_AE);
+    a_running_job(&agent, &worker, WORKER_AE).await;
+    let mut escapee = Escapee::start(&root, WORKER_AE);
     let turn = agent.test_hold_turn(CHAT).await;
 
     let result = agent
@@ -415,14 +421,14 @@ struct Escapee {
 }
 
 impl Escapee {
-    fn start(dir: &Path) -> Self {
+    fn start(dir: &Path, mark: &str) -> Self {
         let mut cmd = Command::new("bash");
         cmd.arg("-c")
             .arg(format!(
                 "for k in $(seq 1 400); do sleep {TICK}; echo tick >> {}; done",
                 dir.join("escapee.log").display()
             ))
-            .env(WORKER_MARK_ENV, WORKER)
+            .env(WORKER_MARK_ENV, mark)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
