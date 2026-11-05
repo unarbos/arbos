@@ -24,8 +24,8 @@
 use crate::search::{match_text, MatchKind};
 
 /// Which app is asking: the index differs a little per platform (the Mac has
-/// Updates and On this Mac, the iPhone has Privacy, Text Size, Credits and
-/// Connected apps).
+/// Updates and On this Mac, the iPhone has Text Size, Credits and Connected
+/// apps).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Platform {
     Mac,
@@ -274,7 +274,7 @@ pub const INDEX: &[SettingsEntry] = &[
         "Privacy",
         "Settings",
         ["privacy", "groups", "who can add me", "spam", "invites"],
-        IPHONE
+        BOTH
     ),
     entry!(
         TextSize,
@@ -563,6 +563,17 @@ mod tests {
         assert!(search("updates", Platform::Iphone)
             .iter()
             .any(|h| h.entry.item == SettingsItem::About));
+    }
+
+    #[test]
+    fn privacy_is_on_both_platforms() {
+        for platform in [Platform::Mac, Platform::Iphone] {
+            assert_eq!(titles("privacy", platform)[0].1, SettingsItem::Privacy);
+            assert_eq!(
+                titles("who can add me", platform)[0].1,
+                SettingsItem::Privacy
+            );
+        }
     }
 
     #[test]

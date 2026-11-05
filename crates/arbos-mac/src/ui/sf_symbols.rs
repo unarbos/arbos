@@ -122,6 +122,7 @@ pub const FALLBACKS: &[(&str, &str)] = &[
     ("key", "key"),
     ("pause.fill", "pause"),
     ("lock", "lock"),
+    ("hand.raised", "lock"),
     ("terminal", "terminal"),
     ("video", "video"),
     ("rectangle.portrait.and.arrow.right", "leave"),

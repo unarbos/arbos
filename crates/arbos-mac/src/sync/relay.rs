@@ -59,10 +59,10 @@ use super::{
 use crate::model::{
     new_id, now_ms, trace_rows, AccountView, Attachment, AttachmentKind, BoxReport, BoxState, Call,
     CallEnded, CallLeft, CallMissed, ChannelBinding, ChannelPairing, ChannelPlatform, ChannelsView,
-    ChartBody, Chat, Effort, GifItem, GifPage, Id, Link, LinkState, Machine, MachineState,
-    MediaPick, Message, Part, Person, Project, ProjectDocView, ProjectSecrets, Reachable, ReplyRef,
-    Role, Routine, RoutineRun, Sender, ServerInfo, StickerPack, ThreadInfo, STICKER_KEY_PREFIX,
-    URL_KEY_PREFIX,
+    ChartBody, Chat, Effort, GifItem, GifPage, GroupAdd, Id, Link, LinkState, Machine,
+    MachineState, MediaPick, Message, Part, Person, Project, ProjectDocView, ProjectSecrets,
+    Reachable, ReplyRef, Role, Routine, RoutineRun, Sender, ServerInfo, StickerPack, ThreadInfo,
+    STICKER_KEY_PREFIX, URL_KEY_PREFIX,
 };
 use crate::update;
 
@@ -982,6 +982,9 @@ async fn refresh_me(shared: &Arc<Shared>) {
     *shared.me.lock().unwrap() = Some(u);
     let view = account_view_from_me(&dto);
     let _ = shared.events.send(SyncEvent::Account(Some(view)));
+    let _ = shared.events.send(SyncEvent::GroupAdd(GroupAdd::from_wire(
+        &dto.privacy.group_add,
+    )));
     // D92 remote flags: leaf avatars for agents, and their Lottie playback (absent = on).
     crate::ui::avatars::set_leaf_avatars(dto.features.leaf_avatars.unwrap_or(true));
     crate::ui::avatars::set_leaf_lottie(dto.features.leaf_lottie.unwrap_or(true));
@@ -7303,6 +7306,18 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         refresh_me(&shared).await;
                     }
                 }
+            });
+        }
+        ClientCommand::SetGroupAdd(choice) => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                if let Err(err) = shared
+                    .patch_json("/me", json!({ "group_add": choice.wire() }))
+                    .await
+                {
+                    shared.fail("save the privacy setting", &err);
+                }
+                refresh_me(&shared).await;
             });
         }
         ClientCommand::SetDescription {
