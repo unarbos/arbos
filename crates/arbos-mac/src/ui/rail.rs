@@ -231,6 +231,25 @@ pub(crate) fn morph_list_top(t: f32) -> f32 {
     expanded + (rail - expanded) * t.clamp(0.0, 1.0)
 }
 
+/// A rail tile's fill: the highlight token's selected / hover steps, the
+/// same wash the expanded sidebar's rows wear (`highlight::row`).
+pub(crate) fn tile_fill(theme: &Theme, selected: bool, hover: bool) -> gpui::Hsla {
+    let fills = highlight::fills(theme);
+    if selected {
+        fills.selected
+    } else if hover {
+        fills.hover
+    } else {
+        gpui::transparent_black()
+    }
+}
+
+/// The selected row's card while it travels into its tile: the fill it has at
+/// both ends, so Glass shows no opaque slab mid-fold.
+pub(crate) fn morph_card_fill(theme: &Theme) -> gpui::Hsla {
+    tile_fill(theme, true, false)
+}
+
 /// The text's fade during the morph: gone by half-way, back from half-way.
 pub(crate) fn text_alpha(t: f32) -> f32 {
     (1.0 - 2.0 * t).clamp(0.0, 1.0)
@@ -371,14 +390,7 @@ pub(crate) fn render(shell: &Shell, cx: &mut Context<Shell>) -> gpui::Stateful<D
         // The highlight token's selected / hover steps (`ui::highlight`); the
         // tile is its own pill (Grok's 54 pt, radius 12), hover tracked here
         // because the name tip beside the rail follows it.
-        let fills = highlight::fills(&theme);
-        let tile_fill = if selected {
-            fills.selected
-        } else if is_hover {
-            fills.hover
-        } else {
-            gpui::transparent_black()
-        };
+        let tile_fill = tile_fill(&theme, selected, is_hover);
         // The badge's ring is the tile's colour as painted on the sidebar.
         let ring = highlight::over(theme.sidebar, tile_fill);
         let picture = entry.picture(shell, metrics::AVATAR, &theme, cx);
@@ -650,7 +662,7 @@ pub(crate) fn render_overlay(
                         .w(b.size.width)
                         .h(b.size.height)
                         .rounded(px(radius))
-                        .bg(theme.surface_2),
+                        .bg(morph_card_fill(&theme)),
                 );
             }
         }
@@ -921,6 +933,31 @@ mod tests {
         assert_eq!(f32::from(mid.origin.x), 22.0);
         assert_eq!(f32::from(mid.origin.y), 135.5);
         assert_eq!(f32::from(mid.size.width), 36.0);
+    }
+
+    /// Scout, Glass: the selected row flickered while the column folded in.
+    /// The travelling card wore `surface_2`, an opaque Matte slab, between a
+    /// row and a tile that both wear the text-colour wash; and the morph
+    /// painted the column's translucent wash twice, the inner copy fading out
+    /// by half-way. Every appearance now keeps one fill from row to tile and
+    /// one wash under the column.
+    #[test]
+    fn the_folding_selected_card_keeps_the_row_and_tile_fill() {
+        use crate::ui::theme::Surface;
+        for theme in [
+            Theme::dark(Surface::Matte),
+            Theme::light(Surface::Matte),
+            Theme::dark(Surface::Glass),
+            Theme::light(Surface::Glass),
+        ] {
+            let row = highlight::fills(&theme).rest(true);
+            let tile = tile_fill(&theme, true, false);
+            assert_eq!(morph_card_fill(&theme), row, "{:?}", theme.surface);
+            assert_eq!(morph_card_fill(&theme), tile, "{:?}", theme.surface);
+            assert_ne!(morph_card_fill(&theme), theme.surface_2);
+            assert_eq!(sidebar::column_fill(&theme, false), Some(theme.chrome()));
+            assert_eq!(sidebar::column_fill(&theme, true), None);
+        }
     }
 
     /// Scout on v0.6.350 ([feedback mac-sidebar-slide-jank-2026-10-29]): "it
