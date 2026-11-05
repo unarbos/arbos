@@ -11767,10 +11767,20 @@ impl Agent {
         // the end and agentd's parsed copy of it appended, cut to the 7,000 chars a *prompt* gets
         // with a marker naming a `history_search` call. The user read all of it. Cut for a chat
         // row instead, the way the notice agentd writes itself is (`job_notice_line`).
+        //
+        // Round 13 showed the second half of the same failure, in the same bubble: it opened
+        // "It's listed. Step 1." `ProseFilter::clean_prose` is written for the talking model's own
+        // drafts, and a worker's report is not one — "The user asked whether the note is in the
+        // list." reads as thought-aloud to the thought-prefix stripper and "Checking the two
+        // remaining notes is still open." reads as tool narration to the trailing stripper, so a
+        // report in a worker's register loses both ends. Nothing here filters the worker's words
+        // any more: the contract comes off, the text is cut for a row, and `normalize_tables`
+        // makes a table render (it rewrites table and link syntax only, never a sentence). That is
+        // what `job_notice_line` has always done with the same text.
         let fallback = || {
             let prose = worker_prose(raw);
             if status == "done" && !prose.trim().is_empty() {
-                ProseFilter::clean_prose(
+                crate::markdown_tables::normalize_tables(
                     crate::truncate::clip_for_chat(
                         prose.trim(),
                         crate::truncate::CHAT_NOTICE_CHARS,

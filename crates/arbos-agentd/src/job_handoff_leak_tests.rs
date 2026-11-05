@@ -17,6 +17,23 @@
 //! answer, and that block is the answer — so the rule is the contract's own shape (a `status`
 //! of exactly `done`, `blocked`, `partial` or `needs_input`, plus at least one contract field)
 //! at the end of the text, never "a fenced block".
+//!
+//! ## The second fault on the same path (round 13)
+//!
+//! Round 13 (2026-11-05, same image) reproduced it twice — notes13 at 14:45:20 and status13c at
+//! 14:59:30 — and the notes13 bubble opened "It's listed. Step 1.", which is not a stripping
+//! failure at all. Same trigger, same line, a different fault: the fallback ran the worker's
+//! report through `ProseFilter::clean_prose`, which is written for the *talking model's* own
+//! drafts. Its thought-prefix stripper treats "The user asked …" as the model thinking aloud and
+//! drops it, and its trailing-narration stripper treats "Checking the two remaining notes is
+//! still open." as tool narration and drops that too. A worker writing to the main agent uses
+//! exactly that register, so both ends of its report were deleted — and removing the JSON alone
+//! would have left the user with the broken sentence and nothing else.
+//!
+//! So the fallback no longer filters a worker's prose at all. It strips the contract, cuts for a
+//! chat row and normalises tables, which is what `job_notice_line` — the other path that posts a
+//! worker's words — has always done. `clean_prose` stays on the success branch, where the text
+//! really is the talking model's.
 
 use arbos_core::doc::{MessageView, UserMessageOpts};
 use arbos_core::ids::ulid;
@@ -30,6 +47,17 @@ use crate::sync::SharedHost;
 /// The human half of round 12's worker answer.
 const PROSE: &str = "All eight checks passed and the report is in out/round12.md. \
 The two sites that answered 403 are named in it.";
+
+/// Round 13's notes13 answer, in the register a worker writes to the main agent in: it names
+/// what was asked, answers it, numbers the steps and ends with what is still open.
+///
+/// Every sentence here is the worker's own content. `clean_prose` deletes the first (it starts
+/// "The user asked") and the last (it starts "Checking "), which is how the bubble came to open
+/// at "It's listed. Step 1." — the two assertions below are those two sentences.
+const R13_NOTES: &str = "The user asked whether the note is in the list. It's listed. \
+Step 1. Open the notes file and read the third line. \
+Step 2. The entry is dated 4 November. \
+Checking the two remaining notes is still open.";
 
 /// The return contract that followed it, in the shape the worker prompt asks for.
 const CONTRACT: &str = r#"```json
@@ -132,6 +160,33 @@ async fn a_job_result_fallback_posts_the_prose_and_none_of_the_return_contract()
             "the chat got the job's machinery ({machinery}): {posted}"
         );
     }
+}
+
+/// Round 13's second symptom, driven from the same trigger: the summary call returns nothing, and
+/// what lands in the chat is the worker's report with **both ends still on it**.
+///
+/// Red before the fix with the exact string Jacob quoted: the bubble opened "It's listed. Step 1."
+#[tokio::test]
+async fn a_job_result_fallback_keeps_the_workers_first_and_last_sentence() {
+    let raw = format!("{R13_NOTES}\n\n{CONTRACT}");
+    let (posted, logged) =
+        posted_on_the_empty_summary_path("01TESTCHATHANDOFFLEAK00003", &raw).await;
+
+    assert!(logged.contains("job result call gave nothing"), "{logged}");
+    assert!(
+        !posted.starts_with("It's listed."),
+        "round 13's garbled opener, byte for byte: {posted}"
+    );
+    assert!(
+        posted.starts_with("The user asked whether the note is in the list."),
+        "the worker's opening sentence was eaten as thought-aloud: {posted}"
+    );
+    assert!(
+        posted.contains("Checking the two remaining notes is still open."),
+        "the worker's open item was eaten as tool narration: {posted}"
+    );
+    // And still no contract: the two faults are fixed together or not at all.
+    assert!(!posted.contains("```json"), "{posted}");
 }
 
 /// A worker whose answer *is* JSON (the user asked for the response body) keeps it. The strip is
