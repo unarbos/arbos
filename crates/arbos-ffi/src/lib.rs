@@ -222,24 +222,27 @@ pub enum FrameType {
     Wake,
 }
 
-impl From<WireFrameType> for FrameType {
-    fn from(t: WireFrameType) -> Self {
-        match t {
-            WireFrameType::Hello => Self::Hello,
-            WireFrameType::State => Self::State,
-            WireFrameType::RowsReq => Self::RowsReq,
-            WireFrameType::Row => Self::Row,
-            WireFrameType::RowsDone => Self::RowsDone,
-            WireFrameType::Push => Self::Push,
-            WireFrameType::Ack => Self::Ack,
-            WireFrameType::Presence => Self::Presence,
-            WireFrameType::Probe => Self::Probe,
-            WireFrameType::ProbeOk => Self::ProbeOk,
-            WireFrameType::Error => Self::Error,
-            WireFrameType::Status => Self::Status,
-            WireFrameType::Wake => Self::Wake,
-        }
-    }
+/// The app's view of a frame type, or `None` for a frame the apps are not addressed by: a
+/// `Nudge` is sent to boxes only, and an app that is somehow sent one treats it as it has
+/// always treated an unknown type byte, so this enum — and the Swift it generates — does not
+/// grow a case for it.
+fn app_frame_type(t: WireFrameType) -> Option<FrameType> {
+    Some(match t {
+        WireFrameType::Nudge => return None,
+        WireFrameType::Hello => FrameType::Hello,
+        WireFrameType::State => FrameType::State,
+        WireFrameType::RowsReq => FrameType::RowsReq,
+        WireFrameType::Row => FrameType::Row,
+        WireFrameType::RowsDone => FrameType::RowsDone,
+        WireFrameType::Push => FrameType::Push,
+        WireFrameType::Ack => FrameType::Ack,
+        WireFrameType::Presence => FrameType::Presence,
+        WireFrameType::Probe => FrameType::Probe,
+        WireFrameType::ProbeOk => FrameType::ProbeOk,
+        WireFrameType::Error => FrameType::Error,
+        WireFrameType::Status => FrameType::Status,
+        WireFrameType::Wake => FrameType::Wake,
+    })
 }
 
 impl From<FrameType> for WireFrameType {
@@ -292,8 +295,11 @@ pub fn decode_frame(bytes: Vec<u8>) -> Result<DecodedFrame, FfiError> {
         Ok(Some(frame)) => {
             let header_json = serde_json::to_string(&frame.header)
                 .map_err(|e| FfiError::Decode(e.to_string()))?;
+            let Some(ty) = app_frame_type(frame.ty) else {
+                return Err(FfiError::Decode("unknown frame type".into()));
+            };
             Ok(DecodedFrame {
-                ty: frame.ty.into(),
+                ty,
                 header_json,
                 payload: frame.payload.to_vec(),
             })

@@ -890,15 +890,49 @@ fn chat_open_payload(state: &AppState, chat: &crate::db::Chat, reason: &str) -> 
     })
 }
 
+/// A push is waiting for `project_id`: say so on the socket the box already holds, instead of
+/// leaving it to the box's 5 s push poll (`routines::PUSH_POLL`) or its 3 s listing.
+///
+/// The nudge carries nothing — the box still fetches the queue from
+/// `GET /projects/{id}/pushes`, which stays the one durable source of truth, so a box that is
+/// asleep, restarting or between redials loses nothing by missing it and finds the same push
+/// by polling. This only removes the wait in front of a push that is already queued.
+pub async fn nudge_pushes(state: &AppState, project_id: &str) {
+    let room_name = arbos_core::wire::room_name(project_id, arbos_core::wire::PROJECT_DOC_CHAT_ID);
+    // The box holds the project doc room for as long as it is running (agentd's
+    // `Workspace::start`), which is what makes one room enough to reach it.
+    let rooms = state.rooms.read().await;
+    let Some(room) = rooms.get(&room_name) else {
+        return;
+    };
+    let frame = arbos_core::wire::Frame::new(
+        arbos_core::wire::FrameType::Nudge,
+        json!({ "kind": arbos_core::wire::NUDGE_PUSHES }),
+        bytes::Bytes::new(),
+    )
+    .encode();
+    let _ = room.tx.send(crate::state::RoomBroadcast {
+        from_conn: 0,
+        bytes: frame,
+        seq: 0,
+        boxes_only: true,
+    });
+}
+
 /// A new project chat exists: its box opens the room without waiting for the 3 s listing.
 /// Returns whether a push was queued (false when one is already waiting).
-pub fn chat_created(state: &AppState, chat: &crate::db::Chat) -> bool {
+pub async fn chat_created(state: &AppState, chat: &crate::db::Chat) -> bool {
     match state.db.enqueue_push_once(
         &chat.project_id,
         CHAT_OPEN_PUSH,
         &chat_open_payload(state, chat, "created"),
     ) {
-        Ok(added) => added,
+        Ok(added) => {
+            if added {
+                nudge_pushes(state, &chat.project_id).await;
+            }
+            added
+        }
         Err(e) => {
             tracing::warn!(chat = %chat.id, project = %chat.project_id, error = %e, "chat_open push not queued");
             false
@@ -948,6 +982,7 @@ pub async fn after_person_row(
         match state.db.enqueue_push_once(&a.project_id, kind, &payload) {
             Ok(true) => {
                 queued += 1;
+                nudge_pushes(state, &a.project_id).await;
                 tracing::info!(
                     chat = %chat.chat_id, project = %a.project_id, owner = %a.owner, kind,
                     "row landed with no box socket on the room; told the box to open it"

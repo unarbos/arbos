@@ -49,6 +49,8 @@ mod model_switch_tests;
 mod people;
 #[cfg(test)]
 mod pi_crash_loop_tests;
+#[cfg(test)]
+mod push_nudge_tests;
 mod relay_error;
 mod reply;
 mod resources;

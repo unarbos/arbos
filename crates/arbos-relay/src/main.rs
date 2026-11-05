@@ -75,6 +75,8 @@ mod proxy_trace;
 mod proxy_trace_tests;
 mod push;
 mod push_guard;
+#[cfg(test)]
+mod push_nudge_tests;
 mod releases;
 mod restart;
 mod room_health;

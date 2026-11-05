@@ -56,6 +56,7 @@ pub async fn announce(state: &AppState, seconds: u64) -> usize {
                 from_conn: 0,
                 bytes: bytes.clone(),
                 seq: 0,
+                boxes_only: false,
             })
             .is_ok()
         {
