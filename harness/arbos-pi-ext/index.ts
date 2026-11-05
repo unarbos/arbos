@@ -372,7 +372,19 @@ export default function arbosPiExt(pi: ExtensionAPI) {
         if (typeof cur.reason === "string") reason = cur.reason;
       }
     }
-    if (state === "pending") {
+    if (state === "pending" && first.park === true) {
+      // A main-session call: stop holding the chat's turn. The card stays answerable for its
+      // full deadline and agentd runs the call itself once it is approved, so this is a park
+      // rather than a failure. Holding the turn for the whole wait is Test5 round 5 bug R —
+      // fourteen minutes in which that chat could only answer from the quick lane.
+      const parked = await hook("/hook/approval-park", { approvalId });
+      if (parked?.ok && parked.parked === true) {
+        audit({ kind: "approval_parked", session: sessionId, tool, call_id: callId, approval_id: approvalId });
+        return { block: true, reason: String(parked.reason ?? "This needs the user's approval; nothing ran.") };
+      }
+      // Decided inside the grace, or already gone: fall through on the state agentd reports.
+      if (typeof parked?.state === "string") state = parked.state as ApprovalState;
+    } else if (state === "pending") {
       // Stopped waiting: agentd expires the card so the UI shows the timeout promptly.
       void hook("/hook/approval-abandon", { approvalId });
     }

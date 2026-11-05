@@ -189,6 +189,24 @@ fn canonical(v: &Value) -> String {
     }
 }
 
+/// What the harness tells the model when its gated call is parked.
+///
+/// Three things it has to carry, because each was got wrong somewhere in Test5: nothing ran, so
+/// the model may not report the work as done; the call must not be repeated, since the re-run is
+/// Arbos's job once the card is answered; and the turn should end rather than wait, which is the
+/// point of parking it at all.
+///
+/// It names no chat. The model is not told where the card went (`hook_approval`'s pending reply
+/// carries that), so a sentence here would be the invention this is meant to stop.
+fn parked_reason(approval_id: &str) -> String {
+    format!(
+        "Nothing ran. This needs the user's approval and card {approval_id} is waiting for them. \
+         Do not call it again and do not wait for it: say in one short sentence that it needs \
+         their approval, then end your turn. When they approve, Arbos runs the call and gives \
+         you the result."
+    )
+}
+
 /// How long a card is answerable when nothing shorter than the TTL bounds the wait for it:
 /// `APPROVAL_TTL_MS` (24 h), or `ARBOS_APPROVAL_TIMEOUT_SECS` where a box shortens it.
 pub(crate) fn approval_ttl_ms() -> i64 {
@@ -215,6 +233,25 @@ pub(crate) fn harness_wait_cap_ms() -> i64 {
         .and_then(|s| s.parse::<i64>().ok())
         .filter(|ms| *ms > 0)
         .unwrap_or(14 * 60 * 1000)
+}
+
+/// How long a main-session gated call blocks inside the harness hook before it is parked and the
+/// chat's turn released (`ARBOS_APPROVAL_PARK_AFTER_MS`).
+///
+/// Short, because every millisecond of it is a millisecond the chat cannot hold a conversation:
+/// the main turn is held for the whole wait, so a new message in that chat can only reach the
+/// quick lane. Round 5 held a side chat's turn this way for fourteen minutes.
+///
+/// Not zero, because approving straight away is the common case, and answering inside the grace
+/// keeps that case on its original tool call — nothing is parked, nothing is re-run, and no
+/// second model call is spent. Ten seconds buys that and still frees the turn long before
+/// anyone has typed a follow-up.
+fn park_after_ms() -> i64 {
+    std::env::var("ARBOS_APPROVAL_PARK_AFTER_MS")
+        .ok()
+        .and_then(|s| s.parse::<i64>().ok())
+        .filter(|ms| *ms > 0)
+        .unwrap_or(10_000)
 }
 
 impl Agent {
@@ -1267,12 +1304,26 @@ impl Agent {
             payload: json!({ "kind": "tool_call", "tool": tool, "input": input, "class": hit.class, "why": hit.why, "session_id": session_id, "role": role,
                 "path_class": hit.path_class.map(PathClass::as_str), "grant_options": grant_options(&hit) }),
         };
-        // The extension blocks the call for `waitMs` and then refuses it, so that is this card's
-        // real deadline and `expires_at` says exactly that. `waitMs` goes back in the reply so
-        // the waiter reads agentd's number instead of its own copy of the default.
-        let wait_ms = harness_wait_cap_ms();
+        // How long the caller blocks, and therefore what bounds this card.
+        //
+        // A main-session call is parked when the grace passes (`park_approval`): the turn is
+        // released and the decision is picked up later, so nothing is waiting on a clock and the
+        // card keeps the full TTL. A worker's call is not parked — it has no chat turn to release
+        // and its job is ended by one expired card (`fail_job_on_expired_approval`) — so it is
+        // still bounded by the extension's cap, and the card says so.
+        let parks = role == "main" && job.is_none();
+        let wait_ms = if parks {
+            park_after_ms()
+        } else {
+            harness_wait_cap_ms()
+        };
+        let expires_in = if parks {
+            approval_ttl_ms()
+        } else {
+            harness_wait_cap_ms()
+        };
         match self
-            .begin_approval(&chat_id, req, WaitMode::Polled, None, wait_ms)
+            .begin_approval(&chat_id, req, WaitMode::Polled, None, expires_in)
             .await
         {
             Ok(id) => {
@@ -1295,7 +1346,7 @@ impl Agent {
                     )
                     .await;
                 }
-                json!({ "ok": true, "state": "pending", "approvalId": id, "title": title, "why": hit.why, "waitMs": wait_ms })
+                json!({ "ok": true, "state": "pending", "approvalId": id, "title": title, "why": hit.why, "waitMs": wait_ms, "park": parks })
             }
             Err(e) => json!({ "ok": false, "error": e.to_string() }),
         }
@@ -1309,6 +1360,68 @@ impl Agent {
             .await
             .values()
             .any(|p| p.chat_id == chat_id)
+    }
+
+    /// `/hook/approval-park`: the harness stopped blocking a main-session call and the turn is
+    /// about to end, but the card is left answerable for its full deadline.
+    ///
+    /// This is Test5 round 5 bug R's second half. The gated call used to hold the chat's main
+    /// turn for the whole wait — fourteen minutes in rounds 4 and 5 — so a message arriving in
+    /// that chat meanwhile could only get a quick-lane answer. Nothing about an approval needs
+    /// the turn to stay open: the card is in the chat, and the user answers the card.
+    ///
+    /// So the mode moves from `Polled` to `Deferred`, which is the whole mechanism. Everything
+    /// that finishes the work already exists for the late-approval case and is reached by that
+    /// one change:
+    ///
+    /// - `decide_approval` treats a `Deferred` entry as deferred, so the decision runs
+    ///   `follow_up` instead of handing the outcome to a waiter that has gone;
+    /// - `follow_up`'s `("tool_call", Approved)` arm records a `Grant` for the identical call and
+    ///   starts a turn in the card's chat telling the agent to run it again;
+    /// - `take_grant` lets that re-run through without a second card.
+    ///
+    /// Nothing here is a new waiting state, and `draft_message` has used this path since S18.
+    pub async fn park_approval(self: &Arc<Self>, approval_id: &str) -> Value {
+        let Some(row) = self.store.approval(approval_id).ok().flatten() else {
+            return json!({ "ok": false, "error": "unknown approval" });
+        };
+        if row.state != ApprovalState::Pending.as_str() {
+            // Decided inside the grace: the caller reads the real state and acts on it.
+            return json!({ "ok": true, "state": row.state, "parked": false });
+        }
+        let parked = {
+            let mut pending = self.approvals.pending.lock().await;
+            match pending.get_mut(approval_id) {
+                Some(p) if p.mode == WaitMode::Polled => {
+                    p.mode = WaitMode::Deferred;
+                    true
+                }
+                _ => false,
+            }
+        };
+        if !parked {
+            return json!({ "ok": true, "state": row.state, "parked": false });
+        }
+        self.set_approval_wait_activity(&row.chat_id, true).await;
+        let _ = self.store.t3_append(
+            &row.chat_id,
+            None,
+            Some(&row.chat_id),
+            "approval",
+            Some("system"),
+            &format!(
+                "approval parked: {} — the turn was released; the decision resumes it",
+                row.title
+            ),
+            Some(&json!({ "approval_id": approval_id })),
+        );
+        self.append_audit(
+            "approval_parked",
+            json!({ "approval_id": approval_id, "chat_id": row.chat_id, "title": row.title,
+                "expires_at": row.expires_at }),
+        );
+        tracing::info!(approval_id, chat_id = %row.chat_id, "approval parked; the turn is released until the card is decided");
+        json!({ "ok": true, "state": row.state, "parked": true, "reason": parked_reason(approval_id) })
     }
 
     /// `/hook/approval-abandon`: the extension stopped polling (its wait cap passed) and the
@@ -1865,6 +1978,186 @@ mod job_approval_tests {
     }
 }
 
+/// Test5 round 5, bug R, second half: a gated main-session call held the chat's turn for the
+/// whole approval wait, so that chat could only answer from the quick lane meanwhile.
+#[cfg(test)]
+mod park_tests {
+    use super::*;
+    use crate::status::tests::test_agent;
+
+    fn rm() -> Value {
+        json!({ "command": "rm -rf /opt/x" })
+    }
+
+    /// The main session's wait is a short grace, and because the call is parked rather than
+    /// refused at the end of it, nothing shorter than the TTL bounds the card any more — so the
+    /// card goes back to advertising the full TTL, and that is again the truth.
+    #[tokio::test]
+    async fn a_main_session_wait_is_short_and_the_card_keeps_the_full_deadline() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATAPPROVALPARK0000";
+        agent.store.upsert_chat(chat, "Main", true, 0).unwrap();
+        let _host = agent.sync.open_room(chat).await.unwrap();
+
+        let before = now_ms();
+        let v = agent.hook_approval("bash", &rm(), chat, "main").await;
+        assert_eq!(v["state"], "pending", "{v}");
+        assert_eq!(v["park"], json!(true), "a main-session call parks: {v}");
+        let wait = v["waitMs"].as_i64().unwrap();
+        assert!(
+            wait < 30_000,
+            "the turn must be free before a follow-up message arrives: {wait} ms"
+        );
+        assert!(
+            wait < harness_wait_cap_ms(),
+            "round 5 blocked for the whole {} ms cap",
+            harness_wait_cap_ms()
+        );
+        let row = agent
+            .store
+            .approval(v["approvalId"].as_str().unwrap())
+            .unwrap()
+            .unwrap();
+        let life = row.expires_at - before;
+        assert!(
+            (life - approval_ttl_ms()).abs() < 5_000,
+            "a parked card is bounded by nothing but its TTL: {life} ms"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The owner's third test: approving before `expires_at` runs the command and the result
+    /// comes back in the same chat. Parking moves the entry to `Deferred`, which is what hands
+    /// the decision to `follow_up` — the late-approval path that records a `Grant` for the
+    /// identical call and starts a turn to run it. No second card is raised.
+    #[tokio::test]
+    async fn a_parked_card_approved_later_runs_the_call_without_a_second_card() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATAPPROVALPARK0001";
+        agent.store.upsert_chat(chat, "Main", true, 0).unwrap();
+        let _host = agent.sync.open_room(chat).await.unwrap();
+
+        let v = agent.hook_approval("bash", &rm(), chat, "main").await;
+        let id = v["approvalId"].as_str().unwrap().to_owned();
+
+        let parked = agent.park_approval(&id).await;
+        assert_eq!(parked["parked"], json!(true), "{parked}");
+        assert_eq!(
+            parked["state"], "pending",
+            "parking decides nothing: {parked}"
+        );
+        let reason = parked["reason"].as_str().unwrap();
+        assert!(
+            reason.contains("Nothing ran") && reason.contains("end your turn"),
+            "the model must not report work it did not do, and must stop: {reason}"
+        );
+        assert_eq!(
+            agent.approvals.pending.lock().await[&id].mode,
+            WaitMode::Deferred,
+            "the parked entry is what makes the decision deferred"
+        );
+
+        agent
+            .decide_approval_from_command(
+                &id,
+                ApprovalOutcome::Approved,
+                "dev-mac",
+                &json!({ "approvalId": id }),
+            )
+            .await
+            .unwrap();
+
+        // `follow_up` runs on its own task; the grant it records is the observable half.
+        let mut granted = None;
+        for _ in 0..100 {
+            if let Some(g) = agent
+                .approvals
+                .grants
+                .lock()
+                .await
+                .iter()
+                .find(|g| g.approval_id == id)
+            {
+                granted = Some(g.tool.clone());
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            granted.as_deref(),
+            Some("bash"),
+            "an approved parked call is pre-approved for its re-run"
+        );
+        assert_eq!(
+            agent.hook_approval("bash", &rm(), chat, "main").await["state"],
+            "allowed",
+            "the re-run must not raise a second card"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// #2770 sweeps every row a turn opened that shows nothing, and a parked wait outlives its
+    /// turn — so the question is whether the sweep hides the card.
+    ///
+    /// It does not, and the reason is structural rather than lucky. This change opens no row of
+    /// its own: the status it shows is the turn's activity label and the relay's presence line,
+    /// and the only row involved is the one `begin_approval` already writes the card onto. That
+    /// row holds an `approval` part, and `wordless_row` counts anything other than `text` and
+    /// `status` as content the client draws, so the row is not wordless and neither
+    /// `retire_wordless_rows` nor `trim_wordless_result_row` touches it. The assertion below
+    /// hands the row's own id to the real predicate rather than reasoning about it.
+    #[tokio::test]
+    async fn a_parked_cards_row_survives_the_wordless_sweep() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATAPPROVALPARK0002";
+        agent.store.upsert_chat(chat, "Main", true, 0).unwrap();
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            agent.test_open_row(&host, t).await;
+        }
+
+        let v = agent.hook_approval("bash", &rm(), chat, "main").await;
+        let id = v["approvalId"].as_str().unwrap().to_owned();
+        assert_eq!(agent.park_approval(&id).await["parked"], json!(true));
+
+        let (rows, card_row) = {
+            let tl = agent.turn.lock().await;
+            let t = tl.as_ref().unwrap();
+            (t.rows_opened.clone(), t.assistant_msg_id.clone())
+        };
+        assert!(
+            rows.contains(&card_row),
+            "the card is on a row this turn opened, which is what the sweep looks at"
+        );
+
+        let h = host.lock().await;
+        h.doc.finish_message(&card_row, MessageStatus::Done);
+        assert!(
+            !crate::agent::wordless_row(&h.doc.message(&card_row).unwrap()).0,
+            "an approval part is content the client draws"
+        );
+        // `last` is a row the sweep settles elsewhere, so the card's row is really considered.
+        let retired =
+            crate::agent::retire_wordless_rows(&h.doc, &rows, "01NOTAROWOFTHISTURN0000000");
+        assert_eq!(retired, 0, "the card's row must survive its own turn");
+        assert_ne!(
+            h.doc
+                .message(&card_row)
+                .unwrap()
+                .rest
+                .get("hidden")
+                .and_then(Value::as_bool),
+            Some(true),
+            "a hidden row takes the card away from the user who has to answer it"
+        );
+        drop(h);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
 #[cfg(test)]
 mod deadline_tests {
     use super::*;
@@ -1885,11 +2178,23 @@ mod deadline_tests {
         agent.store.upsert_chat(chat, "Main", true, 0).unwrap();
         let _host = agent.sync.open_room(chat).await.unwrap();
 
+        // A worker's call is not parked — it has no chat turn to release — so the extension's cap
+        // is still what bounds it, and the card has to say so rather than claim 24 hours.
         let before = now_ms();
         let v = agent
-            .hook_approval("bash", &json!({ "command": "rm -rf /opt/x" }), chat, "main")
+            .hook_approval(
+                "bash",
+                &json!({ "command": "rm -rf /opt/x" }),
+                chat,
+                "subagent",
+            )
             .await;
         assert_eq!(v["state"], "pending", "{v}");
+        assert_eq!(
+            v["park"],
+            json!(false),
+            "a worker's call is not parked: {v}"
+        );
         let row = agent
             .store
             .approval(v["approvalId"].as_str().unwrap())
