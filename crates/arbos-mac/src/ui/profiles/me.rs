@@ -68,6 +68,7 @@ impl Shell {
         let notify_on = state.notifier.enabled;
         let permission = state.notification_permission();
         let read_receipts = state.read_receipts;
+        let notification_sound = state.notification_sound;
         let link_previews = state.link_previews;
         let secrets_value = if state.secrets.loaded {
             state.secrets.row_value()
@@ -873,6 +874,42 @@ impl Shell {
                     ),
                 &theme,
             ));
+            // Sound has no say without banners: the row dims and stops taking clicks
+            // while Notifications is off, or while macOS blocks them outright.
+            let sound_live = notify_on && permission != crate::ui::notify::Permission::Denied;
+            let group = group.child(
+                seg_row(
+                    "Sound",
+                    div()
+                        .flex()
+                        .gap(px(2.0))
+                        .child(
+                            glass::segment("sound-on", "On", notification_sound, &theme).when(
+                                sound_live,
+                                |el| {
+                                    el.on_click(cx.listener(|this, _, _, cx| {
+                                        this.state
+                                            .update(cx, |s, cx| s.set_notification_sound(true, cx));
+                                    }))
+                                },
+                            ),
+                        )
+                        .child(
+                            glass::segment("sound-off", "Off", !notification_sound, &theme).when(
+                                sound_live,
+                                |el| {
+                                    el.on_click(cx.listener(|this, _, _, cx| {
+                                        this.state.update(cx, |s, cx| {
+                                            s.set_notification_sound(false, cx)
+                                        });
+                                    }))
+                                },
+                            ),
+                        ),
+                    &theme,
+                )
+                .when(!sound_live, |el| el.opacity(0.5)),
+            );
             div()
                 .flex()
                 .flex_col()
@@ -881,7 +918,8 @@ impl Shell {
                 .child(footnote(
                 "A banner with the sender's picture when an agent finishes or a person writes, \
                      only while you are not looking. Read receipts tell others when you have \
-                     opened their messages — turn them off to stop sending that."
+                     opened their messages — turn them off to stop sending that. Sound rings \
+                     those banners; off posts them silently."
                     .into(),
                 &theme,
             ))
