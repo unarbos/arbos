@@ -951,11 +951,19 @@ else
   eval "$mg_src"
   R=owner/repo
   sleep() { :; }   # the shipped bound is 4 waits of 3s; the test asserts the logic, not the clock
-  # The stub's state lives in FILES, not variables. Every `x=$(gh ...)` in the function under test is
-  # a command substitution, which forks — so a counter or a queue held in a shell variable is updated
-  # in the child and lost, leaving the stub answering its first reply forever and the call count at
-  # zero. That mistake makes a broken function look correct here, which is the one thing this file
-  # must never do.
+  # The stub's state lives in FILES, not variables, and that is not a style choice. Every
+  # `x=$(gh ...)` in the function under test is a command substitution, which FORKS: a counter or a
+  # reply queue held in a shell variable is updated in the child and lost when it exits. The stub
+  # then answers its first reply forever and reports zero calls.
+  #
+  # THE DANGER IS THE DIRECTION THAT PASSES. This file hit the benign direction first — four cases
+  # failed while the shipped function was correct, which is loud and gets fixed in minutes. The
+  # malign direction is silent and permanent: "no re-read happened" is asserted with a call count,
+  # and a counter stuck at zero SATISFIES that assertion no matter what the function did. A stub
+  # that always replies MERGEABLE likewise passes a case about a cold field warming up without the
+  # function ever re-reading anything. A harness that makes a broken function look correct is
+  # strictly worse than no harness, because it is read as evidence. Assert nothing through state
+  # that a fork can discard.
   mgq=$(mktemp); mgc=$(mktemp)
   # Replies are popped in order; the LAST reply is sticky, which is how a field that never computes
   # is modelled without writing out one line per re-read.
