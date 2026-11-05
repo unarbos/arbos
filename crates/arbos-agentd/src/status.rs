@@ -1189,6 +1189,63 @@ pub(crate) mod tests {
         test_agent_with(axum::Router::new()).await
     }
 
+    /// A test's own `tracing` output, kept so what the box logged can be read back as evidence
+    /// instead of taken on trust.
+    ///
+    /// `#[tokio::test]` is a current-thread runtime on one thread, and `set_default` is per
+    /// thread, so the capture covers the lanes one test spawns and no other test's events can
+    /// reach it.
+    #[derive(Clone, Default)]
+    pub(crate) struct Journal(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    pub(crate) struct JournalSink(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for JournalSink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Journal {
+        type Writer = JournalSink;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            JournalSink(self.0.clone())
+        }
+    }
+
+    impl Journal {
+        pub(crate) fn capture(&self) -> tracing::subscriber::DefaultGuard {
+            self.capture_at(tracing::Level::WARN)
+        }
+
+        pub(crate) fn capture_info(&self) -> tracing::subscriber::DefaultGuard {
+            self.capture_at(tracing::Level::INFO)
+        }
+
+        fn capture_at(&self, level: tracing::Level) -> tracing::subscriber::DefaultGuard {
+            tracing::subscriber::set_default(
+                tracing_subscriber::fmt()
+                    .with_writer(self.clone())
+                    .with_ansi(false)
+                    .with_max_level(level)
+                    .finish(),
+            )
+        }
+
+        pub(crate) fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap_or_else(|e| e.into_inner())).into_owned()
+        }
+    }
+
     /// Same, with a real `pi_bin`, so `start_pi` and its supervisor run as they do on a box.
     ///
     /// Every other test box points `pi_bin` at nothing, which leaves the agent with no main
