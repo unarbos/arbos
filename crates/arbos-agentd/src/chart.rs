@@ -125,9 +125,10 @@ pub async fn post(
     let png_len = png.len();
     let key = media::blob_key(&png);
     media::upload(a, &target.chat_id, png, &key, "image/png").await?;
-    let Some(host) = a.sync.host(&target.chat_id).await else {
-        anyhow::bail!("chat {} is not open on this box", target.chat_id);
-    };
+    let host = a
+        .room(&target.chat_id)
+        .await
+        .map_err(|e| anyhow::anyhow!("chat {} has no room on this box: {e}", target.chat_id))?;
     let msg_id = ulid();
     let att_id = ulid();
     let chart_id = ulid();

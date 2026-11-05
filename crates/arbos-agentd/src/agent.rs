@@ -3490,9 +3490,12 @@ impl Agent {
         // is owed an answer and will not write a row in front of it (bug M).
         let _in_flight =
             matches!(cmd.kind.as_str(), "send" | "answer").then(|| self.claim_send_in_flight());
-        let Some(host) = self.sync.host(chat_id).await else {
-            return Err(anyhow!("no room for chat {chat_id}"));
-        };
+        // A command is work, so the idle close leaves its room alone (#2367) — but a command
+        // older than that pin still has to run, so the room is opened rather than refused.
+        let host = self
+            .room(chat_id)
+            .await
+            .map_err(|e| anyhow!("no room for chat {chat_id}: {e}"))?;
         // People chats route by the judge (`people.rs`): a message not for this agent is left
         // pending for whoever it is for; humans' own sends are theirs. When the judge picked
         // several agents the send stays `taken` until each has replied — see
@@ -9658,7 +9661,9 @@ impl Agent {
                     h.doc
                         .set_message_fields(&t.assistant_msg_id, &[("waitingUser", json!(true))]);
                 }
-            } else if let Some(host) = self.sync.host(&chat_id).await {
+            // Standalone ask on the main chat, which this turn is not running in and the idle
+            // close may have taken (#2367): open it, or the question is never asked.
+            } else if let Ok(host) = self.room(&chat_id).await {
                 // Standalone ask on the main chat; the side-thread turn just stops.
                 let h = host.lock().await;
                 let last_user = h

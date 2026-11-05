@@ -405,7 +405,7 @@ impl Agent {
         delivery: &Delivery,
         text: &str,
     ) {
-        let Some(host) = self.sync.host(chat_id).await else {
+        let Ok(host) = self.room(chat_id).await else {
             return;
         };
         let h = host.lock().await;
@@ -436,7 +436,7 @@ impl Agent {
     }
 
     async fn write_paused_line(&self, chat_id: &str, reason: &str) {
-        let Some(host) = self.sync.host(chat_id).await else {
+        let Ok(host) = self.room(chat_id).await else {
             return;
         };
         let line = reason

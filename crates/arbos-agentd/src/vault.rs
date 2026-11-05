@@ -804,7 +804,7 @@ pub async fn on_push(agent: &Arc<Agent>, kind: &str, payload: &Value) {
             }
             let chat_hint = payload["chat_id"].as_str().unwrap_or("").to_owned();
             let chat_id = agent.approval_chat(&chat_hint).await.unwrap_or(chat_hint);
-            if let Some(host) = agent.sync.host(&chat_id).await {
+            if let Ok(host) = agent.room(&chat_id).await {
                 let h = host.lock().await;
                 h.doc.append_system_note(
                     &ulid(),

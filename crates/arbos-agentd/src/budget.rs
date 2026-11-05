@@ -204,7 +204,7 @@ impl Agent {
     /// The centred system line that names whose budget ran out and when it resets.
     pub async fn write_budget_line(&self, chat_id: &str, refusal: Refusal, err: &str) {
         let text = refusal.chat_line(&self.owner_label(chat_id));
-        if let Some(host) = self.sync.host(chat_id).await {
+        if let Ok(host) = self.room(chat_id).await {
             let h = host.lock().await;
             h.doc.append_voice_line(
                 "system",

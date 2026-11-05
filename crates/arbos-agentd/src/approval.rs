@@ -639,7 +639,7 @@ impl Agent {
                         decided_by,
                     )
                     .await;
-                    if let Some(host) = self.sync.host(&row.chat_id).await {
+                    if let Ok(host) = self.room(&row.chat_id).await {
                         host.lock()
                             .await
                             .doc
@@ -689,7 +689,10 @@ impl Agent {
             Some(p) => (p.chat_id.clone(), p.msg_id.clone()),
             None => (row.chat_id.clone(), row.message_id.clone()),
         };
-        if let Some(host) = self.sync.host(&chat_id).await {
+        // An approval waits up to 24 h for its decision, far past the idle window, so by now the
+        // room is very likely closed (#2367). Without opening it the card in the chat would stay
+        // "pending" for ever even though the decision landed.
+        if let Ok(host) = self.room(&chat_id).await {
             let h = host.lock().await;
             h.doc
                 .set_approval_state(approval_id, state, Some(decided_by), reason.as_deref());
