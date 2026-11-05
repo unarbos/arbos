@@ -30,8 +30,16 @@ fn anthropic_body(system: &str, tool: &str, user: &str) -> serde_json::Value {
 /// prefix hash — otherwise every turn looks like a different prefix and the trace says nothing.
 #[test]
 fn the_same_prompt_head_in_two_chats_hashes_the_same() {
-    let a = prompt_shape(&anthropic_body("you are test5", "route", "Reply with only the word PONG."));
-    let b = prompt_shape(&anthropic_body("you are test5", "route", "r10pinga1: reply with PONG10"));
+    let a = prompt_shape(&anthropic_body(
+        "you are test5",
+        "route",
+        "Reply with only the word PONG.",
+    ));
+    let b = prompt_shape(&anthropic_body(
+        "you are test5",
+        "route",
+        "r10pinga1: reply with PONG10",
+    ));
     assert_eq!(a.prefix_sha, b.prefix_sha, "the cacheable head is the same");
     assert_eq!(a.system_sha, b.system_sha);
     assert_eq!(a.tools_sha, b.tools_sha);
@@ -72,7 +80,10 @@ fn cache_markers_and_the_ttl_asked_for_are_reported() {
     });
     let s = prompt_shape(&body);
     assert_eq!(s.cache_marks, "system:1,tools:1,messages:1");
-    assert_eq!(s.cache_ttl, "1h", "the longest retention the request asked for");
+    assert_eq!(
+        s.cache_ttl, "1h",
+        "the longest retention the request asked for"
+    );
     assert_eq!(s.tools, 2);
     assert_eq!(s.messages, 2);
 
@@ -92,7 +103,10 @@ fn hashes_are_short_hex_and_carry_no_prompt_text() {
         assert!(sha.chars().all(|c| c.is_ascii_hexdigit()));
     }
     let line = format!("{s:?}");
-    assert!(!line.contains("Example Street"), "prompt text leaked: {line}");
+    assert!(
+        !line.contains("Example Street"),
+        "prompt text leaked: {line}"
+    );
     assert!(!line.contains("route"), "tool names are hashed too: {line}");
 }
 
@@ -118,7 +132,10 @@ fn the_openai_shape_takes_its_system_prompt_from_the_messages() {
     }));
     assert_eq!(s.system_sha, same_head.system_sha);
     assert_eq!(s.prefix_sha, same_head.prefix_sha);
-    assert_eq!(s.messages, 2, "the system message is counted as a message too");
+    assert_eq!(
+        s.messages, 2,
+        "the system message is counted as a message too"
+    );
 }
 
 /// A body the relay cannot parse must still be loggable: the trace never decides whether a call
@@ -148,7 +165,10 @@ fn the_upstream_backend_and_cache_headers_are_picked_out() {
     assert_eq!(m.cache, "anthropic-cache-status=miss");
     assert_eq!(m.upstream_id, "req_abc123");
     let line = format!("{m:?}");
-    assert!(!line.contains("secret"), "only named headers are traced: {line}");
+    assert!(
+        !line.contains("secret"),
+        "only named headers are traced: {line}"
+    );
 
     let bare = upstream_marks(&axum::http::HeaderMap::new());
     assert_eq!(bare.backend, "");
@@ -182,7 +202,8 @@ fn the_generation_id_and_provider_are_read_off_the_stream() {
     assert_eq!(provider.as_deref(), Some("Amazon Bedrock"));
 
     // Anthropic's own shape nests it under `message`.
-    let (id, provider) = generation_marks("data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_01\"}}\n");
+    let (id, provider) =
+        generation_marks("data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_01\"}}\n");
     assert_eq!(id.as_deref(), Some("msg_01"));
     assert_eq!(provider, None);
 

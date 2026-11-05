@@ -4686,12 +4686,7 @@ impl Agent {
             .await;
         self.pending_sends.fetch_sub(1, Ordering::SeqCst);
         let lock_ms = received.elapsed().as_millis() as i64;
-        tracing::info!(
-            chat_id,
-            msg = user_msg_id,
-            lock_ms,
-            "turn lock taken"
-        );
+        tracing::info!(chat_id, msg = user_msg_id, lock_ms, "turn lock taken");
         // The send order and the turn lock both waited since `handle_command` looked this room
         // up, and every row of this turn goes through the handle from here on.
         let host = &self.room_for_reply(chat_id, host).await;

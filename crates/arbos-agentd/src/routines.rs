@@ -286,6 +286,9 @@ impl Agent {
                     let chat_id = chat_id.to_owned();
                     tokio::spawn(async move { agent.prefetch_chat_session(&chat_id).await })
                 });
+                // A push for a room this box already holds is a no-op that still costs the
+                // turn its wait; how long it had been open says whether that is what happened.
+                let already_open_ms = self.sync.open_ms(chat_id).await;
                 let t0 = std::time::Instant::now();
                 crate::workspace::open_listed_chat(
                     &self.cfg,
@@ -299,6 +302,7 @@ impl Agent {
                     chat_id,
                     reason = ?payload.get("reason"),
                     open_ms = t0.elapsed().as_millis() as i64,
+                    already_open_ms,
                     pending,
                     "chat_open push: room opened"
                 );

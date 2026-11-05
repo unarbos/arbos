@@ -939,7 +939,10 @@ pub async fn after_person_row(
                 let Ok(Some(row)) = state.db.chat(pid, &chat.chat_id) else {
                     continue;
                 };
-                (CHAT_OPEN_PUSH, chat_open_payload(state, &row, "rows_pending"))
+                (
+                    CHAT_OPEN_PUSH,
+                    chat_open_payload(state, &row, "rows_pending"),
+                )
             }
         };
         match state.db.enqueue_push_once(&a.project_id, kind, &payload) {
