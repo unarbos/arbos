@@ -1120,6 +1120,12 @@ pub(crate) mod tests {
     /// criterion restated to the user as a description of what happened.
     pub(crate) const AD_MODEL_ANSWER: &str = "All four steps finished: 1,200 rows parsed, 1,196 normalised, and the summary table is written to summary.csv. One thing to flag: the four steps ran in the foreground, not as a background job.";
 
+    /// The ask text that makes the stub answer a job-result call with nothing, which is what
+    /// `job result call gave nothing; plain line` is: the call returned, and there was no prose
+    /// to post as the job's one answer bubble. Jacob's Test5 round 12 logged it for job
+    /// 01M6PJABNVZ84YXHHFY9HV3FAK (bug AC, `job_handoff_leak_tests.rs`).
+    pub(crate) const EMPTY_JOB_RESULT_ASK: &str = "what came out of the empty job one?";
+
     async fn mock_quick(axum::Json(body): axum::Json<Value>) -> axum::response::Response {
         use axum::response::IntoResponse;
         tokio::time::sleep(Duration::from_millis(300)).await;
@@ -1157,6 +1163,8 @@ pub(crate) mod tests {
         }
         let (content, finish) = if user.contains(EMPTY_STATUS_ASK) {
             ("[status]\n", "stop")
+        } else if user.contains(EMPTY_JOB_RESULT_ASK) {
+            ("", "stop")
         } else if user.contains("stop at 20, not 40") {
             // The b7 shape: a guide whose one line has no full stop.
             (

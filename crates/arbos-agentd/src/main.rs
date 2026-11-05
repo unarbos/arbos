@@ -33,6 +33,8 @@ mod job_backgrounded;
 #[cfg(test)]
 mod job_cancel_tests;
 #[cfg(test)]
+mod job_handoff_leak_tests;
+#[cfg(test)]
 mod job_leftover_tests;
 #[cfg(test)]
 mod job_note_tests;

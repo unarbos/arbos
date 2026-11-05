@@ -237,7 +237,12 @@ impl Agent {
         }
         // The same backstop and the same configured limit the turn surfaces apply (D19, and
         // `config::chat_text_max`): one chat is one set of rules, however the words reach it.
-        let text = crate::store::redact(&crate::agent::ProseFilter::clean_prose(text.trim()));
+        // `worker_prose` as well, because this is the other place a worker's own words reach a
+        // chat with no model between them and the user: a note that ends like a final reply
+        // carries the return contract, and bug AC is bug AC wherever it is posted from.
+        let text = crate::store::redact(&crate::agent::ProseFilter::clean_prose(
+            crate::agent::worker_prose(text.trim()).trim(),
+        ));
         let text = text.trim();
         if text.is_empty() {
             return Err(anyhow!("nothing to send"));
