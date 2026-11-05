@@ -10612,6 +10612,10 @@ impl Agent {
         // This ask answers beside the chat with no job row of its own, so [`Agent::start_job`]'s
         // inheritance never runs for it — and it is the path a correction burst takes most
         // often, since every message that arrives mid-turn comes through here (bug AG).
+        //
+        // A correction inside the window appears twice here, once in `recent` and once below,
+        // and that is deliberate: the first says when it was spoken, the second says that it
+        // binds. Only the second survives a worker that reads the brief as its instructions.
         let inherited = inherited_steers_note(&self.steers_to_inherit(chat_id, ""));
         let brief = format!(
             "{prelude}The user sent this message to you while you were busy with another request in the same chat; answer it now, in parallel, as yourself.\n\nMessage: {user_text}\n\nRecent turns in this chat:\n{recent}\n{inherited}\nDo what the message asks (use your tools when needed) and finish with the answer the user should read: plain prose, no process narration, no mention of other requests. If it only needs a reply, reply."
