@@ -367,8 +367,11 @@ struct ChatSession: View {
     /// ([feedback app-01M5Z0GE2GV4ZJ5RH28QBT7H12]).
     private var visibleRows: [Row] {
         let q = Self.searchKeyword(searchText)
-        guard showSearch, !q.isEmpty else { return rows }
-        return rows.filter { Self.searchMatches(m_text($0), keyword: q) }
+        guard showSearch, !q.isEmpty || searchSender != nil else { return rows }
+        return rows.filter {
+            ChatSearchSenderPin.rowHits(keyword: q, pinned: searchSender, rowSenderKey: m_senderKey($0),
+                                        keywordInText: Self.searchMatches(m_text($0), keyword: q))
+        }
     }
 
     /// The typed text as the filter compares it. Empty means no filter at all.
@@ -386,10 +389,15 @@ struct ChatSession: View {
         keyword.isEmpty || HomeSearch.fold(text).contains(keyword)
     }
 
-    /// True while Search-in-chat has a keyword: every filtered message is a hit.
+    /// True while Search-in-chat is filtering: every row still shown is a hit,
+    /// whether the keyword chose it or the pinned sender did.
     private var searchHitsActive: Bool {
-        showSearch && !Self.searchKeyword(searchText).isEmpty
+        showSearch && !Self.searchKeyword(searchText).isEmpty || searchSenderPinned
     }
+
+    /// A sender pinned in an open bar — the other thing that makes the shown
+    /// rows a result list rather than the history.
+    private var searchSenderPinned: Bool { showSearch && searchSender != nil }
 
     /// What the transcript draws above its rows. At most one of these is in the lazy stack at a
     /// time, and which one it is changes while a chat is on screen — that is the whole point of
@@ -492,7 +500,19 @@ struct ChatSession: View {
     /// lands at the bottom anchor. That is a jump to the end instead of a blank transcript.
     private var transcriptStackIdentity: String {
         Self.transcriptStackIdentity(lead: transcriptLead, banner: machineBannerText != nil,
-                                     query: searchHitsActive ? searchText.trimmingCharacters(in: .whitespaces) : nil)
+                                     query: searchHitsActive ? searchFilterKey : nil)
+    }
+
+    /// The whole filter as one string: the pinned sender and then the keyword.
+    ///
+    /// The sender has to be in it for the reason the keyword is. Swapping one
+    /// pinned sender for another replaces the row set in one step, and a key
+    /// that did not move is the blank transcript above — the keyword alone
+    /// cannot tell "From Sam" apart from "From Dana" when the field is empty.
+    /// It stays out of `stackIdentityForTrace` along with the keyword, so no
+    /// log line records who someone went looking for.
+    private var searchFilterKey: String {
+        (searchSender.map { "from:\($0.key) " } ?? "") + searchText.trimmingCharacters(in: .whitespaces)
     }
 
     /// `transcriptStackIdentity` with the keyword taken out, for the reveal trace.

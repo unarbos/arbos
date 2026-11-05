@@ -175,6 +175,14 @@ final class ChatSearchSenderTests: XCTestCase {
                           encoding: .utf8)
     }
 
+    private func chatViewSource() throws -> String {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Arbos")
+        return try String(contentsOf: root.appendingPathComponent("UI/ChatView.swift"), encoding: .utf8)
+    }
+
     /// The guard that matters, in the shape `HomeSearchTests` uses for the pickers:
     /// the sender half routes through the shared rules and holds no comparison of
     /// its own. Two of this surface's bugs were one rule written twice — a folding
@@ -190,5 +198,41 @@ final class ChatSearchSenderTests: XCTestCase {
             XCTAssertFalse(src.contains(adHoc),
                            "ad-hoc comparison \(adHoc): the sender half must ask the shared rules")
         }
+    }
+
+    // MARK: - The filtered stack
+
+    /// Pinning a sender replaces the row set in one step, which is the thing
+    /// iOS 27 does not re-measure: it keeps the space the departed rows had,
+    /// reports a content height built from it and builds none of the survivors,
+    /// leaving a blank transcript ([feedback iphone-search-blank-ios27-2026-10-31]).
+    /// The cure already in the file is a stack keyed by the filter, so the
+    /// sender has to be *in* that key — with an empty field, "From Sam" and
+    /// "From Dana" are two different row sets and one unchanged keyword.
+    func testTwoDifferentPinnedSendersAreTwoDifferentStacks() {
+        let sam = ChatSession.transcriptStackIdentity(lead: .rowsOnly, banner: false,
+                                                      query: "from:user:sam ")
+        let dana = ChatSession.transcriptStackIdentity(lead: .rowsOnly, banner: false,
+                                                       query: "from:user:dana ")
+        let unfiltered = ChatSession.transcriptStackIdentity(lead: .rowsOnly, banner: false, query: nil)
+        XCTAssertNotEqual(sam, dana, "swapping the pinned sender must re-key the stack")
+        XCTAssertNotEqual(sam, unfiltered, "a pinned sender is a filtered stack")
+        XCTAssertEqual(sam, ChatSession.transcriptStackIdentity(lead: .rowsOnly, banner: false,
+                                                                query: "from:user:sam "),
+                       "the same filter must not re-key it")
+    }
+
+    /// And that the identity is actually built that way, since the composition
+    /// is private: the key carries the sender, and the trace still does not.
+    /// What someone searched for is their content — a name they went looking
+    /// for is as much theirs as the words they typed.
+    func testThePinnedSenderIsInTheStackKeyAndNotInTheTrace() throws {
+        let src = try chatViewSource()
+        XCTAssertTrue(src.contains("query: searchHitsActive ? searchFilterKey : nil"),
+                      "the stack identity must be keyed by the whole filter")
+        XCTAssertTrue(src.contains(#"(searchSender.map { "from:\($0.key) " } ?? "")"#),
+                      "the filter key must carry the pinned sender")
+        XCTAssertTrue(src.contains(##"searchHitsActive ? "filtered:\(transcriptStackShape)" : "all:\(transcriptStackShape)""##),
+                      "the trace must stay free of both the keyword and the sender")
     }
 }
