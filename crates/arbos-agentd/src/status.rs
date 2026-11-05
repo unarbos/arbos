@@ -1394,7 +1394,7 @@ pub(crate) mod tests {
     async fn renamed_agent_speaks_as_its_new_name() {
         let (agent, root) = test_agent().await;
         assert_eq!(agent.name(), "Doug");
-        agent.write_system_prompt().unwrap();
+        agent.write_system_prompt().await.unwrap();
         let path = agent.cfg.state_dir.join("pi").join("system-prompt.md");
         let before = std::fs::read_to_string(&path).unwrap();
         assert!(before.contains("You are Doug, this user's agent in Arbos"));
@@ -1403,7 +1403,7 @@ pub(crate) mod tests {
         assert_eq!((r.from.as_str(), r.to.as_str()), ("Doug", "GigChadAgent"));
         assert_eq!(agent.name(), "GigChadAgent");
         assert_eq!(agent.identity.handle(), "gigchadagent");
-        agent.write_system_prompt().unwrap();
+        agent.write_system_prompt().await.unwrap();
         let after = std::fs::read_to_string(&path).unwrap();
         assert!(after.contains("You are GigChadAgent, this user's agent in Arbos"));
         assert!(after.contains("as @gigchadagent"));
