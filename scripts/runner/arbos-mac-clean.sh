@@ -52,14 +52,20 @@ sweep_deleting
 # leaves it behind (5 clones = 61 GB on 2026-10-25 19:1x, free space 14 GB). A clone no process has open and
 # untouched for 30 min is garbage: delete it through simctl so the device set stays consistent, then its
 # Deleting-* residue goes on the next sweep_deleting pass. Runs in every pass.
+# While an xcodebuild of the set's owner runs, its clones are live (the clone dir's mtime is its creation
+# time, so a 40-min UI suite's clone looks "untouched for 30 min" mid-run); a left-behind clone goes on the
+# first pass after it exits. lsof 4.91 here exits 1 for +D even when it lists open files, so the listing,
+# not the status, says "in use" (2026-10-31 07:33:16: the gate's running clone was deleted, #2448).
 sweep_xctest_clones() {
-  local set n=0 d u
+  local set n=0 d u owner
   for set in /Users/ec2-user/Library/Developer/XCTestDevices /Users/arbosgui/Library/Developer/XCTestDevices; do
     [ -d "$set" ] || continue
+    owner=$(stat -f %Su "$set")
+    pgrep -u "$owner" -qx xcodebuild && { say "kept every clone in $set: $owner runs xcodebuild"; continue; }
     while read -r d; do
-      lsof +D "$d" >/dev/null 2>&1 && continue
+      [ -n "$(lsof +D "$d" 2>/dev/null)" ] && { say "kept open clone $(basename "$d") in $set"; continue; }
       u=$(basename "$d")
-      sudo -u "$(stat -f %Su "$set")" xcrun simctl --set "$set" delete "$u" >/dev/null 2>&1 || rm -rf "$d" 2>/dev/null
+      sudo -u "$owner" xcrun simctl --set "$set" delete "$u" >/dev/null 2>&1 || rm -rf "$d" 2>/dev/null
       [ -d "$d" ] || n=$((n + 1))
     done < <(find "$set" -mindepth 1 -maxdepth 1 -type d -mmin +30 2>/dev/null)
   done
