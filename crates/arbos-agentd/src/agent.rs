@@ -1940,7 +1940,12 @@ pub struct Agent {
     /// the message is picked up, and this is what keeps it.
     pub(crate) pi_owed_sends: Mutex<Vec<(String, CommandView)>>,
     /// A drain is already running, so a later supervisor tick does not start a second one.
-    pi_draining: AtomicBool,
+    ///
+    /// It is also the only way to tell a drain that has *finished* from one that has merely
+    /// emptied [`Self::pi_owed_sends`], which it does before it decides anything. A reader that
+    /// wants the drain's outcome — a record written, a message answered — must wait for this to
+    /// fall, not for the list to empty.
+    pub(crate) pi_draining: AtomicBool,
     /// Sends that failed in a row, reset by the first one that works (bug Y, phase two). Test5
     /// failed every send for thirty minutes while reporting itself healthy, because nothing
     /// counted them and nothing drew a conclusion from them.

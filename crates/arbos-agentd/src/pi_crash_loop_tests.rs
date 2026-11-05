@@ -1106,17 +1106,28 @@ where
     (agent, s, root, msg)
 }
 
-/// Wait for the drain to have run, whichever way it went.
+/// Wait for the drain to have finished, whichever way it went.
 ///
-/// The emptied owed list is what shows it: `mem::take` happens before the drain decides anything,
-/// so this condition is reached even by a drain that drops the message. A test can then assert on
-/// the outcome at once, instead of waiting out the whole bound for a row a silent drop never
-/// writes.
+/// Two conditions, and both are needed. The emptied owed list says a drain got far enough to
+/// commit: `mem::take` is the only thing that empties it, and it happens before the drain decides
+/// anything — so a drain that drops the message reaches this too, which is what lets a test assert
+/// on the outcome at once instead of waiting out the whole bound for a row a silent drop never
+/// writes. But *only* that is the gate this helper used to be, and it is reached a few `await`
+/// points before the record is appended. A test that read the audit file there raced the drain's
+/// own write and saw nothing about one run in twenty, on an idle machine.
+///
+/// `pi_draining` closes it. It is raised before the drain is spawned and lowered only after
+/// `drain_owed_sends` has returned, so an empty list with the flag down means the drain that
+/// emptied it has finished writing. The pair cannot pass early: the list can only be emptied by a
+/// drain, and no second drain can run while that one holds the flag.
 async fn the_owed_send_drain_ran(agent: &Arc<Agent>) {
     let a = agent.clone();
     wait_until("the owed-send drain ran", || {
         let a = a.clone();
-        async move { a.pi_owed_sends.lock().await.is_empty() }
+        async move {
+            a.pi_owed_sends.lock().await.is_empty()
+                && !a.pi_draining.load(std::sync::atomic::Ordering::SeqCst)
+        }
     })
     .await;
 }
