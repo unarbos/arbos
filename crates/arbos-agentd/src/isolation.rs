@@ -26,12 +26,18 @@ pub struct RunAs {
 ///
 /// An environment is copied on fork and carried through exec, so every process a job's tool
 /// calls start inherits this mark — and keeps it when its parent dies, when it is reparented to
-/// PID 1, when it changes process group and when it starts a session of its own. Nothing the
-/// kernel maintains survives all four, which is why the mark is how a cancel *verifies* its
-/// work ([`ProcessTree::escapees`]).
+/// PID 1, when it changes process group, when it calls `setsid`, and at any depth of tree.
+/// `nohup` and a double fork shed none of it either. No set the kernel maintains survives all
+/// of that outside a cgroup, which is why a box without one needs the mark to find a tree at
+/// all.
 ///
-/// It is evidence of descent, not membership of a set, so it is read and never signalled: see
-/// [`ProcessTree::kill`].
+/// One way out of it, named rather than hidden: a process that execs with its environment
+/// cleared (`env -i`) sheds the mark, and on a box with isolation the cgroup is what still
+/// holds that process.
+///
+/// The value is a worker's session id — a ULID agentd minted — so a cancel of one worker reads
+/// only its own mark, and the main agent's children, another job's worker and another
+/// workspace's processes are all invisible to it.
 pub const WORKER_MARK_ENV: &str = "ARBOS_WORKER";
 
 /// Where a harness child's descendants can be found again once the child itself is gone.
@@ -42,12 +48,18 @@ pub const WORKER_MARK_ENV: &str = "ARBOS_WORKER";
 /// names a set the kernel keeps for us, so a tree can be reaped after its root has died and its
 /// children have been reparented to PID 1.
 ///
-/// Which one catches what, measured rather than assumed:
+/// They are read together and in this order of strength, measured rather than assumed:
 ///
-/// - **cgroup**: everything. Membership is inherited on fork and `setsid` does not change it.
-///   Only exists where agentd is root and cgroup v2 is writable, so it is absent on a dev box
-///   and on a box running without isolation.
-/// - **session**: everything except an explicit `setsid`. A session id is inherited on fork,
+/// - **cgroup**: everything, and the only handle a process cannot leave by its own action.
+///   Membership is inherited on fork, `setsid` does not change it, and `cgroup.kill` ends the
+///   whole subtree in one atomic write. It exists only where agentd is root and cgroup v2 is
+///   writable, which is the box and not a dev machine — so it is relied on where it is there
+///   and the rest of this list is what a box without it has.
+/// - **mark**: everything a process cannot shed short of clearing its own environment. This is
+///   what reaches a descendant that calls `setsid` itself (Test5 round 14: the job's tree was
+///   2571, 2572, 2574 and 2576, and 2576 led a session of its own and wrote on after the job
+///   read `cancelled`), and a tree that stacks `setsid` on `nohup` at any depth.
+/// - **session**: everything except a deliberate `setsid`. A session id is inherited on fork,
 ///   is untouched by reparenting, and — unlike the group — is untouched by the `setpgid` a tool
 ///   runner does to give its command a group it can time out. This is the handle Test5 round 13
 ///   needed: the job backgrounded `(bash tmp/tick13.sh > tmp/tick13.run.out 2>&1; …) &`, shell
@@ -57,10 +69,10 @@ pub const WORKER_MARK_ENV: &str = "ARBOS_WORKER";
 ///   ignores `SIGHUP`, and `&` starts no new group in a non-interactive shell), but not a
 ///   command the tool runner put in a group of its own, and not an explicit `setsid`.
 ///
-/// All three are read together, because each is incomplete on its own. Even together they are
-/// knowingly incomplete — an explicit `setsid` leaves every one of them — which is why
-/// [`ProcessTree::kill`] verifies against [`WORKER_MARK_ENV`] and reports survivors instead of
-/// assuming a clean kill.
+/// Each is incomplete on its own and the union is what a cancel kills. The union is still not a
+/// proof — a process can leave the last of them by clearing its environment on a box with no
+/// cgroup — which is why [`ProcessTree::kill`] reads the kernel back by pid and reports
+/// survivors instead of assuming a clean kill.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProcessTree {
     /// The child's own process group.
@@ -140,12 +152,13 @@ impl ProcessTree {
         self.pgid.is_none() && self.sid.is_none() && self.cgroup.is_none() && self.mark.is_none()
     }
 
-    /// Every live process the kernel still counts as a member of this tree: the cgroup's, the
-    /// session's and the process group's, together.
+    /// Every live process of this tree: the cgroup's members, the session's, the process
+    /// group's and everything carrying the mark, together.
     ///
-    /// All three are read, not whichever looks authoritative: on a box with isolation the
-    /// cgroup is the complete set and the other two add nothing — but on one without it the
-    /// cgroup is `None` and they are all there is.
+    /// All four are read, not whichever looks authoritative: on a box with isolation the cgroup
+    /// is the complete set and the rest add nothing — but on one without it the cgroup is
+    /// `None` and they are all there is. The mark is what makes the union hold at a depth and
+    /// through a `setsid` that no other handle here reaches.
     ///
     /// A handle that names agentd's **own** session or group is dropped rather than swept. The
     /// ids are recorded from a child that leads both, so this cannot happen from a correct
@@ -165,35 +178,14 @@ impl ProcessTree {
                 }
             }
         }
+        if let Some(mark) = &self.mark {
+            pids.extend(marked_procs(mark));
+        }
         let me = std::process::id();
         pids.retain(|p| *p > 1 && *p != me && is_running(*p));
         pids.sort_unstable();
         pids.dedup();
         pids
-    }
-
-    /// Live processes that carry this tree's [`WORKER_MARK_ENV`] and are in none of the sets
-    /// above: what the job started and what then left every set the cancel owns.
-    ///
-    /// These are reported and never signalled. A mark is inherited through exec and is never
-    /// revoked, so it says where a process came from and not what it still belongs to; the
-    /// kernel's sets say the second thing, and a kill acts on that. Reporting is not a
-    /// consolation prize either — `stop_job`'s note names these pids, and the bash guard's
-    /// exception lets the agent `kill -9` exactly them, which is the escape hatch Test5 round
-    /// 13 did not have.
-    pub fn escapees(&self) -> Vec<u32> {
-        let Some(mark) = &self.mark else {
-            return Vec::new();
-        };
-        let members = self.members();
-        let me = std::process::id();
-        let mut out: Vec<u32> = marked_procs(mark)
-            .into_iter()
-            .filter(|p| *p > 1 && *p != me && !members.contains(p) && is_running(*p))
-            .collect();
-        out.sort_unstable();
-        out.dedup();
-        out
     }
 
     /// SIGKILL every member of the tree, then read the kernel back and report what is left.
@@ -203,6 +195,10 @@ impl ProcessTree {
     /// enumerated a second time. Re-enumerating proves only that the handle is empty, which is
     /// what a process that left the handle makes true without dying — bug AE's claim, in one
     /// sentence.
+    ///
+    /// The kill is re-issued each round and the membership re-read, so a tree that forks while
+    /// it is being reaped is caught on the next pass rather than slipping between the
+    /// enumeration and the signal.
     pub fn kill(&self) -> Sweep {
         let found = self.members();
         let witnesses: Vec<Witness> = found.iter().copied().filter_map(Witness::of).collect();
@@ -250,11 +246,6 @@ impl ProcessTree {
             }
         }
         let mut survivors = alive;
-        for pid in self.escapees() {
-            if !survivors.contains(&pid) {
-                survivors.push(pid);
-            }
-        }
         survivors.sort_unstable();
         Sweep {
             found: found.len(),
