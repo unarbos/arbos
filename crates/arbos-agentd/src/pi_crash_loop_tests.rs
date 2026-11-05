@@ -59,13 +59,19 @@ struct Stub {
     bin: String,
 }
 
+/// How long a dying child holds ready by default: long enough that the parent has read its boot
+/// response, short enough that the tests are quick.
+const STUB_LIFE_MS: u64 = 150;
+
 fn stub(die_for: i64, forever: bool) -> Stub {
-    stub_with(die_for, forever, false)
+    stub_with(die_for, forever, false, STUB_LIFE_MS)
 }
 
 /// `race` makes the first start die in the middle of its prompt, after it has streamed its
 /// words and before it settles — bug V's turn-end race, which is what started bug Y.
-fn stub_with(die_for: i64, forever: bool, race: bool) -> Stub {
+/// `life_ms` is how long a dying child stays ready: past one supervisor tick, and the loop finds
+/// it alive and idle, which is the window Test5's park caught a doomed child in.
+fn stub_with(die_for: i64, forever: bool, race: bool, life_ms: u64) -> Stub {
     let dir = std::env::temp_dir().join(format!("arbos-pi-stub-{}", ulid()));
     std::fs::create_dir_all(&dir).unwrap();
     let script = dir.join("stub-pi.py");
@@ -77,6 +83,7 @@ here = os.path.dirname(os.path.abspath(__file__))
 die_for = int(sys.argv[1])
 forever = sys.argv[2] == "1"
 race = sys.argv[3] == "1"
+life_s = float(sys.argv[4]) / 1000.0
 
 # Which start is this? The counter lives beside the script, so a respawn sees the last one.
 counter = os.path.join(here, "starts")
@@ -131,7 +138,7 @@ for line in sys.stdin:
         if dying:
             # Ready, then gone. The pause lets the parent read the boot response first, which
             # is the case round 9 pinned down: pi_ready flickers true between starts.
-            time.sleep(0.15)
+            time.sleep(life_s)
             sys.stderr.write("stub pi: exiting after extension load\n")
             sys.stderr.flush()
             sys.exit(9)
@@ -156,7 +163,7 @@ for line in sys.stdin:
     std::fs::write(
         &launcher,
         format!(
-            "#!/bin/sh\nexec python3 {} {die_for} {} {} \"$@\"\n",
+            "#!/bin/sh\nexec python3 {} {die_for} {} {} {life_ms} \"$@\"\n",
             script.display(),
             if forever { 1 } else { 0 },
             if race { 1 } else { 0 }
@@ -488,7 +495,9 @@ async fn a_child_that_never_works_is_reported_degraded_and_every_message_is_answ
 /// respawns for fourteen minutes, with `is_healthy` reading the parked agent as well.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_child_that_dies_young_is_never_parked_and_the_box_says_it_is_degraded() {
-    let s = stub(0, true);
+    // Each child outlives a supervisor tick, so the loop does find it alive and idle. Without
+    // that the park branch is never even reached and this test proves nothing about parking.
+    let s = stub_with(0, true, false, 2_500);
     let (agent, _root) = test_agent_with_pi(&s.bin).await;
     fast_backoff(&agent);
     let chat = "01TESTCHATPICRASHLOOP0003";
@@ -517,16 +526,18 @@ async fn a_child_that_dies_young_is_never_parked_and_the_box_says_it_is_degraded
     // every one of them a chance for the old rule to park one, which is what makes this a test
     // of parking rather than of the backoff.
     let want = s.starts() + 3;
-    let st = &s;
-    wait_until(
-        "more children came and went while the box was idle",
-        || async { st.starts() >= want },
-    )
-    .await;
-    assert!(
-        !agent.pi_parked.load(std::sync::atomic::Ordering::SeqCst),
-        "a child that has never held ready for a minute must never be parked"
-    );
+    let deadline = Instant::now() + SETTLE;
+    while s.starts() < want {
+        assert!(
+            !agent.pi_parked.load(std::sync::atomic::Ordering::SeqCst),
+            "a child that has never held ready for a minute must never be parked"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "more children came and went while the box was idle did not happen within {SETTLE:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     assert!(
         !agent.is_healthy(),
         "and the box must not read as healthy while it is in a crash loop"
@@ -552,7 +563,7 @@ async fn a_child_that_dies_young_is_never_parked_and_the_box_says_it_is_degraded
 /// fix does not touch.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_turn_end_race_does_not_start_a_crash_loop_and_the_correction_lands() {
-    let s = stub_with(3, false, true);
+    let s = stub_with(3, false, true, STUB_LIFE_MS);
     let (agent, _root) = test_agent_with_pi(&s.bin).await;
     fast_backoff(&agent);
     let chat = "01TESTCHATPICRASHLOOP0004";
