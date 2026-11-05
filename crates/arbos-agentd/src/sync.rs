@@ -607,7 +607,7 @@ pub struct SyncHub {
     /// workspace is stopping. The idle close and the room cap record nothing here, because a
     /// room they took is still a live chat whose next write reopens it (#2367).
     ///
-    /// One record, asked by every writer, rather than a per-host flag as well. A flag on the
+    /// One record, asked by every writer, rather than a flag on each host. A flag on the
     /// host answers only a caller that already holds one, and `close_room` takes the host out
     /// of `hosts` before it could be set, so a writer resolving fresh — most of them — would
     /// have had nothing to read. It is also the record that stays right when a chat is left
@@ -674,12 +674,23 @@ impl SyncHub {
 
     /// Open a room that is not under this project (a people chat: `people/<chat>`); `doc_project`
     /// is what a fresh doc's `meta.projectId` says.
+    ///
+    /// Refuses a chat this box may not open again, rather than leaving that to callers. The
+    /// refusal is the enforcement of one ordering: a rejoin has to clear the record *before*
+    /// the fresh room can be observed, because a window where the re-add has landed and the
+    /// record still says no is worse than having no record at all — it declines a chat the
+    /// agent is a live member of and the reply is dropped. `note_people_chats` clears as it
+    /// takes the relay's list, before it opens anything; move that clear after the open and
+    /// the open fails here instead of handing out a room nothing was allowed to want.
     pub async fn open_room_named(
         &self,
         chat_id: &str,
         room: &str,
         doc_project: &str,
     ) -> Result<SharedHost> {
+        if !self.may_open(chat_id).await {
+            anyhow::bail!("chat {chat_id} is one this box left for good; not opening its room");
+        }
         // An open room is handed back and marked in use. A host left behind by a close is
         // dropped here and replaced below, so no caller writes into a doc that no session
         // pushes any more (#2367). `try_lock` keeps the hub lock from waiting on a room lock.
@@ -2920,7 +2931,7 @@ mod tests {
         let host = bx.hub.host(left).await;
         assert!(
             host.is_none(),
-            "the fresh lookup a writer makes has no handle and so no flag to consult"
+            "the fresh lookup a writer makes has no handle, so nothing on a host can decide this"
         );
         assert!(
             !bx.hub.may_open(left).await,
