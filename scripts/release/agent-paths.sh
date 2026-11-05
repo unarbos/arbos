@@ -20,6 +20,15 @@
 # the Claude settings are all COPYed in, and each one changes the image without changing a line
 # of Rust.
 #
+# `harness` is in the image too, and is the entry most easily missed because no `COPY` line names
+# it: image/Dockerfile bind-mounts `harness/arbos-pi-ext` and copies it to
+# /etc/arbos/pi-seed/extensions/arbos-pi-ext, then writes AGENTD_SHA beside it as `.source-sha`.
+# That file is what scripts/deploy/arbos-deploy-worker's seed check reads to decide whether the
+# image carries the extension its own commit says it does — so a harness fix that cut no image
+# would be invisible twice over. The whole directory, matching `paths_of agentd` in that worker,
+# because the side that rolls an image and the side that cuts one must not disagree about what
+# counts as a change.
+#
 # Cargo.lock earns its place the way it does on the Mac list: it is not a source file, and our
 # own crates' version numbers move in it after every release. paths-change.sh reads the lockfile
 # rather than diffing it, so a real dependency change counts and a carried-forward version bump
@@ -34,4 +43,4 @@
 #     watched; the snapshot itself is a deploy step, not a build input).
 set -euo pipefail
 
-echo "${ARBOS_AGENT_PATHS:-crates/arbos-agentd crates/arbos-core image Cargo.lock}"
+echo "${ARBOS_AGENT_PATHS:-crates/arbos-agentd crates/arbos-core image harness Cargo.lock}"

@@ -345,10 +345,58 @@ fn the_agent_path_list_watches_every_crate_the_image_links() {
              so a fix in it would reach boxes with no image cut for it"
         );
     }
-    for required in ["crates/arbos-agentd", "image", "Cargo.lock"] {
+    for required in ["crates/arbos-agentd", "image", "harness", "Cargo.lock"] {
         assert!(
             watched.iter().any(|p| p == required),
             "{required} builds the image and must be watched"
+        );
+    }
+}
+
+#[test]
+fn the_agent_path_list_covers_everything_the_deploy_worker_rolls_for() {
+    // Two sides read "did the agent image change?": this list decides whether release.yml cuts an
+    // `image-v0.1.N`, and `paths_of agentd` in scripts/deploy/arbos-deploy-worker decides whether
+    // the relay host rolls one. A path the worker rolls for and this list does not watch is a fix
+    // that reaches boxes with no release cut for it — the Mac-list hole of 2026-11-04, one
+    // artifact over. `harness` was exactly that: image/Dockerfile bind-mounts
+    // `harness/arbos-pi-ext` rather than naming it in a COPY, so reading the Dockerfile for COPY
+    // lines misses it.
+    //
+    // A superset, not an equality. This list also watches Cargo.lock, which the worker's does
+    // not, so a dependency bump cuts an image here and does not roll one there.
+    let worker =
+        std::fs::read_to_string(repo_root().join("scripts/deploy/arbos-deploy-worker")).unwrap();
+    let line = worker
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("agentd) echo \""))
+        .expect("arbos-deploy-worker's paths_of still has an `agentd) echo \"…\"` arm");
+    let rolled: Vec<&str> = line
+        .trim_start_matches("agentd) echo \"")
+        .split('"')
+        .next()
+        .expect("the arm's path list is quoted")
+        .split_whitespace()
+        .collect();
+    assert!(
+        rolled.len() >= 3,
+        "the worker's agentd path list parsed as {rolled:?}, which is not a path list"
+    );
+
+    let paths = Command::new(repo_root().join("scripts/release/agent-paths.sh"))
+        .output()
+        .expect("agent-paths.sh is executable and runs");
+    let watched: Vec<String> = String::from_utf8_lossy(&paths.stdout)
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
+    for path in rolled {
+        assert!(
+            watched.iter().any(|p| p == path),
+            "scripts/deploy/arbos-deploy-worker rolls a new image when {path} changes, and \
+             scripts/release/agent-paths.sh does not watch it, so that change would reach boxes \
+             with no image release cut for it"
         );
     }
 }
