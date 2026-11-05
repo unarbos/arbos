@@ -1667,25 +1667,21 @@ struct RowView: View, Equatable {
             let openPerson = openProfile(personTarget)
             HStack(alignment: .bottom, spacing: Theme.memberAvatarGap) {
                 avatarColumn {
-                    Button(action: openPerson) {
-                        PersonAvatar(url: avatar, handle: handle, size: Theme.memberAvatar, name: model.personName(handle: handle), id: model.personId(handle: handle))
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel(personLabel)
-                    .accessibilityIdentifier("sender-avatar")
+                    PersonAvatar(url: avatar, handle: handle, size: Theme.memberAvatar, name: model.personName(handle: handle), id: model.personId(handle: handle))
+                        .modifier(ProfileDoor(open: openPerson))
+                        .accessibilityLabel(personLabel)
+                        .accessibilityIdentifier("sender-avatar")
                 }
                 // Group / channel: the name inside the bubble, in the sender's colour,
                 // then the reply quote, then the text. No time in the bubble (drag to reveal).
                 VStack(alignment: .leading, spacing: 0) {
                     if named {
-                        Button(action: openPerson) {
-                            LiveSenderName(name: personName,
-                                           url: avatar, seed: model.personId(handle: handle) ?? handle, agent: false)
-                        }
-                        .buttonStyle(.plain)
-                        .padding(.bottom, Self.nameToTextGap)
-                        .accessibilityLabel(personLabel)
-                        .accessibilityIdentifier("bubble-name")
+                        LiveSenderName(name: personName,
+                                       url: avatar, seed: model.personId(handle: handle) ?? handle, agent: false)
+                            .modifier(ProfileDoor(open: openPerson))
+                            .padding(.bottom, Self.nameToTextGap)
+                            .accessibilityLabel(personLabel)
+                            .accessibilityIdentifier("bubble-name")
                     }
                     if let quote {
                         quoteHeader(quote, color: theme.text)
@@ -1720,8 +1716,8 @@ struct RowView: View, Equatable {
             let openMember = openProfile(memberTarget)
             HStack(alignment: .bottom, spacing: Theme.memberAvatarGap) {
                 avatarColumn {
-                    Button(action: openMember) { memberAvatar(agent) }
-                        .buttonStyle(.plain)
+                    memberAvatar(agent)
+                        .modifier(ProfileDoor(open: openMember))
                         .accessibilityLabel(memberLabel)
                         .accessibilityIdentifier("sender-avatar")
                 }
@@ -1729,13 +1725,11 @@ struct RowView: View, Equatable {
                     agent,
                     content: VStack(alignment: .leading, spacing: 0) {
                         if named {
-                            Button(action: openMember) {
-                                memberName(agent)
-                            }
-                            .buttonStyle(.plain)
-                            .padding(.bottom, Self.nameToTextGap)
-                            .accessibilityLabel(memberLabel)
-                            .accessibilityIdentifier("bubble-name")
+                            memberName(agent)
+                                .modifier(ProfileDoor(open: openMember))
+                                .padding(.bottom, Self.nameToTextGap)
+                                .accessibilityLabel(memberLabel)
+                                .accessibilityIdentifier("bubble-name")
                         }
                         if let quote {
                             quoteHeader(quote, color: theme.text)
@@ -2118,22 +2112,18 @@ struct RowView: View, Equatable {
             let openPerson = openProfile(personTarget)
             HStack(alignment: .bottom, spacing: Theme.memberAvatarGap) {
                 avatarColumn {
-                    Button(action: openPerson) {
-                        PersonAvatar(url: avatar, handle: handle, size: Theme.memberAvatar, name: model.personName(handle: handle), id: model.personId(handle: handle))
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel(personLabel)
-                    .accessibilityIdentifier("sender-avatar")
+                    PersonAvatar(url: avatar, handle: handle, size: Theme.memberAvatar, name: model.personName(handle: handle), id: model.personId(handle: handle))
+                        .modifier(ProfileDoor(open: openPerson))
+                        .accessibilityLabel(personLabel)
+                        .accessibilityIdentifier("sender-avatar")
                 }
                 VStack(alignment: .leading, spacing: 4) {
                     if named {
-                        Button(action: openPerson) {
-                            LiveSenderName(name: personName, url: avatar, seed: model.personId(handle: handle) ?? handle, agent: false)
-                        }
-                        .buttonStyle(.plain)
-                        .padding(.leading, 6)
-                        .accessibilityLabel(personLabel)
-                        .accessibilityIdentifier("bubble-name")
+                        LiveSenderName(name: personName, url: avatar, seed: model.personId(handle: handle) ?? handle, agent: false)
+                            .modifier(ProfileDoor(open: openPerson))
+                            .padding(.leading, 6)
+                            .accessibilityLabel(personLabel)
+                            .accessibilityIdentifier("bubble-name")
                     }
                     card()
                 }
@@ -2148,15 +2138,15 @@ struct RowView: View, Equatable {
             let openMember = openProfile(memberTarget)
             HStack(alignment: .bottom, spacing: Theme.memberAvatarGap) {
                 avatarColumn {
-                    Button(action: openMember) { memberAvatar(agent) }
-                        .buttonStyle(.plain)
+                    memberAvatar(agent)
+                        .modifier(ProfileDoor(open: openMember))
                         .accessibilityLabel(memberLabel)
                         .accessibilityIdentifier("sender-avatar")
                 }
                 VStack(alignment: .leading, spacing: 4) {
                     if named {
-                        Button(action: openMember) { memberName(agent) }
-                            .buttonStyle(.plain)
+                        memberName(agent)
+                            .modifier(ProfileDoor(open: openMember))
                             .padding(.leading, 6)
                             .accessibilityLabel(memberLabel)
                             .accessibilityIdentifier("bubble-name")
@@ -2415,6 +2405,45 @@ struct TypedBody: View {
                 BlockView(block: block, live: false, mentions: mentions, ink: ink, chip: chip)
             }
         }
+    }
+}
+
+/// A profile door — a sender's disc, or their name above the bubble — that opens on a tap and
+/// stands aside for a swipe.
+///
+/// These were `Button`s, and a `Button`'s activation outlived a short pan. Measured on gate
+/// [41812227199](https://github.com/unarbos/arbos/actions/runs/41812227199): a 50 pt rightward
+/// drag begun anywhere in the avatar column opened the sender's page instead of swiping, at
+/// **11 of 11** start positions from x = 8 to x = 48, and not once at 52, 56 or 60 — the
+/// column/body boundary to the point. The same drag begun in the name's band fired 3 of 3. Both
+/// doors call one `openProfile`, so the defect was the activation and not either door.
+///
+/// A `TapGesture` fails once the finger travels past a tap's slop, which is where the line
+/// belongs: a real tap carries jitter and must still open the page, a swipe must not. The 180 pt
+/// drags in `AvatarBackSwipeUITests` already went back, so the `Button` was cancelling somewhere
+/// above 50 pt; this moves that threshold down to where a reader would put it rather than
+/// refusing activation after any movement at all.
+///
+/// Still a tap and not a pan, which is the half that matters: `BackSwipe.sharesTouch` keeps
+/// letting the back recognisers run alongside taps and presses, so
+/// [#2530](https://github.com/unarbos/arbos/pull/2530)'s avatar back swipe is untouched. A
+/// `require(toFail:)` would have bought the swipe by holding the page until the swipe failed —
+/// a profile that opens after a pause, which that PR rejected on purpose — and an added
+/// `DragGesture` is pan-backed, so `sharesTouch` would decline it and take the back swipe with
+/// it.
+///
+/// `contentShape` is part of the fix rather than tidying: the measured reactive region reached
+/// 6 pt above the disc's frame and 4 pt left of it, so the region a touch could arrive in was
+/// never the region the control drew. This pins it to the laid-out frame.
+private struct ProfileDoor: ViewModifier {
+    let open: () -> Void
+
+    func body(content: Content) -> some View {
+        content
+            .contentShape(Rectangle())
+            .onTapGesture(perform: open)
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.isButton)
     }
 }
 
