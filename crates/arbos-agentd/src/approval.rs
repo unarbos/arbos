@@ -1258,7 +1258,9 @@ impl Agent {
         let _ = self.store.set_job_step(&job.id, APPROVAL_WAIT_STEP);
         // Only when the card is somewhere else: a notice beside the card it describes is noise.
         if job.chat_id != card_chat_id {
-            if let Some(host) = self.sync.host(&job.chat_id).await {
+            // The job's chat, not the card's: its room may be closed while the card's is open,
+            // and this notice is the only thing that says there why the job stopped (#2367).
+            if let Ok(host) = self.room(&job.chat_id).await {
                 let h = host.lock().await;
                 let last_user = h
                     .doc
@@ -1277,7 +1279,10 @@ impl Agent {
                     .add_part_from_json(&id, &json!({ "kind": "text", "text": line }));
                 h.doc.finish_message(&id, MessageStatus::Done);
             } else {
-                tracing::debug!(job = %job.id, chat = %job.chat_id, "no open room for the job's chat; its card notice is in the rollout view only");
+                // Reached only when the room cannot be opened at all — a chat the agent was
+                // removed from. Before #2395 this arm meant "the room happens to be shut",
+                // which no box ever was, so it was unreachable rather than rare.
+                tracing::debug!(job = %job.id, chat = %job.chat_id, "the job's chat cannot be opened; its card notice is in the rollout view only");
             }
         }
         self.refresh_job_activity(&job.chat_id).await;
