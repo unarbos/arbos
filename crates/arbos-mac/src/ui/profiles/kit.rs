@@ -59,6 +59,19 @@ pub const SECTION_TITLE_BOTTOM: f32 = 8.0;
 pub const SECTION_TITLE_LINE: f32 = 16.0;
 /// The avatar size on people / agent / group rows.
 pub const AVATAR: f32 = 36.0;
+/// An action row's icon ("Add members", "Description", the server pane's add
+/// rows) follows the menus' rule — [`glass::MENU_SYMBOL_PT`] and
+/// [`glass::MENU_SYMBOL_SLOT`], "point size = the label's, Apple's natural
+/// canvas centred in a slot wide enough to hold it". These rows went through
+/// [`sf_symbols::glyph`] instead, whose slot is only 1.18 × the point size it
+/// derives, so a symbol whose canvas is wider than it is tall did not fit:
+/// `person.badge.plus` at 15 pt is about 21 pt wide in an 18 pt slot and was
+/// squeezed into it. The slot is the menus' ratio of the point size, with room
+/// to spare ([feedback chat-info-pane-icon-defaults-2026-10-31]).
+pub const ROW_GLYPH_PT: f32 = TEXT_BODY;
+pub const ROW_GLYPH_SLOT: f32 = 24.0;
+/// The icon box's corners — the iPhone's `PaneKit.glyphRadius`.
+pub const ROW_GLYPH_RADIUS: f32 = 10.0;
 /// The divider between two grouped rows stops this far from the card's
 /// edges — **the same at both ends**, and it is the row's content padding
 /// ([feedback mac-settings-card-dividers-2026-10-26]). Before, the line
@@ -85,7 +98,8 @@ pub enum Leading {
     Tile(&'static str),
     /// A 36 pt picture (people, agents, groups, files).
     Avatar(AnyElement),
-    /// A 36 pt box with a glyph in it (Add members, files).
+    /// An [`AVATAR`] box with a system symbol in it, drawn like the row's own
+    /// label (Add members, Description, files): [`ROW_GLYPH_PT`].
     Glyph(&'static str),
 }
 
@@ -188,16 +202,25 @@ fn leading_el(leading: Leading, theme: &Theme) -> Option<AnyElement> {
         Leading::None => None,
         Leading::Tile(glyph) => Some(glass::icon_tile(glyph, theme).into_any_element()),
         Leading::Avatar(el) => Some(identity::slot(AVATAR, el).into_any_element()),
+        // The symbol takes the row title's own colour. In `label_muted` it read
+        // lighter than the text beside it — Scout, via Jacob, 2026-10-31: the
+        // pane's icons "look messy, too thin".
         Leading::Glyph(glyph) => Some(
             div()
                 .size(px(AVATAR))
                 .flex_shrink_0()
-                .rounded(px(10.0))
+                .rounded(px(ROW_GLYPH_RADIUS))
                 .bg(theme.control_fill())
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(sf_symbols::glyph(glyph, 18.0, theme.label_muted()))
+                .child(sf_symbols::symbol(
+                    glyph,
+                    ROW_GLYPH_PT,
+                    sf_symbols::Weight::Medium,
+                    ROW_GLYPH_SLOT,
+                    theme.text,
+                ))
                 .into_any_element(),
         ),
     }
@@ -566,6 +589,29 @@ mod tests {
                 .count();
             assert_eq!(seps, n.saturating_sub(1), "{n} rows");
         }
+    }
+
+    /// [feedback chat-info-pane-icon-defaults-2026-10-31]: an action row's icon
+    /// is the row's label, drawn as a system symbol — the label's point size,
+    /// and a slot wide enough for Apple's canvas. The menus set that ratio
+    /// (`MENU_SYMBOL_SLOT` 20 for a `TEXT_SMALL` 13 label) and these rows did
+    /// not follow it: an 18 pt slot for a 15 pt symbol cannot hold a
+    /// `person.badge.plus`, so the widest symbols were squeezed narrow. The
+    /// iPhone twin is
+    /// `ProfilePaneStructureTests.testChatInfoRowsLeadWithStockSymbolsDrawnLikeTheirLabel`.
+    #[test]
+    fn an_action_rows_icon_has_the_menus_room_around_it() {
+        assert_eq!(ROW_GLYPH_PT, TEXT_BODY, "the row label's own point size");
+        let menus = glass::MENU_SYMBOL_SLOT / glass::MENU_SYMBOL_PT;
+        assert!(
+            ROW_GLYPH_SLOT / ROW_GLYPH_PT >= menus,
+            "a {ROW_GLYPH_SLOT} pt slot for a {ROW_GLYPH_PT} pt symbol is tighter than the menus' {menus:.2}"
+        );
+        // The slot sits inside the leading box, which stays the avatar's width:
+        // the add rows share a card with the member rows, so every label in it
+        // starts at one left edge.
+        const { assert!(ROW_GLYPH_SLOT < AVATAR) };
+        assert_eq!(ROW_GLYPH_RADIUS, 10.0, "the iPhone's PaneKit.glyphRadius");
     }
 
     /// [feedback mac-settings-card-dividers-2026-10-26]: the divider is inset

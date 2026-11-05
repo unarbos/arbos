@@ -257,7 +257,7 @@ pub(super) fn page(
                 add_rows.push(
                     kit::row(
                         DESCRIPTION_ID,
-                        kit::Leading::Glyph("text.alignleft"),
+                        kit::Leading::Glyph("note.text"),
                         "Description",
                         None,
                         None,
