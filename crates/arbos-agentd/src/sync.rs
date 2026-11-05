@@ -64,7 +64,10 @@ pub struct DocHost {
     seen_commands: std::collections::HashSet<String>,
     recovered: bool,
     ever_caught_up: bool,
-    /// Set by `close_room`: the session ends and is not reopened.
+    /// This host is retired: its session exits at its next tick, and the hub neither hands it
+    /// out nor counts it as open. Every close sets it — `close_room`, `close_all`, and the idle
+    /// and cap close (`close_cold`) — so it says nothing about whether the chat may be opened
+    /// again. Ask [`SyncHub::may_open`] for that.
     pub closed: bool,
     /// Commands issued before this instant are not ours to run: a host opened after the
     /// workspace started (the agent was re-added to a people chat) must not replay the room's
@@ -599,6 +602,28 @@ pub struct SyncHub {
     room_tasks: Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
     /// Rooms closed for being idle or over the cap since boot (`/box/state`, #2367).
     closed_cold: Arc<std::sync::atomic::AtomicU64>,
+    /// Chats no writer may open again while this box lives: the agent was removed from one
+    /// (#1440 — reopening made the relay 403 every 16 s until the box restarted), or the
+    /// workspace is stopping. The idle close and the room cap record nothing here, because a
+    /// room they took is still a live chat whose next write reopens it (#2367).
+    ///
+    /// One record, asked by every writer, rather than a per-host flag as well. A flag on the
+    /// host answers only a caller that already holds one, and `close_room` takes the host out
+    /// of `hosts` before it could be set, so a writer resolving fresh — most of them — would
+    /// have had nothing to read. It is also the record that stays right when a chat is left
+    /// and rejoined while a writer still holds a handle from before: this says the chat is
+    /// open again, where a flag on that stale handle would still say no and the row would go
+    /// into a doc nothing pushes.
+    ///
+    /// Memory only, and that is a choice of which way to fail rather than a gap to close. A
+    /// restart empties it, so the worst a lost entry costs is what this box already did before
+    /// #2367: #1440's 403 every 16 s, loud and in the logs. Persisting it would move the
+    /// failure to the other side — an entry that outlives a rejoin the box never saw would
+    /// leave the agent silently unable to write to a chat it belongs to, with nothing in the
+    /// logs to say why. Anyone persisting this needs the rejoin path to be at least as reliable
+    /// as the removal path first; today both come from the same relay list, but only while the
+    /// process lives.
+    no_reopen: Arc<Mutex<std::collections::HashSet<String>>>,
 }
 
 /// Backoff while the relay refuses a room outright (HTTP 403 / 404: the project was deleted,
@@ -636,6 +661,7 @@ impl SyncHub {
             peer_id,
             room_tasks: Arc::new(Mutex::new(HashMap::new())),
             closed_cold: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            no_reopen: Arc::new(Mutex::new(std::collections::HashSet::new())),
         }
     }
 
@@ -808,6 +834,9 @@ impl SyncHub {
     /// end at its next tick (the socket closes cleanly; the task is not aborted). The doc stays
     /// on disk, so a reopen resumes from its cursor and re-pushes anything unacked.
     ///
+    /// Records nothing in [`SyncHub::may_open`] — a room this takes is still a live chat, and a
+    /// writer still holding its handle must reopen rather than write into the retired doc.
+    ///
     /// Returns false when the room turned out not to be closable after all — a change that
     /// arrived between the check and the close keeps the room open.
     async fn close_cold(
@@ -878,8 +907,13 @@ impl SyncHub {
     /// every 16 s each until the box restarted.
     pub async fn close_all(&self) {
         let hosts: Vec<SharedHost> = self.hosts.lock().await.drain().map(|(_, h)| h).collect();
-        for h in &hosts {
-            h.lock().await.closed = true;
+        {
+            let mut no_reopen = self.no_reopen.lock().await;
+            for h in &hosts {
+                let mut h = h.lock().await;
+                h.closed = true;
+                no_reopen.insert(h.chat_id.clone());
+            }
         }
         for (_, t) in self.room_tasks.lock().await.drain() {
             t.abort();
@@ -892,11 +926,57 @@ impl SyncHub {
     /// reconnect, so an old session kept importing rows and handing commands to the agent loop
     /// beside the host that replaced it (#1440).
     pub async fn close_room(&self, chat_id: &str) {
+        self.no_reopen.lock().await.insert(chat_id.to_owned());
         if let Some(h) = self.hosts.lock().await.remove(chat_id) {
             h.lock().await.closed = true;
         }
         if let Some(t) = self.room_tasks.lock().await.remove(chat_id) {
             t.abort();
+        }
+    }
+
+    /// May a writer open this chat's room? `false` for a chat the agent was removed from and
+    /// has not been re-added to, and for every chat of a stopping workspace: reopening either
+    /// is the 403 redial loop of #1440. A cold close (idle or cap) never lands a chat here —
+    /// that room is meant to come back on the next write (#2367).
+    pub async fn may_open(&self, chat_id: &str) -> bool {
+        !self.no_reopen.lock().await.contains(chat_id)
+    }
+
+    /// Test seam: leave a room the way the idle close and the room cap leave it — host out of
+    /// the hub, session ending at its next tick, doc on disk, **nothing recorded against the
+    /// chat**, so the next write reopens it.
+    ///
+    /// Reach for this and not `close_room`, which says the agent was removed from the chat and
+    /// stops every later write from opening it. Three of the media tests here called
+    /// `close_room` while their own comments said "the idle close"; the comments were right and
+    /// the call was wrong, and it only surfaced once that distinction started to matter.
+    ///
+    /// It exists because a harness with no live relay session never settles, so
+    /// `close_if_settled` — the production path — refuses to close anything there.
+    #[cfg(test)]
+    pub(crate) async fn test_close_cold(&self, chat_id: &str) {
+        if let Some(h) = self.hosts.lock().await.remove(chat_id) {
+            h.lock().await.closed = true;
+        }
+        self.room_tasks.lock().await.remove(chat_id);
+    }
+
+    /// The relay says the agent is a member of this chat again, so the next write may open it.
+    ///
+    /// Only the membership paths call this — `note_people_chats`, on the relay's own list or
+    /// its `people_agent_added` push. Membership is the relay's word; a write is only a
+    /// request, and the two must not be confused here.
+    ///
+    /// Deliberately **not** in `open_room` or `open_room_named`, which is the constraint a
+    /// later refactor is most likely to break: `Agent::room` opens rooms, so a clear sitting
+    /// there would let the very first refused write erase the record that is meant to refuse
+    /// it, and the second attempt would sail through. That is #1440's 403 redial loop restored
+    /// through the registry built to prevent it. `note_people_chats` opens its own room
+    /// directly for this reason, and clears separately.
+    pub async fn mark_rejoined(&self, chat_id: &str) {
+        if self.no_reopen.lock().await.remove(chat_id) {
+            tracing::info!(chat = %chat_id, "re-added to a chat the agent had left; writes may open it again");
         }
     }
 
@@ -2812,6 +2892,116 @@ mod tests {
         assert!(
             host.lock().await.doc.message(&delivered).is_some(),
             "the reply written after the reopen is in the room the relay is reading"
+        );
+        bx.stop().await;
+    }
+
+    /// Why the record lives in the hub and not on the host. `close_room` takes the host out of
+    /// `hosts` first, so a writer that resolves its host fresh — the common case — gets `None`
+    /// from `host()` and would have nothing of the host's to read. It would reopen the room and
+    /// redial the relay every 16 s for a chat the agent is no longer in (#1440). Writers ask
+    /// the hub through `Agent::room` instead, which works whether or not they hold a handle.
+    ///
+    /// The cold close deliberately leaves no record, so an evicted room still comes back on
+    /// the next write; that is the distinction the rest of #2367 rests on.
+    #[tokio::test]
+    async fn a_writer_holding_no_handle_cannot_reopen_a_chat_the_agent_left() {
+        let bx = TestBox::start("01TESTPROJECTLEFTCHAT000").await;
+        let left = "chat-the-agent-was-removed-from";
+        let evicted = "chat-the-cap-took";
+        for chat in [left, evicted] {
+            bx.hub.open_room(chat).await.unwrap();
+            bx.wait_caught_up(chat).await;
+        }
+
+        // `people_agent_removed` is the only production caller of this, and it drops its own
+        // handle as it goes — exactly the writer this test is about.
+        bx.hub.close_room(left).await;
+        let host = bx.hub.host(left).await;
+        assert!(
+            host.is_none(),
+            "the fresh lookup a writer makes has no handle and so no flag to consult"
+        );
+        assert!(
+            !bx.hub.may_open(left).await,
+            "the hub refuses to open a chat the agent was removed from"
+        );
+
+        let cold = bx.hub.host(evicted).await.expect("open");
+        wait_for("the room to settle", || async {
+            cold.lock().await.settled()
+        })
+        .await;
+        assert!(
+            bx.hub.close_if_settled(evicted).await,
+            "the cold close took it"
+        );
+        assert!(
+            bx.hub.may_open(evicted).await,
+            "an evicted room is still openable: the next write brings it back (#2367)"
+        );
+        bx.hub
+            .open_room(evicted)
+            .await
+            .expect("and opening it works");
+
+        // Only the relay's membership word lifts the refusal, never a write.
+        bx.hub.mark_rejoined(left).await;
+        assert!(
+            bx.hub.may_open(left).await,
+            "re-added to the chat, so writes may open it again"
+        );
+        bx.stop().await;
+    }
+
+    /// How a writer tells an eviction from a removal, and the reason `closed` cannot be the
+    /// answer: every close sets that one, because setting it is what makes the room's session
+    /// exit at its next tick. So the cold close — which both the room cap and the idle sweep
+    /// call — has to leave the chat openable, and only a removal may close it off. A writer
+    /// reopens the room in the first case and must not in the second (#1440: reopening a chat
+    /// the agent was removed from made the relay 403 every 16 s until the box restarted).
+    ///
+    /// Without this, an eviction looks exactly like a removal to that writer, and the reply it
+    /// then writes into the retired doc is lost in the silent way
+    /// [`a_room_evicted_with_a_reply_pending_is_reopened_by_the_write`] measures.
+    #[tokio::test]
+    async fn the_cold_close_leaves_a_room_reopenable_and_only_removal_does_not() {
+        let bx = TestBox::start("01TESTPROJECTNOREOPEN000").await;
+
+        let evicted = "chat-the-cap-took";
+        let cold = bx.hub.open_room(evicted).await.unwrap();
+        bx.wait_caught_up(evicted).await;
+        wait_for("the room to settle", || async {
+            cold.lock().await.settled()
+        })
+        .await;
+        assert!(
+            bx.hub.close_cold(evicted, &cold, "test", false).await,
+            "the cold close is the one the cap and the idle sweep both go through"
+        );
+        {
+            let h = cold.lock().await;
+            assert!(
+                h.closed,
+                "the evicted host is retired, so its session ends and the socket goes"
+            );
+        }
+        assert!(
+            bx.hub.may_open(evicted).await,
+            "the chat is still live: the next write reopens its room (#2367)"
+        );
+
+        let removed = "chat-the-agent-left";
+        let gone = bx.hub.open_room(removed).await.unwrap();
+        bx.wait_caught_up(removed).await;
+        bx.hub.close_room(removed).await;
+        assert!(
+            gone.lock().await.closed,
+            "removal retires the host too, which is why `closed` cannot separate the two"
+        );
+        assert!(
+            !bx.hub.may_open(removed).await,
+            "reopening this chat is the 403 loop, so no writer may open it again"
         );
         bx.stop().await;
     }

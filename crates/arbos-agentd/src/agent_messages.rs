@@ -927,6 +927,10 @@ mod tests {
     /// from dead code into a live path — the shape that shipped broken twice (#2757, #2759). The
     /// row here is written by `hook_send_message`, whose own lookup refuses a shut room, so this
     /// path reopens the room first and the answer still lands.
+    ///
+    /// The close is the cold one, which is what this test has always meant: a room taken for
+    /// being idle belongs to a chat the agent is still in, so the next write opens it again.
+    /// Leaving the chat is the other close, and a reopen there is #1440's 403 every 16 s.
     #[tokio::test]
     async fn a_closed_room_is_reopened_instead_of_swallowing_the_message() {
         let (agent, root) = crate::status::tests::test_agent().await;
@@ -940,7 +944,7 @@ mod tests {
         }
         agent.sync.persist(&host).await.unwrap();
         drop(host);
-        agent.sync.close_room(chat).await;
+        agent.sync.test_close_cold(chat).await;
         assert!(agent.sync.host(chat).await.is_none(), "the room is shut");
 
         agent

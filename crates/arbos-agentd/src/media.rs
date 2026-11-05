@@ -993,7 +993,7 @@ mod tests {
             .persist(&agent.sync.host(chat).await.expect("open"))
             .await
             .unwrap();
-        agent.sync.close_room(chat).await;
+        agent.sync.test_close_cold(chat).await;
         assert!(
             !agent.sync.is_open(chat).await,
             "the room is closed before the second delivery"
@@ -1058,7 +1058,7 @@ mod tests {
             .persist(&agent.sync.host(chat).await.expect("open"))
             .await
             .unwrap();
-        agent.sync.close_room(chat).await;
+        agent.sync.test_close_cold(chat).await;
         assert!(!agent.sync.is_open(chat).await);
 
         let posted = deliver_file(
@@ -1133,7 +1133,7 @@ mod tests {
             .persist(&agent.sync.host(chat).await.expect("open"))
             .await
             .unwrap();
-        agent.sync.close_room(chat).await;
+        agent.sync.test_close_cold(chat).await;
         assert!(!agent.sync.is_open(chat).await, "the idle close took it");
 
         // The write path reopens it, which is the whole of this PR's change here.
