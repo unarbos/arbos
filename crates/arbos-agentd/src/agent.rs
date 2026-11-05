@@ -3126,7 +3126,7 @@ impl Agent {
     /// `key` becomes the row's `deliveryKey`, the same marker the interrupted-job row carries.
     /// Nothing reads that field back, so it is for tracing only — posting once is the caller's
     /// job, not the key's.
-    async fn post_chat_line(
+    pub(crate) async fn post_chat_line(
         &self,
         host: &SharedHost,
         chat_id: &str,
@@ -3845,12 +3845,22 @@ impl Agent {
                 data_heavy,
                 escalated,
                 None,
+                None,
             );
         }
         result
     }
 
     /// Run the subagent in the background and report a start failure into the chat.
+    ///
+    /// `ticket` is the user message's place in its chat's send order (bug O), when this task is
+    /// the one that owes that message its answer — a job the user asked for in words
+    /// (`forced_job.rs`), whose answer is this job's result turn and nothing earlier. The
+    /// contract is the one in [`crate::send_order`]: whoever posts the answer holds the ticket
+    /// until that answer's row is posted, so it is moved into the task and only dropped when the
+    /// task ends. A fresh worker after a failed one carries it on, because the answer is still
+    /// owed. Every other caller passes `None`: a model-started job's ask was already answered by
+    /// the acknowledgement its main turn posted, and that turn held the ticket for it.
     #[allow(clippy::too_many_arguments)]
     fn spawn_subagent_task(
         self: &Arc<Self>,
@@ -3865,6 +3875,7 @@ impl Agent {
         data_heavy: bool,
         escalated: bool,
         job: Option<JobSpec>,
+        ticket: Option<crate::send_order::SendTicket>,
     ) {
         let me = self.clone();
         let chat = chat_id.to_owned();
@@ -3949,6 +3960,9 @@ impl Agent {
                             attempt: j.attempt + 1,
                             ..j.clone()
                         }),
+                        // The answer is still owed, so the place in the send order goes to the
+                        // worker that will post it.
+                        ticket,
                     );
                     return;
                 }
@@ -4029,6 +4043,10 @@ impl Agent {
                     tracing::warn!(error = %e2, "result turn after a failed start");
                 }
             }
+            // The answer is posted, or this task has given up on it: either way the ask is no
+            // longer owed one from here, so its place in the chat's send order is released and
+            // the next message may go. A fresh worker took the ticket with it above.
+            drop(ticket);
         });
     }
 
@@ -5468,6 +5486,15 @@ impl Agent {
             title: job.map_or_else(|| name.to_owned(), |j| j.title.clone()),
             result: result.to_owned(),
         };
+        // The other half of the ticket contract (`crate::send_order`): holding a message's place
+        // only makes younger messages wait: this is where the held message waits its own turn,
+        // after the work and before the row. It bites for a job the user asked for in words
+        // (`forced_job.rs`), whose answer is this turn and nothing earlier, so its ask is still
+        // queued here. For a job the model started it is a no-op by construction — that ask was
+        // answered by the acknowledgement its main turn posted, so it is no longer in the queue
+        // and `place` returns `None`.
+        self.await_send_order(chat_id, user_msg_id, "job_result")
+            .await;
         let Some(outcome) = self
             .drive_relay_turn(chat_id, host, user_msg_id, &prompt, kind, None)
             .await?
@@ -6707,7 +6734,18 @@ impl Agent {
             "Continue this task the main agent started and could not finish quickly; the user has already seen a one-line acknowledgement.\n\nUser request: {user_text}\n\nPlan: {plan}\n\nDone so far:\n{transcript}\n\nFinish it and return the answer the user should read. For a comparison or research: each item with its page URL, the compared facts, the sources you used and what could not be checked. Do not repeat the acknowledgement."
         );
         match self
-            .start_job(chat_id, host, user_msg_id, &title, &brief, kind, Vec::new())
+            .start_job(
+                chat_id,
+                host,
+                user_msg_id,
+                &title,
+                &brief,
+                kind,
+                Vec::new(),
+                crate::forced_job::forces_a_job(user_text),
+                // The ack bubble this turn already posted is the ask's answer.
+                &mut None,
+            )
             .await
         {
             Ok(v) => {
@@ -6870,12 +6908,42 @@ impl Agent {
         let Some(host) = self.sync.host(&chat_id).await else {
             return Err("no room for this chat".into());
         };
-        self.start_job(&chat_id, &host, &user_msg_id, &title, brief, kind, touches)
-            .await
+        // The same signal the burst path reads (`forced_job.rs`), read from the ask itself: a
+        // job the user asked for in words must not meet the per-chat cap in one path and pass
+        // it in the other.
+        let forced = {
+            let h = host.lock().await;
+            h.doc
+                .message(&user_msg_id)
+                .map(|m| m.text())
+                .is_some_and(|t| crate::forced_job::forces_a_job(&t))
+        };
+        // No ticket: this job's ask was answered by the acknowledgement this very turn posted,
+        // and the main lane holds that message's place for as long as the turn runs.
+        self.start_job(
+            &chat_id,
+            &host,
+            &user_msg_id,
+            &title,
+            brief,
+            kind,
+            touches,
+            forced,
+            &mut None,
+        )
+        .await
     }
 
     /// Start a job for `user_msg_id` in `chat_id` (the `start_job` tool and the step-4 act→job
     /// conversion share this): caps, the row, the worker task. Returns `{job_id, title, state}`.
+    ///
+    /// `forced` = the user's own words asked for a background job (`forced_job.rs`). Such a job
+    /// passes the per-chat cap. That cap bounds how much work the *model* may put in one chat
+    /// off its own judgement; it was never a promise that a person's fourth explicit request is
+    /// refused (bug U: four forced asks two seconds apart, and the third-and-fourth refusal
+    /// would read as the agent ignoring them). The per-agent cap still holds for every job, and
+    /// a job over the per-chat cap only holds a row until a worker slot frees, so what the cap
+    /// really guards — workers — is bounded either way.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn start_job(
         self: &Arc<Self>,
@@ -6886,6 +6954,8 @@ impl Agent {
         brief: &str,
         kind: &str,
         touches: Vec<String>,
+        forced: bool,
+        ticket: &mut Option<crate::send_order::SendTicket>,
     ) -> Result<Value, String> {
         let title = title.to_owned();
         let open_here = self
@@ -6898,10 +6968,18 @@ impl Agent {
         let open_all = self.store.open_jobs().unwrap_or_default().len();
         let cap_chat = crate::config::job_max_per_chat();
         let cap_agent = crate::config::job_max_per_agent();
-        if open_here >= cap_chat {
+        if open_here >= cap_chat && !forced {
             return Err(format!(
                 "{open_here} jobs already run in this chat (cap {cap_chat}); fold this into one of them or wait for one to finish, and tell the user"
             ));
+        }
+        if open_here >= cap_chat {
+            tracing::info!(
+                chat_id,
+                open_here,
+                cap_chat,
+                "the user asked for this job in words; it passes the per-chat cap"
+            );
         }
         if open_all >= cap_agent {
             return Err(format!(
@@ -6962,6 +7040,10 @@ impl Agent {
             false,
             false,
             Some(spec),
+            // Taken only now: the caps are past, the row exists and the worker is going, so this
+            // task is the one that owes the ask its answer. A refusal above leaves the ticket
+            // with the caller, whose own lane still answers the message.
+            ticket.take(),
         );
         let no_slot = self.subagent_slots.available_permits() == 0;
         let mut out = json!({
@@ -8225,6 +8307,16 @@ impl Agent {
         if from_voice || from_routine || user_text.trim().is_empty() {
             return Ok(false);
         }
+        // The ask below is not a job, whatever this function is called: it is a subagent that
+        // writes its answer straight into the chat, with no job row, no job id and nothing
+        // `list_jobs`, `steer_job` or `stop_job` can name. When the user's own words say the
+        // work must run as a background job and not inline, that is the wrong shape (bug U), so
+        // the forced ask starts a real job here instead.
+        if crate::forced_job::forces_a_job(&user_text) {
+            return self
+                .start_forced_job(chat_id, host, &user_msg_id, &user_text, ticket)
+                .await;
+        }
         let cap = self
             .job_cap
             .lock()
@@ -8263,27 +8355,7 @@ impl Agent {
             }
         );
         let purpose: String = words.join(" ").chars().take(140).collect();
-        let recent = self
-            .store
-            .t3_thread(chat_id, None, None, 12)
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|r| r.kind == "user" || r.kind == "assistant")
-            .map(|r| {
-                format!(
-                    "- {}: {}",
-                    r.role.unwrap_or_default(),
-                    r.text
-                        .split_whitespace()
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                        .chars()
-                        .take(240)
-                        .collect::<String>()
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+        let recent = self.recent_turns_for_brief(chat_id);
         let mut prelude = String::new();
         if let Some(p) = self.people_turn_context(chat_id, host, &user_msg_id).await {
             prelude = p;
@@ -8363,6 +8435,89 @@ impl Agent {
             drop(ticket);
         });
         Ok(true)
+    }
+
+    /// A message that arrived mid-turn and says in its own words that the work is a background
+    /// job, not inline work (`forced_job.rs`): start the job the user asked for, here, without
+    /// the main session. Returns `Ok(true)` when the job is running or queued.
+    ///
+    /// The title and the brief come from the user's words, as they do for the step-4 act→job
+    /// conversion ([`Agent::convert_act_turn_to_job`]); the kind is `other`, because nothing
+    /// here knows whether the work is research, code or ops, and `other` is the kind that takes
+    /// no path or git lock on a guess.
+    ///
+    /// `Ok(false)` means no job was started — jobs are off on this box, or the per-agent cap is
+    /// full. The ask then queues for the main session exactly as it did before, which is the one
+    /// path left that can still make it a job and can tell the user in words why it could not.
+    async fn start_forced_job(
+        self: &Arc<Self>,
+        chat_id: &str,
+        host: &SharedHost,
+        user_msg_id: &str,
+        user_text: &str,
+        ticket: &mut Option<crate::send_order::SendTicket>,
+    ) -> Result<bool> {
+        let recent = self.recent_turns_for_brief(chat_id);
+        let title = crate::forced_job::title_for(user_text);
+        let brief = format!(
+            "The user sent this message while you were busy with another request in the same chat, and asked for it to run as a background job rather than inside that turn.\n\nMessage: {user_text}\n\nRecent turns in this chat:\n{recent}\n\nDo what the message asks and return the answer the user should read: plain prose, no process narration, no mention of other requests."
+        );
+        match self
+            .start_job(
+                chat_id,
+                host,
+                user_msg_id,
+                &title,
+                &brief,
+                "other",
+                Vec::new(),
+                true,
+                ticket,
+            )
+            .await
+        {
+            Ok(v) => {
+                tracing::info!(
+                    chat_id,
+                    job = %v["job_id"],
+                    %title,
+                    "the message asked for a background job; one started beside the running turn"
+                );
+                Ok(true)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    chat_id,
+                    error = %e,
+                    "the message asked for a background job and none could start; it queues for the main session"
+                );
+                Ok(false)
+            }
+        }
+    }
+
+    /// The last turns of a chat, one short line each, for a job brief written without the model.
+    fn recent_turns_for_brief(&self, chat_id: &str) -> String {
+        self.store
+            .t3_thread(chat_id, None, None, 12)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| r.kind == "user" || r.kind == "assistant")
+            .map(|r| {
+                format!(
+                    "- {}: {}",
+                    r.role.unwrap_or_default(),
+                    r.text
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                        .chars()
+                        .take(240)
+                        .collect::<String>()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -9506,6 +9661,9 @@ impl Agent {
                     false,
                     false,
                     Some(spec),
+                    // A job reclaimed after a restart: whatever place its ask had in the send
+                    // order went with the process that died.
+                    None,
                 );
             }
         }
