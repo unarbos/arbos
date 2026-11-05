@@ -337,6 +337,28 @@ async fn owner_card_chat(agent: &Arc<Agent>, asking_chat: &str) -> String {
     main.id.clone()
 }
 
+/// The chat an ask came from: what the relay is told, so a "this chat only" answer scopes the
+/// secret to the thread the owner meant and the card says truthfully where it was asked.
+///
+/// Deliberately not `approval_chat`, which is about where a card is *shown*: it moves a card
+/// out of a side thread into the pinned chat so the owner sees it (#1440). The use side sends
+/// the turn's own chat to `/egress`, and the relay compares that with the access's
+/// `scope_chat_id`, so reporting the card's chat here would record a scope the use side can
+/// never present. `card_chat` is the last resort only, for a hint that names no chat with no
+/// turn running — there the card's chat is the only chat there is.
+async fn scope_chat(agent: &Arc<Agent>, hint: &str, card_chat: &str) -> String {
+    if agent.people.is_people_chat(hint) {
+        return hint.to_owned();
+    }
+    if let Ok(Some(c)) = agent.store.chat(hint) {
+        return c.id;
+    }
+    if let Some(t) = agent.turn.lock().await.as_ref() {
+        return t.chat_id.clone();
+    }
+    card_chat.to_owned()
+}
+
 /// User id of the human directing the current turn, when known.
 fn asked_by_user_id(agent: &Agent) -> Option<String> {
     agent.people.current_asker().map(|a| a.user_id)
@@ -1145,12 +1167,16 @@ async fn obtain_grant(
     use_kind: &str,
     host: Option<&str>,
 ) -> Result<Grant, Value> {
-    // Access cards belong on the pinned main chat (same rule as `approval_chat`).
+    // Access cards belong on the pinned main chat (same rule as `approval_chat`); the chat the
+    // relay is told about is the one that asked (`scope_chat`), which is what a "this chat
+    // only" answer scopes to and what the use side presents.
     let chat_id = agent
         .approval_chat(chat_hint)
         .await
         .unwrap_or_else(|| chat_hint.to_owned());
     let chat_id = chat_id.as_str();
+    let asked_in = scope_chat(agent, chat_hint, chat_id).await;
+    let asked_in = asked_in.as_str();
     let project = agent.cfg.project_id.clone();
     if is_paused(&project) {
         return Err(err_result("Secrets are paused by the owner. Stop and tell the user; do not ask again until they turn Pause all secrets off."));
@@ -1199,7 +1225,7 @@ async fn obtain_grant(
             // Ask me: fall through to the relay, which raises the owner's card.
         }
     }
-    let mut req = json!({ "name": name, "purpose": purpose, "use": use_kind, "host": host, "chat_id": chat_id });
+    let mut req = json!({ "name": name, "purpose": purpose, "use": use_kind, "host": host, "chat_id": asked_in });
     if let Some(uid) = asked_by_user_id(agent) {
         req["asked_by"] = json!(uid);
     }
@@ -1242,7 +1268,7 @@ async fn obtain_grant(
     }
     agent.append_audit(
         "secret_requested",
-        json!({ "requestId": request_id, "name": name, "kind": kind, "use": use_kind, "host": host, "purpose": purpose, "chatId": chat_id, "resumed": resumed }),
+        json!({ "requestId": request_id, "name": name, "kind": kind, "use": use_kind, "host": host, "purpose": purpose, "chatId": asked_in, "resumed": resumed }),
     );
     let _ = agent.store.t3_append(
         chat_id,
@@ -1291,7 +1317,7 @@ async fn obtain_grant(
                 "askedBy": asker.as_ref().map(|a| a.user_id.clone()),
                 "askedByHandle": asker.as_ref().map(|a| a.handle.clone()),
                 "askedByName": asker.as_ref().map(|a| a.spoken().to_owned()),
-                "askedIn": asker.as_ref().map(|_| chat_id),
+                "askedIn": asker.as_ref().map(|_| asked_in),
                 "answers": [
                     { "id": "once", "label": "Allow once" },
                     { "id": "chat", "label": "Allow for this chat" },
@@ -1939,5 +1965,92 @@ mod tests {
             "unset GITHUB_LOGIN_PASSWORD GITHUB_LOGIN_USERNAME MAILGUN_API_KEY STRIPE_KEY\n"
         ));
         assert!(!text.contains("export"));
+    }
+}
+
+#[cfg(test)]
+mod chat_scope_tests {
+    use super::*;
+    use crate::status::tests::test_agent_with;
+    use axum::routing::{get, post};
+    use axum::{Json, Router};
+
+    /// A relay stub for one `secrets_request` round trip: it records every request body the box
+    /// sends, answers the poll as if the owner had chosen "Allow for this chat", and keeps the
+    /// two refreshes cheap.
+    fn relay_stub() -> (Router, Arc<Mutex<Vec<Value>>>) {
+        let bodies: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen = bodies.clone();
+        let item = json!({ "env": "ENGY_API_KEY", "kind": "key", "enabled": true, "hosts": [],
+            "placeholders": { "value": "arbos-secret://ENGY_API_KEY/value" }, "note": "",
+            "vault_name": "Arbos" });
+        let router = Router::new()
+            .route(
+                "/box/secrets/request",
+                post(move |Json(b): Json<Value>| {
+                    let seen = seen.clone();
+                    async move {
+                        seen.lock().unwrap().push(b);
+                        (
+                            axum::http::StatusCode::CREATED,
+                            Json(json!({ "request": { "id": "rq_scope" } })),
+                        )
+                    }
+                }),
+            )
+            .route(
+                "/box/secrets/requests/{id}",
+                get(|| async { Json(json!({ "request": { "status": "allowed_chat" } })) }),
+            )
+            .route(
+                "/box/secrets",
+                get(move || {
+                    let item = item.clone();
+                    async move { Json(json!({ "paused": false, "items": [item] })) }
+                }),
+            )
+            .route(
+                "/box/secrets/env",
+                get(|| async { Json(json!({ "paused": false, "items": [] })) }),
+            );
+        (router, bodies)
+    }
+
+    /// "Allow for this chat" has to name the thread that asked. The card is posted in the
+    /// pinned chat on purpose (`approval_chat`, #1440), but the use side sends the turn's own
+    /// chat to `/egress`, and the relay compares that with the access's `scope_chat_id`. If the
+    /// ask reports the card's chat instead, the owner's answer scopes the secret to a thread
+    /// nobody asked from: refused where it was meant, allowed in the pinned chat.
+    #[tokio::test]
+    async fn a_chat_scoped_secret_names_the_thread_that_asked() {
+        let (router, bodies) = relay_stub();
+        let (agent, root) = test_agent_with(router).await;
+        let main = "01TESTCHATSECRETSCOPE00000";
+        let side = "01TESTCHATSECRETSCOPE00001";
+        agent.store.upsert_chat(main, "Main", true, 0).unwrap();
+        agent.store.upsert_chat(side, "Side", false, 1).unwrap();
+        let _host = agent.sync.open_room(main).await.unwrap();
+
+        let _ = secrets_request(
+            &agent,
+            &json!({ "name": "ENGY_API_KEY", "purpose": "the nightly report", "use": "header" }),
+            side,
+        )
+        .await;
+
+        let sent = bodies.lock().unwrap().clone();
+        assert_eq!(sent.len(), 1, "one request reached the relay: {sent:?}");
+        assert_eq!(
+            sent[0]["chat_id"].as_str(),
+            Some(side),
+            "the relay must be told the thread that asked, because that is the chat the use \
+             side presents at `/egress`; it was told the chat the card was posted in"
+        );
+        // The card itself still belongs in the pinned chat, where the owner is looking.
+        assert!(
+            agent.sync.host(side).await.is_none(),
+            "the side thread must not become the card's chat"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
