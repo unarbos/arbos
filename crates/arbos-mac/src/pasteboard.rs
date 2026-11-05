@@ -64,7 +64,8 @@ pub struct PasteItem {
 impl PasteItem {
     /// The pasteboard types this item declares, most descriptive first — the order a
     /// reader that walks `types` sees (the native picture type before its fallbacks).
-    #[cfg_attr(any(not(target_os = "macos"), test), allow(dead_code))]
+    /// Only the tests call it: the macOS writer declares the same order inline.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn types(&self) -> Vec<&'static str> {
         let mut out = Vec::new();
         if let Some(image) = &self.image {
@@ -402,6 +403,7 @@ pub fn read(cx: &App) -> Option<ClipboardItem> {
 /// The gpui `ClipboardItem` for `items` where the platform writer is not available
 /// (Linux dev builds, tests): every text and every picture as entries; gpui's writer
 /// keeps what it can of them.
+#[cfg_attr(all(target_os = "macos", not(test)), allow(dead_code))]
 pub fn fallback_item(items: &[PasteItem]) -> ClipboardItem {
     let mut entries = Vec::new();
     let mut paths = Vec::new();
