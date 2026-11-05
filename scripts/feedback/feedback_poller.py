@@ -2160,6 +2160,11 @@ class Loop:
     # The paths CI's Layout job runs `shellcheck -S warning` over (.github/workflows/ci.yml). A scripts-only branch
     # is merged without the Rust gate, so it is the one path where a shell warning reaches main unchecked:
     # 430bbcfe5 (#1567) landed an SC2115 at 21:29 on 2026-10-23 and main was red for everyone until 22:07.
+    # This list is a copy of CI's line, and a copy drifts — c91bad3f4 added scripts/merge/*.sh to CI's and not
+    # here. It is covered anyway only because `fnmatch` lets `*` cross `/`, so scripts/*.sh already means every
+    # .sh under scripts/ at any depth; a path CI adds OUTSIDE scripts/ and image/ would be a real hole, and a
+    # scripts-only branch merges without the Rust gate, so the hole would be a shell warning landing on main
+    # with nothing said. test_vacuous_checks.py reads ci.yml's own line and fails if one stops being covered.
     SHELLCHECK_GLOBS = ("scripts/*.sh", "scripts/release/*.sh", "scripts/runner/*.sh", "scripts/feedback/*.sh", "image/*.sh")
 
     def shellcheck_ok(self, fid: str, st: dict, head: str) -> bool:
@@ -2178,14 +2183,30 @@ class Loop:
                 try:
                     blob = self.gh.repo_api("GET", f"/contents/{urllib.parse.quote(f)}?ref={head}")
                 except HttpError as e:
-                    log(f"[{fid}] shellcheck: cannot fetch {f}@{head[:8]} ({e}); skipping that file")
-                    continue
+                    if e.status == 404:
+                        continue  # the branch deletes this file: there is nothing to lint at its head
+                    # A file the loop could not read is not a file the loop checked. Skipping it left `paths`
+                    # short (or empty, and `not paths` reads as clean), so a 403 or a 5xx on `/contents` merged
+                    # CI-linted shell with no lint behind it — `run_failed_tests` already refuses to wave an
+                    # unreadable log through, and this is the same call.
+                    log(f"[{fid}] shellcheck: cannot fetch {f}@{head[:8]} ({e}); holding {st.get('branch')} in gating "
+                        f"(CI-linted shell is not merged unchecked)")
+                    return False
+                content = base64.b64decode(blob.get("content") or "")
+                if not content and blob.get("size"):
+                    # `/contents` gives no body for a blob over 1 MB (encoding "none"). That wrote an empty file,
+                    # which shellcheck reds with SC2148 (no shebang) — the other direction of the same mistake:
+                    # the owner got a followup about a file nobody read instead of the branch's own diagnostics.
+                    log(f"[{fid}] shellcheck: {f}@{head[:8]} came back without content ({blob.get('size')} bytes, "
+                        f"encoding {blob.get('encoding')}); holding {st.get('branch')} in gating "
+                        f"(CI-linted shell is not merged unchecked)")
+                    return False
                 p = Path(tmp) / f
                 p.parent.mkdir(parents=True, exist_ok=True)
-                p.write_bytes(base64.b64decode(blob.get("content") or ""))
+                p.write_bytes(content)
                 paths.append(str(p))
             if not paths:
-                return True
+                return True  # every CI-linted file this branch touches was deleted by it
             r = subprocess.run(["shellcheck", "-S", "warning", *paths], capture_output=True, text=True, timeout=120)
         if r.returncode == 0:
             return True
@@ -3055,14 +3076,30 @@ class Loop:
         if mac:
             self.rust_gate_mac_start(cur)
 
+    # The wording of this report is `ios-gate.sh`'s, so it moves: 755fd2ee9 (2026-10-25) replaced "the same
+    # failure exists on main" with "every error exists on main too" and this matcher then matched nothing for
+    # eight days without one failure anywhere. Both wordings are read, and a FAIL-to-compile report that none of
+    # them matches is said out loud — silence from a matcher that cannot match reads as "main is fine".
+    TESTS_EXCUSED_ON_MAIN_RES = (re.compile(r"== tests: every error exists on main too \(([0-9a-f]+)\)"),
+                                 re.compile(r"== tests: the same failure exists on main \(([0-9a-f]+)\)"))
+    TESTS_COMPILE_FAILED = "== tests: FAIL to compile"
+    TESTS_BRANCH_REGRESSION = "== tests: errors NOT on main"
+
     def note_main_tests_broken(self, active: dict, body: str) -> None:
         """The iOS half compiles the unit-test target too (#1621); when it fails the same way on main the half is
         green ('reported, not blamed') — but a report nobody reads is no report (16:4x Oct 24: MentionDraftTests
         broke main at 15:15 and was found by a worker by hand). Surface it: loop log, `status` (cursor field) and
         one note per main head in the journal; the operator routes the fix to the test's owner."""
-        m = re.search(r"== tests: the same failure exists on main \(([0-9a-f]+)\)", body)
+        m = next((found for r in self.TESTS_EXCUSED_ON_MAIN_RES for found in [r.search(body)] if found), None)
         cur = self.store.cursor()
         if not m:
+            if self.TESTS_COMPILE_FAILED in body and self.TESTS_BRANCH_REGRESSION not in body:
+                # The gate said main's test target does not compile, in words this does not read: the report is
+                # here and the alert is not. Nothing else would notice, so name it as the loop's own fault.
+                lines = [l.strip() for l in body.splitlines() if l.startswith("== tests:")]
+                log(f"ALERT Gate {active['id']}: the iOS half reported the unit-test target failing to compile but none of "
+                    f"this loop's verdict patterns matched it — ios-gate.sh's wording has changed and "
+                    f"`main's iOS unit tests broken` is no longer being raised at all: " + " | ".join(lines)[:600])
             if cur.get("main_ios_tests_broken") and "== tests: compile" in body:
                 cur.pop("main_ios_tests_broken", None)
                 self.store.save_cursor(cur)
