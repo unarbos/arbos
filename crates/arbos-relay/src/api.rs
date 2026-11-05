@@ -2459,9 +2459,15 @@ mod primary_chat_tests {
 
         // The first row lands before the box has a socket on the room: one `rows_pending`
         // push, not one per row; none once the box is in the room.
-        let room = state
-            .room(&arbos_core::wire::room_name(&project, &chat_id))
-            .await;
+        let room_name = arbos_core::wire::room_name(&project, &chat_id);
+        // Two rows are waiting in the room before any box has a socket on it.
+        for i in 0..2 {
+            state
+                .db
+                .append_row(&room_name, "dev-mac", &format!("b{i}"), b"x")
+                .unwrap();
+        }
+        let room = state.room(&room_name).await;
         let chat = crate::notify::ChatRef::project(&project, &chat_id);
         let agents = [boxes::ServingAgent {
             project_id: project.clone(),
@@ -2485,6 +2491,14 @@ mod primary_chat_tests {
             "the chat row rides along so the box does not reset it"
         );
         assert!(pushes[0].2["created_at"].as_i64().unwrap() > 0);
+        // How far the room has got, so the box can tell how much it is behind and start the
+        // turn's slow half while it connects. Seqs only: no row content leaves the relay here.
+        assert_eq!(
+            pushes[0].2["head_seq"],
+            json!(2),
+            "the push says work is waiting: {:?}",
+            pushes[0].2
+        );
         room.box_joined(&alice);
         assert_eq!(
             boxes::after_person_row(&state, &room, &chat, &agents).await,

@@ -263,6 +263,33 @@ impl Agent {
                 };
                 let mut chat = payload.clone();
                 chat["id"] = Value::String(chat_id.to_owned());
+                // How far the room has got on the relay against how far this box has read it.
+                // Rows waiting mean a turn is owed as soon as the room catches up, so pi's
+                // session switch — which needs no room at all — runs beside the connect
+                // instead of after it.
+                let pending = {
+                    let head_seq = payload
+                        .get("head_seq")
+                        .and_then(Value::as_i64)
+                        .unwrap_or_default();
+                    let room = arbos_core::wire::room_name(&self.cfg.project_id, chat_id);
+                    let cursor = self
+                        .store
+                        .room_doc(&room)
+                        .ok()
+                        .flatten()
+                        .map_or(0, |(cursor, _, _)| cursor);
+                    (head_seq - cursor).max(0)
+                };
+                let prefetch = (pending > 0).then(|| {
+                    let agent = self.clone();
+                    let chat_id = chat_id.to_owned();
+                    tokio::spawn(async move { agent.prefetch_chat_session(&chat_id).await })
+                });
+                // A push for a room this box already holds is a no-op that still costs the
+                // turn its wait; how long it had been open says whether that is what happened.
+                let already_open_ms = self.sync.open_ms(chat_id).await;
+                let t0 = std::time::Instant::now();
                 crate::workspace::open_listed_chat(
                     &self.cfg,
                     &self.store,
@@ -271,7 +298,17 @@ impl Agent {
                     &chat,
                 )
                 .await;
-                tracing::info!(chat_id, reason = ?payload.get("reason"), "chat_open push: room opened");
+                tracing::info!(
+                    chat_id,
+                    reason = ?payload.get("reason"),
+                    open_ms = t0.elapsed().as_millis() as i64,
+                    already_open_ms,
+                    pending,
+                    "chat_open push: room opened"
+                );
+                if let Some(task) = prefetch {
+                    let _ = task.await;
+                }
             }
             // F5: the library changed on the relay; refetch the index now rather than at the
             // next 60 s tick.

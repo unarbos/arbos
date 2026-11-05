@@ -871,7 +871,13 @@ pub const PEOPLE_CHAT_OPEN_PUSH: &str = "people_chat_open";
 
 /// The `chat_open` payload: the chat row rides along because agentd's `open_listed_chat`
 /// upserts title / pin / created_at from it (a bare id would reset them).
-fn chat_open_payload(chat: &crate::db::Chat, reason: &str) -> Value {
+///
+/// `head_seq` is how far the room has got. The box holds its own cursor, so the two together
+/// say how many rows it is behind — which is how it knows, before the room is even connected,
+/// that a turn is owed and pi's session can be switched now rather than after the catch-up.
+/// A seq and nothing else: no row content is read here and none leaves the relay.
+fn chat_open_payload(state: &AppState, chat: &crate::db::Chat, reason: &str) -> Value {
+    let room = arbos_core::wire::room_name(&chat.project_id, &chat.id);
     json!({
         "chat_id": chat.id,
         "project_id": chat.project_id,
@@ -880,6 +886,7 @@ fn chat_open_payload(chat: &crate::db::Chat, reason: &str) -> Value {
         "is_pinned": chat.is_pinned,
         "created_at": chat.created_at,
         "forked_from": chat.forked_from,
+        "head_seq": state.db.room_head(&room).unwrap_or(0),
     })
 }
 
@@ -889,7 +896,7 @@ pub fn chat_created(state: &AppState, chat: &crate::db::Chat) -> bool {
     match state.db.enqueue_push_once(
         &chat.project_id,
         CHAT_OPEN_PUSH,
-        &chat_open_payload(chat, "created"),
+        &chat_open_payload(state, chat, "created"),
     ) {
         Ok(added) => added,
         Err(e) => {
@@ -932,7 +939,10 @@ pub async fn after_person_row(
                 let Ok(Some(row)) = state.db.chat(pid, &chat.chat_id) else {
                     continue;
                 };
-                (CHAT_OPEN_PUSH, chat_open_payload(&row, "rows_pending"))
+                (
+                    CHAT_OPEN_PUSH,
+                    chat_open_payload(state, &row, "rows_pending"),
+                )
             }
         };
         match state.db.enqueue_push_once(&a.project_id, kind, &payload) {

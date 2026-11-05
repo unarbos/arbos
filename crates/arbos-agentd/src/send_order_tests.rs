@@ -28,7 +28,7 @@ use tokio::time::Instant;
 
 use crate::agent::{retire_if_wordless, retire_wordless_rows, JobSpec};
 use crate::send_order::SEND_ORDER_WAIT;
-use crate::status::tests::{test_agent, FIRST_REPLY_GATE_SECS};
+use crate::status::tests::{test_agent, Journal, FIRST_REPLY_GATE_SECS};
 use crate::sync::SharedHost;
 
 /// How long #2759's inline approval wait holds the chat's main turn, measured on Jacob's box in
@@ -483,54 +483,6 @@ async fn an_inline_approval_wait(
         tokio::task::yield_now().await;
     }
     card
-}
-
-/// This test's own `tracing` output, kept so the ordering log can be read back as evidence
-/// instead of taken on trust.
-///
-/// `#[tokio::test]` is a current-thread runtime on one thread, and `set_default` is per thread,
-/// so the capture covers the lanes this test spawns and no other test's events can reach it.
-#[derive(Clone, Default)]
-struct Journal(Arc<Mutex<Vec<u8>>>);
-
-struct JournalSink(Arc<Mutex<Vec<u8>>>);
-
-impl std::io::Write for JournalSink {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Journal {
-    type Writer = JournalSink;
-
-    fn make_writer(&'a self) -> Self::Writer {
-        JournalSink(self.0.clone())
-    }
-}
-
-impl Journal {
-    fn capture(&self) -> tracing::subscriber::DefaultGuard {
-        tracing::subscriber::set_default(
-            tracing_subscriber::fmt()
-                .with_writer(self.clone())
-                .with_ansi(false)
-                .with_max_level(tracing::Level::WARN)
-                .finish(),
-        )
-    }
-
-    fn text(&self) -> String {
-        String::from_utf8_lossy(&self.0.lock().unwrap_or_else(|e| e.into_inner())).into_owned()
-    }
 }
 
 /// Interaction 1 with #2759 (Jacob, 2026-11-05), and the one the valve exists for.

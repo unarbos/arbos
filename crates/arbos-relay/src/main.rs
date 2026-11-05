@@ -70,6 +70,9 @@ mod preview_token_tests;
 #[cfg(test)]
 mod project_lookup_tests;
 mod proxy;
+mod proxy_trace;
+#[cfg(test)]
+mod proxy_trace_tests;
 mod push;
 mod push_guard;
 mod releases;

@@ -47,6 +47,8 @@ mod relay_error;
 mod reply;
 mod resources;
 mod responders;
+#[cfg(test)]
+mod room_marks_tests;
 mod routines;
 mod rpc_child;
 mod selfref;
@@ -64,6 +66,8 @@ mod tree;
 mod truncate;
 #[cfg(test)]
 mod turn_end_race_tests;
+#[cfg(test)]
+mod turn_marks_tests;
 mod vault;
 mod voice;
 mod web;

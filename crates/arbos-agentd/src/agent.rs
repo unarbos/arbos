@@ -3082,6 +3082,30 @@ impl Agent {
         self.switch_session_to(chat_id, &path).await
     }
 
+    /// Switch pi to a chat before the turn that needs it arrives (a `chat_open` push that named
+    /// rows already waiting). The room's connect and catch-up do not need pi, so the two run
+    /// beside each other instead of in series.
+    ///
+    /// Only when the lease is free: a turn in flight owns pi's session for its whole length,
+    /// and switching under one would answer it against another chat's window. A prefetch that
+    /// cannot take the lease is simply not done — the turn's own `ensure_chat_session` still
+    /// runs, exactly as before.
+    pub(crate) async fn prefetch_chat_session(self: &Arc<Self>, chat_id: &str) -> bool {
+        let Ok(_lease) = self.pi_lease.try_lock() else {
+            tracing::info!(chat_id, "session prefetch skipped: a turn holds pi");
+            return false;
+        };
+        let t0 = Instant::now();
+        let ok = self.ensure_chat_session(chat_id).await.is_ok();
+        tracing::info!(
+            chat_id,
+            ok,
+            ms = t0.elapsed().as_millis() as i64,
+            "session prefetch"
+        );
+        ok
+    }
+
     /// Replace the chat's model window: a fresh pi session file, switched to at once. Used when
     /// the current window is stuck — a provider refusal bound to its content, or a turn that
     /// settled with no route and no prose (the same session keeps failing the same way).
@@ -4635,6 +4659,10 @@ impl Agent {
         host: &SharedHost,
         cmd: &CommandView,
     ) -> Result<()> {
+        // The clock the pre-model legs are measured against. Between this point and the session
+        // switch a turn used to log nothing at all, so a lock wait and slow setup could not be
+        // told apart afterwards (Test5, 14:17:23Z: 384 ms, unaccounted for).
+        let received = Instant::now();
         let user_msg_id = cmd
             .payload
             .get("messageId")
@@ -4657,6 +4685,8 @@ impl Agent {
             .acquire_turn_lock(chat_id, &user_msg_id, this_is_voice)
             .await;
         self.pending_sends.fetch_sub(1, Ordering::SeqCst);
+        let lock_ms = received.elapsed().as_millis() as i64;
+        tracing::info!(chat_id, msg = user_msg_id, lock_ms, "turn lock taken");
         // The send order and the turn lock both waited since `handle_command` looked this room
         // up, and every row of this turn goes through the handle from here on.
         let host = &self.room_for_reply(chat_id, host).await;
@@ -4904,6 +4934,13 @@ impl Agent {
             return Ok(());
         }
 
+        tracing::info!(
+            chat_id,
+            msg = user_msg_id,
+            lock_ms,
+            setup_ms = received.elapsed().as_millis() as i64,
+            "turn setup done"
+        );
         let outcome = self
             .drive_turn(
                 chat_id,
@@ -5813,6 +5850,7 @@ impl Agent {
         // is what `open_turn_row` refuses to do.
         let relay_turn = !matches!(kind, TurnKind::User | TurnKind::JobFallback { .. });
         let assistant_msg_id = ulid();
+        let driving = Instant::now();
         let Some(text_part_id) = self
             .open_turn_row(
                 chat_id,
@@ -5826,6 +5864,12 @@ impl Agent {
         else {
             return Err(anyhow!(RELAY_SLOT_LOST));
         };
+        tracing::info!(
+            chat_id,
+            msg = user_msg_id,
+            row_ms = driving.elapsed().as_millis() as i64,
+            "turn row open"
+        );
 
         // Disk headroom (#1641): decide before pi touches its session files. A full disk is
         // answered here with a plain line (or a clean-up), never with a raw errno.
@@ -5926,8 +5970,20 @@ impl Agent {
         let prompt_text = prompt_text.as_str();
 
         // The session is this turn's until it ends: no prompt-refresh restart lands under it.
+        let before_lease = Instant::now();
         let _pi_lease = self.pi_lease.lock().await;
-        if let Err(e) = self.ensure_chat_session(chat_id).await {
+        let lease_ms = before_lease.elapsed().as_millis() as i64;
+        let before_session = Instant::now();
+        let session = self.ensure_chat_session(chat_id).await;
+        tracing::info!(
+            chat_id,
+            msg = user_msg_id,
+            lease_ms,
+            session_ms = before_session.elapsed().as_millis() as i64,
+            ok = session.is_ok(),
+            "turn session ready"
+        );
+        if let Err(e) = session {
             {
                 let h = host.lock().await;
                 h.doc.add_status_part(&assistant_msg_id, "failed", "Failed");

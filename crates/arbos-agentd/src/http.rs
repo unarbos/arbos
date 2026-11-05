@@ -319,9 +319,11 @@ async fn stub_forward(
     } else {
         format!("{}/proxy{}{}", a.cfg.relay_url, path, query)
     };
-    let client = reqwest::Client::new();
+    // The agent's own client, so its connection pool is reused: a client per call meant a new
+    // connection, and on the relay's real base a new TLS handshake, before every model call.
     // One box serves every project of the user: the relay meters usage per project by this header.
-    let mut req = client
+    let mut req = a
+        .http_client()
         .request(method, &target)
         .bearer_auth(&a.cfg.box_token)
         .header("x-arbos-project", &a.cfg.project_id)
@@ -336,16 +338,29 @@ async fn stub_forward(
             req = req.header(h, v);
         }
     }
+    let t0 = std::time::Instant::now();
     match req.send().await {
         Ok(resp) => {
             let status =
                 StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
             let mut out_headers = HeaderMap::new();
             for (k, v) in resp.headers() {
-                if k == "content-type" || k == "cache-control" {
+                // `x-arbos-req-id` is the relay's id for this model call: passing it on is what
+                // lets a turn on the box be read against the relay's record of the same call.
+                if k == "content-type" || k == "cache-control" || k == "x-arbos-req-id" {
                     out_headers.insert(k.clone(), v.clone());
                 }
             }
+            tracing::info!(
+                req_id = out_headers
+                    .get("x-arbos-req-id")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or(""),
+                %path,
+                status = status.as_u16(),
+                headers_ms = t0.elapsed().as_millis() as u64,
+                "model call forwarded"
+            );
             let stream = resp
                 .bytes_stream()
                 .map(|r| r.map_err(std::io::Error::other));
@@ -359,4 +374,76 @@ pub fn stub_router(agent: Arc<Agent>) -> Router {
     Router::new()
         .route("/{*path}", any(stub_forward))
         .with_state(agent)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// Every model call the box makes goes through this stub, and a fresh client per call meant
+    /// a fresh TCP handshake and TLS session to the relay before the prompt could even be sent.
+    /// That cost sits inside the first-token figure and nothing on either side could see it.
+    #[tokio::test]
+    async fn the_model_stub_reuses_one_connection_to_the_relay() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let connections = Arc::new(AtomicUsize::new(0));
+        let counted = connections.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    break;
+                };
+                counted.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 8192];
+                    while let Ok(n) = sock.read(&mut buf).await {
+                        if n == 0 {
+                            break;
+                        }
+                        let reply = "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                             x-arbos-req-id: 0a1b2c3d4e5f\r\nset-cookie: nope\r\n\
+                             content-length: 2\r\n\r\n{}";
+                        if sock.write_all(reply.as_bytes()).await.is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+
+        let (agent, _root) =
+            crate::status::tests::test_agent_on_relay(&format!("http://127.0.0.1:{port}")).await;
+        for _ in 0..3 {
+            let r = stub_forward(
+                State(agent.clone()),
+                Method::POST,
+                "/v1/messages".parse::<Uri>().unwrap(),
+                HeaderMap::new(),
+                Bytes::from_static(b"{}"),
+            )
+            .await;
+            assert_eq!(r.status(), StatusCode::OK);
+            assert_eq!(
+                r.headers()
+                    .get("x-arbos-req-id")
+                    .and_then(|v| v.to_str().ok()),
+                Some("0a1b2c3d4e5f"),
+                "the relay's id for this call reaches the caller"
+            );
+            assert!(
+                r.headers().get("set-cookie").is_none(),
+                "and nothing else new does"
+            );
+            // The connection goes back to the pool only once its body is drained.
+            axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
+        }
+        assert_eq!(
+            connections.load(Ordering::SeqCst),
+            1,
+            "three model calls, one connection"
+        );
+    }
 }

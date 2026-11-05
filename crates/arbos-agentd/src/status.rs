@@ -1189,6 +1189,63 @@ pub(crate) mod tests {
         test_agent_with(axum::Router::new()).await
     }
 
+    /// A test's own `tracing` output, kept so what the box logged can be read back as evidence
+    /// instead of taken on trust.
+    ///
+    /// `#[tokio::test]` is a current-thread runtime on one thread, and `set_default` is per
+    /// thread, so the capture covers the lanes one test spawns and no other test's events can
+    /// reach it.
+    #[derive(Clone, Default)]
+    pub(crate) struct Journal(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    pub(crate) struct JournalSink(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for JournalSink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Journal {
+        type Writer = JournalSink;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            JournalSink(self.0.clone())
+        }
+    }
+
+    impl Journal {
+        pub(crate) fn capture(&self) -> tracing::subscriber::DefaultGuard {
+            self.capture_at(tracing::Level::WARN)
+        }
+
+        pub(crate) fn capture_info(&self) -> tracing::subscriber::DefaultGuard {
+            self.capture_at(tracing::Level::INFO)
+        }
+
+        fn capture_at(&self, level: tracing::Level) -> tracing::subscriber::DefaultGuard {
+            tracing::subscriber::set_default(
+                tracing_subscriber::fmt()
+                    .with_writer(self.clone())
+                    .with_ansi(false)
+                    .with_max_level(level)
+                    .finish(),
+            )
+        }
+
+        pub(crate) fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap_or_else(|e| e.into_inner())).into_owned()
+        }
+    }
+
     /// Same, with a real `pi_bin`, so `start_pi` and its supervisor run as they do on a box.
     ///
     /// Every other test box points `pi_bin` at nothing, which leaves the agent with no main
@@ -1201,6 +1258,12 @@ pub(crate) mod tests {
     /// Same, with extra mock-relay routes merged in (`/box/secrets/…` for the hand-off tests).
     pub(crate) async fn test_agent_with(extra: axum::Router) -> (Arc<Agent>, std::path::PathBuf) {
         test_agent_full(extra, "/nonexistent/pi").await
+    }
+
+    /// Same, pointed at a relay the caller serves itself. The model-stub tests count the TCP
+    /// connections the box opens, which `axum::serve` cannot report.
+    pub(crate) async fn test_agent_on_relay(relay_url: &str) -> (Arc<Agent>, std::path::PathBuf) {
+        test_agent_on(relay_url.to_owned(), "/nonexistent/pi").await
     }
 
     async fn test_agent_full(
@@ -1227,11 +1290,15 @@ pub(crate) mod tests {
         tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
+        test_agent_on(format!("http://127.0.0.1:{port}"), pi_bin).await
+    }
+
+    async fn test_agent_on(relay_url: String, pi_bin: &str) -> (Arc<Agent>, std::path::PathBuf) {
         let root = std::env::temp_dir().join(format!("arbos-quick-{}", ulid()));
         std::fs::create_dir_all(&root).unwrap();
         let bx = crate::config::BoxConfig {
             user_id: Some("u-test".into()),
-            relay_url: format!("http://127.0.0.1:{port}"),
+            relay_url,
             box_token: "test-token".into(),
             mcp_token: "test-mcp".into(),
             work_root: root.clone(),
