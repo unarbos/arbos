@@ -476,7 +476,7 @@ enum Transcript {
             // a lone "Today 5:45 PM" in a blank chat.
             var chunk: [Row] = []
             let streaming = message.isStreaming
-            let dateBreak = message.createdAt > 0 && (lastAt == 0 || message.createdAt - lastAt > 3_600_000)
+            let dateBreak = Self.showsDivider(previous: lastAt, at: message.createdAt)
             // Does this message start a sender run? Agents group like people (Jacob,
             // 2026-10-28; supersedes #1447's name on every reply): a reply that quotes the
             // ask starts its own run and is named, a quick follow-up within the window is not.
@@ -838,7 +838,7 @@ enum Transcript {
                }) {
                 chunk[ix].replyCount = count
             }
-            // Date separators when the gap is over an hour (Grok: "Today 8:00 AM").
+            // The date separator ("Today 8:00 AM"), at a new day or an hour's gap.
             if dateBreak {
                 rows.append(Row(id: "\(message.id)#date", messageId: message.id, role: .system,
                                 kind: .system(icon: nil, text: dateLabel(message.createdAt), avatarProject: nil),
@@ -1096,6 +1096,20 @@ enum Transcript {
         var i = 1
         while i < lines.count && lines[i].isEmpty { i += 1 }
         return lines[i...].joined(separator: "\n")
+    }
+
+    /// Whether the message at `at` opens with a centred time line, given the clock of the
+    /// message above it (`previous`, 0 when there is none): a new local day, or an hour or
+    /// more between the two (Jacob, 2026-11-05, [feedback time-dividers-2026-11-05]).
+    ///
+    /// The rule itself is `arbos_core::transcript::shows_divider` through `ArbosFFI`, and the
+    /// Mac asks the same function — a divider between nearly every message group was two
+    /// client implementations of one question, each wrong in its own way. `timeZone` decides
+    /// the day half and is the reader's; a test pins it.
+    static func showsDivider(previous: Int64, at: Int64, timeZone: TimeZone = .current) -> Bool {
+        let moment = Date(timeIntervalSince1970: Double(at) / 1000)
+        return showsTimeDivider(previousMs: previous, atMs: at,
+                                utcOffsetSeconds: Int32(timeZone.secondsFromGMT(for: moment)))
     }
 
     static func dateLabel(_ ms: Int64) -> String {

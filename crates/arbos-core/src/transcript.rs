@@ -77,9 +77,15 @@ mod tests {
 
     #[test]
     fn an_hour_exactly_draws_one_and_anything_under_it_does_not() {
-        assert!(!shows_divider(NOON, NOON + HOUR - 1, 0), "a millisecond under");
+        assert!(
+            !shows_divider(NOON, NOON + HOUR - 1, 0),
+            "a millisecond under"
+        );
         assert!(shows_divider(NOON, NOON + HOUR, 0), "exactly an hour");
-        assert!(shows_divider(NOON, NOON + HOUR + 1, 0), "a millisecond over");
+        assert!(
+            shows_divider(NOON, NOON + HOUR + 1, 0),
+            "a millisecond over"
+        );
     }
 
     /// The symptom: Jacob's screenshot had a divider between nearly every

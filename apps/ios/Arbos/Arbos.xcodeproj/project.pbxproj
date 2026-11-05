@@ -197,6 +197,7 @@
 		A1CD0000000000000000D041 /* ChatDensityMetricsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1CD0000000000000000D040 /* ChatDensityMetricsTests.swift */; };
 		A1C4A0C0000000000000E002 /* ReactionChipAnchorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C4A0C0000000000000E001 /* ReactionChipAnchorTests.swift */; };
 		A1CD0000000000000000D061 /* GroupedMessagesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1CD0000000000000000D060 /* GroupedMessagesTests.swift */; };
+		A1CD0000000000000000D081 /* TimeDividerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1CD0000000000000000D080 /* TimeDividerTests.swift */; };
 		A15C0000000000000000000B /* SessionRoomTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15C0000000000000000000A /* SessionRoomTests.swift */; };
 		A15C00000000000000000004 /* ArbosFFI in Frameworks */ = {isa = PBXBuildFile; productRef = A15C00000000000000000002 /* ArbosFFI */; };
 		A15C00000000000000000005 /* ArbosFFI in Frameworks */ = {isa = PBXBuildFile; productRef = A15C00000000000000000003 /* ArbosFFI */; };
@@ -454,6 +455,7 @@
 		A1CD0000000000000000D040 /* ChatDensityMetricsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatDensityMetricsTests.swift; sourceTree = "<group>"; };
 		A1C4A0C0000000000000E001 /* ReactionChipAnchorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReactionChipAnchorTests.swift; sourceTree = "<group>"; };
 		A1CD0000000000000000D060 /* GroupedMessagesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GroupedMessagesTests.swift; sourceTree = "<group>"; };
+		A1CD0000000000000000D080 /* TimeDividerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimeDividerTests.swift; sourceTree = "<group>"; };
 		A15C0000000000000000000A /* SessionRoomTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionRoomTests.swift; sourceTree = "<group>"; };
 		A15C00000000000000000001 /* ArbosFFI */ = {isa = PBXFileReference; lastKnownFileType = wrapper; name = ArbosFFI; path = ../../../packages/ArbosFFI; sourceTree = SOURCE_ROOT; };
 		A1B5EA00000000000000A001 /* GlobalSearch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlobalSearch.swift; sourceTree = "<group>"; };
@@ -726,6 +728,7 @@
 				A1CD0000000000000000D040 /* ChatDensityMetricsTests.swift */,
 				A1C4A0C0000000000000E001 /* ReactionChipAnchorTests.swift */,
 				A1CD0000000000000000D060 /* GroupedMessagesTests.swift */,
+				A1CD0000000000000000D080 /* TimeDividerTests.swift */,
 				A1C0B10000000000000000B1 /* MessagePasteboardTests.swift */,
 				A11B0000000000000000A003 /* LibraryListTests.swift */,
 				A1AC0E00000000000000A003 /* MachineMetricsTests.swift */,
@@ -1123,6 +1126,7 @@
 				A1CD0000000000000000D041 /* ChatDensityMetricsTests.swift in Sources */,
 				A1C4A0C0000000000000E002 /* ReactionChipAnchorTests.swift in Sources */,
 				A1CD0000000000000000D061 /* GroupedMessagesTests.swift in Sources */,
+				A1CD0000000000000000D081 /* TimeDividerTests.swift in Sources */,
 				A1C0B10000000000000000B2 /* MessagePasteboardTests.swift in Sources */,
 				A11B0000000000000000A004 /* LibraryListTests.swift in Sources */,
 				A1AC0E00000000000000A004 /* MachineMetricsTests.swift in Sources */,
