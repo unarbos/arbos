@@ -316,6 +316,20 @@ range_gate() {
   return $rc
 }
 
+# host_loop_setup: what LOOP_SRC=host needs that this host has not got. Prints each finding; rc 1 if any.
+#
+# The default LOOP_SRC=public needs no vault and no relay, so this is checked only on the path that does.
+# Without it, a host with no op, no token or no ssh config fails inside loop_gating and the caller appends
+# "relay check failed" to nogo[] — which comes out of this script as a NO-GO, i.e. as a statement about the
+# repository's loop items. It is nothing of the kind: the check never ran.
+host_loop_setup() {
+  local miss=0
+  op_preflight || miss=1
+  [ -d "$K" ] || { echo "SETUP: the merge kit directory $K does not exist, so the ssh-agent socket has nowhere to live."; miss=1; }
+  [ -r "$K/config" ] || { echo "SETUP: there is no readable ssh config at $K/config, so the 'relay' host is undefined here."; miss=1; }
+  return $miss
+}
+
 loop_gating() {
   # The relay key goes from the vault straight into a private, minimal-environment ssh-agent (never a file)
   # that lives only for this check.
@@ -490,6 +504,13 @@ go() {
   # LOOP_SRC=public (default) needs no vault read and no SSH; LOOP_SRC=host reads the poller's state on the relay.
   if [ "${LOOP_SRC:-public}" = host ]; then
     echo "3 loop items in gating (relay host, read only):"
+    if ! hls=$(host_loop_setup); then
+      echo "$hls" | sed 's/^/    /'
+      echo "  LOOP_SRC=host cannot be checked on this host until the above is fixed. No verdict is printed,"
+      echo "  because none was reached: this is setup, not a NO-GO about the loop. Re-run with the default"
+      echo "  LOOP_SRC=public, which needs no credential, or install what is named above."
+      exit 5
+    fi
     lg=$(loop_gating); echo "$lg" | sed 's/^/    /'
     echo "$lg" | grep -q '^rc=0$' || nogo+=("relay check failed")
     echo "$lg" | grep -q '^RELEASABLE' && nogo+=("a loop item the timer can release is gating")
