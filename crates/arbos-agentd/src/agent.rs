@@ -2677,6 +2677,14 @@ impl Agent {
         // answers it has posted the row. The main session keeps the ticket for the rest of this
         // function; an ask that runs as a job takes it below and keeps it until its own answer
         // is posted, so a job that finishes early cannot answer in front of an older message.
+        //
+        // **`stop` is deliberately absent from this list, and must stay absent.** A cancel may
+        // not queue behind the burst it is cancelling: it is the answer to the user asking for
+        // the work to end, the one thing in the chat that must not wait on the work. Give it a
+        // ticket and a cancel sent into a thirty-message burst is taken only after those
+        // messages are answered — the user watches the job they just stopped keep running, which
+        // is bug S with a queue in front of it. `write_stop_line` waits for no ticket either,
+        // for the same reason.
         let mut ticket = match cmd.kind.as_str() {
             "send" | "answer" => cmd
                 .payload
@@ -2973,12 +2981,17 @@ impl Agent {
 
     /// The one plain line the chat gets for a stop that ended jobs, anchored to the message the
     /// stop came with.
+    ///
+    /// It takes no place in the chat's send order (bug O) and waits for none: a `stop` command
+    /// joins no queue, so the cancel lands however long the chat's burst is, and this line is the
+    /// user's only proof that it did. Held behind a queue it could be two minutes late, which is
+    /// the silence the valve in `send_order.rs` exists to avoid.
     async fn write_stop_line(&self, chat_id: &str, anchor: &str, stopped: &[StoppedJob]) {
         if stopped.is_empty() {
             return;
         }
         let line = stop_line(stopped);
-        let Some(host) = self.sync.host(chat_id).await else {
+        let Ok(host) = self.room(chat_id).await else {
             return;
         };
         let h = host.lock().await;
@@ -3070,8 +3083,14 @@ impl Agent {
     ///
     /// [`retire_row`] and never `delete_message`: the relay refuses to remove a row whose author
     /// it did not record and a refused op blocks the whole push queue behind it.
+    ///
+    /// Through [`Agent::room`] rather than `sync.host`, so this cannot be a no-op on a chat whose
+    /// room went cold. Those rows are in the persisted doc either way, and the next writer to
+    /// want the chat reopens it — a job's own progress note does exactly that — and would find
+    /// them still streaming. Retiring on the handle the hub hands out means that reopen is this
+    /// same room, already settled, instead of a second one racing this one.
     async fn retire_live_job_rows(&self, chat_id: &str, job_id: &str) {
-        let Some(host) = self.sync.host(chat_id).await else {
+        let Ok(host) = self.room(chat_id).await else {
             return;
         };
         let h = host.lock().await;
@@ -3099,6 +3118,25 @@ impl Agent {
             .ok()
             .flatten()
             .is_some_and(|row| row.state == "cancelled")
+    }
+
+    /// The job of `chat_id` that answers `ask_message_id` and reads `cancelled`, if there is one.
+    ///
+    /// The question [`Self::job_is_cancelled`] asks, for a writer that holds the ask rather than
+    /// the job id. [`Self::write_job_result`] is the one that needs it: its answer belongs to a
+    /// message, and the job behind that message can be cancelled while the answer waits in the
+    /// chat's send order.
+    pub(crate) fn cancelled_job_for_ask(
+        &self,
+        chat_id: &str,
+        ask_message_id: &str,
+    ) -> Option<String> {
+        self.store
+            .jobs_for_chat(chat_id)
+            .unwrap_or_default()
+            .into_iter()
+            .find(|j| j.ask_message_id == ask_message_id && j.state == "cancelled")
+            .map(|j| j.id)
     }
 
     /// The title of a job of `chat_id` that is still `queued` or `running`, for the guard that
@@ -5596,7 +5634,12 @@ impl Agent {
     /// A finished subagent never speaks to the user directly: its raw output stays hidden and the
     /// main agent writes the update in prose, as a follow-up turn in the same chat (demo review
     /// item 1). Runs on a relay slot, so it lands after whatever the user is doing right now.
-    async fn run_result_turn(
+    ///
+    /// This turn *is* the answer for a job the user asked for in words (`forced_job.rs`), which
+    /// is why the cancel is asked about here and not only in `write_job_result`: that one is
+    /// reached for `ask-…` subagents alone (`is_job_name`), so a forced job's only answer is
+    /// this one. See the two checks below for which moments they cover.
+    pub(crate) async fn run_result_turn(
         self: &Arc<Self>,
         chat_id: &str,
         host: &SharedHost,
@@ -5613,6 +5656,13 @@ impl Agent {
             error,
             job,
         } = *d;
+        // Cancelled before any of this was built (bug S). `run_subagent` checks too, but it
+        // checks on its way here and a cancel can land afterwards; nothing below is worth doing
+        // for a job that will deliver nothing, and the chat's place is freed sooner for it.
+        if let Some(j) = job.filter(|j| self.job_is_cancelled(&j.id)) {
+            tracing::info!(chat_id, job = %j.id, "the job was cancelled before its result turn; nothing delivered");
+            return Ok(());
+        }
         let ask = {
             let h = host.lock().await;
             h.doc
@@ -5699,6 +5749,15 @@ impl Agent {
         // and `place` returns `None`.
         self.await_send_order(chat_id, user_msg_id, "job_result")
             .await;
+        // And on the far side of that wait, which is the window nothing else covers: every
+        // cancel check before this one ran before the wait, and the wait is up to
+        // `SEND_ORDER_WAIT` long, so without this a job cancelled while its answer queued would
+        // have that answer delivered in full up to two minutes later — bug S, on the one path a
+        // forced job answers through.
+        if let Some(j) = job.filter(|j| self.job_is_cancelled(&j.id)) {
+            tracing::info!(chat_id, job = %j.id, "the job was cancelled while its result turn waited its turn; nothing delivered");
+            return Ok(());
+        }
         let Some(outcome) = self
             .drive_relay_turn(chat_id, host, user_msg_id, &prompt, kind, None)
             .await?
@@ -9766,7 +9825,22 @@ impl Agent {
         // (bug O). A job that overtook an older message waits here, after its own model call, so
         // the hold costs nothing once the older answer is posted. A job whose ask is not queued
         // — the model's own `start_job`, or an ask already answered — is not held at all.
+        // Asked on both sides of that wait, because the wait is up to two minutes long and a
+        // cancel can land anywhere in it (bug S). Here, so a cancelled answer does not sit at
+        // the head of its chat's queue holding every message behind it for a row it will never
+        // write; the wait would be spent to reach a `return` either way.
+        if let Some(job_id) = self.cancelled_job_for_ask(chat_id, in_reply_to) {
+            tracing::info!(chat_id, job = %job_id, "the job was cancelled before its answer took its turn; not posted");
+            return Ok(());
+        }
         self.await_send_order(chat_id, in_reply_to, "job").await;
+        // And again on the far side: the worker had already finished, so the check in
+        // `run_subagent` ran before the cancel and caught nothing, and this is the last moment
+        // the question can be asked before the row exists.
+        if let Some(job_id) = self.cancelled_job_for_ask(chat_id, in_reply_to) {
+            tracing::info!(chat_id, job = %job_id, "the job was cancelled while its answer waited its turn; not posted");
+            return Ok(());
+        }
         // This task resolved its handle before the job ran, which is minutes ago and a wait ago.
         let host = &self.room_for_reply(chat_id, host).await;
         let row_id = ulid();

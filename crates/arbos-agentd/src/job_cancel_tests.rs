@@ -20,9 +20,11 @@
 use std::time::{Duration, Instant};
 
 use arbos_core::doc::{CommandView, MessageStatus, UserMessageOpts};
+use arbos_core::ids::ulid;
 use serde_json::{json, Value};
 
 use crate::agent::{Agent, CANCEL_CLAIM_REFUSAL};
+use crate::send_order::SEND_ORDER_WAIT;
 use crate::status::tests::test_agent;
 use crate::sync::SharedHost;
 
@@ -298,4 +300,381 @@ async fn a_reported_cancel_has_to_match_the_job_state() {
         .expect("with the state cancelled the claim is grounded");
 
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A cancel retires the job's live rows even when the chat's room has gone cold — the window
+/// where the hub lets a room go between the command resolving it and the retirement reaching it.
+///
+/// The rows are in the persisted doc whether the hub holds the room or not, so a retirement that
+/// quietly no-opped would be undone by the next writer to reopen the chat: the worker's row
+/// comes back from disk still streaming, and a client draws a working indicator for a dead job.
+#[tokio::test]
+async fn a_cancel_retires_the_jobs_rows_on_a_chat_whose_room_went_cold() {
+    let (agent, root) = test_agent().await;
+    let opened = agent.sync.open_room(CHAT).await.unwrap();
+    a_running_job(&agent, &opened).await;
+
+    // Cold, the shape a cap or an idle sweep leaves: persisted, out of the hub's map, and not
+    // `closed` — `closed` marks a chat this agent was removed from and must never be reopened
+    // into (#1440).
+    agent.sync.persist(&opened).await.unwrap();
+    agent.sync.hosts.lock().await.remove(CHAT);
+    assert!(agent.sync.host(CHAT).await.is_none());
+    assert!(!opened.lock().await.closed);
+
+    // The same call the stop command makes, which is the only part of it that needs no room.
+    let stopped = agent.stop_jobs(CHAT, Some(JOB)).await;
+    assert_eq!(stopped.len(), 1);
+    assert_eq!(stopped[0].state, "cancelled");
+
+    // The retirement went where the rows are rather than skipping a chat the hub had let go.
+    let live = agent
+        .sync
+        .host(CHAT)
+        .await
+        .expect("the cancel took the chat's room to retire its rows in");
+    let retired = |host: &SharedHost| {
+        let h = host.try_lock().expect("host free");
+        let row = h
+            .doc
+            .message("01TESTROWJOBCANCELWORKER01")
+            .expect("the worker row");
+        (
+            row.rest.get("hidden").and_then(Value::as_bool),
+            row.status.clone(),
+        )
+    };
+    assert_eq!(
+        retired(&live),
+        (Some(true), MessageStatus::Done.as_str().to_owned()),
+        "a cancelled job's row is left streaming on a chat whose room was cold, so the next \
+         reopen brings back a working indicator for a dead job"
+    );
+    // And when something does reopen the chat, what comes back from disk is settled: the
+    // retirement is part of the doc, so there is no streaming row for a reopen to restore.
+    agent.sync.persist(&live).await.unwrap();
+    agent.sync.hosts.lock().await.remove(CHAT);
+    let reopened = agent.sync.open_room(CHAT).await.unwrap();
+    assert_eq!(
+        retired(&reopened),
+        (Some(true), MessageStatus::Done.as_str().to_owned()),
+        "the reopened room brought the cancelled job's row back drawing and streaming"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Bug O puts a per-chat FIFO in front of every reply, and a job's answer waits in it for up to
+/// `SEND_ORDER_WAIT` *after* its worker has finished. A cancel landing inside that wait is the
+/// one window the check in `run_subagent` cannot see: it ran before the cancel and found a
+/// running job.
+///
+/// The ticket that waiting answer holds *is* the chat's ordering. So this pins both halves: the
+/// suppressed answer writes no row, and it releases the place rather than stranding it — a
+/// cancel that stalled the chat's order would be a worse failure than the late result it fixed.
+#[tokio::test]
+async fn a_cancel_inside_the_send_order_wait_posts_nothing_and_strands_no_ticket() {
+    let (agent, root) = test_agent().await;
+    let host = agent.sync.open_room(CHAT).await.unwrap();
+    a_running_job(&agent, &host).await;
+
+    // An older message of the chat is being answered, so the job's answer is queued behind it.
+    // `ASK` carries no readable send time, so it inherits the tail's key and can never jump the
+    // queue — which is what puts it second here.
+    let older = ulid();
+    let holding = agent
+        .send_order
+        .join(CHAT, &older)
+        .expect("the older message");
+    assert!(
+        agent
+            .send_order
+            .wait_turn(CHAT, &older, SEND_ORDER_WAIT)
+            .await
+    );
+    let ticket = agent.send_order.join(CHAT, ASK).expect("the job's ask");
+    assert_eq!(agent.send_order.ahead(CHAT, ASK), 1);
+
+    // The job's own task, as `start_job_for_send` leaves it: the place travels with the answer
+    // and is dropped when the answer is posted, or when this task gives up.
+    let answering = {
+        let agent = agent.clone();
+        let host = host.clone();
+        tokio::spawn(async move {
+            let r = agent
+                .write_job_result(
+                    CHAT,
+                    &host,
+                    ASK,
+                    "job-mersenne",
+                    "done",
+                    "Found M127.",
+                    None,
+                )
+                .await;
+            drop(ticket);
+            r
+        })
+    };
+    // Long enough to be past the model call and sitting in the wait, which the empty reply set
+    // is the check on: an answer already written would make the rest of this measure nothing.
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(
+        job_answers_to(&host, ASK).await,
+        Vec::<String>::new(),
+        "the answer was posted before the cancel, so this test proves nothing"
+    );
+
+    let cancel_msg = "01TESTASKJOBCANCELSTOP0003";
+    {
+        let h = host.lock().await;
+        h.doc
+            .append_user_message(
+                cancel_msg,
+                "cancel the Mersenne job",
+                "dev-mac",
+                &UserMessageOpts::default(),
+            )
+            .unwrap();
+    }
+    agent
+        .handle_command(CHAT, cancel_cmd(cancel_msg))
+        .await
+        .unwrap();
+
+    // The cancel itself queues for nothing: a `stop` takes no place, so it lands however long
+    // the chat's burst is. Were it gated, a cancel would be answerable only after the burst it
+    // is meant to cut short.
+    assert_eq!(
+        agent.send_order.waiting(CHAT),
+        2,
+        "the stop took a place in the chat's send order"
+    );
+
+    // A third message, so what follows measures a real turn coming up and not an empty queue.
+    let next = ulid();
+    let _next_place = agent.send_order.join(CHAT, &next).expect("behind both");
+
+    drop(holding);
+    let t0 = Instant::now();
+    answering
+        .await
+        .expect("the job's task")
+        .expect("a suppressed answer is not a failure");
+    assert!(
+        t0.elapsed() < Duration::from_secs(5),
+        "the cancelled answer sat out the whole ordering valve instead of returning: {:?}",
+        t0.elapsed()
+    );
+    assert_eq!(
+        job_answers_to(&host, ASK).await,
+        Vec::<String>::new(),
+        "the cancelled job answered in the chat after all"
+    );
+
+    // The place is free, so the message behind it is answered at once rather than after
+    // `SEND_ORDER_WAIT`. This is the assertion a stranded ticket fails.
+    assert_eq!(agent.send_order.waiting(CHAT), 1);
+    let t1 = Instant::now();
+    assert!(
+        agent
+            .send_order
+            .wait_turn(CHAT, &next, Duration::from_secs(5))
+            .await,
+        "the cancelled job stranded its place and stalled the chat's order"
+    );
+    assert!(t1.elapsed() < Duration::from_secs(1), "{:?}", t1.elapsed());
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A job the user asked for in words (`forced_job.rs`) answers through its relay result turn and
+/// never through `write_job_result`, which is reached for `ask-…` subagents alone
+/// (`is_job_name`). So that turn is a writer of its own, and it carries its own copy of what bug
+/// O created: `await_send_order` sits *inside* `run_result_turn`, after every cancel check
+/// `run_subagent` makes on its way there, and holds the answer for up to `SEND_ORDER_WAIT`. A
+/// cancel landing in that window would be followed by the whole answer being delivered minutes
+/// later — bug S, on the one path a forced job answers through.
+///
+/// Measured before the fix: the cancelled job ran the full relay turn and left a row in the
+/// chat. A relay turn needs a live main agent to write the prose, which a test has not got, so
+/// what is asserted is the row — the thing the user would have seen either way.
+#[tokio::test]
+async fn a_cancelled_forced_job_delivers_nothing_through_its_relay_turn() {
+    let (agent, root) = test_agent().await;
+    let host = agent.sync.open_room(CHAT).await.unwrap();
+    a_running_job(&agent, &host).await;
+    let spec = crate::agent::JobSpec {
+        id: JOB.to_owned(),
+        title: "Hunting Mersenne primes".to_owned(),
+        kind: "code".to_owned(),
+        brief: "Search for Mersenne primes and report what you find.".to_owned(),
+        touches: Vec::new(),
+        attempt: 0,
+    };
+
+    // An older message of the chat is being answered, so this answer queues behind it and the
+    // relay turn parks in `await_send_order` exactly as it does in production.
+    let older = ulid();
+    let holding = agent
+        .send_order
+        .join(CHAT, &older)
+        .expect("the older message");
+    assert!(
+        agent
+            .send_order
+            .wait_turn(CHAT, &older, SEND_ORDER_WAIT)
+            .await
+    );
+    let ticket = agent.send_order.join(CHAT, ASK).expect("the forced ask");
+    assert_eq!(agent.send_order.ahead(CHAT, ASK), 1);
+
+    let before = visible_assistant_rows(&host);
+    let relaying = {
+        let agent = agent.clone();
+        let host = host.clone();
+        tokio::spawn(async move {
+            let r = agent
+                .run_result_turn(
+                    CHAT,
+                    &host,
+                    ASK,
+                    &crate::agent::ResultDelivery {
+                        subagent_id: WORKER,
+                        name: "forced-hunt-mersenne",
+                        status: "done",
+                        total_ms: 1_000,
+                        raw: "Found M127.",
+                        result: "Found M127.",
+                        error: None,
+                        job: Some(&spec),
+                    },
+                )
+                .await;
+            drop(ticket);
+            r
+        })
+    };
+    // Long enough to be parked in the wait rather than still building its prompt.
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(
+        visible_assistant_rows(&host),
+        before,
+        "the answer was delivered before the cancel, so this test proves nothing"
+    );
+
+    let cancel_msg = "01TESTASKJOBCANCELSTOP0004";
+    {
+        let h = host.lock().await;
+        h.doc
+            .append_user_message(
+                cancel_msg,
+                "cancel the Mersenne job",
+                "dev-mac",
+                &UserMessageOpts::default(),
+            )
+            .unwrap();
+    }
+    agent
+        .handle_command(CHAT, cancel_cmd(cancel_msg))
+        .await
+        .unwrap();
+    let with_stop_line = visible_assistant_rows(&host);
+
+    drop(holding);
+    let t0 = Instant::now();
+    let _ = relaying.await.expect("the relay task");
+    assert_eq!(
+        visible_assistant_rows(&host),
+        with_stop_line,
+        "the cancelled forced job delivered through its relay turn after all"
+    );
+    assert!(
+        t0.elapsed() < Duration::from_secs(5),
+        "and it sat out the ordering valve to do it: {:?}",
+        t0.elapsed()
+    );
+    assert_eq!(
+        agent.send_order.waiting(CHAT),
+        0,
+        "the relay turn stranded the forced ask's place in the chat's send order"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The other side of the same wait. A job already cancelled when its result turn starts must not
+/// join the queue at all: it has nothing to post, so a place at the head would hold every
+/// message behind it for up to `SEND_ORDER_WAIT` to reach a `return`.
+#[tokio::test]
+async fn a_relay_turn_for_an_already_cancelled_job_does_not_wait_for_its_turn() {
+    let (agent, root) = test_agent().await;
+    let host = agent.sync.open_room(CHAT).await.unwrap();
+    a_running_job(&agent, &host).await;
+    agent.store.set_job_state(JOB, "cancelled", None).unwrap();
+    let spec = crate::agent::JobSpec {
+        id: JOB.to_owned(),
+        title: "Hunting Mersenne primes".to_owned(),
+        kind: "code".to_owned(),
+        brief: "Search for Mersenne primes and report what you find.".to_owned(),
+        touches: Vec::new(),
+        attempt: 0,
+    };
+
+    // An older message holds the head, so anything that joins the queue here is stuck behind it.
+    let older = ulid();
+    let _holding = agent
+        .send_order
+        .join(CHAT, &older)
+        .expect("the older message");
+    assert!(
+        agent
+            .send_order
+            .wait_turn(CHAT, &older, SEND_ORDER_WAIT)
+            .await
+    );
+    let _ticket = agent.send_order.join(CHAT, ASK).expect("the forced ask");
+
+    let t0 = Instant::now();
+    agent
+        .run_result_turn(
+            CHAT,
+            &host,
+            ASK,
+            &crate::agent::ResultDelivery {
+                subagent_id: WORKER,
+                name: "forced-hunt-mersenne",
+                status: "done",
+                total_ms: 1_000,
+                raw: "Found M127.",
+                result: "Found M127.",
+                error: None,
+                job: Some(&spec),
+            },
+        )
+        .await
+        .expect("a suppressed result turn is not a failure");
+    assert!(
+        t0.elapsed() < Duration::from_secs(1),
+        "the cancelled job's result turn queued behind the older message: {:?}",
+        t0.elapsed()
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The answer bubbles a job wrote in reply to `msg_id`. `decision: "job"` is what
+/// `write_job_result` stamps on the one row it posts, which is the row a cancel must prevent —
+/// the worker's own hidden progress row replies to the same message and is not one.
+async fn job_answers_to(host: &SharedHost, msg_id: &str) -> Vec<String> {
+    let h = host.lock().await;
+    h.doc
+        .messages()
+        .into_iter()
+        .filter(|m| {
+            m.rest.get("inReplyTo").and_then(Value::as_str) == Some(msg_id)
+                && m.rest.get("decision").and_then(Value::as_str) == Some("job")
+        })
+        .map(|m| m.id)
+        .collect()
 }
