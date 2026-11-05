@@ -5090,13 +5090,17 @@ impl Agent {
     /// Run the subagent in the background and report a start failure into the chat.
     ///
     /// `ticket` is the user message's place in its chat's send order (bug O), when this task is
-    /// the one that owes that message its answer — a job the user asked for in words
-    /// (`forced_job.rs`), whose answer is this job's result turn and nothing earlier. The
-    /// contract is the one in [`crate::send_order`]: whoever posts the answer holds the ticket
-    /// until that answer's row is posted, so it is moved into the task and only dropped when the
-    /// task ends. A fresh worker after a failed one carries it on, because the answer is still
-    /// owed. Every other caller passes `None`: a model-started job's ask was already answered by
-    /// the acknowledgement its main turn posted, and that turn held the ticket for it.
+    /// the one that owes that message its answer — an ask answered by the plain `ask-…` subagent
+    /// of [`Agent::start_job_for_send`], whose answer is this task's one bubble and nothing
+    /// earlier. The contract is the one in [`crate::send_order`]: whoever posts the answer holds
+    /// the ticket until that answer's row is posted, so it is moved into the task and only
+    /// dropped when the task ends. A fresh worker after a failed one carries it on, because the
+    /// answer is still owed.
+    ///
+    /// Every other caller passes `None`, and a *job* always does: its ask is answered by an
+    /// acknowledgement posted at job start — the main turn's own words for a job the model
+    /// started, and the receipt [`Agent::start_job`] writes for one the user asked for in words.
+    /// A job used to carry the ticket until its result; bug AA is what that cost.
     #[allow(clippy::too_many_arguments)]
     fn spawn_subagent_task(
         self: &Arc<Self>,
@@ -6741,10 +6745,12 @@ impl Agent {
     /// main agent writes the update in prose, as a follow-up turn in the same chat (demo review
     /// item 1). Runs on a relay slot, so it lands after whatever the user is doing right now.
     ///
-    /// This turn *is* the answer for a job the user asked for in words (`forced_job.rs`), which
-    /// is why the cancel is asked about here and not only in `write_job_result`: that one is
-    /// reached for `ask-…` subagents alone (`is_job_name`), so a forced job's only answer is
-    /// this one. See the two checks below for which moments they cover.
+    /// A job the user asked for in words (`forced_job.rs`) does **not** come here: its ack
+    /// answered its ask at job start and its result is written by `write_job_result`, because
+    /// this turn waits for a slot the main session may not free for minutes (bug AA, and the
+    /// branch in `run_subagent` that routes past this one says why). So this is a job the *model*
+    /// started, whose ask its own main turn answered. The cancel is still asked about on both
+    /// sides of the wait below — see the two checks for which moments they cover.
     pub(crate) async fn run_result_turn(
         self: &Arc<Self>,
         chat_id: &str,
@@ -6848,11 +6854,11 @@ impl Agent {
         };
         // The other half of the ticket contract (`crate::send_order`): holding a message's place
         // only makes younger messages wait: this is where the held message waits its own turn,
-        // after the work and before the row. It bites for a job the user asked for in words
-        // (`forced_job.rs`), whose answer is this turn and nothing earlier, so its ask is still
-        // queued here. For a job the model started it is a no-op by construction — that ask was
-        // answered by the acknowledgement its main turn posted, so it is no longer in the queue
-        // and `place` returns `None`.
+        // after the work and before the row. For every job that reaches this function it is a
+        // no-op by construction — the ask was answered by an acknowledgement posted at job
+        // start, so it is no longer in the queue and `place` returns `None`. Kept because the
+        // wait is what makes that a guarantee rather than an observation: were an unanswered ask
+        // ever to arrive here, its result would still not jump an older message's answer.
         self.await_send_order(chat_id, user_msg_id, "job_result")
             .await;
         // And on the far side of that wait, which is the window nothing else covers: every
@@ -8305,13 +8311,21 @@ impl Agent {
     /// Start a job for `user_msg_id` in `chat_id` (the `start_job` tool and the step-4 act→job
     /// conversion share this): caps, the row, the worker task. Returns `{job_id, title, state}`.
     ///
-    /// `forced` = the user's own words asked for a background job (`forced_job.rs`). Such a job
-    /// passes the per-chat cap. That cap bounds how much work the *model* may put in one chat
-    /// off its own judgement; it was never a promise that a person's fourth explicit request is
-    /// refused (bug U: four forced asks two seconds apart, and the third-and-fourth refusal
-    /// would read as the agent ignoring them). The per-agent cap still holds for every job, and
-    /// a job over the per-chat cap only holds a row until a worker slot frees, so what the cap
-    /// really guards — workers — is bounded either way.
+    /// `forced` = the user's own words asked for a background job (`forced_job.rs`), and it does
+    /// two things here.
+    ///
+    /// Such a job passes the per-chat cap. That cap bounds how much work the *model* may put in
+    /// one chat off its own judgement; it was never a promise that a person's fourth explicit
+    /// request is refused (bug U: four forced asks two seconds apart, and the third-and-fourth
+    /// refusal would read as the agent ignoring them). The per-agent cap still holds for every
+    /// job, and a job over the per-chat cap only holds a row until a worker slot frees, so what
+    /// the cap really guards — workers — is bounded either way.
+    ///
+    /// Such a job also acknowledges its own ask, when `ticket` carries that ask's place in the
+    /// chat's send order — so the ask is answered at job start rather than at its result, which
+    /// is bug AA and written out at the ack below. A `ticket` of `None` means some other lane
+    /// owes the answer (the main turn, for the `start_job` tool), and then nothing is posted
+    /// here.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn start_job(
         self: &Arc<Self>,
@@ -8386,6 +8400,59 @@ impl Agent {
         // What the job waits for as of now, named before the worker task is spawned so the
         // reply cannot report this job's own locks.
         let blocked_by = self.job_lock_blocker(&spec).await;
+        let queued_line = blocked_by.as_ref().map(|(_, blocker_title)| {
+            format!(
+                "\"{title}\" is queued behind \"{blocker_title}\" — it starts when that one frees what they both need."
+            )
+        });
+        // A job the user asked for in words answers its ask here, with a receipt, and then lets
+        // the rest of the chat move.
+        //
+        // Bug AA (Jacob, Test5 round 10, 2026-11-05, agentd 0.1.195, scenario `r10burst`). Four
+        // asks "As a background job (not inline) …" arrived one to two seconds apart during a
+        // busy turn and became four jobs, which is what #2778 bought. Every one of them had its
+        // answer computed within sixteen seconds, and the user saw none of them for six and a
+        // half minutes — while the twelve messages he sent next each waited the whole of
+        // `SEND_ORDER_WAIT` and came back out of order, which is #2774 undone.
+        //
+        // Neither result was late because anything was slow. The ask held its place in the
+        // chat's FIFO until the job's *result* row was posted (the ticket below), so twelve
+        // messages queued behind four workers. Each of those messages, waiting, held
+        // `Agent::sends_in_flight` above zero — and `relay_slot`, which the result turn needs,
+        // only takes the turn lock when no user send is in flight. So the thing that would have
+        // released the places was itself waiting on the messages the places were blocking: a
+        // circular wait, broken only by each message timing out at two minutes.
+        //
+        // The ack cuts it, and it is also the honest answer to the ask. The user asked for the
+        // work to be taken out of this turn; a receipt is the whole of what there is to say
+        // about it now, and it is the only row whose time is known. The result is its own row
+        // whenever the worker lands (see the forced-job branch in `run_subagent`), owing the
+        // send order nothing — a row that arrives minutes later is out of turn whatever the
+        // queue says, and holding it for order is what this bug was.
+        let ack = match forced {
+            true => ticket.take(),
+            false => None,
+        };
+        let told_queued = ack.is_some() && queued_line.is_some();
+        if let Some(ack) = ack {
+            let line = match &queued_line {
+                Some(q) => format!("{q} I'll post the result here when it lands."),
+                None => format!(
+                    "\"{title}\" is running in the background now — I'll post the result here when it lands."
+                ),
+            };
+            self.post_chat_line(
+                host,
+                chat_id,
+                user_msg_id,
+                &format!("job:{job_id}:ack"),
+                &line,
+            )
+            .await;
+            // After the row, never before: the place is released on the strength of a row that
+            // exists, so nothing reads the ask as unanswered in the gap.
+            drop(ack);
+        }
         let _ = self.store.t3_append(
             chat_id,
             None,
@@ -8410,7 +8477,8 @@ impl Agent {
             Some(spec),
             // Taken only now: the caps are past, the row exists and the worker is going, so this
             // task is the one that owes the ask its answer. A refusal above leaves the ticket
-            // with the caller, whose own lane still answers the message.
+            // with the caller, whose own lane still answers the message. A forced job's ack took
+            // it already, so this is `None` for the one case that used to hold it longest.
             ticket.take(),
         );
         let no_slot = self.subagent_slots.available_permits() == 0;
@@ -8425,16 +8493,17 @@ impl Agent {
         // for the model may never come — T9 in Jacob's Test5 round 2 sat queued for ten minutes
         // behind T8 while its own interim said the work had begun (bug I).
         if let Some((blocker_id, blocker_title)) = blocked_by {
-            self.post_chat_line(
-                host,
-                chat_id,
-                user_msg_id,
-                &format!("job:{job_id}:queued"),
-                &format!(
-                    "\"{title}\" is queued behind \"{blocker_title}\" — it starts when that one frees what they both need."
-                ),
-            )
-            .await;
+            // Unless the ack above already carried it: one row, not two saying the same thing.
+            if let (false, Some(line)) = (told_queued, queued_line.as_deref()) {
+                self.post_chat_line(
+                    host,
+                    chat_id,
+                    user_msg_id,
+                    &format!("job:{job_id}:queued"),
+                    line,
+                )
+                .await;
+            }
             out["queued_behind"] = json!({ "job_id": blocker_id, "title": blocker_title });
             out["note"] = json!(format!(
                 "queued behind \"{blocker_title}\": this job starts when that one frees what they both need. The chat has been told already — do not repeat it, and do not say this work has started."
@@ -9847,6 +9916,10 @@ impl Agent {
     /// here knows whether the work is research, code or ops, and `other` is the kind that takes
     /// no path or git lock on a guess.
     ///
+    /// The ask is answered by the receipt [`Agent::start_job`] posts for it, and its result is
+    /// its own row later ([`Agent::write_job_result`], reached from the forced-job branch of
+    /// `run_subagent`). Nothing about this job waits for the main session.
+    ///
     /// `Ok(false)` means no job was started — jobs are off on this box, or the per-agent cap is
     /// full. The ask then queues for the main session exactly as it did before, which is the one
     /// path left that can still make it a job and can tell the user in words why it could not.
@@ -9895,6 +9968,20 @@ impl Agent {
                 Ok(false)
             }
         }
+    }
+
+    /// Did the user's own words ask for this work to run as a background job
+    /// (`crate::forced_job::forces_a_job`)?
+    ///
+    /// Read from the ask itself, as [`Agent::hook_start_job`] reads it, so the answer is the same
+    /// wherever it is asked. A message that is gone from the doc forces nothing, which is the
+    /// reading that changes least.
+    pub(crate) async fn ask_forced_a_job(&self, host: &SharedHost, user_msg_id: &str) -> bool {
+        let h = host.lock().await;
+        h.doc
+            .message(user_msg_id)
+            .map(|m| m.text())
+            .is_some_and(|t| crate::forced_job::forces_a_job(&t))
     }
 
     /// The last turns of a chat, one short line each, for a job brief written without the model.
@@ -10736,6 +10823,42 @@ impl Agent {
             return self
                 .run_job_fallback_turn(chat_id, host, in_reply_to, j, &e, &text)
                 .await;
+        }
+        // A job the user asked for in words posts its own result row, by the same direct model
+        // call an `ask-…` subagent's answer takes above, and does not queue for the main session.
+        //
+        // The other half of bug AA. `run_result_turn` below is a *relay* turn: `relay_slot` waits
+        // for a moment when no user send is in flight and none is owed its first assistant row,
+        // and `open_turn_row` refuses the row again under the doc lock if one is. That politeness
+        // is right for a result the main session narrates — it is bug M's guarantee — but it has
+        // no bound, so a chat that keeps receiving messages starves it. In `r10burst` four
+        // answers that existed by 08:40:16 were posted at 08:46:28, when the chat finally went
+        // quiet. For work the user asked to be taken out of the turn, waiting for the turn to be
+        // free is the wrong contract: the result is one bubble, it needs no tools, and it is due
+        // when the worker lands.
+        //
+        // Checked by reading the ask, which is where `hook_start_job` reads the same signal, so
+        // one message cannot be forced on one path and not on the other.
+        if let Some(j) = &job {
+            if self.ask_forced_a_job(host, in_reply_to).await {
+                let r = self
+                    .write_job_result(
+                        chat_id,
+                        host,
+                        in_reply_to,
+                        &sub_name,
+                        &status,
+                        &result_text,
+                        done_err.as_deref(),
+                    )
+                    .await;
+                if r.is_ok() {
+                    let _ = self
+                        .store
+                        .set_job_delivered(&j.id, &format!("job:{}:result", j.id));
+                }
+                return r;
+            }
         }
         let r = self
             .run_result_turn(

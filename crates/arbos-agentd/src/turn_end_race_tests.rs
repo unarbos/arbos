@@ -374,15 +374,14 @@ async fn a_job_whose_worker_dies_with_the_main_pi_child_waits_for_it_and_keeps_t
     assert_eq!(job.state, "queued", "the job is waiting for a fresh worker");
 
     // The other side of the send-order contract, and the reason the lost-message re-run cannot
-    // reach this path: `start_job_for_send` took the ask's place in the chat's FIFO with it
-    // into the job's task, and answered the command, so `handle_command` returned `Ok` and the
-    // re-run — which only runs on a child error — was never reached. The place stays held
-    // until the job's own task posts the answer, which is why this test counts 1 here and why
-    // no test that runs a job may assert the send order is empty.
+    // reach this path: `start_job_for_send` answered the command, so `handle_command` returned
+    // `Ok` and the re-run — which only runs on a child error — was never reached. The ask's
+    // place went with its ack at job start (bug AA), so the chat is owed nothing even while the
+    // job is between workers: a job's own waiting is never the chat's.
     assert_eq!(
         agent.send_order.waiting(chat),
-        1,
-        "the job holds its ask's place in the chat's send order until it answers"
+        0,
+        "the ack answered the ask, so the job must hold no place while it waits for a worker"
     );
 
     // 1. Nothing is started into the window, and the job is not given up on either.

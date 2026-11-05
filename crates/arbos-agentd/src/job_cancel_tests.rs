@@ -488,19 +488,23 @@ async fn a_cancel_inside_the_send_order_wait_posts_nothing_and_strands_no_ticket
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// A job the user asked for in words (`forced_job.rs`) answers through its relay result turn and
-/// never through `write_job_result`, which is reached for `ask-…` subagents alone
-/// (`is_job_name`). So that turn is a writer of its own, and it carries its own copy of what bug
-/// O created: `await_send_order` sits *inside* `run_result_turn`, after every cancel check
-/// `run_subagent` makes on its way there, and holds the answer for up to `SEND_ORDER_WAIT`. A
-/// cancel landing in that window would be followed by the whole answer being delivered minutes
-/// later — bug S, on the one path a forced job answers through.
+/// A job the model started answers through its relay result turn, which is a writer of its own,
+/// and it carries its own copy of what bug O created: `await_send_order` sits *inside*
+/// `run_result_turn`, after every cancel check `run_subagent` makes on its way there, and holds
+/// the answer for up to `SEND_ORDER_WAIT`. A cancel landing in that window would be followed by
+/// the whole answer being delivered minutes later — bug S, on this path.
+///
+/// Bug AA moved a job the user asked for in words off this path — its result is written by
+/// `write_job_result`, whose own cancel window
+/// `a_cancel_inside_the_send_order_wait_posts_nothing_and_strands_no_ticket` covers — so this
+/// case is the model-started job it was always also about. The wait is set up by hand below
+/// because a relay turn's own cancel window is what is under test, whoever started the job.
 ///
 /// Measured before the fix: the cancelled job ran the full relay turn and left a row in the
 /// chat. A relay turn needs a live main agent to write the prose, which a test has not got, so
 /// what is asserted is the row — the thing the user would have seen either way.
 #[tokio::test]
-async fn a_cancelled_forced_job_delivers_nothing_through_its_relay_turn() {
+async fn a_cancelled_job_delivers_nothing_through_its_relay_turn() {
     let (agent, root) = test_agent().await;
     let host = agent.sync.open_room(CHAT).await.unwrap();
     a_running_job(&agent, &host).await;
@@ -526,7 +530,7 @@ async fn a_cancelled_forced_job_delivers_nothing_through_its_relay_turn() {
             .wait_turn(CHAT, &older, SEND_ORDER_WAIT)
             .await
     );
-    let ticket = agent.send_order.join(CHAT, ASK).expect("the forced ask");
+    let ticket = agent.send_order.join(CHAT, ASK).expect("the job's ask");
     assert_eq!(agent.send_order.ahead(CHAT, ASK), 1);
 
     let before = visible_assistant_rows(&host);
@@ -541,7 +545,7 @@ async fn a_cancelled_forced_job_delivers_nothing_through_its_relay_turn() {
                     ASK,
                     &crate::agent::ResultDelivery {
                         subagent_id: WORKER,
-                        name: "forced-hunt-mersenne",
+                        name: "job-hunt-mersenne-b2vc",
                         status: "done",
                         total_ms: 1_000,
                         raw: "Found M127.",
@@ -587,7 +591,7 @@ async fn a_cancelled_forced_job_delivers_nothing_through_its_relay_turn() {
     assert_eq!(
         visible_assistant_rows(&host),
         with_stop_line,
-        "the cancelled forced job delivered through its relay turn after all"
+        "the cancelled job delivered through its relay turn after all"
     );
     assert!(
         t0.elapsed() < Duration::from_secs(5),
@@ -597,7 +601,7 @@ async fn a_cancelled_forced_job_delivers_nothing_through_its_relay_turn() {
     assert_eq!(
         agent.send_order.waiting(CHAT),
         0,
-        "the relay turn stranded the forced ask's place in the chat's send order"
+        "the relay turn stranded the ask's place in the chat's send order"
     );
 
     let _ = std::fs::remove_dir_all(&root);
@@ -633,7 +637,7 @@ async fn a_relay_turn_for_an_already_cancelled_job_does_not_wait_for_its_turn() 
             .wait_turn(CHAT, &older, SEND_ORDER_WAIT)
             .await
     );
-    let _ticket = agent.send_order.join(CHAT, ASK).expect("the forced ask");
+    let _ticket = agent.send_order.join(CHAT, ASK).expect("the job's ask");
 
     let t0 = Instant::now();
     agent
@@ -643,7 +647,7 @@ async fn a_relay_turn_for_an_already_cancelled_job_does_not_wait_for_its_turn() 
             ASK,
             &crate::agent::ResultDelivery {
                 subagent_id: WORKER,
-                name: "forced-hunt-mersenne",
+                name: "job-hunt-mersenne-b2vc",
                 status: "done",
                 total_ms: 1_000,
                 raw: "Found M127.",

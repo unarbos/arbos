@@ -91,7 +91,10 @@ async fn four_forced_job_asks_two_seconds_apart_give_four_jobs() {
             job.title
         );
     }
-    // Nothing was answered inline instead: no assistant row in this chat holds words.
+    // The only words in the chat are the four receipts, one per ask, each naming its own job
+    // (bug AA; `forced_job_burst_tests.rs` is where the receipt itself is pinned). No ask was
+    // answered inline, which is what this burst asked four times not to happen: a receipt says
+    // the work is running, and nothing about the work.
     let spoken: Vec<String> = {
         let h = host.try_lock().expect("host free");
         h.doc
@@ -102,10 +105,21 @@ async fn four_forced_job_asks_two_seconds_apart_give_four_jobs() {
             .filter(|t| !t.is_empty())
             .collect()
     };
-    assert!(
-        spoken.is_empty(),
-        "the asks became jobs, not inline answers: {spoken:?}"
+    assert_eq!(
+        spoken.len(),
+        4,
+        "four receipts and nothing else: {spoken:?}"
     );
+    for (pkg, _) in &asks {
+        assert_eq!(
+            spoken
+                .iter()
+                .filter(|t| t.contains(*pkg) && t.contains("background"))
+                .count(),
+            1,
+            "one receipt names the {pkg} job and says it is running: {spoken:?}"
+        );
+    }
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -167,25 +181,22 @@ async fn a_forced_ask_skips_the_quick_lane_and_a_status_question_still_takes_it(
 }
 
 /// The ticket contract of bug O (`crate::send_order`): whoever owes the answer holds that
-/// message's place in its chat's send order until it is no longer owed. The bound is the owning
-/// **task**, not the answer's row — release is `SendTicket`'s `Drop`, and the ticket is a local
-/// of the spawned body, so every ending releases it, including one that posts nothing. The test
-/// below this one covers that ending.
+/// message's place in its chat's send order until it is no longer owed. **A place is held for an
+/// answer, never for the work behind one.**
 ///
-/// A forced job is the case that makes the contract bite. `handle_command` returns having posted
-/// nothing at all — the four-job test above asserts exactly that — so the answer to the ask is
-/// the job's own result turn, which runs minutes later inside the job's task. The ticket
-/// therefore travels with the job (`spawn_subagent_task`) instead of being dropped when
-/// `handle_command` returns.
+/// A forced job is the case that decides what counts as the answer, and bug AA is what the first
+/// reading of it cost. The ticket used to travel into the job's task and be held until the
+/// result row — minutes of work later — so twelve messages sent behind four such asks queued
+/// behind four workers and each paid the whole of `SEND_ORDER_WAIT`. The answer to a forced ask
+/// is the receipt `start_job` posts at job start; the result is a later row this queue does not
+/// order, because a row that arrives minutes afterwards is out of turn whatever the queue says.
 ///
-/// This test asserts the guarantee rather than the job count, in both directions. Were the
-/// ticket dropped at the end of `handle_command`, the ask would leave the queue at job start:
-/// `waiting` would read 1 instead of 2, the result turn would be free to post in front of the
-/// older message, and — the sharpest of the three — the younger message would become the head
-/// the moment the older one answered, with the forced answer still unposted. That is bug O
-/// restored for the one path users ask for in words.
+/// So this test asserts the release, in the two places it has to hold: the queue is back to the
+/// older message alone, and a message sent after the forced ask waits for that older message and
+/// for nothing else. Were the ticket held to the result again, `waiting` would read 2 and the
+/// younger message would be stuck behind a worker — which is bug AA restored.
 #[tokio::test]
-async fn a_forced_jobs_answer_keeps_its_place_in_the_send_order() {
+async fn a_forced_asks_place_is_released_by_the_receipt_at_job_start() {
     let (agent, root) = test_agent().await;
     let chat = "01TESTCHATFORCEDJOB000004";
     let host = agent.sync.open_room(chat).await.unwrap();
@@ -205,64 +216,58 @@ async fn a_forced_jobs_answer_keeps_its_place_in_the_send_order() {
         1,
         "the ask became a job"
     );
+    // The receipt is in the chat, under the ask, so the ask is answered.
+    let receipt: Vec<String> = {
+        let h = host.try_lock().expect("host free");
+        h.doc
+            .messages()
+            .into_iter()
+            .filter(|m| {
+                m.role == "assistant"
+                    && m.rest.get("inReplyTo").and_then(Value::as_str) == Some(forced.as_str())
+            })
+            .map(|m| m.text().trim().to_owned())
+            .filter(|t| !t.is_empty())
+            .collect()
+    };
+    assert_eq!(receipt.len(), 1, "one receipt under the ask: {receipt:?}");
     assert_eq!(
         agent.send_order.waiting(chat),
-        2,
-        "the ask is still owed an answer after handle_command returned, so it keeps its place"
+        1,
+        "only the older message is still owed an answer: the ask's place went with its receipt"
     );
-    // Its own answer waits behind the older message.
-    assert!(!agent.send_order.is_turn(chat, &forced));
-    assert!(
-        tokio::time::timeout(
-            Duration::from_millis(300),
-            agent.await_send_order(chat, &forced, "job_result"),
-        )
-        .await
-        .is_err(),
-        "the job's result turn must not post in front of a message sent before it"
-    );
-    // A younger message waits behind the forced ask, not just behind the older one.
+    // A younger message waits for the older one, and for nothing else — in particular not for
+    // the worker, which is the whole of bug AA.
     tokio::time::sleep(Duration::from_millis(2)).await;
     let younger = ulid();
     let _younger_ticket = agent
         .send_order
         .join(chat, &younger)
         .expect("the younger ask");
-    assert_eq!(agent.send_order.ahead(chat, &younger), 2);
-    // The older message is answered. The forced ask takes the floor; the younger one still waits
-    // for it, because the answer it is waiting for has not been posted yet.
+    assert_eq!(agent.send_order.ahead(chat, &younger), 1);
     drop(older_ticket);
     assert!(
-        agent.send_order.is_turn(chat, &forced),
-        "the forced ask is the head once the older message is answered"
-    );
-    assert!(
-        !agent.send_order.is_turn(chat, &younger),
-        "a younger message cannot answer in front of a forced job whose answer is still owed"
+        agent.send_order.is_turn(chat, &younger),
+        "the older message answered, so the younger one is the head — a running job orders nothing"
     );
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// The other end of the same contract: the place is held for as long as the job's task lives,
-/// and no longer. A job that ends without posting anything — a failed start, a refusal, a cancel
-/// — must still let the chat move, because nobody owes that ask an answer any more.
+/// A job's result is not posted when the job was cancelled, and cancelling it still leaves the
+/// chat free. Both halves of what the release above must not have broken.
 ///
 /// The cancel is the ending that is quick and certain to produce no answer: cancelled before its
 /// worker could start, the task settles its rows, skips the inline fallback that would otherwise
 /// answer the ask, and ends. The job row is asserted to still read `cancelled` so a lost race
 /// (the worker failing first, which writes `failed`) cannot leave this test quietly passing on
 /// the wrong path.
-///
-/// Were the place released only where an answer's row is posted, this test would hang on the
-/// five-second timeout: the forced ask would hold its place for the life of the process and the
-/// younger message behind it would never get the floor.
 #[tokio::test]
-async fn a_forced_jobs_place_is_released_when_its_task_ends_without_an_answer() {
+async fn a_cancelled_forced_job_adds_nothing_to_its_receipt_and_holds_no_place() {
     let (agent, root) = test_agent().await;
     let chat = "01TESTCHATFORCEDJOB000005";
     let host = agent.sync.open_room(chat).await.unwrap();
     let _busy = agent.test_hold_turn(chat).await;
-    let (_forced, cmd) = send_cmd(
+    let (forced, cmd) = send_cmd(
         &host,
         "Install markupsafe and report its version, as a background job (not inline).",
     );
@@ -270,8 +275,8 @@ async fn a_forced_jobs_place_is_released_when_its_task_ends_without_an_answer() 
     let job = agent.store.jobs_for_chat(chat).unwrap().remove(0);
     assert_eq!(
         agent.send_order.waiting(chat),
-        1,
-        "the handler has returned and the place is held by the job's task"
+        0,
+        "the handler has returned and the receipt answered the ask"
     );
     // Cancelled before the worker could fail of its own accord, which is what makes the ending
     // certain: a failed worker would run the inline fallback and answer the ask after all.
@@ -279,8 +284,8 @@ async fn a_forced_jobs_place_is_released_when_its_task_ends_without_an_answer() 
         .store
         .set_job_state(&job.id, "cancelled", None)
         .unwrap();
-    // A message sent after the forced ask, which cannot take the floor until that ask's place
-    // is released.
+    // A message sent after the forced ask takes the floor at once: nothing is owed in front of
+    // it, cancelled job or not.
     let younger = ulid();
     let _younger_ticket = agent
         .send_order
@@ -294,7 +299,7 @@ async fn a_forced_jobs_place_is_released_when_its_task_ends_without_an_answer() 
     .await;
     assert!(
         freed.is_ok(),
-        "the job's task ended, so the chat must move on: waiting={}",
+        "the chat must move on: waiting={}",
         agent.send_order.waiting(chat)
     );
     assert_eq!(
@@ -307,6 +312,7 @@ async fn a_forced_jobs_place_is_released_when_its_task_ends_without_an_answer() 
         "cancelled",
         "the job ended by the cancel, which is the ending that posts no answer"
     );
+    // The receipt, and nothing after it: a cancelled job delivers no result (bug S).
     let spoken: Vec<String> = {
         let h = host.lock().await;
         h.doc
@@ -317,11 +323,37 @@ async fn a_forced_jobs_place_is_released_when_its_task_ends_without_an_answer() 
             .filter(|t| !t.is_empty())
             .collect()
     };
+    assert_eq!(
+        spoken.len(),
+        1,
+        "the receipt is the only thing the cancelled job said: {spoken:?}"
+    );
     assert!(
-        spoken.is_empty(),
-        "the place was released without any answer being posted: {spoken:?}"
+        spoken[0].contains("markupsafe"),
+        "and it is the receipt for this ask: {spoken:?}"
+    );
+    assert_eq!(
+        visible_replies_to(&host, &forced).len(),
+        1,
+        "under the ask it answered"
     );
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Assistant rows under `msg_id` that hold words.
+fn visible_replies_to(host: &SharedHost, msg_id: &str) -> Vec<String> {
+    let h = host.try_lock().expect("host free");
+    h.doc
+        .messages()
+        .into_iter()
+        .filter(|m| {
+            m.role == "assistant"
+                && m.rest.get("inReplyTo").and_then(Value::as_str) == Some(msg_id)
+                && m.rest.get("hidden").and_then(Value::as_bool) != Some(true)
+                && !m.text().trim().is_empty()
+        })
+        .map(|m| m.text())
+        .collect()
 }
 
 /// The per-chat cap (three) is what would have refused the fourth ask. A job the user asked for
