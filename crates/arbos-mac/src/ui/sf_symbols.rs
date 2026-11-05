@@ -9,13 +9,46 @@
 //! path route. The symbol is therefore rasterised the way AppKit's own menus
 //! do it: `NSImage(systemSymbolName:)` + `NSImageSymbolConfiguration(pointSize,
 //! weight, scale: .medium)`, drawn as the template it is into an
-//! `NSBitmapImageRep` of `natural size × the window's backing scale` (2× on
-//! every Retina display — crisp, no resampling), then tinted with the text
-//! colour through a `sourceIn` fill, and handed to GPUI as a premultiplied
-//! BGRA [`RenderImage`]. One raster per (name, size, weight, scale, colour),
-//! cached for the app's lifetime — a handful of KB. The element is laid out
-//! at the symbol's natural point size inside a fixed square slot, so rows
-//! align on the slot while each symbol keeps Apple's proportions.
+//! `NSBitmapImageRep`, then tinted with the text colour through a `sourceIn`
+//! fill, and handed to GPUI as a BGRA [`RenderImage`]. One
+//! raster per (name, size, weight, scale, colour), cached for the app's
+//! lifetime — a handful of KB. The element is laid out inside a fixed square
+//! slot, so rows align on the slot while each symbol keeps Apple's
+//! proportions.
+//!
+//! **Straight alpha, not premultiplied.** `RenderImage` holds BGRA with
+//! **un-premultiplied** alpha — GPUI's own SVG renderer takes tiny-skia's
+//! premultiplied pixmap and runs every pixel through `swap_rgba_pa_to_bgra`
+//! before it builds one. [`render_pixel`] does the same here, because an
+//! `NSBitmapImageRep` with an empty `NSBitmapFormat` is premultiplied too.
+//! Handing that buffer over unconverted multiplies the colour by its alpha a
+//! second time, and the damage is worth spelling out: a stroke tinted
+//! `label_muted` (white at 72 %) over the group pane's tile should paint 207,
+//! and painted 156; an edge pixel at a quarter coverage should sit at 115 and
+//! sank to 78, **below the 85 of the tile behind it**. Every symbol in the app
+//! therefore wore a dark rim it had no business having and never reached its
+//! own colour — read off the build as thin, faint and grainy, which is one
+//! fault wearing three names rather than three values anyone chose.
+//!
+//! **The pixel grid.** The raster is a bitmap, so it also has to cover whole
+//! device pixels and land on them. Three sizes have to agree, and
+//! [`whole_points`] / [`snap_box`] / [`raster_pixels`] are the three steps
+//! that make them:
+//!
+//! 1. the **point size** the symbol is configured at is a whole number, so
+//!    AppKit lays Apple's artwork out on the pixel grid rather than between it;
+//! 2. the **box** the element occupies is a whole number of points, so the
+//!    slot's centring offset — half the difference of two whole numbers — is a
+//!    whole device pixel on a 2× display;
+//! 3. the **raster** is exactly that box times the backing scale, so GPUI
+//!    blits it 1:1 instead of rescaling it.
+//!
+//! Before that rule the box was the symbol's raw natural size and the raster
+//! `ceil(natural × scale)`, both off the grid for any configuration whose
+//! natural size is fractional — which is most of them, because [`glyph`] asked
+//! for `box × 0.85` points (an 18 pt box gave 15.3). A symbol then sat up to a
+//! device pixel off the centre of its slot, and neighbouring strokes picked up
+//! different coverage, so some read crisper than others.
 //!
 //! **Fallback.** On a macOS that lacks a name (`NSImage` answers nil), and on
 //! every other OS (the Linux dev build and the headless tests), the pack glyph
@@ -24,8 +57,9 @@
 //!
 //! **Every surface** ([feedback sf-symbols-everywhere-mac-2026-10-28]): [`glyph`]
 //! is the drop-in for the old `icons::icon(name, size, color)` — same box, same
-//! layout — with the symbol at `size × 0.85` points (the menu precedent: 13 in
-//! a 15 box), **medium** weight (the pack's 2 pt stroke on the 24 grid ≈ SF
+//! layout — with the symbol at `size × 0.85` points, rounded to the nearest
+//! whole point by [`whole_points`] (the menu precedent: 13 in a 15 box),
+//! **medium** weight (the pack's 2 pt stroke on the 24 grid ≈ SF
 //! Medium) and semibold for the few marks the pack drew heavier (checkmark,
 //! the arrows, the waveform, number, code, the exclamation).
 
@@ -43,6 +77,53 @@ pub enum Weight {
 
 /// The symbol's point size for a glyph box of `size` (the old `icon` box).
 pub const GLYPH_POINT_RATIO: f32 = 0.85;
+
+/// Step 1 of the pixel grid: the whole point size a symbol is configured at.
+/// Apple's canvas for a symbol is a whole number of points at a whole point
+/// size. `18 × 0.85` is 15.3, and a 15.3 pt canvas lays strokes down between
+/// device pixels instead of on them, so neighbours end up with different
+/// coverage and read as unevenly drawn.
+pub fn whole_points(size: f32) -> f32 {
+    size.round().max(1.0)
+}
+
+/// Step 2: the box an element gives a symbol of `natural` points — whole
+/// points, so the slot centres it by a whole device pixel at 2×. AppKit
+/// scales the *vector* artwork into this box when it rasterises, so the
+/// rounding costs sharpness nothing; leaving the box fractional cost it
+/// everything.
+///
+/// Only the mac raster calls this — a build without system symbols draws the
+/// pack through `icons::icon`, which GPUI paints as a vector at any size — but
+/// the rule it states is pinned by this module's tests on every platform.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn snap_box(natural: (f32, f32)) -> (f32, f32) {
+    (natural.0.round().max(1.0), natural.1.round().max(1.0))
+}
+
+/// Step 3: the raster for a `box_pt` point box on a `scale`× display —
+/// exactly the device pixels the box covers, so GPUI blits it 1:1. The old
+/// `ceil(natural × scale)` made a bitmap a fraction of a pixel wider than its
+/// box and left GPUI to resample the difference away. Mac-only for the same
+/// reason as [`snap_box`].
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn raster_pixels(box_pt: (f32, f32), scale: f32) -> (u32, u32) {
+    let px = |v: f32| ((v * scale).round() as u32).max(1);
+    (px(box_pt.0), px(box_pt.1))
+}
+
+/// One raster pixel the way [`RenderImage`](gpui::RenderImage) reads it: the
+/// channels swapped to BGRA **and the alpha divided back out**, through the
+/// same `swap_rgba_pa_to_bgra` GPUI's SVG renderer uses. An
+/// `NSBitmapImageRep` hands back premultiplied RGBA; passing that straight on
+/// applies the alpha twice, which is the dark rim and the washed-out stroke
+/// described in the module doc. Mac-only for the same reason as [`snap_box`].
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn render_pixel(premultiplied_rgba: [u8; 4]) -> [u8; 4] {
+    let mut pixel = premultiplied_rgba;
+    gpui::swap_rgba_pa_to_bgra(&mut pixel);
+    pixel
+}
 
 /// Marks the pack drew with a 2.2–2.6 stroke: semibold, so they keep their weight.
 const HEAVIER: &[&str] = &[
@@ -182,6 +263,7 @@ pub fn symbol(name: &str, size: f32, weight: Weight, slot: f32, color: Hsla) -> 
         is_registered(name),
         "{name:?} is not a registered SF Symbol — add it to sf_symbols::FALLBACKS"
     );
+    let size = whole_points(size);
     let frame = div()
         .size(px(slot))
         .flex_shrink_0()
@@ -189,7 +271,8 @@ pub fn symbol(name: &str, size: f32, weight: Weight, slot: f32, color: Hsla) -> 
         .items_center()
         .justify_center();
     #[cfg(target_os = "macos")]
-    if let Some((w, h)) = mac::natural_size(name, size, weight) {
+    if let Some(natural) = mac::natural_size(name, size, weight) {
+        let (w, h) = snap_box(natural);
         return frame.child(mac::element(name, size, weight, color).w(px(w)).h(px(h)));
     }
     #[cfg(not(target_os = "macos"))]
@@ -319,8 +402,11 @@ mod mac {
     ) -> Option<Arc<RenderImage>> {
         let image = configured(name, size, weight)?;
         let natural = image.size();
-        let width = (natural.width * scale as f64).ceil().max(1.0) as isize;
-        let height = (natural.height * scale as f64).ceil().max(1.0) as isize;
+        // The same box `symbol` lays the element out in, so the bitmap is the
+        // element's device pixels exactly and GPUI never resamples it.
+        let box_pt = super::snap_box((natural.width as f32, natural.height as f32));
+        let (w_px, h_px) = super::raster_pixels(box_pt, scale);
+        let (width, height) = (w_px as isize, h_px as isize);
         // SAFETY: plain AppKit drawing on the main thread (GPUI paints there);
         // the rep owns its buffer and outlives every pointer read below.
         let pixels = unsafe {
@@ -370,13 +456,156 @@ mod mac {
             for y in 0..h {
                 let row = std::slice::from_raw_parts(data.add(y * stride), w * 4);
                 for px in row.chunks_exact(4) {
-                    // RGBA premultiplied → BGRA premultiplied.
-                    out.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
+                    // Premultiplied RGBA → the straight BGRA `RenderImage` reads.
+                    out.extend_from_slice(&super::render_pixel([px[0], px[1], px[2], px[3]]));
                 }
             }
             out
         };
         let buffer = image::RgbaImage::from_raw(width as u32, height as u32, pixels)?;
         Some(Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! The pixel grid (see the module doc), pinned without a window: a symbol
+    //! is configured at a whole point size, occupies a whole-point box, and
+    //! rasters to exactly the device pixels that box covers. Break any one of
+    //! the three and GPUI resamples the bitmap — the thin, faint, grainy
+    //! tiles on the group pane.
+    use super::{raster_pixels, render_pixel, snap_box, whole_points, GLYPH_POINT_RATIO};
+
+    /// The backing scales a Mac actually paints at.
+    const SCALES: [f32; 3] = [1.0, 2.0, 3.0];
+
+    /// Natural sizes AppKit hands back: the fractional ones are what a
+    /// fractional point size produced, and they are the whole point of this.
+    const NATURALS: [(f32, f32); 6] = [
+        (15.0, 17.0),
+        (17.595, 16.42),
+        (19.5, 15.0),
+        (13.333, 13.333),
+        (23.86, 20.14),
+        (0.4, 0.6),
+    ];
+
+    /// `label_muted` on a dark Glass pane: white at 72 %, which AppKit stores
+    /// premultiplied. GPUI wants the white back.
+    #[test]
+    fn a_raster_pixel_hands_gpui_its_colour_not_its_colour_times_alpha() {
+        let alpha = (0.72 * 255.0_f32).round() as u8;
+        let covered = [alpha, alpha, alpha, alpha]; // premultiplied white
+        assert_eq!(
+            render_pixel(covered),
+            [255, 255, 255, alpha],
+            "a fully covered stroke is white at the tint's alpha"
+        );
+
+        // A quarter-covered edge pixel: still white, just thinner.
+        let quarter = (0.25 * alpha as f32).round() as u8;
+        let [b, g, r, a] = render_pixel([quarter, quarter, quarter, quarter]);
+        assert_eq!((b, g, r), (255, 255, 255), "edges keep the colour too");
+        assert_eq!(a, quarter);
+
+        // Fully clear stays clear, and does not divide by zero.
+        assert_eq!(render_pixel([0, 0, 0, 0]), [0, 0, 0, 0]);
+    }
+
+    /// The flat tile the group pane draws these on reads 85; a stroke tinted
+    /// `label_muted` should reach 207 over it, and an edge pixel should never
+    /// fall *below* 85. Premultiplied data reached 156 and sank to 78 — the
+    /// dark rim Scout read as grain.
+    #[test]
+    fn a_composited_stroke_reaches_its_colour_and_never_darkens_the_tile() {
+        const TILE: f32 = 85.0;
+        let over = |pixel: [u8; 4]| {
+            let [b, _, _, a] = pixel;
+            let a = a as f32 / 255.0;
+            b as f32 * a + TILE * (1.0 - a)
+        };
+        let alpha = (0.72 * 255.0_f32).round() as u8;
+        let covered = over(render_pixel([alpha, alpha, alpha, alpha]));
+        assert!(
+            (covered - 207.0).abs() <= 1.0,
+            "a covered stroke paints {covered}, not label_muted's 207"
+        );
+        for step in 0..=20 {
+            let c = step as f32 / 20.0;
+            let v = (c * alpha as f32).round() as u8;
+            let painted = over(render_pixel([v, v, v, v]));
+            assert!(
+                painted >= TILE - 0.5,
+                "coverage {c} painted {painted}, darker than the {TILE} tile"
+            );
+        }
+    }
+
+    #[test]
+    fn a_glyph_box_asks_for_a_whole_point_size() {
+        // Every box `glyph` is called with across the app; `× 0.85` makes all
+        // but a few fractional, which is why the rounding is not optional.
+        for box_pt in [
+            8.0, 11.0, 11.5, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 20.0, 36.0,
+        ] {
+            let size = whole_points(box_pt * GLYPH_POINT_RATIO);
+            assert_eq!(size, size.trunc(), "{box_pt} pt box → {size} pt symbol");
+            assert!(size >= 1.0, "{box_pt} pt box → {size} pt symbol");
+        }
+    }
+
+    #[test]
+    fn a_snapped_box_is_whole_points_and_never_vanishes() {
+        for natural in NATURALS {
+            let (w, h) = snap_box(natural);
+            assert_eq!((w.trunc(), h.trunc()), (w, h), "{natural:?} → {w}×{h}");
+            assert!(w >= 1.0 && h >= 1.0, "{natural:?} → {w}×{h}");
+        }
+    }
+
+    /// The invariant that keeps the bitmap crisp: its pixels *are* the box's
+    /// device pixels, so GPUI blits 1:1. The old `ceil(natural × scale)` could
+    /// not promise this — the raster was a fraction of a pixel wider than the
+    /// box it was painted into, and the difference came out as blur.
+    #[test]
+    fn a_snapped_box_rasters_onto_exactly_its_device_pixels() {
+        for natural in NATURALS {
+            let (w, h) = snap_box(natural);
+            for scale in SCALES {
+                let (w_px, h_px) = raster_pixels((w, h), scale);
+                assert_eq!(
+                    (w_px as f32, h_px as f32),
+                    (w * scale, h * scale),
+                    "{natural:?} at {scale}×: raster {w_px}×{h_px} vs box {w}×{h} pt"
+                );
+            }
+        }
+    }
+
+    /// What the old path did, for the record: a fractional natural size at 2×
+    /// is a bitmap wider than its box, and that gap is the resample.
+    #[test]
+    fn the_old_ceil_did_not_land_on_the_grid() {
+        let natural = (17.595_f32, 16.42_f32);
+        let scale = 2.0_f32;
+        let ceiled = ((natural.0 * scale).ceil(), (natural.1 * scale).ceil());
+        assert_ne!(ceiled.0, natural.0 * scale, "the width had slack");
+        assert_ne!(ceiled.1, natural.1 * scale, "the height had slack");
+    }
+
+    /// A whole-point box in a whole-point slot is centred by a whole device
+    /// pixel at 2×, so the symbol lands on the grid rather than across it.
+    /// `Leading::Glyph` draws a 20 pt slot; the menus a 13 and a 15.
+    #[test]
+    fn a_whole_point_box_centres_on_a_whole_device_pixel() {
+        for slot in [13.0_f32, 15.0, 18.0, 20.0] {
+            for natural in NATURALS {
+                let (w, h) = snap_box(natural);
+                let offset = |box_pt: f32| (slot - box_pt) / 2.0 * 2.0;
+                for o in [offset(w), offset(h)] {
+                    assert_eq!(o, o.trunc(), "slot {slot}, box {w}×{h}: offset {o} px");
+                }
+            }
+        }
     }
 }
