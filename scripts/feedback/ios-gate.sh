@@ -371,7 +371,33 @@ if [[ "$rc" -eq 0 ]]; then
       rm -f "$blog"
     fi
     new_errs=$(new_test_errors "$branch_errs" "$base_errs")
-    if [[ -z "$new_errs" ]]; then
+    # A failed build whose log yields no parseable diagnostic is not "no new errors" — it is a
+    # failure this script could not read, and without this branch the comparison turns it into a
+    # pass: an empty branch set minus an empty base set is empty, which prints the "exists on main
+    # too" line below and leaves rc at 0. A green gate on a build that did not build.
+    # The trigger is not hypothetical. The scratch volume filling prints
+    #   error: failed to build archive at `…`: No space left on device (os error 28)
+    # which begins at column 0 with `error: ` but carries no second `": error: "`, so
+    # test_error_set's pattern cannot match it (confirmed against four real gate-Mac logs:
+    # 0 matching lines each). Nineteen such events are in ~/arbos-rust-gate-runs; every one so far
+    # struck the cargo stage, which is upstream of this block, so this has not yet fired here.
+    # Widening the pattern is not the fix: the ways a build fails without a `path:line:col: error:`
+    # line are open-ended (disk, a crashed Swift frontend, the linker, signing), so any enumeration
+    # is a guess at the next one. The floor is the fix — no diagnostic on a failed build is its own
+    # verdict, and it is never a pass.
+    # It blames the branch rather than reporting infrastructure (rc=2) on purpose: rc=2 is "no
+    # verdict, retry", which would excuse a real compile error this parser happens not to read, and
+    # a failure that is silently excused is the mode this whole block exists to prevent. A false red
+    # is re-runnable; a false green merges. The same asymmetry already governs the base build above,
+    # where a failed base checkout blames the branch for everything.
+    if [[ -z "$branch_errs" ]]; then
+      echo "== tests: FAIL — the test target did not build (rc=$trc) and its log carries no"
+      echo "   'path:line:col: error:' diagnostic, so this gate cannot tell a branch regression from"
+      echo "   a rig failure and will not call it either. Check the tail below for a disk, toolchain"
+      echo "   or linker failure before reading it as the branch's:"
+      tail -n 8 "$log" | cut -c1-200
+      rc=1
+    elif [[ -z "$new_errs" ]]; then
       echo "== tests: every error exists on main too (${GATE_BASE_SHA:0:8}); not this branch's regression — reported, not blamed"
     else
       echo "== tests: errors NOT on main (${GATE_BASE_SHA:0:8}) — this branch's regression:"
