@@ -173,6 +173,77 @@ exit code; `axbin/osascript` is a shim on `runner.sh`'s PATH that forwards every
 - After a reboot both runners are gone: start `ax-runner.sh` via `sudo launchctl asuser 502 sudo -u arbosgui …`
   from ssh and `runner.sh` via `open /Users/Shared/arbos-run/start-runner.command` (Terminal identity).
 
+## Security-sensitive work is read by a context-clean agent before it ships, against both trees (2026-11-04)
+
+Required for any change whose purpose is to stop something unwanted from happening — permissions,
+authentication, approval routing, who may act on whose behalf, anything that decides what runs on a
+user's own machine. Three steps, in this order:
+
+1. **Write the user-facing instructions first**, before the fix is called done. An outside agent reads
+   the setup instructions as part of deciding whether to run them, so the instructions are part of the
+   security surface and not documentation polish applied afterwards.
+2. **Run a context-clean agent against the fixed tree** — a fresh session with no knowledge of the
+   change, given the instructions a real user would be handed and allowed to read the source, and asked
+   whether it would run this on its user's machine and why. Forbid it from reading commit messages,
+   branch names, pull-request text and any `.md` design note: all of those argue *for* the change
+   rather than being evidence about it, and an agent that has read the PR is not a reader, it is an
+   audience.
+3. **Run the same prompt against the pre-fix tree**, changing only which tree it points at and which
+   instructions it quotes.
+
+### Step 3 is the part that makes it work, and the part everyone will skip
+
+The control is not a formality and it is not for completeness. **Without it, an acceptance proves only
+that the agent was agreeable.** An agent that says yes to the fixed tree and would also have said yes
+to the broken one has measured nothing, and its approval is a compliance artefact — worse than no
+evidence, because it reads like evidence.
+
+The inbox-1460 run is the worked example. The control, pointed at `main` and the old four-command
+connect wording, refused: *"The bridge answers for you, in code, and its default answer is yes… anyone
+who can @mention me in an Arbos group, including people a group member adds later or anyone who
+follows an invite link, gets to run commands and edit files in this project directory, on your laptop,
+as you."* It reached the original reporter's agent's conclusion from the same code, with no knowledge
+that anybody had complained, and independently found a fail-open in the picker that nobody had written
+down. That refusal is what turns the later acceptance into evidence. Run it first, or the acceptance
+means nothing.
+
+### State the scope honestly, in the PR, so nobody over-claims it later
+
+**This tests the instructions and the code against a sceptical agent. It does not test the Claude Code
+product.** The reason is concrete and belongs in the write-up: no `claude` binary and no Anthropic key
+is reachable from a worker VM. On 2026-11-04 that was established by checking the process environment,
+`CLOUD_AGENT_ALL_SECRET_NAMES` (which holds only `CURSOR_API_KEY`, `CUROR_API_KEY_ENV` and
+`OP_SERVICE_ACCOUNT_TOKEN`), all 180 items of the `Arbos` 1Password vault through `op`, and `doppler`,
+which is installed but has no token.
+
+Keep that check in the write-up. Shown as a search that came back empty it is a finding about the
+environment; asserted bare it is an excuse, and a reader cannot tell the difference between "we looked
+and there is none" and "we did not look".
+
+### The yield, which is the argument for the rule
+
+Three defects in one change, none found by review or by the tests written for it:
+
+- The owner's relay key was in the environment of every command the agent ran, so the key was only as
+  private as every approval ever granted — load-bearing *because* approving commands had just become
+  the designed flow.
+- `ARBOS_ACP_PERMISSIONS=allow` turned the asking off through the environment. **This one was a defect
+  against a requirement the author had written down himself and believed he had met** — the fix had
+  made one flag command-line-only and stated the property as though it covered all of them. That is the
+  whole reason a context-clean reader beats a careful author: the author checks the thing he was
+  thinking about, and his own stated requirement reads to him as satisfied once he has done the work he
+  had in mind.
+- `ARBOS_RELAY_URL` and `ARBOS_ACP_AGENT` went **around** the switches rather than relaxing them. Its
+  sentence is the one that generalises: *"the relay is the thing that raises your approval card and the
+  thing that answers it, so pointing it somewhere else means something other than you is tapping
+  Approve."*
+
+That third kind is why the rule exists rather than "audit the switch harder". **An approval mechanism
+is only as trustworthy as the binding that decides who gets asked.** Auditing the permission switch
+finds the first two classes and can never find the third, because the third does not touch the switch —
+it changes who the question is sent to. When reviewing an approval path, enumerate every input that
+selects the approver, not only the inputs that select the answer.
+
 ## Standing rules that this does not change
 
 - One issue per release; a hotfix marker (`[hotfix]`) is for P0s only.
