@@ -83,6 +83,9 @@ export function promisesMore(text: string): boolean {
 // Mirrors `arbos_core::approval::SHELL_TOOLS`; the classification itself happens in agentd.
 const SHELL_TOOLS = new Set(["bash", "shell", "run_command", "execute_command"]);
 const APPROVAL_POLL_MS = Number(process.env.ARBOS_APPROVAL_POLL_MS ?? 1500);
+// Fallback only: agentd sends the real cap as `waitMs` on the pending reply, because the card's
+// `expires_at` has to be the same number the waiter uses. Keeping a second copy of the default
+// here is what made a card advertise 24 hours and die at 14 minutes (Test5 round 5, bug R).
 const APPROVAL_WAIT_MS = Number(process.env.ARBOS_APPROVAL_WAIT_MS ?? 14 * 60 * 1000); // under the turn deadline
 // Code mode (D86): agentd sets ARBOS_CODE_MODE=on|off per pi spawn (flag file / box env, default off).
 const CODE_MODE = (process.env.ARBOS_CODE_MODE ?? "off").trim().toLowerCase() === "on";
@@ -358,7 +361,8 @@ export default function arbosPiExt(pi: ExtensionAPI) {
     if (state === "allowed") return undefined;
     const approvalId = String(first.approvalId ?? "");
     audit({ kind: "approval_wait", session: sessionId, tool, call_id: callId, approval_id: approvalId, title: first.title ?? null });
-    const deadline = Date.now() + APPROVAL_WAIT_MS;
+    const waitMs = typeof first.waitMs === "number" && first.waitMs > 0 ? first.waitMs : APPROVAL_WAIT_MS;
+    const deadline = Date.now() + waitMs;
     let reason: string | undefined;
     while (state === "pending" && Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, APPROVAL_POLL_MS));

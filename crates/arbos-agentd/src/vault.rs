@@ -1304,7 +1304,13 @@ async fn obtain_grant(
             None => chat_id.to_owned(),
         };
         match agent
-            .begin_approval(&card_chat, req, WaitMode::Inline, Some(tx))
+            .begin_approval(
+                &card_chat,
+                req,
+                WaitMode::Inline,
+                Some(tx),
+                crate::approval::approval_ttl_ms(),
+            )
             .await
         {
             Ok(id) => (Some(id), Some(rx)),

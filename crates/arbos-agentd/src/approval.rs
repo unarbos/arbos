@@ -189,11 +189,32 @@ fn canonical(v: &Value) -> String {
     }
 }
 
-fn timeout_secs() -> u64 {
+/// How long a card is answerable when nothing shorter than the TTL bounds the wait for it:
+/// `APPROVAL_TTL_MS` (24 h), or `ARBOS_APPROVAL_TIMEOUT_SECS` where a box shortens it.
+pub(crate) fn approval_ttl_ms() -> i64 {
     std::env::var("ARBOS_APPROVAL_TIMEOUT_SECS")
         .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or((APPROVAL_TTL_MS / 1000) as u64)
+        .and_then(|s| s.parse::<i64>().ok())
+        .map(|secs| secs.saturating_mul(1000))
+        .filter(|ms| *ms > 0)
+        .unwrap_or(APPROVAL_TTL_MS)
+}
+
+/// How long the harness blocks a gated tool call while it polls `/hook/approval-status`
+/// (`ARBOS_APPROVAL_WAIT_MS`, 14 minutes), after which the call is refused and nothing runs.
+///
+/// agentd owns this number and hands it to the extension in the `/hook/approval` reply, because
+/// the card's deadline has to be the same one the waiter uses. The extension kept its own copy
+/// of the default, and that is the whole of Test5 round 5 bug R: card
+/// `01M6MRB89V75ZEX909EDWQJRDV` advertised `expires_at` at +24 h and was expired by
+/// `arbos:timeout` at +14 min, the moment the extension stopped polling. Round 4 shows the same
+/// fourteen minutes, which is what tells you it was a fixed cap rather than a slow user.
+pub(crate) fn harness_wait_cap_ms() -> i64 {
+    std::env::var("ARBOS_APPROVAL_WAIT_MS")
+        .ok()
+        .and_then(|s| s.parse::<i64>().ok())
+        .filter(|ms| *ms > 0)
+        .unwrap_or(14 * 60 * 1000)
 }
 
 impl Agent {
@@ -266,12 +287,20 @@ impl Agent {
     }
 
     /// Post the card and register the pending entry. Returns the approval id.
+    ///
+    /// `expires_in_ms` is the deadline this card gets, and it is the caller's statement of when
+    /// its own wait stops. The two cannot be chosen separately: a card is answerable only while
+    /// something is still prepared to act on the answer, so whatever cancels the wait *is* the
+    /// expiry, and `expires_at` has to say so. Round 5 is what happens when they drift — the
+    /// card advertised 24 h to the user while the harness gave up at 14 minutes
+    /// ([`harness_wait_cap_ms`]) and expired it.
     pub async fn begin_approval(
         self: &Arc<Self>,
         chat_id: &str,
         req: ApprovalRequest,
         mode: WaitMode,
         waiter: Option<oneshot::Sender<ApprovalOutcome>>,
+        expires_in_ms: i64,
     ) -> Result<String> {
         let host = self
             .sync
@@ -279,7 +308,7 @@ impl Agent {
             .await
             .ok_or_else(|| anyhow!("approval: chat {chat_id} has no doc"))?;
         let approval_id = ulid();
-        let expires_at = now_ms() + APPROVAL_TTL_MS;
+        let expires_at = now_ms() + expires_in_ms.max(1);
         // An optional card (the secret hand-off's "that looks like a key" offer) asks nothing
         // of the turn: no waiting status, no composer lock, no "Waiting for approval" line.
         let optional = req
@@ -378,7 +407,29 @@ impl Agent {
         if !optional {
             self.set_approval_wait_activity(chat_id, true).await;
         }
+        self.expire_at_deadline(&approval_id, expires_in_ms);
         Ok(approval_id)
+    }
+
+    /// Expire this card when its own `expires_at` arrives.
+    ///
+    /// The minute sweep (`expire_approvals`) is the backstop that survives a restart; it cannot
+    /// be the deadline, because a card is then expired up to a minute after the time the user
+    /// was shown. This timer is what makes `expires_at` the answer to "when does it stop being
+    /// answerable" rather than a rounded-down hint.
+    ///
+    /// Firing twice is harmless: `Store::decide_approval` only updates a row still `pending`, so
+    /// the first decision wins and a later one returns `Err` here, where it is dropped.
+    fn expire_at_deadline(self: &Arc<Self>, approval_id: &str, expires_in_ms: i64) {
+        let me = self.clone();
+        let id = approval_id.to_owned();
+        let wait = Duration::from_millis(expires_in_ms.max(1) as u64);
+        tokio::spawn(async move {
+            tokio::time::sleep(wait).await;
+            let _ = me
+                .decide_approval(&id, ApprovalOutcome::Expired, "arbos:expiry")
+                .await;
+        });
     }
 
     /// Activity while a card of `chat_id` waits for Approve/Reject (or clear when none do).
@@ -406,14 +457,20 @@ impl Agent {
 
     /// The shared entry point (brief §4): write the card, wait for `approve`/`reject` (or the
     /// 24 h expiry / `ARBOS_APPROVAL_TIMEOUT_SECS`), update its state, audit the decision.
+    ///
+    /// The wait and the card's deadline are the same `approval_ttl_ms()`, so this caller cannot
+    /// cancel a card that still looks answerable. It used to time out on
+    /// `ARBOS_APPROVAL_TIMEOUT_SECS` while the card advertised the fixed 24 h TTL, which on a
+    /// box that set that variable was round 5's bug with a different number in it.
     pub async fn request_approval(
         self: &Arc<Self>,
         chat_id: &str,
         req: ApprovalRequest,
     ) -> ApprovalOutcome {
         let (tx, rx) = oneshot::channel();
+        let ttl = approval_ttl_ms();
         let approval_id = match self
-            .begin_approval(chat_id, req, WaitMode::Inline, Some(tx))
+            .begin_approval(chat_id, req, WaitMode::Inline, Some(tx), ttl)
             .await
         {
             Ok(id) => id,
@@ -424,7 +481,11 @@ impl Agent {
                 };
             }
         };
-        match tokio::time::timeout(Duration::from_secs(timeout_secs()), rx).await {
+        // A second of slack past the card's own deadline, so the expiry that lands is the card's
+        // (`expire_at_deadline`, `decided_by = arbos:expiry`) and this is only the backstop for
+        // a waiter whose card somehow never settled.
+        let backstop = Duration::from_millis(ttl.saturating_add(1_000) as u64);
+        match tokio::time::timeout(backstop, rx).await {
             Ok(Ok(outcome)) => outcome,
             Ok(Err(_)) => ApprovalOutcome::Expired,
             Err(_) => {
@@ -1206,8 +1267,12 @@ impl Agent {
             payload: json!({ "kind": "tool_call", "tool": tool, "input": input, "class": hit.class, "why": hit.why, "session_id": session_id, "role": role,
                 "path_class": hit.path_class.map(PathClass::as_str), "grant_options": grant_options(&hit) }),
         };
+        // The extension blocks the call for `waitMs` and then refuses it, so that is this card's
+        // real deadline and `expires_at` says exactly that. `waitMs` goes back in the reply so
+        // the waiter reads agentd's number instead of its own copy of the default.
+        let wait_ms = harness_wait_cap_ms();
         match self
-            .begin_approval(&chat_id, req, WaitMode::Polled, None)
+            .begin_approval(&chat_id, req, WaitMode::Polled, None, wait_ms)
             .await
         {
             Ok(id) => {
@@ -1230,7 +1295,7 @@ impl Agent {
                     )
                     .await;
                 }
-                json!({ "ok": true, "state": "pending", "approvalId": id, "title": title, "why": hit.why })
+                json!({ "ok": true, "state": "pending", "approvalId": id, "title": title, "why": hit.why, "waitMs": wait_ms })
             }
             Err(e) => json!({ "ok": false, "error": e.to_string() }),
         }
@@ -1795,6 +1860,89 @@ mod job_approval_tests {
             1,
             "one row per card, not one per poll: {:?}",
             waiting_rows(&side)
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+    use crate::status::tests::test_agent;
+
+    /// Test5 round 5, bug R. Card `01M6MRB89V75ZEX909EDWQJRDV` was posted at 20:24:29 with
+    /// `expires_at` 1793931869499 — exactly +24 h, `APPROVAL_TTL_MS` — and was expired by
+    /// `arbos:timeout` at 20:38:29, +14 minutes. Round 4 landed on the same fourteen minutes
+    /// (19:19:17 → 19:33:18), which is what says "fixed cap" rather than "slow user": the
+    /// extension stops polling at `ARBOS_APPROVAL_WAIT_MS` and nothing told the card.
+    ///
+    /// The card now carries the deadline its own waiter enforces, and the reply hands that
+    /// waiter the number instead of letting it keep a second copy of the default.
+    #[tokio::test]
+    async fn a_gated_card_advertises_the_deadline_its_waiter_enforces() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATAPPROVALTTL00000";
+        agent.store.upsert_chat(chat, "Main", true, 0).unwrap();
+        let _host = agent.sync.open_room(chat).await.unwrap();
+
+        let before = now_ms();
+        let v = agent
+            .hook_approval("bash", &json!({ "command": "rm -rf /opt/x" }), chat, "main")
+            .await;
+        assert_eq!(v["state"], "pending", "{v}");
+        let row = agent
+            .store
+            .approval(v["approvalId"].as_str().unwrap())
+            .unwrap()
+            .unwrap();
+        let life = row.expires_at - before;
+        assert!(
+            (life - harness_wait_cap_ms()).abs() < 5_000,
+            "the card must expire when its waiter stops waiting: {life} ms"
+        );
+        assert!(
+            life < APPROVAL_TTL_MS,
+            "round 5 advertised the whole 24 h TTL on a card capped at 14 minutes: {life} ms"
+        );
+        assert_eq!(
+            v["waitMs"].as_i64(),
+            Some(harness_wait_cap_ms()),
+            "the waiter reads agentd's cap, so the two cannot drift apart again: {v}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The owner's first test: leave a card undecided and its real expiry matches `expires_at`
+    /// within five seconds. The minute sweep cannot answer that on its own — it would expire a
+    /// card up to 60 s after the time the user was shown — so each card carries a timer for its
+    /// own deadline and the sweep stays the restart backstop.
+    #[tokio::test]
+    async fn an_undecided_card_expires_at_the_time_it_advertises() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATAPPROVALTTL00001";
+        agent.store.upsert_chat(chat, "Main", true, 0).unwrap();
+        let _host = agent.sync.open_room(chat).await.unwrap();
+
+        let req = ApprovalRequest {
+            title: "Run a destructive command (file.delete)".into(),
+            summary: "rm -rf /opt/x".into(),
+            risk: Risk::Destructive,
+            payload: json!({ "kind": "tool_call", "tool": "bash" }),
+        };
+        let id = agent
+            .begin_approval(chat, req, WaitMode::Polled, None, 200)
+            .await
+            .unwrap();
+        let row = agent.store.approval(&id).unwrap().unwrap();
+        assert_eq!(agent.approval_status(&id).await["state"], "pending");
+
+        tokio::time::sleep(Duration::from_millis(900)).await;
+        let after = agent.store.approval(&id).unwrap().unwrap();
+        assert_eq!(after.state, "expired", "the deadline must be enforced");
+        let late = after.decided_at.unwrap() - row.expires_at;
+        assert!(
+            late.abs() < 5_000,
+            "expired {late} ms away from the advertised deadline"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
