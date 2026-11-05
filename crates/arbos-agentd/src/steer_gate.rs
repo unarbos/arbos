@@ -22,6 +22,25 @@
 //! - [`SteerGate::hold`] is what a delivery calls. It waits while a message of that chat is still
 //!   being routed, and answers [`Hold::SteerFirst`] when a correction is sitting unread in the
 //!   worker's session.
+//! - [`SteerGate::steer_first_now`] is the same question without the wait, for the last look
+//!   before a row is written — see "asked at the door is not asked at the counter" below.
+//!
+//! **Asked at the door is not asked at the counter (Jacob, Test5 round 12, `r12race`, agentd
+//! 0.1.196 `508151f6a` — this module's own fix, on its first retest).** The first cut asked once,
+//! at the top of `media::deliver`, and then let the delivery run on: `upload` to the relay,
+//! `Agent::room`, and the wait for the chat's room lock — the lock the routing lane needs too, so
+//! a delivery is *routinely* parked there while a correction is being routed. The row the user
+//! sees is written at the end of all that. So a delivery could pass the gate while the chat was
+//! quiet and write its row seconds later with the correction already in the worker's session: a
+//! gate consulted strictly before the window it exists to cover. Round 12 recorded the ask at
+//! 13:12:23, the correction at 13:12:24, and the uncorrected CSV in the chat at 13:12:29 — the
+//! same second the steer reached the session.
+//!
+//! Both held surfaces now ask again on the far side of the upload, and once more under the room
+//! lock through [`SteerGate::steer_first_now`], where awaiting is not allowed: the routing lane
+//! takes that lock, so a delivery that waited for routing while holding it would deadlock.
+//! Asking [`SteerGate::hold`] twice does not double the delay — [`SteerGate::look`] bounds the
+//! wait by each mark's own age, so every call ends at `mark.since + cap` however many are made.
 //!
 //! **Why a refusal and not a longer wait.** pi hands a steer to a session between tool calls, so
 //! a worker parked inside `deliver_file` cannot read the correction while that call is held. The
@@ -184,6 +203,19 @@ impl SteerGate {
         self.lock().jobs.remove(job_id);
     }
 
+    /// Is a correction of `job_id` sitting unread right now? Asked without waiting.
+    ///
+    /// The last look before a row is written, which happens under the chat's room lock. That
+    /// lock is one the routing lane takes as well, so a delivery holding it may not await
+    /// anything that routing has to finish first — [`Self::hold`] under the lock would deadlock
+    /// against the turn it is waiting for. This reads the one fact that needs no waiting.
+    ///
+    /// Consumes the same one-refusal-per-correction budget as [`Self::hold`], so a worker whose
+    /// queue signal never arrives posts on its next attempt rather than never.
+    pub(crate) fn steer_first_now(&self, job_id: &str) -> bool {
+        take_unread(&mut self.lock(), job_id)
+    }
+
     /// Hold a delivery of `job_id` until the chat has nothing in flight, or `cap` runs out.
     ///
     /// `cap` is a hard bound by construction and not a deadline this loop polices: a mark older
@@ -230,9 +262,7 @@ impl SteerGate {
         let mut s = self.lock();
         // An unread correction decides on its own: there is nothing to learn from waiting for the
         // rest of the routing, because the answer the routing would give has arrived.
-        if s.jobs.get(job_id).is_some_and(JobSteers::unread) {
-            let j = s.jobs.entry(job_id.to_owned()).or_default();
-            j.refused = j.delivered;
+        if take_unread(&mut s, job_id) {
             return Look::Decided(Hold::SteerFirst);
         }
         // Wait while any message of this chat is still live, until the last of them is `cap` old.
@@ -272,6 +302,19 @@ impl SteerGate {
 enum Look {
     Decided(Hold),
     Wait(Duration),
+}
+
+/// Is a correction of `job_id` unread, and if so claim the refusal for it.
+///
+/// Shared by [`SteerGate::look`] and [`SteerGate::steer_first_now`] so the waiting and
+/// non-waiting looks cannot answer the same state differently.
+fn take_unread(s: &mut State, job_id: &str) -> bool {
+    if !s.jobs.get(job_id).is_some_and(JobSteers::unread) {
+        return false;
+    }
+    let j = s.jobs.entry(job_id.to_owned()).or_default();
+    j.refused = j.delivered;
+    true
 }
 
 /// One message's routing mark, held until this is dropped.

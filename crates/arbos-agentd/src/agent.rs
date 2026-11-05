@@ -4522,6 +4522,24 @@ impl Agent {
             .steer(&sid, text)
             .await
             .map_err(|e| format!("steer failed: {e}"))?;
+        Ok(self
+            .correction_reached_worker(chat_id, &job, &sid, text)
+            .await)
+    }
+
+    /// Everything that follows a correction actually reaching its worker's session.
+    ///
+    /// Its own method because the line above it — the adapter's `steer` — needs a live pi child,
+    /// which a box with no pi binary cannot have (the same limit [`Self::test_note_job_steer`]
+    /// exists for). Split out, the bookkeeping that decides what the user sees is the code a test
+    /// runs rather than a copy of it.
+    async fn correction_reached_worker(
+        &self,
+        chat_id: &str,
+        job: &crate::store::JobRow,
+        sid: &str,
+        text: &str,
+    ) -> Value {
         // Counted before anything else can await: from here on a delivery of this job knows a
         // correction is in its worker's session and will not post the uncorrected file in front
         // of it (bug AB, `steer_gate.rs`).
@@ -4544,16 +4562,30 @@ impl Agent {
         );
         // On the worker's own thread too, so the rollout view shows the steer in place.
         let _ = self.store.t3_append(
-            &sid,
-            Some(&sid),
-            Some(&sid),
+            sid,
+            Some(sid),
+            Some(sid),
             "steer",
             Some("user"),
             text,
             Some(&json!({ "job_id": job.id })),
         );
-        tracing::info!(chat_id, job = %job.id, "job steered");
-        Ok(json!({ "job_id": job.id, "title": job.title, "state": "steered" }))
+        // One ask, one file. If this job has already put a card in the chat, the corrected file
+        // replaces it rather than appending to it (r12steer's three CSVs).
+        let superseded = self
+            .supersede_posted_file_of_running_job(chat_id, &job.id)
+            .await;
+        tracing::info!(chat_id, job = %job.id, superseded = ?superseded, "job steered");
+        let mut out = json!({ "job_id": job.id, "title": job.title, "state": "steered" });
+        if let Some(card_id) = superseded {
+            out["superseded_message_id"] = json!(card_id);
+            out["note"] = json!(
+                "The file this job already posted is marked superseded in the chat. The worker is \
+                 redoing the work with your correction and will post the corrected file in its \
+                 place — one file, not a second copy."
+            );
+        }
+        out
     }
 
     /// The job a `steer_job` is about: a running one as [`Self::resolve_job`] finds it, or — for
@@ -4583,6 +4615,46 @@ impl Agent {
             .into_iter()
             .find(|j| j.state == "done" && Self::ended_inside_replace_window(j))
             .ok_or(err)
+    }
+
+    /// A correction for a *running* job that has already put a file in the chat: mark that card
+    /// superseded, so the corrected file which follows replaces it rather than standing beside it.
+    ///
+    /// [`Self::replace_just_posted_job`] does this for a job that has already finished, and has to
+    /// reopen the job to get a corrected file at all. A running job needs no reopening — the
+    /// correction has just reached its worker — but it has the same duplicate to answer for.
+    /// Round 12's `r12steer` put **three** CSVs in the chat for one ask (13:10:15, 13:10:19,
+    /// 13:10:32): a correction arriving after a card is written leaves that card standing, and the
+    /// corrected file is appended beside it. The steer gate suppresses the stale delivery when the
+    /// correction beats the row (`steer_gate.rs`); this is the other side of that line, for the
+    /// corrections that arrive after it.
+    ///
+    /// Only inside [`crate::config::STEER_REPLACE_WINDOW_MS`] of the card, and only while the card
+    /// is still in the chat — a correction minutes after a file is a new ask, not a replacement.
+    async fn supersede_posted_file_of_running_job(
+        &self,
+        chat_id: &str,
+        job_id: &str,
+    ) -> Option<String> {
+        let (card_id, posted_at) = self.job_last_file(job_id).await?;
+        if arbos_core::ids::now_ms() - posted_at > crate::config::STEER_REPLACE_WINDOW_MS {
+            return None;
+        }
+        let host = self.sync.host(chat_id).await?;
+        {
+            let h = host.lock().await;
+            // The card has to still be there to be superseded; a row that went is a new delivery.
+            h.doc.message(&card_id)?;
+            h.doc
+                .set_message_fields(&card_id, &[("superseded", json!(true))]);
+        }
+        tracing::info!(
+            chat_id,
+            job = job_id,
+            card = %card_id,
+            "the file this job already posted is superseded by the user's correction"
+        );
+        Some(card_id)
     }
 
     /// Did this job finish recently enough for a correction to replace its file?
@@ -13741,6 +13813,22 @@ impl Agent {
     /// box with no pi binary cannot have.
     pub(crate) fn test_note_job_steer(&self, job_id: &str, text: &str) {
         let _ = self.store.append_job_steer(job_id, text);
+    }
+
+    /// Test seam: the half of `steer_job_in` that runs once a correction has reached the worker's
+    /// session. Everything but the adapter call, which needs the live pi child a box with no pi
+    /// binary cannot have — the same limit as [`Agent::test_note_job_steer`].
+    pub(crate) async fn test_correction_reached_worker(
+        self: &Arc<Self>,
+        chat_id: &str,
+        job_id: &str,
+        text: &str,
+    ) -> Result<Value, String> {
+        let job = self.resolve_steer_target(chat_id, job_id)?;
+        let sid = job.subagent_id.clone().ok_or("the job has no worker yet")?;
+        Ok(self
+            .correction_reached_worker(chat_id, &job, &sid, text)
+            .await)
     }
 
     /// Test seam: `steer_job` for a named chat rather than the running turn's, which is the only
