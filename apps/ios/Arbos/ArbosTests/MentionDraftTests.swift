@@ -1,3 +1,4 @@
+import SwiftUI
 import XCTest
 @testable import Arbos
 
@@ -198,6 +199,21 @@ final class MentionDraftTests: XCTestCase {
         XCTAssertEqual(c.attributedOffset(forPlain: 7, mentions: mentions), 4, "after the chip")
         XCTAssertEqual(c.attributedOffset(forPlain: 10, mentions: mentions), 7)
         XCTAssertEqual(c.attributedOffset(forPlain: 5, mentions: mentions), 4, "inside the chip snaps after it")
+    }
+
+    /// Affinity, 2026-10-29 (Mac twin in `mention.rs`): `@A` (Scout, a chat member with a photo)
+    /// and a directory person also named "Scout" — the chip is the first one on every rebuild,
+    /// never the dictionary's pick.
+    func testASharedDisplayNameResolvesToTheFirstEntityOnEveryRebuild() {
+        for _ in 0..<32 {
+            let entry = { (id: String) in
+                MentionEntry(name: "Scout", target: .agent(projectId: id), picture: AnyView(EmptyView()))
+            }
+            let table = MentionTable(entries: [("a", entry("p_member")), ("le-scout", entry("p_directory"))])
+            let chips = table.find(in: table.display("@A did our server get nuked?"))
+            XCTAssertEqual(chips.count, 1)
+            XCTAssertEqual(chips.first?.1.target, .agent(projectId: "p_member"))
+        }
     }
 }
 
