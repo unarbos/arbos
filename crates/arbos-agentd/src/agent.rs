@@ -2204,18 +2204,24 @@ impl Agent {
 
     /// The room to write a reply into, for a lane that resolved its handle before waiting.
     ///
-    /// **Requirement on every caller that closes a room: a room dropped because it is *cold* —
-    /// a cap, an idle sweep, anything meaning "we may want this chat again" — must leave
-    /// `DocHost::closed` false. Only leaving a chat for good may set it.**
+    /// **Requirement on every closer: a room dropped because it is *cold* — a cap, an idle
+    /// sweep, anything meaning "we may want this chat again" — records nothing against the
+    /// chat. Only leaving a chat for good records it ([`SyncHub::may_open`]).**
     ///
-    /// That is the condition this function is correct under, not a remark about how the code
-    /// happens to behave today, and it is worth stating because both ways of getting it wrong
-    /// have already been bugs. Reopen a chat the agent was *removed* from and the box redials a
-    /// room the relay answers 403 to, every 16 s, until it restarts (#1440). Decline to reopen
-    /// a room that was merely cold and the reply is written into a `ChatDoc` nothing pushes —
-    /// invisible to the user and to every gate we have. `closed` is the only thing that tells
-    /// those apart, so `reply_dropped_closed_room` below is what the requirement costs when it
-    /// is broken: at least the loss is loud and countable instead of silent.
+    /// That is the condition this function is correct under, not a remark about how today's
+    /// closers happen to behave, which is what makes a future closer's violation a bug against
+    /// a stated rule rather than a surprise. Both ways of getting it wrong have already been
+    /// bugs. Reopen a chat the agent was *removed* from and the box redials a room the relay
+    /// answers 403 to, every 16 s, until it restarts (#1440). Decline to reopen a room that was
+    /// merely cold and the reply is written into a `ChatDoc` nothing pushes — invisible to the
+    /// user and to every gate we have. So `reply_dropped_closed_room` below is what a broken
+    /// requirement costs: at least the loss is loud and countable instead of silent.
+    ///
+    /// The record is the hub's and is keyed on the chat, not a flag on the handle. A flag can
+    /// only be read by a caller already holding a host, and most writers resolve fresh; worse,
+    /// it goes stale. A chat left, re-added, and then dropped cold leaves the handle this lane
+    /// carries still marked from the removal, so reading it would decline a chat the agent is a
+    /// live member of — which is `a_reply_through_a_stale_handle_survives_a_rejoin_and_a_cold_drop`.
     ///
     /// Why any of this is needed: a `SharedHost` is resolved once and then carried — into a
     /// spawned job task, or across `await_send_order` and `turn_lock`. The hub can drop the room
@@ -2225,16 +2231,17 @@ impl Agent {
         if let Some(live) = self.sync.host(chat_id).await {
             return live;
         }
-        // Gone from the hub and marked closed: by the requirement above, a chat the agent was
-        // removed from. The reply goes where it was always going to go, which is nowhere — said
-        // out loud and counted, because if that requirement is ever broken this line is all that
-        // stands between a dropped reply and silence.
-        if held.lock().await.closed {
+        // Gone from the hub, and the hub says this box may not open it again: by the
+        // requirement above, a chat the agent was removed from. The reply goes where it was
+        // always going to go, which is nowhere — said out loud and counted, because if that
+        // requirement is ever broken this line is all that stands between a dropped reply and
+        // silence.
+        if !self.sync.may_open(chat_id).await {
             tracing::warn!(
                 chat_id,
-                "the chat's room is closed, so this reply is written where nothing will push it; \
-                 if the room was closed for being cold rather than left for good, that is the \
-                 bug — a cold drop must leave `closed` false"
+                "the chat's room is closed and this box may not open it again, so this reply is \
+                 written where nothing will push it; if the room was dropped for being cold \
+                 rather than left for good, that is the bug — a cold drop must record nothing"
             );
             let _ = self
                 .post_timing("reply_dropped_closed_room", 1, Some("send_order"))
@@ -3490,9 +3497,12 @@ impl Agent {
         // is owed an answer and will not write a row in front of it (bug M).
         let _in_flight =
             matches!(cmd.kind.as_str(), "send" | "answer").then(|| self.claim_send_in_flight());
-        let Some(host) = self.sync.host(chat_id).await else {
-            return Err(anyhow!("no room for chat {chat_id}"));
-        };
+        // A command is work, so the idle close leaves its room alone (#2367) — but a command
+        // older than that pin still has to run, so the room is opened rather than refused.
+        let host = self
+            .room(chat_id)
+            .await
+            .map_err(|e| anyhow!("no room for chat {chat_id}: {e}"))?;
         // People chats route by the judge (`people.rs`): a message not for this agent is left
         // pending for whoever it is for; humans' own sends are theirs. When the judge picked
         // several agents the send stays `taken` until each has replied — see
@@ -3926,15 +3936,28 @@ impl Agent {
                 h.doc.finish_message(&id, MessageStatus::Done);
             }
         }
-        {
+        let evicted: Vec<(String, CommandView)> = {
             let mut owed = self.pi_owed_sends.lock().await;
             owed.retain(|(_, held)| {
                 held.payload.get("messageId").and_then(Value::as_str) != Some(&user_msg_id)
             });
             owed.push((chat_id.to_owned(), cmd.clone()));
-            while owed.len() > Self::PI_OWED_MAX {
-                owed.remove(0);
-            }
+            let over = owed.len().saturating_sub(Self::PI_OWED_MAX);
+            owed.drain(..over).collect()
+        };
+        // The bound above is deliberate and the eviction is the intended behaviour; the silence
+        // was not. The user whose message goes has already read the line promising the agent
+        // would come back to them, so the drop is recorded even though nothing will retry it.
+        for (lost_chat, lost_cmd) in evicted {
+            tracing::warn!(
+                chat_id = lost_chat,
+                command_id = %lost_cmd.id,
+                "the owed queue is full; the oldest promised message is dropped"
+            );
+            self.append_audit(
+                "owed_send_evicted",
+                json!({ "chat_id": lost_chat, "command_id": lost_cmd.id }),
+            );
         }
         self.append_audit(
             "send_owed_while_restarting",
@@ -3986,9 +4009,28 @@ impl Agent {
         }
         let owed: Vec<(String, CommandView)> =
             std::mem::take(&mut *self.pi_owed_sends.lock().await);
+        // The list is emptied above, before anything is decided, so from here every exit either
+        // delivers, restores or records. A path that merely skips has consumed the promise and
+        // lost the message, which is the contentless row this whole part exists to prevent — so
+        // the one that cannot be delivered is recorded rather than restored: a chat this box left
+        // for good never becomes deliverable, and an entry put back for it would sit in the queue
+        // and be retried on every tick.
         for (chat_id, cmd) in owed {
-            let Some(host) = self.sync.host(&chat_id).await else {
-                continue;
+            let host = match self.room(&chat_id).await {
+                Ok(h) => h,
+                Err(e) => {
+                    tracing::warn!(
+                        chat_id,
+                        command_id = %cmd.id,
+                        error = %e,
+                        "the promised message has nowhere to go and is dropped"
+                    );
+                    self.append_audit(
+                        "owed_send_undeliverable",
+                        json!({ "chat_id": chat_id, "command_id": cmd.id, "reason": e.to_string() }),
+                    );
+                    continue;
+                }
             };
             if self.message_answered(&host, &cmd).await {
                 continue;
@@ -4002,8 +4044,13 @@ impl Agent {
                 "owed_send_resumed",
                 json!({ "chat_id": chat_id, "command_id": cmd.id }),
             );
+            let command_id = cmd.id.clone();
             if let Err(e) = self.handle_command(&chat_id, cmd).await {
                 tracing::warn!(chat_id, error = %e, "the promised message could not be answered");
+                self.append_audit(
+                    "owed_send_undeliverable",
+                    json!({ "chat_id": chat_id, "command_id": command_id, "reason": e.to_string() }),
+                );
             }
         }
     }
@@ -8724,9 +8771,7 @@ impl Agent {
                 None => return Err("no turn is running".into()),
             }
         };
-        let Some(host) = self.sync.host(&chat_id).await else {
-            return Err("no room for this chat".into());
-        };
+        let host = self.room(&chat_id).await.map_err(|e| e.to_string())?;
         // The same signal the burst path reads (`forced_job.rs`), read from the ask itself: a
         // job the user asked for in words must not meet the per-chat cap in one path and pass
         // it in the other.
@@ -9075,12 +9120,32 @@ impl Agent {
                 return Err(CANCEL_CLAIM_REFUSAL.into());
             }
         }
+        // The idle close and the room cap make "no open room" a live state here (#2367), and
+        // this is the writer that holds nothing: `hooks.rs` calls straight in, so there is no
+        // handle to ask and a refusal would simply swallow the message. Opening is safe because
+        // the hub refuses a chat the agent was removed from — the judgement is the record's, not
+        // this site's, which is why #1440's 403 loop cannot come back through here.
+        //
+        // The chat is read under a short lock, the room opened with the lock released, and the
+        // lock then re-taken: opening awaits the relay, and the turn lock is the one every part
+        // of a turn waits on. `post_to_this_chat_from_turn` resolves outside the lock for the
+        // same reason, and this inherits the seam that path already accepts — the turn can
+        // change between the two acquisitions, so the host is the one this chat had when it was
+        // read, and everything written below belongs to the turn read after it.
+        let chat_id = {
+            let tl = self.turn.lock().await;
+            match tl.as_ref() {
+                Some(t) => t.chat_id.clone(),
+                None => return Err("no turn is running".into()),
+            }
+        };
+        let host = match self.room(&chat_id).await {
+            Ok(h) => h,
+            Err(e) => return Err(format!("no room for this chat: {e}")),
+        };
         let mut tl = self.turn.lock().await;
         let Some(t) = tl.as_mut() else {
             return Err("no turn is running".into());
-        };
-        let Some(host) = self.sync.host(&t.chat_id).await else {
-            return Err("no room for this chat".into());
         };
         // Silence is an outcome, not a message: a bubble that only says the agent is not
         // answering never reaches a shared chat. The tool answers as if posted, so the model
@@ -9658,7 +9723,9 @@ impl Agent {
                     h.doc
                         .set_message_fields(&t.assistant_msg_id, &[("waitingUser", json!(true))]);
                 }
-            } else if let Some(host) = self.sync.host(&chat_id).await {
+            // Standalone ask on the main chat, which this turn is not running in and the idle
+            // close may have taken (#2367): open it, or the question is never asked.
+            } else if let Ok(host) = self.room(&chat_id).await {
                 // Standalone ask on the main chat; the side-thread turn just stops.
                 let h = host.lock().await;
                 let last_user = h
@@ -9944,7 +10011,10 @@ impl Agent {
             let Some(chat_id) = chat_id.as_deref() else {
                 continue;
             };
-            let Some(host) = self.sync.host(chat_id).await else {
+            // Boot's room budget (#2367) may not have opened this chat's room; a working
+            // indicator left behind by the dead box still has to be closed. There is one such
+            // chat per interrupted subagent, so this opens a handful of rooms at most.
+            let Ok(host) = self.room(chat_id).await else {
                 continue;
             };
             let h = host.lock().await;
@@ -11640,8 +11710,14 @@ impl Agent {
             let _ = self
                 .store
                 .set_job_state(&j.id, "interrupted", Some("box restart"));
-            let Some(host) = self.sync.host(&j.chat_id).await else {
-                continue;
+            // A chat with a job left mid-flight needs its room whether or not boot's room
+            // budget opened it (#2367), or this line and the restart would be dropped.
+            let host = match self.room(&j.chat_id).await {
+                Ok(h) => h,
+                Err(e) => {
+                    tracing::warn!(error = %e, chat = %j.chat_id, job = %j.id, "job reclaim: no room");
+                    continue;
+                }
             };
             let restartable = j.restarts < 1 && job_restart_allowed(&j, &self.cfg.project_id);
             let line = if restartable {

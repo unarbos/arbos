@@ -577,10 +577,29 @@ impl Agent {
         extra
     }
 
+    /// The host to write this chat's rows into, opening the room when the idle close or the
+    /// room cap has taken it (#2367). Every write path that must survive a closed room resolves
+    /// its host here rather than through `sync.host`, which answers `None` for a closed room.
+    ///
+    /// Refuses a chat the agent was removed from, which the hub records because this resolves
+    /// fresh and has no handle of its own to consult: reopening is the 403 every 16 s of #1440.
+    ///
+    /// Most callers resolve with `if let Ok(host)` and write nothing. The two that hand the
+    /// refusal onwards are the message tools — the turn's own `send_message`, and a job's
+    /// progress note (#2777) — where it reaches `mcp.rs` as a one-shot tool error. So the
+    /// sentence is written for a model: what happened, and that there is nothing to retry.
     pub(crate) async fn room(&self, chat_id: &str) -> Result<SharedHost> {
         match self.sync.host(chat_id).await {
             Some(h) => Ok(h),
-            None => self.sync.open_room(chat_id).await,
+            None => {
+                if !self.sync.may_open(chat_id).await {
+                    anyhow::bail!(
+                        "the agent is not in chat {chat_id} any more, so nothing can be posted \
+                         there; retrying will not change that"
+                    );
+                }
+                self.sync.open_room(chat_id).await
+            }
         }
     }
 

@@ -422,8 +422,11 @@ async fn call_tool(
             let chat_id = s("chat_id")
                 .filter(|c| !c.trim().is_empty())
                 .unwrap_or_else(|| chat_for_scratch.clone());
-            let Some(host) = a.sync.host(&chat_id).await else {
-                return err_result(format!("no open chat {chat_id} on this box"));
+            // Any chat of this project, not only the one the turn runs in, so the idle close may
+            // well have taken its room (#2367). Opening it is the difference between reading the
+            // history and telling the agent the chat does not exist.
+            let Ok(host) = a.room(&chat_id).await else {
+                return err_result(format!("no chat {chat_id} on this box"));
             };
             let all = { host.lock().await.doc.messages() };
             let row = |m: &arbos_core::doc::MessageView, full: bool| -> Value {

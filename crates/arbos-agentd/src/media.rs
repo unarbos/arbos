@@ -215,9 +215,11 @@ pub(crate) async fn target(a: &Agent, session_id: Option<&str>) -> Option<Target
 }
 
 /// `inReplyTo` (the ask a worker row answers) and the id of the job the worker runs, read from
-/// the worker's own progress row when the chat is open.
+/// the worker's own progress row. The room is opened if the idle close took it (#2367): without
+/// the job id the duplicate guard below cannot fire, so a closed room would both detach the card
+/// from its ask and put the same file in the chat twice (#2757).
 async fn worker_row(a: &Agent, chat_id: &str, row_id: &str) -> (Option<String>, Option<String>) {
-    let Some(host) = a.sync.host(chat_id).await else {
+    let Ok(host) = a.room(chat_id).await else {
         return (None, None);
     };
     let h = host.lock().await;
@@ -484,9 +486,9 @@ pub async fn deliver(
         if let Some(message_id) = a.job_file_posted(job_id, &key).await {
             // Only a card that is still in the chat may stand in for this one; if it went, the
             // honest answer is to write a new one.
-            let standing = match a.sync.host(&target.chat_id).await {
-                Some(host) => row_holds_blob(&*host.lock().await, &message_id, &key),
-                None => false,
+            let standing = match a.room(&target.chat_id).await {
+                Ok(host) => row_holds_blob(&*host.lock().await, &message_id, &key),
+                Err(_) => false,
             };
             if standing {
                 // The sentence that says the file is posted needs a read-back row from this
@@ -506,9 +508,10 @@ pub async fn deliver(
         }
     }
     upload(a, &target.chat_id, bytes, &key, &mime).await?;
-    let Some(host) = a.sync.host(&target.chat_id).await else {
-        anyhow::bail!("chat {} is not open on this box", target.chat_id);
-    };
+    let host = a
+        .room(&target.chat_id)
+        .await
+        .map_err(|e| anyhow::anyhow!("chat {} has no room on this box: {e}", target.chat_id))?;
     let msg_id = ulid();
     let caption = caption.map(str::trim).filter(|c| !c.is_empty());
     {
@@ -938,6 +941,253 @@ mod tests {
             serde_json::from_str(elsewhere["content"][0]["text"].as_str().unwrap()).unwrap();
         assert!(r.get("already_posted").is_none(), "another job delivers");
         assert_eq!(attachment_rows(&*host.lock().await), 3);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// #2367 against #2757: closing an idle room must not undo "one file, one card". Every
+    /// closed-room branch of this path was dead code while a box held a room open for every
+    /// chat it had ever had; the idle close makes them reachable for the first time.
+    ///
+    /// The duplicate guard needs two things out of the doc — the job id on the worker's row and
+    /// the card that already holds the bytes — and a closed room used to answer "neither". The
+    /// job id went missing first, which skipped the guard entirely, and the file went into the
+    /// chat a second time.
+    #[tokio::test]
+    async fn a_closed_room_does_not_turn_one_file_into_two_cards() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATATTACH0000000009";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let ask = ulid();
+        {
+            let h = host.lock().await;
+            h.doc
+                .append_user_message(
+                    &ask,
+                    "price the plans and send me the sheet",
+                    "dev-mac",
+                    &arbos_core::doc::UserMessageOpts::default(),
+                )
+                .unwrap();
+        }
+        let job = "01TESTJOB00000000000000009";
+        let sid = "01TESTWORKERSESSION0000090";
+        worker_session(&agent, &host, chat, &ask, job, sid).await;
+        let dir = out_dir(&agent.cfg);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("plans.csv"), b"plan,price\nbasic,10\n").unwrap();
+
+        let first = deliver_file(
+            &agent,
+            &json!({ "path": "out/plans.csv", "session_id": sid }),
+        )
+        .await;
+        let r: Value = serde_json::from_str(first["content"][0]["text"].as_str().unwrap()).unwrap();
+        let card = r["message_id"].as_str().unwrap().to_owned();
+        assert_eq!(attachment_rows(&*host.lock().await), 1);
+        drop(host);
+
+        // Nobody touched the chat for its quiet window: the room persists itself and goes. This
+        // is the end state of the idle close — the doc is on disk, the host is gone.
+        agent
+            .sync
+            .persist(&agent.sync.host(chat).await.expect("open"))
+            .await
+            .unwrap();
+        agent.sync.test_close_cold(chat).await;
+        assert!(
+            !agent.sync.is_open(chat).await,
+            "the room is closed before the second delivery"
+        );
+
+        // The same job delivers the same bytes again, with its room closed.
+        let again = deliver_file(
+            &agent,
+            &json!({ "path": "out/plans.csv", "session_id": sid }),
+        )
+        .await;
+        let r: Value = serde_json::from_str(again["content"][0]["text"].as_str().unwrap()).unwrap();
+        let host = agent
+            .sync
+            .host(chat)
+            .await
+            .expect("the delivery reopened it");
+        assert_eq!(
+            attachment_rows(&*host.lock().await),
+            1,
+            "a closed room wrote a second card for a file the job had already posted"
+        );
+        assert_eq!(r["already_posted"], json!(true));
+        assert_eq!(
+            r["message_id"],
+            json!(card),
+            "the answer names the card that is already in the chat"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// #2367: a worker's file card keeps the ask it answers and the job it came from even when
+    /// the idle close took the room first. Both are read off the worker's own row in the doc, so
+    /// a closed room used to detach the card from the conversation it belongs to.
+    #[tokio::test]
+    async fn a_closed_room_keeps_a_worker_card_tied_to_its_ask_and_job() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATATTACH0000000010";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let ask = ulid();
+        {
+            let h = host.lock().await;
+            h.doc
+                .append_user_message(
+                    &ask,
+                    "draw me the logo",
+                    "dev-mac",
+                    &arbos_core::doc::UserMessageOpts::default(),
+                )
+                .unwrap();
+        }
+        let job = "01TESTJOB00000000000000010";
+        let sid = "01TESTWORKERSESSION0000100";
+        worker_session(&agent, &host, chat, &ask, job, sid).await;
+        let dir = out_dir(&agent.cfg);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("logo.png"), b"\x89PNG\r\n\x1a\nlogo").unwrap();
+        drop(host);
+
+        agent
+            .sync
+            .persist(&agent.sync.host(chat).await.expect("open"))
+            .await
+            .unwrap();
+        agent.sync.test_close_cold(chat).await;
+        assert!(!agent.sync.is_open(chat).await);
+
+        let posted = deliver_file(
+            &agent,
+            &json!({ "path": "out/logo.png", "session_id": sid }),
+        )
+        .await;
+        let r: Value =
+            serde_json::from_str(posted["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(r["posted"], json!(true));
+        let card_id = r["message_id"].as_str().unwrap().to_owned();
+
+        let host = agent
+            .sync
+            .host(chat)
+            .await
+            .expect("the delivery reopened it");
+        {
+            let h = host.lock().await;
+            let card = h.doc.message(&card_id).expect("the card is in the doc");
+            assert_eq!(
+                card.rest.get("inReplyTo").and_then(Value::as_str),
+                Some(ask.as_str()),
+                "a card delivered into a closed room lost the ask it answers"
+            );
+        }
+        // The job the card came from is recorded against its bytes, not written on the row —
+        // and that record is what the duplicate guard keys on, so losing it is how a closed
+        // room produced a second card.
+        assert_eq!(
+            agent
+                .job_file_posted(job, &blob_key(b"\x89PNG\r\n\x1a\nlogo"))
+                .await,
+            Some(card_id),
+            "a card delivered into a closed room lost its job"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Where #2367 meets #2751. Closing idle rooms made `deliver`'s read-back-failure branch
+    /// reachable for a chat whose room had been closed — before, the function bailed at the
+    /// room lookup and never got that far. That branch used to `delete_message` the row it had
+    /// just written, and agentd's rows carry no author the relay's push guard accepts, so the
+    /// removal comes back `not_yours` and parks every op queued behind it, replies included.
+    ///
+    /// Two honest limits on what this pins. The trigger is not reproducible: `row_holds_blob`
+    /// reads back the part `deliver` itself just added, so making it fail would need the
+    /// production path to lie. And the refusal itself lives in the relay, which this test does
+    /// not run. What it does cover is the state this change newly reaches — a room the idle
+    /// close took, reopened on demand by a write path — and the property the relay cares
+    /// about: the bytes leaving the box for that room carry no removal. The second half shows
+    /// the assertion has teeth, by taking the same row off the far side with a delete.
+    #[tokio::test]
+    async fn a_failed_delivery_in_a_reopened_room_pushes_no_removal() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATATTACH0000000011";
+        let ask = ulid();
+        {
+            let host = agent.sync.open_room(chat).await.unwrap();
+            let h = host.lock().await;
+            h.doc
+                .append_user_message(
+                    &ask,
+                    "post the plan",
+                    "dev-mac",
+                    &arbos_core::doc::UserMessageOpts::default(),
+                )
+                .unwrap();
+        }
+        agent
+            .sync
+            .persist(&agent.sync.host(chat).await.expect("open"))
+            .await
+            .unwrap();
+        agent.sync.test_close_cold(chat).await;
+        assert!(!agent.sync.is_open(chat).await, "the idle close took it");
+
+        // The write path reopens it, which is the whole of this PR's change here.
+        let host = agent.room(chat).await.expect("a write path reopens it");
+        let row = ulid();
+        let (mark, history, pushed) = {
+            let h = host.lock().await;
+            let mark = h.doc.oplog_vv();
+            // What the relay already holds for this room before the failed delivery.
+            let history = h.doc.export_updates_since(&loro::VersionVector::default());
+            h.doc
+                .start_assistant_message(&row, &ask, &agent.cfg.device_id);
+            h.doc
+                .finish_message(&row, arbos_core::doc::MessageStatus::Done);
+            // Exactly what the read-back-failure branch does with the row it wrote.
+            crate::agent::retire_row(&h.doc, &row);
+            (mark.clone(), history, h.doc.export_updates_since(&mark))
+        };
+
+        let mut far_side = arbos_core::doc::ChatDoc::new(Some(9), true);
+        far_side.import(&history).expect("the room's history");
+        let status = far_side
+            .import(&pushed)
+            .expect("the relay applies the batch");
+        assert!(
+            status.pending.is_none(),
+            "the batch did not apply on its own, so the room is jammed behind it"
+        );
+        let m = far_side
+            .message(&row)
+            .expect("no removal crossed the wire: the row is still on the far side");
+        assert_eq!(
+            m.rest.get("hidden").and_then(Value::as_bool),
+            Some(true),
+            "the row reached the relay unhidden, so both apps would draw the failed delivery"
+        );
+        assert_eq!(m.status.as_str(), "done", "and it arrives finished");
+
+        // Teeth: a delete of that same row does take it off the far side, which is what used
+        // to be offered to the relay here and what it refuses.
+        let deleted = {
+            let h = host.lock().await;
+            h.doc.delete_message(&row).unwrap();
+            h.doc.export_updates_since(&mark)
+        };
+        let mut other_side = arbos_core::doc::ChatDoc::new(Some(11), true);
+        other_side.import(&history).expect("the room's history");
+        other_side
+            .import(&deleted)
+            .expect("the bytes themselves are well formed");
+        assert!(
+            other_side.message(&row).is_none(),
+            "a delete left the row in place, so this test cannot tell the two apart"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

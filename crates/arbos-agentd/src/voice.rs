@@ -282,8 +282,10 @@ impl Agent {
                 }
             }
         }
-        let recent = match self.sync.host(chat_id).await {
-            Some(host) => {
+        // A call can start on a chat nobody has touched for hours, whose room the idle close
+        // took (#2367); without opening it the agent joins the call knowing none of the chat.
+        let recent = match self.room(chat_id).await {
+            Ok(host) => {
                 let h = host.lock().await;
                 let msgs = h.doc.messages();
                 let mut out: Vec<Value> = msgs
@@ -307,7 +309,7 @@ impl Agent {
                 }
                 out
             }
-            None => Vec::new(),
+            Err(_) => Vec::new(),
         };
         json!({
             "name": st.name,

@@ -64,7 +64,10 @@ pub struct DocHost {
     seen_commands: std::collections::HashSet<String>,
     recovered: bool,
     ever_caught_up: bool,
-    /// Set by `close_room`: the session ends and is not reopened.
+    /// This host is retired: its session exits at its next tick, and the hub neither hands it
+    /// out nor counts it as open. Every close sets it — `close_room`, `close_all`, and the idle
+    /// and cap close (`close_cold`) — so it says nothing about whether the chat may be opened
+    /// again. Ask [`SyncHub::may_open`] for that.
     pub closed: bool,
     /// Commands issued before this instant are not ours to run: a host opened after the
     /// workspace started (the agent was re-added to a people chat) must not replay the room's
@@ -84,6 +87,16 @@ pub struct DocHost {
     /// When this host was opened, so the legs of a cold chat — opened, connected, caught up —
     /// are durations in the journal rather than timestamps a reader has to subtract.
     pub opened_at: std::time::Instant,
+    /// Last traffic in either direction, and the last time a caller asked the hub for this
+    /// host. The idle close waits for this to go quiet, and the room cap closes the coldest
+    /// room first (#2367).
+    pub last_active_ms: i64,
+    /// Never closed for being idle:
+    /// - the project doc, which carries the box status and the settings;
+    /// - people chats, because the relay's "no box socket on this room" check is per owner,
+    ///   not per project (`Room::has_box`), so a sibling workspace's socket would keep the
+    ///   reopen push from being queued and this agent would never see the row.
+    pub keep_open: bool,
 }
 
 /// What a room's relay session is doing right now (2026-10-23 #1575: two rooms came back
@@ -126,6 +139,45 @@ const OVERSIZE_STRIKES: u32 = 3;
 fn redial_gate() -> &'static tokio::sync::Semaphore {
     static GATE: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
     GATE.get_or_init(|| tokio::sync::Semaphore::new(REDIAL_CONCURRENCY))
+}
+
+/// Default quiet window of [`room_idle_ms`].
+const ROOM_IDLE_SECS: i64 = 15 * 60;
+/// Default room cap of [`max_open_rooms`].
+const MAX_OPEN_ROOMS: usize = 64;
+/// Work in a room's doc keeps the room open whatever its quiet window says. A row still marked
+/// `streaming` after this long is wreckage from a turn that died, not work (#2367: without a
+/// bound, one such row would pin its room open for the life of the box).
+const WORK_STALE_MS: i64 = 2 * 60 * 60 * 1000;
+/// How often a quiet room runs the doc half of the idle check (the cheap half runs every tick).
+const IDLE_CHECK_EVERY: Duration = Duration::from_secs(60);
+
+fn env_i64(key: &str, default: i64) -> i64 {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .unwrap_or(default)
+        .max(0)
+}
+
+/// A chat room with no traffic for this long closes itself (#2367): before that, agentd opened
+/// a room for every chat a box had ever had and closed none, so an idle box with 1,667 chats
+/// held 1,667 relay websockets and burnt 1.22 of its 2 cores on their timers.
+///
+/// A row that lands in a closed room is not lost: the relay sees that no socket of the box is
+/// on the room and queues a `chat_open` push (`boxes::after_person_row`), which reopens it.
+/// `ARBOS_ROOM_IDLE_SECS=0` keeps every room open for good, as before.
+pub fn room_idle_ms() -> i64 {
+    static V: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_i64("ARBOS_ROOM_IDLE_SECS", ROOM_IDLE_SECS) * 1000)
+}
+
+/// At most this many chat rooms stay open per workspace, whatever their quiet window: opening
+/// one over the line closes the coldest room that holds no work. `ARBOS_MAX_OPEN_ROOMS=0`
+/// lifts the cap. The project doc and people chats are outside it (see `DocHost::keep_open`).
+pub fn max_open_rooms() -> usize {
+    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_i64("ARBOS_MAX_OPEN_ROOMS", MAX_OPEN_ROOMS as i64) as usize)
 }
 
 /// A pending people-chat `send` older than this at catch-up is history, not work: nobody asked
@@ -321,6 +373,59 @@ impl DocHost {
         }
     }
 
+    /// Traffic, or a caller asking for this host: the room is in use now.
+    fn touch(&mut self) {
+        self.last_active_ms = now_ms();
+    }
+
+    /// No traffic for [`room_idle_ms`]. Cheap, unlike [`DocHost::work_in_flight`].
+    pub fn quiet(&self, now: i64) -> bool {
+        room_idle_ms() > 0
+            && !self.keep_open
+            && !self.closed
+            && now.saturating_sub(self.last_active_ms) >= room_idle_ms()
+    }
+
+    /// Nothing in flight and nothing local the relay has not acked: closing the room now would
+    /// lose no change.
+    fn settled(&self) -> bool {
+        self.inflight.is_none() && self.doc.oplog_vv() == self.acked_vv
+    }
+
+    /// A turn, job or subagent of this chat is still working, or a command waits to run. Reads
+    /// the whole doc, so it runs at most once a minute per room ([`IDLE_CHECK_EVERY`]).
+    fn work_in_flight(&self, now: i64) -> bool {
+        let fresh = |at: i64| now.saturating_sub(at) < WORK_STALE_MS;
+        if self
+            .doc
+            .commands()
+            .iter()
+            .any(|c| matches!(c.status.as_str(), "pending" | "taken") && fresh(c.issued_at))
+        {
+            return true;
+        }
+        self.doc.messages().iter().any(|m| {
+            matches!(m.status.as_str(), "streaming" | "queued" | "running")
+                && m.rest
+                    .get("createdAt")
+                    .and_then(serde_json::Value::as_i64)
+                    .is_none_or(fresh)
+        })
+    }
+
+    /// May this room close? `quiet_first` is the idle close (wait for the quiet window); the
+    /// room cap closes a cold room without waiting for it. Neither ever closes a room that
+    /// holds work or an unsent change.
+    pub fn closable(&self, now: i64, quiet_first: bool) -> bool {
+        if self.keep_open || self.closed {
+            return false;
+        }
+        if quiet_first && !self.quiet(now) {
+            return false;
+        }
+        self.settled() && !self.work_in_flight(now)
+    }
+
     /// A command this box wrote itself (routine, channel, cross-project message) and will run
     /// directly: keep `new_pending` from handing it to the agent loop a second time.
     pub fn mark_seen(&mut self, cmd_id: &str) {
@@ -495,6 +600,30 @@ pub struct SyncHub {
     pub peer_id: u64,
     /// The room client tasks, so a stopped workspace takes its sockets down with it.
     room_tasks: Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
+    /// Rooms closed for being idle or over the cap since boot (`/box/state`, #2367).
+    closed_cold: Arc<std::sync::atomic::AtomicU64>,
+    /// Chats no writer may open again while this box lives: the agent was removed from one
+    /// (#1440 — reopening made the relay 403 every 16 s until the box restarted), or the
+    /// workspace is stopping. The idle close and the room cap record nothing here, because a
+    /// room they took is still a live chat whose next write reopens it (#2367).
+    ///
+    /// One record, asked by every writer, rather than a flag on each host. A flag on the
+    /// host answers only a caller that already holds one, and `close_room` takes the host out
+    /// of `hosts` before it could be set, so a writer resolving fresh — most of them — would
+    /// have had nothing to read. It is also the record that stays right when a chat is left
+    /// and rejoined while a writer still holds a handle from before: this says the chat is
+    /// open again, where a flag on that stale handle would still say no and the row would go
+    /// into a doc nothing pushes.
+    ///
+    /// Memory only, and that is a choice of which way to fail rather than a gap to close. A
+    /// restart empties it, so the worst a lost entry costs is what this box already did before
+    /// #2367: #1440's 403 every 16 s, loud and in the logs. Persisting it would move the
+    /// failure to the other side — an entry that outlives a rejoin the box never saw would
+    /// leave the agent silently unable to write to a chat it belongs to, with nothing in the
+    /// logs to say why. Anyone persisting this needs the rejoin path to be at least as reliable
+    /// as the removal path first; today both come from the same relay list, but only while the
+    /// process lives.
+    no_reopen: Arc<Mutex<std::collections::HashSet<String>>>,
 }
 
 /// Backoff while the relay refuses a room outright (HTTP 403 / 404: the project was deleted,
@@ -531,6 +660,8 @@ impl SyncHub {
             incoming,
             peer_id,
             room_tasks: Arc::new(Mutex::new(HashMap::new())),
+            closed_cold: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            no_reopen: Arc::new(Mutex::new(std::collections::HashSet::new())),
         }
     }
 
@@ -543,14 +674,43 @@ impl SyncHub {
 
     /// Open a room that is not under this project (a people chat: `people/<chat>`); `doc_project`
     /// is what a fresh doc's `meta.projectId` says.
+    ///
+    /// Refuses a chat this box may not open again, rather than leaving that to callers. The
+    /// refusal is the enforcement of one ordering: a rejoin has to clear the record *before*
+    /// the fresh room can be observed, because a window where the re-add has landed and the
+    /// record still says no is worse than having no record at all — it declines a chat the
+    /// agent is a live member of and the reply is dropped. `note_people_chats` clears as it
+    /// takes the relay's list, before it opens anything; move that clear after the open and
+    /// the open fails here instead of handing out a room nothing was allowed to want.
     pub async fn open_room_named(
         &self,
         chat_id: &str,
         room: &str,
         doc_project: &str,
     ) -> Result<SharedHost> {
-        if let Some(h) = self.hosts.lock().await.get(chat_id) {
-            return Ok(h.clone());
+        if !self.may_open(chat_id).await {
+            anyhow::bail!("chat {chat_id} is one this box left for good; not opening its room");
+        }
+        // An open room is handed back and marked in use. A host left behind by a close is
+        // dropped here and replaced below, so no caller writes into a doc that no session
+        // pushes any more (#2367). `try_lock` keeps the hub lock from waiting on a room lock.
+        {
+            let mut hosts = self.hosts.lock().await;
+            if let Some(h) = hosts.get(chat_id).cloned() {
+                let dead = h
+                    .try_lock()
+                    .map(|mut g| {
+                        if !g.closed {
+                            g.touch();
+                        }
+                        g.closed
+                    })
+                    .unwrap_or(false);
+                if !dead {
+                    return Ok(h);
+                }
+                hosts.remove(chat_id);
+            }
         }
         let room = room.to_owned();
         let (cursor, snapshot, acked) = self.store.room_doc(&room)?.unwrap_or((0, None, None));
@@ -590,6 +750,8 @@ impl SyncHub {
             joined_at_ms: 0,
             link: LinkState::default(),
             opened_at: std::time::Instant::now(),
+            last_active_ms: now_ms(),
+            keep_open: chat_id == PROJECT_DOC_CHAT_ID || room.starts_with("people/"),
         }));
         self.hosts
             .lock()
@@ -606,6 +768,7 @@ impl SyncHub {
         {
             old.abort();
         }
+        self.enforce_room_cap(chat_id).await;
         Ok(host)
     }
 
@@ -614,6 +777,116 @@ impl SyncHub {
         let host = self.hosts.lock().await.get(chat_id).cloned()?;
         let ms = host.lock().await.opened_at.elapsed().as_millis() as i64;
         Some(ms)
+    }
+
+    /// Is this room open? Unlike [`Self::host`] this does not count as use, so the 3 s registry
+    /// pass asking after every chat cannot keep every room open for ever (#2367).
+    pub async fn is_open(&self, chat_id: &str) -> bool {
+        let Some(h) = self.hosts.lock().await.get(chat_id).cloned() else {
+            return false;
+        };
+        h.try_lock().map(|g| !g.closed).unwrap_or(true)
+    }
+
+    /// Keep at most [`max_open_rooms`] chat rooms open: opening one over the line closes the
+    /// coldest room that holds no work. `keep` — the room just opened — is never the one to go.
+    /// A box whose every open room holds work stays over the cap and says so: dropping work to
+    /// meet a number would be worse than the sockets.
+    async fn enforce_room_cap(&self, keep: &str) {
+        let cap = max_open_rooms();
+        if cap == 0 {
+            return;
+        }
+        loop {
+            let now = now_ms();
+            let hosts: Vec<(String, SharedHost)> = self
+                .hosts
+                .lock()
+                .await
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            let mut open = 0usize;
+            let mut coldest: Option<(i64, String, SharedHost)> = None;
+            for (id, h) in hosts {
+                // A room held by someone else is in use: counted, never closed.
+                let Ok(g) = h.try_lock() else {
+                    open += 1;
+                    continue;
+                };
+                if g.closed || g.keep_open {
+                    continue;
+                }
+                open += 1;
+                let (active, closable) = (g.last_active_ms, g.closable(now, false));
+                drop(g);
+                if id != keep && closable && coldest.as_ref().is_none_or(|(a, ..)| active < *a) {
+                    coldest = Some((active, id, h));
+                }
+            }
+            if open <= cap {
+                return;
+            }
+            let Some((_, id, host)) = coldest else {
+                tracing::warn!(
+                    open,
+                    cap,
+                    "room cap: every open room holds work in flight; none closed"
+                );
+                return;
+            };
+            if !self.close_cold(&id, &host, "cap", false).await {
+                return;
+            }
+        }
+    }
+
+    /// Close one room that holds no work: persist it, drop it from the hub, and let its session
+    /// end at its next tick (the socket closes cleanly; the task is not aborted). The doc stays
+    /// on disk, so a reopen resumes from its cursor and re-pushes anything unacked.
+    ///
+    /// Records nothing in [`SyncHub::may_open`] — a room this takes is still a live chat, and a
+    /// writer still holding its handle must reopen rather than write into the retired doc.
+    ///
+    /// Returns false when the room turned out not to be closable after all — a change that
+    /// arrived between the check and the close keeps the room open.
+    async fn close_cold(
+        &self,
+        chat_id: &str,
+        host: &SharedHost,
+        why: &'static str,
+        quiet_first: bool,
+    ) -> bool {
+        let _ = self.persist(host).await;
+        {
+            let mut hosts = self.hosts.lock().await;
+            let Ok(mut g) = host.try_lock() else {
+                return false;
+            };
+            if !g.closable(now_ms(), quiet_first) {
+                return false;
+            }
+            g.closed = true;
+            if hosts.get(chat_id).is_some_and(|h| Arc::ptr_eq(h, host)) {
+                hosts.remove(chat_id);
+            }
+        }
+        // Dropped, not aborted: this is the session's own task on the idle path.
+        self.room_tasks.lock().await.remove(chat_id);
+        self.closed_cold
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        tracing::info!(chat = %chat_id, why, "room closed; a row for it reopens it (chat_open push)");
+        true
+    }
+
+    /// Close this room if it holds no work and has nothing unsent. The secret scrub uses it for
+    /// the rooms it opened only to redact history; a room with changes still in flight stays
+    /// open and the idle close takes it later.
+    pub async fn close_if_settled(&self, chat_id: &str) -> bool {
+        let Some(host) = self.hosts.lock().await.get(chat_id).cloned() else {
+            return false;
+        };
+        self.close_cold(chat_id, &host, "done with it", false).await
     }
 
     /// The agent was (re-)added to this chat while the workspace was running: what happened in
@@ -645,8 +918,13 @@ impl SyncHub {
     /// every 16 s each until the box restarted.
     pub async fn close_all(&self) {
         let hosts: Vec<SharedHost> = self.hosts.lock().await.drain().map(|(_, h)| h).collect();
-        for h in &hosts {
-            h.lock().await.closed = true;
+        {
+            let mut no_reopen = self.no_reopen.lock().await;
+            for h in &hosts {
+                let mut h = h.lock().await;
+                h.closed = true;
+                no_reopen.insert(h.chat_id.clone());
+            }
         }
         for (_, t) in self.room_tasks.lock().await.drain() {
             t.abort();
@@ -659,6 +937,7 @@ impl SyncHub {
     /// reconnect, so an old session kept importing rows and handing commands to the agent loop
     /// beside the host that replaced it (#1440).
     pub async fn close_room(&self, chat_id: &str) {
+        self.no_reopen.lock().await.insert(chat_id.to_owned());
         if let Some(h) = self.hosts.lock().await.remove(chat_id) {
             h.lock().await.closed = true;
         }
@@ -667,8 +946,63 @@ impl SyncHub {
         }
     }
 
+    /// May a writer open this chat's room? `false` for a chat the agent was removed from and
+    /// has not been re-added to, and for every chat of a stopping workspace: reopening either
+    /// is the 403 redial loop of #1440. A cold close (idle or cap) never lands a chat here —
+    /// that room is meant to come back on the next write (#2367).
+    pub async fn may_open(&self, chat_id: &str) -> bool {
+        !self.no_reopen.lock().await.contains(chat_id)
+    }
+
+    /// Test seam: leave a room the way the idle close and the room cap leave it — host out of
+    /// the hub, session ending at its next tick, doc on disk, **nothing recorded against the
+    /// chat**, so the next write reopens it.
+    ///
+    /// Reach for this and not `close_room`, which says the agent was removed from the chat and
+    /// stops every later write from opening it. Three of the media tests here called
+    /// `close_room` while their own comments said "the idle close"; the comments were right and
+    /// the call was wrong, and it only surfaced once that distinction started to matter.
+    ///
+    /// It exists because a harness with no live relay session never settles, so
+    /// `close_if_settled` — the production path — refuses to close anything there.
+    #[cfg(test)]
+    pub(crate) async fn test_close_cold(&self, chat_id: &str) {
+        if let Some(h) = self.hosts.lock().await.remove(chat_id) {
+            h.lock().await.closed = true;
+        }
+        self.room_tasks.lock().await.remove(chat_id);
+    }
+
+    /// The relay says the agent is a member of this chat again, so the next write may open it.
+    ///
+    /// Only the membership paths call this — `note_people_chats`, on the relay's own list or
+    /// its `people_agent_added` push. Membership is the relay's word; a write is only a
+    /// request, and the two must not be confused here.
+    ///
+    /// Deliberately **not** in `open_room` or `open_room_named`, which is the constraint a
+    /// later refactor is most likely to break: `Agent::room` opens rooms, so a clear sitting
+    /// there would let the very first refused write erase the record that is meant to refuse
+    /// it, and the second attempt would sail through. That is #1440's 403 redial loop restored
+    /// through the registry built to prevent it. `note_people_chats` opens its own room
+    /// directly for this reason, and clears separately.
+    pub async fn mark_rejoined(&self, chat_id: &str) {
+        if self.no_reopen.lock().await.remove(chat_id) {
+            tracing::info!(chat = %chat_id, "re-added to a chat the agent had left; writes may open it again");
+        }
+    }
+
+    /// The open room of this chat, marked as in use so the idle close leaves it alone for the
+    /// next quiet window. `None` for a chat whose room is not open: callers that write on an
+    /// incoming message open it instead (`Agent::room`).
     pub async fn host(&self, chat_id: &str) -> Option<SharedHost> {
-        self.hosts.lock().await.get(chat_id).cloned()
+        let h = self.hosts.lock().await.get(chat_id).cloned()?;
+        if let Ok(mut g) = h.try_lock() {
+            if g.closed {
+                return None;
+            }
+            g.touch();
+        }
+        Some(h)
     }
 
     /// Persist cursor + snapshot + acked vv together.
@@ -830,6 +1164,9 @@ impl SyncHub {
         let mut inflight_since: Option<std::time::Instant> = None;
         let mut last_rx = std::time::Instant::now();
         let mut dirty_since_persist = false;
+        // The doc half of the idle check (#2367) runs at most once a minute; the first quiet
+        // tick runs it at once.
+        let mut idle_checked_at = std::time::Instant::now() - IDLE_CHECK_EVERY;
         let mut head_seq_for_checkpoint: Option<(i64, i64, i64)> = None;
         // False once a row of this session failed to import or was parked by Loro as pending
         // (its deps are missing here): a snapshot of such a doc must never become the relay's
@@ -899,6 +1236,7 @@ impl SyncHub {
                                 }
                                 h.cursor = h.cursor.max(rh.seq);
                                 dirty_since_persist = true;
+                                h.touch();
                                 if h.caught_up { h.new_pending() } else { Vec::new() }
                             };
                             for cmd in cmds {
@@ -972,6 +1310,7 @@ impl SyncHub {
                                 inflight_since = None;
                             }
                             dirty_since_persist = true;
+                            h.touch();
                         }
                         FrameType::Status => {
                             if let Ok(s) = serde_json::from_value::<wire::StatusHeader>(f.header) {
@@ -1009,12 +1348,36 @@ impl SyncHub {
                     if last_rx.elapsed() > PROBE_EVERY * 2 {
                         return Err(anyhow!("no frame from the relay in {:?}; link presumed dead", PROBE_EVERY * 2));
                     }
-                    let push = { host.lock().await.next_push() };
+                    let push = {
+                        let mut h = host.lock().await;
+                        let push = h.next_push();
+                        if push.is_some() {
+                            // Any local write to the doc shows up here within one tick: that is
+                            // what keeps a room the agent is writing into out of the idle close.
+                            h.touch();
+                        }
+                        push
+                    };
                     if let Some((batch, bytes)) = push {
                         let f = Frame::new(FrameType::Push, json!({ "batchId": batch }), Bytes::from(bytes));
                         sink.send(Message::Binary(f.encode())).await?;
                         inflight_since = Some(std::time::Instant::now());
                         dirty_since_persist = true;
+                    }
+                    // #2367: a room nobody has used for `room_idle_ms` closes itself. The
+                    // session ends here; the relay reopens the room on the next row.
+                    // Both halves of this are cheap, and both must hold before the once-a-minute
+                    // budget is spent: a room still waiting on an ack would otherwise burn the
+                    // whole minute and close a minute late for no reason.
+                    let ready = {
+                        let h = host.lock().await;
+                        h.quiet(now_ms()) && h.settled()
+                    };
+                    if ready && idle_checked_at.elapsed() >= IDLE_CHECK_EVERY {
+                        idle_checked_at = std::time::Instant::now();
+                        if self.close_cold(&chat_id, host, "idle", true).await {
+                            return Ok(());
+                        }
                     }
                 }
                 _ = persist_tick.tick() => {
@@ -1069,7 +1432,12 @@ impl SyncHub {
                 }));
             }
         }
-        json!({ "rooms": total, "connected": connected, "trouble": trouble })
+        json!({
+            "rooms": total, "connected": connected, "trouble": trouble,
+            // #2367: the room budget, so a box's own numbers explain its socket count.
+            "cap": max_open_rooms(), "idle_secs": room_idle_ms() / 1000,
+            "closed_cold": self.closed_cold.load(std::sync::atomic::Ordering::Relaxed),
+        })
     }
 
     /// Write the box status into the project doc (`status` map).
@@ -1091,6 +1459,492 @@ impl SyncHub {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A relay with just enough of the room protocol for the room-budget tests (#2367): it
+    /// keeps the rows of each room, walks a replica through them, acks pushes, and counts the
+    /// box sockets on a room the way the real relay's `Room::has_box` does.
+    #[derive(Default)]
+    struct FakeRelay {
+        rooms: std::sync::Mutex<HashMap<String, FakeRoom>>,
+    }
+
+    #[derive(Default)]
+    struct FakeRoom {
+        /// Row payloads; a row's `seq` is its index + 1.
+        rows: Vec<Vec<u8>>,
+        sockets: i64,
+        peak_sockets: i64,
+    }
+
+    impl FakeRelay {
+        fn with<T>(&self, room: &str, f: impl FnOnce(&mut FakeRoom) -> T) -> T {
+            f(self
+                .rooms
+                .lock()
+                .unwrap()
+                .entry(room.to_owned())
+                .or_default())
+        }
+        /// A person's device wrote into the room while no box socket was on it.
+        fn append_row(&self, room: &str, bytes: Vec<u8>) {
+            self.with(room, |r| r.rows.push(bytes));
+        }
+        fn sockets(&self, room: &str) -> i64 {
+            self.with(room, |r| r.sockets)
+        }
+        fn peak_sockets(&self) -> i64 {
+            self.rooms
+                .lock()
+                .unwrap()
+                .values()
+                .map(|r| r.peak_sockets)
+                .sum()
+        }
+        fn open_sockets(&self) -> i64 {
+            self.rooms.lock().unwrap().values().map(|r| r.sockets).sum()
+        }
+    }
+
+    /// Start the fake relay on `rt` and return it with its port.
+    fn spawn_fake_relay(rt: &tokio::runtime::Handle) -> (Arc<FakeRelay>, u16) {
+        let relay = Arc::new(FakeRelay::default());
+        let app = axum::Router::new()
+            .route("/room/{project}/{chat}", axum::routing::get(fake_room_ws))
+            .with_state(relay.clone());
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        rt.spawn(async move {
+            let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+            axum::serve(listener, app).await.unwrap();
+        });
+        (relay, port)
+    }
+
+    async fn fake_room_ws(
+        ws: axum::extract::ws::WebSocketUpgrade,
+        axum::extract::Path((project, chat)): axum::extract::Path<(String, String)>,
+        axum::extract::State(relay): axum::extract::State<Arc<FakeRelay>>,
+    ) -> axum::response::Response {
+        let room = wire::room_name(&project, &chat);
+        ws.on_upgrade(move |socket| fake_room_session(socket, relay, room))
+    }
+
+    async fn fake_room_session(
+        mut socket: axum::extract::ws::WebSocket,
+        relay: Arc<FakeRelay>,
+        room: String,
+    ) {
+        relay.with(&room, |r| {
+            r.sockets += 1;
+            r.peak_sockets = r.peak_sockets.max(r.sockets);
+        });
+        async fn send(socket: &mut axum::extract::ws::WebSocket, f: Frame) -> bool {
+            socket
+                .send(axum::extract::ws::Message::Binary(f.encode()))
+                .await
+                .is_ok()
+        }
+        while let Some(Ok(msg)) = socket.next().await {
+            let axum::extract::ws::Message::Binary(b) = msg else {
+                continue;
+            };
+            let Ok(Some(f)) = Frame::decode(b) else {
+                continue;
+            };
+            match f.ty {
+                FrameType::Hello => {
+                    let (rows, bytes) = relay.with(&room, |r| {
+                        (
+                            r.rows.len() as i64,
+                            r.rows.iter().map(Vec::len).sum::<usize>() as i64,
+                        )
+                    });
+                    let st = wire::State {
+                        head_seq: rows,
+                        seq_floor: 0,
+                        checkpoint_seq: 0,
+                        checkpoint_size: 0,
+                        row_count: rows,
+                        row_bytes: bytes,
+                        box_state: wire::BoxState::Awake,
+                    };
+                    let f = Frame::new(
+                        FrameType::State,
+                        serde_json::to_value(st).unwrap(),
+                        Bytes::new(),
+                    );
+                    if !send(&mut socket, f).await {
+                        break;
+                    }
+                }
+                FrameType::RowsReq => {
+                    let after = f.header.get("after").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let rows = relay.with(&room, |r| r.rows.clone());
+                    let mut ok = true;
+                    for (i, payload) in rows.iter().enumerate() {
+                        let seq = i as i64 + 1;
+                        if seq <= after {
+                            continue;
+                        }
+                        let header = serde_json::to_value(wire::RowHeader {
+                            seq,
+                            device: "mac".into(),
+                            batch_id: ulid(),
+                        })
+                        .unwrap();
+                        let f = Frame::new(FrameType::Row, header, Bytes::from(payload.clone()));
+                        ok = send(&mut socket, f).await;
+                        if !ok {
+                            break;
+                        }
+                    }
+                    if !ok {
+                        break;
+                    }
+                    let f = Frame::new(
+                        FrameType::RowsDone,
+                        json!({ "headSeq": rows.len() as i64 }),
+                        Bytes::new(),
+                    );
+                    if !send(&mut socket, f).await {
+                        break;
+                    }
+                }
+                FrameType::Push => {
+                    let batch = f
+                        .header
+                        .get("batchId")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_owned();
+                    let seq = relay.with(&room, |r| {
+                        r.rows.push(f.payload.to_vec());
+                        r.rows.len() as i64
+                    });
+                    let ack = serde_json::to_value(wire::Ack {
+                        batch_id: batch,
+                        seq,
+                        dup: false,
+                    })
+                    .unwrap();
+                    if !send(&mut socket, Frame::new(FrameType::Ack, ack, Bytes::new())).await {
+                        break;
+                    }
+                }
+                FrameType::Probe => {
+                    let f = Frame::new(FrameType::ProbeOk, json!({}), Bytes::new());
+                    if !send(&mut socket, f).await {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        relay.with(&room, |r| r.sockets = (r.sockets - 1).max(0));
+    }
+
+    /// A hub wired to a [`FakeRelay`] on a loopback port, with its own state dir.
+    struct TestBox {
+        hub: SyncHub,
+        cfg: Arc<Config>,
+        store: Store,
+        relay: Arc<FakeRelay>,
+        rx: mpsc::Receiver<Incoming>,
+        root: std::path::PathBuf,
+    }
+
+    impl TestBox {
+        async fn start(project_id: &str) -> Self {
+            Self::start_with(project_id, &tokio::runtime::Handle::current())
+        }
+
+        fn start_with(project_id: &str, relay_rt: &tokio::runtime::Handle) -> Self {
+            let (relay, port) = spawn_fake_relay(relay_rt);
+            let root = std::env::temp_dir().join(format!("arbos-rooms-{}", ulid()));
+            std::fs::create_dir_all(&root).unwrap();
+            let bx = crate::config::BoxConfig {
+                user_id: Some("u-test".into()),
+                relay_url: format!("http://127.0.0.1:{port}"),
+                box_token: "test-token".into(),
+                mcp_token: "test-mcp".into(),
+                work_root: root.clone(),
+                bind: "127.0.0.1".into(),
+                port: 0,
+                local_box: true,
+                pi_bin: "/nonexistent/pi".into(),
+                prime_bin: "/nonexistent/prime-agent".into(),
+                claude_bin: "/nonexistent/claude".into(),
+                pi_ext_override: None,
+                device_id: "box:test".into(),
+                default_talking_model: "mock-talking".into(),
+                default_subagent_model: "mock-sub".into(),
+                legacy_project_id: None,
+            };
+            let cfg = Arc::new(bx.workspace(&json!({ "id": project_id, "name": "Rooms" }), 0));
+            std::fs::create_dir_all(cfg.state_dir.join("agentd")).unwrap();
+            let store = Store::open(&cfg.state_dir.join("agentd").join("agentd.db")).unwrap();
+            let (tx, rx) = mpsc::channel(256);
+            let hub = SyncHub::new(cfg.clone(), store.clone(), tx);
+            Self {
+                hub,
+                cfg,
+                store,
+                relay,
+                rx,
+                root,
+            }
+        }
+
+        fn room(&self, chat_id: &str) -> String {
+            wire::room_name(&self.cfg.project_id, chat_id)
+        }
+
+        /// Wait for the room to have walked the relay's rows.
+        async fn wait_caught_up(&self, chat_id: &str) {
+            let host = self.hub.host(chat_id).await.expect("room open");
+            wait_for("catch-up", || async { host.lock().await.caught_up }).await;
+        }
+
+        /// Pretend the room has seen no traffic for its whole quiet window. Waits for the room
+        /// to finish its own opening traffic first: an ack landing after this would touch the
+        /// room and push the quiet window back out.
+        async fn make_quiet(&self, chat_id: &str) {
+            let host = self.hub.host(chat_id).await.expect("room open");
+            wait_for("the room to settle", || async {
+                host.lock().await.closable(now_ms(), false)
+            })
+            .await;
+            host.lock().await.last_active_ms = now_ms() - room_idle_ms() - 1;
+        }
+
+        async fn stop(self) {
+            self.hub.close_all().await;
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    /// CPU seconds this process' threads have used, split by thread name (tokio names its
+    /// workers after the runtime), plus resident memory and open file descriptors. Read from
+    /// `/proc/self`, so the room-load profile can attribute its cost.
+    #[derive(Default, Debug)]
+    struct ProcSample {
+        box_cpu_s: f64,
+        relay_cpu_s: f64,
+        other_cpu_s: f64,
+        rss_mib: f64,
+        fds: usize,
+    }
+
+    fn proc_sample() -> ProcSample {
+        let ticks = 100.0; // _SC_CLK_TCK on Linux
+        let mut s = ProcSample::default();
+        if let Ok(tasks) = std::fs::read_dir("/proc/self/task") {
+            for t in tasks.flatten() {
+                let name = std::fs::read_to_string(t.path().join("comm")).unwrap_or_default();
+                let Ok(stat) = std::fs::read_to_string(t.path().join("stat")) else {
+                    continue;
+                };
+                // utime and stime are fields 14 and 15 after the (comm) field.
+                let Some(rest) = stat.rsplit_once(')') else {
+                    continue;
+                };
+                let f: Vec<&str> = rest.1.split_whitespace().collect();
+                let cpu = f
+                    .get(11)
+                    .and_then(|v| v.parse::<f64>().ok())
+                    .unwrap_or_default()
+                    + f.get(12)
+                        .and_then(|v| v.parse::<f64>().ok())
+                        .unwrap_or_default();
+                let cpu = cpu / ticks;
+                match name.trim() {
+                    n if n.starts_with("arbos-box") => s.box_cpu_s += cpu,
+                    n if n.starts_with("fake-relay") => s.relay_cpu_s += cpu,
+                    _ => s.other_cpu_s += cpu,
+                }
+            }
+        }
+        if let Ok(statm) = std::fs::read_to_string("/proc/self/statm") {
+            if let Some(pages) = statm.split_whitespace().nth(1) {
+                s.rss_mib = pages.parse::<f64>().unwrap_or_default() * 4096.0 / 1_048_576.0;
+            }
+        }
+        s.fds = std::fs::read_dir("/proc/self/fd")
+            .map(|d| d.count())
+            .unwrap_or_default();
+        s
+    }
+
+    /// Room load profile for #2367, the before/after measurement. Not a check: it prints
+    /// numbers and asserts nothing, so it is `#[ignore]`d.
+    ///
+    /// It boots one workspace's rooms the way the real boot does
+    /// ([`crate::workspace::boot_rooms`]) against a fake relay in the same process but on its
+    /// own runtime, so the box threads' CPU is read apart from the relay's. The sampling
+    /// follows the protocol agreed for the lt-eval box: settle 15 minutes, then five 60 s
+    /// samples. The same binary measures both arms, one commit, one machine:
+    ///
+    /// ```text
+    /// ulimit -n 65536
+    /// # before: the behaviour up to 0.6.369 — a room per chat, never closed
+    /// ARBOS_MAX_OPEN_ROOMS=0 ARBOS_ROOM_IDLE_SECS=0 \
+    ///   cargo test --release -p arbos-agentd room_load_profile -- --ignored --nocapture
+    /// # after: the room budget at its shipped defaults
+    /// cargo test --release -p arbos-agentd room_load_profile -- --ignored --nocapture
+    /// ```
+    ///
+    /// This is a host-native harness, not the lt-eval box: it has no gVisor, no `pi`, and the
+    /// fake relay shares the process. Read it as the room cost of one agentd process at the
+    /// same room count, not as that box's figure.
+    #[test]
+    #[ignore = "measurement, not a check: see #2367"]
+    fn room_load_profile() {
+        let chats = env_i64("ARBOS_ROOM_LOAD_CHATS", 1667) as usize;
+        let secs = env_i64("ARBOS_ROOM_LOAD_SECS", 60) as u64;
+        let samples = env_i64("ARBOS_ROOM_LOAD_SAMPLES", 5) as u32;
+        let settle_secs = env_i64("ARBOS_ROOM_LOAD_SETTLE_SECS", 900) as u64;
+        let runtime = |name: &'static str| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_name(name)
+                .enable_all()
+                .build()
+                .unwrap()
+        };
+        // Two worker threads each, as the box has two cores.
+        let relay_rt = runtime("fake-relay");
+        let box_rt = runtime("arbos-box");
+
+        let bx = TestBox::start_with("01TESTPROJECTLOAD00000000", relay_rt.handle());
+        let now = now_ms();
+        for i in 0..chats {
+            bx.store
+                .upsert_chat(
+                    &format!("chat{i:06}"),
+                    "Chat",
+                    i == 0,
+                    now - i as i64 * 1000,
+                )
+                .unwrap();
+        }
+        let known = bx.store.chats().unwrap();
+        let to_open = crate::workspace::boot_rooms(&known);
+        println!(
+            "#2367 room load profile: {} chats known, cap {}, quiet window {} s → {} rooms at boot",
+            known.len(),
+            max_open_rooms(),
+            room_idle_ms() / 1000,
+            to_open.len()
+        );
+        let t0 = std::time::Instant::now();
+        box_rt.block_on(async {
+            bx.hub.open_room(PROJECT_DOC_CHAT_ID).await.unwrap();
+            for id in &to_open {
+                bx.hub.open_room(id).await.unwrap();
+            }
+        });
+        // Let every room finish its handshake and catch-up first: the idle window must measure
+        // the steady state, not the connect storm.
+        let want = to_open.len() as i64 + 1;
+        let settle = std::time::Instant::now();
+        while bx.relay.open_sockets() < want && settle.elapsed() < Duration::from_secs(300) {
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        std::thread::sleep(Duration::from_secs(5));
+        let before = proc_sample();
+        println!(
+            "boot: {:.1} s until {} of {want} rooms were connected, {} process fds (both ends: \
+             the relay is in-process), {:.0} MiB rss",
+            t0.elapsed().as_secs_f64(),
+            bx.relay.open_sockets(),
+            before.fds,
+            before.rss_mib
+        );
+        // Idle from here: no rows, no turns. The sampling follows the protocol agreed for the
+        // lt-eval box — settle, then five 60 s samples — so the two read the same way.
+        println!("settling for {settle_secs} s, then {samples} samples of {secs} s");
+        std::thread::sleep(Duration::from_secs(settle_secs));
+        let window = Duration::from_secs(secs);
+        let mut prev = proc_sample();
+        let mut cores = Vec::new();
+        for n in 1..=samples {
+            std::thread::sleep(window);
+            let now = proc_sample();
+            let d = |a: f64, b: f64| (b - a) / window.as_secs_f64();
+            let box_cores = d(prev.box_cpu_s, now.box_cpu_s);
+            cores.push(box_cores);
+            println!(
+                "sample {n}: box {:.3} cores, relay {:.3} cores, other {:.3} cores, \
+                 {} relay sockets, {} process fds, {:.0} MiB rss",
+                box_cores,
+                d(prev.relay_cpu_s, now.relay_cpu_s),
+                d(prev.other_cpu_s, now.other_cpu_s),
+                bx.relay.open_sockets(),
+                now.fds,
+                now.rss_mib,
+            );
+            prev = now;
+        }
+        let open = bx.relay.open_sockets();
+        let median = {
+            let mut c = cores.clone();
+            c.sort_by(f64::total_cmp);
+            c[c.len() / 2]
+        };
+        println!(
+            "median of {samples}: {median:.3} box cores with {open} relay sockets ({} project \
+             rooms open), {} rooms closed cold, {} chats known",
+            open,
+            bx.hub
+                .closed_cold
+                .load(std::sync::atomic::Ordering::Relaxed),
+            known.len(),
+        );
+        if open > 0 {
+            println!(
+                "{:.3} cores per 1,000 open project rooms ({:.3} ms of CPU per room per second)",
+                median * 1000.0 / open as f64,
+                median * 1000.0 / open as f64
+            );
+        }
+        println!(
+            "{:.3} cores per 1,000 chats the box knows",
+            median * 1000.0 / known.len().max(1) as f64
+        );
+        box_rt.block_on(bx.stop());
+    }
+
+    /// Poll `cond` for up to 10 s.
+    async fn wait_for<F, Fut>(what: &str, mut cond: F)
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = bool>,
+    {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            if cond().await {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!("timed out waiting for {what}");
+    }
+
+    /// One row as a person's device would write it: a user message and its `send` command.
+    fn person_row(chat_id: &str, project_id: &str, msg_id: &str, text: &str) -> Vec<u8> {
+        let doc = ChatDoc::new(Some(0x5EED), true);
+        doc.init_meta(chat_id, project_id, 1);
+        doc.append_user_message(
+            msg_id,
+            text,
+            "mac",
+            &arbos_core::doc::UserMessageOpts::default(),
+        )
+        .unwrap();
+        doc.push_command("send", json!({ "messageId": msg_id }), "mac");
+        doc.export_updates_since(&VersionVector::default())
+    }
 
     fn host_with(doc: ChatDoc) -> DocHost {
         DocHost {
@@ -1114,6 +1968,8 @@ mod tests {
             joined_at_ms: 0,
             link: LinkState::default(),
             opened_at: std::time::Instant::now(),
+            last_active_ms: now_ms(),
+            keep_open: false,
         }
     }
 
@@ -1769,6 +2625,396 @@ mod tests {
         );
         hub.close_all().await;
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// #2367, the question the whole change turns on: a message that arrives for a room this
+    /// box has closed must still be answered. The row waits in the room; the relay sees no box
+    /// socket on it and queues a `chat_open` push; the box opens the room, walks the rows it
+    /// missed and hands the `send` to the agent loop. Nothing is dropped and nothing is
+    /// replayed twice.
+    #[tokio::test]
+    async fn a_row_for_a_closed_room_reopens_it_and_reaches_the_agent() {
+        const PROJECT: &str = "01TESTPROJECTIDLE00000000";
+        let mut bx = TestBox::start(PROJECT).await;
+        let chat = "01TESTCHATIDLE0000000001";
+        bx.hub.open_room(chat).await.unwrap();
+        bx.wait_caught_up(chat).await;
+        let room = bx.room(chat);
+        wait_for("the box socket", || async { bx.relay.sockets(&room) == 1 }).await;
+
+        // Nobody has used the room for its whole quiet window: it closes itself and lets the
+        // relay socket go.
+        bx.make_quiet(chat).await;
+        wait_for("the idle close", || async { !bx.hub.is_open(chat).await }).await;
+        wait_for("the socket to go", || async {
+            bx.relay.sockets(&room) == 0
+        })
+        .await;
+        assert!(
+            bx.hub.host(chat).await.is_none(),
+            "a closed room is not handed to a writer"
+        );
+
+        // A person writes into the chat while the room is closed.
+        bx.relay
+            .append_row(&room, person_row(chat, PROJECT, "m1", "are you there?"));
+
+        // What the relay does next (`boxes::after_person_row`): no box socket on the room, so a
+        // `chat_open` / `rows_pending` push. This is the push handler's own path.
+        crate::workspace::open_listed_chat(
+            &bx.cfg,
+            &bx.store,
+            &bx.hub,
+            PROJECT,
+            &json!({ "id": chat, "title": "Idle", "reason": "rows_pending" }),
+            true,
+        )
+        .await;
+        assert!(bx.hub.is_open(chat).await, "the push reopened the room");
+
+        let mut sends = Vec::new();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_millis(250), bx.rx.recv()).await {
+                Ok(Some(Incoming::Command { chat_id, cmd })) => {
+                    assert_eq!(chat_id, chat);
+                    sends.push(cmd);
+                    break;
+                }
+                Ok(Some(_)) => {}
+                Ok(None) => break,
+                Err(_) => {}
+            }
+        }
+        assert_eq!(
+            sends.len(),
+            1,
+            "the waiting send reached the agent loop once"
+        );
+        assert_eq!(sends[0].kind, "send");
+        assert_eq!(sends[0].payload["messageId"], json!("m1"));
+        let host = bx.hub.host(chat).await.expect("room open");
+        assert_eq!(
+            host.lock().await.doc.message("m1").map(|m| m.text()),
+            Some("are you there?".to_owned()),
+            "and the row is in the doc the turn will read"
+        );
+        bx.stop().await;
+    }
+
+    /// #2367: a room is never closed while its chat holds work — a pending command, or a reply,
+    /// job or subagent row still streaming — nor while it holds a change the relay has not
+    /// acked. Those rules are what keep the idle close from losing a turn's output.
+    #[test]
+    fn a_room_with_work_or_unsent_changes_is_never_closed() {
+        let now = now_ms();
+        let settled = |h: &mut DocHost| h.acked_vv = h.doc.oplog_vv();
+
+        let doc = ChatDoc::new(Some(7), true);
+        let mut h = host_with(doc);
+        settled(&mut h);
+        h.last_active_ms = now - room_idle_ms() - 1;
+        assert!(h.closable(now, true), "quiet, settled, no work: it closes");
+
+        // A local change the relay has not acked.
+        h.doc
+            .append_user_message(
+                "m1",
+                "hi",
+                "mac",
+                &arbos_core::doc::UserMessageOpts::default(),
+            )
+            .unwrap();
+        assert!(
+            !h.closable(now, true),
+            "a change still to be pushed keeps the room open"
+        );
+        settled(&mut h);
+        assert!(h.closable(now, true));
+
+        // A pending send waiting to be run.
+        let cmd = h
+            .doc
+            .push_command("send", json!({ "messageId": "m1" }), "mac");
+        settled(&mut h);
+        assert!(!h.closable(now, true), "a pending command is work");
+        h.doc.set_command_status(&cmd, CommandStatus::Done, None);
+        settled(&mut h);
+        assert!(h.closable(now, true));
+
+        // A reply still streaming (the same shape as a running job or subagent row).
+        h.doc.start_assistant_message("a1", "m1", "box:test");
+        settled(&mut h);
+        assert!(!h.closable(now, true), "a streaming row is work");
+        h.doc
+            .finish_message("a1", arbos_core::doc::MessageStatus::Done);
+        settled(&mut h);
+        assert!(h.closable(now, true));
+
+        // Still quiet is still required on the idle path, and not on the cap path.
+        h.last_active_ms = now;
+        assert!(!h.closable(now, true), "a room in use is not idle");
+        assert!(h.closable(now, false), "the cap may still take a cold room");
+
+        // The project doc and people rooms are never closed for being idle.
+        h.last_active_ms = now - room_idle_ms() - 1;
+        h.keep_open = true;
+        assert!(!h.closable(now, true));
+        assert!(!h.closable(now, false));
+    }
+
+    /// #2367: a box with far more chats than the cap keeps at most `max_open_rooms` of them
+    /// open, and the room just opened is never the one dropped. Before this, the lt-eval box
+    /// held 1,667 relay sockets at once.
+    #[tokio::test]
+    async fn open_rooms_stay_under_the_cap() {
+        let bx = TestBox::start("01TESTPROJECTCAP00000000").await;
+        let cap = max_open_rooms();
+        assert!(cap > 0, "the test needs a cap to exceed");
+        let chats: Vec<String> = (0..cap + 8).map(|i| format!("chat{i:04}")).collect();
+        for c in &chats[..cap] {
+            bx.hub.open_room(c).await.unwrap();
+        }
+        // A room whose first rows are still on their way to the relay is never dropped to meet
+        // the cap, so the cap bites once the first rooms have settled, not during a boot burst.
+        let hosts: Vec<SharedHost> = bx.hub.hosts.lock().await.values().cloned().collect();
+        wait_for("the first rooms to settle", || async {
+            let now = now_ms();
+            let mut all = true;
+            for h in &hosts {
+                all &= h.lock().await.closable(now, false);
+            }
+            all
+        })
+        .await;
+        // Used in the order they were opened, so the eviction order is not a coin toss.
+        let base = now_ms() - 10_000;
+        for (i, c) in chats[..cap].iter().enumerate() {
+            let h = bx.hub.hosts.lock().await.get(c).cloned().expect("open");
+            h.lock().await.last_active_ms = base + i as i64;
+        }
+        for c in &chats[cap..] {
+            bx.hub.open_room(c).await.unwrap();
+        }
+        let open = bx.hub.hosts.lock().await.len();
+        assert!(open <= cap, "{open} rooms open with a cap of {cap}");
+        for c in &chats[cap..] {
+            assert!(bx.hub.is_open(c).await, "the rooms just opened are kept");
+        }
+        for c in &chats[..8] {
+            assert!(
+                !bx.hub.is_open(c).await,
+                "the coldest rooms are the ones closed"
+            );
+        }
+        wait_for("the sockets over the cap to go", || async {
+            bx.relay.open_sockets() <= cap as i64
+        })
+        .await;
+        assert!(
+            bx.relay.peak_sockets() <= (cap + 8) as i64,
+            "no room dialled twice"
+        );
+        bx.stop().await;
+    }
+
+    /// #2367 where it meets a per-chat send valve. A chat whose reply is parked in such a queue
+    /// has written nothing yet, so its doc reads settled with no work in flight; the cap evicts
+    /// with `closable(now, false)`, which skips the quiet check; and nobody holds the host lock
+    /// during the wait, so the `try_lock` guard does not count the room as in use. The room is
+    /// therefore evictable for the whole wait. This test is why that is safe, not why it cannot
+    /// happen.
+    ///
+    /// The safety rests on one property: a write path acquires its host at the moment it
+    /// writes. Then an eviction costs one reopen and nothing else. The first half here shows
+    /// what breaking that property costs — a handle resolved before the wait and written
+    /// through after it reaches nobody, because `close_room` aborts the room's session task, so
+    /// the ops sit in a `DocHost` that no session will push and no reopen will load.
+    ///
+    /// That asymmetry is the argument for fixing a queued reply at the writer rather than
+    /// here. No marker in this layer can make a stale handle live, and a marker is not free:
+    /// `keep_open` is unbounded, so one that outlived its turn would pin the room for good,
+    /// which is the leak this PR exists to remove.
+    #[tokio::test]
+    async fn a_room_evicted_with_a_reply_pending_is_reopened_by_the_write() {
+        let bx = TestBox::start("01TESTPROJECTVALVE000000").await;
+        let cap = max_open_rooms();
+        let chat = "chat-with-a-parked-reply";
+
+        bx.hub.open_room(chat).await.unwrap();
+        bx.wait_caught_up(chat).await;
+        // The handle a spawned task holds across the wait.
+        let parked: SharedHost = bx.hub.host(chat).await.expect("open");
+        wait_for("the room to settle", || async {
+            parked.lock().await.settled()
+        })
+        .await;
+        parked.lock().await.last_active_ms = now_ms() - 60_000;
+        assert!(
+            parked.lock().await.closable(now_ms(), false),
+            "a room whose reply is still queued reads evictable, which is this test's premise"
+        );
+
+        for i in 0..cap {
+            bx.hub.open_room(&format!("other{i:04}")).await.unwrap();
+        }
+        assert!(
+            !bx.hub.is_open(chat).await,
+            "the cap took the room while its reply was still parked"
+        );
+
+        let lost = ulid();
+        {
+            let h = parked.lock().await;
+            h.doc.start_assistant_message(&lost, "m1", "box:test");
+            h.doc
+                .finish_message(&lost, arbos_core::doc::MessageStatus::Done);
+            // The write itself succeeds, which is what makes the loss silent: the row is real,
+            // it is just in a doc nothing reads. Without this the check below would pass for a
+            // write that never happened.
+            assert!(
+                h.doc.message(&lost).is_some(),
+                "the stale write did not land at all, so the next check proves nothing"
+            );
+            assert!(h.closed, "the host the task still holds is the closed one");
+        }
+
+        let host = bx
+            .hub
+            .open_room(chat)
+            .await
+            .expect("a write path reopens it");
+        assert!(bx.hub.is_open(chat).await);
+        let delivered = ulid();
+        {
+            let h = host.lock().await;
+            assert!(
+                h.doc.message(&lost).is_none(),
+                "the stale handle's row came back, so this test cannot tell the two apart"
+            );
+            h.doc.start_assistant_message(&delivered, "m1", "box:test");
+            h.doc
+                .finish_message(&delivered, arbos_core::doc::MessageStatus::Done);
+        }
+        wait_for("the reopened room to push its reply", || async {
+            host.lock().await.settled()
+        })
+        .await;
+        assert!(
+            host.lock().await.doc.message(&delivered).is_some(),
+            "the reply written after the reopen is in the room the relay is reading"
+        );
+        bx.stop().await;
+    }
+
+    /// Why the record lives in the hub and not on the host. `close_room` takes the host out of
+    /// `hosts` first, so a writer that resolves its host fresh — the common case — gets `None`
+    /// from `host()` and would have nothing of the host's to read. It would reopen the room and
+    /// redial the relay every 16 s for a chat the agent is no longer in (#1440). Writers ask
+    /// the hub through `Agent::room` instead, which works whether or not they hold a handle.
+    ///
+    /// The cold close deliberately leaves no record, so an evicted room still comes back on
+    /// the next write; that is the distinction the rest of #2367 rests on.
+    #[tokio::test]
+    async fn a_writer_holding_no_handle_cannot_reopen_a_chat_the_agent_left() {
+        let bx = TestBox::start("01TESTPROJECTLEFTCHAT000").await;
+        let left = "chat-the-agent-was-removed-from";
+        let evicted = "chat-the-cap-took";
+        for chat in [left, evicted] {
+            bx.hub.open_room(chat).await.unwrap();
+            bx.wait_caught_up(chat).await;
+        }
+
+        // `people_agent_removed` is the only production caller of this, and it drops its own
+        // handle as it goes — exactly the writer this test is about.
+        bx.hub.close_room(left).await;
+        let host = bx.hub.host(left).await;
+        assert!(
+            host.is_none(),
+            "the fresh lookup a writer makes has no handle, so nothing on a host can decide this"
+        );
+        assert!(
+            !bx.hub.may_open(left).await,
+            "the hub refuses to open a chat the agent was removed from"
+        );
+
+        let cold = bx.hub.host(evicted).await.expect("open");
+        wait_for("the room to settle", || async {
+            cold.lock().await.settled()
+        })
+        .await;
+        assert!(
+            bx.hub.close_if_settled(evicted).await,
+            "the cold close took it"
+        );
+        assert!(
+            bx.hub.may_open(evicted).await,
+            "an evicted room is still openable: the next write brings it back (#2367)"
+        );
+        bx.hub
+            .open_room(evicted)
+            .await
+            .expect("and opening it works");
+
+        // Only the relay's membership word lifts the refusal, never a write.
+        bx.hub.mark_rejoined(left).await;
+        assert!(
+            bx.hub.may_open(left).await,
+            "re-added to the chat, so writes may open it again"
+        );
+        bx.stop().await;
+    }
+
+    /// How a writer tells an eviction from a removal, and the reason `closed` cannot be the
+    /// answer: every close sets that one, because setting it is what makes the room's session
+    /// exit at its next tick. So the cold close — which both the room cap and the idle sweep
+    /// call — has to leave the chat openable, and only a removal may close it off. A writer
+    /// reopens the room in the first case and must not in the second (#1440: reopening a chat
+    /// the agent was removed from made the relay 403 every 16 s until the box restarted).
+    ///
+    /// Without this, an eviction looks exactly like a removal to that writer, and the reply it
+    /// then writes into the retired doc is lost in the silent way
+    /// [`a_room_evicted_with_a_reply_pending_is_reopened_by_the_write`] measures.
+    #[tokio::test]
+    async fn the_cold_close_leaves_a_room_reopenable_and_only_removal_does_not() {
+        let bx = TestBox::start("01TESTPROJECTNOREOPEN000").await;
+
+        let evicted = "chat-the-cap-took";
+        let cold = bx.hub.open_room(evicted).await.unwrap();
+        bx.wait_caught_up(evicted).await;
+        wait_for("the room to settle", || async {
+            cold.lock().await.settled()
+        })
+        .await;
+        assert!(
+            bx.hub.close_cold(evicted, &cold, "test", false).await,
+            "the cold close is the one the cap and the idle sweep both go through"
+        );
+        {
+            let h = cold.lock().await;
+            assert!(
+                h.closed,
+                "the evicted host is retired, so its session ends and the socket goes"
+            );
+        }
+        assert!(
+            bx.hub.may_open(evicted).await,
+            "the chat is still live: the next write reopens its room (#2367)"
+        );
+
+        let removed = "chat-the-agent-left";
+        let gone = bx.hub.open_room(removed).await.unwrap();
+        bx.wait_caught_up(removed).await;
+        bx.hub.close_room(removed).await;
+        assert!(
+            gone.lock().await.closed,
+            "removal retires the host too, which is why `closed` cannot separate the two"
+        );
+        assert!(
+            !bx.hub.may_open(removed).await,
+            "reopening this chat is the 403 loop, so no writer may open it again"
+        );
+        bx.stop().await;
     }
 
     /// 2026-10-24 02:23 (image 0.1.106): after the roll TestAgent re-gated 189 Arbonites

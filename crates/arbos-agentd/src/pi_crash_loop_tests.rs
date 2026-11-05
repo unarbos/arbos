@@ -1058,3 +1058,206 @@ fn the_shipped_backoff_is_two_seconds_doubling_to_a_minute() {
         "the fifth death is what clears the workspace and rotates the session"
     );
 }
+
+/// A message sent into an outage and promised an answer, with a working child on its way, and
+/// `take_the_room` run at the one moment that makes the test about the room rather than about
+/// timing.
+///
+/// That moment needs the owed list's own lock. A message is owed when the re-run after the
+/// respawn loses a child too, which in a crash loop happens a breath before a child finally
+/// survives — so a close made after this function returned would be racing the recovery, and
+/// about one run in twenty the recovery won and answered the message by the ordinary route.
+/// The drain's first act is to look at the owed list, so holding it across the close is what
+/// makes the room already gone by the time the drain can start, every time.
+async fn a_send_owed_into_an_outage<F, Fut>(
+    chat: &str,
+    take_the_room: F,
+) -> (Arc<Agent>, Stub, std::path::PathBuf, String)
+where
+    F: FnOnce(Arc<Agent>) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    let s = stub(6, false);
+    let (agent, root) = test_agent_with_pi(&s.bin).await;
+    fast_backoff(&agent);
+    agent
+        .store
+        .upsert_chat(chat, "owed sends", false, now_ms())
+        .unwrap();
+    let host = agent.sync.open_room(chat).await.unwrap();
+    agent.start_pi(chat).await.expect("the first child boots");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let (msg, cmd) = send_cmd(&host, "are you there?").await;
+    agent
+        .handle_command(chat, cmd)
+        .await
+        .expect("a box that is restarting has not failed this message");
+    agent.sync.persist(&host).await.unwrap();
+    drop(host);
+
+    let owed = agent.pi_owed_sends.lock().await;
+    assert_eq!(
+        owed.len(),
+        1,
+        "premise: the message was promised an answer rather than served"
+    );
+    take_the_room(agent.clone()).await;
+    drop(owed);
+    (agent, s, root, msg)
+}
+
+/// Wait for the drain to have run, whichever way it went.
+///
+/// The emptied owed list is what shows it: `mem::take` happens before the drain decides anything,
+/// so this condition is reached even by a drain that drops the message. A test can then assert on
+/// the outcome at once, instead of waiting out the whole bound for a row a silent drop never
+/// writes.
+async fn the_owed_send_drain_ran(agent: &Arc<Agent>) {
+    let a = agent.clone();
+    wait_until("the owed-send drain ran", || {
+        let a = a.clone();
+        async move { a.pi_owed_sends.lock().await.is_empty() }
+    })
+    .await;
+}
+
+/// The precondition for #2395's idle close: an owed send must never be dropped silently.
+///
+/// A chat goes quiet precisely because the box is down, so the chat with a message owed in it is
+/// the likeliest in the box to meet #2367's idle close. The drain resolved its room with
+/// `sync.host`, which a closed room answers `None` — and the owed list is emptied by `mem::take`
+/// before that decision, so the skip consumed the promise and lost the message, with no answer
+/// and no record. That is the contentless row bug Y exists to prevent, arriving by a new route.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_owed_send_is_answered_after_the_idle_close_took_its_room() {
+    let chat = "01TESTCHATOWEDCOLD000001";
+    let (agent, _s, root, msg) = a_send_owed_into_an_outage(chat, |a| async move {
+        a.sync.test_close_cold(chat).await;
+        assert!(a.sync.host(chat).await.is_none(), "premise: no handle");
+        assert!(
+            a.sync.may_open(chat).await,
+            "premise: a cold drop records nothing against the chat"
+        );
+    })
+    .await;
+
+    the_owed_send_drain_ran(&agent).await;
+
+    // The promise, not the route that keeps it. Two recovery paths can answer a message lost to
+    // a dying child — this drain, and bug V's re-run — and which one gets there is a race the
+    // user cannot see and this test has no business pinning. What must never happen is the one
+    // the idle close caused: the entry consumed and nothing in the chat.
+    let answered = |a: Arc<Agent>, msg: String| async move {
+        let Some(host) = a.sync.host(chat).await else {
+            return false;
+        };
+        visible_answers(&host, &msg)
+            .await
+            .iter()
+            .any(|(_, t)| !t.is_empty() && t != PI_RESTARTING_LINE)
+    };
+    wait_until("the promised message was answered", || {
+        answered(agent.clone(), msg.clone())
+    })
+    .await;
+    assert!(
+        audit_lines(&agent, "owed_send_undeliverable").is_empty(),
+        "a cold room is reopened, not recorded as somewhere the message cannot go"
+    );
+    assert!(
+        agent.sync.is_open(chat).await,
+        "and the answer went to a room the relay can push from"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The same guarantee where the reopen cannot help, which is what makes this test discriminating:
+/// a chat the agent left for good is refused by `Agent::room`, so a fix that only reopens cold
+/// rooms still consumes this promise in silence. An undeliverable owed send is recorded.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_owed_send_that_can_never_be_delivered_still_leaves_a_record() {
+    let chat = "01TESTCHATOWEDLEFT000001";
+    let (agent, _s, root, _msg) = a_send_owed_into_an_outage(chat, |a| async move {
+        a.sync.close_room(chat).await;
+        assert!(
+            !a.sync.may_open(chat).await,
+            "premise: the chat is recorded as one this box left"
+        );
+    })
+    .await;
+
+    the_owed_send_drain_ran(&agent).await;
+
+    let records = audit_lines(&agent, "owed_send_undeliverable");
+    assert_eq!(
+        records.len(),
+        1,
+        "an owed send that cannot be delivered is recorded, never just dropped: {records:?}"
+    );
+    assert_eq!(
+        records[0].get("chat_id").and_then(Value::as_str),
+        Some(chat),
+        "and the record names the chat: {records:?}"
+    );
+    assert!(
+        records[0]
+            .get("reason")
+            .and_then(Value::as_str)
+            .is_some_and(|r| !r.is_empty()),
+        "and says why, so a silence is never the only trace: {records:?}"
+    );
+    assert!(
+        !agent.sync.is_open(chat).await,
+        "and the chat the agent left stays left"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The one place an owed send is dropped by design: the queue is bounded, and a chat someone
+/// keeps typing into while the agent is down owes answers rather than an endless queue. The bound
+/// is deliberate and stays; what it must not be is silent, because the user whose message is
+/// evicted has already been told the agent would come back to them.
+///
+/// Pre-existing on main and nothing to do with #2367 — the idle close neither causes it nor
+/// worsens it.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_oldest_owed_send_is_recorded_when_the_queue_overflows() {
+    let s = stub(0, true);
+    let (agent, root) = test_agent_with_pi(&s.bin).await;
+    fast_backoff(&agent);
+    let chat = "01TESTCHATOWEDCAP0000001";
+    agent
+        .store
+        .upsert_chat(chat, "owed cap", false, now_ms())
+        .unwrap();
+    let host = agent.sync.open_room(chat).await.unwrap();
+    agent.start_pi(chat).await.expect("the first child boots");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // One more than the bound, so exactly one eviction is owed.
+    for i in 0..=Agent::PI_OWED_MAX {
+        let (_, cmd) = send_cmd(&host, &format!("message {i}")).await;
+        agent
+            .handle_command(chat, cmd)
+            .await
+            .expect("a box that is restarting has not failed this message");
+    }
+
+    assert_eq!(
+        agent.pi_owed_sends.lock().await.len(),
+        Agent::PI_OWED_MAX,
+        "premise: the queue holds its bound and no more"
+    );
+    let evicted = audit_lines(&agent, "owed_send_evicted");
+    assert_eq!(
+        evicted.len(),
+        1,
+        "the promise the bound dropped is recorded: {evicted:?}"
+    );
+    assert_eq!(
+        evicted[0].get("chat_id").and_then(Value::as_str),
+        Some(chat),
+        "and names the chat whose oldest promise went: {evicted:?}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}

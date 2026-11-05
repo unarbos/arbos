@@ -639,7 +639,7 @@ impl Agent {
                         decided_by,
                     )
                     .await;
-                    if let Some(host) = self.sync.host(&row.chat_id).await {
+                    if let Ok(host) = self.room(&row.chat_id).await {
                         host.lock()
                             .await
                             .doc
@@ -689,7 +689,10 @@ impl Agent {
             Some(p) => (p.chat_id.clone(), p.msg_id.clone()),
             None => (row.chat_id.clone(), row.message_id.clone()),
         };
-        if let Some(host) = self.sync.host(&chat_id).await {
+        // An approval waits up to 24 h for its decision, far past the idle window, so by now the
+        // room is very likely closed (#2367). Without opening it the card in the chat would stay
+        // "pending" for ever even though the decision landed.
+        if let Ok(host) = self.room(&chat_id).await {
             let h = host.lock().await;
             h.doc
                 .set_approval_state(approval_id, state, Some(decided_by), reason.as_deref());
@@ -1255,7 +1258,9 @@ impl Agent {
         let _ = self.store.set_job_step(&job.id, APPROVAL_WAIT_STEP);
         // Only when the card is somewhere else: a notice beside the card it describes is noise.
         if job.chat_id != card_chat_id {
-            if let Some(host) = self.sync.host(&job.chat_id).await {
+            // The job's chat, not the card's: its room may be closed while the card's is open,
+            // and this notice is the only thing that says there why the job stopped (#2367).
+            if let Ok(host) = self.room(&job.chat_id).await {
                 let h = host.lock().await;
                 let last_user = h
                     .doc
@@ -1274,7 +1279,10 @@ impl Agent {
                     .add_part_from_json(&id, &json!({ "kind": "text", "text": line }));
                 h.doc.finish_message(&id, MessageStatus::Done);
             } else {
-                tracing::debug!(job = %job.id, chat = %job.chat_id, "no open room for the job's chat; its card notice is in the rollout view only");
+                // Reached only when the room cannot be opened at all — a chat the agent was
+                // removed from. Before #2395 this arm meant "the room happens to be shut",
+                // which no box ever was, so it was unreachable rather than rare.
+                tracing::debug!(job = %job.id, chat = %job.chat_id, "the job's chat cannot be opened; its card notice is in the rollout view only");
             }
         }
         self.refresh_job_activity(&job.chat_id).await;

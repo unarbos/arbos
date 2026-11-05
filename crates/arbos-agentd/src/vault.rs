@@ -804,7 +804,7 @@ pub async fn on_push(agent: &Arc<Agent>, kind: &str, payload: &Value) {
             }
             let chat_hint = payload["chat_id"].as_str().unwrap_or("").to_owned();
             let chat_id = agent.approval_chat(&chat_hint).await.unwrap_or(chat_hint);
-            if let Some(host) = agent.sync.host(&chat_id).await {
+            if let Ok(host) = agent.room(&chat_id).await {
                 let h = host.lock().await;
                 h.doc.append_system_note(
                     &ulid(),
@@ -920,10 +920,13 @@ async fn scrub_secret(agent: &Arc<Agent>, secret_id: &str) -> Result<ScrubStats,
     }
 
     // Open every known chat so historical leaks are covered, not only the ones already loaded.
+    // The rooms the scrub opens are closed again below: a scrub of a box with many chats would
+    // otherwise leave a relay socket per chat behind (#2367).
+    let mut opened_to_scrub: Vec<String> = Vec::new();
     if let Ok(chats) = agent.store.chats() {
         for c in chats {
-            if agent.sync.host(&c.id).await.is_none() {
-                let _ = agent.sync.open_room(&c.id).await;
+            if !agent.sync.is_open(&c.id).await && agent.sync.open_room(&c.id).await.is_ok() {
+                opened_to_scrub.push(c.id);
             }
         }
     }
@@ -947,6 +950,12 @@ async fn scrub_secret(agent: &Arc<Agent>, secret_id: &str) -> Result<ScrubStats,
         if n > 0 || repersist {
             let _ = agent.sync.persist(&host).await;
         }
+    }
+
+    // A room whose redaction is still on its way to the relay stays open; the idle close takes
+    // it once the relay has acked it.
+    for id in opened_to_scrub {
+        agent.sync.close_if_settled(&id).await;
     }
 
     let sessions = scrub_session_files(&agent.cfg, &values);

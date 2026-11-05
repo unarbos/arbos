@@ -1001,15 +1001,18 @@ async fn an_answer_lands_in_a_room_that_was_dropped_while_it_waited() {
         "the answer was written before the room was dropped, so this measured nothing"
     );
     agent.sync.persist(&dropped).await.unwrap();
-    agent.sync.hosts.lock().await.remove(chat);
+    // Dropped the way the idle close and the cap drop a room, flag and all, rather than by
+    // reaching into the map: the real closer does mark the handle, and the point of the record
+    // below is that marking the handle is no longer what decides anything.
+    agent.sync.test_close_cold(chat).await;
     assert!(agent.sync.host(chat).await.is_none());
     // The contract `Agent::room_for_reply` is correct under, written out where the drop happens:
-    // a room let go of because it is cold must not be marked `closed`, because `closed` is the
-    // only thing that tells this from a chat the agent was removed from. A closer that sets the
-    // flag here turns every reply in this window into a row nobody will ever read.
+    // a room let go of because it is cold records nothing against the chat, because that record
+    // is the only thing that tells this from a chat the agent was removed from. A closer that
+    // records here turns every reply in this window into a row nobody will ever read.
     assert!(
-        !dropped.lock().await.closed,
-        "a cold drop marked the room closed, which reads as a removal and loses the reply"
+        agent.sync.may_open(chat).await,
+        "a cold drop recorded the chat as left for good, which reads as a removal and loses the reply"
     );
 
     drop(holding);
@@ -1082,10 +1085,10 @@ async fn an_answer_lands_in_a_room_that_was_dropped_while_it_waited() {
 /// The other half of the same rule, and the reason the re-acquire is not a plain `open_room`:
 /// a chat this agent was *removed* from is never reopened to post into.
 ///
-/// `close_room` is that removal (`people_agent_removed`), and it marks the handle `closed`.
-/// Reopening there would spawn a room task the relay answers 403 to, every 16 seconds, until
-/// the box restarts — which is #1440, already fixed once. So the answer to a chat we have left
-/// goes nowhere, exactly as it does today, and the room stays shut.
+/// `close_room` is that removal (`people_agent_removed`), and it records the chat as one this
+/// box may not open again. Reopening there would spawn a room task the relay answers 403 to,
+/// every 16 seconds, until the box restarts — which is #1440, already fixed once. So the answer
+/// to a chat we have left goes nowhere, exactly as it does today, and the room stays shut.
 #[tokio::test]
 async fn an_answer_does_not_reopen_a_chat_the_agent_was_removed_from() {
     let (agent, root) = test_agent().await;
@@ -1094,8 +1097,8 @@ async fn an_answer_does_not_reopen_a_chat_the_agent_was_removed_from() {
     let (ask, _cmd) = send_cmd(&left, "reply with only 2").await;
     agent.sync.close_room(chat).await;
     assert!(
-        left.lock().await.closed,
-        "close_room must mark the handle, since that is what tells a removal from an eviction"
+        !agent.sync.may_open(chat).await,
+        "close_room must record the chat, since that is what tells a removal from an eviction"
     );
 
     let journal = Journal::default();
@@ -1124,7 +1127,8 @@ async fn an_answer_does_not_reopen_a_chat_the_agent_was_removed_from() {
     // reply was lost and the counter beside it is what a real-box measurement would see.
     let logged = journal.text();
     assert!(
-        logged.contains("nothing will push it") && logged.contains("a cold drop must leave"),
+        logged.contains("nothing will push it")
+            && logged.contains("a cold drop must record nothing"),
         "a dropped reply was declined without saying so: {logged}"
     );
     // The write succeeded and the row is unreachable, which is the same loss as above and here
@@ -1163,5 +1167,99 @@ async fn a_voice_send_does_not_queue_behind_typed_messages() {
         got.is_ok(),
         "a voice send waited for an older typed message's answer"
     );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Remove, re-add, then a cold drop: the one sequence where a flag on the handle and a record on
+/// the chat disagree, and the record is the one that is right.
+///
+/// `H1` is resolved before the wait, as this whole lane is about. The chat is left, so `H1` is
+/// marked and the chat recorded; the agent is re-added, so the record is cleared and a fresh
+/// `H2` opens; then the chat goes cold, so `H2` leaves the hub with nothing recorded against it.
+/// The lane resumes on `H1`, finds the hub empty, and must reopen — the agent is a live member of
+/// this chat and its answer is owed.
+///
+/// A handle-local flag cannot get this right. `H1.closed` is still true from the removal, so
+/// reading it declines the reply and counts `reply_dropped_closed_room` against a chat nobody
+/// left. That is why the decision reads [`crate::sync::SyncHub::may_open`], which is keyed on
+/// the chat and cleared by the rejoin, and it is what this test discriminates: restore the flag
+/// read and it fails here while every other case still passes.
+#[tokio::test]
+async fn a_reply_through_a_stale_handle_survives_a_rejoin_and_a_cold_drop() {
+    let (agent, root) = test_agent().await;
+    let chat = "01TESTCHATSENDORDER0000040";
+    let stale = agent.sync.open_room(chat).await.unwrap();
+    let (ask, _cmd) = send_cmd(&stale, "reply with only 2").await;
+    agent.sync.persist(&stale).await.unwrap();
+
+    // Removed from the chat: the handle this lane carries is marked, and so is the chat.
+    agent.sync.close_room(chat).await;
+    assert!(
+        stale.lock().await.closed,
+        "premise: the removal marked the handle the lane still holds"
+    );
+    assert!(
+        !agent.sync.may_open(chat).await,
+        "premise: and recorded the chat, so no writer may open it"
+    );
+
+    // Re-added, on the relay's word. `note_people_chats` is what calls this on a live box, and
+    // the ordering it has to keep is `a_rejoin_lifts_the_refusal_before_the_room_it_opens_can_be_seen`.
+    agent.sync.mark_rejoined(chat).await;
+    let fresh = agent
+        .sync
+        .open_room(chat)
+        .await
+        .expect("the re-add can open the room again");
+    agent.sync.persist(&fresh).await.unwrap();
+
+    // And now the chat goes cold, which records nothing: the hub is empty and the only marked
+    // handle left in the world is the stale one this lane holds.
+    agent.sync.test_close_cold(chat).await;
+    assert!(
+        agent.sync.host(chat).await.is_none(),
+        "premise: the cold drop emptied the hub for this chat"
+    );
+    assert!(
+        agent.sync.may_open(chat).await,
+        "premise: and left the chat openable, because the agent is still in it"
+    );
+
+    let journal = Journal::default();
+    {
+        let _logs = journal.capture();
+        agent
+            .write_job_result(
+                chat,
+                &stale,
+                &ask,
+                "ask-reply-with-only-2",
+                "done",
+                "The answer is 2.",
+                None,
+            )
+            .await
+            .unwrap();
+    }
+
+    let live = agent
+        .sync
+        .host(chat)
+        .await
+        .expect("the reply reopened the room it is owed to");
+    assert!(
+        replies_to(&live, &ask)
+            .await
+            .iter()
+            .any(|m| m.has_visible_content() && m.status == "done"),
+        "the answer is not in the room the relay reads, so it went through the stale handle"
+    );
+    // The warn is emitted immediately before `post_timing("reply_dropped_closed_room", …)`, so
+    // its absence here is the counter's absence.
+    assert!(
+        !journal.text().contains("nothing will push it"),
+        "a reply to a chat the agent is a member of was declined and counted as dropped"
+    );
+    drop(fresh);
     let _ = std::fs::remove_dir_all(&root);
 }
