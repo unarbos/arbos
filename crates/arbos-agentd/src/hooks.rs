@@ -422,7 +422,7 @@ async fn working_set(State(a): State<S>, headers: HeaderMap, Json(b): Json<Value
     let skills = a.skills_section_text().await;
     // D87: project memory stays in the (debounced) system prompt; `memory` is reserved for a
     // later experiment and empty today.
-    Json(json!({ "ok": true, "text": a.working_set_text(&chat_id), "skills": skills, "memory": "", "stable_prefix": a.cfg.stable_prefix() }))
+    Json(json!({ "ok": true, "text": a.working_set_for_turn(&chat_id), "skills": skills, "memory": "", "stable_prefix": a.cfg.stable_prefix() }))
         .into_response()
 }
 

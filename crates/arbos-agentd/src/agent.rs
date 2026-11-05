@@ -1965,6 +1965,10 @@ pub struct Agent {
     /// and this is what spots one when the error does not say "refusal" in words agentd knows
     /// (`SOFT_COMPACTION_STRIKES`).
     compaction_strikes: std::sync::Mutex<HashMap<String, u32>>,
+    /// Per chat: the window the rolling summary was last sent into, and the summary it was
+    /// (`(session path, hash)`). What [`Agent::working_set_for_turn`] reads to send that
+    /// summary once per window instead of once per turn.
+    summary_in_window: std::sync::Mutex<HashMap<String, (String, u64)>>,
     /// User messages waiting for `turn_lock` right now. Relay turns and the soft compaction
     /// yield to them (see `status.rs`).
     pub(crate) pending_sends: std::sync::atomic::AtomicUsize,
@@ -2158,6 +2162,7 @@ impl Agent {
             pi_model: Mutex::new(None),
             compaction_floor: std::sync::Mutex::new(HashMap::new()),
             compaction_strikes: std::sync::Mutex::new(HashMap::new()),
+            summary_in_window: std::sync::Mutex::new(HashMap::new()),
             pending_sends: std::sync::atomic::AtomicUsize::new(0),
             send_order: Arc::new(crate::send_order::SendOrder::default()),
             steer_gate: Arc::new(crate::steer_gate::SteerGate::default()),
@@ -6084,6 +6089,9 @@ impl Agent {
                     .lock()
                     .expect("compaction strikes")
                     .remove(chat_id);
+                // pi has just summarised the window, this chat's injected copy of the rolling
+                // summary with it, so the next turn carries that summary again.
+                self.summary_left_the_window(chat_id);
                 tracing::info!(chat_id, tokens, threshold, compactions = n, cut = ?cut, ms = t0.elapsed().as_millis() as i64, "soft compaction");
             }
             Ok(resp) => {
@@ -10050,8 +10058,62 @@ impl Agent {
     }
 
     /// Working-set section (design §6.6 item 2b): running subagents + compaction summary +
-    /// handles + notes, ≤ 40 lines.
+    /// handles + notes, ≤ 40 lines. Always carries the summary; the turn path takes
+    /// [`Agent::working_set_for_turn`] instead.
     pub fn working_set_text(&self, chat_id: &str) -> String {
+        self.working_set_lines(chat_id, true)
+    }
+
+    /// The working set for a turn of `chat_id`, as the `/hook/working-set` call that is about to
+    /// put it in front of the user's words asks for it.
+    ///
+    /// The difference from [`Agent::working_set_text`] is the rolling summary. With the stable
+    /// prefix on (D87) the block rides inside the user turn, so every block sent stays in the
+    /// window and is paid for again on every later turn until the next compaction; the summary
+    /// is up to 6,000 characters of it. Measured on 2026-11-05, two consecutive turns of one
+    /// chat repeated 8,728 identical characters of block, 6,434 of them that summary — about
+    /// 2,300 tokens a turn.
+    ///
+    /// It is not dropped, because it is the backstop for a window pi could not carry: it goes in
+    /// on the first turn after the window was rotated or compacted, and after a compaction
+    /// rewrites the summary itself. In between, the copy already in the window is the live one.
+    /// With the stable prefix off the block is a system-prompt section instead, rebuilt from
+    /// nothing every turn, so there the summary always rides.
+    pub fn working_set_for_turn(&self, chat_id: &str) -> String {
+        let with_summary = !self.cfg.stable_prefix() || self.summary_due_for_turn(chat_id);
+        self.working_set_lines(chat_id, with_summary)
+    }
+
+    /// Whether this chat's rolling summary has to ride this turn, recording that it did. True
+    /// when the live window is not the one it last went into (a rotation) or the summary is not
+    /// the one that went in (a compaction rewrote it).
+    fn summary_due_for_turn(&self, chat_id: &str) -> bool {
+        let Ok(Some(chat)) = self.store.chat(chat_id) else {
+            return true;
+        };
+        let Some(summary) = chat.compaction_summary.filter(|s| !s.trim().is_empty()) else {
+            return false;
+        };
+        let window = chat.pi_session_path.unwrap_or_default();
+        let mark = (window, hash_of(&summary));
+        let mut sent = self.summary_in_window.lock().expect("summary in window");
+        if sent.get(chat_id) == Some(&mark) {
+            return false;
+        }
+        sent.insert(chat_id.to_owned(), mark);
+        true
+    }
+
+    /// Forget that this chat's rolling summary is in its window: pi has just rewritten the
+    /// window under it, so the next turn sends the summary again.
+    pub(crate) fn summary_left_the_window(&self, chat_id: &str) {
+        self.summary_in_window
+            .lock()
+            .expect("summary in window")
+            .remove(chat_id);
+    }
+
+    fn working_set_lines(&self, chat_id: &str, with_summary: bool) -> String {
         let mut lines = Vec::new();
         // Prefer the live task map when available so a zombie `running` row
         // (task gone, status never cleared) does not keep the agent thinking
@@ -10125,12 +10187,14 @@ impl Agent {
                 ));
             }
         }
-        if let Ok(Some(c)) = self.store.chat(chat_id) {
-            if let Some(s) = c.compaction_summary {
-                lines.push(format!(
-                    "Summary of earlier turns in this chat: {}",
-                    s.chars().take(6000).collect::<String>()
-                ));
+        if with_summary {
+            if let Ok(Some(c)) = self.store.chat(chat_id) {
+                if let Some(s) = c.compaction_summary {
+                    lines.push(format!(
+                        "Summary of earlier turns in this chat: {}",
+                        s.chars().take(6000).collect::<String>()
+                    ));
+                }
             }
         }
         for h in self.store.handles_for_chat(chat_id, 20).unwrap_or_default() {
@@ -12183,6 +12247,15 @@ pub(crate) fn chat_recap(
         "[This chat so far, newest last — these are the facts about this chat and outrank any retrieved memory from other chats; \"done?\", \"the last number\" and the like refer to this chat's work:]\n{}\n[End of this chat so far]\n\n",
         lines.join("\n")
     )
+}
+
+/// A text's identity, for telling "the same summary again" from "a rewritten one". Not a
+/// checksum of anything that leaves the box.
+fn hash_of(text: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut h);
+    h.finish()
 }
 
 /// The retry prompt: the recap goes right after the memory block when there is one (nearest to
@@ -15658,6 +15731,141 @@ mod tests {
             "a window that will not compact twice in a row is replaced"
         );
         pi.shutdown().await;
+    }
+
+    /// The rolling summary is the most expensive line of the working set — up to 6,000
+    /// characters — and with the stable prefix on it rides inside the user turn, where every
+    /// copy stays in the window and is paid for again on every later turn. Measured on
+    /// 2026-11-05, two consecutive turns repeated 6,434 characters of it for nothing.
+    ///
+    /// It still has to ride whenever the window cannot already hold it, which is what this
+    /// pins: the first turn of a window, the first turn after a rotation, and the first turn
+    /// after a compaction rewrote the summary. The lines around it are unaffected — a new
+    /// handle must still reach the model the turn it appears.
+    #[tokio::test]
+    async fn the_rolling_summary_rides_a_new_window_and_not_every_turn_of_it() {
+        let (agent, _root) = crate::status::tests::test_agent().await;
+        let chat_id = "01TESTPROJECTQUICKREPLY000";
+        agent
+            .store
+            .upsert_chat(chat_id, "stress", false, arbos_core::ids::now_ms())
+            .unwrap();
+        agent
+            .store
+            .set_chat_session_path(chat_id, "/work/.arbos/pi/sessions/first.jsonl")
+            .unwrap();
+        agent
+            .store
+            .set_chat_compaction(chat_id, "Jacob asked for the deploy plan.", "m9")
+            .unwrap();
+
+        const SUMMARY: &str = "Summary of earlier turns in this chat";
+        assert!(
+            agent.working_set_for_turn(chat_id).contains(SUMMARY),
+            "the first turn of a window carries the summary: nothing else in that window has it"
+        );
+        assert!(
+            !agent.working_set_for_turn(chat_id).contains(SUMMARY),
+            "the next turn must not pay for it again: the copy above is still in the window"
+        );
+
+        // A handle appears mid-window: the block changes and is re-sent, and this is exactly the
+        // turn the old code dragged the whole summary along with it.
+        agent
+            .store
+            .upsert_handle(
+                "h1",
+                Some(chat_id),
+                Some(chat_id),
+                "output",
+                4_000,
+                120,
+                "/work/out/run.log",
+                "the build log",
+                None,
+            )
+            .unwrap();
+        let with_handle = agent.working_set_for_turn(chat_id);
+        assert!(
+            with_handle.contains("h1"),
+            "a new handle still reaches the model the turn it appears: {with_handle}"
+        );
+        assert!(
+            !with_handle.contains(SUMMARY),
+            "but it does not drag the summary back in: {with_handle}"
+        );
+
+        // The window is replaced (`rotate_chat_session`): nothing the model saw survives, so the
+        // backstop goes in again.
+        agent
+            .store
+            .set_chat_session_path(chat_id, "/work/.arbos/pi/sessions/second.jsonl")
+            .unwrap();
+        assert!(
+            agent.working_set_for_turn(chat_id).contains(SUMMARY),
+            "a rotated window starts empty: the summary is the only trace of the earlier turns"
+        );
+        assert!(!agent.working_set_for_turn(chat_id).contains(SUMMARY));
+
+        // A compaction rewrites the summary itself: the window holds the old text, so the new
+        // one has to ride.
+        agent
+            .store
+            .set_chat_compaction(
+                chat_id,
+                "Jacob asked for the deploy plan, then cancelled the roll.",
+                "m14",
+            )
+            .unwrap();
+        let after_compaction = agent.working_set_for_turn(chat_id);
+        assert!(
+            after_compaction.contains("cancelled the roll"),
+            "a summary the model has never seen rides the next turn: {after_compaction}"
+        );
+        assert!(!agent.working_set_for_turn(chat_id).contains(SUMMARY));
+
+        // And pi compacting the window in place takes the injected copy with it.
+        agent.summary_left_the_window(chat_id);
+        assert!(
+            agent.working_set_for_turn(chat_id).contains(SUMMARY),
+            "a window pi summarised no longer holds the copy, so the next turn sends it"
+        );
+
+        // The status page and the voice prompt build their text from scratch every time, so
+        // they are not part of this and always carry it.
+        assert!(agent.working_set_text(chat_id).contains(SUMMARY));
+        assert!(agent.working_set_text(chat_id).contains(SUMMARY));
+    }
+
+    /// With the stable prefix off the working set is a system-prompt section instead, rebuilt
+    /// from nothing at every turn: there is no window holding the last copy, so a turn that left
+    /// the summary out would simply lose it.
+    #[tokio::test]
+    async fn with_the_stable_prefix_off_the_summary_rides_every_turn() {
+        let (agent, root) = crate::status::tests::test_agent().await;
+        let flags = root.join(".arbos");
+        std::fs::create_dir_all(&flags).unwrap();
+        std::fs::write(flags.join(crate::config::STABLE_PREFIX_FILE), "off").unwrap();
+        assert!(!agent.cfg.stable_prefix(), "the box file turns it off");
+
+        let chat_id = "01TESTPROJECTQUICKREPLY000";
+        agent
+            .store
+            .upsert_chat(chat_id, "stress", false, arbos_core::ids::now_ms())
+            .unwrap();
+        agent
+            .store
+            .set_chat_compaction(chat_id, "Jacob asked for the deploy plan.", "m9")
+            .unwrap();
+
+        for turn in 1..=3 {
+            assert!(
+                agent
+                    .working_set_for_turn(chat_id)
+                    .contains("Summary of earlier turns in this chat"),
+                "turn {turn} rebuilds the section from nothing and must carry the summary"
+            );
+        }
     }
 
     /// The refusal wordings this lane has to recognise. #2750 reads a turn's refusal off
