@@ -963,7 +963,10 @@ mod tests {
         // An unselected tile wears the hover step or nothing — the card only
         // ever travels for the selected row.
         let theme = Theme::dark(Surface::Matte);
-        assert_eq!(tile_fill(false, true, &theme), highlight::fills(&theme).hover);
+        assert_eq!(
+            tile_fill(false, true, &theme),
+            highlight::fills(&theme).hover
+        );
         assert_eq!(tile_fill(false, false, &theme).a, 0.0);
     }
 
