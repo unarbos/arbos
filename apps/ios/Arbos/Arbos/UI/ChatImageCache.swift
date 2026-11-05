@@ -65,10 +65,7 @@ enum ChatImageCache {
     /// WebP keep every frame (`AnimatedImageFrames`). `nil` when the bytes are not a picture.
     static func decode(_ data: Data, maxPixels: CGSize) async -> Decoded? {
         await Task.detached(priority: .userInitiated) { () -> Decoded? in
-            if let animated = AnimatedImageFrames.animatedImage(from: data) {
-                return Decoded(image: animated, stillFrame: animated.images?.first ?? animated, animated: true,
-                               naturalSize: animated.size)
-            }
+            if let animated = animation(in: data) { return animated }
             guard let img = UIImage(data: data) else { return nil }
             let trimmed = ImageTrim.trimmed(img)
             let natural = trimmed.size
@@ -83,5 +80,20 @@ enum ChatImageCache {
             }
             return Decoded(image: ready, stillFrame: nil, animated: false, naturalSize: natural)
         }.value
+    }
+
+    /// Only the animation in `data`, decoded away from the main actor; `nil` for a still.
+    /// The viewer loads full-resolution stills itself, so it asks for frames alone
+    /// ([feedback gif-send-and-playback-2026-11-05]).
+    static func animatedOnly(_ data: Data) async -> Decoded? {
+        await Task.detached(priority: .userInitiated) { animation(in: data) }.value
+    }
+
+    /// Every frame of an animated GIF / WebP, at the frame caps (`AnimatedImageFrames`);
+    /// `nil` when the bytes are a still. Both callers are already off the main actor.
+    private static func animation(in data: Data) -> Decoded? {
+        guard let animated = AnimatedImageFrames.animatedImage(from: data) else { return nil }
+        return Decoded(image: animated, stillFrame: animated.images?.first ?? animated, animated: true,
+                       naturalSize: animated.size)
     }
 }

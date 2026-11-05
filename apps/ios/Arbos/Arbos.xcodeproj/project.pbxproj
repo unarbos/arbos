@@ -55,6 +55,7 @@
 		A1F7A0000000000000000002 /* ProfileToggle.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F7A0000000000000000001 /* ProfileToggle.swift */; };
 		A1BB00000000000000000002 /* BackSwipe.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000001 /* BackSwipe.swift */; };
 		A1BB00000000000000000004 /* BackSwipeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000003 /* BackSwipeTests.swift */; };
+		A1F700000000000000000002 /* GifPlaybackAndPreviewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F700000000000000000001 /* GifPlaybackAndPreviewTests.swift */; };
 		A1BB00000000000000000006 /* BackSwipeUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000005 /* BackSwipeUITests.swift */; };
 		A1BB00000000000000000031 /* ScrollPerfUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000030 /* ScrollPerfUITests.swift */; };
 		A1F50000000000000000E004 /* PerfBaselineUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F50000000000000000E003 /* PerfBaselineUITests.swift */; };
@@ -309,6 +310,7 @@
 		A1F7A0000000000000000001 /* ProfileToggle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileToggle.swift; sourceTree = "<group>"; };
 		A1BB00000000000000000001 /* BackSwipe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackSwipe.swift; sourceTree = "<group>"; };
 		A1BB00000000000000000003 /* BackSwipeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackSwipeTests.swift; sourceTree = "<group>"; };
+		A1F700000000000000000001 /* GifPlaybackAndPreviewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GifPlaybackAndPreviewTests.swift; sourceTree = "<group>"; };
 		A1BB00000000000000000005 /* BackSwipeUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackSwipeUITests.swift; sourceTree = "<group>"; };
 		A1BB00000000000000000030 /* ScrollPerfUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScrollPerfUITests.swift; sourceTree = "<group>"; };
 		A1F50000000000000000E003 /* PerfBaselineUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerfBaselineUITests.swift; sourceTree = "<group>"; };
@@ -774,6 +776,7 @@
 				A15EC9000000000000000103 /* SecretHandoffTests.swift */,
 				A1C5440000000000000003 /* ShellApprovalCardTests.swift */,
 				A1BB00000000000000000003 /* BackSwipeTests.swift */,
+				A1F700000000000000000001 /* GifPlaybackAndPreviewTests.swift */,
 			);
 			path = ArbosTests;
 			sourceTree = "<group>";
@@ -1166,6 +1169,7 @@
 				A15EC9000000000000000004 /* AgentPickerTests.swift in Sources */,
 				A15EC9000000000000000104 /* SecretHandoffTests.swift in Sources */,
 				A1C5440000000000000004 /* ShellApprovalCardTests.swift in Sources */,
+				A1F700000000000000000002 /* GifPlaybackAndPreviewTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

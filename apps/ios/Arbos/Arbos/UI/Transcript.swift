@@ -3313,9 +3313,14 @@ struct ImageBubble: View {
             let flush = PhotoBubbleLayout.pictureIsFlush(picture: picture, bubbleWidth: g.size.width)
             ZStack {
                 if let shown = (animate ? image : stillFrame) ?? image {
-                    Image(uiImage: shown)
-                        .resizable()
-                        .scaledToFit()
+                    if animate, (shown.images?.count ?? 0) > 1 {
+                        // Frames play in a UIImageView; SwiftUI's Image would hold one.
+                        AnimatedImage(image: shown, playing: true)
+                    } else {
+                        Image(uiImage: shown)
+                            .resizable()
+                            .scaledToFit()
+                    }
                 } else if failed || item.cacheKey == nil {
                     Image(systemName: "photo")
                         .font(theme.font(28))
@@ -3476,6 +3481,58 @@ enum AnimatedImageFrames {
             return d < 0.02 ? 0.1 : d
         }
         return 0.1
+    }
+}
+
+/// A decoded animation in motion. `ChatImageCache` already keeps every frame, but SwiftUI's
+/// `Image(uiImage:)` draws one frame of a multi-frame `UIImage` and never advances it, so
+/// every GIF and animated sticker stood still ([feedback gif-send-and-playback-2026-11-05]).
+/// `UIImageView` is the only view that plays frames. Stills keep the SwiftUI path.
+struct AnimatedImage: UIViewRepresentable {
+    let image: UIImage
+    /// An off-screen row hands over `false`, so the frames cost nothing while it is away.
+    var playing: Bool
+
+    func makeUIView(context: Context) -> AnimatedImageView {
+        let view = AnimatedImageView()
+        view.contentMode = .scaleAspectFit
+        view.clipsToBounds = true
+        // The bubble decides the tile's size; the picture's own frames must not widen it.
+        view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        view.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
+        view.show(image, playing: playing)
+        return view
+    }
+
+    func updateUIView(_ view: AnimatedImageView, context: Context) {
+        view.show(image, playing: playing)
+    }
+}
+
+/// `UIImageView` that plays an animated `UIImage`'s frames, and only while asked to.
+final class AnimatedImageView: UIImageView {
+    /// Whether the frames should be running. The tests read this intent; UIKit runs the
+    /// frames themselves once the view is on screen.
+    private(set) var wantsAnimation = false
+    private var source: UIImage?
+
+    /// `image` may be a still, a multi-frame animation, or nothing at all.
+    func show(_ image: UIImage?, playing: Bool) {
+        if source !== image {
+            source = image
+            let frames = image?.images ?? []
+            // The still under the animation: its first frame, so a paused row shows the
+            // picture rather than an empty tile.
+            self.image = frames.first ?? image
+            animationImages = frames.count > 1 ? frames : nil
+            animationDuration = image?.duration ?? 0
+            animationRepeatCount = 0
+            wantsAnimation = false
+        }
+        let play = playing && animationImages != nil
+        guard play != wantsAnimation else { return }
+        wantsAnimation = play
+        if play { startAnimating() } else { stopAnimating() }
     }
 }
 
