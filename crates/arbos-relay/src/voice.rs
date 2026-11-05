@@ -1228,11 +1228,66 @@ pub struct UsageBody {
     pub usage: VoiceUsage,
 }
 
-/// `POST /voice/calls/{id}/usage` — cumulative usage for this agent in this call. The relay
-/// debits the difference since the last report from the owner's ledger (`voice`,
-/// `ref = call:<id>`; the camera-vision part as its own line, `ref = call:<id>#vision`),
-/// mirrors it into the project's `usage` table (so the project's spend cap counts it), and
-/// answers the caps: `{ caps: { stop: null | reason, … }, usd_charged }`.
+/// Debit one usage report into the payer's account ledger and say what was charged.
+///
+/// This is where the money of a voice call is taken, and it runs on every report the worker
+/// sends — every `ARBOS_VOICE_USAGE_EVERY_S` (30 s) while the call is up, not only on the
+/// final one. Only the difference since the last report is charged, so the cumulative figures
+/// the worker sends are safe to replay. The camera-vision share goes in as its own line
+/// (`ref = call:<id>#vision`) so the breakdown survives.
+///
+/// Charging as the call runs is what lets the account's one limit end a call: the caller reads
+/// the stop straight after this and hands it to the worker. A call charged only at hang-up
+/// could not be stopped by any limit, however the limit was written.
+fn charge_report(
+    state: &AppState,
+    call_id: &str,
+    project_id: &str,
+    payer: &str,
+    started_at: i64,
+    usage: &VoiceUsage,
+    model: &str,
+) -> Result<f64, String> {
+    let row = state
+        .db
+        .voice_usage_upsert(call_id, project_id, payer, started_at, usage)
+        .map_err(|e| e.to_string())?;
+    let delta = row.usage.usd - row.usd_charged;
+    if delta <= 0.000_001 {
+        return Ok(row.usd_charged);
+    }
+    let vision_delta = (row.usage.vision_usd - row.vision_charged).clamp(0.0, delta);
+    let voice_delta = delta - vision_delta;
+    let reference = format!("call:{call_id}");
+    if voice_delta > 0.000_001 {
+        crate::credits::charge(state, payer, voice_delta, "voice", Some(&reference));
+    }
+    if vision_delta > 0.000_001 {
+        let vision_ref = format!("{reference}#vision");
+        crate::credits::charge(state, payer, vision_delta, "voice", Some(&vision_ref));
+    }
+    let _ = state
+        .db
+        .voice_charged(call_id, project_id, delta, vision_delta);
+    let _ = state.db.record_usage(
+        project_id,
+        "voice",
+        model,
+        usage.audio_in_tokens + usage.text_in_tokens,
+        usage.audio_out_tokens + usage.text_out_tokens,
+        usage.cached_tokens,
+        0,
+        delta,
+        (usage.seconds * 1000.0) as i64,
+        usage.ttfa_ms_p50,
+    );
+    Ok(row.usd_charged + delta)
+}
+
+/// `POST /voice/calls/{id}/usage` — cumulative usage for this agent in this call. Debits the
+/// difference since the last report into the owner's account ledger ([`charge_report`]) and
+/// answers the caps: `{ caps: { stop: null | reason, … }, usd_charged }`. The worker leaves the
+/// call on any `stop`, so this is the path a cost limit ends a call through, mid-call.
 pub async fn call_usage(
     State(state): State<AppState>,
     principal: Principal,
@@ -1247,42 +1302,18 @@ pub async fn call_usage(
         Err(r) => return *r,
     };
     let payer = project.user_id.clone();
-    let row =
-        match state
-            .db
-            .voice_usage_upsert(&call.id, &project.id, &payer, call.started_at, &b.usage)
-        {
-            Ok(r) => r,
-            Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
-        };
-    let delta = row.usage.usd - row.usd_charged;
-    if delta > 0.000_001 {
-        let vision_delta = (row.usage.vision_usd - row.vision_charged).clamp(0.0, delta);
-        let voice_delta = delta - vision_delta;
-        let reference = format!("call:{}", call.id);
-        if voice_delta > 0.000_001 {
-            crate::credits::charge(&state, &payer, voice_delta, "voice", Some(&reference));
-        }
-        if vision_delta > 0.000_001 {
-            let vision_ref = format!("{reference}#vision");
-            crate::credits::charge(&state, &payer, vision_delta, "voice", Some(&vision_ref));
-        }
-        let _ = state
-            .db
-            .voice_charged(&call.id, &project.id, delta, vision_delta);
-        let _ = state.db.record_usage(
-            &project.id,
-            "voice",
-            &state.voice.model,
-            b.usage.audio_in_tokens + b.usage.text_in_tokens,
-            b.usage.audio_out_tokens + b.usage.text_out_tokens,
-            b.usage.cached_tokens,
-            0,
-            delta,
-            (b.usage.seconds * 1000.0) as i64,
-            b.usage.ttfa_ms_p50,
-        );
-    }
+    let charged = match charge_report(
+        &state,
+        &call.id,
+        &project.id,
+        &payer,
+        call.started_at,
+        &b.usage,
+        &state.voice.model,
+    ) {
+        Ok(v) => v,
+        Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e),
+    };
     if b.usage.ended {
         tracing::info!(
             call = %call.id, project = %project.id, seconds = b.usage.seconds, usd = b.usage.usd,
@@ -1308,7 +1339,7 @@ pub async fn call_usage(
     }
     Json(json!({
         "caps": caps_json(&state, &payer, &call.id, &project.id),
-        "usd_charged": row.usd_charged + delta.max(0.0),
+        "usd_charged": charged,
     }))
     .into_response()
 }
@@ -1507,6 +1538,68 @@ mod cost_stop_tests {
     use crate::state::AuthMode;
 
     use super::stops_for;
+
+    fn report(seconds: f64, usd: f64) -> crate::db_voice::VoiceUsage {
+        crate::db_voice::VoiceUsage {
+            seconds,
+            usd,
+            ..Default::default()
+        }
+    }
+
+    /// The money of a call is taken while the call is up, not at hang-up. Three interim reports
+    /// (`ended` false, as the worker sends them every 30 s) each leave their own ledger row for
+    /// the difference, and the stop the worker is handed flips as soon as the account's limit is
+    /// reached — which is the whole reason a cost limit can end a call at all.
+    #[test]
+    fn each_interim_report_is_charged_and_the_limit_bites_mid_call() {
+        let state = test_state(AuthMode::Github);
+        state.db.set_kill_switch(&Default::default()).unwrap();
+        state.db.grant_credits("u_mid", 100.0, "t", "t").unwrap();
+        state
+            .db
+            .set_user_limits("u_mid", Some(SpendLimit::Daily(3.0).stored()), None)
+            .unwrap();
+
+        let mut charged = Vec::new();
+        for (secs, usd) in [(30.0, 1.0), (60.0, 2.0), (90.0, 3.5)] {
+            assert!(!report(secs, usd).ended, "an interim report, not the last");
+            charged.push(
+                super::charge_report(
+                    &state,
+                    "call_mid",
+                    "p_mid",
+                    "u_mid",
+                    0,
+                    &report(secs, usd),
+                    "test-model",
+                )
+                .expect("charged"),
+            );
+            if stops_for(&state, "u_mid").is_err() {
+                break;
+            }
+        }
+        assert_eq!(
+            charged,
+            vec![1.0, 2.0, 3.5],
+            "each report charges the difference as the call runs"
+        );
+
+        let by_kind = state.db.credits("u_mid", 0).unwrap().today_by_kind;
+        assert_eq!(by_kind.len(), 1, "one source: {by_kind:?}");
+        assert_eq!(by_kind[0].kind, "voice");
+        assert_eq!(by_kind[0].usd, 3.5);
+        assert_eq!(
+            by_kind[0].calls, 3,
+            "three ledger rows mid-call, not one at the end"
+        );
+        assert_eq!(
+            stops_for(&state, "u_mid"),
+            Err("daily_cap"),
+            "the worker's next report is answered with a stop and it leaves the call"
+        );
+    }
 
     /// A long, expensive call on an unlimited account keeps going. Every pass of the worker's
     /// usage loop asks this, so a limit that read an unset value as zero would hang up on the
