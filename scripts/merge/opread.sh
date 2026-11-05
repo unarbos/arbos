@@ -64,8 +64,24 @@ opread() {
     export DBUS_SESSION_BUS_ADDRESS=disabled: OP_CACHE=false
     exec op --cache=false read "$1" 2>"$_operr" )
 }
-# oprl: prints the account read_write USED count, or "?" if the probe failed. The ratelimit query is free.
+# oprl: prints the account read_write USED count, or "?" if the probe failed.
 # The counter is account-wide, so a before/after difference also includes any other lane's requests in between.
+#
+# THE COST OF THE PROBE IS UNVERIFIED AND SUSPECTED NON-ZERO. This comment used to say the ratelimit query
+# was free. That was never measured either, and it is the claim that costs us if it is wrong: the 1,000/day
+# budget is shared by every lane, so a probe that quietly bills a read is spent through every lane told it
+# was costless. Treat each call as costing a read.
+#
+# The suspicion, and its weakness, so the next reader can weigh it rather than inherit it. On 2026-11-05,
+# across a span whose only op invocations were three `service-account ratelimit` probes and no reads at all,
+# `token read` moved 0 → 4 from a cold N/A reset and account `read_write` moved 485 → 489. The account
+# counter is shared with every lane, so that delta attributes to nobody; `token read` rising from a cold
+# window is harder to explain away, but three probes do not account for four requests either. It is an
+# observation, not a measurement.
+#
+# Do not run probes to settle it. The clean experiment needs a quiet account, and a quiet account is
+# exactly what a night of parallel lanes does not have — the measurement would cost budget and still not
+# isolate the probe. Ask 1Password, or read it off a quiet morning.
 oprl() {
   ( for v in $(compgen -e); do case $v in PATH|HOME|OP_SERVICE_ACCOUNT_TOKEN) ;; *) unset "$v" ;; esac; done
     export DBUS_SESSION_BUS_ADDRESS=disabled: OP_CACHE=false

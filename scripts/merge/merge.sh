@@ -179,6 +179,7 @@ TOKEN=$(opread 'op://Arbos/gefompyaklwbv2iuyyb4z5rvbm/credential') && [ -n "$TOK
        echo "  op said: $(head -c 300 "$(op_err_file)")"; exit 4; }
 rl1=$(oprl)
 echo "PAT read $(date -u +%FT%TZ): served by 1Password with the cache off. The client cannot see its cost in account requests; the account counter (shared by every lane) went from $rl0 to $rl1 across the read."
+echo "    That delta is an UPPER BOUND on this read, not its cost: it also holds any other lane's requests in the same window, and the two ratelimit probes that produced the two numbers may themselves be counted (see oprl in opread.sh)."
 body=$(printf '{"sha":"%s","merge_method":"merge"}' "$SHA")
 hdr=$(mktemp); chmod 600 "$hdr"
 # The PR merge API pins the PR head but not main, so this last read is the narrowest window this tool can give.
