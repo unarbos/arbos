@@ -433,9 +433,18 @@ push_tag() {
 
 # image_run_state <tag> → ok | pending | failed | none  (the build + smoke steps; the register
 # step always fails in CI — no DAYTONA_API_KEY there — and is done here instead)
+#
+# Any event, not `push` alone. This worker is no longer the only side that tags `image-v0.1.N`:
+# release.yml's `agent` channel cuts one for a range that touched only agentd or image/, and a
+# tag it pushes with GITHUB_TOKEN starts no workflow, so release.yml reaches image.yml by
+# `workflow_dispatch` instead. With `&event=push` on this query that run is invisible here,
+# next_image_version() reuses the tag because it already sits on the sha being rolled, and the
+# roll waits out IMAGE_WAIT_S for a push run that will never exist. The `branch=` filter still
+# pins the answer to runs on this tag, which is what makes the query specific; the event never
+# was.
 image_run_state() {
   local runs id jobs
-  runs="$(gh_api "/actions/workflows/image.yml/runs?branch=$1&event=push&per_page=3" 2>/dev/null || true)"
+  runs="$(gh_api "/actions/workflows/image.yml/runs?branch=$1&per_page=3" 2>/dev/null || true)"
   id="$(printf '%s' "$runs" | python3 -c 'import json,sys; r=json.load(sys.stdin).get("workflow_runs",[]); print(r[0]["id"] if r else "")' 2>/dev/null || true)"
   [[ -n "$id" ]] || { echo none; return; }
   jobs="$(gh_api "/actions/runs/$id/jobs" 2>/dev/null || true)"

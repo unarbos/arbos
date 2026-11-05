@@ -14,6 +14,11 @@
 //! the one with a signing and notarization cost that must not be paid twice.
 //!
 //! Every case builds its own throwaway repository, so none of them changes answer as main moves.
+//! That is not a preference: CI checks main out one commit deep, so a case pinned to a real
+//! commit could not read it. The live case these fixtures stand in for is #2817, merged as
+//! 7988e3427 — two files, both under `crates/arbos-agentd/src`. `mac-change.sh` answers "no Mac
+//! path changed" for 7988e3427^1..7988e3427 and `release-channel.sh` answers `channel=agent`,
+//! which is the whole of this change in one range anybody can replay in a full checkout.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -234,7 +239,10 @@ fn a_range_on_both_path_sets_is_one_mac_cut() {
     // already rebuilds and pushes the image, so the two must not both fire.
     let checkout = Checkout::new("both");
     let base = checkout.base_commit(&lock());
-    checkout.write("crates/arbos-core/src/lib.rs", "pub fn core() { fixed(); }\n");
+    checkout.write(
+        "crates/arbos-core/src/lib.rs",
+        "pub fn core() { fixed(); }\n",
+    );
     let target = checkout.commit("fix: a core change both the app and agentd link");
 
     let plan = checkout.channel(&base, &base, &target);
@@ -253,7 +261,10 @@ fn a_relay_only_range_cuts_nothing_and_says_so_twice() {
     // report, so the log distinguishes them.
     let checkout = Checkout::new("relay-only");
     let base = checkout.base_commit(&lock());
-    checkout.write("crates/arbos-relay/src/lib.rs", "pub fn relay() { fixed(); }\n");
+    checkout.write(
+        "crates/arbos-relay/src/lib.rs",
+        "pub fn relay() { fixed(); }\n",
+    );
     let target = checkout.commit("fix: the relay keeps its websocket");
 
     let plan = checkout.channel(&base, &base, &target);
@@ -293,7 +304,10 @@ fn a_dependency_change_reaches_both_artifacts() {
 
     let plan = checkout.channel(&base, &base, &target);
     assert_eq!(plan["channel"], "stable", "{plan:?}");
-    assert_eq!(plan["agent"], "yes", "a dependency change is in the image too");
+    assert_eq!(
+        plan["agent"], "yes",
+        "a dependency change is in the image too"
+    );
 }
 
 // ── the path list is the image's closure, not a guess at it ─────────────────────────────────────
