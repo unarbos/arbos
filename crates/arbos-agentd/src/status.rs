@@ -1215,6 +1215,19 @@ pub(crate) mod tests {
         (agent, root)
     }
 
+    /// Shorten the act-ack promotion threshold for one agent only. The knob file lives in this
+    /// agent's own state dir, so two promotion tests can run at once; the process-global
+    /// `ARBOS_ACT_ACK_BUBBLE_SECS` they used to set could not (either one's cleanup restored the
+    /// 4 s default inside the other's sleep and killed the promotion under test).
+    fn promote_act_ack_after_1s(agent: &Arc<Agent>) {
+        let f = agent
+            .cfg
+            .state_dir
+            .join(crate::config::ACT_ACK_BUBBLE_SECS_FILE);
+        std::fs::write(&f, "1").unwrap();
+        assert_eq!(agent.cfg.act_ack_bubble_after().as_secs(), 1);
+    }
+
     fn send_cmd(host: &SharedHost, text: &str) -> (String, CommandView) {
         let msg_id = ulid();
         let h = host.try_lock().expect("host free");
@@ -2498,8 +2511,8 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn long_act_turn_promotes_its_ack_to_a_bubble() {
         use crate::config::SendTool;
-        std::env::set_var("ARBOS_ACT_ACK_BUBBLE_SECS", "1");
         let (agent, root) = test_agent().await;
+        promote_act_ack_after_1s(&agent);
         let chat = "01TESTCHATQUICKREPLY000011";
         let host = agent.sync.open_room(chat).await.unwrap();
         let _busy = agent.test_hold_turn(chat).await;
@@ -2545,7 +2558,6 @@ pub(crate) mod tests {
             assert!(t.ack_posted);
             assert!(!t.row_closed, "a fresh result row is open for the answer");
         }
-        std::env::remove_var("ARBOS_ACT_ACK_BUBBLE_SECS");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2837,8 +2849,8 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn prose_after_a_promoted_act_ack_still_becomes_the_result_bubble() {
         use crate::config::SendTool;
-        std::env::set_var("ARBOS_ACT_ACK_BUBBLE_SECS", "1");
         let (agent, root) = test_agent().await;
+        promote_act_ack_after_1s(&agent);
         let chat = "01TESTCHATQUICKREPLY000013";
         let host = agent.sync.open_room(chat).await.unwrap();
         let _busy = agent.test_hold_turn(chat).await;
@@ -2901,7 +2913,6 @@ pub(crate) mod tests {
             result_row.rest.get("turnRole").and_then(Value::as_str),
             Some("ack")
         );
-        std::env::remove_var("ARBOS_ACT_ACK_BUBBLE_SECS");
         let _ = std::fs::remove_dir_all(&root);
     }
 

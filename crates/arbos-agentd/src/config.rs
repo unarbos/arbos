@@ -82,6 +82,32 @@ pub fn act_to_job_after_with(files: &[std::path::PathBuf]) -> std::time::Duratio
     std::time::Duration::from_secs(secs)
 }
 
+/// Override file for the act-ack promotion threshold: `.arbos/act-ack-bubble-secs` (a number of
+/// seconds), in the project's state dir first, then box-wide.
+pub const ACT_ACK_BUBBLE_SECS_FILE: &str = "act-ack-bubble-secs";
+/// Default seconds an `act` turn may run before its ack becomes a bubble. Four seconds: a quick
+/// act answers inside it and shows one bubble; longer work shows the ack where Grok Bot shows it.
+pub const ACT_ACK_BUBBLE_SECS_DEFAULT: u64 = 4;
+
+/// Seconds an `act` turn may run before its ack is promoted to a bubble: override files, then
+/// `ARBOS_ACT_ACK_BUBBLE_SECS`, then `ACT_ACK_BUBBLE_SECS_DEFAULT`. `0` keeps the ack on the
+/// working row only. Read per turn, so a file flips it with no restart.
+pub fn act_ack_bubble_after_with(files: &[std::path::PathBuf]) -> std::time::Duration {
+    let from_file = files.iter().find_map(|f| {
+        std::fs::read_to_string(f)
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+    });
+    let secs = from_file
+        .or_else(|| {
+            std::env::var("ARBOS_ACT_ACK_BUBBLE_SECS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+        })
+        .unwrap_or(ACT_ACK_BUBBLE_SECS_DEFAULT);
+    std::time::Duration::from_secs(secs)
+}
+
 /// Override file for the research-job worker model: `.arbos/research-worker-model` holding a model
 /// id, or `off` to run research jobs on the subagent model like every other kind.
 pub const RESEARCH_WORKER_MODEL_FILE: &str = "research-worker-model";
@@ -595,6 +621,11 @@ impl Config {
     /// Seconds before an act turn becomes a job (cost knob 2); project file, box file, env, default.
     pub fn act_to_job_after(&self) -> std::time::Duration {
         act_to_job_after_with(&self.knob_files(ACT_TO_JOB_SECS_FILE))
+    }
+
+    /// Seconds before an act ack is promoted to a bubble; project file, box file, env, default.
+    pub fn act_ack_bubble_after(&self) -> std::time::Duration {
+        act_ack_bubble_after_with(&self.knob_files(ACT_ACK_BUBBLE_SECS_FILE))
     }
 
     /// The model `research` jobs run on (cost knob 1); `None` = the subagent model.
