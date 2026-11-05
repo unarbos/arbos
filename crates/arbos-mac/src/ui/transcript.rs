@@ -2347,6 +2347,7 @@ impl Transcript {
                 }
                 // Not one of my projects (a subagent): initials on the name's gradient.
                 None => {
+                    // avatar-lint: allow (named only in the row's prose: no record, so no picture)
                     crate::ui::avatars::element(name, name, None, 16.0, theme).into_any_element()
                 }
             };

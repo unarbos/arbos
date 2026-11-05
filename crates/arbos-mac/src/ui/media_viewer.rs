@@ -645,6 +645,7 @@ fn forward_picker(
         let avatar = state
             .project(&target.space_id)
             .map(|p| crate::ui::groups::chat_picture(p, state, 36.0, theme))
+            // avatar-lint: allow (a forward target with no space record: nothing to resolve)
             .unwrap_or_else(|| avatars::element(&target.space_id, &target.name, None, 36.0, theme));
         let pick = target.clone();
         list = list.child(

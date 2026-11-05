@@ -2249,6 +2249,7 @@ struct RowView: View, Equatable {
             AgentAvatar(project: target, theme: theme, size: 16, still: true)
         } else {
             // An agent we do not list: initials on the colour its name hashes to.
+            // avatar-lint: allow (named only in the row's prose: no record, so no picture)
             InitialsAvatar(name: name, handle: name, id: name, size: 16)
         }
     }
@@ -3012,6 +3013,7 @@ struct PersonAvatar: View {
     }
 
     private var initials: some View {
+        // avatar-lint: allow (PersonAvatar's own fallback: the picture branch is in `body`)
         InitialsAvatar(name: name, handle: handle, id: id ?? handle, override: colorIndex, size: size)
     }
 }

@@ -83,6 +83,7 @@ pub fn tab_glyphs(
                         GLYPH,
                         theme,
                     ),
+                    // avatar-lint: allow (a participant with no project record: no URL to ask for)
                     None => crate::ui::avatars::element(id, id, None, GLYPH, theme),
                 };
                 row = row.child(head.absolute().left(px(step * i as f32)).top(px(0.0)));

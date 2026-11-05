@@ -896,13 +896,21 @@ struct ChatSession: View {
             let m = people?.members.first {
                 !$0.isAgent && $0.handle.caseInsensitiveCompare(handle) == .orderedSame
             }
+            // The chat's roster is the current truth for a member of it. A typist who is not
+            // on it is still someone the model knows — a channel member shares no group with
+            // me, and this chat may not be a people chat at all — so the shared lookups
+            // answer rather than the row drawing a bare letter and "@handle"
+            // ([feedback avatar-letter-fallbacks-2026-11-05]).
+            let url = m?.avatarUrl ?? model.personAvatarURL(handle: handle)
+            let name = m?.name.flatMap { $0.isEmpty ? nil : $0 } ?? model.personName(handle: handle)
             out.append(PresenceParticipant(
                 id: "typing:\(handle)",
-                name: m?.name.flatMap { $0.isEmpty ? nil : $0 } ?? "@\(handle)",
+                name: name?.isEmpty == false ? name! : "@\(handle)",
                 activity: .typing,
-                picture: AnyView(PersonAvatar(url: m?.avatarUrl, handle: handle, size: PresenceRow.avatar,
-                                              name: m?.name, id: m?.id, colorIndex: m?.avatarColorIndex)),
-                target: model.personTarget(handle: handle, avatarUrl: m?.avatarUrl, chatId: chatId)
+                picture: AnyView(PersonAvatar(url: url, handle: handle, size: PresenceRow.avatar,
+                                              name: name, id: m?.id ?? model.personId(handle: handle),
+                                              colorIndex: m?.avatarColorIndex)),
+                target: model.personTarget(handle: handle, avatarUrl: url, chatId: chatId)
             ))
         }
         guard streaming else { return out }
@@ -3908,6 +3916,7 @@ struct ChatSession: View {
                     ForEach(collectives, id: \.rawValue) { c in
                         Button { completeMention(.collective(c)) } label: {
                             HStack(spacing: 12) {
+                                // avatar-lint: allow (@here / @agents is nobody: there is no picture of a collective)
                                 InitialsAvatar(name: c.handle, handle: c.handle, id: c.handle, size: 28)
                                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                                     Text("@" + c.handle)

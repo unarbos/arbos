@@ -1015,6 +1015,18 @@ impl SecretsPanel {
     fn render_secret(&self, s: &Secret, theme: &Theme, cx: &mut Context<Self>) -> Div {
         let mut body = div().flex().flex_col().gap(px(18.0));
         let images = avatars::project_images(self.state.read(cx));
+        // The People rows' photos, keyed by user id: taken while the state is readable,
+        // because the rows' listeners below hold `cx` mutably.
+        let person_images: std::collections::HashMap<String, std::sync::Arc<gpui::RenderImage>> = {
+            let st = self.state.read(cx);
+            s.directors
+                .iter()
+                .filter_map(|d| {
+                    let url = d.avatar_url.as_deref().filter(|u| !u.is_empty())?;
+                    st.avatar(url).map(|i| (d.user_id.clone(), i))
+                })
+                .collect()
+        };
         let (paused, projects, acts) = {
             let st = self.state.read(cx);
             let acts: Vec<SecretActivity> = st
@@ -1423,10 +1435,12 @@ impl SecretsPanel {
                     .child(kit::hairline_below(theme))
                     .cursor_pointer()
                     .map(|el| highlight::row(el, false, Shape::Nested(PANEL_RADIUS), theme))
-                    .child(avatars::element(
-                        &d.user_id,
-                        &d.display_name(),
-                        None,
+                    // The relay sends this person's `avatarUrl` and the row ignored it, so a
+                    // Mac People row drew a letter where the iPhone's mirror of it drew the
+                    // photo ([feedback avatar-letter-fallbacks-2026-11-05]).
+                    .child(crate::ui::people::avatar(
+                        person_images.get(&d.user_id).cloned(),
+                        &d.as_person(),
                         30.0,
                         theme,
                     ))

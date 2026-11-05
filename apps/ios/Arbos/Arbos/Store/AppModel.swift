@@ -4590,6 +4590,26 @@ final class AppModel: ObservableObject {
         return directory.first { $0.handle.caseInsensitiveCompare(handle) == .orderedSame }?.name
     }
 
+    /// A person's picture by handle, in the same order as `personName(handle:)`: me, the
+    /// people chats' members, the servers' members, then the directory. `nil` = no picture
+    /// known, which is the only case a render site may draw a letter for. A site that holds
+    /// only a handle — the typing row — asks here instead of settling for `url: nil`
+    /// ([feedback avatar-letter-fallbacks-2026-11-05]).
+    func personAvatarURL(handle: String) -> String? {
+        func some(_ url: String?) -> String? {
+            guard let url, !url.isEmpty else { return nil }
+            return url
+        }
+        if let me = user, me.login.caseInsensitiveCompare(handle) == .orderedSame { return some(me.avatarUrl) }
+        for c in peopleChats {
+            if let m = c.members.first(where: { !$0.isAgent && $0.handle.caseInsensitiveCompare(handle) == .orderedSame }) {
+                return some(m.avatarUrl)
+            }
+        }
+        if let url = some(serverMember(handle: handle)?.avatarUrl) { return url }
+        return some(directory.first { $0.handle.caseInsensitiveCompare(handle) == .orderedSame }?.avatarUrl)
+    }
+
     /// A server member by handle, across every server's roster.
     func serverMember(handle: String) -> ServerMember? {
         for s in servers {

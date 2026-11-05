@@ -163,7 +163,16 @@ pub fn gather(state: &AppState, chat_id: &str, space: &Project, theme: &Theme) -
 
     // People typing (room presence, people chats only).
     for handle in state.typing_in(chat_id) {
-        let person = space.people.iter().find(|p| p.handle == handle).cloned();
+        // The chat's roster is the current truth for a member of it; a typist who is not on
+        // it — a channel member who shares no group with me, or me on another device — is
+        // still someone the client knows, so the shared lookup answers for them rather than
+        // the row drawing a bare letter ([feedback avatar-letter-fallbacks-2026-11-05]).
+        let person = space
+            .people
+            .iter()
+            .find(|p| p.handle.eq_ignore_ascii_case(&handle))
+            .cloned()
+            .or_else(|| state.person_by_handle(&handle));
         let (name, picture) = match person {
             Some(p) => {
                 let image: Option<Arc<RenderImage>> = state.avatar(&p.avatar_url);
@@ -179,7 +188,7 @@ pub fn gather(state: &AppState, chat_id: &str, space: &Project, theme: &Theme) -
                 };
                 (
                     format!("@{handle}"),
-                    avatars::person(&p, AVATAR, theme).into_any_element(),
+                    avatars::person(&p, AVATAR, theme).into_any_element(), // avatar-lint: allow (nobody the client knows by that handle: no picture to find)
                 )
             }
         };

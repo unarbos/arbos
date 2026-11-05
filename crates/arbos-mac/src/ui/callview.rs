@@ -64,7 +64,7 @@ fn picture(sender: &Sender, image: Option<Arc<RenderImage>>, size: f32, theme: &
     if image.is_some() {
         return people::avatar(image, &sender.as_person(), size, theme);
     }
-    avatars::sender(sender, size, theme)
+    avatars::sender(sender, size, theme) // avatar-lint: allow (sender_image resolved it above; the photo won two lines up)
 }
 
 /// One tile: the camera when it is on, else the picture on a dark card.

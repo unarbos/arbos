@@ -13,7 +13,11 @@
 //! The rules (hits, cursor, count) are `crate::chat_search`; the state is
 //! `AppState::chat_search`.
 
-use gpui::{actions, div, prelude::*, px, AnyElement, Context, Focusable, Hsla, Stateful};
+use std::sync::Arc;
+
+use gpui::{
+    actions, div, prelude::*, px, AnyElement, Context, Focusable, Hsla, RenderImage, Stateful,
+};
 
 use crate::app::AppState;
 use crate::chat_search::Sender;
@@ -154,8 +158,13 @@ pub fn bar(shell: &Shell, cx: &mut Context<Shell>) -> Option<AnyElement> {
             theme.text_muted,
         ));
 
+    // The chips' pictures come out of the state here, while it is still borrowed: the
+    // builders below hold `cx` mutably for their listeners and cannot keep it.
+    let pinned_picture = search.query.sender.as_ref().and_then(|s| picture(state, s));
+    let offered_picture = offered.as_ref().and_then(|s| picture(state, s));
+
     if let Some(sender) = search.query.sender.clone() {
-        bar = bar.child(pinned_chip(&sender, &theme, cx));
+        bar = bar.child(pinned_chip(&sender, pinned_picture, &theme, cx));
     }
 
     let mut field = div()
@@ -173,7 +182,7 @@ pub fn bar(shell: &Shell, cx: &mut Context<Shell>) -> Option<AnyElement> {
                 .child(shell.chat_search_input.clone()),
         );
     if let Some(sender) = offered {
-        field = field.child(offered_chip(&sender, &theme, cx));
+        field = field.child(offered_chip(&sender, offered_picture, &theme, cx));
     }
     bar = bar.child(field);
 
@@ -278,7 +287,24 @@ fn nav(id: &'static str, glyph: &str, on: bool, theme: &Theme) -> Stateful<gpui:
         ))
 }
 
-fn chip_base(id: &'static str, sender: &Sender, theme: &Theme) -> Stateful<gpui::Div> {
+/// The decoded photo for a chip's sender, when the loader has it. `sender_identity` carries
+/// the URL (`AppState::person_by_handle`, or the row's own `senderAvatar` for an agent) and
+/// every source it draws on is warmed at sync, so a hit here means the photo is ready now
+/// — there is nothing to wait for and nothing to invalidate.
+fn picture(state: &AppState, sender: &Sender) -> Option<Arc<RenderImage>> {
+    sender
+        .avatar_url
+        .as_deref()
+        .filter(|u| !u.is_empty())
+        .and_then(|u| state.avatar(u))
+}
+
+fn chip_base(
+    id: &'static str,
+    sender: &Sender,
+    picture: Option<Arc<RenderImage>>,
+    theme: &Theme,
+) -> Stateful<gpui::Div> {
     div()
         .id(id)
         .flex_shrink_0()
@@ -293,19 +319,35 @@ fn chip_base(id: &'static str, sender: &Sender, theme: &Theme) -> Stateful<gpui:
         .font_weight(gpui::FontWeight::MEDIUM)
         .debug_selector(move || id.into())
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .child(avatars::element(
-            &sender.key,
-            &sender.name,
-            None,
-            metrics::CHIP_AVATAR,
-            theme,
-        ))
+        // Affinity (Arbonites, 2026-11-05): "From Affinity" drew her initial while her photo
+        // sat decoded in the loader — the chip never asked for it. The photo wins; the
+        // initials disc is only what is left when there is no picture to draw.
+        .child(match picture {
+            Some(image) => div()
+                .size(px(metrics::CHIP_AVATAR))
+                .flex_shrink_0()
+                .rounded_full()
+                .overflow_hidden()
+                .child(
+                    gpui::img(crate::ui::picture_fit::fit(&image, metrics::CHIP_AVATAR))
+                        .size(px(metrics::CHIP_AVATAR))
+                        .rounded_full()
+                        .object_fit(gpui::ObjectFit::Cover),
+                ),
+            // avatar-lint: allow (the picture is the arm above; this is the no-photo case)
+            None => avatars::element(&sender.key, &sender.name, None, metrics::CHIP_AVATAR, theme),
+        })
         .child(format!("From {}", sender.name))
 }
 
 /// The pinned sender: accent chip with a ✕ that unpins it.
-fn pinned_chip(sender: &Sender, theme: &Theme, cx: &mut Context<Shell>) -> AnyElement {
-    chip_base("chat-search-sender", sender, theme)
+fn pinned_chip(
+    sender: &Sender,
+    picture: Option<Arc<RenderImage>>,
+    theme: &Theme,
+    cx: &mut Context<Shell>,
+) -> AnyElement {
+    chip_base("chat-search-sender", sender, picture, theme)
         .bg(Theme::with_alpha(theme.accent, metrics::CHIP_ALPHA))
         .text_color(theme.accent)
         .child(sf_symbols::glyph("xmark", 9.0, theme.accent))
@@ -320,9 +362,14 @@ fn pinned_chip(sender: &Sender, theme: &Theme, cx: &mut Context<Shell>) -> AnyEl
 }
 
 /// The sender the typed text names, offered: ⇥ or a click pins it.
-fn offered_chip(sender: &Sender, theme: &Theme, cx: &mut Context<Shell>) -> AnyElement {
+fn offered_chip(
+    sender: &Sender,
+    picture: Option<Arc<RenderImage>>,
+    theme: &Theme,
+    cx: &mut Context<Shell>,
+) -> AnyElement {
     let sender_for_click = sender.clone();
-    chip_base("chat-search-offer", sender, theme)
+    chip_base("chat-search-offer", sender, picture, theme)
         .bg(Theme::with_alpha(theme.text, 0.08))
         .border_1()
         .border_color(theme.border_strong)

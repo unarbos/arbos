@@ -3157,6 +3157,20 @@ impl AppState {
             }
             SyncEvent::Secrets(view) => {
                 self.secrets = view;
+                // The People rows draw the photo the relay sends with each director, so
+                // the loader is asked for it here — the same warm every server roster gets
+                // ([feedback avatar-letter-fallbacks-2026-11-05]).
+                let urls: Vec<String> = self
+                    .secrets
+                    .secrets
+                    .iter()
+                    .flat_map(|s| s.directors.iter())
+                    .filter_map(|d| d.avatar_url.clone())
+                    .filter(|u| !u.is_empty())
+                    .collect();
+                for url in urls {
+                    self.want_avatar(url);
+                }
                 cx.notify();
             }
             SyncEvent::Devices(result) => {
@@ -8070,15 +8084,36 @@ impl AppState {
         }
     }
 
-    /// A person by handle, from any space's member list or the directory.
+    /// A person by handle: me, any space's member list, any server's roster, then the
+    /// directory. Every surface that has only a handle — the search filter tag, the typing
+    /// row, a bubble's profile target — asks here, so one lookup decides whether they draw
+    /// a photo or a letter. Handles are compared without case: the relay, Matrix and a
+    /// typed query disagree on it ([feedback avatar-letter-fallbacks-2026-11-05]).
     pub fn person_by_handle(&self, handle: &str) -> Option<Person> {
+        if let Some(me) = self
+            .account
+            .as_ref()
+            .filter(|a| a.login.eq_ignore_ascii_case(handle))
+        {
+            return Some(Person {
+                id: me.id.clone(),
+                handle: me.login.clone(),
+                name: Some(me.name.clone()).filter(|n| !n.trim().is_empty()),
+                avatar_url: me.avatar_url.clone(),
+                ..Person::default()
+            });
+        }
         self.projects
             .iter()
             .flat_map(|p| p.people.iter())
             // A shared agent's owner (API §9 `owner`), who need not be in any member list.
             .chain(self.projects.iter().filter_map(|p| p.owner_person.as_ref()))
+            // A channel-only member shares no group with me, so the server's roster is the
+            // only record of their picture ([feedback server-member-names-2026-10-28]).
+            .chain(self.servers.iter().flat_map(|s| s.members.iter()))
             .chain(self.people_results.iter())
-            .find(|p| p.handle == handle)
+            .chain(self.people_directory.iter())
+            .find(|p| p.handle.eq_ignore_ascii_case(handle))
             .cloned()
     }
 
@@ -14086,6 +14121,207 @@ mod channel_sender_tests {
 }
 
 #[cfg(test)]
+mod avatar_lookup_tests {
+    //! Affinity (Arbonites, 2026-11-05): the "From Affinity" search filter tag and the
+    //! typing row drew a letter disc for a person whose picture the client already holds.
+    //! Both sites ask one lookup for the person behind a handle, so the lookup is what is
+    //! tested here: whatever a render site receives, it receives it from `person_by_handle`
+    //! (the chip, through `sender_identity`) — a URL or nothing.
+    use futures::future::BoxFuture;
+    use gpui::{AppContext as _, TestAppContext};
+    use tokio::sync::mpsc;
+
+    use super::*;
+    use crate::model::{AccountView, ServerInfo};
+
+    struct Idle;
+
+    impl SyncSource for Idle {
+        fn name(&self) -> &'static str {
+            "idle"
+        }
+
+        fn run(
+            self: Box<Self>,
+            _events: mpsc::UnboundedSender<SyncEvent>,
+            _commands: mpsc::UnboundedReceiver<ClientCommand>,
+        ) -> BoxFuture<'static, anyhow::Result<()>> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    const CHANNEL: &str = "!general:arbos.life";
+    const SERVER: &str = "01SERVERTEST0000000000000";
+    const ME_PICTURE: &str = "https://relay.test/a/me.png";
+    const AFFINITY_PICTURE: &str = "https://relay.test/a/affinity.png";
+
+    fn affinity() -> Person {
+        Person {
+            id: "test_01AFFINITY".into(),
+            handle: "Affinity".into(),
+            name: Some("Affinity".into()),
+            avatar_url: AFFINITY_PICTURE.into(),
+            ..Person::default()
+        }
+    }
+
+    fn mount(cx: &mut TestAppContext) -> (tokio::runtime::Runtime, gpui::Entity<AppState>) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio");
+        let handle = rt.handle().clone();
+        cx.update(|cx| gpui_tokio::init_from_handle(cx, handle));
+        let state = cx.new(|cx| AppState::new(Box::new(Idle), cx));
+        state.update(cx, |s, _| {
+            s.account = Some(AccountView {
+                id: "test_01ME".into(),
+                login: "unconst".into(),
+                name: "Jacob".into(),
+                avatar_url: ME_PICTURE.into(),
+                device_name: "test".into(),
+                balance_usd: 0.0,
+                spent_today_usd: 0.0,
+                daily_cap_usd: None,
+            });
+        });
+        (rt, state)
+    }
+
+    fn row(chat: &str, id: &str, sender: &str, handle: &str) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "chatId": chat, "role": "user", "sender": sender,
+            "senderHandle": handle, "status": "done", "createdAt": 1_000, "completedAt": 1_000,
+            "parts": [{ "id": format!("{id}-t"), "kind": "text", "text": "hi" }],
+        }))
+        .expect("message")
+    }
+
+    /// A server's roster is the only place a channel-only member's picture lives: they
+    /// need share no group with me ([feedback server-member-names-2026-10-28], which fixed
+    /// the same gap for the *name* on the bubble and left the picture lookup behind).
+    #[gpui::test]
+    fn a_handle_resolves_through_a_server_roster(cx: &mut TestAppContext) {
+        let (_rt, state) = mount(cx);
+        state.update(cx, |s, _| {
+            s.servers.push(ServerInfo {
+                id: SERVER.into(),
+                name: "test server".into(),
+                members: vec![affinity()],
+                ..ServerInfo::default()
+            });
+        });
+        let found = state.read_with(cx, |s, _| s.person_by_handle("Affinity"));
+        assert_eq!(
+            found.map(|p| p.avatar_url).as_deref(),
+            Some(AFFINITY_PICTURE),
+            "a channel member's picture comes from the server roster"
+        );
+    }
+
+    /// The relay, Matrix and a typed query disagree on case; iPhone compares handles
+    /// case-insensitively everywhere and the Mac did not, so "From Affinity" missed a
+    /// roster spelled "affinity".
+    #[gpui::test]
+    fn a_handle_resolves_whatever_its_case(cx: &mut TestAppContext) {
+        let (_rt, state) = mount(cx);
+        state.update(cx, |s, _| {
+            s.projects.push(Project {
+                id: "01GROUP00000000000000000".into(),
+                name: "group".into(),
+                kind: SpaceKind::Group,
+                people: vec![affinity()],
+                ..Project::default()
+            });
+        });
+        let found = state.read_with(cx, |s, _| s.person_by_handle("AFFINITY"));
+        assert_eq!(
+            found.map(|p| p.avatar_url).as_deref(),
+            Some(AFFINITY_PICTURE),
+            "one person, however the caller spells their handle"
+        );
+    }
+
+    /// My own handle is a person too: the "From Jacob" chip and my typing row on another
+    /// device are not in any roster, and the account is the only record of my picture.
+    #[gpui::test]
+    fn my_own_handle_resolves_to_my_account_picture(cx: &mut TestAppContext) {
+        let (_rt, state) = mount(cx);
+        let found = state.read_with(cx, |s, _| s.person_by_handle("unconst"));
+        assert_eq!(
+            found.map(|p| p.avatar_url).as_deref(),
+            Some(ME_PICTURE),
+            "me, by my own handle"
+        );
+    }
+
+    /// The directory the sheet already fetched answers for someone I share nothing with.
+    #[gpui::test]
+    fn a_handle_resolves_through_the_cached_directory(cx: &mut TestAppContext) {
+        let (_rt, state) = mount(cx);
+        state.update(cx, |s, _| s.people_directory.push(affinity()));
+        let found = state.read_with(cx, |s, _| s.person_by_handle("affinity"));
+        assert_eq!(
+            found.map(|p| p.avatar_url).as_deref(),
+            Some(AFFINITY_PICTURE),
+            "the cached directory is searched, not only the last query's results"
+        );
+    }
+
+    /// Nothing known stays nothing: the disc is the honest answer, not a wrong picture.
+    #[gpui::test]
+    fn an_unknown_handle_resolves_to_nothing(cx: &mut TestAppContext) {
+        let (_rt, state) = mount(cx);
+        assert!(
+            state.read_with(cx, |s, _| s.person_by_handle("nobody").is_none()),
+            "no record, no picture"
+        );
+    }
+
+    /// What the "From …" chip receives for someone else's row: the picture URL, so the
+    /// chip can draw the photo instead of the initial.
+    #[gpui::test]
+    fn the_search_chip_receives_a_picture_for_another_person(cx: &mut TestAppContext) {
+        let (_rt, state) = mount(cx);
+        state.update(cx, |s, _| {
+            s.servers.push(ServerInfo {
+                id: SERVER.into(),
+                name: "test server".into(),
+                members: vec![affinity()],
+                ..ServerInfo::default()
+            });
+        });
+        let sender = state.read_with(cx, |s, _| {
+            s.sender_identity(
+                CHANNEL,
+                &row(CHANNEL, "m1", "user:test_01AFFINITY", "Affinity"),
+            )
+        });
+        assert_eq!(sender.name, "Affinity");
+        assert_eq!(
+            sender.avatar_url.as_deref(),
+            Some(AFFINITY_PICTURE),
+            "the chip is handed the picture the bubble beside it draws"
+        );
+    }
+
+    /// And for my own row: `is_mine` hard-coded `None`, so "From Jacob" could never be
+    /// anything but a letter even once every other chip had its photo.
+    #[gpui::test]
+    fn the_search_chip_receives_my_own_picture(cx: &mut TestAppContext) {
+        let (_rt, state) = mount(cx);
+        let sender = state.read_with(cx, |s, _| {
+            s.sender_identity(CHANNEL, &row(CHANNEL, "m1", "user:test_01ME", "unconst"))
+        });
+        assert_eq!(
+            sender.avatar_url.as_deref(),
+            Some(ME_PICTURE),
+            "my own chip draws my photo"
+        );
+    }
+}
+
+#[cfg(test)]
 mod people_sheet_matcher_tests {
     //! Jacob, Mac v0.6.268, 2026-10-26 09:16 CR: "Give a person access" with
     //! "aff" typed listed only "Andreas F @aff" — the sheet showed the relay's
@@ -15004,7 +15240,11 @@ impl AppState {
                 key: format!("user:{}", self.me_id()),
                 name: self.me_name(),
                 handle: self.me_handle(),
-                avatar_url: None,
+                avatar_url: self
+                    .account
+                    .as_ref()
+                    .map(|a| a.avatar_url.clone())
+                    .filter(|u| !u.is_empty()),
             };
         }
         if let Some(h) = m.sender_handle.as_deref().filter(|h| !h.is_empty()) {

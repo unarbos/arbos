@@ -1700,6 +1700,7 @@ pub fn server_picture(server: &ServerInfo, state: &AppState, size: f32, theme: &
             avatars::leaf_hover_key(&server.id, size),
         );
     }
+    // avatar-lint: allow (this function IS the server resolver: its picture branch is above)
     avatars::element(
         &server.id,
         &server.name,
