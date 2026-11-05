@@ -6413,11 +6413,12 @@ impl Agent {
     }
 
     /// An `act` ack is working-row status while the work is quick. When the turn is still at it
-    /// after `act_ack_bubble_after()` with nothing posted, the same sentence becomes the first
-    /// bubble — Grok Bot acks long work as a message ("Looking up the top-rated surf schools …
-    /// now."), and the parity trait `ack_first` reads bubbles, not the status line.
+    /// after `Config::act_ack_bubble_after()` with nothing posted, the same sentence becomes the
+    /// first bubble — Grok Bot acks long work as a message ("Looking up the top-rated surf schools
+    /// … now."), and the parity trait `ack_first` reads bubbles, not the status line. Research
+    /// turns promote at 2 s once a web tool has run (duplex step 4).
     fn spawn_act_ack_promotion(self: &Arc<Self>, t: &TurnState) {
-        let after = act_ack_bubble_after();
+        let after = self.cfg.act_ack_bubble_after();
         if after.is_zero() {
             return;
         }
@@ -10063,18 +10064,6 @@ fn act_job_title(ack: &str, activity: Option<&str>, kind: &str) -> String {
         "code" => "Working on the code".to_owned(),
         _ => "Working on it".to_owned(),
     }
-}
-
-/// How long an `act` turn may run before its ack becomes a bubble (`ARBOS_ACT_ACK_BUBBLE_SECS`,
-/// default 4; `0` keeps the ack on the working row only). Four seconds: a quick act answers inside
-/// it and shows one bubble; longer work shows the ack where Grok Bot shows it. Research turns
-/// promote at 2 s once a web tool has run (duplex step 4).
-fn act_ack_bubble_after() -> Duration {
-    let secs = std::env::var("ARBOS_ACT_ACK_BUBBLE_SECS")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(4);
-    Duration::from_secs(secs)
 }
 
 /// Is this a finished row with no words and nothing a client would draw (only empty text and
