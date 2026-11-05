@@ -5,6 +5,22 @@
 import Foundation
 import ArbosFFI
 
+/// Bytes-sent on one upload, as a fraction of the whole. `URLSession` calls this on its own
+/// delegate queue, so the report hops to the main actor — the outbox's published progress is
+/// read by the transcript and may only change there.
+private final class UploadProgress: NSObject, URLSessionTaskDelegate {
+    private let report: @MainActor @Sendable (Double) -> Void
+
+    init(_ report: @escaping @MainActor @Sendable (Double) -> Void) { self.report = report }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didSendBodyData bytesSent: Int64,
+                    totalBytesSent: Int64, totalBytesExpectedToSend: Int64) {
+        guard totalBytesExpectedToSend > 0 else { return }
+        let fraction = min(1, Double(totalBytesSent) / Double(totalBytesExpectedToSend))
+        Task { @MainActor [report] in report(fraction) }
+    }
+}
+
 struct RelayError: Error, LocalizedError {
     var status: Int
     var message: String
@@ -627,7 +643,11 @@ final class RelayAPI {
     }
 
     /// Upload an attachment to the relay blob mirror; returns the key.
-    func putBlob(projectId: Id, key: String, mime: String, data: Data) async throws -> String {
+    /// `onProgress` reports 0…1 on the main actor as the body goes out. The bytes ride an
+    /// upload task instead of `httpBody` because only a task reports how much has been sent;
+    /// `data(for:)` is silent until the whole thing has landed.
+    func putBlob(projectId: Id, key: String, mime: String, data: Data,
+                 onProgress: (@MainActor @Sendable (Double) -> Void)? = nil) async throws -> String {
         guard let url = URL(string: "\(endpoint.httpUrl)/blob/\(projectId)/\(key)") else {
             throw RelayError(status: 0, message: "Bad relay URL")
         }
@@ -635,8 +655,8 @@ final class RelayAPI {
         req.httpMethod = "PUT"
         req.setValue("Bearer \(token())", forHTTPHeaderField: "Authorization")
         req.setValue(mime, forHTTPHeaderField: "Content-Type")
-        req.httpBody = data
-        let (body, response) = try await session.data(for: req)
+        let (body, response) = try await session.upload(for: req, from: data,
+                                                        delegate: onProgress.map(UploadProgress.init))
         guard let http = response as? HTTPURLResponse, http.statusCode < 400 else {
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
             throw RelayError.from(status: status, body: body)

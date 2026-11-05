@@ -97,9 +97,14 @@ final class OptimisticSendTests: XCTestCase {
 final class OutboxSendTests: XCTestCase {
     private let chatId = "fx-group-launch"
 
+    /// Pinned to `http://fixture.invalid`, where every upload fails — the simulated bad
+    /// connection. `.invalid` is guaranteed unresolvable (RFC 6761), so this reaches no
+    /// network at all. Pinned explicitly: `AppModel()` otherwise takes the saved relay URL,
+    /// which outside the simulator's fixture launch is the production relay.
     private func fixtureModel() -> AppModel {
         let model = AppModel()
         model.loadFixture()
+        model.installRelayForTests(url: "http://fixture.invalid", token: "fixture")
         model.fixtureAttachDoc(chatId: chatId)
         return model
     }
@@ -108,8 +113,6 @@ final class OutboxSendTests: XCTestCase {
         AppModel.PendingAttachment(name: "clip.mp4", mime: "video/mp4", data: Data(repeating: 7, count: 2_048))
     }
 
-    /// The fixture relay is `http://fixture.invalid`, so every upload fails — which is the
-    /// simulated bad connection, with no live relay touched.
     private func settle(until done: () -> Bool) {
         let deadline = Date().addingTimeInterval(20)
         while Date() < deadline, !done() {
@@ -241,5 +244,175 @@ final class OutboxSendTests: XCTestCase {
         XCTAssertEqual(drawn.kind, "video")
         XCTAssertEqual(drawn.bytes, 2_048)
         XCTAssertNil(drawn.blobRef, "it is not on the relay yet")
+    }
+}
+
+/// The upload that is slow and then **succeeds**, and the ring that turns while it runs
+/// (Affinity, Arbonites 2026-11-05: a video attachment lost on send, with nothing on the
+/// attachment to say an upload was still going).
+///
+/// `OutboxSendTests` above drives the failing half against `http://fixture.invalid`, which
+/// can only ever fail: `.invalid` is guaranteed unresolvable (RFC 6761). An upload that is
+/// slow and then lands needs a real server that accepts the `PUT` late, so these run against
+/// a loopback one that holds the response.
+@MainActor
+final class OutboxUploadProgressTests: XCTestCase {
+    private let chatId = "fx-group-launch"
+    /// Long enough to assert inside the upload, short enough not to pad the suite.
+    private let hold: TimeInterval = 0.6
+
+    private var server: LoopbackRelay!
+
+    override func setUpWithError() throws {
+        server = try LoopbackRelay()
+        // The blob `PUT` is answered 200, but only after the hold — so there is a window in
+        // which the upload is genuinely in flight and the test can look at the chat. The
+        // model's own probes (`/healthz` and the like) are answered at once: the relay
+        // serves on one queue, and holding those would hold the upload behind them.
+        let hold = self.hold
+        server.respond = { req in
+            guard req.path.hasPrefix("/blob/") else { return (200, Data("{}".utf8)) }
+            Thread.sleep(forTimeInterval: hold)
+            return (200, Data())
+        }
+    }
+
+    override func tearDown() {
+        server?.stop()
+        server = nil
+    }
+
+    private func fixtureModel() -> AppModel {
+        let model = AppModel()
+        model.loadFixture()
+        model.installRelayForTests(url: "http://127.0.0.1:\(server.port)", token: "test-token")
+        model.fixtureAttachDoc(chatId: chatId)
+        return model
+    }
+
+    private func clip() -> AppModel.PendingAttachment {
+        AppModel.PendingAttachment(name: "clip.mp4", mime: "video/mp4", data: Data(repeating: 7, count: 64_000))
+    }
+
+    private func settle(until done: () -> Bool) {
+        let deadline = Date().addingTimeInterval(20)
+        while Date() < deadline, !done() {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+        }
+    }
+
+    private func pump(_ seconds: TimeInterval) {
+        RunLoop.main.run(until: Date().addingTimeInterval(seconds))
+    }
+
+    /// The ordering the defect came from: Send is pressed, the upload is still running, and
+    /// **nothing may be written for anyone** until it lands — then the words and the video
+    /// are written together, as one row, in one go.
+    ///
+    /// A test that only covered send-after-upload-completes would have passed before the bug
+    /// existed. The assertions in the middle are the ones that matter.
+    func testASlowUploadWritesNothingUntilItLandsAndThenWritesBothAtOnce() throws {
+        let model = fixtureModel()
+        let posted = model.messages[chatId]?.count ?? 0
+
+        model.sendPeople(chatId: chatId, text: "look at this", replyTo: nil, attachments: [clip()])
+        let own = try XCTUnwrap(model.messages(of: chatId).last)
+
+        // Mid-flight: the relay has the bytes and is holding the answer.
+        pump(hold / 2)
+        XCTAssertEqual(model.messages[chatId]?.count ?? 0, posted,
+                       "the caption must not be in the document while the video is still going up")
+        XCTAssertTrue(model.isUnsent(own.id), "the whole message is still the sender's alone")
+        XCTAssertTrue(model.messages(of: chatId).last?.pending == true, "and it reads as sending")
+
+        // The answer arrives: now, and only now, one row carries both halves.
+        settle { !model.isUnsent(own.id) }
+        settle { model.messages[chatId]?.contains { $0.id == own.id } == true }
+        XCTAssertFalse(model.isUnsent(own.id), "the outbox let go of it")
+        XCTAssertEqual(model.messages[chatId]?.count ?? 0, posted + 1, "exactly one row was written")
+
+        let row = try XCTUnwrap(model.messages[chatId]?.last)
+        XCTAssertEqual(row.id, own.id, "the same message, not a replacement")
+        XCTAssertEqual(row.plainText, "look at this")
+        let refs: [String?] = row.parts.compactMap {
+            if case .attachment(_, let a) = $0 { return a.blobRef } else { return nil }
+        }
+        XCTAssertEqual(refs.count, 1, "the video is on the row it was sent with")
+        XCTAssertNotNil(refs.first ?? nil, "and it carries the relay key the upload returned")
+        XCTAssertEqual(model.messages(of: chatId).filter { $0.id == own.id }.count, 1,
+                       "one row, not the outbox copy plus the written one")
+    }
+
+    /// The missing indicator: while the upload runs the attachment carries a ring, and the
+    /// ring goes when the message lands. Without `uploadProgress` there is nothing on the
+    /// attachment at all, which is why the sender could not tell the send was premature.
+    func testTheRingTurnsWhileTheUploadRunsAndGoesWhenTheMessageLands() throws {
+        let model = fixtureModel()
+        model.sendPeople(chatId: chatId, text: "look at this", replyTo: nil, attachments: [clip()])
+        let own = try XCTUnwrap(model.messages(of: chatId).last)
+
+        // Set before the first byte leaves, so the ring is on the card from the start
+        // rather than appearing once the upload is already half done.
+        XCTAssertNotNil(model.outboxProgress[own.id], "the ring is turning")
+        XCTAssertEqual(Delivery.of(try XCTUnwrap(model.messages(of: chatId).last)), .uploading(0),
+                       "the card draws it from the row")
+
+        pump(hold / 2)
+        let sending = try XCTUnwrap(model.messages(of: chatId).last)
+        let fraction = try XCTUnwrap(sending.uploadProgress)
+        XCTAssertTrue((0...1).contains(fraction), "a fraction of the whole message's bytes: \(fraction)")
+
+        settle { !model.isUnsent(own.id) }
+        settle { model.messages[chatId]?.contains { $0.id == own.id } == true }
+        XCTAssertNil(model.outboxProgress[own.id], "the upload is over, so the ring is not")
+        XCTAssertNil(model.messages[chatId]?.last?.uploadProgress, "a written row never carries one")
+        XCTAssertEqual(Delivery.of(try XCTUnwrap(model.messages[chatId]?.last)), .pending,
+                       "it is an ordinary unacked send now")
+    }
+
+    /// A stopped upload shows Retry, never a ring. A row that spins for ever would be the
+    /// same silent loss in a different costume.
+    ///
+    /// This covers the restored case too, because the two are the same state: no upload
+    /// outlives its process, so `loadOutbox` marks every entry it reads back failed, and
+    /// progress lives in memory only and is therefore absent after a launch.
+    func testAStoppedUploadShowsRetryAndNoRing() throws {
+        let model = AppModel()
+        model.loadFixture()
+        model.installRelayForTests(url: "http://fixture.invalid", token: "fixture")
+        model.fixtureAttachDoc(chatId: chatId)
+
+        model.sendPeople(chatId: chatId, text: "look at this", replyTo: nil, attachments: [clip()])
+        let own = try XCTUnwrap(model.messages(of: chatId).last)
+        settle { model.messages(of: chatId).last?.status == .error }
+
+        XCTAssertNil(model.outboxProgress[own.id], "nothing is uploading any more")
+        let failed = try XCTUnwrap(model.messages(of: chatId).last)
+        XCTAssertNil(failed.uploadProgress)
+        XCTAssertEqual(Delivery.of(failed), .failed, "Retry, not a bar")
+    }
+
+    /// One ring per message, not per attachment. `Row.delivery` is set on the message's
+    /// first media row only — attach it to every row and a send of four clips turns four
+    /// rings for one upload.
+    func testFourAttachmentsOnOneSendDrawOneRing() throws {
+        var parts: [Part] = (0..<4).map {
+            .attachment(id: "m1-a\($0)", attachment: Attachment(name: "clip\($0).mp4", mime: "video/mp4",
+                                                                blobRef: nil, kind: "video", bytes: 2_048))
+        }
+        parts.append(.text(id: "m1-t", text: "look at these"))
+        var m = Message(id: "m1", chatId: chatId, role: .user, sender: "user:fx-me", status: .done,
+                        turn: nil, decision: nil, subagentId: nil, subagentName: nil, inReplyTo: nil,
+                        usage: [:], model: nil, createdAt: 1_700_000_000_000, completedAt: nil,
+                        pending: true, parts: parts, hiddenCount: 0)
+        m.uploadProgress = 0.4
+
+        let rows = Transcript.rows([m], projectId: "\(peopleSlot):\(chatId)", me: "user:fx-me",
+                                   people: true, multiParty: true)
+        let ringed = rows.filter {
+            if case .uploading? = $0.delivery { return true } else { return false }
+        }
+        XCTAssertEqual(ringed.count, 1, "one ring for one upload, got \(ringed.count)")
+        XCTAssertEqual(ringed.first?.delivery, .uploading(0.4))
     }
 }

@@ -926,6 +926,11 @@ final class AppModel: ObservableObject {
     private var outboxMemoryBytes: [String: Data] = [:]
     /// Outbox ids with an upload running, so a second Retry tap cannot start a second one.
     private var outboxSending: Set<Id> = []
+    /// How far an outbox entry's uploads have gone, 0…1, by message id — what the progress
+    /// ring on its card reads. Deliberately not a field of `OutboxMessage`: that is written
+    /// to disk, and an entry restored at launch has to come back stopped with Retry rather
+    /// than resuming a bar that nothing is moving. Living only in memory makes that free.
+    @Published private(set) var outboxProgress: [Id: Double] = [:]
     /// Rooms whose pushes were refused with `not_available` on the live connection.
     /// Cleared by that room's next ACK (not by another room's ACK).
     @Published private(set) var pushRefused: Set<Id> = []
@@ -1862,6 +1867,7 @@ final class AppModel: ObservableObject {
         storeUsage = DeviceStore.Usage()
         outbox = [:]
         outboxSending = []
+        outboxProgress = [:]
         outboxMemoryBytes = [:]
         outboxStore = nil
         if let creds = credentials {
@@ -2855,6 +2861,8 @@ final class AppModel: ObservableObject {
 
     /// Drop an outbox entry and its staged bytes — it was posted, or the sender deleted it.
     private func dropOutbox(_ messageId: Id) {
+        // Before the entry goes: the ring is found through it.
+        clearOutboxProgress(messageId)
         for (chatId, list) in outbox where list.contains(where: { $0.id == messageId }) {
             let rest = list.filter { $0.id != messageId }
             outbox[chatId] = rest.isEmpty ? nil : rest
@@ -2908,6 +2916,9 @@ final class AppModel: ObservableObject {
         m.senderHandle = user?.login
         m.senderName = user?.name
         m.senderAvatar = user?.avatarUrl
+        // Only while an upload is actually running: a failed entry, and every entry read
+        // back at launch, has no progress and draws Retry instead.
+        m.uploadProgress = entry.failed ? nil : outboxProgress[entry.id]
         return m
     }
 
@@ -2919,8 +2930,15 @@ final class AppModel: ObservableObject {
         updateOutbox(messageId) { $0.failed = false }
         clearSendError(entry.chatId)
         let slot = entry.kind == .people ? "\(peopleSlot):\(entry.chatId)" : (entry.projectId ?? peopleSlot)
+        // One ring for the whole message, so it measures every attachment's bytes together:
+        // `sent` is what the finished ones came to, and the running one scales into the gap.
+        // Set here rather than inside the task, so the ring is on the card the instant Send
+        // is pressed instead of appearing once the upload is already under way.
+        let total = entry.attachments.reduce(Int64(0)) { $0 + $1.bytes }
+        setOutboxProgress(messageId, 0)
         Task {
             var uploaded: [Attachment] = []
+            var sent: Int64 = 0
             for a in entry.attachments {
                 guard let data = outboxBytes(entry, a) else {
                     failOutbox(messageId, UserError.classify("upload the attachment",
@@ -2928,14 +2946,20 @@ final class AppModel: ObservableObject {
                     return
                 }
                 let key = AppModel.blobKey(for: a.name)
+                let done = sent, size = a.bytes
                 do {
-                    _ = try await api.putBlob(projectId: slot, key: key, mime: a.mime, data: data)
+                    _ = try await api.putBlob(projectId: slot, key: key, mime: a.mime, data: data) { [weak self] part in
+                        guard total > 0 else { return }
+                        self?.setOutboxProgress(messageId, Double(done + Int64(part * Double(size))) / Double(total))
+                    }
                 } catch {
                     // Nothing is written to the document: no caption goes out on its own,
                     // and the row stays here with its bytes until Retry or Delete.
                     failOutbox(messageId, UserError.classify("upload the attachment", error))
                     return
                 }
+                sent += a.bytes
+                setOutboxProgress(messageId, total > 0 ? Double(sent) / Double(total) : 1)
                 uploaded.append(Attachment(name: a.name, mime: a.mime, blobRef: key,
                                            kind: a.kind, bytes: a.bytes))
             }
@@ -2943,8 +2967,26 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Move the ring on one outbox entry. Small steps are dropped: this is called per body
+    /// chunk, and every published change rebuilds that chat's rows.
+    private func setOutboxProgress(_ messageId: Id, _ fraction: Double) {
+        let next = min(1, max(0, fraction))
+        if let drawn = outboxProgress[messageId], next < 1, next - drawn < 0.01 { return }
+        outboxProgress[messageId] = next
+        guard let chatId = outboxEntry(messageId)?.chatId else { return }
+        messagesVersion[chatId, default: 0] &+= 1
+    }
+
+    /// The upload is no longer running: the ring goes, whatever happened to the message.
+    private func clearOutboxProgress(_ messageId: Id) {
+        guard outboxProgress.removeValue(forKey: messageId) != nil else { return }
+        guard let chatId = outboxEntry(messageId)?.chatId else { return }
+        messagesVersion[chatId, default: 0] &+= 1
+    }
+
     private func failOutbox(_ messageId: Id, _ error: UserError) {
         outboxSending.remove(messageId)
+        clearOutboxProgress(messageId)
         updateOutbox(messageId) { $0.failed = true }
         if let entry = outboxEntry(messageId) { setSendError(entry.chatId, error) }
     }

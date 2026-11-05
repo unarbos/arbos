@@ -1647,6 +1647,32 @@ struct RowView: View, Equatable {
         }
     }
 
+    /// How far my picture or video has uploaded, as a ring on the card's outer edge — the
+    /// slot the failed mark uses, and the two never show together because a message is
+    /// either still going up or has stopped ([feedback caption-sent-without-media]).
+    ///
+    /// One ring per message, not per card: `Row.delivery` is set on the message's first
+    /// media row only, so four attachments on one send still turn one ring.
+    @ViewBuilder
+    private func uploadProgressRing(gap: CGFloat) -> some View {
+        if case .uploading(let fraction)? = row.delivery {
+            ZStack {
+                Circle().stroke(theme.muted.opacity(0.35), lineWidth: 2)
+                Circle()
+                    // A sliver at zero, so the ring reads as started rather than as an
+                    // empty circle someone forgot to fill.
+                    .trim(from: 0, to: max(0.03, CGFloat(fraction)))
+                    .stroke(theme.muted, style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+            }
+            .frame(width: 16, height: 16)
+            .animation(.linear(duration: 0.2), value: fraction)
+            .padding(.trailing, gap)
+            .accessibilityLabel("Uploading, \(Int((fraction * 100).rounded())) per cent")
+            .accessibilityIdentifier("media-upload-progress-\(row.messageId)")
+        }
+    }
+
     @ViewBuilder
     private var bubble: some View {
         switch row.kind {
@@ -1914,6 +1940,7 @@ struct RowView: View, Equatable {
                 HStack {
                     if row.role == .user { Spacer(minLength: 0) }
                     failedRetryMark(gap: 0)
+                    uploadProgressRing(gap: 0)
                     FileCard(item: item, subtitle: subtitle, chatId: chatId, fromUser: row.role == .user, caption: caption,
                              forwardedFrom: forwardedFrom, quote: quote, onQuoteTap: onQuoteTap)
                         .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: row.role == .user) }
@@ -1932,6 +1959,7 @@ struct RowView: View, Equatable {
             HStack {
                 if fromUser { Spacer(minLength: 0) }
                 failedRetryMark(gap: 0)
+                uploadProgressRing(gap: 0)
                 VoiceMemoBubble(name: name, projectId: projectId, blobRef: ref, fromUser: fromUser)
                     .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: fromUser) }
                     .frame(maxWidth: maxBubble, alignment: fromUser ? .trailing : .leading)
@@ -1971,6 +1999,7 @@ struct RowView: View, Equatable {
                     if fromUser { Spacer(minLength: 0) }
                     if lane { Color.clear.frame(width: Theme.memberLane(composerInset: composerInset), height: 1) }
                     failedRetryMark(gap: 8)
+                    uploadProgressRing(gap: 8)
                     ImageBubble(item: item, chatId: chatId, fromUser: fromUser,
                                 maxWidth: lane ? maxBubble - Theme.memberLane(composerInset: composerInset) : maxBubble,
                                 caption: caption, mentions: mentions, source: source, forwardedFrom: forwardedFrom,
@@ -2755,6 +2784,12 @@ private extension View {
 enum Delivery: Equatable {
     /// Not yet acknowledged by the relay: the only dimmed state.
     case pending
+    /// My own media send whose attachments are still going up, 0…1 of their bytes together
+    /// ([feedback caption-sent-without-media]). Dimmed like `pending`, because it is the
+    /// same thing seen closer: a message nobody else has yet. Only a send that carries
+    /// files reaches this — a text-only send never waits on an upload — so the fraction
+    /// always has a card to draw on.
+    case uploading(Double)
     /// The relay refused it: full opacity plus a red "! Retry".
     case failed
     /// Acknowledged by the relay: the full own-bubble style, at once. Read receipts never
@@ -2768,12 +2803,13 @@ enum Delivery: Equatable {
 
     var opacity: CGFloat {
         switch self {
-        case .pending: return Delivery.pendingAlpha
+        case .pending, .uploading: return Delivery.pendingAlpha
         case .failed, .delivered: return 1
         }
     }
 
     static func of(_ message: Message) -> Delivery {
+        if let fraction = message.uploadProgress, message.pending { return .uploading(fraction) }
         if message.pending { return .pending }
         if message.status == .error { return .failed }
         return .delivered
