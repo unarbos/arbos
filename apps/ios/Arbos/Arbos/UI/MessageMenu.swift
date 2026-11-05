@@ -110,12 +110,39 @@ struct MessageMenuContent: View {
 
     var body: some View {
         ForEach(items, id: \.self) { item in
-            Button(role: item.isDestructive ? .destructive : nil) {
+            MenuAction(item.label, systemImage: item.systemImage, role: item.isDestructive ? .destructive : nil) {
                 action(item)
-            } label: {
-                Label(item.label, systemImage: item.systemImage)
             }
         }
+    }
+}
+
+/// One glyph row of a system menu (`.contextMenu`, `Menu`). A system menu draws the glyph in
+/// the inherited tint (the root's `theme.text`) even when the role is destructive, while the
+/// title still turns red; a destructive row carries the system red itself so both match.
+struct MenuAction: View {
+    let title: String
+    let systemImage: String
+    let role: ButtonRole?
+    let action: () -> Void
+
+    init(_ title: String, systemImage: String, role: ButtonRole? = nil, action: @escaping () -> Void) {
+        self.title = title
+        self.systemImage = systemImage
+        self.role = role
+        self.action = action
+    }
+
+    var body: some View {
+        if role == .destructive {
+            button.tint(.red)
+        } else {
+            button
+        }
+    }
+
+    private var button: some View {
+        Button(role: role, action: action) { Label(title, systemImage: systemImage) }
     }
 }
 
