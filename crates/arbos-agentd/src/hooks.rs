@@ -236,7 +236,7 @@ async fn send_message(State(a): State<S>, headers: HeaderMap, Json(b): Json<Valu
     if let Some(to) = agent_to {
         // D69 on this port too: only the main session speaks to another agent. The progress
         // note below stays open to a subagent — it reaches this chat only.
-        if let Some(reason) = refusal_for(role, "send_message") {
+        if let Some(reason) = refusal_for(role, "send_message", Some(&to)) {
             return err(reason);
         }
         return match a.send_message_from_turn(Some(&to), &agent_text).await {

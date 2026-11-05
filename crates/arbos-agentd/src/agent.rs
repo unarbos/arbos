@@ -3126,7 +3126,7 @@ impl Agent {
     /// `key` becomes the row's `deliveryKey`, the same marker the interrupted-job row carries.
     /// Nothing reads that field back, so it is for tracing only — posting once is the caller's
     /// job, not the key's.
-    async fn post_chat_line(
+    pub(crate) async fn post_chat_line(
         &self,
         host: &SharedHost,
         chat_id: &str,
