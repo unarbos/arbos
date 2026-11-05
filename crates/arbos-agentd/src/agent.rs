@@ -1409,6 +1409,11 @@ pub struct TurnState {
     /// The row the ack bubble went out on, when the turn posted one: a failure after the retries
     /// is written there as one message, never as a second bubble under it.
     pub ack_row_id: Option<String>,
+    /// Every assistant row this turn opened, oldest first: the row `open_turn_row` created,
+    /// then one per `open_row`. `assistant_msg_id` is only ever the last of them, so this is
+    /// what tells the turn-end sweep about the rows it moved on from (see
+    /// [`retire_wordless_rows`]).
+    pub rows_opened: Vec<String>,
 }
 
 /// First line of every relay-turn prompt (mirrored by `RELAY_TURN_MARK` in arbos-pi-ext): the
@@ -1613,6 +1618,7 @@ impl TurnState {
             parts_continuation: false,
             attachments_posted: Vec::new(),
             ack_row_id: None,
+            rows_opened: Vec::new(),
             streaming_behavior: StreamingBehavior::FollowUp,
         }
     }
@@ -4621,6 +4627,7 @@ impl Agent {
             parts_continuation: false,
             attachments_posted: Vec::new(),
             ack_row_id: None,
+            rows_opened: vec![assistant_msg_id.clone()],
             streaming_behavior: StreamingBehavior::FollowUp,
         });
         self.turn_running.store(true, Ordering::SeqCst);
@@ -4859,6 +4866,7 @@ impl Agent {
             {
                 let h = host.lock().await;
                 retire_row(&h.doc, &assistant_msg_id);
+                retire_wordless_rows(&h.doc, &turn.rows_opened, &assistant_msg_id);
             }
             if turn.activity.is_some() {
                 self.post_activity(chat_id, None);
@@ -4897,6 +4905,7 @@ impl Agent {
         }
         let room_name;
         let mut trimmed = "kept";
+        let retired_earlier;
         let mut merged_into_ack = false;
         {
             let h = host.lock().await;
@@ -4982,8 +4991,8 @@ impl Agent {
             // after the last bubble — wordless, nothing but "Working…". Left finished and empty,
             // the Mac and iPhone draw their stock "<name> didn't answer. Ask again." under the
             // answer that did go out (Jacob, "run bubble sort", 2026-10-25 18:08 UTC). When the
-            // turn put a visible row in front of the user, that empty row goes: deleted when it
-            // holds nothing, kept hidden when it carries tool detail for the Details drawer.
+            // turn put a visible row in front of the user, that empty row is retired, whether it
+            // holds nothing at all or only tool detail for the Details drawer.
             if final_status == MessageStatus::Done
                 && !merged_into_ack
                 && (turn.ack_posted
@@ -4992,6 +5001,8 @@ impl Agent {
             {
                 trimmed = trim_wordless_result_row(&h.doc, &assistant_msg_id);
             }
+            // The same empty row, where the turn left it behind rather than ended on it.
+            retired_earlier = retire_wordless_rows(&h.doc, &turn.rows_opened, &assistant_msg_id);
             room_name = h.room.clone();
         }
         if matches!(trimmed, "hidden" | "hidden_empty") {
@@ -5004,6 +5015,18 @@ impl Agent {
             );
             let _ = self
                 .post_timing("trailing_wordless_row", 1, Some(trimmed))
+                .await;
+        }
+        if retired_earlier > 0 {
+            // Counted apart from `trailing_wordless_row`: this one says how often a turn left a
+            // row behind mid-flight, which is the burst symptom rather than the end-of-turn one.
+            tracing::info!(
+                chat_id,
+                retired_earlier,
+                "retired wordless rows the turn moved on from"
+            );
+            let _ = self
+                .post_timing("wordless_rows_retired", retired_earlier as i64, None)
                 .await;
         }
         if turn.activity.is_some() || final_status != MessageStatus::Done || model_failed.is_some()
@@ -6587,6 +6610,7 @@ impl Agent {
         if let Some(a) = &t.activity {
             h.doc.set_activity(&id, Some(a));
         }
+        t.rows_opened.push(id.clone());
         t.assistant_msg_id = id;
         t.text_part_id = pid;
         t.text_part_dirty = false;
@@ -9992,6 +10016,45 @@ pub(crate) fn trim_wordless_result_row(
     } else {
         "hidden"
     }
+}
+
+/// Retire every row this turn opened and then moved on from without putting anything in it.
+///
+/// #2749 trims the row a turn *ends* on. A turn that is merged into another row, or superseded
+/// while a burst is in flight, leaves its earlier rows behind instead: finished `done`, with no
+/// words and nothing a client draws. Six of those were visible on the relay during the
+/// thirty-message burst of Test5 round 4 (2026-11-04, 19:13:55–19:14:15). They are the same
+/// empty row as #2749's, in a different position, so they get the same treatment.
+///
+/// `last` is the row the caller settles itself — the one the turn ended on, which
+/// [`trim_wordless_result_row`] judges under its own rule. That rule is not simply "wordless":
+/// a turn that showed the user nothing at all keeps its one empty row on purpose, because that
+/// is what makes the apps draw the stock "didn't answer" line instead of leaving the ask with
+/// no response. An earlier row never carries that line (a later row of the same turn always
+/// outranks it), so here wordless is the whole test.
+///
+/// Returns how many rows were retired.
+pub(crate) fn retire_wordless_rows(
+    doc: &arbos_core::doc::ChatDoc,
+    rows: &[String],
+    last: &str,
+) -> usize {
+    let mut retired = 0;
+    for id in rows.iter().filter(|id| id.as_str() != last) {
+        let Some(m) = doc.message(id) else {
+            continue;
+        };
+        if m.rest.get("hidden").and_then(Value::as_bool) == Some(true) {
+            continue;
+        }
+        let (wordless, _) = wordless_row(&m);
+        if !wordless {
+            continue;
+        }
+        retire_row(doc, id);
+        retired += 1;
+    }
+    retired
 }
 
 /// Subagents started by `start_job_for_send` are named `ask-…`; they answer directly.
