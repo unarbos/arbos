@@ -82,6 +82,95 @@ pub fn act_to_job_after_with(files: &[std::path::PathBuf]) -> std::time::Duratio
     std::time::Duration::from_secs(secs)
 }
 
+/// Override file for the act-ack promotion threshold: `.arbos/act-ack-bubble-secs` (a number of
+/// seconds), in the project's state dir first, then box-wide.
+pub const ACT_ACK_BUBBLE_SECS_FILE: &str = "act-ack-bubble-secs";
+/// Default seconds an `act` turn may run before its ack becomes a bubble. Four seconds: a quick
+/// act answers inside it and shows one bubble; longer work shows the ack where Grok Bot shows it.
+pub const ACT_ACK_BUBBLE_SECS_DEFAULT: u64 = 4;
+
+/// Seconds an `act` turn may run before its ack is promoted to a bubble: override files, then
+/// `ARBOS_ACT_ACK_BUBBLE_SECS`, then `ACT_ACK_BUBBLE_SECS_DEFAULT`. `0` keeps the ack on the
+/// working row only. Read per turn, so a file flips it with no restart.
+pub fn act_ack_bubble_after_with(files: &[std::path::PathBuf]) -> std::time::Duration {
+    let from_file = files.iter().find_map(|f| {
+        std::fs::read_to_string(f)
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+    });
+    let secs = from_file
+        .or_else(|| {
+            std::env::var("ARBOS_ACT_ACK_BUBBLE_SECS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+        })
+        .unwrap_or(ACT_ACK_BUBBLE_SECS_DEFAULT);
+    std::time::Duration::from_secs(secs)
+}
+
+/// Override file for the pi respawn backoff: `.arbos/pi-backoff-ms`, the first wait after the
+/// main pi child is lost, in milliseconds. The ceiling scales with it ([`PI_BACKOFF_MAX_RATIO`]
+/// times the first wait), so one number moves the whole curve.
+///
+/// It exists for the tests. Six deaths cost just over two minutes of waiting at the shipped
+/// 2 s → 60 s, which no test suite can spend, and a test that cannot reach the sixth death
+/// cannot measure what happens after the fifth. The doubling, the ceiling and the
+/// crash-loop threshold are the same code at either scale.
+pub const PI_BACKOFF_MS_FILE: &str = "pi-backoff-ms";
+/// The first wait after the main pi child is lost. Test5's box waited nothing at all and
+/// respawned about four thousand times in two and a half hours (bug Y).
+pub const PI_BACKOFF_START_MS_DEFAULT: u64 = 2_000;
+/// The ceiling, as a multiple of the first wait: 2 s doubling to a 60 s cap.
+pub const PI_BACKOFF_MAX_RATIO: u64 = 30;
+
+/// The first wait after a lost pi child, in milliseconds: override files, then the default.
+pub fn pi_backoff_start_ms_with(files: &[std::path::PathBuf]) -> u64 {
+    files
+        .iter()
+        .find_map(|f| {
+            std::fs::read_to_string(f)
+                .ok()
+                .and_then(|s| s.trim().parse::<u64>().ok())
+        })
+        .filter(|ms| *ms > 0)
+        .unwrap_or(PI_BACKOFF_START_MS_DEFAULT)
+}
+
+/// Override file for the steer hold: `.arbos/steer-hold-ms`, how long a job's file delivery waits
+/// for a user message of that chat to finish routing (`steer_gate.rs`, bug AB), in milliseconds.
+///
+/// It exists for the tests. The shipped 20 s is the user-facing figure — long enough for the quick
+/// lane and the main lane to decide whether a message is a correction, short enough that a file
+/// held behind one still arrives while the user is looking — and no suite can spend it per case.
+/// Every branch of the hold is the same code at either scale.
+pub const STEER_HOLD_MS_FILE: &str = "steer-hold-ms";
+/// How long a job's delivery waits for a correction that may be on its way. Round 10's gap
+/// between the correction arriving and `steer_job` being called was five seconds.
+pub const STEER_HOLD_MS_DEFAULT: u64 = 20_000;
+
+/// The steer hold in milliseconds: override files (project, then box), then `ARBOS_STEER_HOLD_MS`,
+/// then the default. `0` turns the hold off.
+pub fn steer_hold_ms_with(files: &[std::path::PathBuf]) -> u64 {
+    files
+        .iter()
+        .find_map(|f| {
+            std::fs::read_to_string(f)
+                .ok()
+                .and_then(|s| s.trim().parse::<u64>().ok())
+        })
+        .or_else(|| {
+            std::env::var("ARBOS_STEER_HOLD_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+        })
+        .unwrap_or(STEER_HOLD_MS_DEFAULT)
+}
+
+/// How long after a job posted its file a correction for that job still replaces it rather than
+/// being refused (`steer_gate.rs`, bug AB). Thirty seconds: r10steer's third correction landed
+/// nine seconds after the card and was simply lost.
+pub const STEER_REPLACE_WINDOW_MS: i64 = 30_000;
+
 /// Override file for the research-job worker model: `.arbos/research-worker-model` holding a model
 /// id, or `off` to run research jobs on the subagent model like every other kind.
 pub const RESEARCH_WORKER_MODEL_FILE: &str = "research-worker-model";
@@ -183,6 +272,33 @@ pub fn send_tool_mode(override_file: &std::path::Path) -> SendTool {
         .and_then(|s| parse_send_tool(&s))
         .unwrap_or(SendTool::On)
 }
+/// Override file for the chat-text limit: `.arbos/chat-text-max`, a number of characters or `off`,
+/// in the project's state dir first, then box-wide.
+pub const CHAT_TEXT_MAX_FILE: &str = "chat-text-max";
+
+/// Characters one chat message may carry, or `None` for **no limit** — the default, because
+/// nothing in the box bounds one: `hook_send_message` never measures the text, `ChatDoc` stores
+/// it whole, and an update too big for one relay frame (`arbos_core::wire::ROW_MAX`) is cut into
+/// frames that fit (#2762, #2765) — a cut Loro can make inside a long text insert. The 51k-char
+/// table of Jacob's Test5 round 5 (bug Q) is about 5 % of one frame.
+///
+/// Set a number only to hold a box below that; it is then the figure the `send_message`
+/// description carries and the figure its refusal names, so the model quotes a real limit
+/// instead of inventing one. Files first (an A/B flips it with no restart), then
+/// `ARBOS_CHAT_TEXT_MAX`; `off`, `0` or anything unparseable means no limit.
+pub fn chat_text_max_with(files: &[PathBuf]) -> Option<usize> {
+    let raw = files
+        .iter()
+        .find_map(|f| {
+            std::fs::read_to_string(f)
+                .ok()
+                .map(|s| s.trim().to_owned())
+                .filter(|s| !s.is_empty())
+        })
+        .or_else(|| std::env::var("ARBOS_CHAT_TEXT_MAX").ok())?;
+    raw.trim().parse::<usize>().ok().filter(|n| *n > 0)
+}
+
 /// Box-local override of the compact memory pack: `<work_root>/.arbos/memory-pack-compact`, `on` or `off`.
 pub const MEMORY_PACK_COMPACT_FILE: &str = "memory-pack-compact";
 /// Box-local override of the fast memory walk: `<work_root>/.arbos/memory-walk-fast`, `on` or `off`.
@@ -239,13 +355,17 @@ pub fn memory_walk_fast_on(override_file: &std::path::Path) -> bool {
     switch_on("ARBOS_MEMORY_WALK_FAST", override_file, true)
 }
 
-/// Box-level settings: what every workspace shares.
+/// Box-level settings: what every workspace shares, plus the box-wide values each workspace's
+/// own are derived from.
 #[derive(Debug, Clone)]
 pub struct BoxConfig {
     /// Owner of the box; `None` until `/box/hello` answers (legacy env without it).
     pub user_id: Option<String>,
     pub relay_url: String,
     pub box_token: String,
+    /// The box-wide MCP token: the relay's credential for the box port (`http::box_admin_authed`),
+    /// which reaches every workspace. Each workspace's loopback servers get their own token
+    /// derived from this one; see `workspace_mcp_token`.
     pub mcp_token: String,
     /// `/work`: workspaces live in `<work_root>/<project>`; box-level state in `<work_root>/.arbos`.
     pub work_root: PathBuf,
@@ -318,6 +438,34 @@ impl BoxConfig {
         }
     }
 
+    /// The MCP and hook token for one workspace. Derived per project, because the loopback servers
+    /// authenticate by comparing this value alone (`mcp.rs`, `hooks.rs`) and the ports are
+    /// `7800 + 10·index` — guessable, not secret. Sharing one value let a child of one workspace
+    /// act on another's turn, jobs and working set, which is the boundary `/work/<project>` and the
+    /// per-workspace Unix users exist to hold.
+    ///
+    /// Not the box-wide `mcp_token`: that stays the relay's credential for the box port, where
+    /// `http::box_admin_authed` reaches every workspace.
+    ///
+    /// Keyed on the project, not on `index`: the index comes from a boot-order counter that
+    /// compacts across restarts, so keying on it would rotate the token for no reason.
+    ///
+    /// Empty in, empty out. With no `ARBOS_MCP_TOKEN` there is no secret to mix in, so the digest
+    /// would be a constant anyone knowing the project id could compute — and a *non-empty*
+    /// constant, which every `tok == configured` arm then accepts as the main session. Answering
+    /// the empty string instead is what lets the servers' `configured.is_empty()` guard fire and
+    /// authenticate nobody: an unconfigured box serves no one rather than serving everyone.
+    fn workspace_mcp_token(&self, project_id: &str) -> String {
+        if self.mcp_token.trim().is_empty() {
+            return String::new();
+        }
+        use sha2::Digest;
+        let digest = sha2::Sha256::digest(
+            format!("arbos-mcp:v1:{}:{project_id}", self.mcp_token).as_bytes(),
+        );
+        format!("mcp_{}", hex::encode(&digest[..16]))
+    }
+
     /// The per-workspace config for one project.
     pub fn workspace(&self, project: &Value, index: u16) -> Config {
         let project_id = project
@@ -346,7 +494,7 @@ impl BoxConfig {
                 .to_owned(),
             relay_url: self.relay_url.clone(),
             box_token: self.box_token.clone(),
-            mcp_token: self.mcp_token.clone(),
+            mcp_token: self.workspace_mcp_token(&project_id),
             mcp_port: base + 1,
             hook_port: base + 2,
             proxy_port: base + 3,
@@ -356,6 +504,8 @@ impl BoxConfig {
             decision_cfg: decision_cfg_of(&models),
             talking_model: talking,
             subagent_model: slot("subagent_model", &self.default_subagent_model),
+            box_default_talking_model: self.default_talking_model.clone(),
+            box_default_subagent_model: self.default_subagent_model.clone(),
             instructions: project
                 .get("instructions")
                 .and_then(Value::as_str)
@@ -425,6 +575,7 @@ pub struct Config {
     pub project_name: String,
     pub relay_url: String,
     pub box_token: String,
+    /// This workspace's own bearer for its MCP and hook servers (`BoxConfig::workspace_mcp_token`).
     pub mcp_token: String,
     pub state_dir: PathBuf,
     pub work_dir: PathBuf,
@@ -438,6 +589,11 @@ pub struct Config {
     pub talking_model: String,
     pub subagent_model: String,
     pub decision_model: String,
+    /// The box-wide default a slot falls back to when the project named no model of its own.
+    /// A slot that differs from its box default is a choice someone made for this agent, and
+    /// [`crate::settings::LiveModels::resolve`] lets that choice govern the agent's whole work.
+    pub box_default_talking_model: String,
+    pub box_default_subagent_model: String,
     /// Responder decision: provider switch, decision-model id, threshold (`decision_model` slot).
     pub decision_cfg: DecisionConfig,
     pub instructions: String,
@@ -471,7 +627,8 @@ impl Config {
     /// The bearer token subagent sessions present to the MCP server and hooks. Derived from
     /// the main token so the main session's token never reaches a subagent process; the MCP
     /// server tells the two apart to refuse main-only tools (D69: subagents never talk
-    /// project-to-project).
+    /// project-to-project). Its input is this workspace's own token, so it separates workspaces
+    /// as well as roles.
     pub fn subagent_mcp_token(&self) -> String {
         use sha2::Digest;
         let digest = sha2::Sha256::digest(format!("subagent:{}", self.mcp_token).as_bytes());
@@ -529,9 +686,36 @@ impl Config {
         act_to_job_after_with(&self.knob_files(ACT_TO_JOB_SECS_FILE))
     }
 
+    /// Seconds before an act ack is promoted to a bubble; project file, box file, env, default.
+    pub fn act_ack_bubble_after(&self) -> std::time::Duration {
+        act_ack_bubble_after_with(&self.knob_files(ACT_ACK_BUBBLE_SECS_FILE))
+    }
+
+    /// How long a job's file delivery waits for a user message of that chat to finish routing
+    /// (bug AB); project file, box file, env, default.
+    pub fn steer_hold(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(steer_hold_ms_with(&self.knob_files(STEER_HOLD_MS_FILE)))
+    }
+
+    /// The first wait after a lost main pi child; project file, box file, default.
+    pub fn pi_backoff_start_ms(&self) -> u64 {
+        pi_backoff_start_ms_with(&self.knob_files(PI_BACKOFF_MS_FILE))
+    }
+
+    /// The ceiling the respawn backoff doubles up to.
+    pub fn pi_backoff_max_ms(&self) -> u64 {
+        self.pi_backoff_start_ms() * PI_BACKOFF_MAX_RATIO
+    }
+
     /// The model `research` jobs run on (cost knob 1); `None` = the subagent model.
     pub fn research_worker_model(&self) -> Option<String> {
         research_worker_model_with(&self.knob_files(RESEARCH_WORKER_MODEL_FILE))
+    }
+
+    /// Characters one chat message may carry; `None` (the default) = no limit. Read per call and
+    /// per `tools/list`, so the description and the refusal always carry the same figure.
+    pub fn chat_text_max(&self) -> Option<usize> {
+        chat_text_max_with(&self.knob_files(CHAT_TEXT_MAX_FILE))
     }
 
     /// A knob's override files in precedence order: this project's `.arbos/<name>` (so an A/B can

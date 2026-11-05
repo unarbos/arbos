@@ -1,6 +1,8 @@
 //! Small model calls from agentd's own Rust code (memory decisions, compaction, sub_llm),
 //! always through the relay proxy with the box token (D2).
 
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use anyhow::{anyhow, Result};
@@ -18,6 +20,10 @@ pub struct Llm {
     /// Sent as `x-arbos-purpose`; the relay tags the usage row and ledger entry with it so a
     /// feature's spend (e.g. `memory-tree`) can be summed exactly.
     purpose: Option<String>,
+    /// Models whose endpoint refuses `reasoning {enabled: false}`, learned from the first
+    /// rejection. Shared by every `with_purpose` clone, so one chat's 400 spares every later
+    /// call on this box the same wasted round trip.
+    reasoning_always_on: Arc<Mutex<HashSet<String>>>,
 }
 
 /// One answer of a decision model. `noul` questions answer with the yes-probability; `choice`
@@ -51,6 +57,7 @@ impl Llm {
             token: cfg.box_token.clone(),
             project_id: cfg.project_id.clone(),
             purpose: None,
+            reasoning_always_on: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -63,6 +70,7 @@ impl Llm {
             token: self.token.clone(),
             project_id: self.project_id.clone(),
             purpose: Some(purpose.to_owned()),
+            reasoning_always_on: Arc::clone(&self.reasoning_always_on),
         }
     }
 
@@ -157,6 +165,7 @@ impl Llm {
             token: token.to_owned(),
             project_id: String::new(),
             purpose: None,
+            reasoning_always_on: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -236,12 +245,68 @@ impl Llm {
             .pointer("/choices/0/finish_reason")
             .and_then(Value::as_str)
             .map(str::to_owned);
+        let refusal = v
+            .pointer("/choices/0/message/refusal")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+            .map(str::to_owned);
         Ok(Completion {
             text,
             latency_ms: t0.elapsed().as_millis() as i64,
             usage,
             finish_reason,
+            refusal,
         })
+    }
+
+    /// A completion whose whole budget must go to text the user reads.
+    ///
+    /// Asks for reasoning off, because hidden thinking counts against `max_tokens` and used to
+    /// cut the visible sentence at the cap (#1411). Some endpoints refuse: Opus 5.5 answers
+    /// HTTP 400 "Reasoning is mandatory for this endpoint and cannot be disabled", and every
+    /// quick reply on it failed and fell back to a full background job (Jacob, Test5,
+    /// 2026-11-04). On that refusal the model is remembered and the call is retried at
+    /// `thinking_max_tokens` — a budget with room for the thinking as well, so the answer still
+    /// arrives whole on this one call. Later calls on the same model skip the refused attempt.
+    pub async fn complete_visible(
+        &self,
+        model: &str,
+        system: &str,
+        user: &str,
+        max_tokens: u32,
+        thinking_max_tokens: u32,
+    ) -> Result<Completion> {
+        if self.reasoning_always_on(model) {
+            return self
+                .complete_full(model, system, user, thinking_max_tokens, None)
+                .await;
+        }
+        let off = json!({ "reasoning": { "enabled": false } });
+        let first = self
+            .complete_full(model, system, user, max_tokens, Some(&off))
+            .await;
+        match first {
+            Err(e) if is_reasoning_mandatory(&e.to_string()) => {
+                tracing::info!(
+                    model,
+                    "endpoint requires reasoning; retrying with room for it and remembering the model"
+                );
+                if let Ok(mut s) = self.reasoning_always_on.lock() {
+                    s.insert(model.to_owned());
+                }
+                self.complete_full(model, system, user, thinking_max_tokens, None)
+                    .await
+            }
+            other => other,
+        }
+    }
+
+    /// This model's endpoint already refused `reasoning {enabled: false}` on this box.
+    pub fn reasoning_always_on(&self, model: &str) -> bool {
+        self.reasoning_always_on
+            .lock()
+            .map(|s| s.contains(model))
+            .unwrap_or(false)
     }
 
     /// A forced-JSON call: strips code fences and parses the first JSON object.
@@ -266,14 +331,20 @@ impl Llm {
         user: &str,
         max_tokens: u32,
     ) -> Result<(Value, i64, Value)> {
-        let (text, ms, usage) = self
-            .complete_with_usage(
+        let c = self
+            .complete_full(
                 model,
                 &format!("{system}\nAnswer with one JSON object and nothing else."),
                 user,
                 max_tokens,
+                None,
             )
             .await?;
+        // A declined request is named as one, so a caller can tell it from a call that failed.
+        if let Some(r) = c.refusal_reason() {
+            return Err(anyhow!("the model provider refused the request: {r}"));
+        }
+        let (text, ms, usage) = (c.text, c.latency_ms, c.usage);
         let v = parse_json_loose(&text).ok_or_else(|| {
             anyhow!(
                 "model did not return JSON: {}",
@@ -293,9 +364,31 @@ pub struct Completion {
     /// `stop`, `length` (the `max_tokens` cap cut the answer), `content_filter`, … as the
     /// provider reports it; `None` when absent.
     pub finish_reason: Option<String>,
+    /// The provider's own refusal text, when it answered with one instead of content
+    /// (OpenAI-style `message.refusal`).
+    pub refusal: Option<String>,
 }
 
 impl Completion {
+    /// The provider declined the request's content rather than failing: it said so on the
+    /// message, or it stopped on a moderation reason. Either way the text is not an answer, and
+    /// sending the same request again gets the same refusal.
+    ///
+    /// Without this, a declined call reached the caller as "model did not return JSON" — a
+    /// failure, by its wording, that no lane could tell from a transient one (Jacob, Test5
+    /// round 2, the F variant of #2750).
+    pub fn refusal_reason(&self) -> Option<String> {
+        if let Some(r) = self.refusal.as_deref() {
+            return Some(r.to_owned());
+        }
+        let reason = self.finish_reason.as_deref()?.to_ascii_lowercase();
+        matches!(
+            reason.as_str(),
+            "content_filter" | "content-filter" | "safety" | "blocklist" | "prohibited_content"
+        )
+        .then(|| format!("the provider stopped on {reason}"))
+    }
+
     /// The provider stopped because `max_tokens` was reached: the text is a fragment.
     pub fn truncated(&self) -> bool {
         matches!(
@@ -306,6 +399,14 @@ impl Completion {
             Some("length") | Some("max_tokens")
         )
     }
+}
+
+/// The endpoint rejected the call because reasoning may not be turned off on it (Opus 5.5:
+/// HTTP 400 "Reasoning is mandatory for this endpoint and cannot be disabled"). Matched on the
+/// wording rather than the status, since the same refusal arrives as 400 or 422 by provider.
+pub fn is_reasoning_mandatory(err: &str) -> bool {
+    let e = err.to_ascii_lowercase();
+    e.contains("reasoning") && (e.contains("mandatory") || e.contains("cannot be disabled"))
 }
 
 /// Find the first `{…}` or `[…]` in model output and parse it.

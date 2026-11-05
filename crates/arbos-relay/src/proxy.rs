@@ -14,6 +14,7 @@ use futures::StreamExt;
 use serde_json::{json, Value};
 
 use crate::auth::Principal;
+use crate::proxy_trace::{generation_marks, prompt_shape, upstream_marks};
 use crate::state::AppState;
 
 #[derive(Debug, Clone, Copy)]
@@ -357,6 +358,19 @@ pub(crate) fn project_of(state: &AppState, p: &Principal, headers: &HeaderMap) -
         .map(|p| p.id)
 }
 
+/// Hex characters in the id the relay gives each model call and returns in `x-arbos-req-id`.
+pub const REQ_ID_HEX: usize = 12;
+
+fn new_req_id() -> String {
+    use rand::Rng;
+    let mut out = String::with_capacity(REQ_ID_HEX);
+    let mut rng = rand::thread_rng();
+    for _ in 0..REQ_ID_HEX {
+        out.push(char::from_digit(rng.gen_range(0..16), 16).unwrap());
+    }
+    out
+}
+
 const PASS_HEADERS: &[&str] = &[
     "anthropic-version",
     "anthropic-beta",
@@ -378,9 +392,6 @@ async fn forward(
     let project_id = project_of(&state, &principal, &headers)
         .or(project_override)
         .unwrap_or_else(|| "relay-admin".to_owned());
-    if let Some(r) = crate::credits::project_cap_refusal(&state, &project_id) {
-        return r;
-    }
     if let Err(r) = crate::credits::check_call(&state, &principal, &project_id) {
         return crate::credits::refused_response(&r);
     }
@@ -397,6 +408,28 @@ async fn forward(
         .and_then(|v| v.get("stream"))
         .and_then(Value::as_bool)
         .unwrap_or(false);
+
+    // One line per model call, joined to its completion line — and to the box's turn log, via
+    // the `x-arbos-req-id` returned below — by `req_id`. The proxy sees every prompt and logs
+    // none of it: what goes in the journal is the shape, hashed.
+    let req_id = new_req_id();
+    let shape = req_json.as_ref().map(prompt_shape).unwrap_or_default();
+    tracing::info!(
+        req_id,
+        project = project_id,
+        api = ?api,
+        model,
+        stream = is_stream,
+        bytes = body.len(),
+        system_sha = shape.system_sha.as_deref().unwrap_or(""),
+        tools_sha = shape.tools_sha.as_deref().unwrap_or(""),
+        prefix_sha = shape.prefix_sha.as_deref().unwrap_or(""),
+        tools = shape.tools,
+        messages = shape.messages,
+        cache_marks = shape.cache_marks,
+        cache_ttl = shape.cache_ttl,
+        "model call in"
+    );
 
     let (url, key, key_header): (String, String, &str) = match api {
         Api::OpenAi => {
@@ -510,7 +543,9 @@ async fn forward(
         Ok(r) => r,
         Err(e) => return (StatusCode::BAD_GATEWAY, format!("upstream: {e}")).into_response(),
     };
+    let headers_ms = t0.elapsed().as_millis() as i64;
     let status = upstream.status();
+    let upstream_marks = upstream_marks(upstream.headers());
     let mut resp_headers = HeaderMap::new();
     for (k, v) in upstream.headers() {
         let name = k.as_str();
@@ -523,6 +558,9 @@ async fn forward(
         }
     }
     resp_headers.insert("x-arbos-proxied", HeaderValue::from_static("1"));
+    if let Ok(v) = HeaderValue::from_str(&req_id) {
+        resp_headers.insert("x-arbos-req-id", v);
+    }
 
     // `x-arbos-purpose: <feature>` (agentd's memory tree sends `memory-tree`): the usage row's
     // `api` becomes `<api>:<feature>` and the ledger reference `<model>|<feature>`, so a feature's
@@ -548,6 +586,7 @@ async fn forward(
         None => base_api.to_owned(),
     };
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(64);
+    let prefix_sha = shape.prefix_sha;
     let db = state.db.clone();
     let pid = project_id.clone();
     let meter_state = state.clone();
@@ -558,6 +597,7 @@ async fn forward(
             ..Default::default()
         };
         let mut ttfb: Option<i64> = None;
+        let mut generation: (Option<String>, Option<String>) = (None, None);
         let mut stream = upstream.bytes_stream();
         let mut carry = String::new();
         while let Some(chunk) = stream.next().await {
@@ -570,6 +610,11 @@ async fn forward(
                     if let Some(idx) = carry.rfind('\n') {
                         let (done, rest) = carry.split_at(idx + 1);
                         meter.scan(api, done);
+                        if generation.0.is_none() || generation.1.is_none() {
+                            let (id, provider) = generation_marks(done);
+                            generation.0 = generation.0.take().or(id);
+                            generation.1 = generation.1.take().or(provider);
+                        }
                         carry = rest.to_owned();
                     }
                     if tx.send(Ok(b)).await.is_err() {
@@ -584,7 +629,33 @@ async fn forward(
         }
         if !carry.is_empty() {
             meter.scan(api, &carry);
+            if generation.0.is_none() || generation.1.is_none() {
+                let (id, provider) = generation_marks(&carry);
+                generation.0 = generation.0.take().or(id);
+                generation.1 = generation.1.take().or(provider);
+            }
         }
+        // The other half of the record: who answered, how fast, and what the upstream counted.
+        // `cache_read` against the `prefix_sha` on the matching `model call in` line is what
+        // says whether a shared prompt head was actually served from cache.
+        tracing::info!(
+            req_id,
+            status = status.as_u16(),
+            headers_ms,
+            ttfb_ms = ttfb,
+            total_ms = t0.elapsed().as_millis() as i64,
+            prefix_sha = prefix_sha.as_deref().unwrap_or(""),
+            backend = upstream_marks.backend,
+            cache = upstream_marks.cache,
+            upstream_id = upstream_marks.upstream_id,
+            generation_id = generation.0.as_deref().unwrap_or(""),
+            provider = generation.1.as_deref().unwrap_or(""),
+            input = meter.input,
+            output = meter.output,
+            cache_read = meter.cache_read,
+            cache_write = meter.cache_write,
+            "model call done"
+        );
         if status.is_success() {
             let _ = db.record_usage(
                 &pid,
@@ -923,12 +994,12 @@ fn audio_project(state: &AppState, principal: &Principal, headers: &HeaderMap) -
         .unwrap_or_else(|| "relay-admin".to_owned())
 }
 
-/// `Some(response)` when the project's daily cap is already spent or the user may not spend.
+/// `Some(response)` when the account behind this project may not spend.
 fn audio_spend_cap(state: &AppState, principal: &Principal, project_id: &str) -> Option<Response> {
     if let Err(r) = crate::credits::check_call(state, principal, project_id) {
         return Some(crate::credits::refused_response(&r));
     }
-    crate::credits::project_cap_refusal(state, project_id)
+    None
 }
 
 fn audio_key(state: &AppState) -> Option<String> {
@@ -1486,6 +1557,56 @@ mod tests {
         normalize_openai_reasoning_body("openai/gpt-6-astra", &mut body);
         assert_eq!(body["reasoning"]["effort"], json!("low"));
         assert_eq!(body["max_completion_tokens"], json!(512));
+    }
+
+    /// Every model call gets an id, and the caller is told it. Without that the box's turn log
+    /// and the relay's own record of the same call cannot be joined, and a turn whose prompt
+    /// missed the cache cannot be traced to the backend that answered it.
+    #[tokio::test]
+    async fn a_proxied_call_is_given_a_request_id_the_caller_can_see() {
+        use crate::state::test_support::test_state;
+        use crate::state::AuthMode;
+        let app = axum::Router::new().route(
+            "/openrouter/api/v1/v1/messages",
+            axum::routing::post(|| async {
+                (
+                    [("x-openrouter-provider", "Amazon Bedrock")],
+                    "data: {\"id\":\"gen-xyz\",\"provider\":\"Amazon Bedrock\"}\n\n",
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let mut state = test_state(AuthMode::Github);
+        let mut cfg = (*state.cfg).clone();
+        cfg.openrouter_key = Some("sk-test".into());
+        cfg.anthropic_base = format!("http://127.0.0.1:{port}/openrouter/api/v1");
+        state.cfg = std::sync::Arc::new(cfg);
+
+        let r = anthropic(
+            State(state),
+            Principal::Admin,
+            Path("v1/messages".to_owned()),
+            HeaderMap::new(),
+            Bytes::from_static(
+                br#"{"model":"claude-opus-5.5","system":"head","messages":[{"role":"user","content":"hi"}]}"#,
+            ),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let id = r
+            .headers()
+            .get("x-arbos-req-id")
+            .and_then(|v| v.to_str().ok())
+            .expect("the call is identified to the caller")
+            .to_owned();
+        assert_eq!(id.len(), REQ_ID_HEX);
+        assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
+        // Two calls are two records.
+        assert_ne!(id, new_req_id());
     }
 
     #[test]

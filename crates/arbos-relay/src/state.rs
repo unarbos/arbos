@@ -80,7 +80,9 @@ pub struct Config {
     /// Credits a new GitHub account starts with (`ARBOS_DEFAULT_GRANT_USD`).
     pub default_grant_usd: f64,
     /// Soft per-user daily debit cap for new accounts (`ARBOS_DEFAULT_DAILY_CAP_USD`).
-    pub default_daily_cap_usd: f64,
+    /// The limit every new account starts with. One limit for the whole ledger; unlimited
+    /// unless `ARBOS_DEFAULT_DAILY_CAP_USD` names a positive number.
+    pub default_account_limit: crate::credits::SpendLimit,
     /// Relay-wide daily inference debit cap; reaching it trips the kill switch (`ARBOS_GLOBAL_DAILY_CAP_USD`).
     pub global_daily_cap_usd: f64,
     /// Relay-wide daily machine cost that only logs a warning (`ARBOS_GLOBAL_MACHINE_DAILY_CAP_USD`).
@@ -157,6 +159,18 @@ pub type HeadCache<T> = std::sync::Mutex<Option<((i64, i64), T)>>;
 pub struct RoomDocCache {
     pub key: (i64, i64),
     pub doc: arbos_core::doc::ChatDoc,
+    /// Every message of `doc` as `(id, sender)`, in list order, kept in step with it.
+    ///
+    /// The pre-image a push check needs: Loro's list diff reports a deletion as a count of
+    /// removed entries and never the entries themselves, so without this the id of a deleted
+    /// message is nowhere to be found. Rebuilding it per push is not an option — the projection
+    /// costs ~15 ms at 2 000 messages and ~82 ms at 10 000 — so it is maintained from each
+    /// diff instead.
+    ///
+    /// The sender travels with the id for the same reason the id does: once an update has
+    /// removed a row, neither can be read back out of the doc, and `push_guard` needs the
+    /// sender to tell a box's own unattributed row from a person's.
+    pub message_ids: Vec<arbos_core::doc::MessageIdentity>,
 }
 
 pub struct Room {
@@ -348,6 +362,13 @@ pub struct AppState {
     pub started_at: std::time::Instant,
     /// Planned-restart signal: room sockets close with 1012 when it flips (`restart.rs`).
     pub restart: Arc<RestartSignal>,
+    /// Bumped once per device revocation (`signin::revoke_device_everywhere`). A live room
+    /// socket resolved its principal at upgrade and never looks again, so without this a
+    /// revoked device keeps reading and writing until it disconnects. The value is a counter
+    /// rather than the device id: a watch channel keeps only the latest value, so two
+    /// revocations in the same moment would hide one another. Watchers re-read
+    /// `device_status`, which is the authority.
+    pub revocations: Arc<tokio::sync::watch::Sender<u64>>,
     /// `call:project` → when the voice worker was last dispatched for it (no double dispatch).
     pub voice_dispatched: Arc<Mutex<HashMap<String, i64>>>,
     /// What the voice worker last reported about itself (`POST /voice/worker/hello`).
@@ -362,6 +383,10 @@ pub struct AppState {
     pub client_seen: Arc<crate::releases::ClientSeen>,
     /// Chats on Matrix (D88): mode, homeserver tokens and the outbox wake-up.
     pub matrix: Arc<crate::matrix::Matrix>,
+    /// Who is watching an agent access link's stream, and how to wake them. Holds the set of
+    /// accounts with a live link, which the announce path reads before it does anything else —
+    /// an account without a link pays one read lock and one `is_empty`.
+    pub link_hub: Arc<crate::agent_link_stream::LinkHub>,
 }
 
 impl AppState {
@@ -430,6 +455,18 @@ impl AppState {
                 })
             })
             .clone()
+    }
+
+    /// Tell every live socket that some device was revoked, so each one re-reads
+    /// `device_status` and closes if it was the device in question (see [`AppState::revocations`]).
+    pub fn note_device_revoked(&self) {
+        self.revocations.send_modify(|n| *n = n.wrapping_add(1));
+    }
+
+    /// Is this device still a live session? `false` for a revoked row and for a row that is
+    /// gone, so a socket cannot outlive the row it was authorised by.
+    pub fn device_is_live(&self, device_id: &str) -> bool {
+        matches!(self.db.device_status(device_id), Ok(Some((_, false))))
     }
 
     /// The user whose box serves a project.
@@ -632,7 +669,7 @@ pub(crate) mod test_support {
             github_client_secret: Some("secret".into()),
             auth_redirects: Vec::new(),
             default_grant_usd: 100.0,
-            default_daily_cap_usd: 20.0,
+            default_account_limit: crate::credits::SpendLimit::Unlimited,
             global_daily_cap_usd: 500.0,
             global_machine_daily_cap_usd: 400.0,
             always_on: false,
@@ -688,12 +725,14 @@ pub(crate) mod test_support {
             default_snapshot: Arc::new(std::sync::RwLock::new(String::new())),
             started_at: std::time::Instant::now(),
             restart: Arc::new(RestartSignal::default()),
+            revocations: Arc::new(tokio::sync::watch::Sender::new(0)),
             voice_dispatched: Arc::new(Mutex::new(HashMap::new())),
             voice_worker: Arc::new(Mutex::new(None)),
             voice_inbox: crate::voice::VoiceInbox::default(),
             image_health: Arc::new(Mutex::new(None)),
             client_seen: Arc::new(std::sync::Mutex::new(HashMap::new())),
             matrix: crate::matrix::Matrix::new(crate::matrix::Config::off()),
+            link_hub: Arc::new(crate::agent_link_stream::LinkHub::default()),
         }
     }
 }

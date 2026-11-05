@@ -312,7 +312,10 @@ pub async fn create_project(
     };
     let now = now_ms();
     let id = ulid();
-    let owner = principal.user_id().unwrap_or("u_default").to_owned();
+    let owner = principal
+        .user_id()
+        .unwrap_or(crate::auth::LEGACY_USER)
+        .to_owned();
     // Defaults are deduped within the user's (tree, colour) pairs so sibling tiles differ.
     let taken: Vec<(String, String)> = state
         .db
@@ -369,18 +372,8 @@ pub async fn create_project(
         state: "hibernated_light".into(),
         created_at: now,
         last_active_at: now,
-        // An owner without a user cap gets no project caps either (Jacob, 2026-10-26).
-        spend_cap_daily: if state
-            .db
-            .user(&owner)
-            .ok()
-            .flatten()
-            .is_some_and(|u| u.daily_cap_usd.is_none())
-        {
-            crate::credits::PROJECT_CAP_UNLIMITED
-        } else {
-            25.0
-        },
+        // A project is not a ledger: it spends its owner's account, which carries the one limit.
+        spend_cap_daily: crate::credits::PROJECT_CAP_UNLIMITED,
         color: b.color.clone().unwrap_or_else(|| "#8b7cf6".into()),
         user_id: owner,
         workspace_state: "stopped".into(),
@@ -630,9 +623,6 @@ pub struct PatchProjectBody {
     /// Merged slot by slot: `{ "talking_model": { "id": "...", "effort": "low" } }` leaves the other slots alone.
     #[serde(default)]
     pub models: Option<Value>,
-    /// Daily cap in USD; present-and-null means no project cap (stored as the sentinel).
-    #[serde(default, deserialize_with = "deserialize_double_option_f64")]
-    pub spend_cap_daily: Option<Option<f64>>,
     /// Tree avatar slug; `null` resets to the deterministic default.
     #[serde(default, deserialize_with = "deserialize_double_option")]
     pub avatar: Option<Option<String>>,
@@ -668,13 +658,6 @@ where
     D: serde::Deserializer<'de>,
 {
     Option::<String>::deserialize(d).map(Some)
-}
-
-fn deserialize_double_option_f64<'de, D>(d: D) -> Result<Option<Option<f64>>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    Option::<f64>::deserialize(d).map(Some)
 }
 
 pub(crate) fn deserialize_double_option_i64<'de, D>(d: D) -> Result<Option<Option<i64>>, D::Error>
@@ -833,8 +816,7 @@ pub async fn patch_project(
             b.color.as_deref(),
             b.instructions.as_deref(),
             models.as_ref(),
-            b.spend_cap_daily
-                .map(|c| c.unwrap_or(crate::credits::PROJECT_CAP_UNLIMITED)),
+            None,
             avatar_patch.as_ref().map(|a| a.as_deref()),
             color_patch.as_ref().map(|a| a.as_deref()),
             description.as_deref(),
@@ -1609,7 +1591,7 @@ pub async fn machine_migrate(
 ) -> ApiResult {
     let user_id = match &principal {
         Principal::Device { user_id, .. } => user_id.clone(),
-        Principal::Admin => "u_default".to_owned(),
+        Principal::Admin => crate::auth::LEGACY_USER.to_owned(),
         Principal::Box { .. } => return Err((StatusCode::FORBIDDEN, "devices only".into())),
     };
     let reports = crate::migrate::migrate_user(&state, &user_id, q.project.as_deref(), q.force)
@@ -2456,9 +2438,15 @@ mod primary_chat_tests {
 
         // The first row lands before the box has a socket on the room: one `rows_pending`
         // push, not one per row; none once the box is in the room.
-        let room = state
-            .room(&arbos_core::wire::room_name(&project, &chat_id))
-            .await;
+        let room_name = arbos_core::wire::room_name(&project, &chat_id);
+        // Two rows are waiting in the room before any box has a socket on it.
+        for i in 0..2 {
+            state
+                .db
+                .append_row(&room_name, "dev-mac", &format!("b{i}"), b"x")
+                .unwrap();
+        }
+        let room = state.room(&room_name).await;
         let chat = crate::notify::ChatRef::project(&project, &chat_id);
         let agents = [boxes::ServingAgent {
             project_id: project.clone(),
@@ -2482,6 +2470,14 @@ mod primary_chat_tests {
             "the chat row rides along so the box does not reset it"
         );
         assert!(pushes[0].2["created_at"].as_i64().unwrap() > 0);
+        // How far the room has got, so the box can tell how much it is behind and start the
+        // turn's slow half while it connects. Seqs only: no row content leaves the relay here.
+        assert_eq!(
+            pushes[0].2["head_seq"],
+            json!(2),
+            "the push says work is waiting: {:?}",
+            pushes[0].2
+        );
         room.box_joined(&alice);
         assert_eq!(
             boxes::after_person_row(&state, &room, &chat, &agents).await,
@@ -2681,7 +2677,6 @@ mod agent_avatar_version_tests {
             color: None,
             instructions: None,
             models: None,
-            spend_cap_daily: None,
             avatar: None,
             avatar_color: None,
             description: None,

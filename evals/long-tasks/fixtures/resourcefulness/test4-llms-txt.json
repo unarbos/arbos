@@ -1,0 +1,53 @@
+{
+ "task": "rs3-llms-txt-read",
+ "agent": "Test4",
+ "image": "0.1.191",
+ "user_messages": [
+  "<exact prompt wording not in evidence>"
+ ],
+ "assistant_messages": [],
+ "tool_calls": [
+  {
+   "name": "mcp__arbos__web_fetch",
+   "target": "https://relay.arbos.life/llms.txt",
+   "error": null,
+   "output_empty": false
+  },
+  {
+   "name": "mcp__arbos__web_fetch",
+   "target": "https://relay.arbos.life/llms.txt",
+   "error": null,
+   "output_empty": false
+  },
+  {
+   "name": "mcp__arbos__web_fetch",
+   "target": "https://relay.arbos.life/llms.txt",
+   "error": null,
+   "output_empty": false
+  },
+  {
+   "name": "mcp__arbos__web_fetch",
+   "target": "https://relay.arbos.life/llms.txt",
+   "error": null,
+   "output_empty": false
+  },
+  {
+   "name": "mcp__arbos__web_fetch",
+   "target": "https://relay.arbos.life/llms.txt",
+   "error": null,
+   "output_empty": false
+  }
+ ],
+ "slots_filled": null,
+ "slots_total": null,
+ "asked_for_count": false,
+ "stated_count": null,
+ "produced_count": null,
+ "committed": null,
+ "nudge_labels": [],
+ "contradictions": [],
+ "notes": {
+  "text_in_evidence": false,
+  "evidence": "five fetches of one URL, and peek offered and unused, are in evidence"
+ }
+}

@@ -3,10 +3,13 @@
 //! agent features until it is upgraded.
 //!
 //! Steps (one task per user, idempotent while it runs):
-//!   measure — start the old sandbox if needed and `du /work` while agentd keeps running; over the
-//!             carry limit (or no spool room on the relay) → refused: nothing stopped, box state
-//!             untouched, `upgrade.last_refused` says why (ARB-339; before, the box's agentd was
-//!             killed first and an oversize box was restarted on every attempt);
+//!   measure — start the old sandbox if needed and, while agentd keeps running, `du /work`, `df`
+//!             where the pack will stage its parts, the biggest single file (it bounds the biggest
+//!             part) and the target snapshot's disk size. Over the carry limit, or no room on the
+//!             relay's spool, on the source itself or on the box the snapshot will make → refused:
+//!             nothing stopped, box state untouched, `upgrade.last_refused` says why with the
+//!             figures it compared (ARB-339; before, the box's agentd was killed first and an
+//!             oversize box was restarted on every attempt);
 //!   pack    — stop its agentd, list `/work` (logs excluded), carry it in parts through the relay's
 //!             spool disk (`upgrade_carry`: per-part tar → sha256 → download with a size-scaled
 //!             deadline and retries); a failure here revives the old box in place;
@@ -14,7 +17,8 @@
 //!             newest per user stay unarchived, older retained ones are Daytona-archived at once);
 //!   create  — a fresh box from the target snapshot, staged: new tokens, the `boxes` row still
 //!             names the source;
-//!   unpack  — stop the new agentd, check room (bytes and inodes), upload / verify / extract part by
+//!   unpack  — stop the new agentd, confirm room on the box itself (bytes and inodes — the measure
+//!             step already applied the same arithmetic to the snapshot's disk size), upload / verify / extract part by
 //!             part, count the tree against the plan, reset the per-workspace owner markers;
 //!   start   — the swap: the row now names the new box, which is bounced so the entrypoint starts
 //!             agentd on the carried `/work` and must say hello.
@@ -659,12 +663,29 @@ async fn run(state: &AppState, user_id: &str, target: &str, source: Source) -> R
         Source::History { sandbox_id } => (sandbox_id.clone(), None),
     };
 
-    // Measure first: nothing on the box is stopped until the carry is known to fit.
+    // Measure first: nothing on the box is stopped until the carry is known to fit everywhere it
+    // has to — the relay's spool, the source's own disk (the pack stages its tarballs there) and
+    // the box the target snapshot will make. The destination used to be checked only after the
+    // pack, so a snapshot too small for the carry was refused after ~22 minutes of packing, a stop
+    // of the old sandbox and a create of the new one (gh_268993031, 2026-11-05).
     note_phase(state, user_id, "measure").await;
     let tb = source_toolbox(dt, &source_id).await?;
     let work_mib = carry::measure_du_mib(&tb).await?;
-    let spool_free = carry::free_mib(&cfg.spool_root).unwrap_or(0);
-    match carry::verdict(work_mib, spool_free, &cfg) {
+    let (source_free_mib, max_file_bytes) = carry::source_room(&tb).await?;
+    let room = carry::Room {
+        work_mib,
+        spool_free_mib: carry::free_mib(&cfg.spool_root).unwrap_or(0),
+        source_free_mib,
+        max_part_mib: carry::max_part_bound_mib(cfg.part_mib, max_file_bytes),
+        target_free_mib: carry::target_free_mib(dt, target).await,
+    };
+    tracing::info!(
+        user = %user_id, target, work_mib, source_free_mib = room.source_free_mib,
+        spool_free_mib = room.spool_free_mib, max_part_mib = room.max_part_mib,
+        target_free_mib = ?room.target_free_mib, part_mib = cfg.part_mib,
+        "carry room measured; nothing stopped yet"
+    );
+    match carry::verdict(&room, &cfg) {
         Verdict::Carry => {}
         v => {
             let reason = v.reason().unwrap_or_default();

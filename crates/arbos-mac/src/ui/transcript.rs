@@ -2,16 +2,17 @@
 //! block (zeron-study §4.1–§4.4). Rows are diffed by `(id, version)` and
 //! spliced; streaming text fades in through the veil.
 
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    actions, canvas, div, list, prelude::*, px, Animation, AnimationExt, AnyElement, App, Bounds,
-    BoxShadow, Context, Div, Entity, FontWeight, ListAlignment, ListScrollEvent, ListState,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, SharedString,
-    Stateful, TextRun, Window,
+    actions, canvas, div, list, point, prelude::*, px, Animation, AnimationExt, AnyElement, App,
+    Bounds, BoxShadow, Context, Div, Entity, FontWeight, ListAlignment, ListScrollEvent, ListState,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, ScrollHandle,
+    ScrollWheelEvent, SharedString, Stateful, TextRun, Window,
 };
 
 use crate::app::{AppEvent, AppState, DetailsTarget};
@@ -36,6 +37,7 @@ use crate::ui::mention::{self, Mentions};
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
 use crate::ui::profile_target;
+use crate::ui::reveal::RevealInset;
 use crate::ui::secret_card::SecretOfferCard;
 use crate::ui::select::{BubbleAt, BubbleSelectable, LinkIcons, Selectable, Span, TextSelection};
 use crate::ui::sf_symbols;
@@ -166,10 +168,10 @@ pub const RUN_WINDOW_MS: u64 = 2 * 60 * 1000;
 pub(crate) const ROW_GAP_HALF: f32 = 3.0;
 pub(crate) const TURN_GAP_EXTRA: f32 = 20.0 - 2.0 * ROW_GAP_HALF;
 /// The gap between two bubbles of one run, and the gap a new run opens — the
-/// numbers the rhythm tests pin.
+/// numbers the rhythm tests pin. `TURN_GAP` is also the air a revealed hit
+/// keeps under the header (`REVEAL_TOP_INSET`).
 #[cfg(test)]
 pub(crate) const RUN_GAP: f32 = 2.0 * ROW_GAP_HALF;
-#[cfg(test)]
 pub(crate) const TURN_GAP: f32 = TURN_GAP_EXTRA + 2.0 * ROW_GAP_HALF;
 
 /// The tail of the sender run the row builder is in: who spoke last and when
@@ -270,6 +272,16 @@ pub const SENDER_LANE: f32 = AVATAR_COLUMN_INSET + SENDER_DISC + SENDER_DISC_GAP
 const HOVER_FADE_MS: f32 = 150.0;
 /// The fade band under the floating header (one number for every chat kind).
 pub const HEADER_FADE_BAND: f32 = crate::ui::header::metrics::FADE_BAND;
+/// Where a reveal brings a message to rest: its row's top edge this far below
+/// the transcript's own top edge.
+///
+/// The chat pane's reading of the shared rule in [`crate::ui::reveal`] — the
+/// band the floating header fades the list out over, plus the gap the transcript
+/// already opens between two speakers. Both terms are read from where they live,
+/// so a header that changes size carries the inset with it. Any other list a
+/// reveal lands in states its own two terms through `reveal::top_inset` rather
+/// than reaching for this one.
+pub const REVEAL_TOP_INSET: f32 = crate::ui::reveal::top_inset(HEADER_FADE_BAND, TURN_GAP);
 /// How long the hover copy glyph stays a checkmark after a successful copy.
 const COPY_FEEDBACK_MS: u64 = 2_000;
 /// Ignore pointer noise until a click-drag travels this far before it is a
@@ -884,6 +896,8 @@ pub struct Transcript {
     pub(crate) rows_laid_out: u64,
     /// Reveal request (`AppState::reveal_nonce`) we already scrolled for.
     revealed: Option<u64>,
+    /// The row a reveal still owes its [`REVEAL_TOP_INSET`] to.
+    reveal_inset: crate::ui::reveal::RevealInset,
     spring: StickSpring,
     /// Set by the scroll callback; the next frame re-pins when the user
     /// stopped within `STICK_THRESHOLD_PX` of the end.
@@ -920,6 +934,9 @@ pub struct Transcript {
     /// list holds while it lays its items out — v0.6.224 crashed on launch,
     /// [feedback bubble-rail-crash-hotfix-2026-10-25]).
     measured: Rc<std::cell::RefCell<Measured>>,
+    /// Where the wide tables and code cards keep their sideways place, read
+    /// by [`Self::claim_sideways_wheel`] to tell their gestures from the chat's.
+    sideways: Rc<SidewaysScroll>,
 }
 
 /// Last-frame geometry, by row id, plus the transcript's viewport.
@@ -986,6 +1003,7 @@ impl Transcript {
             arrived_at: None,
             rows_laid_out: 0,
             revealed: None,
+            reveal_inset: RevealInset::default(),
             spring: StickSpring::default(),
             repin_check_pending: false,
             hover: HoverFade::default(),
@@ -1011,6 +1029,7 @@ impl Transcript {
             }),
             drag_scroll: None,
             measured: Rc::default(),
+            sideways: Rc::default(),
         }
     }
 
@@ -1330,6 +1349,71 @@ impl Transcript {
             self.repin_check_pending = true;
         }
         cx.notify();
+    }
+
+    /// A wheel or trackpad gesture over a sideways scroller — a wide markdown
+    /// table, a code card — offered to that scroller before anything else
+    /// sees it. While it still has room to move the way the gesture goes, it
+    /// takes the gesture alone and the chat behind it stays where it was. At
+    /// its first or last column the chat takes the gesture over, as it does
+    /// straight away for a gesture that is more up-and-down than sideways.
+    /// Returns whether the event was the scroller's, which is what the caller
+    /// stops the propagation of.
+    ///
+    /// This cannot be a listener on the scroller. GPUI's own scroll handling
+    /// never ends a wheel event, and the transcript's `list` registers its
+    /// listener after painting its rows, so in the bubble phase — which runs
+    /// listeners back to front — the chat has already moved by the time the
+    /// table is asked (Jacob, 2026-11-04: a wide table in an agent bubble
+    /// scrolled the transcript behind it along with its own columns).
+    fn claim_sideways_wheel(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) -> bool {
+        // 20 pt a line, the same reading of a line-wise wheel as `on_wheel`
+        // and as the list's own scroll listener.
+        let delta = event.delta.pixel_delta(px(20.0));
+        let (dx, dy) = (f32::from(delta.x), f32::from(delta.y));
+        if dx == 0.0 || dx.abs() <= dy.abs() {
+            return false;
+        }
+        let Some(scroller) = self.sideways.under(event.position) else {
+            return false;
+        };
+        // 0 at the first column, −`travel` at the last.
+        let travel = f32::from(scroller.max_offset().x);
+        let at = f32::from(scroller.offset().x).clamp(-travel, 0.0);
+        let moved = (at + dx).clamp(-travel, 0.0);
+        if moved == at {
+            return false;
+        }
+        scroller.set_offset(point(px(moved), scroller.offset().y));
+        cx.notify();
+        true
+    }
+
+    /// The capture-phase listener that offers every wheel event to the
+    /// scroller under the pointer first ([`Self::claim_sideways_wheel`]). A
+    /// `canvas` because GPUI's fluent wheel listeners are all bubble-phase,
+    /// and by then the chat has moved; the shell's back swipe is wired the
+    /// same way.
+    fn sideways_wheel_arbiter(cx: &mut Context<Self>) -> impl IntoElement {
+        let transcript = cx.entity().downgrade();
+        canvas(
+            |_, _, _| {},
+            move |_, _, window, _| {
+                window.on_mouse_event(move |event: &ScrollWheelEvent, phase, _, cx| {
+                    if phase != gpui::DispatchPhase::Capture {
+                        return;
+                    }
+                    let claimed = transcript
+                        .update(cx, |this, cx| this.claim_sideways_wheel(event, cx))
+                        .unwrap_or(false);
+                    if claimed {
+                        cx.stop_propagation();
+                    }
+                });
+            },
+        )
+        .absolute()
+        .size_full()
     }
 
     /// Wheel over the composer (sibling of this list): move the transcript
@@ -1689,6 +1773,7 @@ impl Transcript {
         let state = self.state.read(cx);
         let Some((chat, msg)) = state.reveal_message.clone() else {
             self.revealed = None;
+            self.reveal_inset.clear();
             return;
         };
         let nonce = state.reveal_nonce;
@@ -1704,10 +1789,23 @@ impl Transcript {
             return;
         };
         self.pinned_to_bottom = false;
+        // The row to the top of the pane, then `REVEAL_TOP_INSET` back down it
+        // from inside the list's own prepaint (`RevealInset::row_request`).
+        //
+        // `offset_in_item` cannot carry the inset, however much it looks like
+        // the field for it. A negative one does anchor the row below the
+        // viewport's top edge — the list's own `scroll_by` says so — but it
+        // renders nothing above the row it anchors: `layout_items` only walks
+        // into earlier rows when the ones from the scroll top down fail to fill
+        // the viewport, and a negative offset makes them appear to fill more of
+        // it, not less. The reveal would land in a blank strip under the header
+        // instead of in the conversation, which is a worse artefact than the dim
+        // row it replaces.
         self.list.scroll_to(gpui::ListOffset {
             item_ix: ix,
             offset_in_item: px(0.0),
         });
+        self.reveal_inset.owed(ix);
         self.revealed = Some(nonce);
         cx.notify();
     }
@@ -1902,6 +2000,7 @@ impl Transcript {
             copied: copied_pill(&self.code_copied, Instant::now()),
             links: Some(links),
             moderates: false,
+            sideways: Some(self.sideways.clone()),
             on_copy: Some(Rc::new(move |id, code, _, cx| {
                 let _ = this.update(cx, |t, cx| t.copy_code(id, code, cx));
             })),
@@ -3573,11 +3672,13 @@ impl Transcript {
             self.state.read(cx).highlight_message.as_deref() == Some(row.message_id.as_str());
         let turn_start = self.is_turn_start(ix);
         let measure = Self::measure_into(&self.measured, Some(row_frame_id.clone()));
+        let inset = self.reveal_inset.row_request(ix, REVEAL_TOP_INSET);
         div()
             .id(SharedString::from(format!("{row_frame_id}#frame")))
             .relative()
             .w_full()
             .child(measure)
+            .when_some(inset, |el, inset| el.child(inset))
             .child(
                 column_row(inner)
                     .when(turn_start, |el| el.pt(px(TURN_GAP_EXTRA)))
@@ -3686,6 +3787,7 @@ fn relative_width(fraction: f32) -> gpui::DefiniteLength {
 impl Render for Transcript {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.step_spring(window, cx);
+        self.sideways.begin_frame();
         let theme = Theme::of(cx).clone();
         // Grok Mac (ref 58): a 40 pt ↓ circle centred above the composer once
         // the user has scrolled up; clicking re-pins and lands on the newest
@@ -3722,6 +3824,7 @@ impl Render for Transcript {
             .key_context("Transcript")
             .track_focus(&focus)
             .child(Self::measure_into(&self.measured, None))
+            .child(Self::sideways_wheel_arbiter(cx))
             .on_action(cx.listener(Self::copy_selection))
             .on_scroll_wheel(cx.listener(|this, event, _, cx| this.on_wheel(event, cx)))
             // Drag-scroll: move/up live on the transcript so a drag that
@@ -6151,14 +6254,19 @@ fn render_block_in(
             }
             // Wider than the bubble (many columns, long cells): the table keeps
             // its column widths and scrolls sideways inside the frame instead
-            // of squeezing every cell to a word per line.
+            // of squeezing every cell to a word per line. A sideways gesture
+            // over it is the table's, not the chat's
+            // ([`Transcript::claim_sideways_wheel`]).
+            let id = SharedString::from(format!("{row_id}#table"));
+            let handle = copy.sideways.as_ref().map(|tables| tables.handle(&id));
             sideways_scroll(
                 div()
-                    .id(SharedString::from(format!("{row_id}#table")))
+                    .id(id)
                     .w_full()
                     .rounded(px(8.0))
                     .border_1()
                     .border_color(theme.border),
+                handle.as_ref(),
             )
             .child(table)
             .into_any_element()
@@ -6254,13 +6362,74 @@ fn math_runs(source: &str, color: gpui::Hsla, theme: &Theme) -> (String, Vec<Tex
 /// trackpad gesture is horizontal. GPUI otherwise turns a vertical wheel over a
 /// horizontal-only scroll area into sideways motion and the transcript stops
 /// scrolling under the pointer (`Style::restrict_scroll_to_axis`).
-fn sideways_scroll(frame: Stateful<Div>) -> Stateful<Div> {
+///
+/// With a `handle` the frame's place is kept in [`SidewaysScroll`] instead of
+/// in GPUI's element state, where [`Transcript::claim_sideways_wheel`] can
+/// read it and so decide whether a gesture belongs to the frame or to the
+/// chat. Without one the frame scrolls as before and claims nothing.
+fn sideways_scroll(frame: Stateful<Div>, handle: Option<&ScrollHandle>) -> Stateful<Div> {
     // A flex row: its one child sizes to its content (max-content) and, with
     // `flex_shrink_0` + `min_w_full`, is never narrower than the frame nor
     // squeezed below its content — so the frame has something to scroll.
     let mut frame = frame.flex().overflow_x_scroll();
     frame.style().restrict_scroll_to_axis = Some(true);
-    frame
+    let frame = match handle {
+        Some(handle) => frame.track_scroll(handle),
+        None => frame,
+    };
+    crate::ui::back_swipe::mark_sideways_scroller(frame)
+}
+
+/// Where the transcript's sideways scrollers — the wide markdown tables and
+/// the code cards — keep their place from frame to frame.
+///
+/// A scrolling frame keeps its offset in GPUI's element state, which nothing
+/// outside the element can read. [`Transcript::claim_sideways_wheel`] has to
+/// read a frame's place and its remaining travel from outside it, so each one
+/// is drawn with a `ScrollHandle` kept here instead.
+#[derive(Default)]
+pub struct SidewaysScroll {
+    /// Bumped once per transcript render, and stamped on every scroller the
+    /// frame draws: a scroller's bounds are only worth reading while fresh.
+    frame: Cell<u64>,
+    scrollers: RefCell<HashMap<SharedString, (u64, ScrollHandle)>>,
+}
+
+/// A scroller the transcript has not drawn for this many frames is forgotten,
+/// and its place with it — as GPUI already drops the element state of a row
+/// the list has scrolled away from.
+const SIDEWAYS_FORGET_AFTER: u64 = 4;
+
+impl SidewaysScroll {
+    /// A new transcript frame.
+    fn begin_frame(&self) {
+        let frame = self.frame.get() + 1;
+        self.frame.set(frame);
+        self.scrollers
+            .borrow_mut()
+            .retain(|_, (drawn, _)| frame - *drawn < SIDEWAYS_FORGET_AFTER);
+    }
+
+    /// The handle scroller `id` is drawn with this frame, new on first sight.
+    fn handle(&self, id: &SharedString) -> ScrollHandle {
+        let frame = self.frame.get();
+        let mut scrollers = self.scrollers.borrow_mut();
+        let (drawn, handle) = scrollers
+            .entry(id.clone())
+            .or_insert_with(|| (frame, ScrollHandle::new()));
+        *drawn = frame;
+        handle.clone()
+    }
+
+    /// The scroller under `at` in the frame on screen, if the pointer is over one.
+    fn under(&self, at: Point<Pixels>) -> Option<ScrollHandle> {
+        let frame = self.frame.get();
+        self.scrollers
+            .borrow()
+            .values()
+            .find(|(drawn, handle)| *drawn == frame && handle.bounds().contains(&at))
+            .map(|(_, handle)| handle.clone())
+    }
 }
 
 /// The narrowest a table column is laid out at, in points.
@@ -6310,6 +6479,11 @@ pub struct CodeCopy {
     /// I moderate this chat (my own project, or a group I own): Remove preview shows on
     /// others' cards too.
     pub moderates: bool,
+    /// Where the wide tables and code cards keep their sideways place, so a
+    /// gesture over one is theirs and not the chat's
+    /// ([`Transcript::claim_sideways_wheel`]). Without it they still scroll;
+    /// they just claim nothing.
+    pub sideways: Option<Rc<SidewaysScroll>>,
 }
 
 /// How long the Copy pill reads "Copied" (Jacob: ~1.5 s).
@@ -6431,7 +6605,11 @@ fn code_fence_card(
         }))
         .child(bubble.text(at, code.to_string(), runs));
     // Long lines (a fenced table, a wide log line) keep their columns and
-    // scroll sideways instead of wrapping into an unreadable stack.
+    // scroll sideways instead of wrapping into an unreadable stack. The card
+    // takes a sideways gesture the way a table does
+    // ([`Transcript::claim_sideways_wheel`]).
+    let id = SharedString::from(format!("{row_id}#code"));
+    let handle = copy.sideways.as_ref().map(|scroll| scroll.handle(&id));
     div()
         .flex()
         .flex_col()
@@ -6441,14 +6619,7 @@ fn code_fence_card(
         .bg(theme.code_bg)
         .border_1()
         .border_color(theme.border)
-        .child(
-            sideways_scroll(
-                div()
-                    .id(SharedString::from(format!("{row_id}#code")))
-                    .w_full(),
-            )
-            .child(body),
-        )
+        .child(sideways_scroll(div().id(id).w_full(), handle.as_ref()).child(body))
         .child(
             div()
                 .absolute()
@@ -8987,6 +9158,92 @@ mod transcript_smoke_tests {
         );
     }
 
+    /// A reveal brings its message to rest clear of the floating header's fade
+    /// band. Every jump into a transcript shares one path — a home-search or
+    /// palette hit, Search-in-chat stepping, a channel-message notification, a
+    /// reply quote click, all through `Transcript::reveal_hit` — and that path
+    /// used to land the row at the pane's top edge, inside the band, so the
+    /// message the reader had just asked for was the faintest on screen.
+    ///
+    /// What this pins is the position against the band rather than a number of
+    /// its own: the row's top edge sits `REVEAL_TOP_INSET` (the band plus one
+    /// turn gap) below the pane's top edge, with the message before it drawn in
+    /// that space — not the blank strip a negative `offset_in_item` leaves.
+    #[gpui::test]
+    fn a_revealed_hit_rests_clear_of_the_headers_fade_band(cx: &mut TestAppContext) {
+        const ROWS: usize = 160;
+        let t = 1_700_000_000_000u64;
+        let messages: Vec<Message> = (0..ROWS)
+            .map(|i| {
+                let role = if i % 2 == 0 { "user" } else { "assistant" };
+                message(
+                    &format!("m{i}"),
+                    role,
+                    &format!("history line {i} — lorem ipsum dolor sit amet, consectetur"),
+                    t + i as u64 * 1_000,
+                )
+            })
+            .collect();
+        let (_rt, state, transcript) = mount_with(cx, messages);
+        let (_host, vcx) = cx.add_window_view(|_, _| Host {
+            transcript: transcript.clone(),
+        });
+        vcx.run_until_parked();
+
+        // How far down the pane the list drew a message's row, or `None` when
+        // that message is off screen.
+        let landing = |vcx: &gpui::VisualTestContext, message_id: &str| -> Option<f32> {
+            transcript.read_with(vcx, |t, _| {
+                let m = t.measured.borrow();
+                let row = t.rows.iter().find(|r| r.message_id == message_id)?;
+                let bounds = m.rows.get(&row.id)?;
+                Some(f32::from(bounds.top() - m.viewport.top()))
+            })
+        };
+        // What the palette, Search-in-chat and a quote click all do to the state.
+        let reveal = |vcx: &mut gpui::VisualTestContext, message_id: &str| {
+            transcript.update(vcx, |t, _| t.measured.borrow_mut().rows.clear());
+            state.update(vcx, |s, cx| {
+                s.reveal_message = Some(("c1".into(), message_id.into()));
+                s.reveal_nonce += 1;
+                cx.notify();
+            });
+            vcx.run_until_parked();
+        };
+
+        // A hit in the middle of the history, with chat above it and below it.
+        reveal(vcx, "m80");
+        let inset = landing(vcx, "m80").expect("the revealed row is on screen");
+        assert!(
+            (inset - REVEAL_TOP_INSET).abs() < 0.5,
+            "the revealed row rests {inset} pt down the pane, not {REVEAL_TOP_INSET}"
+        );
+        assert!(
+            inset > HEADER_FADE_BAND,
+            "…so it is clear of the {HEADER_FADE_BAND} pt fade band, where it used to land"
+        );
+        assert!(
+            landing(vcx, "m79").is_some_and(|above| above < inset),
+            "the message before the hit fills the space above it"
+        );
+
+        // The first message in a chat has next to nothing above it to scroll:
+        // the walk runs out of rows and clamps at the very top, which is where
+        // a reveal landed before the inset — no blank band, nothing worse.
+        reveal(vcx, "m0");
+        let top = transcript.read_with(&*vcx, |t, _| t.list.logical_scroll_top());
+        assert_eq!(
+            (top.item_ix, f32::from(top.offset_in_item)),
+            (0, 0.0),
+            "nothing above the first message to give it the inset"
+        );
+        let first = landing(vcx, "m0").expect("the first message is on screen");
+        assert!(
+            (0.0..REVEAL_TOP_INSET).contains(&first),
+            "it takes what little sits above it ({first} pt) and no more"
+        );
+    }
+
     /// Grouped messages ([feedback grouped-messages-mac-2026-10-28]), drawn by the real
     /// transcript in a people group: Bob's second line 30 s later has no disc and no name
     /// but keeps the lane (its bubble's left edge is the first bubble's), and sits in the
@@ -9063,6 +9320,158 @@ mod transcript_smoke_tests {
         assert_eq!(
             b3.size.height, b1.size.height,
             "Sam's first bubble is named like Bob's"
+        );
+    }
+
+    /// Jacob, 2026-11-04 (Mac, dark): an agent reply held a Check / Finding /
+    /// Source table whose Source column was cut off at the bubble's right
+    /// edge, and scrolling the table sideways scrolled the chat behind it as
+    /// well. Grok's tables are the reference: the table takes the gesture
+    /// alone, and only at its last column does the chat take over.
+    const WIDE_TABLE: &str = "| Check | Finding | Source |\n| --- | --- | --- |\n| Team | Two named founders, both with prior protocol work | GitHub, LinkedIn, the project's own about page |\n| Code | Public repository, audited in August | GitHub, the audit report PDF |\n| Alpha token | Issued on subnet 64, no lock-up | dTAOscan, Geckoterminal, the subnet dashboard |\n| Liquidity | Thin outside the main pool | dTAOscan, Geckoterminal |\n| Emissions | Steady since registration | Taostats, the subnet dashboard |\n| Registration | Subnet 64, registered in June | Taostats, the chain itself |\n| Payout rule | Weekly, to stakers of record | The project's own docs |";
+
+    /// The window and the two numbers these tests watch: where the table's
+    /// Source column is drawn (the table's own place) and where the table is
+    /// drawn (the chat's place).
+    struct TableRig<'a> {
+        /// The state's tokio workers are parked for good, and dropping their
+        /// runtime inside a test would block on them.
+        _rt: tokio::runtime::Runtime,
+        vcx: &'a mut gpui::VisualTestContext,
+    }
+
+    impl TableRig<'_> {
+        /// Left edge of the Source column, in window points.
+        fn column_left(&mut self) -> f32 {
+            f32::from(
+                self.vcx
+                    .debug_bounds("table-cell-r0-c2")
+                    .expect("the Source header is drawn")
+                    .left(),
+            )
+        }
+
+        /// Top edge of the table, which moves only when the chat scrolls.
+        fn table_top(&mut self) -> f32 {
+            f32::from(
+                self.vcx
+                    .debug_bounds("table")
+                    .expect("the table is drawn")
+                    .top(),
+            )
+        }
+
+        /// One trackpad event over the middle of the table. A real sideways
+        /// gesture is never exactly flat, so `dy` is never zero either: it is
+        /// the vertical crumb that used to drag the chat along.
+        fn gesture(&mut self, dx: f32, dy: f32) {
+            let over = self
+                .vcx
+                .debug_bounds("table")
+                .expect("the table is drawn")
+                .center();
+            self.vcx.simulate_event(gpui::ScrollWheelEvent {
+                position: over,
+                delta: gpui::ScrollDelta::Pixels(point(px(dx), px(dy))),
+                modifiers: Modifiers::default(),
+                touch_phase: gpui::TouchPhase::Moved,
+            });
+            self.vcx.run_until_parked();
+        }
+    }
+
+    /// Drives the table to its last column, with a flat gesture so that
+    /// nothing the chat could do shows up in the reading.
+    fn to_the_last_column(rig: &mut TableRig<'_>) {
+        let mut column = rig.column_left();
+        for _ in 0..40 {
+            rig.gesture(-120.0, 0.0);
+            let now = rig.column_left();
+            if now == column {
+                return;
+            }
+            column = now;
+        }
+        panic!("the table never reached its last column");
+    }
+
+    /// A chat long enough to have somewhere to scroll, ending in the wide table.
+    fn mount_wide_table(cx: &mut TestAppContext) -> TableRig<'_> {
+        let t = 1_700_000_000_000u64;
+        let mut messages = Vec::new();
+        for i in 0..4 {
+            messages.push(message(
+                &format!("u{i}"),
+                "user",
+                "What did the diligence turn up?",
+                t + i * 1_000,
+            ));
+            messages.push(message(
+                &format!("a{i}"),
+                "assistant",
+                LONG_REPLY,
+                t + i * 1_000 + 500,
+            ));
+        }
+        messages.push(message("mt", "assistant", WIDE_TABLE, t + 20_000));
+        let (rt, _state, transcript) = mount_with(cx, messages);
+        let (_view, vcx) = cx.add_window_view(|_, _| Host {
+            transcript: transcript.clone(),
+        });
+        vcx.simulate_resize(gpui::size(px(900.0), px(620.0)));
+        vcx.run_until_parked();
+        TableRig { _rt: rt, vcx }
+    }
+
+    #[gpui::test]
+    fn a_sideways_gesture_over_a_table_leaves_the_chat_where_it_was(cx: &mut TestAppContext) {
+        let mut rig = mount_wide_table(cx);
+        let column = rig.column_left();
+        let top = rig.table_top();
+        rig.gesture(-60.0, 8.0);
+        assert_eq!(
+            rig.column_left(),
+            column - 60.0,
+            "the table moved the gesture's 60 pt"
+        );
+        assert_eq!(
+            rig.table_top(),
+            top,
+            "and the chat behind it did not move at all"
+        );
+    }
+
+    /// The table is not a trap: once its last column is on screen the same
+    /// gesture passes through and the chat scrolls.
+    #[gpui::test]
+    fn at_the_tables_last_column_the_chat_takes_the_gesture_over(cx: &mut TestAppContext) {
+        let mut rig = mount_wide_table(cx);
+        to_the_last_column(&mut rig);
+        let column = rig.column_left();
+        let top = rig.table_top();
+        rig.gesture(-60.0, 8.0);
+        assert_eq!(
+            rig.column_left(),
+            column,
+            "the table has nowhere left to go"
+        );
+        assert!(
+            rig.table_top() > top,
+            "so the chat took the gesture: {top} to {}",
+            rig.table_top()
+        );
+    }
+
+    /// An up-and-down gesture over the table is the chat's, as it always was.
+    #[gpui::test]
+    fn an_up_and_down_gesture_over_a_table_still_scrolls_the_chat(cx: &mut TestAppContext) {
+        let mut rig = mount_wide_table(cx);
+        let top = rig.table_top();
+        rig.gesture(-8.0, 60.0);
+        assert!(
+            rig.table_top() > top,
+            "the chat scrolled: {top} to {}",
+            rig.table_top()
         );
     }
 }
@@ -11437,6 +11846,18 @@ mod presence_rows_tests {
                 .all(|r| !matches!(r.kind, RowKind::NoAnswer { .. })),
             "no 'didn't answer' under an answer: {:?}",
             rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>()
+        );
+        // The wordless row draws nothing at all — not a stock line, not a blank bubble, not a
+        // bare sender header. agentd leans on this: since 2026-11-04 it hides that row instead
+        // of deleting it, because the relay refuses a deletion it cannot attribute to the
+        // pusher and the refusal stalled the room link for 10 s. Hiding is only free if the
+        // row is invisible here.
+        assert!(
+            rows.iter().all(|r| r.message_id != "r2"),
+            "the wordless row drew something: {:?}",
+            rows.iter()
+                .map(|r| (r.message_id.as_str(), r.id.as_str()))
+                .collect::<Vec<_>>()
         );
         let silent = [reply_row("r3", "u2", "done", "", now + 2)];
         let rows = rows_of(&silent);

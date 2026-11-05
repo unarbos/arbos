@@ -5,7 +5,8 @@
 //! while the lock is held used to wait, silent, until that turn ended. Now it gets its own row
 //! within milliseconds and a real answer within seconds: one small model call over a snapshot
 //! of the running work (what step is running, what it already said, which helpers are up, the
-//! recent turns), answered without the main session. The model tags its answer:
+//! open background jobs and the step each is on, the recent turns), answered without the main
+//! session. The model tags its answer:
 //!
 //! - `[status]` — a question the snapshot answers: the quick reply is the answer; the main
 //!   session is told about the exchange in its next prompt and never answers it again.
@@ -38,7 +39,8 @@ use crate::sync::SharedHost;
 /// What the quick-reply path did with a command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuickOutcome {
-    /// No turn holds the lock: the normal path answers (nothing was written).
+    /// Nothing is running — no turn on the lock, no message waiting for it, no open job: the
+    /// normal path answers (nothing was written).
     NotBusy,
     /// A status answer was written; the main session does not run for this message.
     Answered,
@@ -70,6 +72,11 @@ impl SideKind {
 /// Output cap of the quick call: a few sentences (reasoning is off for the call, so the whole
 /// budget is visible text).
 pub const QUICK_MAX_TOKENS: u32 = 320;
+/// The same cap for an endpoint that will not turn reasoning off (Opus 5.5): the thinking shares
+/// the budget, so it has to hold both. A cap is not a target — a model that answers in one
+/// sentence still stops there — so the wider room costs no latency, and without it the quick
+/// answer comes back cut at the cap, which sends it to the slow path exactly as a failed call did.
+pub const QUICK_MAX_TOKENS_WITH_THINKING: u32 = 2048;
 /// Model calls per chat per minute before quick replies fall back to a silent queue.
 pub const QUICK_CALLS_PER_MINUTE: usize = 6;
 /// Characters of the user's message the quick call sees.
@@ -77,7 +84,8 @@ const USER_TEXT_MAX: usize = 1200;
 /// How long the agent may stay busy before a new message earns a status note. Short turns that
 /// free the lock inside this window never get a status row (#1448). Kept under the busy-reply
 /// gate (~5 s) so a real status question still answers within seconds. Task acks never become
-/// bubbles at all (#1479).
+/// bubbles at all (#1479). An open background job skips the wait: it is not a turn that might
+/// free, it is work the user was already told runs on its own.
 const BUSY_GRACE: Duration = Duration::from_secs(3);
 
 /// `ARBOS_QUICK_REPLY_TIMEOUT_MS` (default 8000): the call's budget before a silent queue.
@@ -152,17 +160,56 @@ pub fn finish_cleanly(text: &str, truncated: bool) -> Option<String> {
 }
 
 /// What the model's reading becomes. A `[status]` answer must read as a whole sentence
-/// (`finish_cleanly`), else it is not posted and the message queues (`Task`, `None`). A
-/// `[guide]` is a steer whatever the quick line looks like — the line is never shown, so a
-/// missing full stop must not demote the steer to a silent job (#1657). A `[task]` has no line.
+/// (`finish_cleanly`) and must not put a clock on the finish (Jacob, Test5 T7), else it is not
+/// posted and the message queues (`Task`, `None`) for the main session, which answers with the
+/// step it is on. A `[guide]` is a steer whatever the quick line looks like — the line is never
+/// shown, so a missing full stop must not demote the steer to a silent job (#1657). A `[task]`
+/// has no line.
 pub fn settle_quick(kind: SideKind, text: &str, truncated: bool) -> (SideKind, Option<String>) {
     match kind {
         SideKind::Status => match finish_cleanly(text, truncated) {
-            Some(clean) => (SideKind::Status, Some(clean)),
-            None => (SideKind::Task, None),
+            Some(clean) if !crate::agent::promises_a_time(&clean) => {
+                (SideKind::Status, Some(clean))
+            }
+            Some(_) | None => (SideKind::Task, None),
         },
         SideKind::Guide => (SideKind::Guide, None),
         SideKind::Task => (SideKind::Task, None),
+    }
+}
+
+/// One open background job of this chat (`queued` or `running`), for the quick call. `step` is
+/// the job row's own `last_step` — the plain-words line the working row and `list_jobs` already
+/// show — so the quick lane reads the job's real progress and not the turn that started it.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct JobLine {
+    pub title: String,
+    /// `queued` (waiting for a slot or a path lock) or `running`.
+    pub state: String,
+    /// Empty until the worker's first labelled step.
+    pub step: String,
+    pub elapsed_s: i64,
+    /// Seconds since `step` was recorded; `None` while there is no step yet.
+    pub step_age_s: Option<i64>,
+}
+
+impl JobLine {
+    fn line(&self) -> String {
+        let step = match (self.step.trim(), self.step_age_s) {
+            ("", _) => "no step yet".to_owned(),
+            (s, Some(age)) => format!("now: {s} ({age} s ago)"),
+            (s, None) => format!("now: {s}"),
+        };
+        format!(
+            "{} — {} for {} s — {step}",
+            self.title,
+            if self.state == "queued" {
+                "waiting to start"
+            } else {
+                "running"
+            },
+            self.elapsed_s
+        )
     }
 }
 
@@ -181,6 +228,8 @@ pub struct BusySnapshot {
     pub said: String,
     /// `name — status — last progress` per running helper.
     pub helpers: Vec<String>,
+    /// The open background jobs of this chat, the freshest step first.
+    pub jobs: Vec<JobLine>,
     /// `role: text` lines of this chat's recent turns.
     pub recent: Vec<String>,
     /// A user turn of this chat is running and can take a steer.
@@ -217,6 +266,14 @@ impl BusySnapshot {
                 "- What you already told the user in this step: {}\n",
                 self.said.trim()
             ));
+        }
+        if !self.jobs.is_empty() {
+            out.push_str(
+                "- Background tasks you started for this conversation (each answers on its own when it finishes):\n",
+            );
+            for j in &self.jobs {
+                out.push_str(&format!("    {}\n", j.line()));
+            }
         }
         if !self.helpers.is_empty() {
             out.push_str("- Background helpers running (their results arrive later):\n");
@@ -335,8 +392,39 @@ impl Agent {
         noted.insert(chat_id.to_owned(), started);
     }
 
-    /// The running work as the quick call sees it; `None` when nothing holds the lock and
-    /// nothing is waiting for it.
+    /// The open background jobs of `chat_id`, freshest step first. The step comes from the job
+    /// row (`jobs.last_step`, written on every labelled step of its worker), which is where the
+    /// user-facing progress of a job lives — the `subagents` row the helper lines are built from
+    /// carries the internal `step: …` label instead.
+    fn open_job_lines(&self, chat_id: &str) -> Vec<JobLine> {
+        let mut open: Vec<crate::store::JobRow> = self
+            .store
+            .jobs_for_chat(chat_id)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|j| j.is_open())
+            .collect();
+        open.sort_by_key(|j| std::cmp::Reverse(j.last_step_at.unwrap_or(j.created_at)));
+        let now = arbos_core::ids::now_ms();
+        open.iter()
+            .take(5)
+            .map(|j| JobLine {
+                title: clip(&j.title, 120),
+                state: j.state.clone(),
+                step: clip(&crate::store::redact(&j.last_step), 160),
+                elapsed_s: j.elapsed_s(),
+                step_age_s: j.last_step_at.map(|t| (now - t).max(0) / 1000),
+            })
+            .collect()
+    }
+
+    /// The running work as the quick call sees it; `None` only when nothing is running at all.
+    ///
+    /// Three things count as running. A turn holds `turn_lock`; a user message waits for it; or
+    /// a background job of this chat is open. The third was missing (Jacob, Test5 T7): a job
+    /// runs on its own `tokio::spawn`, so the turn that called `start_job` has long dropped the
+    /// lock and `sends_waiting()` is 0 — the box did not read as busy, and a status question
+    /// asked during a job went to a full main-session turn instead of this lane.
     pub(crate) async fn busy_snapshot(
         &self,
         chat_id: &str,
@@ -344,7 +432,8 @@ impl Agent {
     ) -> Option<BusySnapshot> {
         let lock_busy = self.turn_lock_busy();
         let waiting = self.sends_waiting();
-        if !lock_busy && waiting == 0 {
+        let jobs = self.open_job_lines(chat_id);
+        if !lock_busy && waiting == 0 && jobs.is_empty() {
             return None;
         }
         let mut snap = BusySnapshot::default();
@@ -385,24 +474,36 @@ impl Agent {
                     snap.said = clip(&said, 700);
                     snap.steerable = snap.same_chat && !t.stopped && !t.reply_only;
                 }
+                // No turn on the lock. A job is then the running work, and its own step — not
+                // "getting ready" — is what the user is asking about.
                 None => {
                     snap.same_chat = true;
-                    snap.step = if waiting > 0 {
-                        format!("{waiting} earlier message(s) ahead of this one")
+                    let lead = jobs
+                        .iter()
+                        .find(|j| j.state == "running")
+                        .or_else(|| jobs.first());
+                    if waiting > 0 {
+                        snap.step = format!("{waiting} earlier message(s) ahead of this one");
+                    } else if let Some(j) = lead {
+                        snap.step = "a background task".to_owned();
+                        snap.elapsed_s = j.elapsed_s.max(0) as u64;
+                        snap.activity =
+                            (!j.step.trim().is_empty()).then(|| j.step.trim().to_owned());
                     } else {
-                        "getting ready".to_owned()
-                    };
+                        snap.step = "getting ready".to_owned();
+                    }
                 }
             }
         }
+        snap.jobs = jobs;
         // A pending approval card is not running work: never report the gated tool's label.
         let turn_chat = {
             let tl = self.turn.lock().await;
             tl.as_ref().map(|t| t.chat_id.clone())
         };
         if let Some(tc) = turn_chat {
-            if self.approval_pending_for(&tc).await {
-                snap.activity = Some("Waiting for approval".into());
+            if let Some(label) = self.approval_wait_label(&tc) {
+                snap.activity = Some(label);
             }
         }
         let live: std::collections::HashSet<String> =
@@ -510,14 +611,29 @@ impl Agent {
         if from_voice || user_text.trim().is_empty() {
             return QuickOutcome::NotBusy;
         }
+        // "As a background job (not inline)" is an instruction about how this ask runs, and the
+        // quick lane has no way to carry it out (bug U, `forced_job.rs`). Worse, it can end the
+        // ask: a `[status]` reading posts an answer and tells the main session never to answer
+        // the message again, and a `[guide]` reading folds the words into the running turn as a
+        // steer. Either way nothing ever starts a job. So the message queues without a quick
+        // call at all, and `start_job_for_send` makes it the job the user asked for.
+        if crate::forced_job::forces_a_job(&user_text) {
+            tracing::info!(
+                chat_id,
+                "the message asks for a background job; the quick lane stands aside"
+            );
+            return QuickOutcome::Queued;
+        }
         // Wait out short turns: if the lock frees (or the queue drains) inside BUSY_GRACE the
         // user is not really waiting — no status note (#1448). Poll the snapshot so a free
-        // agent exits early instead of only watching the lock.
+        // agent exits early instead of only watching the lock. An open job ends the wait at
+        // once: there is no short turn to ride out, the work outlives the turn by construction
+        // and the user is already watching it on the working row.
         let t_wait = Instant::now();
         let snap = loop {
             match self.busy_snapshot(chat_id, host).await {
                 None => return QuickOutcome::NotBusy,
-                Some(s) if t_wait.elapsed() >= BUSY_GRACE => break s,
+                Some(s) if t_wait.elapsed() >= BUSY_GRACE || !s.jobs.is_empty() => break s,
                 Some(_) => tokio::time::sleep(Duration::from_millis(100)).await,
             }
         };
@@ -535,23 +651,37 @@ impl Agent {
         // work and steers are status and live on the working row (Jacob, 2026-10-23: no "On
         // it." / "Still on it…" placeholders in the transcript).
         let address = self.owner_address_note(chat_id, host, &user_msg_id).await;
-        let (talking_model, _) = self.live_models().await;
-        let model = std::env::var("ARBOS_QUICK_REPLY_MODEL")
+        // A cheaper quick-reply lane is allowed, but never over the agent's head: with a model
+        // picked for this agent, the box override is ignored and the quick reply speaks on that
+        // model like the rest of the turn (Jacob, 2026-11-04).
+        let cheap = std::env::var("ARBOS_QUICK_REPLY_MODEL")
             .ok()
-            .filter(|m| !m.trim().is_empty())
-            .unwrap_or(talking_model);
+            .map(|m| m.trim().to_owned())
+            .filter(|m| !m.is_empty());
+        let model = self
+            .model_for(crate::settings::ModelRole::QuickReply {
+                env_override: cheap.as_deref(),
+            })
+            .await;
         let mut used_model = false;
         let (kind, text) = if self.quick_call_allowed(chat_id) {
             used_model = true;
             let system = quick_system_prompt(&self.name(), address.as_deref());
             let user = snap.render(&user_text);
             let llm = self.llm.with_purpose("quick-reply");
-            // No hidden reasoning on this call: with it on, the model's thinking counted
-            // against `max_tokens` and the visible sentence was cut at the cap (#1411).
-            let extra = json!({ "reasoning": { "enabled": false } });
+            // Reasoning off where the endpoint allows it (#1411: thinking counted against
+            // `max_tokens` and cut the visible sentence), and on the endpoints that refuse,
+            // the larger budget instead — either way one call, and the answer stays on this
+            // fast path rather than falling back to a full background job.
             match tokio::time::timeout(
                 quick_reply_timeout(),
-                llm.complete_full(&model, &system, &user, QUICK_MAX_TOKENS, Some(&extra)),
+                llm.complete_visible(
+                    &model,
+                    &system,
+                    &user,
+                    QUICK_MAX_TOKENS,
+                    QUICK_MAX_TOKENS_WITH_THINKING,
+                ),
             )
             .await
             {
@@ -577,7 +707,7 @@ impl Agent {
                                 chat_id,
                                 truncated,
                                 chars = text.chars().count(),
-                                "quick reply did not end a sentence; silent queue"
+                                "quick reply could not stand as a status line; silent queue"
                             );
                             (SideKind::Task, String::new())
                         }
@@ -681,6 +811,12 @@ impl Agent {
                 "quick reply: no bubble, working row only"
             );
         } else {
+            // The one row that does not wait for the chat's send order (bug O, `send_order.rs`).
+            // A status answer is about the agent *now* and is marked `quick`; holding it behind
+            // the older messages it is asking about would answer a stale question after the work
+            // it asked about had finished, and the gate it must land inside is
+            // `FIRST_REPLY_GATE_SECS`, not a turn. Every other row the lanes write — a main-turn
+            // reply, a job's answer, a job's failure line — is ordered.
             let row_id = ulid();
             let h = host.lock().await;
             h.doc
@@ -849,6 +985,59 @@ pub(crate) mod tests {
         assert_eq!(finish_cleanly("   ", false), None);
     }
 
+    /// Jacob, Test5 T7, both rounds, on agentd 0.1.192: asked "ETA?" the agent answered "10–15
+    /// minutes more… a guess" while ≈3.5 min of a 5 min 04 s task remained, and in round 1
+    /// "5–10 minutes" while 34 s remained. Nothing in the box derives that figure — how many
+    /// more model turns the rest needs is not known until they run — so every one of them is
+    /// invented, and the model's own "a guess" label was judged not to help. The owner's rule:
+    /// no invented number; an honest range or the current step.
+    ///
+    /// The property, not the wording: a posted status line carries no fabricated duration, and
+    /// an answer that describes progress instead is still posted, so "ETA?" is answered rather
+    /// than deflected. A line with a clock is dropped and the message queues for the main
+    /// session (the silent-queue path of #1479), which answers with the step it is on.
+    #[test]
+    fn a_status_answer_describes_the_step_and_invents_no_duration() {
+        for promise in [
+            // Round 2, as observed.
+            "I'm about two thirds of the way through — another 10–15 minutes.",
+            // The same figure with the hedge the report judged insufficient.
+            "Roughly 10–15 minutes more, though that is a guess.",
+            // Round 1, as observed.
+            "I've converted three of the five files; 5–10 minutes to go.",
+            "About 3 minutes left on the last file.",
+            "ETA 10 minutes.",
+            "Give me 5-10 minutes and I'll have the summary.",
+            "It should be done in about 10 minutes.",
+            "I'll have the table ready in 5 minutes.",
+            "Two files left to convert, so maybe 10 more minutes until it's done.",
+        ] {
+            assert_eq!(
+                settle_quick(SideKind::Status, promise, false),
+                (SideKind::Task, None),
+                "a status line put an invented clock on the finish: {promise}"
+            );
+        }
+        // The answers the rule asks for instead — the step, what is done, what is left as work
+        // — still post, and so do the spans that are facts: time already spent, the user's own
+        // clock, a check-in a routine keeps.
+        for fine in [
+            "I'm on the third of five model families; the charts and the PDF come after that.",
+            "Three of the five files are converted; the fourth is running now.",
+            "I've been on this one for about seven minutes.",
+            "The benchmark took 12 minutes.",
+            "I'll check back in 10 minutes with where it stands.",
+            "Your meeting starts in 15 minutes, so I'll keep this short.",
+            "Still on it (about a minute in).",
+        ] {
+            assert_eq!(
+                settle_quick(SideKind::Status, fine, false),
+                (SideKind::Status, Some(fine.to_owned())),
+                "a status line that invents nothing was dropped: {fine}"
+            );
+        }
+    }
+
     #[test]
     fn snapshot_renders_without_internals_in_the_prose_rules() {
         let s = BusySnapshot {
@@ -862,12 +1051,31 @@ pub(crate) mod tests {
                 "loop-2 — running — purpose: optimise — 20 s since its last step — latest: round 3"
                     .into(),
             ],
+            jobs: vec![
+                JobLine {
+                    title: "Searching for surf schools".into(),
+                    state: "running".into(),
+                    step: "Reading delsoulsurf.com".into(),
+                    elapsed_s: 72,
+                    step_age_s: Some(14),
+                },
+                JobLine {
+                    title: "Comparing hosting prices".into(),
+                    state: "queued".into(),
+                    elapsed_s: 5,
+                    ..JobLine::default()
+                },
+            ],
             recent: vec!["user: start the loop".into()],
             steerable: true,
         };
         let r = s.render("what is going on now?");
         assert!(r.contains("Current step: working on a request in this conversation, running for 30 s. Right now: Running a command…."));
         assert!(r.contains("sleep 100"));
+        assert!(r.contains(
+            "Searching for surf schools — running for 72 s — now: Reading delsoulsurf.com (14 s ago)"
+        ));
+        assert!(r.contains("Comparing hosting prices — waiting to start for 5 s — no step yet"));
         assert!(r.contains("The user's new message:\nwhat is going on now?"));
         let p = quick_system_prompt("Doug", Some("[The user is Arbos.]"));
         assert!(p.starts_with("You are Doug, this user's agent in Arbos."));
@@ -888,10 +1096,68 @@ pub(crate) mod tests {
     /// First visible reply within this many seconds, lock held or not.
     pub const FIRST_REPLY_GATE_SECS: u64 = 5;
 
-    async fn mock_quick(axum::Json(body): axum::Json<Value>) -> axum::Json<Value> {
+    /// Quick calls the Opus-5.5-shaped endpoint refused because reasoning was disabled, and the
+    /// ones it then served. A log, not a flag: the memo is proved by what stops arriving.
+    pub(crate) static REASONING_REFUSALS: std::sync::Mutex<usize> = std::sync::Mutex::new(0);
+    pub(crate) static REASONING_SERVED: std::sync::Mutex<usize> = std::sync::Mutex::new(0);
+
+    /// The user text that makes the stub answer like Opus 5.5: reasoning cannot be turned off.
+    pub(crate) const REASONING_MANDATORY_ASK: &str = "what is going on with the mandatory one?";
+
+    /// The user text that makes the stub return a `[status]` tag with no words after it, which
+    /// is what `quick reply could not stand as a status line; silent queue … chars 0` is: the
+    /// call came back, the tag parsed, and there was no sentence to post. Jacob's Test5 round 11
+    /// logged it before every stalled message of `r11burst`.
+    pub(crate) const EMPTY_STATUS_ASK: &str = "what is going on with the empty one?";
+
+    /// The unmet acceptance criterion round 12's worker wrote, as it sits in the notes a
+    /// job-result call carries (`job_background_claim_tests.rs`, bug AD). A call whose notes hold
+    /// it is answered below with the sentence the real talking model wrote from it.
+    pub(crate) const AD_UNMET_BACKGROUND_CRITERION: &str =
+        "\"criterion\": \"background job\", \"met\": false";
+
+    /// Round 12's final post, as the talking model wrote it: the result, and then the unmet
+    /// criterion restated to the user as a description of what happened.
+    pub(crate) const AD_MODEL_ANSWER: &str = "All four steps finished: 1,200 rows parsed, 1,196 normalised, and the summary table is written to summary.csv. One thing to flag: the four steps ran in the foreground, not as a background job.";
+
+    async fn mock_quick(axum::Json(body): axum::Json<Value>) -> axum::response::Response {
+        use axum::response::IntoResponse;
         tokio::time::sleep(Duration::from_millis(300)).await;
         let user = body["messages"][1]["content"].as_str().unwrap_or("");
-        let (content, finish) = if user.contains("stop at 20, not 40") {
+        if user.contains(AD_UNMET_BACKGROUND_CRITERION) {
+            return axum::Json(json!({
+                "choices": [{ "message": { "role": "assistant", "content": AD_MODEL_ANSWER }, "finish_reason": "stop" }],
+                "usage": { "prompt_tokens": 900, "completion_tokens": 40 }
+            }))
+            .into_response();
+        }
+        // Opus 5.5 (Jacob, Test5, 2026-11-04): the endpoint rejects `reasoning {enabled:false}`
+        // outright, and serves the answer only when the flag is absent.
+        if user.contains(REASONING_MANDATORY_ASK) {
+            if body["reasoning"]["enabled"] == json!(false) {
+                *REASONING_REFUSALS.lock().unwrap() += 1;
+                return (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    axum::Json(json!({ "error": {
+                        "message": "Reasoning is mandatory for this endpoint and cannot be disabled.",
+                        "code": 400
+                    } })),
+                )
+                    .into_response();
+            }
+            *REASONING_SERVED.lock().unwrap() += 1;
+            return axum::Json(json!({
+                "choices": [{
+                    "message": { "role": "assistant", "content": "[status]\nThe benchmark is still running, about a minute in; nothing has failed." },
+                    "finish_reason": "stop"
+                }],
+                "usage": { "prompt_tokens": 400, "completion_tokens": 30 }
+            }))
+            .into_response();
+        }
+        let (content, finish) = if user.contains(EMPTY_STATUS_ASK) {
+            ("[status]\n", "stop")
+        } else if user.contains("stop at 20, not 40") {
             // The b7 shape: a guide whose one line has no full stop.
             (
                 "[guide]\nStopping the run at 20 instead of 40 as you asked",
@@ -910,15 +1176,26 @@ pub(crate) mod tests {
                 "stop",
             )
         };
-        assert_eq!(
-            body["reasoning"]["enabled"],
-            json!(false),
-            "reasoning is off for quick calls"
-        );
+        // The invariant belongs to the quick lane, and the quick lane is the caller whose system
+        // prompt asks for the tag. Other callers reach this stub as well — `send_order_tests`
+        // drives a real job result, which is a plain `complete` with no `reasoning` key at all —
+        // and asserting on those says nothing about #1411.
+        if body["messages"][0]["content"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Start your reply with exactly one tag")
+        {
+            assert_eq!(
+                body["reasoning"]["enabled"],
+                json!(false),
+                "reasoning is off for quick calls"
+            );
+        }
         axum::Json(json!({
             "choices": [{ "message": { "role": "assistant", "content": content }, "finish_reason": finish }],
             "usage": { "prompt_tokens": 400, "completion_tokens": 30 }
         }))
+        .into_response()
     }
 
     /// Every activity text the stub relay received (`POST /projects/{id}/activity`), in order.
@@ -937,8 +1214,87 @@ pub(crate) mod tests {
         test_agent_with(axum::Router::new()).await
     }
 
+    /// A test's own `tracing` output, kept so what the box logged can be read back as evidence
+    /// instead of taken on trust.
+    ///
+    /// `#[tokio::test]` is a current-thread runtime on one thread, and `set_default` is per
+    /// thread, so the capture covers the lanes one test spawns and no other test's events can
+    /// reach it.
+    #[derive(Clone, Default)]
+    pub(crate) struct Journal(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    pub(crate) struct JournalSink(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for JournalSink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Journal {
+        type Writer = JournalSink;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            JournalSink(self.0.clone())
+        }
+    }
+
+    impl Journal {
+        pub(crate) fn capture(&self) -> tracing::subscriber::DefaultGuard {
+            self.capture_at(tracing::Level::WARN)
+        }
+
+        pub(crate) fn capture_info(&self) -> tracing::subscriber::DefaultGuard {
+            self.capture_at(tracing::Level::INFO)
+        }
+
+        fn capture_at(&self, level: tracing::Level) -> tracing::subscriber::DefaultGuard {
+            tracing::subscriber::set_default(
+                tracing_subscriber::fmt()
+                    .with_writer(self.clone())
+                    .with_ansi(false)
+                    .with_max_level(level)
+                    .finish(),
+            )
+        }
+
+        pub(crate) fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap_or_else(|e| e.into_inner())).into_owned()
+        }
+    }
+
+    /// Same, with a real `pi_bin`, so `start_pi` and its supervisor run as they do on a box.
+    ///
+    /// Every other test box points `pi_bin` at nothing, which leaves the agent with no main
+    /// session and no supervisor at all — bug Y's tests need the production loop itself, so
+    /// they give it a scripted child to supervise.
+    pub(crate) async fn test_agent_with_pi(pi_bin: &str) -> (Arc<Agent>, std::path::PathBuf) {
+        test_agent_full(axum::Router::new(), pi_bin).await
+    }
+
     /// Same, with extra mock-relay routes merged in (`/box/secrets/…` for the hand-off tests).
     pub(crate) async fn test_agent_with(extra: axum::Router) -> (Arc<Agent>, std::path::PathBuf) {
+        test_agent_full(extra, "/nonexistent/pi").await
+    }
+
+    /// Same, pointed at a relay the caller serves itself. The model-stub tests count the TCP
+    /// connections the box opens, which `axum::serve` cannot report.
+    pub(crate) async fn test_agent_on_relay(relay_url: &str) -> (Arc<Agent>, std::path::PathBuf) {
+        test_agent_on(relay_url.to_owned(), "/nonexistent/pi").await
+    }
+
+    async fn test_agent_full(
+        extra: axum::Router,
+        pi_bin: &str,
+    ) -> (Arc<Agent>, std::path::PathBuf) {
         let app = axum::Router::new()
             .merge(extra)
             .route(
@@ -959,18 +1315,22 @@ pub(crate) mod tests {
         tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
+        test_agent_on(format!("http://127.0.0.1:{port}"), pi_bin).await
+    }
+
+    async fn test_agent_on(relay_url: String, pi_bin: &str) -> (Arc<Agent>, std::path::PathBuf) {
         let root = std::env::temp_dir().join(format!("arbos-quick-{}", ulid()));
         std::fs::create_dir_all(&root).unwrap();
         let bx = crate::config::BoxConfig {
             user_id: Some("u-test".into()),
-            relay_url: format!("http://127.0.0.1:{port}"),
+            relay_url,
             box_token: "test-token".into(),
             mcp_token: "test-mcp".into(),
             work_root: root.clone(),
             bind: "127.0.0.1".into(),
             port: 0,
             local_box: true,
-            pi_bin: "/nonexistent/pi".into(),
+            pi_bin: pi_bin.into(),
             prime_bin: "/nonexistent/prime-agent".into(),
             claude_bin: "/nonexistent/claude".into(),
             pi_ext_override: None,
@@ -990,6 +1350,19 @@ pub(crate) mod tests {
         let sync = crate::sync::SyncHub::new(cfg.clone(), store.clone(), tx);
         let agent = Agent::new(cfg, store, sync, Arc::new(tokio::sync::Semaphore::new(4)));
         (agent, root)
+    }
+
+    /// Shorten the act-ack promotion threshold for one agent only. The knob file lives in this
+    /// agent's own state dir, so two promotion tests can run at once; the process-global
+    /// `ARBOS_ACT_ACK_BUBBLE_SECS` they used to set could not (either one's cleanup restored the
+    /// 4 s default inside the other's sleep and killed the promotion under test).
+    fn promote_act_ack_after_1s(agent: &Arc<Agent>) {
+        let f = agent
+            .cfg
+            .state_dir
+            .join(crate::config::ACT_ACK_BUBBLE_SECS_FILE);
+        std::fs::write(&f, "1").unwrap();
+        assert_eq!(agent.cfg.act_ack_bubble_after().as_secs(), 1);
     }
 
     fn send_cmd(host: &SharedHost, text: &str) -> (String, CommandView) {
@@ -1049,6 +1422,61 @@ pub(crate) mod tests {
         let note = agent.take_side_notes(chat).expect("side note");
         assert!(note.contains("what is going on now?") && note.contains("benchmark"));
         assert!(agent.take_side_notes(chat).is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Jacob on Test5 (2026-11-04, agentd 0.1.191, chat 01M6M0G9257SCE4RRQDW2GXFS9): the quick
+    /// call sends `reasoning {enabled: false}`, and the Opus 5.5 endpoint answers HTTP 400
+    /// "Reasoning is mandatory for this endpoint and cannot be disabled". Every side-session
+    /// message during a busy turn spent ~3 s failing and then became a full background job —
+    /// "hey" took 10.1 s against 2.4 s idle, "what did I say here?" 16.8 s.
+    ///
+    /// The refusal now costs one retry, once per model: the answer comes back on the quick
+    /// path, and the model is remembered so later messages never make the attempt that cannot
+    /// work.
+    #[tokio::test]
+    async fn a_quick_reply_survives_an_endpoint_that_demands_reasoning() {
+        *REASONING_REFUSALS.lock().unwrap() = 0;
+        *REASONING_SERVED.lock().unwrap() = 0;
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATQUICKREPLY000018";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        let (msg_id, cmd) = send_cmd(&host, REASONING_MANDATORY_ASK);
+
+        let t0 = Instant::now();
+        agent.handle_command(chat, cmd).await.unwrap();
+        let elapsed = t0.elapsed();
+
+        let rows = reply_rows(&host, &msg_id);
+        assert_eq!(
+            rows.len(),
+            1,
+            "the refused flag must not send the answer down the background-job path"
+        );
+        let text = rows[0].text();
+        assert!(text.contains("benchmark is still running"), "{text}");
+        assert_eq!(rows[0].status, "done");
+        assert!(
+            elapsed < Duration::from_secs(FIRST_REPLY_GATE_SECS),
+            "quick reply took {elapsed:?} with the turn lock held"
+        );
+        assert_eq!(
+            (
+                *REASONING_REFUSALS.lock().unwrap(),
+                *REASONING_SERVED.lock().unwrap()
+            ),
+            (1, 1),
+            "one refused attempt, then the answer on the retry"
+        );
+        let model = agent
+            .model_for(crate::settings::ModelRole::QuickReply { env_override: None })
+            .await;
+        assert!(
+            agent.llm.reasoning_always_on(&model),
+            "the model is remembered, so the next quick reply skips the refused attempt"
+        );
+        assert!(agent.take_side_notes(chat).is_some());
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1480,6 +1908,7 @@ pub(crate) mod tests {
             id: "job-a".into(),
             title: "Fixing the tests".into(),
             kind: "code".into(),
+            brief: "Fix the failing tests.".into(),
             touches: vec!["path:/work/p/src".into()],
             attempt: 0,
         };
@@ -1487,6 +1916,7 @@ pub(crate) mod tests {
             id: "job-b".into(),
             title: "Renaming a symbol".into(),
             kind: "code".into(),
+            brief: "Rename the symbol everywhere.".into(),
             touches: vec!["path:/work/p".into()],
             attempt: 0,
         };
@@ -1494,6 +1924,7 @@ pub(crate) mod tests {
             id: "job-c".into(),
             title: "Searching the web".into(),
             kind: "research".into(),
+            brief: "Search the web for the answer.".into(),
             touches: vec![],
             attempt: 0,
         };
@@ -1574,6 +2005,595 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Jacob's Test5 round 2, bug I: a code job that declares no `touches` used to take
+    /// `path:/` and the project's git, so every code job queued behind every other and one
+    /// stuck job froze the rest. Its default is now the project subfolder its brief names and
+    /// that folder's own git — while a job that declares the project folder still serializes
+    /// against both subfolders.
+    #[tokio::test]
+    async fn a_code_job_locks_its_own_subfolder_not_the_whole_project() {
+        use crate::agent::JobSpec;
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATJOBLOCKSCOPE0001";
+        let _host = agent.sync.open_room(chat).await.unwrap();
+        // Two repos, one per folder, as a box that cloned two projects has them.
+        let project = agent.cfg.work_dir.clone();
+        for folder in ["alpha", "beta"] {
+            std::fs::create_dir_all(project.join(folder).join(".git")).unwrap();
+        }
+        let code_job = |id: &str, title: &str, brief: &str| JobSpec {
+            id: id.into(),
+            title: title.into(),
+            kind: "code".into(),
+            brief: brief.into(),
+            touches: vec![],
+            attempt: 0,
+        };
+        let a = code_job(
+            "job-alpha",
+            "Fixing the alpha tests",
+            "Fix the failing tests in alpha/ and run the suite.",
+        );
+        let b = code_job(
+            "job-beta",
+            "Renaming a symbol",
+            "Rename the symbol across beta/ and build it.",
+        );
+        for j in [&a, &b] {
+            agent
+                .store
+                .insert_job(
+                    &j.id, chat, "m-busy", &j.title, "code", &j.brief, &j.touches,
+                )
+                .unwrap();
+        }
+        let held_a = agent.acquire_job_locks(&a).await;
+        // The job in alpha/ never finishes in this test: it is the stuck job.
+        let held_b = tokio::time::timeout(Duration::from_millis(500), agent.acquire_job_locks(&b))
+            .await
+            .expect(
+                "a code job in beta/ must start while a code job in alpha/ runs: a code job's \
+                 default lock is its own subfolder, not the whole project",
+            );
+        assert_eq!(
+            held_a,
+            vec![
+                format!("path:{}/alpha", project.display()),
+                format!("git:{}/alpha", project.display()),
+            ]
+        );
+        assert_eq!(
+            held_b,
+            vec![
+                format!("path:{}/beta", project.display()),
+                format!("git:{}/beta", project.display()),
+            ]
+        );
+        // A brief that names no folder of this project (a fresh clone) still takes the whole
+        // project folder and its git, which is what every code job used to take.
+        assert_eq!(
+            agent.job_lock_keys(&code_job(
+                "job-clone",
+                "Cloning subtensor",
+                "Clone https://github.com/opentensor/subtensor and build it.",
+            )),
+            vec![format!("path:{}", project.display()), "git".to_owned()]
+        );
+        // A job that needs the whole project says so, and then it does wait for both.
+        let wide = JobSpec {
+            touches: vec!["path:/".into(), "git".into()],
+            ..code_job("job-wide", "Reformatting everything", "Run the formatter.")
+        };
+        agent
+            .store
+            .insert_job(
+                "job-wide",
+                chat,
+                "m-busy",
+                &wide.title,
+                "code",
+                &wide.brief,
+                &wide.touches,
+            )
+            .unwrap();
+        let agent2 = agent.clone();
+        let wide2 = wide.clone();
+        let waiter = tokio::spawn(async move { agent2.acquire_job_locks(&wide2).await });
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(
+            !waiter.is_finished(),
+            "a job that declares the project folder still waits for every subfolder in it"
+        );
+        agent.release_job_locks("job-alpha").await;
+        agent.release_job_locks("job-beta").await;
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(3), waiter)
+                .await
+                .unwrap()
+                .unwrap(),
+            vec!["path:/".to_owned(), "git".to_owned()]
+        );
+        agent.release_job_locks("job-wide").await;
+        // A project-relative `touches` entry is the same lock as the absolute folder.
+        assert_eq!(
+            agent.job_lock_keys(&JobSpec {
+                touches: vec!["path:alpha".into()],
+                ..code_job("job-rel", "Patching alpha", "Patch it.")
+            }),
+            vec![format!("path:{}/alpha", project.display())]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Bug I, second half: `start_job` used to answer `state: "running"` whenever a worker slot
+    /// was free, so the reply read as if the work had begun while the job was really waiting for
+    /// another job's files. A blocked job comes back queued and names what it is behind.
+    #[tokio::test]
+    async fn start_job_says_it_is_queued_behind_the_job_holding_the_files() {
+        use crate::agent::JobSpec;
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATQUEUEDBEHIND0001";
+        let _host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        let project = agent.cfg.work_dir.clone();
+        std::fs::create_dir_all(project.join("alpha").join(".git")).unwrap();
+        let holder = JobSpec {
+            id: "job-holder".into(),
+            title: "Reformatting everything".into(),
+            kind: "code".into(),
+            brief: "Run the formatter over the project.".into(),
+            touches: vec!["path:/".into(), "git".into()],
+            attempt: 0,
+        };
+        agent
+            .store
+            .insert_job(
+                &holder.id,
+                chat,
+                "m-busy",
+                &holder.title,
+                "code",
+                &holder.brief,
+                &holder.touches,
+            )
+            .unwrap();
+        assert!(!agent.acquire_job_locks(&holder).await.is_empty());
+        let v = agent
+            .hook_start_job(
+                "Fixing the alpha tests",
+                "Fix the failing parser tests in alpha/, run the suite, and return the diff with the test output.",
+                "code",
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            v["state"], "queued",
+            "a job behind another job's files has not started: {v}"
+        );
+        assert_eq!(v["queued_behind"]["title"], "Reformatting everything");
+        assert_eq!(v["queued_behind"]["job_id"], "job-holder");
+        let note = v["note"].as_str().unwrap_or_default();
+        assert!(
+            note.contains("queued behind \"Reformatting everything\""),
+            "the reply must name what the job waits for: {note}"
+        );
+        agent.release_job_locks("job-holder").await;
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Bug I follow-up, the half the tool result cannot reach. The acknowledgement row the main
+    /// agent posts before `start_job` is closed and pushed by then, and the jobs prompt has the
+    /// turn end on that call, so a queued job's state can only reach the user if the box says it
+    /// itself. T9 in Jacob's Test5 round 2 sat queued ten minutes behind T8 while its own interim
+    /// said it was starting a blobless clone.
+    #[tokio::test]
+    async fn a_queued_job_tells_the_chat_itself() {
+        use crate::agent::JobSpec;
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATQUEUEDROW00000001";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        let holder = JobSpec {
+            id: "job-holder".into(),
+            title: "Building NYC taxi Flask app".into(),
+            kind: "code".into(),
+            brief: "Build a small Flask app in taxi_app/ serving the stats.".into(),
+            touches: vec!["path:/".into(), "git".into()],
+            attempt: 0,
+        };
+        agent
+            .store
+            .insert_job(
+                &holder.id,
+                chat,
+                "m-busy",
+                &holder.title,
+                "code",
+                &holder.brief,
+                &holder.touches,
+            )
+            .unwrap();
+        assert!(!agent.acquire_job_locks(&holder).await.is_empty());
+        // The interim the model posts before `start_job`, as the prompt has it: already a closed
+        // row, and wrong the moment the job turns out to be queued.
+        agent
+            .hook_send_message("I'll start with a blobless clone of pandas.", None, None)
+            .await
+            .unwrap();
+        agent
+            .hook_start_job(
+                "Analyzing pandas repository",
+                "Blobless clone pandas, compute commits per month, and write out/pandas_commits.csv.",
+                "code",
+                vec![],
+            )
+            .await
+            .unwrap();
+        let said: Vec<String> = reply_rows(&host, "m-busy")
+            .iter()
+            .map(|r| r.text().trim().to_owned())
+            .filter(|t| !t.is_empty())
+            .collect();
+        assert!(
+            said.iter().any(|t| t
+                == "\"Analyzing pandas repository\" is queued behind \"Building NYC taxi Flask \
+                    app\" — it starts when that one frees what they both need."),
+            "the box must say the job is queued without waiting for the model: {said:?}"
+        );
+        assert_eq!(
+            said.iter().filter(|t| t.contains("queued behind")).count(),
+            1,
+            "one line, not one per surface: {said:?}"
+        );
+        agent.release_job_locks("job-holder").await;
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// #2770 retires every row a turn opened and left wordless. The queued notice is a row the
+    /// box writes during a turn, so it has to be shown not to be swept — otherwise the notice
+    /// #2761 exists to post would vanish again, and silently.
+    ///
+    /// Three grounds, and the test leans on the first two rather than on reading the predicate.
+    /// Its id never enters `rows_opened`, because only `open_row` and the turn driver's own
+    /// `TurnState` literal push there and `post_chat_line` is neither. It is never wordless,
+    /// because its text goes in before it is finished. And there is no window in between: the
+    /// row is built under one `host` lock, which is the same lock every caller of
+    /// `retire_wordless_rows` holds, so no sweep can observe it half-written.
+    #[tokio::test]
+    async fn the_queued_notice_survives_the_wordless_sweep() {
+        use crate::agent::{retire_wordless_rows, JobSpec};
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATQUEUEDSWEEP00001";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        let holder = JobSpec {
+            id: "job-holder".into(),
+            title: "Building NYC taxi Flask app".into(),
+            kind: "code".into(),
+            brief: "Build a small Flask app in taxi_app/ serving the stats.".into(),
+            touches: vec!["path:/".into(), "git".into()],
+            attempt: 0,
+        };
+        agent
+            .store
+            .insert_job(
+                &holder.id,
+                chat,
+                "m-busy",
+                &holder.title,
+                "code",
+                &holder.brief,
+                &holder.touches,
+            )
+            .unwrap();
+        assert!(!agent.acquire_job_locks(&holder).await.is_empty());
+        agent
+            .hook_start_job(
+                "Analyzing pandas repository",
+                "Blobless clone pandas and write out/pandas_commits.csv.",
+                "code",
+                vec![],
+            )
+            .await
+            .unwrap();
+        // The notice row, found the way a client would: by the delivery key it carries.
+        let notice = {
+            let h = host.lock().await;
+            h.doc
+                .messages()
+                .into_iter()
+                .find(|m| {
+                    m.rest
+                        .get("deliveryKey")
+                        .and_then(Value::as_str)
+                        .is_some_and(|k| k.starts_with("job:") && k.ends_with(":queued"))
+                })
+                .expect("the queued notice was posted")
+        };
+        assert!(
+            notice.text().contains("is queued behind"),
+            "the row carries its words from the start: {:?}",
+            notice.text()
+        );
+        let (rows_opened, trailing) = {
+            let tl = agent.turn.lock().await;
+            let t = tl.as_ref().unwrap();
+            (t.rows_opened.clone(), t.assistant_msg_id.clone())
+        };
+        // Ground one: the sweep never sees this row, because only `open_row` enrols rows.
+        assert!(
+            !rows_opened.contains(&notice.id),
+            "the notice is not one of the turn's opened rows: {rows_opened:?}"
+        );
+        // Ground two: handed to the sweep anyway, it is kept — so enrolling it later, by
+        // routing the notice through `open_row`, would still not lose it.
+        let forced: Vec<String> = vec![notice.id.clone()];
+        assert_eq!(
+            {
+                let h = host.lock().await;
+                retire_wordless_rows(&h.doc, &forced, &trailing)
+            },
+            0,
+            "the notice is not wordless, so the sweep leaves it alone"
+        );
+        {
+            let h = host.lock().await;
+            let after = h.doc.message(&notice.id).unwrap();
+            assert_ne!(
+                after.rest.get("hidden").and_then(Value::as_bool),
+                Some(true),
+                "the notice is still in the chat"
+            );
+            assert!(after.text().contains("is queued behind"));
+        }
+        agent.release_job_locks("job-holder").await;
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The other half of the same rule: a job that waits for nothing says nothing, so an ordinary
+    /// start is not narrated twice.
+    #[tokio::test]
+    async fn a_job_that_waits_for_nothing_posts_no_queued_line() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATNOQUEUEDROW00001";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        agent
+            .hook_start_job(
+                "Charting the zones",
+                "Chart the top ten pickup zones from out/nyc_taxi_summary.csv and post it.",
+                "code",
+                vec![],
+            )
+            .await
+            .unwrap();
+        let said: Vec<String> = reply_rows(&host, "m-busy")
+            .iter()
+            .map(|r| r.text().trim().to_owned())
+            .filter(|t| !t.is_empty())
+            .collect();
+        assert!(
+            !said.iter().any(|t| t.contains("queued behind")),
+            "nothing held a key, so nothing was queued: {said:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Two code jobs in two folders of *one* repo take turns on that repo's index — `git` writes
+    /// `.git/index.lock` whichever subfolder it runs from — while their file work still overlaps.
+    /// Only the git key rises to the repo root; the path key stays on the named folder, which is
+    /// what keeps the parallelism this default exists to win.
+    #[tokio::test]
+    async fn one_repo_two_folders_take_turns_on_git_but_not_on_files() {
+        use crate::agent::JobSpec;
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATONEREPOTWODIRS01";
+        let _host = agent.sync.open_room(chat).await.unwrap();
+        let project = agent.cfg.work_dir.clone();
+        // One repo at the project root, with the two folders a refactor would name.
+        std::fs::create_dir_all(project.join(".git")).unwrap();
+        std::fs::create_dir_all(project.join("src")).unwrap();
+        std::fs::create_dir_all(project.join("tests")).unwrap();
+        let code_job = |id: &str, title: &str, brief: &str| JobSpec {
+            id: id.into(),
+            title: title.into(),
+            kind: "code".into(),
+            brief: brief.into(),
+            touches: vec![],
+            attempt: 0,
+        };
+        let on_src = code_job(
+            "job-src",
+            "Refactoring the parser",
+            "Rework the parser in src/ and commit it.",
+        );
+        let on_tests = code_job(
+            "job-tests",
+            "Widening the suite",
+            "Add the missing cases in tests/ and commit them.",
+        );
+        // The git key is the repo root for both; the path keys stay on the two folders.
+        assert_eq!(
+            agent.job_lock_keys(&on_src),
+            vec![
+                format!("path:{}/src", project.display()),
+                format!("git:{}", project.display()),
+            ],
+            "only git rises to the repo root"
+        );
+        assert_eq!(
+            agent.job_lock_keys(&on_tests),
+            vec![
+                format!("path:{}/tests", project.display()),
+                format!("git:{}", project.display()),
+            ]
+        );
+        for j in [&on_src, &on_tests] {
+            agent
+                .store
+                .insert_job(
+                    &j.id, chat, "m-busy", &j.title, "code", &j.brief, &j.touches,
+                )
+                .unwrap();
+        }
+        agent.acquire_job_locks(&on_src).await;
+        // Half one: the second job's git work waits, because one index cannot take two.
+        let agent2 = agent.clone();
+        let waiter = tokio::spawn(async move { agent2.acquire_job_locks(&on_tests).await });
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(
+            !waiter.is_finished(),
+            "two jobs must not run git against one index at once"
+        );
+        // Half two: file work in the other folder is not held up — the path lock never rose, so
+        // `tests/` is free while `src/` is taken. A fix that locked the whole project would pass
+        // the assertion above and fail this one.
+        let files_only = JobSpec {
+            touches: vec!["path:tests".into()],
+            ..code_job("job-files", "Formatting the suite", "Run the formatter.")
+        };
+        agent
+            .store
+            .insert_job(
+                &files_only.id,
+                chat,
+                "m-busy",
+                &files_only.title,
+                "code",
+                &files_only.brief,
+                &files_only.touches,
+            )
+            .unwrap();
+        tokio::time::timeout(
+            Duration::from_millis(500),
+            agent.acquire_job_locks(&files_only),
+        )
+        .await
+        .expect("file work in another folder of the same repo still runs side by side");
+        agent.release_job_locks("job-files").await;
+        agent.release_job_locks("job-src").await;
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(3), waiter)
+                .await
+                .unwrap()
+                .unwrap(),
+            vec![
+                format!("path:{}/tests", project.display()),
+                format!("git:{}", project.display()),
+            ],
+            "the waiting job takes its turn once the index is free"
+        );
+        agent.release_job_locks("job-tests").await;
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Bug I, measured against the round-2 traces. Each brief below carries the folder token its
+    /// real brief carried (`t4`/`t5` and `t8`/`t9` in `test5/*.events.json`), and in the run T5
+    /// waited 6.5 min behind T4 and T9 waited about 10 min behind T8. None of these folders
+    /// exists when its job starts — each job is the thing that creates it — so the pair only runs
+    /// side by side when a named-but-absent folder scopes both the path and the git lock.
+    #[tokio::test]
+    async fn the_round_two_traces_run_side_by_side() {
+        use crate::agent::JobSpec;
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATTRACEREPLAY00001";
+        let _host = agent.sync.open_room(chat).await.unwrap();
+        let project = agent.cfg.work_dir.clone();
+        // By the time T8 and T9 ran, `out/` was on disk: T4 and T5 had written into it hours
+        // earlier. Their own folders — humanize, data, taxi_app — were still absent.
+        std::fs::create_dir_all(project.join("out")).unwrap();
+        // The run's project folder was a plain workspace, not a repo: every git command in the
+        // dumps is run from a subfolder, and the only one at the root is `git clone`. So no repo
+        // root sits above these folders, and the four git keys below are each the folder itself.
+        // Were the repo lookup to resolve somewhere shared, these assertions would catch it.
+        assert!(!project.join(".git").exists());
+        let code_job = |id: &str, title: &str, brief: &str| JobSpec {
+            id: id.into(),
+            title: title.into(),
+            kind: "code".into(),
+            brief: brief.into(),
+            touches: vec![],
+            attempt: 0,
+        };
+        // T4 and T5: the clone target and the download target, neither on disk yet.
+        let t4 = code_job(
+            "job-t4",
+            "Hunting a humanize bug",
+            "git clone https://github.com/python-humanize/humanize into humanize/. Write the \
+             failing test output to out/humanize_before.txt.",
+        );
+        let t5 = code_job(
+            "job-t5",
+            "Analyzing NYC taxi data",
+            "Download the parquet files into data/nyc_tlc/ (verify sizes). Save the script to \
+             out/nyc_taxi.py.",
+        );
+        // T8 and T9: the app folder and, for T9, the output folder, since T9 names its clone
+        // target as a bare word with no slash.
+        let t8 = code_job(
+            "job-t8",
+            "Building NYC taxi Flask app",
+            "Build a small Flask app in taxi_app/ serving the stats already computed in \
+             out/nyc_taxi_summary.csv.",
+        );
+        let t9 = code_job(
+            "job-t9",
+            "Analyzing pandas repository",
+            "Blobless clone: git clone --filter=blob:none https://github.com/pandas-dev/pandas \
+             pandas. Commits per month to out/pandas_commits_per_month.csv.",
+        );
+        for j in [&t4, &t5, &t8, &t9] {
+            agent
+                .store
+                .insert_job(
+                    &j.id, chat, "m-busy", &j.title, "code", &j.brief, &j.touches,
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            agent.job_lock_keys(&t4),
+            vec![
+                format!("path:{}/humanize", project.display()),
+                format!("git:{}/humanize", project.display()),
+            ],
+            "T4 works in the folder it clones into"
+        );
+        assert_eq!(
+            agent.job_lock_keys(&t5),
+            vec![
+                format!("path:{}/data", project.display()),
+                format!("git:{}/data", project.display()),
+            ],
+            "T5 works in the folder it downloads into"
+        );
+        assert_eq!(
+            agent.job_lock_keys(&t8),
+            vec![
+                format!("path:{}/taxi_app", project.display()),
+                format!("git:{}/taxi_app", project.display()),
+            ]
+        );
+        assert_eq!(
+            agent.job_lock_keys(&t9),
+            vec![
+                format!("path:{}/out", project.display()),
+                format!("git:{}/out", project.display()),
+            ],
+            "T9 names no folder for its clone, so its first named folder is the output one"
+        );
+        // T4 is the stalled job: it never releases in this test.
+        agent.acquire_job_locks(&t4).await;
+        tokio::time::timeout(Duration::from_millis(500), agent.acquire_job_locks(&t5))
+            .await
+            .expect("T5 waited 6.5 min behind T4 in the run; it must start at once now");
+        agent.acquire_job_locks(&t8).await;
+        tokio::time::timeout(Duration::from_millis(500), agent.acquire_job_locks(&t9))
+            .await
+            .expect("T9 waited about 10 min behind T8 in the run; it must start at once now");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// py-06 on image 0.1.121 (parity after-run, 2026-10-25 02:11 UTC): an `act` turn computed the
     /// answer and wrote it as prose; the ack ("Checking the file now.") sat on the working row,
     /// counted as "posted", and the fallback never ran — the user got an empty row. An act ack is
@@ -1628,8 +2648,8 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn long_act_turn_promotes_its_ack_to_a_bubble() {
         use crate::config::SendTool;
-        std::env::set_var("ARBOS_ACT_ACK_BUBBLE_SECS", "1");
         let (agent, root) = test_agent().await;
+        promote_act_ack_after_1s(&agent);
         let chat = "01TESTCHATQUICKREPLY000011";
         let host = agent.sync.open_room(chat).await.unwrap();
         let _busy = agent.test_hold_turn(chat).await;
@@ -1675,7 +2695,6 @@ pub(crate) mod tests {
             assert!(t.ack_posted);
             assert!(!t.row_closed, "a fresh result row is open for the answer");
         }
-        std::env::remove_var("ARBOS_ACT_ACK_BUBBLE_SECS");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1827,6 +2846,138 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Jacob, Test5, 2026-11-04, T2 (agentd 0.1.192): an act turn searched the web, posted the
+    /// whole answer with `send_message` at 13:45:29.439, and ended 1.5 s later — and 67 ms after
+    /// that a job started on the same ask. The job's worker re-read the page and the result turn
+    /// said "the answer I sent you stands", which cost a second Opus run and told the user
+    /// nothing. A turn that has already answered is finishing, not long work to hand off.
+    #[tokio::test]
+    async fn an_act_turn_that_already_answered_is_not_converted_to_a_job() {
+        use crate::config::SendTool;
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATQUICKREPLY000013";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            t.ack_text.clear();
+            t.activity = None;
+            t.send_tool = SendTool::On;
+            t.act_transcript.clear();
+            agent.test_open_row(&host, t).await;
+        }
+        agent
+            .hook_route(&json!({ "action": "act", "ack": "Checking the python.org downloads page now.", "plan": "open the release page and read the version" }))
+            .await
+            .unwrap();
+        // The web tool runs, so the conversion is armed exactly as it was in T2.
+        agent
+            .test_fold(
+                chat,
+                &host,
+                &arbos_core::rpc::Event::ToolExecutionStart {
+                    tool_call_id: "c1".into(),
+                    tool_name: "mcp__arbos__web_fetch".into(),
+                    args: json!({ "url": "https://www.python.org/downloads/" }),
+                    parent_tool_call_id: None,
+                },
+            )
+            .await;
+        // …and then the turn answers.
+        agent
+            .hook_send_message(
+                "The newest Python is 3.15.2, released on 28 October 2026.",
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        {
+            let tl = agent.turn.lock().await;
+            let t = tl.as_ref().unwrap();
+            assert!(t.web_tool_used, "the conversion trigger is armed");
+            assert!(
+                t.progress_texts.iter().any(|p| p.contains("3.15.2")),
+                "the answer is out: {:?}",
+                t.progress_texts
+            );
+        }
+        assert!(
+            !agent
+                .maybe_convert_act_to_job(&host, Duration::from_secs(13))
+                .await,
+            "the answer is already in the chat; a job would only contradict it"
+        );
+        {
+            let tl = agent.turn.lock().await;
+            assert!(!tl.as_ref().unwrap().act_to_job);
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Round 2 of the same stress run: the answer to "make me the CSV" is the CSV. That turn
+    /// posts a file and never calls `send_message`, so `progress_texts` is empty while the
+    /// user plainly has their answer — and it was still being handed to a job. Whatever shape
+    /// the answer took, a turn that delivered one is finishing.
+    #[tokio::test]
+    async fn an_act_turn_that_delivered_a_file_is_not_converted_to_a_job() {
+        use crate::config::SendTool;
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATQUICKREPLY000017";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            t.ack_text.clear();
+            t.activity = None;
+            t.send_tool = SendTool::On;
+            t.act_transcript.clear();
+            agent.test_open_row(&host, t).await;
+        }
+        agent
+            .hook_route(&json!({ "action": "act", "ack": "Pulling the release dates into a CSV now.", "plan": "read the release pages, build the table, post it" }))
+            .await
+            .unwrap();
+        agent
+            .test_fold(
+                chat,
+                &host,
+                &arbos_core::rpc::Event::ToolExecutionStart {
+                    tool_call_id: "c1".into(),
+                    tool_name: "mcp__arbos__web_search".into(),
+                    args: json!({ "query": "python release dates" }),
+                    parent_tool_call_id: None,
+                },
+            )
+            .await;
+        // The file goes into the chat, and that is the whole answer: no bubble follows it.
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            t.attachments_posted
+                .push("01POSTEDCSVROW000000000000".to_owned());
+            assert!(t.web_tool_used, "the conversion trigger is armed");
+            assert!(
+                t.progress_texts.iter().all(|p| p.trim().is_empty()),
+                "nothing was said: the file is the answer, which is the case the earlier \
+                 progress-text guard missed"
+            );
+        }
+        assert!(
+            !agent
+                .maybe_convert_act_to_job(&host, Duration::from_secs(13))
+                .await,
+            "the file is already in the chat; a job would only duplicate it"
+        );
+        {
+            let tl = agent.turn.lock().await;
+            assert!(!tl.as_ref().unwrap().act_to_job);
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// #1776 (run 6 on 0.1.131: x3, c6, m9, c7, l1, g5): the act ack had been promoted to a
     /// bubble, the model then wrote its answer as prose without `send_message`, and the fallback
     /// stayed quiet because the ack counted as "posted" — the user kept only "Reading the README
@@ -1835,8 +2986,8 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn prose_after_a_promoted_act_ack_still_becomes_the_result_bubble() {
         use crate::config::SendTool;
-        std::env::set_var("ARBOS_ACT_ACK_BUBBLE_SECS", "1");
         let (agent, root) = test_agent().await;
+        promote_act_ack_after_1s(&agent);
         let chat = "01TESTCHATQUICKREPLY000013";
         let host = agent.sync.open_room(chat).await.unwrap();
         let _busy = agent.test_hold_turn(chat).await;
@@ -1899,16 +3050,22 @@ pub(crate) mod tests {
             result_row.rest.get("turnRole").and_then(Value::as_str),
             Some("ack")
         );
-        std::env::remove_var("ARBOS_ACT_ACK_BUBBLE_SECS");
         let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Jacob, "run bubble sort" (Mac, 2026-10-25 18:08 UTC, image 0.1.132): the answer went out as
     /// a `send_message` bubble, the fresh result row it opened ended wordless, and the Mac drew
     /// "The agent didn't answer. Ask again." under the answer. The trailing wordless row is
-    /// deleted when it holds nothing, hidden when it carries tool detail.
+    /// hidden, whether it holds nothing or carries tool detail.
+    ///
+    /// It used to be deleted when it held nothing. The relay refuses a removal it cannot
+    /// attribute to the pusher, and that refusal cost a 10 s link stall (Jacob, Test5,
+    /// 2026-11-04); hiding is a plain field write, which the guard allows. Nothing the user
+    /// sees changes: the row has no visible content either way, and `arbos-mac`'s
+    /// `no_stock_line_when_the_turn_answered_in_another_row` holds the other half — a wordless
+    /// row whose turn answered elsewhere draws no row and no "didn't answer" line.
     #[tokio::test]
-    async fn wordless_row_after_a_bubble_is_removed_or_hidden() {
+    async fn wordless_row_after_a_bubble_is_hidden_never_deleted() {
         use crate::agent::trim_wordless_result_row;
         use crate::config::SendTool;
         let (agent, root) = test_agent().await;
@@ -1943,11 +3100,35 @@ pub(crate) mod tests {
         {
             let h = host.lock().await;
             h.doc.finish_message(&trailing, MessageStatus::Done);
-            assert_eq!(trim_wordless_result_row(&h.doc, &trailing), "deleted");
+            assert_eq!(
+                trim_wordless_result_row(&h.doc, &trailing),
+                "hidden_empty",
+                "an empty trailing row is hidden, not deleted: a deletion the relay cannot \
+                 attribute to us is refused and stalls the link"
+            );
+            // The row is still there — no `removed` op goes into the batch, which is the whole
+            // point — and it is marked hidden and still holds nothing a reader can see.
+            let m = h.doc.message(&trailing).expect("the row survives the trim");
+            assert_eq!(m.rest.get("hidden").and_then(Value::as_bool), Some(true));
+            assert!(
+                !m.has_visible_content(),
+                "nothing on it for the apps to draw"
+            );
+            // Finished, never left streaming. The iPhone's working line scans `status` parts
+            // for `working` / `step`, and that scan is gated on the row still streaming, with
+            // a 15-minute freshness window — so a row kept streaming would drive "Working…"
+            // on the phone for a quarter of an hour after the turn ended. Deleting the row hid
+            // that choice; keeping it makes the status agentd leaves load-bearing.
+            assert_eq!(
+                m.status.as_str(),
+                "done",
+                "a hidden row left streaming drives the phone's working line"
+            );
         }
         let rows = reply_rows(&host, "m-busy");
-        assert_eq!(rows.len(), 1);
+        assert_eq!(rows.len(), 2, "the bubble and the hidden row");
         assert_eq!(rows[0].text().trim(), "Sorted: 1, 2, 3, 5, 8.");
+        assert!(rows[1].text().trim().is_empty());
         // with hidden tool detail on the trailing row: kept, but hidden
         {
             let mut tl = agent.turn.lock().await;
@@ -1989,6 +3170,248 @@ pub(crate) mod tests {
             h.doc.append_text(&id, &t.text_part_id, "Done.");
             h.doc.finish_message(&id, MessageStatus::Done);
             assert_eq!(trim_wordless_result_row(&h.doc, &id), "kept");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Test5 round 4 (2026-11-04, agentd 0.1.193): during the thirty-message burst six assistant
+    /// rows sat on the relay finished `done` with nothing in them (19:13:55 → 19:14:15). #2749
+    /// only judges the row a turn *ends* on, so a row the turn opened and then moved on from —
+    /// merged into another, or superseded while the burst queued behind it — was neither filled
+    /// nor hidden. Every row the turn opened is swept now, not only the last.
+    ///
+    /// Each one is retired, never deleted, for the reason in [`crate::agent::retire_row`]: the
+    /// relay refuses a removal it cannot attribute to the pusher, and a refused op holds every
+    /// op queued behind it, replies included.
+    #[tokio::test]
+    async fn every_wordless_row_the_turn_left_behind_is_retired() {
+        use crate::agent::{retire_wordless_rows, trim_wordless_result_row};
+        use crate::config::SendTool;
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATQUICKREPLY000024";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            t.ack_text.clear();
+            t.activity = None;
+            t.send_tool = SendTool::On;
+            // Opened, finished, and walked away from with nothing written into it.
+            agent.test_open_row(&host, t).await;
+            let empty = t.assistant_msg_id.clone();
+            // The same, but carrying tool detail the Details drawer reads and the
+            // transcript does not: still nothing the user sees.
+            agent.test_open_row(&host, t).await;
+            let with_detail = t.assistant_msg_id.clone();
+            {
+                let h = host.lock().await;
+                h.doc.finish_message(&empty, MessageStatus::Done);
+                h.doc.add_tool_part(
+                    &with_detail,
+                    "c1",
+                    "bash",
+                    &json!({"command": "ls"}),
+                    "a b",
+                    None,
+                    Some(3),
+                    false,
+                );
+                // `with_detail` is deliberately left streaming: the other shape of an
+                // abandoned row, which the sweep has to finish as well as hide.
+            }
+            agent.test_open_row(&host, t).await;
+        }
+        agent
+            .hook_send_message("Sorted: 1, 2, 3, 5, 8.", None, None)
+            .await
+            .unwrap();
+        let (rows_opened, trailing) = {
+            let tl = agent.turn.lock().await;
+            let t = tl.as_ref().unwrap();
+            (t.rows_opened.clone(), t.assistant_msg_id.clone())
+        };
+        assert_eq!(
+            rows_opened.len(),
+            4,
+            "three opened by hand, one more by the bubble"
+        );
+        assert_eq!(
+            rows_opened.last().map(String::as_str),
+            Some(trailing.as_str()),
+            "a turn only ever ends on the last row it opened"
+        );
+        {
+            let h = host.lock().await;
+            // The round-4 symptom, before the sweep runs: neither row is hidden and neither
+            // has anything on it for a client to draw. The first is the shape the report
+            // counted — finished `done` and empty.
+            for id in &rows_opened[..2] {
+                let m = h.doc.message(id).unwrap();
+                assert!(m.rest.get("hidden").is_none());
+                assert!(!m.has_visible_content());
+            }
+            assert_eq!(h.doc.message(&rows_opened[0]).unwrap().status, "done");
+            assert_eq!(h.doc.message(&rows_opened[1]).unwrap().status, "streaming");
+            h.doc.finish_message(&trailing, MessageStatus::Done);
+            assert_eq!(trim_wordless_result_row(&h.doc, &trailing), "hidden_empty");
+            assert_eq!(
+                retire_wordless_rows(&h.doc, &rows_opened, &trailing),
+                2,
+                "both rows the turn left behind, the empty one and the tool-detail one"
+            );
+            for id in &rows_opened[..2] {
+                let m = h.doc.message(id).expect("the row survives the sweep");
+                assert_eq!(
+                    m.rest.get("hidden").and_then(Value::as_bool),
+                    Some(true),
+                    "a row the turn abandoned is hidden"
+                );
+                assert!(!m.has_visible_content());
+                // Finished too, including the one abandoned mid-stream: a hidden row left
+                // streaming still feeds the iPhone's working line, which scans `status`
+                // parts for `working` / `step` on streaming rows inside a fifteen-minute
+                // window.
+                assert_eq!(m.status.as_str(), "done");
+            }
+            let bubble = h.doc.message(&rows_opened[2]).unwrap();
+            assert!(
+                bubble.rest.get("hidden").is_none(),
+                "the row that holds the answer is not swept"
+            );
+            assert_eq!(bubble.text().trim(), "Sorted: 1, 2, 3, 5, 8.");
+            assert_eq!(
+                retire_wordless_rows(&h.doc, &rows_opened, &trailing),
+                0,
+                "a row already hidden is not written a second time"
+            );
+        }
+        let rows = reply_rows(&host, "m-busy");
+        assert_eq!(
+            rows.len(),
+            4,
+            "retired, never deleted: a removal the relay cannot attribute to the box is \
+             refused `not_yours`, and a refused op holds the whole push queue behind it"
+        );
+        let visible: Vec<_> = rows
+            .iter()
+            .filter(|m| m.rest.get("hidden").and_then(Value::as_bool) != Some(true))
+            .collect();
+        assert_eq!(visible.len(), 1, "the answer, and no empty 'done' rows");
+        assert_eq!(visible[0].text().trim(), "Sorted: 1, 2, 3, 5, 8.");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Test5 round 5: the same empty `done` row outside any burst. A request that runs as an
+    /// inline subagent leaves the helper's own row holding an empty text part and a `Done`
+    /// status — everything it took on the way (the tool parts, the raw `subagent_result`) is
+    /// `hidden`, and the answer the user reads is a separate row. Three were visible on the
+    /// relay: `01M6MQV1VPE51J4BQKG7FYBER5`, `01M6MR21MV7N4TKN70BSRMJ1QS`,
+    /// `01M6MS91NW0FYS9EBNGHV8XVA8`.
+    ///
+    /// #2770's sweep missed them for one reason only: a helper's row is minted by
+    /// `run_subagent`, never by `open_turn_row` or `open_row`, so it never joins
+    /// `TurnState::rows_opened` and was never a candidate. The predicate was always right about
+    /// this shape, which is why the fix widens where the rule is applied and leaves the rule
+    /// alone. The first assertion below is that claim, pinned.
+    #[tokio::test]
+    async fn an_inline_subagent_row_that_shows_nothing_is_retired() {
+        use crate::agent::{retire_if_wordless, wordless_row};
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATQUICKREPLY000026";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        // The helper's row, written exactly as `run_subagent` settles one.
+        let clean = "01M6MQV1VPE51J4BQKG7FYBER5";
+        let failed = "01M6MR21MV7N4TKN70BSRMJ1QS";
+        for (id, with_error) in [(clean, false), (failed, true)] {
+            let h = host.lock().await;
+            h.doc
+                .start_assistant_message(id, "m-busy", &agent.cfg.device_id);
+            h.doc.set_message_fields(
+                id,
+                &[
+                    ("subagentId", json!("01TESTSUBAGENT000000000001")),
+                    ("subagentName", json!("Pip")),
+                    ("turn", json!({ "kind": "spawn" })),
+                    ("worker", json!(true)),
+                ],
+            );
+            h.doc.add_tool_part(
+                id,
+                "c1",
+                "bash",
+                &json!({"command": "cargo test"}),
+                "ok",
+                None,
+                Some(2),
+                false,
+            );
+            if with_error {
+                h.doc
+                    .add_error_part(id, "subagent_error", "the worker could not start");
+            }
+            h.doc.add_hidden_part(
+                id,
+                "subagent_result",
+                "Sorted the list and checked it twice.",
+                &json!({ "subagentId": "01TESTSUBAGENT000000000001", "status": "done" }),
+            );
+            h.doc.add_status_part(
+                id,
+                if with_error { "failed" } else { "done" },
+                if with_error { "Failed" } else { "Done" },
+            );
+            h.doc.finish_message(id, MessageStatus::Done);
+        }
+        {
+            let h = host.lock().await;
+            let m = h.doc.message(clean).unwrap();
+            // The round-5 symptom, and the reason #2770 missed it: the predicate already reads
+            // this row as wordless, so nothing was wrong with the rule — the row was simply
+            // never offered to it.
+            assert!(
+                wordless_row(&m).0,
+                "the predicate already covers this shape"
+            );
+            assert!(m.rest.get("hidden").is_none());
+            assert!(!m.has_visible_content());
+            assert_eq!(m.status.as_str(), "done");
+        }
+        // The answer arrives on its own row, through the quick lane, while the turn lock is held.
+        let (quick_ask, cmd) = send_cmd(&host, "what is going on now?");
+        agent.handle_command(chat, cmd).await.unwrap();
+        let quick = reply_rows(&host, &quick_ask);
+        assert_eq!(quick.len(), 1, "one quick row");
+        assert!(!quick[0].text().trim().is_empty());
+        let quick_id = quick[0].id.clone();
+        {
+            let h = host.lock().await;
+            assert!(
+                retire_if_wordless(&h.doc, clean),
+                "a helper's row with nothing left on it is retired"
+            );
+            assert!(
+                !retire_if_wordless(&h.doc, failed),
+                "a failure keeps its row: the error line is the user's only account of it"
+            );
+            assert!(
+                !retire_if_wordless(&h.doc, &quick_id),
+                "the row that holds the answer is never touched"
+            );
+            assert!(
+                !retire_if_wordless(&h.doc, clean),
+                "a row already hidden is not written a second time"
+            );
+            let m = h.doc.message(clean).unwrap();
+            assert_eq!(m.rest.get("hidden").and_then(Value::as_bool), Some(true));
+            assert_eq!(m.status.as_str(), "done");
+            assert!(
+                h.doc.message(clean).is_some(),
+                "retired, never deleted: a removal the relay cannot attribute to the box is \
+                 refused `not_yours`, and a refused op holds the whole push queue behind it"
+            );
+            assert!(h.doc.message(failed).unwrap().rest.get("hidden").is_none());
         }
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -2132,6 +3555,263 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Jacob on Test5 (2026-11-04 13:13:30 CR, agentd 0.1.192): research job
+    /// 01M6KZET08ANES5MRRXWBSYJXC ended `done` with the worker's return contract at `partial`
+    /// (six sites answered 403) and a CSV in `out/` the worker never posted. The relay turn
+    /// called `bash` beside its `route`, which cut the turn, and the user read "The background
+    /// work I started did not finish" instead of the 45 rows.
+    ///
+    /// The same sequence, replayed: `partial` is a finished job, one tool call beside the first
+    /// `route` leaves the route its retry, and the relay turn may post the file it is told to.
+    #[tokio::test]
+    async fn a_partial_job_delivers_its_unposted_artifact_from_the_relay_turn() {
+        use crate::agent::{relay_fallback_line, TurnKind};
+        use crate::config::SendTool;
+        use crate::media::{deliver_file, out_dir};
+
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATQUICKREPLY000017";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        {
+            let h = host.lock().await;
+            h.doc
+                .append_user_message(
+                    "m-busy",
+                    "compare the shortlisted sites and send me the table",
+                    "dev-mac",
+                    &arbos_core::doc::UserMessageOpts::default(),
+                )
+                .unwrap();
+        }
+        let _busy = agent.test_hold_turn(chat).await;
+
+        // What the worker left behind: the rows on disk, posted nowhere.
+        let csv = "site,price,verdict\nalpha.example,120,shortlist\nbeta.example,98,shortlist\n";
+        let dir = out_dir(&agent.cfg);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("sites.csv"), csv).unwrap();
+
+        let kind = TurnKind::SubagentResult {
+            subagent_id: "01TESTSUBAGENT000000000001".into(),
+            name: "job:sites".into(),
+            job_id: None,
+            status: "partial".into(),
+            title: "Compare the shortlisted sites".into(),
+            result: "Two of the four sites are on the shortlist.".into(),
+        };
+        let fallback = relay_fallback_line(&kind);
+        assert!(
+            !fallback.contains("did not finish"),
+            "a job that returns `partial` finished: {fallback}"
+        );
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            t.ack_text.clear();
+            t.activity = None;
+            t.send_tool = SendTool::On;
+            t.reply_only = true;
+            t.relay_fallback = fallback.clone();
+            agent.test_open_row(&host, t).await;
+        }
+
+        // The model routes `act` and calls `bash` in the same assistant message.
+        let err = agent
+            .hook_route(&json!({
+                "action": "act",
+                "ack": "Pulling the rows together.",
+                "plan": "look at the csv first",
+            }))
+            .await
+            .unwrap_err();
+        assert!(err.contains("relay turn"), "{err}");
+        agent
+            .test_fold(
+                chat,
+                &host,
+                &arbos_core::rpc::Event::ToolExecutionStart {
+                    tool_call_id: "c1".into(),
+                    tool_name: "bash".into(),
+                    args: json!({ "command": "wc -l out/sites.csv" }),
+                    parent_tool_call_id: None,
+                },
+            )
+            .await;
+        {
+            let tl = agent.turn.lock().await;
+            let t = tl.as_ref().unwrap();
+            assert!(
+                !t.stopped,
+                "a tool call beside the first route must not cost the turn its route retry"
+            );
+        }
+
+        // The refusal reaches the model, which retries with `reply` and posts the file.
+        agent
+            .hook_route(&json!({ "action": "reply", "reply": "Here is the comparison." }))
+            .await
+            .unwrap();
+        agent
+            .test_fold(
+                chat,
+                &host,
+                &arbos_core::rpc::Event::ToolExecutionStart {
+                    tool_call_id: "c2".into(),
+                    tool_name: "mcp__arbos__deliver_file".into(),
+                    args: json!({ "path": "out/sites.csv" }),
+                    parent_tool_call_id: None,
+                },
+            )
+            .await;
+        {
+            let tl = agent.turn.lock().await;
+            let t = tl.as_ref().unwrap();
+            assert!(
+                !t.stopped,
+                "a relay turn may deliver the file it was told to"
+            );
+        }
+        let v = deliver_file(&agent, &json!({ "path": "out/sites.csv" })).await;
+        assert!(v.get("isError").is_none(), "{v}");
+        let posted: Value =
+            serde_json::from_str(v["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(posted["posted"], json!(true));
+
+        let table = "| Site | Price |\n| --- | --- |\n| [alpha](https://alpha.example) | 120 |";
+        agent.hook_send_message(table, None, None).await.unwrap();
+
+        // The rows reached the user: the file as its own card, the table as a bubble.
+        let card = host
+            .lock()
+            .await
+            .doc
+            .message(posted["message_id"].as_str().unwrap())
+            .unwrap();
+        let attachment = card
+            .parts
+            .iter()
+            .find_map(|p| p.get("attachment").cloned())
+            .expect("the card carries the file");
+        assert_eq!(attachment["name"], json!("sites.csv"));
+        assert_eq!(
+            attachment["bytes"],
+            json!(csv.len()),
+            "the bytes in the chat are the bytes the worker wrote"
+        );
+        assert_eq!(card.rest["inReplyTo"], json!("m-busy"));
+        let said: String = reply_rows(&host, "m-busy")
+            .iter()
+            .map(|r| r.text())
+            .collect();
+        assert!(said.contains("alpha"), "the table reached the chat: {said}");
+        assert!(
+            !said.contains("did not finish"),
+            "a partial job never reads as a failure: {said}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Jacob on Test5 (2026-11-04, agentd 0.1.191, chat 01M6M0G9257SCE4RRQDW2GXFS9): a relay
+    /// turn delivered its answer as `send_message` parts, was then cut short, and the user read
+    /// "The background work I started did not finish" under the answer it had just been given.
+    /// The cut only looked at streamed text, which is the one place a relay turn's words are
+    /// not.
+    ///
+    /// Same family as the `partial` bug above — both announce a failure that did not happen —
+    /// but a different question: that one asks whether the work finished, this one asks whether
+    /// anything reached the user.
+    #[tokio::test]
+    async fn a_relay_turn_that_already_answered_is_cut_short_without_a_failure_line() {
+        use crate::agent::{relay_fallback_line, TurnKind};
+        use crate::config::SendTool;
+
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATQUICKREPLY000019";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        {
+            let h = host.lock().await;
+            h.doc
+                .append_user_message(
+                    "m-busy",
+                    "how did the migration go?",
+                    "dev-mac",
+                    &arbos_core::doc::UserMessageOpts::default(),
+                )
+                .unwrap();
+        }
+        let _busy = agent.test_hold_turn(chat).await;
+
+        // A relay turn whose fallback line is the failure one: the worker really did fail, so
+        // the line is the right one to hold ready — it just must not be written over an answer.
+        let kind = TurnKind::SubagentResult {
+            subagent_id: "01TESTSUBAGENT000000000002".into(),
+            name: "job:migration".into(),
+            job_id: None,
+            status: "failed".into(),
+            title: "Migrate the rows".into(),
+            result: String::new(),
+        };
+        let fallback = relay_fallback_line(&kind);
+        assert!(fallback.contains("did not finish"), "{fallback}");
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            t.ack_text.clear();
+            t.activity = None;
+            t.send_tool = SendTool::On;
+            t.reply_only = true;
+            t.relay_fallback = fallback;
+            agent.test_open_row(&host, t).await;
+        }
+
+        // The answer goes out as separate messages, never as streamed text.
+        agent
+            .hook_route(&json!({ "action": "reply", "reply": "" }))
+            .await
+            .unwrap();
+        agent
+            .hook_send_message("The migration finished: 45 rows moved.", None, None)
+            .await
+            .unwrap();
+        agent
+            .hook_send_message("Want me to run the row-count check next?", None, None)
+            .await
+            .unwrap();
+        {
+            let tl = agent.turn.lock().await;
+            let t = tl.as_ref().unwrap();
+            assert!(
+                t.streamed_text.trim().is_empty(),
+                "the answer is in the parts, not in streamed text — that is the whole trap"
+            );
+        }
+
+        // Now the turn is cut short (a user message waiting, the deadline, a tool call).
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            agent
+                .test_cut_relay_turn_short(&host, t, "user waiting")
+                .await;
+            assert!(t.stopped);
+        }
+
+        let said: Vec<String> = reply_rows(&host, "m-busy")
+            .iter()
+            .map(|r| r.text().trim().to_owned())
+            .filter(|t| !t.is_empty())
+            .collect();
+        assert_eq!(
+            said,
+            vec![
+                "The migration finished: 45 rows moved.".to_owned(),
+                "Want me to run the row-count check next?".to_owned()
+            ],
+            "the answer stands alone: no failure line under it"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// #1355: an act turn that closes with a second `route reply {reply: …}` must show that text
     /// in its result row (the streamed path only follows the first route of a turn). #1373: a
     /// plain reply turn whose text already streamed must not get it a second time — the hook may
@@ -2251,8 +3931,16 @@ pub(crate) mod tests {
         let host = agent.sync.open_room(chat).await.unwrap();
         let _busy = agent.test_hold_turn(chat).await;
         let (msg_id, cmd) = send_cmd(&host, "also count the files in the project folder");
-        let took = agent.start_job_for_send(chat, &host, &cmd).await.unwrap();
+        let mut ticket = agent.send_order.join(chat, &msg_id);
+        let took = agent
+            .start_job_for_send(chat, &host, &cmd, &mut ticket)
+            .await
+            .unwrap();
         assert!(took, "the ask runs as a job beside the running turn");
+        assert!(
+            ticket.is_none(),
+            "the job keeps the ask's place in the chat's send order"
+        );
         assert_eq!(
             agent.jobs_running.load(std::sync::atomic::Ordering::SeqCst),
             1
@@ -2265,7 +3953,10 @@ pub(crate) mod tests {
         );
         let (_m2, cmd2) = send_cmd(&host, "and list the biggest one");
         assert!(
-            !agent.start_job_for_send(chat, &host, &cmd2).await.unwrap(),
+            !agent
+                .start_job_for_send(chat, &host, &cmd2, &mut None)
+                .await
+                .unwrap(),
             "cap reached: queue"
         );
         agent.turn.lock().await.as_mut().unwrap().reply_only = true;
@@ -2273,7 +3964,10 @@ pub(crate) mod tests {
             .jobs_running
             .store(0, std::sync::atomic::Ordering::SeqCst);
         assert!(
-            !agent.start_job_for_send(chat, &host, &cmd2).await.unwrap(),
+            !agent
+                .start_job_for_send(chat, &host, &cmd2, &mut None)
+                .await
+                .unwrap(),
             "relay turn: queue"
         );
         let _ = std::fs::remove_dir_all(&root);
@@ -2310,7 +4004,9 @@ pub(crate) mod tests {
                 },
             )
             .await;
-        agent.hook_turn_without_route(chat, true).await;
+        agent
+            .hook_turn_without_route(chat, true, crate::mcp::SessionRole::Main)
+            .await;
         // Correction: `route reply` streamed as arguments and then run.
         agent
             .test_fold(
@@ -2465,6 +4161,92 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Test5 round 5, bug R, part 3. While a wait is parked the chat has to say what it is
+    /// waiting for, and name it: "Waiting for approval" said that a decision was wanted without
+    /// saying which, and the turn-end sweep then cleared even that, leaving the chat looking
+    /// idle while it was in fact waiting on the person.
+    ///
+    /// The tool here is deliberately a one-off name, because the stub relay's activity log is
+    /// process-wide and every shell card shares the title "Run a destructive command (…)".
+    #[tokio::test]
+    async fn a_parked_approval_leaves_the_chat_saying_what_it_waits_for() {
+        const TOOL: &str = "publish_parkstatus_probe";
+        let want = format!("Waiting for your approval: {TOOL} (tool-send)");
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATPARKSTATUS000000";
+        agent.store.upsert_chat(chat, "Main", true, 0).unwrap();
+        let host = agent.sync.open_room(chat).await.unwrap();
+
+        let id = {
+            let _busy = agent.test_hold_turn(chat).await;
+            {
+                let mut tl = agent.turn.lock().await;
+                let t = tl.as_mut().unwrap();
+                agent.test_open_row(&host, t).await;
+            }
+            let v = agent
+                .hook_approval(TOOL, &json!({ "to": "someone" }), chat, "main")
+                .await;
+            assert_eq!(v["state"], "pending", "{v}");
+            // The running turn's own row says it too, in place of "Running a command…".
+            let row = agent
+                .turn
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .assistant_msg_id
+                .clone();
+            assert_eq!(
+                host.lock()
+                    .await
+                    .doc
+                    .message(&row)
+                    .unwrap()
+                    .rest
+                    .get("activity")
+                    .and_then(Value::as_str),
+                Some(want.as_str()),
+                "the working row must name the card, not the gated tool"
+            );
+            v["approvalId"].as_str().unwrap().to_owned()
+        };
+        assert_eq!(agent.park_approval(&id).await["parked"], json!(true));
+
+        // The turn ends here, which is where the line used to be dropped. Every presence post is
+        // a spawned HTTP call to the in-process stub, so let the earlier ones land before
+        // clearing: without that the card's own post arrives after the clear and stands in for
+        // the one under test.
+        *agent.turn.lock().await = None;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        ACTIVITY_LOG.lock().unwrap().clear();
+        agent.refresh_job_activity(chat).await;
+        let t0 = Instant::now();
+        loop {
+            if ACTIVITY_LOG.lock().unwrap().contains(&want) {
+                break;
+            }
+            assert!(
+                t0.elapsed() < Duration::from_secs(5),
+                "the chat went silent while it was waiting on the user; posted {:?}",
+                ACTIVITY_LOG.lock().unwrap()
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        // Answering the card is what clears it.
+        agent
+            .decide_approval(
+                &id,
+                arbos_core::approval::ApprovalOutcome::Rejected { reason: None },
+                "dev-mac",
+            )
+            .await
+            .unwrap();
+        assert_eq!(agent.approval_wait_label(chat), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[tokio::test]
     async fn idle_agent_takes_the_normal_path() {
         let (agent, root) = test_agent().await;
@@ -2474,6 +4256,85 @@ pub(crate) mod tests {
         assert_eq!(
             agent.quick_reply(chat, &host, &cmd).await,
             QuickOutcome::NotBusy
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Jacob, Test5 T7 (agentd 0.1.192): a research job ran for 5 min 04 s and the "ETA?" asked
+    /// 60 s in was answered by a full main-session turn. `busy_snapshot` read `turn_lock` and
+    /// the waiting-send counter only, and a job touches neither — `start_job` spawns its worker
+    /// and the turn drops the lock — so the box did not read as busy and the lane built for
+    /// "how is it going?" was skipped exactly while work was running.
+    ///
+    /// The property, not the wording: the question is taken by the quick lane, and the job's
+    /// own current step (`jobs.last_step`, the line the working row already shows) is in the
+    /// snapshot the quick call reads, so the lane has something true to answer with.
+    #[tokio::test]
+    async fn a_status_question_during_a_background_job_takes_the_quick_path() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATQUICKREPLY000019";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        agent
+            .store
+            .insert_job(
+                "job-eta",
+                chat,
+                "m-ask",
+                "Searching for surf schools",
+                "research",
+                "Find the three best-reviewed surf schools near Santa Teresa.",
+                &[],
+            )
+            .unwrap();
+        agent
+            .store
+            .set_job_state("job-eta", "running", None)
+            .unwrap();
+        agent
+            .store
+            .set_job_step("job-eta", "Reading delsoulsurf.com")
+            .unwrap();
+
+        // Nothing holds the turn lock and nothing waits for it: the job is the only work.
+        assert!(!agent.turn_lock_busy());
+        assert_eq!(agent.sends_waiting(), 0);
+        let snap = agent
+            .busy_snapshot(chat, &host)
+            .await
+            .expect("a running background job reads as busy");
+        let job = snap
+            .jobs
+            .iter()
+            .find(|j| j.title == "Searching for surf schools")
+            .expect("the running job is in the snapshot");
+        assert_eq!(job.state, "running");
+        assert_eq!(
+            job.step, "Reading delsoulsurf.com",
+            "the job's real current step is not reachable from the quick lane"
+        );
+        assert!(snap.render("ETA?").contains("Reading delsoulsurf.com"));
+
+        let (msg_id, cmd) = send_cmd(&host, "what is going on now?");
+        let t0 = Instant::now();
+        assert_eq!(
+            agent.quick_reply(chat, &host, &cmd).await,
+            QuickOutcome::Answered,
+            "a status question asked while a background job runs must take the quick-reply lane"
+        );
+        let elapsed = t0.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(FIRST_REPLY_GATE_SECS),
+            "quick reply took {elapsed:?} with a job running"
+        );
+        let rows = reply_rows(&host, &msg_id);
+        assert_eq!(rows.len(), 1, "one quick row, no main-session row");
+        assert_eq!(
+            rows[0].rest.get("decision").and_then(Value::as_str),
+            Some("quick")
+        );
+        assert!(
+            agent.take_side_notes(chat).is_some(),
+            "the main session is told once and never answers it again"
         );
         let _ = std::fs::remove_dir_all(&root);
     }

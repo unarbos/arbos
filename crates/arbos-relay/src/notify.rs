@@ -429,6 +429,13 @@ pub async fn announce_with(
     reply_ref: Option<&ReplyRefBody>,
     mentions: &[String],
 ) -> Option<i64> {
+    // The sender as every rule downstream names it, resolved from the principal by `sender_for`
+    // and never from the row the client wrote. `moderation` reads it back out of
+    // `message_authors` to decide whose message this is.
+    let member = match sender.kind {
+        "agent" => format!("agent:{}", sender.id),
+        _ => format!("user:{}", sender.id),
+    };
     let event_id = state
         .db
         .insert_chat_event(
@@ -436,6 +443,7 @@ pub async fn announce_with(
             chat.project_id.as_deref(),
             message_id,
             sender.user_id.as_deref(),
+            &member,
         )
         .ok()
         .flatten()?;
@@ -444,10 +452,6 @@ pub async fn announce_with(
     if let Some(u) = sender.user_id.as_deref() {
         let _ = state.db.mark_chat_read(u, &chat.chat_id);
     }
-    let member = match sender.kind {
-        "agent" => format!("agent:{}", sender.id),
-        _ => format!("user:{}", sender.id),
-    };
     // The announce is the writing client's account of its own message, and no app fills
     // `mentions` in: each resolves them into the row it writes and then posts the message id
     // and the text alone. The relay has the roster, so it resolves them here rather than
@@ -458,6 +462,9 @@ pub async fn announce_with(
     let mentions = &union_resolved_mentions(state, chat, &member, text, mentions);
     // Outside agents in this chat get the message as an ASP event (#2140).
     crate::outside::on_announce(state, chat, sender, message_id, text, None, mentions);
+    // An agent holding an access link gets it on its SSE stream. Returns after one read lock
+    // when no account on this relay holds a live link, which is the normal case.
+    crate::agent_link_stream::on_announce(state, chat, sender, message_id, text, None, mentions);
     state.matrix.message(
         state,
         &chat.chat_id,

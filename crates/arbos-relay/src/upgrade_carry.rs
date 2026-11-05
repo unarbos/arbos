@@ -6,8 +6,10 @@
 //! box's agentd had been killed, so an oversize box was restarted on every attempt (gh_268993031,
 //! 3979 MiB, 2026-10-26). Now:
 //!
-//! 1. **Measure first.** `du -sm /work` runs while agentd keeps serving. Over the limit (or no room
-//!    on the relay's spool disk) → a clean refusal, nothing stopped, box state untouched.
+//! 1. **Measure first.** `du -sm /work`, the free space where the pack stages its parts, the
+//!    biggest single file and the target snapshot's disk size are all read while agentd keeps
+//!    serving. Over the limit, or no room on the relay's spool, on the source itself or on the box
+//!    the snapshot will make → a clean refusal naming the figures, nothing stopped, box untouched.
 //! 2. **Quiesce, list, plan.** agentd is stopped, `/work` is listed once (`find -printf`), and the
 //!    listing is cut into parts of at most `part_mib` apparent bytes, in walk order (a directory
 //!    precedes its children). Every part is its own tarball (`tar --no-recursion -T list`), so a
@@ -15,9 +17,9 @@
 //! 3. **Pack per part.** One part at a time on the source box: tar → sha256 → download (long
 //!    per-part deadline, retried) → verify → spool to the relay's disk → delete on the source. The
 //!    source never holds more than one part's tarball; the relay never holds more than one part in
-//!    memory.
-//! 4. **Unpack per part.** On the new box: room check (bytes *and* inodes, the same floor as
-//!    agentd's disk gate), then per part: upload (deadline scaled to the size, retried) → sha256
+//!    memory. The staging directory is removed when the pack ends, whether it ended well or not.
+//! 4. **Unpack per part.** On the new box: the room check again, on the box itself (bytes *and*
+//!    inodes, the same floor as agentd's disk gate), then per part: upload (deadline scaled to the size, retried) → sha256
 //!    check on the box → extract → delete. A failed transfer resumes at the failed part, never from
 //!    byte 0. At the end the carried tree is counted and summed against the plan.
 //!
@@ -61,10 +63,24 @@ pub const INODE_FLOOR: u64 = 1024;
 pub const SPOOL_MARGIN_MIB: u64 = 2048;
 /// Room the new box keeps beyond the carried bytes and one staged part (MiB).
 pub const DEST_MARGIN_MIB: u64 = 512;
+/// Room the SOURCE box keeps beyond the part it is packing (MiB). The pack stages its tarballs on
+/// the source's own disk, so the source needs room too — 2026-11-05, gh_268993031: part 80 was a
+/// lone 357 MiB file, its tarball filled the 365 MiB that was free and `head` cutting the first
+/// piece failed with ENOSPC. agentd is stopped while the pack runs, so the gate's floor is not in
+/// play; this margin covers `work.list` (26 MiB on that box), the per-part list, tar's own headers
+/// and gzip's worst case on incompressible data.
+pub const SOURCE_MARGIN_MIB: u64 = 256;
+/// What a fresh box's own files take off its disk before `/work` holds any of the carry (MiB).
+/// A 10 GiB Daytona box reported 10 111 MiB free of 10 240 at its first boot (2026-11-04): the
+/// image's writable layer and the filesystem's reserve. Doubled, so a bigger image still fits.
+pub const FRESH_BOX_OVERHEAD_MIB: u64 = 256;
 
 const MIB: u64 = 1024 * 1024;
 /// Staging directory on both boxes (the toolbox user's home; readable by the toolbox download).
 pub const STAGE_DIR: &str = "/home/daytona/arbos-upgrade";
+/// The directory [`STAGE_DIR`] is made in: `df` of this says how much room the pack has. The box's
+/// `/work` and `/home` are one overlay today, but the pack writes here, so this is what is measured.
+pub const STAGE_PARENT: &str = "/home/daytona";
 /// Relative path (from `/work`) of the tree agentd rebuilds from the image seed.
 pub const REBUILDABLE_SUFFIX: &str = "/.arbos/pi/extensions/arbos-pi-ext/node_modules";
 
@@ -121,9 +137,28 @@ pub enum Verdict {
         need_mib: u64,
         free_mib: u64,
     },
+    /// The source box cannot hold the tarball of its own biggest part.
+    NoSourceRoom {
+        free_mib: u64,
+        need_mib: u64,
+        max_part_mib: u64,
+        part_mib: u64,
+    },
+    /// A fresh box from the target snapshot cannot hold the carry (the snapshot's disk is too
+    /// small). The real `df` on the new box still has the last word; this is the same arithmetic
+    /// read early enough that nothing has been stopped yet.
+    NoDestinationRoom {
+        work_mib: u64,
+        free_mib: u64,
+        need_mib: u64,
+        max_part_mib: u64,
+        part_mib: u64,
+    },
 }
 
 impl Verdict {
+    /// Every reason carries the words `too large to carry` (the relay's `REFUSED_PHRASE`) inside
+    /// its first 200 characters, which is all `last_refused` and the deploy worker keep.
     pub fn reason(&self) -> Option<String> {
         match self {
             Verdict::Carry => None,
@@ -133,24 +168,92 @@ impl Verdict {
             Verdict::NoSpoolRoom { need_mib, free_mib } => Some(format!(
                 "/work is {need_mib} MiB but the relay's spool disk has {free_mib} MiB free; too large to carry through the relay right now"
             )),
+            Verdict::NoSourceRoom { free_mib, need_mib, max_part_mib, part_mib } => Some(format!(
+                "the source box has {free_mib} MiB free where the pack stages parts but needs {need_mib} (biggest part {max_part_mib} + one {part_mib} MiB piece + {SOURCE_MARGIN_MIB} margin); too large to carry through the relay right now"
+            )),
+            Verdict::NoDestinationRoom { work_mib, free_mib, need_mib, max_part_mib, part_mib } => Some(format!(
+                "/work is {work_mib} MiB and a fresh box from the target snapshot has about {free_mib} MiB free but needs {need_mib} (+ biggest part {max_part_mib}, 2x{part_mib} MiB pieces, {DEST_MARGIN_MIB} margin); too large to carry onto that snapshot"
+            )),
         }
     }
 }
 
-/// Decide from the `du -sm /work` figure and the free MiB on the spool filesystem.
-pub fn verdict(du_mib: i64, spool_free_mib: u64, cfg: &CarryConfig) -> Verdict {
-    if du_mib > cfg.max_work_mib {
+/// Every figure the room checks compare (MiB), all of them readable while the box still serves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Room {
+    /// `du -sm /work` on the source.
+    pub work_mib: i64,
+    /// Free on the relay's spool filesystem.
+    pub spool_free_mib: u64,
+    /// Free on the source filesystem that holds [`STAGE_DIR`].
+    pub source_free_mib: u64,
+    /// The most any one part's tarball can need — see [`max_part_bound_mib`].
+    pub max_part_mib: u64,
+    /// Free `/work` a fresh box from the target snapshot is expected to have, from the snapshot's
+    /// own disk size. `None` when Daytona does not say: then only the `df` after the create judges.
+    pub target_free_mib: Option<u64>,
+}
+
+/// Peak the pack needs on the source: the biggest part's tarball, one piece cut beside it, margin.
+pub fn source_need_mib(max_part_mib: u64, part_mib: u64) -> u64 {
+    max_part_mib + part_mib + SOURCE_MARGIN_MIB
+}
+
+/// Peak the carry needs on the destination: every carried byte, plus the biggest part's tarball
+/// staged for extraction, plus two pieces in flight (the uploaded piece and the daemon's `/tmp`
+/// copy of it), plus a margin. One function so the check before the pack and the check on the new
+/// box cannot drift apart.
+pub fn destination_need_mib(work_mib: u64, part_mib: u64, max_part_mib: u64) -> u64 {
+    work_mib + max_part_mib + 2 * part_mib + DEST_MARGIN_MIB
+}
+
+/// The most one part's tarball can need, in MiB, known before the listing: a part holds at most
+/// `part_mib` apparent bytes, except a single file bigger than that, which becomes a part of its own.
+pub fn max_part_bound_mib(part_mib: u64, max_file_bytes: u64) -> u64 {
+    part_mib.max(max_file_bytes.div_ceil(MIB))
+}
+
+/// Free `/work` MiB a fresh box from a snapshot of `disk_gib` is expected to have.
+pub fn fresh_box_free_mib(disk_gib: i64) -> u64 {
+    (disk_gib.max(0) as u64 * 1024).saturating_sub(FRESH_BOX_OVERHEAD_MIB)
+}
+
+/// Decide, before anything on the box is stopped, whether the carry fits everywhere it has to: the
+/// relay's spool, the source's own disk (the pack stages there) and the box the snapshot will make.
+pub fn verdict(room: &Room, cfg: &CarryConfig) -> Verdict {
+    if room.work_mib > cfg.max_work_mib {
         return Verdict::TooLarge {
-            mib: du_mib,
+            mib: room.work_mib,
             max_mib: cfg.max_work_mib,
         };
     }
-    let need = du_mib.max(0) as u64 + SPOOL_MARGIN_MIB;
-    if spool_free_mib < need {
+    let work = room.work_mib.max(0) as u64;
+    if room.spool_free_mib < work + SPOOL_MARGIN_MIB {
         return Verdict::NoSpoolRoom {
-            need_mib: du_mib.max(0) as u64,
-            free_mib: spool_free_mib,
+            need_mib: work,
+            free_mib: room.spool_free_mib,
         };
+    }
+    let source_need = source_need_mib(room.max_part_mib, cfg.part_mib);
+    if room.source_free_mib < source_need {
+        return Verdict::NoSourceRoom {
+            free_mib: room.source_free_mib,
+            need_mib: source_need,
+            max_part_mib: room.max_part_mib,
+            part_mib: cfg.part_mib,
+        };
+    }
+    if let Some(free) = room.target_free_mib {
+        let need = destination_need_mib(work, cfg.part_mib, room.max_part_mib);
+        if free < need {
+            return Verdict::NoDestinationRoom {
+                work_mib: work,
+                free_mib: free,
+                need_mib: need,
+                max_part_mib: room.max_part_mib,
+                part_mib: cfg.part_mib,
+            };
+        }
     }
     Verdict::Carry
 }
@@ -316,9 +419,10 @@ pub fn expected_after_carry(parts: &[Part]) -> (u64, u64) {
     (n, b)
 }
 
-/// Does the new box have room? Bytes: the whole carry, plus the biggest part's tarball staged
-/// for extraction, plus two pieces in flight (the uploaded piece and the daemon's `/tmp` copy of
-/// it), plus a margin. Inodes (when the filesystem counts them): one per entry plus the gate's floor.
+/// Does the new box have room, measured on the box itself once it exists? Bytes are
+/// [`destination_need_mib`] — the same arithmetic the measure step already applied to the
+/// snapshot's disk size, so this is the confirmation, not the first look. Inodes (when the
+/// filesystem counts them): one per entry plus the gate's floor.
 pub fn destination_fits(
     avail_mib: u64,
     avail_inodes: Option<u64>,
@@ -327,7 +431,7 @@ pub fn destination_fits(
     part_mib: u64,
     max_part_mib: u64,
 ) -> std::result::Result<(), String> {
-    let need_bytes = need_mib + max_part_mib + 2 * part_mib + DEST_MARGIN_MIB;
+    let need_bytes = destination_need_mib(need_mib, part_mib, max_part_mib);
     if avail_mib < need_bytes {
         return Err(format!(
             "the new box has {avail_mib} MiB free on /work; carrying {need_mib} MiB needs {need_bytes} MiB (the biggest part's {max_part_mib} MiB tarball, two {part_mib} MiB pieces in flight and a {DEST_MARGIN_MIB} MiB margin included)"
@@ -494,6 +598,41 @@ pub async fn measure_du_mib(tb: &Toolbox<'_>) -> Result<i64> {
         .ok_or_else(|| anyhow!("du /work: unreadable answer {:?}", text.trim()))
 }
 
+/// What the source box can spare for the pack, read on a running box: free MiB where the parts are
+/// staged, and the biggest single carried file in bytes (it bounds the biggest part — see
+/// [`max_part_bound_mib`]). Logs are excluded, exactly as the carry excludes them. Read-only.
+pub async fn source_room(tb: &Toolbox<'_>) -> Result<(u64, u64)> {
+    let cmd = format!(
+        "df -Pm {STAGE_PARENT} | awk 'NR==2{{print $4}}'; cd /work 2>/dev/null || exit 0; sudo -n find . -xdev \\( -path ./.arbos/logs -o -path './*/.arbos/logs' \\) -prune -o -type f -printf '%s\\n' | awk 'm<$1{{m=$1}} END{{printf \"%.0f\\n\", m+0}}'"
+    );
+    let out = tb.exec(&cmd, 600).await.context("room on the source box")?;
+    let text = exec_ok(&out, "df and the biggest file on the source", &[0])?;
+    let mut lines = text.lines().map(str::trim).filter(|l| !l.is_empty());
+    let free_mib: u64 = lines
+        .next()
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| anyhow!("df {STAGE_PARENT}: unreadable {text:?}"))?;
+    let max_file_bytes = lines.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    Ok((free_mib, max_file_bytes))
+}
+
+/// Free `/work` MiB a fresh box from `snapshot` is expected to have, from the disk size Daytona
+/// holds for the snapshot. `None` when it cannot be read: the carry then goes ahead and the `df`
+/// on the new box decides, as it did before this was checked up front.
+pub async fn target_free_mib(dt: &crate::daytona::Daytona, snapshot: &str) -> Option<u64> {
+    match dt.get_snapshot(snapshot).await {
+        Ok(s) => s.disk.filter(|gib| *gib > 0).map(fresh_box_free_mib),
+        Err(e) => {
+            tracing::warn!(
+                snapshot,
+                error = %format!("{e:#}"),
+                "the target snapshot's disk size is unknown; the destination is checked on the new box only"
+            );
+            None
+        }
+    }
+}
+
 /// Free MiB on the filesystem holding `path` (created when missing).
 pub fn free_mib(path: &Path) -> Result<u64> {
     std::fs::create_dir_all(path)?;
@@ -513,8 +652,31 @@ pub async fn quiesce(tb: &Toolbox<'_>) -> Result<()> {
     Ok(())
 }
 
-/// List `/work` on a quiesced box and parse it.
+/// Remove the carry's own staging directory from a box, and nothing else: `/work` is never touched
+/// here. Every step that writes into [`STAGE_DIR`] ends with this, on its error paths as well as
+/// its happy one — 2026-11-05, gh_268993031: a pack that failed on ENOSPC returned before its
+/// cleanup and left 389 MiB of tarball, listing and piece on the box, which took the box from
+/// 365 MiB free to 122 and made agentd release its ballast at the next turn.
+pub async fn clear_staging(tb: &Toolbox<'_>) {
+    if let Err(e) = tb.exec(&format!("sudo -n rm -rf {STAGE_DIR}"), 60).await {
+        tracing::warn!(
+            error = %format!("{e:#}"),
+            "the carry's staging directory could not be removed from the box"
+        );
+    }
+}
+
+/// List `/work` on a quiesced box and parse it. `work.list` stays on the box for the pack that
+/// follows; a failure here takes the whole staging directory with it.
 pub async fn list_work(tb: &Toolbox<'_>, attempts: u32) -> Result<Vec<Entry>> {
+    let listed = list_work_inner(tb, attempts).await;
+    if listed.is_err() {
+        clear_staging(tb).await;
+    }
+    listed
+}
+
+async fn list_work_inner(tb: &Toolbox<'_>, attempts: u32) -> Result<Vec<Entry>> {
     let cmd = format!(
         "sudo -n rm -rf {d} && mkdir -p {d} && cd /work && sudo -n find . -xdev \\( -path ./.arbos/logs -o -path './*/.arbos/logs' \\) -prune -o -printf '%y\\t%s\\t%i\\t' -print0 > {d}/work.list && wc -c < {d}/work.list",
         d = STAGE_DIR
@@ -562,8 +724,24 @@ pub struct SpooledPart {
 
 /// Pack every part on the source box and spool it on the relay. The source holds one part's
 /// tarball plus one piece at a time; the relay holds one piece in memory. `progress(k, n)` is
-/// called before part `k` of `n` is made.
+/// called before part `k` of `n` is made. The staging directory is gone when this returns,
+/// whichever way it returns.
 pub async fn pack_parts<P>(
+    tb: &Toolbox<'_>,
+    parts: &[Part],
+    spool: &Path,
+    cfg: &CarryConfig,
+    progress: P,
+) -> Result<Vec<SpooledPart>>
+where
+    P: FnMut(usize, usize),
+{
+    let packed = pack_each_part(tb, parts, spool, cfg, progress).await;
+    clear_staging(tb).await;
+    packed
+}
+
+async fn pack_each_part<P>(
     tb: &Toolbox<'_>,
     parts: &[Part],
     spool: &Path,
@@ -694,7 +872,6 @@ where
             pieces,
         });
     }
-    let _ = tb.exec(&format!("sudo -n rm -rf {STAGE_DIR}"), 60).await;
     tracing::info!(
         parts = n,
         bytes = throughput.bytes,
@@ -874,20 +1051,174 @@ mod tests {
         b
     }
 
+    /// A carry that fits everywhere, as the measure step sees it.
+    fn room(work_mib: i64, spool_free_mib: u64) -> Room {
+        Room {
+            work_mib,
+            spool_free_mib,
+            source_free_mib: 100_000,
+            max_part_mib: DEFAULT_PART_MIB,
+            target_free_mib: None,
+        }
+    }
+
     /// The limit is a sanity stop far above today's boxes: Jacob's 3979 MiB carries; 16 GiB + 1 MiB
     /// does not, and the refusal keeps the phrase the deploy worker's skip rule matches.
     #[test]
     fn limit_is_16_gib_and_refusal_keeps_the_skip_phrase() {
         let c = cfg();
-        assert_eq!(verdict(3979, 500_000, &c), Verdict::Carry);
-        assert_eq!(verdict(16 * 1024, 500_000, &c), Verdict::Carry);
-        let v = verdict(16 * 1024 + 1, 500_000, &c);
+        assert_eq!(verdict(&room(3979, 500_000), &c), Verdict::Carry);
+        assert_eq!(verdict(&room(16 * 1024, 500_000), &c), Verdict::Carry);
+        let v = verdict(&room(16 * 1024 + 1, 500_000), &c);
         assert!(matches!(v, Verdict::TooLarge { .. }));
         assert!(v.reason().unwrap().contains("too large to carry"));
-        let v = verdict(4000, 4000, &c);
+        let v = verdict(&room(4000, 4000), &c);
         assert!(matches!(v, Verdict::NoSpoolRoom { .. }));
         assert!(v.reason().unwrap().contains("too large to carry"));
-        assert_eq!(verdict(4000, 4000 + SPOOL_MARGIN_MIB, &c), Verdict::Carry);
+        assert_eq!(
+            verdict(&room(4000, 4000 + SPOOL_MARGIN_MIB), &c),
+            Verdict::Carry
+        );
+    }
+
+    /// The pack stages its tarballs on the source's own disk, so the source is measured before
+    /// agentd is stopped. gh_268993031, 2026-11-05: `/work` was 9557 MiB with a lone 356.9 MiB file
+    /// in it and 365 MiB free where the parts are staged. Nothing in the old checks looked at that,
+    /// the tarball of that one file filled the disk, and `head` cutting its first piece hit ENOSPC.
+    #[test]
+    fn the_source_box_is_measured_before_it_is_stopped() {
+        let c = CarryConfig {
+            part_mib: 16,
+            ..cfg()
+        };
+        let big_file = 374_241_280; // 356.9 MiB: the pip cache entry that filled the disk
+        let test5 = Room {
+            work_mib: 9557,
+            spool_free_mib: 500_000,
+            source_free_mib: 365,
+            max_part_mib: max_part_bound_mib(c.part_mib, big_file),
+            target_free_mib: None,
+        };
+        assert_eq!(test5.max_part_mib, 357, "a lone big file is its own part");
+        let v = verdict(&test5, &c);
+        assert_eq!(
+            v,
+            Verdict::NoSourceRoom {
+                free_mib: 365,
+                need_mib: 357 + 16 + SOURCE_MARGIN_MIB,
+                max_part_mib: 357,
+                part_mib: 16,
+            }
+        );
+        let reason = v.reason().unwrap();
+        for figure in ["365", "629", "357", "16", "too large to carry"] {
+            assert!(reason.contains(figure), "{figure} missing from {reason:?}");
+        }
+        assert!(
+            reason.len() <= 200,
+            "the reason is cut at 200 characters: {reason:?}"
+        );
+        // Exactly the peak fits; one MiB less does not.
+        assert_eq!(
+            verdict(
+                &Room {
+                    source_free_mib: 629,
+                    ..test5
+                },
+                &c
+            ),
+            Verdict::Carry
+        );
+        assert!(matches!(
+            verdict(
+                &Room {
+                    source_free_mib: 628,
+                    ..test5
+                },
+                &c
+            ),
+            Verdict::NoSourceRoom { .. }
+        ));
+        // Without a file bigger than a part, the peak is one part plus one piece plus the margin.
+        assert_eq!(source_need_mib(max_part_bound_mib(16, 4096), 16), 288);
+        assert_eq!(STAGE_DIR.rsplit_once('/').unwrap().0, STAGE_PARENT);
+    }
+
+    /// The destination's arithmetic is the one the new box is held to; the measure step applies it
+    /// to the target snapshot's disk size, so a snapshot that cannot hold the carry is refused
+    /// before the pack rather than after it. Test5's shape on a 10 GiB snapshot: 9557 + 357 + 32 +
+    /// 512 = 10 458 MiB needed, about 9984 MiB free on a fresh box.
+    #[test]
+    fn a_snapshot_too_small_for_the_carry_is_refused_at_the_measure_step() {
+        let c = CarryConfig {
+            part_mib: 16,
+            ..cfg()
+        };
+        let test5 = Room {
+            work_mib: 9557,
+            spool_free_mib: 500_000,
+            source_free_mib: 100_000,
+            max_part_mib: 357,
+            target_free_mib: Some(fresh_box_free_mib(10)),
+        };
+        assert_eq!(fresh_box_free_mib(10), 9984);
+        let v = verdict(&test5, &c);
+        assert_eq!(
+            v,
+            Verdict::NoDestinationRoom {
+                work_mib: 9557,
+                free_mib: 9984,
+                need_mib: 10_458,
+                max_part_mib: 357,
+                part_mib: 16,
+            }
+        );
+        let reason = v.reason().unwrap();
+        for figure in ["9557", "9984", "10458", "357", "too large to carry"] {
+            assert!(reason.contains(figure), "{figure} missing from {reason:?}");
+        }
+        assert!(
+            reason.len() <= 200,
+            "the reason is cut at 200 characters: {reason:?}"
+        );
+        // The same figures on a 20 GiB snapshot carry, and so does the 0.1.193 upgrade of the same
+        // box, which fitted a 10 GiB snapshot when /work was 3 GiB smaller.
+        assert_eq!(
+            verdict(
+                &Room {
+                    target_free_mib: Some(fresh_box_free_mib(20)),
+                    ..test5
+                },
+                &c
+            ),
+            Verdict::Carry
+        );
+        assert_eq!(
+            verdict(
+                &Room {
+                    work_mib: 6500,
+                    ..test5
+                },
+                &c
+            ),
+            Verdict::Carry
+        );
+        // An unknown snapshot disk leaves the verdict to the `df` on the new box, as before.
+        assert_eq!(
+            verdict(
+                &Room {
+                    target_free_mib: None,
+                    ..test5
+                },
+                &c
+            ),
+            Verdict::Carry
+        );
+        // One arithmetic, two moments: what the measure step needs is what the new box is held to.
+        let need = destination_need_mib(9557, 16, 357);
+        assert_eq!(need, 10_458);
+        assert!(destination_fits(need, None, 9557, 10, 16, 357).is_ok());
+        assert!(destination_fits(need - 1, None, 9557, 10, 16, 357).is_err());
     }
 
     #[test]
@@ -1265,13 +1596,17 @@ mod tests {
             assert_eq!(alive(&a).await?, agentd_before, "measure must not touch agentd");
             // 2. a refusal leaves agentd exactly as it was
             let tiny = CarryConfig { max_work_mib: 100, part_mib, attempts: 3, skip_rebuildable: false, concurrent_carries: 1, spool_root: std::env::temp_dir().join(format!("arbos-carry-e2e-{stamp}")) };
-            let v = verdict(du, 1 << 20, &tiny);
+            let (source_free_mib, max_file_bytes) = source_room(&a).await?;
+            eprintln!("source: {source_free_mib} MiB free at {STAGE_PARENT}, biggest file {max_file_bytes} bytes");
+            let mut room = Room { work_mib: du, spool_free_mib: 1 << 20, source_free_mib, max_part_mib: max_part_bound_mib(part_mib, max_file_bytes), target_free_mib: None };
+            let v = verdict(&room, &tiny);
             assert!(matches!(v, Verdict::TooLarge { .. }), "{v:?}");
             assert_eq!(alive(&a).await?, agentd_before, "a refused attempt must not touch agentd");
             eprintln!("refused at {du} MiB with a 100 MiB limit; agentd untouched");
             // 3. the real carry
             let cfg = CarryConfig { max_work_mib: DEFAULT_MAX_WORK_MIB, ..tiny.clone() };
-            assert_eq!(verdict(du, free_mib(&cfg.spool_root)?, &cfg), Verdict::Carry);
+            room.spool_free_mib = free_mib(&cfg.spool_root)?;
+            assert_eq!(verdict(&room, &cfg), Verdict::Carry);
             quiesce(&a).await?;
             let entries = list_work(&a, cfg.attempts).await?;
             let m = measure(&entries);

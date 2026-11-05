@@ -8,11 +8,12 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use loro::event::DiffEvent;
-pub use loro::VersionVector;
+use loro::event::{Diff, DiffEvent, ListDiffItem};
 use loro::{
-    Container, ExportMode, Index, LoroDoc, LoroList, LoroMap, LoroText, LoroValue, ValueOrContainer,
+    Container, ContainerID, ContainerType, ExportMode, Index, LoroDoc, LoroList, LoroMap, LoroText,
+    LoroValue, ValueOrContainer,
 };
+pub use loro::{Frontiers, VersionVector};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -50,6 +51,58 @@ pub struct Touched {
     /// Anything outside `messages` (project doc maps, `commands`, `meta`, …).
     /// Mirrors Swift `ChatDoc.Touched.other` so UniFFI clients lose nothing.
     pub other: bool,
+}
+
+/// One string field of a Loro map, when it is a plain string.
+fn map_str(m: &LoroMap, key: &str) -> Option<String> {
+    match m.get(key) {
+        Some(ValueOrContainer::Value(LoroValue::String(s))) => Some(s.to_string()),
+        _ => None,
+    }
+}
+
+/// Is this the root `messages` list, rather than a map or list nested inside it?
+fn is_messages_root(cid: &ContainerID) -> bool {
+    matches!(
+        cid,
+        ContainerID::Root { name, container_type }
+            if name.as_str() == "messages" && *container_type == ContainerType::List
+    )
+}
+
+/// What one imported update did to a chat's `messages` list.
+///
+/// Mechanical on purpose: it reports what an update changed and never whether the change was
+/// allowed. Who may delete, insert or relabel a message is the relay's to decide, because only
+/// the relay knows which principal pushed the bytes.
+/// A message's id and the `sender` written on it, as the list stands at a given version.
+pub type MessageIdentity = (String, Option<String>);
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct MessageChanges {
+    /// Messages the update took out of the list: the id, and the `sender` the row carried
+    /// before it went.
+    ///
+    /// The sender is here because the relay cannot recover it afterwards — the row is gone
+    /// from the doc by the time the diff is read — and it is what tells a box's own
+    /// unattributed row apart from a person's. See `push_guard`'s removal arm.
+    pub removed: Vec<MessageIdentity>,
+    /// Messages the update added, each with the `sender` written on it (`None` when absent).
+    pub inserted: Vec<(String, Option<String>)>,
+    /// `(message id, field)` for each field written onto a message that was already in the
+    /// list. Only messages are reported: an edit inside a message's `parts` is not a field on
+    /// the message, and a part map carries its own `id` that must not be mistaken for one.
+    pub rewritten: Vec<(String, String)>,
+    /// Every message id, in list order, as the list stands at `to`.
+    ///
+    /// Returned rather than left to the caller because the caller cannot recompute it cheaply
+    /// and must not guess: a mirror whose *order* drifts from the list would make the next
+    /// diff name the wrong message as deleted. Applying the delta is the only exact way, and
+    /// the walk that reports the changes is already doing it.
+    pub ids_after: Vec<MessageIdentity>,
+    /// The diff could not be read, so nothing above is known to be complete. A caller deciding
+    /// authorisation must treat this as "anything may have changed".
+    pub unreadable: bool,
 }
 
 /// Map a root diff to message indexes. Paths look like
@@ -357,6 +410,9 @@ pub struct ChatDoc {
     /// Set from inside Loro's diff callback when an import (or a local write) stamps a
     /// message `redactedAt`; folded into the two cells above by [`Self::sync_redaction_flag`].
     redaction_seen: Arc<AtomicBool>,
+    /// What [`Self::start_assistant_message`] writes as `sender`. See
+    /// [`Self::set_assistant_sender`] for why this is settable.
+    assistant_sender: RefCell<String>,
     _redaction_sub: loro::Subscription,
 }
 
@@ -618,7 +674,27 @@ impl ChatDoc {
             shallow_mode: Cell::new(false),
             redaction_seen,
             _redaction_sub: sub,
+            assistant_sender: RefCell::new("agent".to_owned()),
         }
+    }
+
+    /// Name the agent that assistant rows opened on this replica belong to, as
+    /// `agent:<project_id>`.
+    ///
+    /// The relay attributes a row the box pushes from its `sender`, and `Pusher::BoxOf::owns`
+    /// (`arbos-relay` `push_guard.rs`) only accepts `agent:<project_id>` resolving to a project
+    /// the box's owner holds. The bare `agent` this defaults to resolves to nothing, so the
+    /// relay recorded **no author at all** for agentd's rows — and then refused every later
+    /// removal of one as `not_yours`, blocking the push queue behind it (Jacob, 2026-11-04:
+    /// 231 refusals, and a reply that never reached the relay).
+    ///
+    /// This is not a new value on the wire: rows in shared chats already carry
+    /// `agent:<project_id>`, and every reader handles it — `reply.rs` counts it as the agent's
+    /// own, and the Mac's avatar lookup treats it as attributed rather than falling back to
+    /// guessing the room's only agent. Holders that cannot name one agent (the relay's own
+    /// writers, fixtures) keep the default.
+    pub fn set_assistant_sender(&self, sender: &str) {
+        *self.assistant_sender.borrow_mut() = sender.to_owned();
     }
 
     /// Fold what the diff callback saw into the flags (called by every reader of them).
@@ -1394,7 +1470,8 @@ impl ChatDoc {
         let m = msgs.push_container(LoroMap::new()).expect("push message");
         m.insert("id", msg_id).ok();
         m.insert("role", "assistant").ok();
-        m.insert("sender", "agent").ok();
+        m.insert("sender", self.assistant_sender.borrow().as_str())
+            .ok();
         m.insert("createdAt", now_ms()).ok();
         m.insert("deviceId", device_id).ok();
         m.insert("inReplyTo", in_reply_to).ok();
@@ -1958,6 +2035,135 @@ impl ChatDoc {
         self.set_message_fields(msg_id, &[("activity", v)]);
     }
 
+    /// This doc's place in its own history, for [`Self::messages_changed`] to diff against.
+    pub fn frontiers(&self) -> Frontiers {
+        self.doc.oplog_frontiers()
+    }
+
+    /// Every message id, in list order, without projecting the messages themselves.
+    ///
+    /// [`Self::messages`] goes through `get_deep_value`, which costs about 15 ms at 2 000
+    /// messages and 82 ms at 10 000 — too much to spend on a push. This walk reads one key per
+    /// row, which is what lets a caller keep a mirror of the list in step with a busy room.
+    /// Every message's id and `sender`, in list order. The sender half is what lets the relay
+    /// say whose a row was *after* an update removed it; see [`MessageChanges::removed`].
+    pub fn message_identities(&self) -> Vec<MessageIdentity> {
+        let msgs = self.messages_list();
+        let mut out = Vec::with_capacity(msgs.len());
+        for i in 0..msgs.len() {
+            let Some(ValueOrContainer::Container(Container::Map(m))) = msgs.get(i) else {
+                continue;
+            };
+            if let Some(id) = map_str(&m, "id") {
+                out.push((id, map_str(&m, "sender")));
+            }
+        }
+        out
+    }
+
+    pub fn message_ids(&self) -> Vec<String> {
+        let msgs = self.messages_list();
+        let mut out = Vec::with_capacity(msgs.len());
+        for i in 0..msgs.len() {
+            let Some(ValueOrContainer::Container(Container::Map(m))) = msgs.get(i) else {
+                continue;
+            };
+            if let Some(id) = map_str(&m, "id") {
+                out.push(id);
+            }
+        }
+        out
+    }
+
+    /// What the history between `from` and `to` did to the `messages` list.
+    ///
+    /// `before_ids` is [`Self::message_ids`] as the list stood at `from`, and it is load-bearing
+    /// rather than an optimisation: Loro's `ListDiffItem::Delete` carries only a count of
+    /// removed entries, never the entries themselves, so the id of a deleted message exists
+    /// nowhere in the diff. The alternative is `LoroDoc::fork_at`, which is documented O(n) in
+    /// both time and space and so cannot run per push.
+    pub fn messages_changed(
+        &self,
+        from: &Frontiers,
+        to: &Frontiers,
+        before_ids: &[MessageIdentity],
+    ) -> MessageChanges {
+        let mut out = MessageChanges::default();
+        let Ok(batch) = self.doc.diff(from, to) else {
+            out.unreadable = true;
+            return out;
+        };
+        let mut saw_list = false;
+        for (cid, diff) in batch.iter() {
+            match diff {
+                Diff::List(items) if is_messages_root(cid) => {
+                    saw_list = true;
+                    // Delta encoding over the list as it stood at `from`: retain and delete
+                    // both consume the old list, insert does not. Walking it is also how
+                    // `ids_after` is built, since applying the delta is the only exact way to
+                    // know the order the list ends up in.
+                    let mut after = Vec::with_capacity(before_ids.len());
+                    let mut old = 0usize;
+                    for item in items {
+                        match item {
+                            ListDiffItem::Retain { retain } => {
+                                let end = (old + retain).min(before_ids.len());
+                                after.extend_from_slice(&before_ids[old.min(end)..end]);
+                                old += retain;
+                            }
+                            ListDiffItem::Delete { delete } => {
+                                let end = (old + delete).min(before_ids.len());
+                                out.removed
+                                    .extend_from_slice(&before_ids[old.min(end)..end]);
+                                old += delete;
+                            }
+                            ListDiffItem::Insert { insert, .. } => {
+                                for v in insert {
+                                    let m = match v {
+                                        ValueOrContainer::Container(Container::Map(m)) => Some(m),
+                                        _ => None,
+                                    };
+                                    let id = m.and_then(|m| map_str(m, "id"));
+                                    // An entry with no readable id still takes up a position.
+                                    // Holding an unnameable placeholder keeps the mirror in
+                                    // step, so a later delete over it reports an id no message
+                                    // can have instead of a neighbour's.
+                                    after.push((
+                                        id.clone().unwrap_or_default(),
+                                        m.and_then(|m| map_str(m, "sender")),
+                                    ));
+                                    if let (Some(id), Some(m)) = (id, m) {
+                                        out.inserted.push((id, map_str(m, "sender")));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    after.extend_from_slice(&before_ids[old.min(before_ids.len())..]);
+                    out.ids_after = after;
+                }
+                Diff::Map(delta) => {
+                    // A map somewhere in the doc. It is a message only if its own `id` is one
+                    // of the ids the list held at `from`; parts carry an `id` too.
+                    let Some(id) = self.doc.try_get_map(cid).and_then(|m| map_str(&m, "id")) else {
+                        continue;
+                    };
+                    if !before_ids.iter().any(|(b, _)| *b == id) {
+                        continue;
+                    }
+                    for key in delta.updated.keys() {
+                        out.rewritten.push((id.clone(), key.to_string()));
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !saw_list {
+            out.ids_after = before_ids.to_vec();
+        }
+        out
+    }
+
     pub fn messages(&self) -> Vec<MessageView> {
         let v = lv_to_json(&self.messages_list().get_deep_value());
         v.as_array()
@@ -2303,7 +2509,202 @@ mod secret_redaction_tests {
 }
 
 #[cfg(test)]
+mod message_change_tests {
+    use super::*;
+
+    fn with(sender: &str) -> UserMessageOpts {
+        UserMessageOpts {
+            sender: Some(sender.to_owned()),
+            ..Default::default()
+        }
+    }
+
+    /// One doc with three messages, as a room stands before a push.
+    /// The ids out of an id+sender list, for assertions that only care about order.
+    fn just_ids(v: &[MessageIdentity]) -> Vec<&str> {
+        v.iter().map(|(id, _)| id.as_str()).collect()
+    }
+
+    fn seeded() -> (ChatDoc, Vec<MessageIdentity>) {
+        let doc = ChatDoc::new(Some(1), false);
+        for (id, who) in [
+            ("m1", "user:alice"),
+            ("m2", "user:bob"),
+            ("m3", "user:alice"),
+        ] {
+            doc.append_user_message(id, "hello", "dev", &with(who))
+                .unwrap();
+        }
+        doc.commit_now();
+        let ids = doc.message_identities();
+        assert_eq!(just_ids(&ids), ["m1", "m2", "m3"]);
+        (doc, ids)
+    }
+
+    /// A deleted message's id is in no part of the diff — `ListDiffItem::Delete` is a count —
+    /// so the mirror of ids is what names it. This is the test that justifies carrying one.
+    #[test]
+    fn a_delete_is_named_from_the_mirror_of_ids() {
+        let (doc, ids) = seeded();
+        let before = doc.frontiers();
+        doc.delete_message("m2").unwrap();
+        doc.commit_now();
+
+        let changes = doc.messages_changed(&before, &doc.frontiers(), &ids);
+        assert_eq!(
+            changes.removed,
+            [("m2".to_owned(), Some("user:bob".to_owned()))]
+        );
+        assert!(changes.inserted.is_empty());
+        assert!(changes.rewritten.is_empty());
+        assert!(!changes.unreadable);
+    }
+
+    /// An insert reports the `sender` the writer put on the row, which is what lets the caller
+    /// compare it against the principal that pushed it.
+    #[test]
+    fn an_insert_reports_the_sender_it_claims() {
+        let (doc, ids) = seeded();
+        let before = doc.frontiers();
+        doc.append_user_message("m4", "mine", "dev", &with("user:carol"))
+            .unwrap();
+        doc.commit_now();
+
+        let changes = doc.messages_changed(&before, &doc.frontiers(), &ids);
+        assert_eq!(
+            changes.inserted,
+            [("m4".to_owned(), Some("user:carol".to_owned()))]
+        );
+        assert!(changes.removed.is_empty());
+        assert!(
+            changes.rewritten.is_empty(),
+            "a brand-new row is an insert, not a rewrite: {:?}",
+            changes.rewritten
+        );
+    }
+
+    /// Relabelling an existing row is a field written onto a message that was already there,
+    /// and it has to be told apart from the insert above or the caller cannot refuse one
+    /// without refusing both.
+    #[test]
+    fn relabelling_an_existing_message_is_a_rewrite() {
+        let (doc, ids) = seeded();
+        let before = doc.frontiers();
+        doc.set_message_fields("m1", &[("sender", Value::from("user:bob"))]);
+        doc.commit_now();
+
+        let changes = doc.messages_changed(&before, &doc.frontiers(), &ids);
+        assert_eq!(changes.rewritten, [("m1".to_owned(), "sender".to_owned())]);
+        assert!(changes.removed.is_empty());
+        assert!(changes.inserted.is_empty());
+    }
+
+    /// The shortcut this design rejects: one update that deletes someone else's message and
+    /// adds one of your own leaves the list the same length, so a count comparison sees
+    /// nothing. The diff sees both.
+    #[test]
+    fn a_delete_plus_an_insert_is_not_hidden_by_an_unchanged_count() {
+        let (doc, ids) = seeded();
+        let before = doc.frontiers();
+        doc.delete_message("m1").unwrap();
+        doc.append_user_message("m9", "mine", "dev", &with("user:bob"))
+            .unwrap();
+        doc.commit_now();
+
+        assert_eq!(doc.message_ids().len(), ids.len(), "the count is unchanged");
+        let changes = doc.messages_changed(&before, &doc.frontiers(), &ids);
+        assert_eq!(
+            changes.removed,
+            [("m1".to_owned(), Some("user:alice".to_owned()))]
+        );
+        assert_eq!(
+            changes.inserted,
+            [("m9".to_owned(), Some("user:bob".to_owned()))]
+        );
+    }
+
+    /// The caller keeps its mirror from `ids_after` instead of rebuilding it, so the walk owes
+    /// it the list in the doc's own order. Appending the inserts onto the old order is not the
+    /// same thing — a delete earlier in the list shifts everything behind it — and a mirror
+    /// whose order has drifted makes the next diff name the wrong message as deleted.
+    #[test]
+    fn the_post_image_is_the_list_in_the_docs_own_order() {
+        let (doc, ids) = seeded();
+        let before = doc.frontiers();
+        doc.delete_message("m1").unwrap();
+        doc.append_user_message("m9", "mine", "dev", &with("user:bob"))
+            .unwrap();
+        doc.commit_now();
+
+        let changes = doc.messages_changed(&before, &doc.frontiers(), &ids);
+        assert_eq!(just_ids(&changes.ids_after), ["m2", "m3", "m9"]);
+        assert_eq!(changes.ids_after, doc.message_identities());
+    }
+
+    /// An update that leaves the list alone still has to hand the mirror back, or the caller
+    /// would store an empty one and read the next delete as a message it has never seen.
+    #[test]
+    fn an_update_that_leaves_the_list_alone_hands_the_mirror_back() {
+        let (doc, ids) = seeded();
+        let before = doc.frontiers();
+        doc.set_message_fields("m1", &[("sender", Value::from("user:bob"))]);
+        doc.commit_now();
+
+        let changes = doc.messages_changed(&before, &doc.frontiers(), &ids);
+        assert_eq!(changes.ids_after, ids);
+    }
+
+    /// Editing a message's text touches a part, not the message, and parts carry their own
+    /// `id`. Reporting those as rewritten messages would make ordinary edits unpushable.
+    #[test]
+    fn editing_text_is_not_a_change_to_the_message_row() {
+        let (doc, ids) = seeded();
+        let before = doc.frontiers();
+        doc.edit_message_text("m1", "changed my mind").unwrap();
+        doc.commit_now();
+
+        let changes = doc.messages_changed(&before, &doc.frontiers(), &ids);
+        assert!(
+            !changes
+                .rewritten
+                .iter()
+                .any(|(id, f)| id == "m1" && f == "sender"),
+            "an edit must not look like a relabel: {:?}",
+            changes.rewritten
+        );
+        assert!(changes.removed.is_empty());
+        assert!(changes.inserted.is_empty());
+    }
+}
+
+#[cfg(test)]
 mod tests {
+    /// An assistant row must name the agent it belongs to. The relay attributes a box's row
+    /// from `sender` and only accepts `agent:<project_id>` (`push_guard.rs`); the bare `agent`
+    /// this used to always write matched nothing, so no author was recorded and every later
+    /// edit of that row came back `not_yours`.
+    #[test]
+    fn an_assistant_row_is_signed_with_the_agent_that_opened_it() {
+        let doc = ChatDoc::new(Some(1), true);
+        doc.start_assistant_message("unsigned", "ask", "box:1");
+        assert_eq!(
+            doc.message("unsigned").unwrap().rest["sender"],
+            Value::from("agent"),
+            "holders that cannot name one agent keep the old default"
+        );
+
+        doc.set_assistant_sender("agent:01PROJECT");
+        doc.start_assistant_message("signed", "ask", "box:1");
+        let sender = doc.message("signed").unwrap().rest["sender"].clone();
+        assert_eq!(sender, Value::from("agent:01PROJECT"));
+        // The shape `Pusher::BoxOf::owns` strips to reach a project id.
+        assert_eq!(
+            sender.as_str().unwrap().strip_prefix("agent:"),
+            Some("01PROJECT"),
+            "the relay cannot resolve this to a project, so it would record no author"
+        );
+    }
+
     #[test]
     fn remove_parts_of_kind_drops_only_that_kind_and_leaves_the_rest() {
         use super::*;

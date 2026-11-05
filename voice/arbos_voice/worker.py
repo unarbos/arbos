@@ -15,7 +15,9 @@ Tools: `ask_agent(request)`, forwarded through the relay to agentd on the owner'
 `look(what, hand_to_agent)`, a full-resolution camera still (vision.py). While a human's camera is
 on the model also gets a small still about once a second (owner toggle `vision_enabled`).
 Costs, time to first audio and barge-in cut time are measured here and reported to the relay
-every 30 s and at the end; the relay's answer carries the cost stops.
+every 30 s and at the end. The relay debits each report into the account's ledger as it arrives
+and answers with any cost stop, so the account's own limit ends a call within one interval of
+the money running out; every other limit here is a resource bound, not a budget.
 """
 
 from __future__ import annotations
@@ -116,12 +118,10 @@ _SPOKEN_SHORT = frozenset(
 )
 
 GOODBYE = {
-    "call_cap": "I've hit the spending cap for this call, so I'll drop off now. Everything we said is in the chat.",
-    "voice_daily_cap": "I've reached today's voice budget, so I'll leave the call. I'm still here in the text chat.",
-    "daily_cap": "Today's spending cap is reached, so I'll leave the call. I'm still here in the text chat.",
+    "daily_cap": "Today's spending limit is reached, so I'll leave the call. I'm still here in the text chat.",
     "credits": "There are no credits left, so I'll leave the call.",
     "kill_switch": "Arbos is in read-only mode right now, so I'll leave the call.",
-    "call_max": "We've been on for an hour, which is my limit per call. I'll drop off now.",
+    "leak_guard": "This call has been open far longer than it should be, so I'll drop off. Call me again any time.",
     "idle": "I'll drop off since it's gone quiet. Call me again any time.",
     "asked": "Okay, leaving. Bye.",
     "alone": "",
@@ -1284,8 +1284,10 @@ class VoiceCall:
             if stop:
                 await self.finish(stop)
                 return
-            if self.meter.seconds() >= self.cfg.call_max_s:
-                await self.finish("call_max")
+            # Not a budget: what a call costs is bounded by the stop above, charged into the
+            # account's ledger on every pass of this loop. This only catches a wedged call.
+            if self.meter.seconds() >= self.cfg.call_leak_guard_s:
+                await self.finish("leak_guard")
                 return
 
     async def settings_loop(self) -> None:

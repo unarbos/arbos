@@ -144,7 +144,6 @@ RUN chmod 644 /usr/local/lib/arbos/secrets-env.sh \
  && printf '\n. /usr/local/lib/arbos/secrets-env.sh\n' >> /etc/bash.bashrc
 # --- Our binary (built earlier in the same CI job: cargo build --release -p arbos-agentd → dist/)
 COPY dist/arbos-agentd /usr/local/bin/arbos-agentd
-COPY image/AGENTS.md   /etc/arbos/AGENTS.md
 
 # --- User and folders (the node image already owns uid 1000; reuse it for daytona)
 RUN userdel -r node \

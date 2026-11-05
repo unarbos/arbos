@@ -48,10 +48,18 @@ DEPLOY_ENV=/etc/arbos/deploy.env
 KILL_FILE=/etc/arbos/deploy.disabled
 # Disk guard (#1890): below DISK_LOW_GB free on the state volume no image build starts (a build + its
 # docker layers is ~4 GB each; 22 stale tags held 85 GB on 2026-10-26 when the host hit 94–99 %); the
-# request stays queued and is picked up when space is back. Every tick also prunes the agent image
-# tags this worker produced down to IMAGE_TAGS_KEEP (the deployed one, the default, and the newest few).
+# request stays queued and is picked up when space is back. Every tick also looks at the agent image
+# tags this worker produced beyond IMAGE_TAGS_KEEP (the deployed one, the default, and the newest few).
 DISK_LOW_GB="${ARBOS_DISK_LOW_GB:-40}"
 IMAGE_TAGS_KEEP="${ARBOS_IMAGE_TAGS_KEEP:-4}"
+# Removing an image tag is a DELETE, so the prune is OFF unless someone turns it on, and the shipped
+# default must stay 0 (2026-11-05). With no configuration present the tick names every tag it would
+# remove and removes none, which is also how the operator gets the list to decide from — the names,
+# not a count. `$STATE/agentd.image-tags-unpruned` always holds the current list; the log line repeats
+# only when that list changes, because this runs once a minute. Turn it on with IMAGE_TAG_PRUNE=1 in
+# /etc/arbos/deploy.env (sourced below) or ARBOS_IMAGE_TAG_PRUNE=1 in the environment.
+IMAGE_TAG_PRUNE="${ARBOS_IMAGE_TAG_PRUNE:-0}"
+image_tag_prune_enabled() { [[ "$IMAGE_TAG_PRUNE" == 1 ]]; }
 disk_free_gb() { df --output=avail -BG "$STATE" 2>/dev/null | tail -n 1 | tr -d ' G'; }
 disk_low() { local f; f="$(disk_free_gb)"; [[ -n "$f" ]] && (( f < DISK_LOW_GB )); }
 HOOK="${ARBOS_DEPLOY_HOOK:-/usr/local/bin/arbos-deploy-hook}"
@@ -133,33 +141,35 @@ record_failure() {
 
 # Image-roll hold (2026-10-24 01:1x): three images in a row (0.1.101/102/103) failed the busy-reply canary on
 # the same bad agentd commit; every new merge burned another image. After a canary failure the lane is HELD:
-# no agentd roll starts until an operator lifts it (`arbos-deploy-worker hold-agentd off`) or a commit whose
-# message carries `[canary-fix]` reaches main. The hold file names the failing image and sha.
+# no agentd roll starts until an operator lifts it with `arbos-deploy-worker hold-agentd off`. The hold file
+# names the failing image and sha.
+#
+# THE HOLD LIFTS BY HAND ONLY, and the auto-lift is gone rather than downgraded (2026-11-05).
+# `agentd_hold_release_if_fixed` used to run at the top of every roll_image — so once a minute — and delete
+# the hold file as soon as a commit on main since the hold both matched
+# `git log --format='%H %s' … | grep -i 'canary-fix\]'` and touched crates/arbos-agentd/ or image/. The next
+# tick then built main's head and rolled it to every box outside agentd.skip, with no person in the loop.
+# Three things were wrong with it, and the third is why nothing replaces it:
+#   1. A commit subject is author-controlled text. It is reviewed as prose and never as deploy authority, so
+#      one line of a commit message decided whether 56 production boxes moved.
+#   2. The pattern was much wider than the tag it documented. No leading bracket and case-insensitive, so
+#      `Revert "…" [Canary-Fix]` and `drop the canary-fix] hack` armed it exactly as well as `[canary-fix]`.
+#   3. It has already rolled an unapproved image. At 01:19:29 on Oct 24, 6903de6f0 introduced the hold and
+#      the auto-lift; at 01:30 the auto-lift fired on that same commit's own subject and rolled 0.1.105
+#      without the fix; at 01:37:20, 8dbf5d19c added the agentd-path condition. That remedy also silently
+#      WIDENED the text match, dropping the `\[` the original pattern had. So the one recorded use of the
+#      automation was a wrong one, and narrowing the trigger has already been tried as the answer.
+# A warning in its place would have to fire on that same unreliable pattern to be worth anything, which
+# makes it noise standing next to a safety gate — and an operator is told the lane is held anyway, by the
+# hold file, by `status`, and by roll_image's own "roll skipped — lane held" line every minute. `rm -f` on
+# the hold file now exists in exactly one place in this script: the `hold-agentd off` command.
 agentd_hold_file() { echo "$STATE/agentd.hold"; }
 agentd_held() { [[ -f "$(agentd_hold_file)" ]]; }
 hold_agentd() {
   # hold_agentd <sha> <version> <reason>
   printf 'sha=%s\nimage=%s\nat=%s\nreason=%s\n' "$1" "$2" "$(date -u +%FT%TZ)" "$3" > "$(agentd_hold_file)"
-  event agentd "$1" roll_held "image $2: $3 — agentd rolls held until a [canary-fix] commit lands or the hold is lifted"
-  log "agentd: HOLD — $3 (image $2); no further images until a [canary-fix] commit lands or 'hold-agentd off'"
-}
-agentd_hold_release_if_fixed() {
-  # A commit tagged [canary-fix] on main since the hold lifts it.
-  agentd_held || return 0
-  local held_sha c
-  held_sha="$(sed -n 's/^sha=//p' "$(agentd_hold_file)" | head -1)"
-  # Only a commit that (a) carries the tag in its subject and (b) touches agentd code lifts the hold — a
-  # commit that merely mentions the tag in prose (01:30 Oct 24: this very feature's commit, which rolled
-  # 0.1.105 without the fix) must not.
-  while read -r c; do
-    [[ -n "$c" ]] || continue
-    if git -C "$REPO" diff-tree --no-commit-id --name-only -r "$c" 2>/dev/null | grep -qE '^(crates/arbos-agentd/|image/)'; then
-      log "agentd: canary-fix commit ${c:0:9} is on main; lifting the hold"
-      event agentd "$c" roll_hold_lifted "canary-fix commit ${c:0:9} landed"
-      rm -f "$(agentd_hold_file)"
-      return 0
-    fi
-  done < <(git -C "$REPO" log --format='%H %s' "${held_sha:-HEAD~50}..origin/main" 2>/dev/null | grep -i 'canary-fix\]' | cut -d' ' -f1)
+  event agentd "$1" roll_held "image $2: $3 — agentd rolls held until an operator lifts the hold"
+  log "agentd: HOLD — $3 (image $2); no further images until 'arbos-deploy-worker hold-agentd off'"
 }
 
 # Lane collision (2026-10-29 00:13): the 0.1.180 canary busy-reply smoke ran while the relay lane restarted
@@ -584,6 +594,15 @@ pending_boxes() {
   # owner (the CD rig, the code-mode eval) and must not hold the roll (2026-10-22: 0.1.56 held the agentd
   # slot 98 min on two such boxes, so 0.1.57 never built). Real users' errored boxes still count: they
   # are the point of the roll and the operator must see them.
+  # The same shape came back through the pin door (2026-11-03: 0.1.184 held the agentd slot the full
+  # 90-min ROLL_WAIT_S on test_01M56N391S4DWWAFH24WMKHZFF and test_01M62YD3JJ7TJXNAP5NYS6WTQN, both
+  # `users.snapshot = arbos-agent-0.1.184`, so the next image roll could not start for an hour). The
+  # relay resolves a box's target as `users.snapshot ?? default_snapshot` (upgrade.rs), so a box on its
+  # pin answers "already on the current snapshot" every pass and could never leave a pending set that
+  # compared the row against the ROLL's target alone. A satisfied pin is NOT pending: it is deliberate,
+  # so it never reaches roll_pass and never counts toward ROLL_MAX_CONSECUTIVE_FAILURES, and
+  # `pinned_boxes` names it so "pinned" reads apart from "missing". A pin the box has NOT reached yet
+  # stays pending: the roll drives it, and the relay takes it to the pin rather than to the target.
   admin_users | python3 -c '
 import sys, json
 target, tier = sys.argv[1], sys.argv[2]
@@ -596,6 +615,8 @@ for u in json.load(sys.stdin):
     if not m.get("sandbox_id"):
         continue
     if is_test and m.get("state") == "error":
+        continue
+    if m.get("pinned_snapshot") and m.get("snapshot") == m.get("pinned_snapshot"):
         continue
     if u["id"] in skipped:
         continue
@@ -637,6 +658,19 @@ for u in json.load(sys.stdin):
     m = u.get("machine") or {}
     if u["id"].startswith("test_") and m.get("sandbox_id") and m.get("state") == "error":
         print(u["id"])'
+}
+
+pinned_boxes() {
+  # Boxes skipped by pending_boxes because their `users.snapshot` pin is already satisfied — printed as
+  # `<uid> <pin>` so the roll log and `status` can say "pinned, deliberately not rolling" rather than
+  # leaving the box unaccounted for.
+  admin_users | python3 -c '
+import sys, json
+for u in json.load(sys.stdin):
+    m = u.get("machine") or {}
+    pin = m.get("pinned_snapshot")
+    if m.get("sandbox_id") and pin and m.get("snapshot") == pin:
+        print(u["id"], pin)'
 }
 
 real_min_sha() {
@@ -899,9 +933,11 @@ roll_boxes() {
   # roll_boxes <target> — passes every 2 min for up to ROLL_WAIT_S; 0 when no box is pending.
   local target="$1" t0
   t0=$(date +%s)
-  local errored
+  local errored pinned
   errored="$(errored_test_boxes | tr '\n' ' ')"
   [[ -n "$errored" ]] && log "agentd: skipping errored test boxes (needs their owner, not the roll): $errored"
+  pinned="$(pinned_boxes | sed 's/ /=/' | tr '\n' ' ')"
+  [[ -n "$pinned" ]] && log "agentd: skipping boxes already on their users.snapshot pin (deliberate, not a failure): $pinned"
   while (( $(date +%s) - t0 < ROLL_WAIT_S )); do
     if [[ -z "$(pending_boxes "$target" all || true)" ]]; then
       log "agentd: every box (real and test) is on $target"
@@ -1006,9 +1042,8 @@ roll_image() {
   need_root
   local sha="$1" version tag t0 st waited=0 image snapshot
   ensure_repo
-  agentd_hold_release_if_fixed
   if agentd_held; then
-    log "agentd: roll of $1 skipped — lane held ($(sed -n 's/^reason=//p' "$(agentd_hold_file)" | head -1)); 'arbos-deploy-worker hold-agentd off' or a [canary-fix] commit lifts it"
+    log "agentd: roll of $1 skipped — lane held ($(sed -n 's/^reason=//p' "$(agentd_hold_file)" | head -1)); only 'arbos-deploy-worker hold-agentd off' lifts it"
     exit 0
   fi
   sha="$(resolve "$sha")" || { log "agentd: cannot resolve $1"; exit 1; }
@@ -1429,17 +1464,36 @@ continue_roll_if_due() {
 }
 
 # Local docker image tags of our agent image, newest first by version; keep the ones a container runs,
-# the relay default, and the IMAGE_TAGS_KEEP newest. ~3.8 GB each.
+# the relay default, and the IMAGE_TAGS_KEEP newest. ~3.8 GB each. Deletes nothing unless
+# IMAGE_TAG_PRUNE=1; see the knob above for why the default is off.
 prune_agent_image_tags() {
-  local repo="ghcr.io/unarbos/arbos/arbos-agent" in_use tag n=0
-  in_use="$(docker ps -a --format '{{.Image}}' 2>/dev/null | grep -F "$repo:" | sed "s#^$repo:##" | sort -u | tr '\n' ' ')"
-  in_use="$in_use $(secret_from "$RELAY_ENV" ARBOS_DAYTONA_SNAPSHOT 2>/dev/null | sed 's/^arbos-agent-//')"
+  local repo="ghcr.io/unarbos/arbos/arbos-agent" in_use tag n=0 listed
+  local -a spare=()
+  # `|| true` on both: with `set -o pipefail` a grep that matches nothing fails the whole pipeline, and
+  # this assignment would then end the TICK, not just the prune — no container using the image is an
+  # ordinary state, not an error. Same shape as the no-marker grep that ended every tick on Oct 23.
+  in_use="$(docker ps -a --format '{{.Image}}' 2>/dev/null | grep -F "$repo:" | sed "s#^$repo:##" | sort -u | tr '\n' ' ' || true)"
+  in_use="$in_use $(secret_from "$RELAY_ENV" ARBOS_DAYTONA_SNAPSHOT 2>/dev/null | sed 's/^arbos-agent-//' || true)"
   while read -r tag; do
     [[ -n "$tag" ]] || continue
     case " $in_use " in *" $tag "*) continue ;; esac
+    spare+=("$tag")
+  done < <(docker images --format '{{.Tag}}' "$repo" 2>/dev/null | grep -E '^0\.[0-9]+\.[0-9]+$' | sort -t. -k3 -rn | tail -n "+$((IMAGE_TAGS_KEEP + 1))")
+  (( ${#spare[@]} )) || { rm -f "$STATE/agentd.image-tags-unpruned"; return 0; }
+  if ! image_tag_prune_enabled; then
+    # Name every tag, every time the set changes: this list is what a decision to enable the prune is
+    # made from, so a count would not do. The file carries the same list for reading at any moment.
+    listed="$(cat "$STATE/agentd.image-tags-unpruned" 2>/dev/null || true)"
+    printf '%s\n' "${spare[@]}" > "$STATE/agentd.image-tags-unpruned"
+    [[ "$listed" == "$(printf '%s\n' "${spare[@]}")" ]] \
+      || log "agentd: image tag prune is OFF (IMAGE_TAG_PRUNE=$IMAGE_TAG_PRUNE); ${#spare[@]} spare tag(s) kept, none removed: ${spare[*]}; $(disk_free_gb) GB free"
+    return 0
+  fi
+  rm -f "$STATE/agentd.image-tags-unpruned"
+  for tag in "${spare[@]}"; do
     if dry; then log "dry-run: would remove image tag $repo:$tag"; continue; fi
     docker rmi "$repo:$tag" >/dev/null 2>&1 && n=$((n + 1))
-  done < <(docker images --format '{{.Tag}}' "$repo" 2>/dev/null | grep -E '^0\.[0-9]+\.[0-9]+$' | sort -t. -k3 -rn | tail -n "+$((IMAGE_TAGS_KEEP + 1))")
+  done
   (( n > 0 )) && log "agentd: pruned $n old agent image tag(s); $(disk_free_gb) GB free"
   return 0
 }
@@ -1484,6 +1538,11 @@ tick() {
 
 status() {
   echo "disk    $(disk_free_gb) GB free on $STATE (image builds pause below ${DISK_LOW_GB} GB)$(disk_low && echo '  ** LOW **')"
+  if image_tag_prune_enabled; then
+    echo "prune   image tag prune ON (IMAGE_TAG_PRUNE=1); tags beyond the newest ${IMAGE_TAGS_KEEP} are removed each tick"
+  else
+    echo "prune   image tag prune OFF; spare tags are kept and listed: $(tr '\n' ' ' < "$STATE/agentd.image-tags-unpruned" 2>/dev/null || echo none)"
+  fi
   echo "relay   deployed $(deployed_sha relay)"
   echo "voice   deployed $(deployed_sha voice)"
   echo "agentd  deployed $(deployed_sha agentd) (default snapshot $(secret_from "$RELAY_ENV" ARBOS_DAYTONA_SNAPSHOT 2>/dev/null || echo ?))"
@@ -1499,6 +1558,12 @@ status() {
     echo "skipped boxes (left on their image; 'unskip <uid>' after the fix):"
     while IFS='|' read -r u r w; do echo "  $u since $w: $r"; done < "$STATE/agentd.skip"
   fi
+  local pinned
+  pinned="$(pinned_boxes 2>/dev/null || true)"
+  if [[ -n "$pinned" ]]; then
+    echo "pinned boxes (on their users.snapshot pin, deliberately not rolling; clear the pin to roll them):"
+    while read -r u p; do [[ -n "$u" ]] && echo "  $u → $p"; done <<< "$pinned"
+  fi
   echo "agentd roll unit: $(systemctl show -p ActiveState --value arbos-deploy-agentd.service 2>/dev/null || true)"
   [[ -f "$STATE/agentd.rolling" ]] && echo "agentd roll pending: $(tr '\n' ' ' < "$STATE/agentd.rolling")"
   echo "events (last 5):"; tail -n 5 "$EVENTS" 2>/dev/null || true
@@ -1509,8 +1574,8 @@ status() {
 # queue, no deploy), exit 0 only if every expected answer comes back. install-deploy-hook.sh runs
 # it before installing, so a worker that cannot complete a tick is never installed again.
 selftest() {
-  local t b m c
-  t="$(mktemp -d)"; trap 'rm -rf "$t"' RETURN
+  local t b m c h
+  t="$(mktemp -d)"; h="$(mktemp -d)"; trap 'rm -rf "$t" "$h"' RETURN
   git -C "$t" init -q && git -C "$t" -c user.name=t -c user.email=t@t commit -q --allow-empty -m base
   b="$(git -C "$t" rev-parse HEAD)"
   git -C "$t" -c user.name=t -c user.email=t@t commit -q --allow-empty -m "feat: a"
@@ -1550,7 +1615,137 @@ selftest() {
   [[ "$(box_outcome gh_9 new 1000)" == "pending" ]] || { echo "selftest: box_outcome in progress must be pending" >&2; return 1; }
   local o; o="$(box_outcome gh_9 new 1000)"; o="${o#refused}"; o="${o#"${o%%[![:space:]]*}"}"
   [[ "$o" == "pending" ]] || { echo "selftest: reason strip" >&2; return 1; }
+  # pending_boxes and the users.snapshot pin (2026-11-03): a box already on its pin is deliberately not
+  # rolling and must leave the pending set, or it holds the lane for the whole ROLL_WAIT_S. A box whose
+  # pin it has NOT reached yet stays pending, and an unpinned box behind the target stays pending.
+  users='[{"id":"test_pinned","machine":{"state":"awake","sandbox_id":"s1","snapshot":"pin","pinned_snapshot":"pin","upgrade":{"in_progress":false}}},
+          {"id":"test_behind_pin","machine":{"state":"awake","sandbox_id":"s2","snapshot":"old","pinned_snapshot":"pin","upgrade":{"in_progress":false}}},
+          {"id":"gh_plain","machine":{"state":"awake","sandbox_id":"s3","snapshot":"old","pinned_snapshot":null,"upgrade":{"in_progress":false}}}]'
+  [[ "$(pending_boxes new all | tr '\n' ' ')" == "test_behind_pin gh_plain " ]] \
+    || { echo "selftest: pending_boxes with a satisfied pin ($(pending_boxes new all | tr '\n' ' '))" >&2; return 1; }
+  [[ "$(pending_boxes new test | tr '\n' ' ')" == "test_behind_pin " ]] \
+    || { echo "selftest: pending_boxes test tier ($(pending_boxes new test | tr '\n' ' '))" >&2; return 1; }
+  [[ "$(pending_boxes new real | tr '\n' ' ')" == "gh_plain " ]] \
+    || { echo "selftest: pending_boxes real tier ($(pending_boxes new real | tr '\n' ' '))" >&2; return 1; }
+  [[ "$(pinned_boxes | tr '\n' ' ')" == "test_pinned pin " ]] || { echo "selftest: pinned_boxes ($(pinned_boxes | tr '\n' ' '))" >&2; return 1; }
+  # A box on the roll target is not pending whether or not the pin names that same snapshot.
+  users='[{"id":"gh_8","machine":{"state":"awake","sandbox_id":"s4","snapshot":"new","pinned_snapshot":"new","upgrade":{"in_progress":false}}}]'
+  [[ -z "$(pending_boxes new all)" ]] || { echo "selftest: a box on the target must not be pending" >&2; return 1; }
+  hold_cases "$h"
+  image_tag_prune_cases "$h/prune"
   echo "selftest ok"
+}
+
+# The image tag prune removes nothing unless it is switched on. Three parts, because the obvious test —
+# "the off path deletes nothing" — would still pass if someone shipped the default as ON, and would also
+# pass if the function stopped working altogether. So: the shipped default is pinned, the off path is
+# shown to delete nothing while still naming every tag, and the on path is shown to delete, which is what
+# makes the first two mean anything. `docker` is a stub on PATH that records every call it is given.
+image_tag_prune_cases() {
+  local d="$1" calls="$1/docker-calls" out
+  mkdir -p "$d/bin"
+  cat > "$d/bin/docker" <<'STUB'
+#!/usr/bin/env bash
+echo "$*" >> "$DOCKER_CALLS"
+[[ "$1" == images ]] && printf '%s\n' 0.1.190 0.1.189 0.1.188 0.1.187 0.1.186 0.1.185
+exit 0
+STUB
+  chmod +x "$d/bin/docker"
+  # 1. The shipped default is OFF, read out of this file rather than out of the running environment,
+  # which a developer's ARBOS_IMAGE_TAG_PRUNE could otherwise mask. Removing a tag is a delete and
+  # needs a decision; it must never arrive as a default.
+  grep -qE '^IMAGE_TAG_PRUNE="\$\{ARBOS_IMAGE_TAG_PRUNE:-0\}"' "${BASH_SOURCE[0]}" \
+    || { echo "selftest: the shipped IMAGE_TAG_PRUNE default is not 0 — the prune deletes images, so off is the only safe default" >&2; return 1; }
+  STATE="$d"; LOG="$d/log"
+  # 2. Off: no deletion, and the log names every spare tag rather than counting them.
+  : > "$calls"
+  out="$(DOCKER_CALLS="$calls" PATH="$d/bin:$PATH" IMAGE_TAG_PRUNE=0 prune_agent_image_tags)"
+  [[ "$(rmi_calls "$calls")" == 0 ]] \
+    || { echo "selftest: the prune made $(rmi_calls "$calls") rmi call(s) with IMAGE_TAG_PRUNE=0; it must remove nothing" >&2; return 1; }
+  [[ "$out" == *0.1.186* && "$out" == *0.1.185* ]] \
+    || { echo "selftest: the disabled prune must name every spare tag it would remove; it logged: $out" >&2; return 1; }
+  [[ "$(tr '\n' ' ' < "$d/agentd.image-tags-unpruned")" == "0.1.186 0.1.185 " ]] \
+    || { echo "selftest: the disabled prune must leave the spare tags in agentd.image-tags-unpruned" >&2; return 1; }
+  # 3. On: it really does delete, so parts 1 and 2 are pinning behaviour and not a broken function.
+  : > "$calls"
+  DOCKER_CALLS="$calls" PATH="$d/bin:$PATH" IMAGE_TAG_PRUNE=1 prune_agent_image_tags > /dev/null
+  [[ "$(rmi_calls "$calls")" == 2 ]] \
+    || { echo "selftest: with IMAGE_TAG_PRUNE=1 the prune must remove the 2 spare tags; it made $(rmi_calls "$calls") rmi call(s)" >&2; return 1; }
+  [[ ! -f "$d/agentd.image-tags-unpruned" ]] \
+    || { echo "selftest: an enabled prune must not leave a kept-tag list behind" >&2; return 1; }
+}
+# grep -c prints 0 and exits 1 when it matches nothing, so the count needs the `|| true` to survive set -e.
+rmi_calls() { grep -c '^rmi ' "$1" 2>/dev/null || true; }
+
+# The agentd hold lifts by hand only. Every case runs the REAL gate — the top of `roll_image` — against a
+# scratch repo and a scratch state directory, with `resolve` standing in for the first step after the gate:
+# the roll reaching it is what "the roll proceeded" means. Nothing here needs root, the network, or the host.
+#
+# The subjects below are all commits the old auto-lift accepted, not just the documented tag. Its match was
+# `grep -i 'canary-fix\]'` over commit SUBJECTS, with no leading bracket and no case sensitivity, so a revert
+# and a passing mention armed it exactly as well as `[canary-fix]` did. A case list of one literal tag would
+# pass against a fix that only stopped the literal tag, which is most of the hole left open.
+HOLD_SUBJECTS='fix(agentd): the busy reply lands [canary-fix]
+Revert "fix(agentd): the busy reply lands" [Canary-Fix]
+agentd: drop the canary-fix] hack from the smoke output'
+hold_cases() {
+  local h="$1" subject n=0
+  need_root() { :; }
+  ensure_repo() { :; }
+  resolve() { : > "$STATE/roll-proceeded"; return 1; }
+  while IFS= read -r subject; do
+    [[ -n "$subject" ]] || continue
+    n=$((n + 1))
+    hold_scratch "$h/case$n" "$subject"
+    ( roll_image "$HOLD_HELD_SHA" ) > /dev/null 2>&1 || true
+    [[ -f "$(agentd_hold_file)" ]] \
+      || { echo "selftest: the commit subject '$subject' deleted the agentd hold — the gate released itself" >&2; return 1; }
+    [[ ! -f "$STATE/roll-proceeded" ]] \
+      || { echo "selftest: the agentd roll proceeded past a standing hold after the commit subject '$subject'" >&2; return 1; }
+  done <<< "$HOLD_SUBJECTS"
+  # A subject with no closing bracket never matched even the old pattern, so it is the control: if this one
+  # ever starts behaving differently from the three above, the case list has stopped describing the gate.
+  hold_scratch "$h/control" "wip(agentd): starting a [canary-fix for tomorrow"
+  ( roll_image "$HOLD_HELD_SHA" ) > /dev/null 2>&1 || true
+  [[ -f "$(agentd_hold_file)" ]] || { echo "selftest: an unmatched subject deleted the agentd hold" >&2; return 1; }
+  # And the gate is not welded shut: the operator's own command still opens the lane, and the roll then runs.
+  ARBOS_DEPLOY_STATE="$STATE" ARBOS_DEPLOY_EVENTS="$EVENTS" bash "${BASH_SOURCE[0]}" hold-agentd off > /dev/null
+  [[ ! -f "$(agentd_hold_file)" ]] || { echo "selftest: 'hold-agentd off' left the hold in place" >&2; return 1; }
+  ( roll_image "$HOLD_HELD_SHA" ) > /dev/null 2>&1 || true
+  [[ -f "$STATE/roll-proceeded" ]] \
+    || { echo "selftest: with the hold lifted by hand the roll must proceed" >&2; return 1; }
+  # Exactly one line in this script may delete the hold file, and it is the operator's `hold-agentd off`.
+  # This is the one assertion the cases above cannot make: a scan that notices a commit and keeps the flag
+  # passes every state assertion, so only counting the delete sites can tell "the lane opens by hand alone"
+  # from "something automatic is allowed near the flag again".
+  local removals
+  removals="$(grep -cE 'rm -f "(\$\(agentd_hold_file\)|\$STATE/agentd\.hold)"' "${BASH_SOURCE[0]}")"
+  [[ "$removals" == 1 ]] \
+    || { echo "selftest: $removals lines in this script delete the agentd hold file; only 'hold-agentd off' may" >&2; return 1; }
+}
+
+# hold_scratch <dir> <subject>: a held agentd lane in <dir>, whose main carries one commit with that subject
+# touching the agentd crate — the path half of the old auto-lift's test, so only the subject varies between
+# cases. Points STATE, REPO, LOG and EVENTS at <dir> and sets HOLD_HELD_SHA to the held commit.
+# commit.gpgsign is forced off: a developer whose global config signs commits would otherwise pay an
+# ssh-keygen per commit here, or fail outright without a key, for signatures nothing in the test reads.
+hold_scratch() {
+  STATE="$1"; REPO="$1/repo"; LOG="$1/log"; EVENTS="$1/events.jsonl"
+  mkdir -p "$REPO/crates/arbos-agentd"
+  git -C "$REPO" init -q
+  echo v1 > "$REPO/crates/arbos-agentd/main.rs"
+  git -C "$REPO" add -A
+  hold_commit "agentd: the commit whose image failed the canary"
+  HOLD_HELD_SHA="$(git -C "$REPO" rev-parse HEAD)"
+  git -C "$REPO" update-ref refs/remotes/origin/main HEAD
+  hold_agentd "$HOLD_HELD_SHA" 0.1.200 "canary failed on image 0.1.200" > /dev/null
+  echo v2 > "$REPO/crates/arbos-agentd/main.rs"
+  git -C "$REPO" add -A
+  hold_commit "$2"
+  git -C "$REPO" update-ref refs/remotes/origin/main HEAD
+}
+hold_commit() {
+  git -C "$REPO" -c user.name=t -c user.email=t@t -c commit.gpgsign=false commit -q -m "$1"
 }
 
 case "${1:-}" in
