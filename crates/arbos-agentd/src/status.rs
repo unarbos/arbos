@@ -611,6 +611,19 @@ impl Agent {
         if from_voice || user_text.trim().is_empty() {
             return QuickOutcome::NotBusy;
         }
+        // "As a background job (not inline)" is an instruction about how this ask runs, and the
+        // quick lane has no way to carry it out (bug U, `forced_job.rs`). Worse, it can end the
+        // ask: a `[status]` reading posts an answer and tells the main session never to answer
+        // the message again, and a `[guide]` reading folds the words into the running turn as a
+        // steer. Either way nothing ever starts a job. So the message queues without a quick
+        // call at all, and `start_job_for_send` makes it the job the user asked for.
+        if crate::forced_job::forces_a_job(&user_text) {
+            tracing::info!(
+                chat_id,
+                "the message asks for a background job; the quick lane stands aside"
+            );
+            return QuickOutcome::Queued;
+        }
         // Wait out short turns: if the lock frees (or the queue drains) inside BUSY_GRACE the
         // user is not really waiting — no status note (#1448). Poll the snapshot so a free
         // agent exits early instead of only watching the lock. An open job ends the wait at
