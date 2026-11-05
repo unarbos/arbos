@@ -1,0 +1,43 @@
+name: Dockerfile lint
+
+# hadolint over image/Dockerfile. It was a job in ci.yml keyed on `if: github.event_name == 'push'`,
+# so every push that was not apps/ios-only queued it on GitHub's hosted pool, whose per-repo job cap
+# this repo shares with the Swift gate (swift-core-check.yml) — the gate then waits behind a lint of
+# a file the push did not touch. Its own workflow is the only way to key it to that file: `paths` is
+# a trigger-level filter, and ci.yml's trigger has to stay broad.
+#
+# NOT a required check: scripts/merge/checks.sh GATES names swift-core-check.yml and nothing else, so
+# a push that skips this by path loses no verdict the merge lane reads. Adding a GATES line is what
+# would make it one; the patterns below are kept in the literal / `dir/**` shape that file's
+# files_match_patterns can evaluate, because anything else there is BLOCKED rather than "not
+# required". Note that a skipped run is absent, not green, to a reader that goes by check name.
+
+on:
+  push:
+    # ci.yml's push branches, which is where this lint ran from.
+    branches: [main, arbos-v2, "cursor/**", "gate/**"]
+    paths:
+      - "image/Dockerfile"
+      - ".github/workflows/dockerfile-lint.yml"
+  # No `pull_request`: the job never ran on that event either (its `if:` was push-only), and a
+  # `paths` filter there reads the whole PR diff against the base rather than the pushed commits,
+  # so the two triggers would not even agree on when to run.
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dockerfile-lint-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  image:
+    name: image (dockerfile lint)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: image/Dockerfile
+          failure-threshold: error
