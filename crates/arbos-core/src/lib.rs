@@ -13,6 +13,7 @@ pub mod ids;
 pub mod local;
 pub mod markdown;
 pub mod redact;
+pub mod relay_url;
 pub mod route;
 pub mod rpc;
 pub mod search;
