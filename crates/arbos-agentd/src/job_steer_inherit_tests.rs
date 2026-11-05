@@ -37,7 +37,11 @@
 //! - *Behaviour.* Revert either half of the fix and the matching test goes red:
 //!   `an_accepted_correction_is_a_turn_a_brief_carries` for the kind,
 //!   `a_jobs_own_bookkeeping_does_not_evict_the_users_turns` for the budget, and
-//!   `a_follow_up_job_inherits_a_correction_already_accepted` for the carrier.
+//!   `a_follow_up_job_inherits_a_correction_already_accepted` for the carrier. The window the
+//!   carrier is bounded by is held from both sides, by
+//!   `a_correction_still_binds_across_a_gap_wider_than_the_replace_window` and
+//!   `a_correction_from_finished_work_does_not_bind_an_unrelated_later_job`, so neither
+//!   widening it away nor narrowing it back to the replace window passes.
 //! - *Timing, with the job boundary as the discriminator.* The same correction, the same job
 //!   and the same store give opposite answers either side of `start_job`:
 //!   `a_follow_up_job_inherits_a_correction_already_accepted` requires it in the brief when it
@@ -180,9 +184,44 @@ async fn a_correction_accepted_after_the_follow_up_job_started_is_not_in_it() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// The bound. These lines arrive as requirements, so a correction from work the chat has
-/// finished with must not override an unrelated job asked for later — a worse failure than the
-/// one being fixed, and a harder one to see.
+/// The window is wider than the one it would have been natural to borrow, and this is why.
+///
+/// Round 13 pins the first job's four CSVs at 14:46:53–14:47:12 and the re-run's final at
+/// 14:47:50, and never states when the re-run started: it began somewhere in a 38-second gap,
+/// with its own execution inside that gap too. At `STEER_REPLACE_WINDOW_MS` the carrier lands
+/// on the wrong side of the boundary for a plausible share of that interval, so the fix would
+/// not demonstrably have fixed the round it was written for.
+///
+/// Ninety seconds here is deliberately outside the replace window and inside the inherit one:
+/// this test goes red against the thirty-second constant and green against the two-minute one,
+/// which is what makes the widening a decision the suite holds rather than a number in a diff.
+#[tokio::test]
+async fn a_correction_still_binds_across_a_gap_wider_than_the_replace_window() {
+    let (agent, root) = test_agent().await;
+    let _host = agent.sync.open_room(CHAT).await.unwrap();
+    let _busy = agent.test_hold_turn(CHAT).await;
+    a_corrected_job(&agent, FIRST, "only the top 50").await;
+    agent.store.set_job_state(FIRST, "done", None).unwrap();
+    let gap = crate::config::STEER_REPLACE_WINDOW_MS + 60_000;
+    assert!(
+        gap < crate::config::STEER_INHERIT_WINDOW_MS,
+        "this test only means something while the gap sits between the two windows"
+    );
+    agent.store.test_backdate_job_end(FIRST, gap).unwrap();
+
+    let brief = brief_of_the_next_job(&agent).await;
+
+    assert!(
+        brief.contains("only the top 50"),
+        "a correction stopped binding across a gap the size of round 13's, so the fix would not \
+         have fixed the round it was written for: {brief}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The far side of the same bound. These lines arrive as requirements, so a correction from
+/// work the chat has finished with must not govern an unrelated job asked for later — a worse
+/// failure than the one being fixed, and a harder one to see.
 #[tokio::test]
 async fn a_correction_from_finished_work_does_not_bind_an_unrelated_later_job() {
     let (agent, root) = test_agent().await;
@@ -192,7 +231,7 @@ async fn a_correction_from_finished_work_does_not_bind_an_unrelated_later_job() 
     agent.store.set_job_state(FIRST, "done", None).unwrap();
     agent
         .store
-        .test_backdate_job_end(FIRST, crate::config::STEER_REPLACE_WINDOW_MS + 60_000)
+        .test_backdate_job_end(FIRST, crate::config::STEER_INHERIT_WINDOW_MS + 60_000)
         .unwrap();
 
     let brief = brief_of_the_next_job(&agent).await;

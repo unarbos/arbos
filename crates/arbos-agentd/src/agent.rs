@@ -4716,6 +4716,15 @@ impl Agent {
         })
     }
 
+    /// Did this job finish recently enough that the corrections it was given still bind the
+    /// work the user asks for next? A longer window, and a different question — see
+    /// [`crate::config::STEER_INHERIT_WINDOW_MS`].
+    fn ended_inside_inherit_window(job: &crate::store::JobRow) -> bool {
+        job.ended_at.is_some_and(|at| {
+            arbos_core::ids::now_ms() - at <= crate::config::STEER_INHERIT_WINDOW_MS
+        })
+    }
+
     /// The corrections the user has already had accepted on the work this chat is doing now,
     /// for a job that is about to take that work over. Oldest first, across jobs as well as
     /// within one, because they are numbered for the worker and a later correction of the same
@@ -4732,15 +4741,19 @@ impl Agent {
     /// `except` is the new job's own id. It has no corrections of its own yet, but its row may
     /// already exist by the time this is asked, and a job must never inherit from itself.
     ///
-    /// **Why this is bounded, and bounded tightly.** Only the jobs this chat is still on count:
-    /// open, or ended inside [`crate::config::STEER_REPLACE_WINDOW_MS`], the window this file
-    /// already reads as "the user is still talking about this answer". The bound is not
-    /// decoration. These lines arrive as *requirements*, so an unbounded rule would let "only
-    /// the top 50" override an unrelated job asked for later in the same chat — a worse failure
-    /// than the one being fixed, and a harder one to see. Outside the window the correction is
-    /// still carried, but as context rather than as a requirement:
-    /// [`Self::recent_turns_for_brief`] keeps the `job_steer` rows now, which is the other half
-    /// of this change and the reason a narrow window here costs little.
+    /// **Why this is bounded.** Only the jobs this chat is still on count: open, or ended inside
+    /// [`crate::config::STEER_INHERIT_WINDOW_MS`]. The bound is not decoration — these lines
+    /// arrive as *requirements*, so an unbounded rule would let "only the top 50" govern an
+    /// unrelated job started in the same chat an hour later, a worse failure than the one being
+    /// fixed and a harder one to see.
+    ///
+    /// Its own constant rather than [`crate::config::STEER_REPLACE_WINDOW_MS`], whose thirty
+    /// seconds answer a typing-speed question; see that constant for why the two must not be
+    /// coupled. And deliberately the longer of the two, because the failures are not
+    /// symmetrical: outside the window a correction is still carried by
+    /// [`Self::recent_turns_for_brief`] as labelled context and merely stops binding, so a
+    /// window that is too short loses a promise silently while one that is too long
+    /// over-applies a line the worker can see and weigh.
     pub(crate) fn steers_to_inherit(&self, chat_id: &str, except: &str) -> Vec<String> {
         let mut jobs: Vec<crate::store::JobRow> = self
             .store
@@ -4748,7 +4761,7 @@ impl Agent {
             .unwrap_or_default()
             .into_iter()
             .filter(|j| j.id != except)
-            .filter(|j| j.is_open() || Self::ended_inside_replace_window(j))
+            .filter(|j| j.is_open() || Self::ended_inside_inherit_window(j))
             .collect();
         // `jobs_for_chat` answers newest first; the worker reads these as one numbered list.
         jobs.reverse();
