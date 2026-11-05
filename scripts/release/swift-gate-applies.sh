@@ -62,16 +62,34 @@ set -euo pipefail
 
 WF=.github/workflows/swift-core-check.yml
 
-# Every quoted path pattern under the workflow's top level `on:` block.
+# Every quoted path pattern under a workflow's top level `on:` block, read from stdin.
 #
 # This is checks.sh's gate_patterns awk, unchanged on purpose. The two read the same bytes and must
 # reach the same list; if one is taught a new shape and the other is not, the disagreement is
 # exactly the class of bug this file exists to close.
-patterns() {
+patterns_in() {
   awk '
     /^on:/          { inon = 1; next }
     /^[^[:space:]]/ { inon = 0 }
-    inon && /^ *- *"/ { gsub(/^ *- *"|" *$/, ""); print }' "$WF" | sort -u
+    inon && /^ *- *"/ { gsub(/^ *- *"|" *$/, ""); print }'
+}
+
+# This head's patterns unioned with main's, which is what checks.sh's gate_applies uses.
+#
+# Judging by this head's list alone reopens the hole from the other side. gate_applies unions both
+# because a path added to the filter on main after a branch forked still gates the merged result:
+# #2376 changes crates/arbos-matrix/src/client.rs, and crates/arbos-matrix/** reached the filter
+# after that branch forked. Deciding here on the head's list alone would answer "does not apply",
+# skip the macOS job, and leave `decide` succeeding beside it — a run that concludes success with
+# nothing built, which checks.sh reads as a pass while it asks for a verdict on the same head.
+# One basis for applicability and answerability means the same basis checks.sh uses, not merely a
+# consistent one.
+#
+# HEAD_WF names the working-tree copy and defaults to $WF. They are separate names so the selftest
+# can stand a synthetic head beside the real main; $WF alone would redirect both reads at once and
+# the test would pass against nothing.
+patterns() {
+  { cat "${HEAD_WF:-$WF}"; git show "origin/main:$WF" 2>/dev/null || true; } | patterns_in | sort -u
 }
 
 # The files this commit should be judged on, which is not the same question on every event.
@@ -202,6 +220,38 @@ selftest() {
     bad "a pattern in $WF is neither a literal path nor a dir/** prefix — checks.sh BLOCKS on those and this screen exits 2"
   else
     ok "every declared pattern is a shape both this screen and checks.sh can evaluate"
+  fi
+
+  # 6. The decision basis must be the union of this head's list and main's, which is what
+  #    checks.sh's gate_applies asks about. Comparing the two real lists proves nothing — they are
+  #    identical whenever nobody has changed the filter — so this stands a synthetic head beside
+  #    the real main and requires both lists in the answer. Head-only loses main's paths and skips
+  #    a build main still gates; main-only loses the head's and skips one this branch adds.
+  local synth union main_pats
+  main_pats=$( { git show "origin/main:$WF" 2>/dev/null || true; } | patterns_in | sort -u)
+  if [ -z "$main_pats" ]; then
+    bad "origin/main has no readable pattern list for $WF, so this screen cannot tell whether it is deciding on main's scope — fetch origin/main"
+  else
+    synth=$(mktemp)
+    printf 'name: synthetic\non:\n  push:\n    paths:\n      - "nowhere/in/main/**"\n' > "$synth"
+    union=$(HEAD_WF=$synth patterns)
+    rm -f "$synth"
+    if ! printf '%s\n' "$union" | grep -qx 'nowhere/in/main/\*\*'; then
+      bad "the head's own patterns are missing from the decision basis — a path this branch adds to the filter would not gate this branch"
+    elif ! printf '%s\n' "$main_pats" | while IFS= read -r p; do printf '%s\n' "$union" | grep -qxF "$p" || exit 1; done; then
+      bad "main's patterns are missing from the decision basis — a path added to the filter after this branch forked still gates the merged result, and the build for it would be skipped while checks.sh asks for the verdict"
+    else
+      ok "the decision basis unions this head's patterns with main's, the same scope checks.sh asks about"
+    fi
+  fi
+
+  # 7. The deferral must be declared on `decide`, not on the macOS job alone. A run is only skipped
+  #    when every job skipped; one cheap job succeeding beside a skipped build concludes the run
+  #    success, which checks.sh reads as a pass. Measured on 6f3061016 before this moved.
+  if printf '%s\n' "$body" | awk '/^  decide:/{d=1;next} /^  [a-z_]+:/{d=0} d && /head\.repo\.full_name != github\.repository/{found=1} END{exit !found}'; then
+    ok "the same-repo deferral is on \`decide\`, so a deferred run skips whole and still reads as no verdict"
+  else
+    bad "the same-repo deferral is not on \`decide\` — a deferred run would conclude success with nothing built, which checks.sh reads as a pass"
   fi
 
   echo

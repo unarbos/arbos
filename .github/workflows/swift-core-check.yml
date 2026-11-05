@@ -47,6 +47,23 @@ concurrency:
 jobs:
   decide:
     name: Swift core check applies?
+    # A branch in this repo gets the push run, so its pull_request run would be the same commit
+    # again on GitHub's macOS pool, which allows this repo five jobs at once (2026-10-30: 33
+    # queued, ~4 h wait; 2026-11-04: 2 h 25 min from queue to first job). Pull requests from forks
+    # have no push run here, so they keep theirs. That deferral is only sound because the push
+    # trigger above filters nothing — when it filtered paths, the push run it defers to did not
+    # always exist, and that is what turned the deferral into a missing verdict.
+    #
+    # The deferral is declared HERE, on the first job, and not on the macOS job it is about. A run
+    # is only "skipped" when every job in it skipped; one cheap job succeeding beside a skipped
+    # macOS job concludes the whole run "success". scripts/merge/checks.sh reads that run-level
+    # conclusion, so a guard on the macOS job alone turns a correctly-read missing verdict into a
+    # silent pass — the exact failure this workflow exists to prevent. Measured on 6f3061016:
+    # run 41926276679 concluded success with build-xcframework skipped. `check` needs `decide`,
+    # so skipping here skips the run entirely and it still reads as no verdict.
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-24.04
     outputs:
       applies: ${{ steps.applies.outputs.applies }}
@@ -64,21 +81,10 @@ jobs:
   check:
     name: build-xcframework + fastlane test
     needs: decide
-    # Two conditions, and they are not the same one.
-    #
-    # The first is this gate's scope, decided on the three-dot diff rather than on what the trigger
-    # happened to fire for. A head the gate applies to always reaches the job below.
-    #
-    # The second is deduplication. A branch in this repo gets the push run, so its pull_request run
-    # would be the same commit again on GitHub's macOS pool, which allows this repo five jobs at
-    # once (2026-10-30: 33 queued, ~4 h wait; 2026-11-04: 2 h 25 min from queue to first job).
-    # Pull requests from forks have no push run here, so they keep theirs. That deferral is only
-    # sound because the push trigger above filters nothing — when it filtered paths, the push run it
-    # defers to did not always exist, and this line is what turned that into a missing verdict.
-    if: >-
-      needs.decide.outputs.applies == 'true' &&
-      (github.event_name != 'pull_request' ||
-       github.event.pull_request.head.repo.full_name != github.repository)
+    # This gate's scope, decided on the three-dot diff rather than on what the trigger happened to
+    # fire for. A head the gate applies to always reaches this job. Deduplication is not repeated
+    # here: it lives on `decide`, which this job needs, for the run-conclusion reason given there.
+    if: needs.decide.outputs.applies == 'true'
     runs-on: macos-15
     # 46-63 min measured on identical content, the spread being runner draw not diff. The old 60
     # killed runs mid-bundle, which is no verdict rather than a red one; this change took 63.4.
