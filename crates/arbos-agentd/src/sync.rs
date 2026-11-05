@@ -157,31 +157,46 @@ impl DocHost {
 
     /// A backlog too big for one frame, cut down to one the relay will take.
     ///
-    /// The cut is a prefix of this box's own ops plus every other peer's ops in full. That
-    /// ordering is what makes a chunk safe to apply on arrival rather than park as pending: an
-    /// op of ours depends only on our earlier ops and on the ops we already held when we wrote
-    /// it, and both are inside the chunk. A cut that split some other peer's range could strand
-    /// the remainder behind a gap, which is the failure this whole file exists to avoid.
+    /// The cut is a prefix of one peer's ops plus every other peer's ops in full, and the
+    /// result is checked for causal closure before it is offered — a chunk whose dependencies
+    /// the receiver does not already hold would park as pending on arrival, delivering nothing
+    /// while looking like progress.
     ///
-    /// `None` when there is nothing left to cut — the overflow is all other peers' ops, or even
-    /// a single op of ours exceeds the budget. Those park rather than loop.
+    /// The peer that gets cut is the one contributing most of the backlog, which is **not**
+    /// necessarily this process. `peer_id_for` mints a fresh Loro peer id on every boot, so a
+    /// box restarting into this state carries its whole backlog under the peer id of its
+    /// previous incarnation while the peer now writing has nothing. Cutting only the current
+    /// peer would park exactly the boxes that cannot be reached by hand.
+    ///
+    /// `None` when no prefix of the largest contributor is both small enough and closed. Those
+    /// park rather than loop.
     fn chunk_to_budget(
         &mut self,
         head: &VersionVector,
         full_len: usize,
     ) -> Option<(Vec<u8>, VersionVector)> {
-        let me = self.doc.doc.peer_id();
-        let from = self.acked_vv.get(&me).copied().unwrap_or(0);
-        let to = head.get(&me).copied().unwrap_or(0);
-        // Largest prefix of our own ops that still fits. The export is not linear in the op
-        // count, so the length is measured rather than predicted.
+        let cut = head
+            .iter()
+            .map(|(peer, counter)| {
+                (
+                    *peer,
+                    counter - self.acked_vv.get(peer).copied().unwrap_or(0),
+                )
+            })
+            .filter(|(_, delta)| *delta > 0)
+            .max_by_key(|(_, delta)| *delta)
+            .map(|(peer, _)| peer)?;
+        let from = self.acked_vv.get(&cut).copied().unwrap_or(0);
+        let to = head.get(&cut).copied().unwrap_or(0);
+        // Largest prefix that still fits. The export is not linear in the op count, so the
+        // length is measured rather than predicted.
         let mut lo = 0i32;
         let mut hi = to - from;
         let mut best: Option<(Vec<u8>, VersionVector)> = None;
         while lo <= hi {
             let take = lo + (hi - lo) / 2;
-            let (bytes, target) = self.export_prefix(head, me, from + take);
-            if !bytes.is_empty() && bytes.len() <= PUSH_BUDGET {
+            let (bytes, target) = self.export_prefix(head, cut, from + take);
+            if !bytes.is_empty() && bytes.len() <= PUSH_BUDGET && self.lands_on_arrival(&bytes) {
                 best = Some((bytes, target));
                 lo = take + 1;
             } else {
@@ -205,19 +220,29 @@ impl DocHost {
         best
     }
 
-    /// Export every other peer's ops in full, and our own up to `own_end`. Returns the bytes
+    /// Can a replica holding `acked_vv` apply these bytes now, or would they sit pending until
+    /// something else arrives? Loro records the range a blob covers, so this is a question the
+    /// chunk can be asked rather than a property the cut is assumed to have.
+    fn lands_on_arrival(&self, bytes: &[u8]) -> bool {
+        match loro::LoroDoc::decode_import_blob_meta(bytes, true) {
+            Ok(meta) => self.acked_vv.includes_vv(&meta.partial_start_vv),
+            Err(_) => false,
+        }
+    }
+
+    /// Export every other peer's ops in full, and `cut`'s up to `cut_end`. Returns the bytes
     /// and the version they carry the room to, which is what an ack for them may advance.
     fn export_prefix(
         &self,
         head: &VersionVector,
-        me: u64,
-        own_end: i32,
+        cut: u64,
+        cut_end: i32,
     ) -> (Vec<u8>, VersionVector) {
         let mut spans = Vec::new();
         let mut target = self.acked_vv.clone();
         for (peer, counter) in head.iter() {
             let from = self.acked_vv.get(peer).copied().unwrap_or(0);
-            let to = if *peer == me { own_end } else { *counter };
+            let to = if *peer == cut { cut_end } else { *counter };
             if to <= from {
                 continue;
             }
@@ -1183,21 +1208,45 @@ mod tests {
         );
     }
 
-    /// The cut only moves our own peer's end, so a backlog that is all someone else's ops has
-    /// nothing to give. That parks rather than offering the same oversized frame forever —
-    /// `next_push` returning `None` is what keeps the socket up, which is the difference
-    /// between a chat that is behind and a chat that is deaf.
+    /// One op that is itself bigger than a frame cannot be cut by anything, because a chunk
+    /// boundary falls between ops and never inside one. That parks and warns once, leaving the
+    /// socket up — a chat that is behind, rather than one that is deaf.
+    ///
+    /// Note this is now hard to provoke: a large text insert does *not* qualify, because Loro
+    /// splits it into several ops and the cut lands between them. It takes a single indivisible
+    /// value, like one enormous attachment field.
     #[test]
-    fn a_backlog_that_cannot_be_cut_parks_instead_of_looping() {
-        let theirs = a_research_backlog();
-        let mut doc = ChatDoc::new(Some(21), false);
-        doc.import(&theirs.export_updates_since(&VersionVector::default()))
-            .expect("import a backlog we did not write");
+    fn an_op_too_big_to_cut_parks_instead_of_looping() {
+        let doc = ChatDoc::new(Some(7), false);
+        doc.init_meta("c", "p", 1);
+        doc.start_assistant_message("m_one", "", "agent");
+        doc.add_part_from_json(
+            "m_one",
+            &serde_json::json!({ "kind": "file", "name": "big.bin", "blob": "z".repeat(PUSH_BUDGET + 4096) }),
+        );
+        doc.set_message_fields("m_one", &[("status", serde_json::json!("done"))]);
         let mut host = host_with(doc);
+        // Whatever it can cut, it sends; the op itself never goes on the wire, and once only
+        // that op is left the room parks instead of offering it round after round.
+        let mut sent = 0;
+        while let Some((batch, bytes)) = host.next_push() {
+            assert!(
+                bytes.len() <= PUSH_BUDGET,
+                "an op too big to cut must never reach the wire, got {} bytes",
+                bytes.len()
+            );
+            host.on_ack(&batch);
+            sent += 1;
+            assert!(sent < 20, "the uncuttable op is being offered forever");
+        }
+        assert!(
+            !host.doc.export_updates_since(&host.acked_vv).is_empty(),
+            "the fixture must leave something undelivered, or it is not testing the park"
+        );
         for _ in 0..OVERSIZE_STRIKES + 2 {
             assert!(
                 host.next_push().is_none(),
-                "an uncuttable backlog must be parked, not put on the wire"
+                "the parked room must stay parked"
             );
         }
     }
@@ -1228,7 +1277,9 @@ mod tests {
 
         // The restart, exactly as `open_room` does it.
         let (cursor, snapshot, acked) = store.room_doc(room).unwrap().unwrap();
-        let doc = ChatDoc::from_snapshot(Some(7), true, &snapshot.unwrap()).unwrap();
+        // `peer_id_for` mints a fresh Loro peer id on every process boot, so the restored
+        // backlog belongs to the box's previous incarnation and not to the peer now writing.
+        let doc = ChatDoc::from_snapshot(Some(21), true, &snapshot.unwrap()).unwrap();
         let mut host = host_with(doc);
         host.acked_vv = acked.as_deref().and_then(decode_vv).unwrap_or_default();
         host.cursor = cursor;
