@@ -1415,6 +1415,7 @@ the agent pane (Details · Library · Computer); `profiles/library.rs`.
 | Show more | after **5** rows a 36 pt "Show more ⌄" row unfolds the rest of that day in place ("Show less ⌃" folds it); per opened pane | `SHOW_MORE_AFTER`, `library_toggle_day` |
 | Preview card | after **300 ms** on a row: **300** wide, left **20** from the pane's edge, **8** above the row (under it when it would reach the window's top 8 pt band); padding 10, radius 12, a step over the card's fill (white in light) with the strong border and shadow; picture **278 × 156** radius 8 aspect-fill (files: the extension at 22 pt on the tile; links: a globe); type line 11.5 muted ("Image" / "Video" / "PDF" / "Link"); the full name 13 semibold on 17, up to 3 lines; the sender's 18 pt picture, name, "· Yesterday 10:06 PM" (`sidebar::stamp_label`) | `HOVER_DELAY_MS`, `CARD_*`, `card_above` |
 | Click | a row opens the viewer at its place in the chat-order album (files included: the viewer's Open / Download); a link opens in the browser — as before | `open` |
+| Source (Jacob 2026-10-25, [feedback library-chat-only-mac-2026-10-25]) | **only what the chat exchanged**: the links, pictures and files people sent, and the pictures, documents and files the agent shared in a reply. **Never** a file it read, a page it fetched or a tool-viewed path. A hidden job row (duplex §2.3) and an unnamed worker's spawn row are the agent's machinery and the transcript draws neither, so neither feeds the list (`shared_in_chat`); links come from people's rows only — the agent's "source: https://…" is its research, not a share (`library_links`); a link needs a typed `http(s)://` scheme, so "app.rs" is a file and not a site (`urls_in`). Tool parts never count. There is no stored index — the same code reads the historical rows, so a polluted list is clean on first open and nothing migrates | `profiles::shared_in_chat`, `library_links`, `library_attachments`, `collect` |
 
 The iPhone has the same list since [feedback library-list-ios-2026-10-25]
 (`apps/ios/Arbos/Arbos/UI/LibraryList.swift`: `LibraryList` is the pure twin —
@@ -1428,7 +1429,11 @@ card's height and flip, the menus) and the headless `library::render_tests`
 on the real shell (one list by day, Show more, ⋯ in the time's place with no
 layout shift, the card 8 pt over the row after the delay, the menus). Rig:
 `ARBOS_OPEN_PROFILE=group:library` / `agent:library`; `ARBOS_LIBRARY_HOVER=<row>`
-draws that row hovered with its card up.
+draws that row hovered with its card up. The Source row is pinned by
+`profiles::library_source_tests`, the iPhone's twin by `LibraryListTests`;
+`ARBOS_FIXTURE_READS=1` ends every fixture agent chat the way Bubble's was —
+a hidden job row that read `app.rs` and a reply naming ten files — for the
+before / after shots.
 
 ### Person pane: the Message pill (Jacob 2026-10-25, [feedback profile-message-button-mac-2026-10-25])
 
