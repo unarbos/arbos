@@ -17,6 +17,17 @@ use crate::ui::theme::Theme;
 /// How much the window dims behind a sheet.
 pub const BACKDROP_ALPHA: f32 = 0.35;
 
+/// Paint priority for a sheet's `deferred` draw.
+///
+/// A sheet has to be above every *deferred* element, not merely above the
+/// ordinary pass, and `occlude` does not do that: a deferred draw paints after
+/// everything that is not deferred, and its hitbox — created later — wins the
+/// click. The composer's staged-picture tile defers its ring and its remove
+/// disc (`composer::tile`), so on the Mac the disc floated over the photo
+/// editor's plate and would have dropped the attachment out from under the open
+/// sheet. Above the nested popovers' 1 and 2 (`ui::header`).
+pub const PRIORITY: usize = 10;
+
 /// The full-window backdrop with `card` centred on it. `dismiss` runs on a
 /// click outside the card (Esc is the shell's: see `Shell::escape`).
 pub fn modal_overlay(
