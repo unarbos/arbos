@@ -79,6 +79,35 @@ pub(crate) fn stopped_by_expired_approval(job: &JobRow) -> bool {
     job.error.as_deref() == Some(APPROVAL_EXPIRED_ERROR)
 }
 
+/// The one line a job's own surfaces get while a card of that job waits in another chat: what
+/// is waiting, and which chat to answer it in.
+///
+/// It names the work, because a notice that does not is worth nothing. Test5 round 3, bug M:
+/// "The background work I started has finished" went out with two jobs in flight, naming
+/// neither, and told the reader nothing they could act on. So the card's own title carries the
+/// line, and its summary — for a shell card, the command itself — is appended when it adds
+/// anything.
+///
+/// `chat` is a name, never an id. A ULID is not a place a person can be asked to go, so the
+/// caller passes a generic pointer to the main chat when the chat it found has no title.
+pub(crate) fn approval_wait_line(title: &str, summary: &str, chat: &str) -> String {
+    let title = title.trim();
+    // Only `describe_tool`'s shell shape opens with a capitalised verb, and only that one needs
+    // lowering to continue this sentence. Its other two shapes — `{provider}: {action}` and
+    // `{tool} ({class})` — read correctly after "to" as they are, and lowering by case alone
+    // turned "Gmail: send" into "gmail: send".
+    let mut what = match (title.strip_prefix("Run "), title.is_empty()) {
+        (Some(rest), _) => format!("run {rest}"),
+        (None, false) => title.to_owned(),
+        (None, true) => "a step of this job".to_owned(),
+    };
+    let summary = summary.trim();
+    if !summary.is_empty() && !what.contains(summary) {
+        what = format!("{what}: {summary}");
+    }
+    format!("Waiting for your approval to {what}. The card is in {chat}.")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WaitMode {
     Inline,
@@ -1035,8 +1064,27 @@ impl Agent {
 
     /// A job's card is posted where the owner can answer it — their main chat — so the job's own
     /// surfaces have to say why it stopped: a line in the worker's thread, which the rollout view
-    /// draws, and the step `list_jobs` and the chat's presence row read.
-    async fn note_job_awaits_approval(&self, job: &JobRow, line: &str, source: &Value) {
+    /// draws, the step `list_jobs` and the chat's presence row read, and one row in the job's own
+    /// chat.
+    ///
+    /// The chat row is the part round 4 was missing. The step alone left the side chat reading as
+    /// silent for fourteen minutes: a presence chip is not the transcript, and it clears the
+    /// moment the job stops running, so a person scrolling that chat afterwards finds no trace of
+    /// what the job was waiting for.
+    ///
+    /// That row is never removed. It states a fact with a time on it — approval was asked for
+    /// then, and the card went to that chat — so nothing later makes it untrue and no supersede
+    /// is owed. Designing the removal out is also what keeps it clear of the relay's refusal of a
+    /// removal it cannot attribute (#2751): were one ever wanted, it would be `retire_row`, never
+    /// `delete_message`. The row is written through the chat's live doc, which signs the box's
+    /// assistant rows `agent:<project_id>`, so it is attributable from birth.
+    async fn note_job_awaits_approval(
+        &self,
+        job: &JobRow,
+        card_chat_id: &str,
+        line: &str,
+        source: &Value,
+    ) {
         if let Some(sid) = job.subagent_id.as_deref() {
             let _ = self.store.t3_append(
                 sid,
@@ -1049,6 +1097,30 @@ impl Agent {
             );
         }
         let _ = self.store.set_job_step(&job.id, APPROVAL_WAIT_STEP);
+        // Only when the card is somewhere else: a notice beside the card it describes is noise.
+        if job.chat_id != card_chat_id {
+            if let Some(host) = self.sync.host(&job.chat_id).await {
+                let h = host.lock().await;
+                let last_user = h
+                    .doc
+                    .messages()
+                    .iter()
+                    .rev()
+                    .find(|m| m.role == "user")
+                    .map(|m| m.id.clone())
+                    .unwrap_or_default();
+                let id = ulid();
+                h.doc
+                    .start_assistant_message(&id, &last_user, &self.cfg.device_id);
+                h.doc
+                    .set_message_fields(&id, &[("turn", json!({ "kind": "approval" }))]);
+                h.doc
+                    .add_part_from_json(&id, &json!({ "kind": "text", "text": line }));
+                h.doc.finish_message(&id, MessageStatus::Done);
+            } else {
+                tracing::debug!(job = %job.id, chat = %job.chat_id, "no open room for the job's chat; its card notice is in the rollout view only");
+            }
+        }
         self.refresh_job_activity(&job.chat_id).await;
     }
 
@@ -1129,7 +1201,7 @@ impl Agent {
         let (title, summary) = describe_tool(tool, input, &hit);
         let req = ApprovalRequest {
             title: title.clone(),
-            summary,
+            summary: summary.clone(),
             risk: hit.risk,
             payload: json!({ "kind": "tool_call", "tool": tool, "input": input, "class": hit.class, "why": hit.why, "session_id": session_id, "role": role,
                 "path_class": hit.path_class.map(PathClass::as_str), "grant_options": grant_options(&hit) }),
@@ -1152,7 +1224,8 @@ impl Agent {
                         .unwrap_or_else(|| "your main chat".to_owned());
                     self.note_job_awaits_approval(
                         j,
-                        &format!("Needs your approval: {title} (in {where_it_is})"),
+                        &chat_id,
+                        &approval_wait_line(&title, &summary, &where_it_is),
                         &json!({ "approval_id": id, "chat_id": chat_id, "job_id": j.id }),
                     )
                     .await;
@@ -1392,6 +1465,62 @@ mod job_approval_tests {
         (agent, host, root)
     }
 
+    const SIDE: &str = "01TESTSIDECHATJOBAPPROVAL0";
+    const SIDE_JOB: &str = "01TESTSIDEJOBAPPROVAL00000";
+    const SIDE_WORKER: &str = "01TESTSIDEJOBWORKER0000000";
+
+    /// Round 4's geometry: the job runs in a side chat, and its card goes to the pinned main
+    /// chat, because that is the chat the owner reads (`approval_chat`). Both rooms are open,
+    /// so a notice in either one is a thing the test could see.
+    async fn agent_running_a_job_in_a_side_chat(
+    ) -> (Arc<Agent>, SharedHost, SharedHost, std::path::PathBuf) {
+        let (agent, root) = test_agent().await;
+        agent.store.upsert_chat(CHAT, "Main", true, 0).unwrap();
+        agent
+            .store
+            .upsert_chat(SIDE, "Trip planning", false, 0)
+            .unwrap();
+        let main = agent.sync.open_room(CHAT).await.unwrap();
+        let side = agent.sync.open_room(SIDE).await.unwrap();
+        agent
+            .store
+            .insert_job(
+                SIDE_JOB,
+                SIDE,
+                "01TESTSIDEASKMESSAGE000000",
+                "Cleaning up the build tree",
+                "code",
+                "Build it, test it, then clean up.",
+                &[],
+            )
+            .unwrap();
+        agent.store.set_job_subagent(SIDE_JOB, SIDE_WORKER).unwrap();
+        agent
+            .store
+            .set_job_state(SIDE_JOB, "running", None)
+            .unwrap();
+        (agent, main, side, root)
+    }
+
+    /// The assistant rows of one chat, as text.
+    fn chat_rows(host: &SharedHost) -> Vec<String> {
+        let h = host.try_lock().expect("host free");
+        h.doc
+            .messages()
+            .into_iter()
+            .filter(|m| m.role == "assistant")
+            .map(|m| m.text())
+            .collect()
+    }
+
+    /// The rows of one chat that tell the reader a card is waiting.
+    fn waiting_rows(host: &SharedHost) -> Vec<String> {
+        chat_rows(host)
+            .into_iter()
+            .filter(|t| t.contains("Waiting for your approval"))
+            .collect()
+    }
+
     fn approval_lines(agent: &Agent) -> Vec<String> {
         let job = agent.store.job(JOB).unwrap().unwrap();
         let doc = crate::jobs_view::document(&agent.store, "p", "Doug", &job.id, 0).unwrap();
@@ -1427,9 +1556,18 @@ mod job_approval_tests {
         assert_eq!(doc["step"], APPROVAL_WAIT_STEP);
         let lines = approval_lines(&agent);
         assert_eq!(lines.len(), 1, "one line in the job's own view: {lines:?}");
-        assert!(lines[0].starts_with("Needs your approval:"), "{}", lines[0]);
         assert!(
-            lines[0].ends_with("(in Main)"),
+            lines[0].starts_with("Waiting for your approval to"),
+            "{}",
+            lines[0]
+        );
+        assert!(
+            lines[0].contains("rm -rf /work/p/exports"),
+            "the line names the work: {}",
+            lines[0]
+        );
+        assert!(
+            lines[0].ends_with("The card is in Main."),
             "the line says which chat holds the card: {}",
             lines[0]
         );
@@ -1551,6 +1689,112 @@ mod job_approval_tests {
         assert_eq!(
             crate::agent::worker_failure(Some(APPROVAL_EXPIRED_ERROR), "", 3, "done").map(|f| f.1),
             Some(false)
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The sentence itself, which the owner may tune: it names the work and where to answer.
+    #[test]
+    fn the_waiting_line_names_the_work_and_the_chat() {
+        assert_eq!(
+            approval_wait_line(
+                "Run a destructive command (file.delete)",
+                "git clean -fdX",
+                "Main"
+            ),
+            "Waiting for your approval to run a destructive command (file.delete): \
+             git clean -fdX. The card is in Main."
+        );
+        // No summary to add: the title carries it alone.
+        assert_eq!(
+            approval_wait_line("Gmail: send", "", "Trip planning"),
+            "Waiting for your approval to Gmail: send. The card is in Trip planning."
+        );
+        // A chat with no title is pointed at generically, never by id — the caller's fallback.
+        assert!(approval_wait_line(
+            "Run a destructive command (file.delete)",
+            "rm -rf x",
+            "your main chat"
+        )
+        .ends_with("The card is in your main chat."));
+        // Nothing to name is still a sentence.
+        assert_eq!(
+            approval_wait_line("", "", "Main"),
+            "Waiting for your approval to a step of this job. The card is in Main."
+        );
+    }
+
+    /// Test5 round 4, bug H again: the card for `git clean -fdX` was raised in the main chat and
+    /// the side chat the job ran in said nothing at all for fourteen minutes, until the card
+    /// expired. The step alone is not enough — it is a presence chip that clears when the job
+    /// stops running, and it leaves nothing in the transcript the person was reading.
+    ///
+    /// So the job's chat gets one row of its own: what is waiting, and which chat to answer it
+    /// in. One row per card and not one per poll, since the wait is fourteen minutes long and
+    /// the extension polls throughout it.
+    #[tokio::test]
+    async fn a_job_in_a_side_chat_says_in_that_chat_that_a_card_is_waiting() {
+        let (agent, main, side, root) = agent_running_a_job_in_a_side_chat().await;
+        let v = agent
+            .hook_approval(
+                "bash",
+                &json!({ "command": "git clean -fdX" }),
+                SIDE_WORKER,
+                "subagent",
+            )
+            .await;
+        assert_eq!(v["state"], "pending", "{v}");
+        let id = v["approvalId"].as_str().expect("a card").to_owned();
+
+        // The geometry this test exists for: the card is in the pinned main chat, not in the
+        // chat the job runs in. Without that split the two surfaces are the same surface.
+        let card = agent.store.approval(&id).unwrap().unwrap();
+        assert_eq!(card.chat_id, CHAT, "the card belongs to the main chat");
+        assert_eq!(
+            agent.store.job(SIDE_JOB).unwrap().unwrap().chat_id,
+            SIDE,
+            "and the job to the side chat"
+        );
+
+        // The side chat says so in the transcript, naming the work and where to answer it.
+        let rows = waiting_rows(&side);
+        assert_eq!(rows.len(), 1, "one row in the job's own chat: {rows:?}");
+        assert!(
+            rows[0].contains("git clean -fdX"),
+            "the notice names the work, as bug M taught: {}",
+            rows[0]
+        );
+        assert!(
+            rows[0].ends_with("The card is in Main."),
+            "the notice says where to act, by name: {}",
+            rows[0]
+        );
+        assert!(
+            !rows[0].contains(CHAT) && !rows[0].contains(SIDE),
+            "a chat is named, never printed as an id: {}",
+            rows[0]
+        );
+        // The card is already in the main chat; a notice there as well would be noise.
+        assert!(
+            waiting_rows(&main).is_empty(),
+            "the notice goes to the job's chat, not to the card's: {:?}",
+            waiting_rows(&main)
+        );
+        // And the step still moves, as the single-chat test pins.
+        assert_eq!(
+            agent.store.job(SIDE_JOB).unwrap().unwrap().last_step,
+            APPROVAL_WAIT_STEP
+        );
+
+        // Fourteen minutes of polling adds no second row.
+        for _ in 0..8 {
+            assert_eq!(agent.approval_status(&id).await["state"], "pending");
+        }
+        assert_eq!(
+            waiting_rows(&side).len(),
+            1,
+            "one row per card, not one per poll: {:?}",
+            waiting_rows(&side)
         );
         let _ = std::fs::remove_dir_all(&root);
     }
