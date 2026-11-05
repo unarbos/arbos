@@ -14,9 +14,10 @@
 //!   forwards tool calls and transcript rows over it and waits for results, the same shape as
 //!   the `arbos-local` helper link (`local.rs`).
 //!
-//! Cost rails: per-call cap (`ARBOS_VOICE_CALL_CAP_USD`, default $1.50), per-user daily voice cap
-//! (`ARBOS_VOICE_DAILY_CAP_USD`, default $5, `PUT /admin/users/{id}/voice` per user), the user's
-//! own credits/daily cap and the global kill switch. Owner setting per agent: chattiness
+//! Cost rails: voice has no cap of its own. It charges the caller's account like any other
+//! spend source, so the rails are that account's credits and single daily limit, plus the global
+//! kill switch. `CALL_MAX_MINUTES` still ends a call, as a resource bound, not a budget. Owner
+//! setting per agent: chattiness
 //! (`quiet` | `balanced` | `chatty`), wake name and `vision_enabled` (may the agent see cameras),
 //! `GET/PUT /projects/{id}/voice`.
 //!
@@ -65,8 +66,6 @@ pub const CALL_MAX_MINUTES: i64 = 60;
 pub struct VoiceCfg {
     /// LiveKit agent name the worker registers with (`ARBOS_VOICE_AGENT_NAME`).
     pub agent_name: String,
-    /// `ARBOS_VOICE_DAILY_CAP_USD` (default 5.0): per user, over every agent they own.
-    /// `ARBOS_VOICE_CALL_CAP_USD` (default 1.50): per agent per call.
     /// `ARBOS_VOICE=0` turns dispatch off while leaving people calls alone.
     pub enabled: bool,
     /// Speech model the worker is expected to use (for the admin view and the docs).

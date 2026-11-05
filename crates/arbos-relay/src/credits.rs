@@ -1,13 +1,19 @@
-//! Credits and metering for self-serve Arbos. Every user has a ledger (`credit_ledger`): grants
-//! in, debits out for inference (what the upstream charged us) and machine time (our Daytona
-//! cost, zero margin). Spending is gated in three layers, checked in this order:
+//! Credits and metering for self-serve Arbos. Every user has one ledger (`credit_ledger`):
+//! grants in, debits out for inference (what the upstream charged us) and machine time (our
+//! Daytona cost, zero margin). Every spend source lands in it — main model calls, decision
+//! calls, memory write passes, the tree builder, subagents, images and voice — each row tagged
+//! with its `kind`, so the account has one limit and still shows what spent it.
+//!
+//! Spending is gated in three layers, checked in this order:
 //!
 //!   1. the global kill switch — manual (`PUT /admin/killswitch`) or tripped automatically when
 //!      the relay-wide debits of the UTC day reach `ARBOS_GLOBAL_DAILY_CAP_USD`; the relay is
 //!      read-only (503 `read_only`) until it is cleared or the day turns;
 //!   2. the user's balance — at or below zero means 402 `credits_exhausted` unless the admin set
 //!      `allow_negative`;
-//!   3. the user's daily cap — 402 `daily_cap` once today's debits reach it (`None` = unlimited).
+//!   3. the account's one daily limit — 402 `daily_cap` once today's debits reach it. There is
+//!      no limit unless someone set one ([`SpendLimit`]), and no other cap anywhere: a project,
+//!      a box, the memory tree and a voice call all spend this and only this.
 //!
 //! In `ARBOS_AUTH_MODE=paircode` (self-hosters) nothing is gated or debited: the ledger is only
 //! meaningful when accounts are GitHub users.
