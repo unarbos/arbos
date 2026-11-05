@@ -714,15 +714,26 @@ mod tests {
                         stale_names.push(format!("{name}:{} {stale:?}", i + 1));
                     }
                 }
-                for call in ["sf_symbols::glyph(\"", "sf_symbols::symbol(\""] {
+                // The name may sit on the line below: rustfmt breaks any call
+                // whose arguments do not fit on one, and nineteen sites are
+                // broken that way, so matching `glyph("` alone walked past
+                // most of what this test exists to read.
+                for call in ["sf_symbols::glyph(", "sf_symbols::symbol("] {
                     let mut from = 0;
                     while let Some(ix) = code[from..].find(call) {
                         let start = from + ix + call.len();
-                        let literal: String =
-                            code[start..].chars().take_while(|c| *c != '"').collect();
-                        literals += 1;
-                        if !crate::ui::sf_symbols::is_registered(&literal) {
-                            unregistered.push(format!("{name}:{} {literal:?}", i + 1));
+                        let here = code[start..].trim_start();
+                        let next = lines
+                            .get(i + 1)
+                            .map(|l| l.split("//").next().unwrap_or("").trim())
+                            .unwrap_or("");
+                        let opens = if here.is_empty() { next } else { here };
+                        if let Some(after) = opens.strip_prefix('"') {
+                            literals += 1;
+                            let literal: String = after.chars().take_while(|c| *c != '"').collect();
+                            if !crate::ui::sf_symbols::is_registered(&literal) {
+                                unregistered.push(format!("{name}:{} {literal:?}", i + 1));
+                            }
                         }
                         from = start;
                     }
@@ -738,7 +749,10 @@ mod tests {
             "hyphenated pack names used as string literals (a glyph table that still names the pack — use the SF name): {stale_names:?}"
         );
         assert!(
-            literals >= 80,
+            // 116 once the scan reads the broken-across-lines calls too; the
+            // floor was 80 while it could only see the single-line ones, so
+            // the scan could have lost a third of the tree and still passed.
+            literals >= 110,
             "the scan found only {literals} symbol literals"
         );
         assert!(
