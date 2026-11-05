@@ -129,6 +129,19 @@ load 66–167). Rule, for every rig script under `/Users/Shared/arbos-*/` and ev
   heavy process alive is stale and gets reclaimed.
 - Shared simulators stay shut down when the rig is done (`xcrun simctl shutdown <udid>`): a booted idle
   simulator keeps a dozen daemons runnable.
+- No boot command you would normally write gets round the boot guard any more. It used to sit only on the
+  `xcrun` PATH shims, so `/usr/bin/xcrun simctl boot` or a direct `$(xcode-select -p)/usr/bin/simctl boot`
+  went straight past it — and its own refusal text recommended the first of those. It now also sits at the
+  developer directory's `simctl`, where all three of those routes end, installed by
+  `scripts/runner/install-boot-guard.sh` (AF-853). If a boot truly has to run with no slot, say so on your
+  issue and have an operator do it.
+- One route is still open and is not reported by anything, so do not read a clean `--check` as "nothing can
+  boot unslotted". The developer directory's `simctl` is a shim that execs the CoreSimulator framework's own
+  `simctl`, and that binary's full path boots with no slot and no refusal. Nobody arrives there by accident,
+  but if you find yourself calling it, you are outside the cap and the box has no way to know.
+- An Xcode update puts Xcode's own `simctl` back and silently reopens that route, so
+  `scripts/runner/install-boot-guard.sh --check` is the thing to run after one — it needs no privileges, names
+  any open route, and exits non-zero. Re-running the installer repairs it and keeps Xcode's newer binary.
 
 ## ssh to the gate Mac goes through the relay host (2026-10-26 23:40 UTC)
 
