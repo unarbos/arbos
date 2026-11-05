@@ -147,7 +147,7 @@ verdict() {
   if [ "${2:-}" != nogate ]; then
     local gfiles gout grc
     gfiles=$(commit_files "$sha") || { echo "BLOCKED reading the files $s8 changed: ${gfiles#BLOCKED:}"; return; }
-    if [ "$(printf '%s\n' "$gfiles" | grep -c .)" -ge 300 ]; then
+    if files_capped "$gfiles"; then
       echo "BLOCKED $s8 changes 300 files or more, GitHub's listing cap, so whether a gate applies to it cannot be read"; return
     fi
     gout=$(require_gates "$sha" "$gfiles"); grc=$?
@@ -267,7 +267,7 @@ range_gate() {
     while read -r sha subj; do
       [ -n "$sha" ] || continue
       if ! files=$(commit_files "$sha"); then why="BLOCKED — cannot read the files it changed: ${files#BLOCKED:}"
-      elif [ "$(printf '%s\n' "$files" | grep -c .)" -ge 300 ]; then why="BLOCKED — it changes 300 files or more, GitHub's listing cap"
+      elif files_capped "$files"; then why="BLOCKED — it changes 300 files or more, GitHub's listing cap"
       else why=$(gate_applies "$wf" "$sha" "$files"); case $? in 0) why="" ;; 1) continue ;; esac
       fi
       if [ -n "$why" ]; then
@@ -579,26 +579,158 @@ after() {
   esac
 }
 
+# open_pr_headed_by <full-sha>: the number of the open pull request whose HEAD is that sha, or
+# empty. rc=1 with the reason on stdout when the listing could not be read.
+#
+# Both halves of the discriminator are load-bearing. `state == open` alone matches a merged or
+# closed pull request that once contained the commit, and the association endpoint lists those
+# too. `head.sha == sha` alone matches nothing useful on a sha that is merely *in* a branch. Only
+# a commit that is an open pull request's tip is a sha whose one-argument reading is wrong.
+open_pr_headed_by() {
+  rd "repos/$R/commits/$1/pulls?per_page=100" \
+    --jq "[.[]|select(.state==\"open\" and .head.sha==\"$1\")|.number]|first // empty"
+}
+
+# open_pr_for_branch <branch>: the number of the open pull request whose HEAD BRANCH is <branch>,
+# or empty. rc=1 with the reason on stdout when the listing could not be read.
+open_pr_for_branch() {
+  rd "repos/$R/pulls?state=open&head=${R%%/*}:$1&per_page=1" --jq '.[0].number // empty'
+}
+
+# stack_chain <pr>: the base chain from <pr> upward, newest first, space separated, ending at the
+# pull request whose base is main. Three non-ordinary endings, each printed as the last field:
+#
+#   UNRESOLVED:<branch>  a base branch that no OPEN pull request produces. The walk cannot say
+#                        what reaches main, so the caller must refuse rather than report a root.
+#   CYCLE                the chain loops back on itself.
+#   DEPTH                more hops than any real stack, so the walk stops rather than spinning.
+#
+# rc=1 with the reason on stdout when a read failed. A failed read is never an ending.
+#
+# Why a chain and not just the base. Six open stacks are deeper than one hop and two are four
+# deep (#2606 → #2602 → #2597 → #2554, #2680 → #2669 → #2668 → #2667). A pre-flight that names
+# the immediate base stops inside the stack, which is exactly the case it exists to catch.
+stack_chain() {
+  local pr=$1 seen="" base next hops=0
+  while :; do
+    printf '%s ' "$pr"
+    base=$(rd "repos/$R/pulls/$pr" --jq '.base.ref') || { echo "BLOCKED reading the base of #$pr: ${base#BLOCKED:}"; return 1; }
+    [ "$base" = main ] && return 0
+    case " $seen " in *" $pr "*) echo "CYCLE"; return 0 ;; esac
+    seen="$seen $pr"
+    hops=$((hops + 1))
+    [ "$hops" -gt 20 ] && { echo "DEPTH"; return 0; }
+    next=$(open_pr_for_branch "$base") || { echo "BLOCKED resolving '$base' to an open pull request: ${next#BLOCKED:}"; return 1; }
+    [ -n "$next" ] || { echo "UNRESOLVED:$base"; return 0; }
+    pr=$next
+  done
+}
+
 # checks <sha> [<pr>]: the required-check reading for one head on its own, so it can be checked
 # against a known commit without running a GO. With <pr>, the diff is that PR's three-dot diff;
 # without it, the commit's diff against its first parent.
+#
+# Everything this function prints is scoped, and until 2026-11-04 none of it said so. Three
+# separate readings overstated themselves, all in the same direction and all in the message
+# rather than in the logic:
+#
+#   1. the one-argument form on an open pull request's head read the wrong diff entirely;
+#   2. a stacked pull request's reading covered its own diff, not what reaches main;
+#   3. `SATISFIED` claimed a successful run even when no gate had applied and nothing had run.
+#
+# A reader acts on the last line. If the last line overstates, the reading is worse than no
+# reading, because it carries the authority of an instrument.
 checks() {
-  local sha=$1 files full
+  local sha=$1 pr=${2:-} files full
   # The one place a ref is allowed to be loose, because a person types it. require_gates needs the
   # full sha and refuses anything else, so resolve first rather than letting an abbreviation become
   # a confident wrong answer about whether a run exists.
   full=$(rd "repos/$R/commits/$sha" --jq '.sha') || { echo "BLOCKED resolving '$sha' to a full sha: ${full#BLOCKED:}"; return 2; }
   sha=$full
-  if [ -n "${2:-}" ]; then files=$(pr_files "$2"); else files=$(commit_files "$sha"); fi
+  if [ -n "$pr" ]; then
+    files=$(pr_files "$pr")
+  else
+    # The one-argument form reads the commit's diff against its FIRST PARENT. On a pull request's
+    # head that is the wrong question, and the two answers are not merely different sizes — they
+    # can be disjoint. Measured on feca2ce5c, #2682's head: the two-argument form reads 1 file,
+    # crates/arbos-agentd/src/web.rs; the one-argument form reads 9, main's incoming side from
+    # #2671, and web.rs is not among them. Both happened to reach the same verdict, because
+    # neither set trips a filtered path. That coincidence is the hazard, not the reassurance.
+    local owner_pr
+    owner_pr=$(open_pr_headed_by "$sha") \
+      || { echo "BLOCKED checking whether ${sha:0:9} heads an open pull request: ${owner_pr#BLOCKED:}"; return 2; }
+    if [ -n "$owner_pr" ]; then
+      echo "REFUSE — ${sha:0:9} is the head of open pull request #$owner_pr, so the one-argument form reads the wrong diff for it:"
+      printf '    %-22s %s\n' \
+        "what you ran"          "checks ${sha:0:9}" \
+        "what that reads"       "the commit's diff against its first parent" \
+        "what the gate filters" "#$owner_pr's three-dot diff — what merging it actually adds to main" \
+        "what to run instead"   "checks ${sha:0:9} $owner_pr"
+      return 1
+    fi
+    files=$(commit_files "$sha")
+  fi
   [ -n "$files" ] && [ "${files#BLOCKED}" = "$files" ] || { echo "BLOCKED reading changed files: ${files#BLOCKED:}"; return 2; }
+  # GitHub caps a commit's file listing at 300. A list at the cap is "cannot tell", never a short
+  # answer that happens to miss the gated path. verdict() has guarded this since it was written;
+  # this path did not, which made the operator subcommand the laxer of the two readers.
+  if files_capped "$files"; then
+    echo "BLOCKED ${sha:0:9} changes 300 files or more, GitHub's listing cap, so whether a gate applies to it cannot be read"
+    return 2
+  fi
   echo "required checks for ${sha:0:9}, $(printf '%s\n' "$files" | grep -c .) file(s) changed:"
   require_gates "$sha" "$files"; local rc=$?
-  case $rc in
-    0) echo "RESULT: SATISFIED — every gate that applies to this head has a successful run on it" ;;
-    1) echo "RESULT: REFUSE — a gate that applies to this head has no successful run on it" ;;
-    2) echo "RESULT: BLOCKED — a gate could not be read, so nothing is inferred" ;;
-    3) echo "RESULT: WAIT — a gate that applies to this head is still running" ;;
-  esac
+  local applied=${GATES_APPLIED:-0}
+
+  # The stack reading. A pull request based on anything but main does not merge into main, so its
+  # own clean reading is accurate and scoped — and nothing above says so.
+  if [ -n "$pr" ]; then
+    local chain cls root
+    chain=$(stack_chain "$pr")
+    cls=$(stack_class "$chain" "$pr")
+    root=$(printf '%s' "$chain" | awk '{print $NF}')
+    if stack_refuses "$cls"; then
+      # The reading above is real and partial, and there is no second reading to complete it.
+      case "$cls" in
+        UNRESOLVED) echo "    stack: #$pr sits on '${root#UNRESOLVED:}', which no open pull request produces, so what reaches main cannot be determined" ;;
+        *)          echo "    stack: the base chain from #$pr does not terminate ($cls), so what reaches main cannot be determined" ;;
+      esac
+      [ $rc -eq 2 ] || rc=1
+    else
+      case "$cls" in
+        BLOCKED) echo "    stack: $chain"; rc=2 ;;
+        SELF)    : ;;  # based on main: the one case where this head's reading is the whole story
+        *)
+          echo "    stack: #$pr is $(printf '%s' "$chain" | wc -w | tr -d ' ') deep — $(printf '%s' "$chain" | sed 's/ *$//; s/ / → #/g; s/^/#/') — and the reading above covers only #$pr's own diff"
+          local rhead rfiles rout rrc
+          rhead=$(rd "repos/$R/pulls/$root" --jq '.head.sha')
+          if [ "${rhead#BLOCKED}" != "$rhead" ]; then
+            echo "    stack root #$root: BLOCKED — ${rhead#BLOCKED:}"; rc=2
+          else
+            rfiles=$(pr_files "$root")
+            if [ -z "$rfiles" ] || [ "${rfiles#BLOCKED}" != "$rfiles" ]; then
+              echo "    stack root #$root: BLOCKED — cannot read its changed files"; rc=2
+            else
+              rout=$(require_gates "$rhead" "$rfiles"); rrc=$?
+              case $rrc in
+                0) if [ "${GATES_APPLIED:-0}" -eq 0 ]; then
+                     echo "    stack root #$root on ${rhead:0:9}: SATISFIED VACUOUSLY — no path-filtered gate applies to it either"
+                   else
+                     echo "    stack root #$root on ${rhead:0:9}: SATISFIED — every gate that applies to it has passed"
+                   fi ;;
+                1) echo "    stack root #$root on ${rhead:0:9}: REFUSE — it has a gate with no passing run" ;;
+                2) echo "    stack root #$root on ${rhead:0:9}: BLOCKED — a gate could not be read" ;;
+                3) echo "    stack root #$root on ${rhead:0:9}: WAIT — a gate on it is still running" ;;
+              esac
+              printf '%s\n' "$rout" | sed 's/^    /        /'
+            fi
+          fi
+        ;;
+      esac
+    fi
+  fi
+
+  echo "RESULT: $(result_line "$rc" "$applied")"
   return $rc
 }
 
