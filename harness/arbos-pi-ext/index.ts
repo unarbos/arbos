@@ -615,7 +615,7 @@ export default function arbosPiExt(pi: ExtensionAPI) {
     promptSnippet: "start_job: run longer work beside the chat; its result arrives later as an [Arbos] job notice",
     parameters: Type.Object({
       title: Type.String({ description: "2-5 words, present tense, what the user sees while it runs (\"Searching for surf schools\")" }),
-      brief: Type.String({ description: "The exact instruction for the worker: what to find or build, for whom, the acceptance criterion, what to return (URLs and sources for research)" }),
+      brief: Type.String({ description: "The exact instruction for the worker: what to find or build, for whom, the acceptance criterion, what to return (URLs and sources for research). The job is already running beside the chat, so never tell the worker to detach anything (no nohup, setsid or trailing &) — its steps run in the foreground, and a process it detaches is one stop_job may not be able to kill." }),
       kind: Type.Union([Type.Literal("research"), Type.Literal("code"), Type.Literal("ops"), Type.Literal("other")]),
       touches: Type.Optional(Type.Union([Type.Array(Type.String()), Type.Null()], { description: "Resources the job changes: paths, 'git', 'routines', 'secret:<name>' (none for research)" })),
     }),

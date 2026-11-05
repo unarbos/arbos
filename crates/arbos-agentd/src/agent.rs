@@ -14218,11 +14218,11 @@ mod tests {
             "call `send_message(to, text)` from whatever chat you are in",
             "Bare `send_message(text)` (no `to`) is only a progress note here",
             "Never post `@name …` or a group message to reach one agent",
-            // long tasks: loop, light plan, detached jobs, standby
+            // long tasks: loop, light plan, jobs run the work (never detached), standby
             "understand the current state, act, observe what happened, repeat",
             "exactly one step in progress",
             "Do not stop at analysis",
-            "starts detached and gets a scheduled check-in",
+            "runs as a job and gets a scheduled check-in",
             "stand by",
             // verify before done, diagnostics after edits, ~3 attempts then escalate
             "Before you say something is done, check it",
