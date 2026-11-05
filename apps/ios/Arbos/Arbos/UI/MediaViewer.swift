@@ -732,9 +732,7 @@ private struct ZoomableImagePage: View {
         GeometryReader { geo in
             ZStack {
                 if let image {
-                    Image(uiImage: image)
-                        .resizable()
-                        .scaledToFit()
+                    picture(image)
                         .frame(width: geo.size.width, height: geo.size.height)
                         .scaleEffect(scale)
                         .offset(offset)
@@ -760,11 +758,29 @@ private struct ZoomableImagePage: View {
             }
         }
         .task(id: item.blobRef ?? item.pictureURL) {
-            if let (data, _) = await MediaFetch.bytes(for: item, model: model), let img = UIImage(data: data) {
+            guard let (data, _) = await MediaFetch.bytes(for: item, model: model) else {
+                failed = true
+                return
+            }
+            // A GIF full screen plays, like the bubble it was opened from
+            // ([feedback gif-send-and-playback-2026-11-05]). A still skips the frame
+            // decode and keeps its full resolution for the zoom.
+            if let animated = await ChatImageCache.animatedOnly(data) {
+                image = animated.image
+            } else if let img = UIImage(data: data) {
                 image = img
             } else {
                 failed = true
             }
+        }
+    }
+
+    /// Frames play in a `UIImageView`; a still is a SwiftUI `Image`.
+    @ViewBuilder private func picture(_ image: UIImage) -> some View {
+        if (image.images?.count ?? 0) > 1 {
+            AnimatedImage(image: image, playing: true)
+        } else {
+            Image(uiImage: image).resizable().scaledToFit()
         }
     }
 

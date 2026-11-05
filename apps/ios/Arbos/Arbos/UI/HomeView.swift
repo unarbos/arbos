@@ -965,10 +965,9 @@ struct HomeView: View {
     }
 
     private func chatPreview(_ c: Chat) -> String {
-        guard let m = model.messages(of: c.id).last(where: { !$0.voice && !$0.plainText.isEmpty }) else { return "No messages yet" }
-        let line = m.plainText.split(separator: "\n").first.map(String.init) ?? ""
+        guard let m = model.messages(of: c.id).last(where: { !$0.voice && $0.hasPreviewLine }) else { return "No messages yet" }
         let who = m.role == .user ? "You" : (m.senderHandle.map { "@\($0)" } ?? (model.project(c.projectId)?.name ?? ""))
-        return (who.isEmpty ? "" : who + ": ") + HomeView.plain(line)
+        return (who.isEmpty ? "" : who + ": ") + m.previewLine
     }
 
     private func peopleActivity(_ c: PeopleChat) -> Int64 {
@@ -979,20 +978,19 @@ struct HomeView: View {
         // Skip group deletion audits (hidden in the chat; Activity only) so the
         // home row matches what you see when you open the conversation.
         guard let m = model.messages(of: c.id).last(where: {
-            !$0.voice && !$0.plainText.isEmpty && !GroupActivity.isAuditLine($0.plainText)
+            !$0.voice && $0.hasPreviewLine && !GroupActivity.isAuditLine($0.plainText)
         }) else {
             return c.pending ? "Invited · opens when they sign in" : "Say hi"
         }
-        let line = m.plainText.split(separator: "\n").first.map(String.init) ?? ""
         let who = m.sender == model.myUserId ? "You" : (m.senderHandle.map { "@\($0)" } ?? "")
-        return (who.isEmpty ? "" : who + ": ") + HomeView.plain(line)
+        return (who.isEmpty ? "" : who + ": ") + m.previewLine
     }
 
-    /// Newest message with prose (or an open question) across the project's chats.
+    /// Newest message with something to say (or an open question) across the project's chats.
     private func latest(_ p: Project) -> Message? {
         var best: Message? = nil
         for chat in model.chats(of: p.id) {
-            if let m = model.messages(of: chat.id).last(where: { !$0.voice && (!$0.plainText.isEmpty || $0.openQuestion != nil) }) {
+            if let m = model.messages(of: chat.id).last(where: { !$0.voice && ($0.hasPreviewLine || $0.openQuestion != nil) }) {
                 if best == nil || m.createdAt > best!.createdAt { best = m }
             }
         }
@@ -1018,11 +1016,11 @@ struct HomeView: View {
             return model.isStreaming(project: p.id) ? "\(p.name) is working" : "No messages yet"
         }
         if let q = m.openQuestion { return HomeView.plain(q.question) }
-        let line = m.plainText.split(separator: "\n").first.map(String.init) ?? ""
+        let line = m.previewLine
         if m.role != .user, m.turn == .new, let name = m.subagentName {
-            return line.isEmpty ? "Messaged \(name)" : "Messaged \(name): \(HomeView.plain(line))"
+            return line.isEmpty ? "Messaged \(name)" : "Messaged \(name): \(line)"
         }
-        return (m.role == .user ? "You: " : "") + HomeView.plain(line)
+        return (m.role == .user ? "You: " : "") + line
     }
 
     /// Strip inline markdown markers for one-line previews.
@@ -1288,31 +1286,70 @@ struct HiddenChatsView: View {
         return c.counterpart(me: model.user?.id)?.displayName ?? c.title
     }
 
-    /// Last line of prose in the agent's chats, as on home.
+    /// Last line in the agent's chats, as on home.
     static func preview(_ p: Project, in model: AppModel) -> String {
         var best: Message? = nil
         for chat in model.chats(of: p.id) {
-            if let m = model.messages(of: chat.id).last(where: { !$0.voice && !$0.plainText.isEmpty }),
+            if let m = model.messages(of: chat.id).last(where: { !$0.voice && $0.hasPreviewLine }),
                best == nil || m.createdAt > best!.createdAt { best = m }
         }
         guard let m = best else { return "No messages yet" }
-        let line = m.plainText.split(separator: "\n").first.map(String.init) ?? ""
-        return (m.role == .user ? "You: " : "") + HomeView.plain(line)
+        return (m.role == .user ? "You: " : "") + m.previewLine
     }
 
     static func peoplePreview(_ c: PeopleChat, in model: AppModel) -> String {
         // A row hidden for me (someone I blocked) never previews. Deletion
         // audits stay out too — same filter as the open chat (Transcript).
         guard let m = model.messages(of: c.id).last(where: {
-            !$0.voice && !$0.plainText.isEmpty
+            !$0.voice && $0.hasPreviewLine
                 && !model.hidesMessage($0, chatId: c.id)
                 && !GroupActivity.isAuditLine($0.plainText)
         }) else {
             return c.pending ? "Invited · opens when they sign in" : "Say hi"
         }
-        let line = m.plainText.split(separator: "\n").first.map(String.init) ?? ""
         let who = m.sender == model.myUserId ? "You" : (m.senderHandle.map { "@\($0)" } ?? "")
-        return (who.isEmpty ? "" : who + ": ") + HomeView.plain(line)
+        return (who.isEmpty ? "" : who + ": ") + m.previewLine
+    }
+}
+
+/// What the chat lists show for a message: its prose, or — when it has none — what it
+/// carries. Prose alone skipped a wordless picture / GIF / sticker row and showed the text
+/// message before it, which also held that row's time out of the home sort
+/// ([feedback gif-send-and-playback-2026-11-05]). The Mac sidebar's `media_line` matches.
+extension Message {
+    /// A message the chat list can show a line for: prose, or something to look at.
+    var hasPreviewLine: Bool {
+        !plainText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || mediaPreviewLine != nil
+    }
+
+    /// The chat list's one line: the first line of prose, else what the message carries.
+    var previewLine: String {
+        let line = plainText.split(separator: "\n").first.map(String.init) ?? ""
+        if !line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return HomeView.plain(line) }
+        return mediaPreviewLine ?? ""
+    }
+
+    /// Pictures and video by kind — a picked GIF's file name is the provider's numeric id —
+    /// and a document by its name, which is the useful thing about it. `nil` when the
+    /// message carries nothing to look at.
+    var mediaPreviewLine: String? {
+        // A chart bubble reads as its chart; its fallback picture only stands in for the
+        // chart on a client that cannot draw one, where the picture is what is shown.
+        if parts.contains(where: { if case .chart = $0 { return true } else { return false } }) { return "Chart" }
+        for part in parts {
+            guard case .attachment(_, let a) = part else { continue }
+            if a.isSticker { return "Sticker" }
+            if a.isImage {
+                let ext = (a.name as NSString).pathExtension.lowercased()
+                return a.mime.lowercased() == "image/gif" || ext == "gif" ? "GIF" : "Photo"
+            }
+            switch a.kindLabel {
+            case "Video": return "Video"
+            case "Audio": return "Voice message"
+            default: return a.name
+            }
+        }
+        return nil
     }
 }
 

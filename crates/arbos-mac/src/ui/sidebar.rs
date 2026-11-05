@@ -29,7 +29,9 @@ use gpui::{
 };
 
 use crate::app::AppState;
-use crate::model::{Id, MachineState, Message, Project, Role, ServerInfo};
+use crate::model::{
+    Attachment, AttachmentKind, Id, MachineState, Message, Part, Project, Role, ServerInfo,
+};
 use crate::search;
 use crate::ui::avatars;
 use crate::ui::back_swipe;
@@ -540,8 +542,8 @@ impl ListFilter {
 
 const FILTER_FILE: &str = "sidebar_filter";
 
-/// Newest message with prose across a space's chats (archived ones too — the
-/// history is still there), for the preview line.
+/// Newest message with something to say across a space's chats (archived ones
+/// too — the history is still there), for the preview line.
 fn latest<'a>(state: &'a AppState, space: &Project) -> Option<&'a Message> {
     let mut best: Option<&Message> = None;
     for chat in state.tabs(&space.id) {
@@ -550,7 +552,7 @@ fn latest<'a>(state: &'a AppState, space: &Project) -> Option<&'a Message> {
             .iter()
             .rev()
             // A row hidden for me (someone I blocked) never previews.
-            .find(|m| !m.plain_text().trim().is_empty() && !state.hides_message(&chat.id, m))
+            .find(|m| previewable(m) && !state.hides_message(&chat.id, m))
         {
             if best.map(|b| m.created_at > b.created_at).unwrap_or(true) {
                 best = Some(m);
@@ -558,6 +560,47 @@ fn latest<'a>(state: &'a AppState, space: &Project) -> Option<&'a Message> {
         }
     }
     best
+}
+
+/// A message the chat list can show a line for: prose, or something to look at.
+/// Prose alone skipped a wordless picture / GIF / sticker row and showed the
+/// text message before it, which also held the row's time out of the sort
+/// ([feedback gif-send-and-playback-2026-11-05]).
+fn previewable(m: &Message) -> bool {
+    !m.plain_text().trim().is_empty() || media_line(m).is_some()
+}
+
+/// What the chat list says for a message with no prose: pictures and video by
+/// kind — a picked GIF's file name is the provider's numeric id — and a
+/// document by its name, which is the useful thing about it. `None` when the
+/// message carries nothing to look at.
+fn media_line(m: &Message) -> Option<String> {
+    // A chart bubble reads as its chart; its fallback picture only stands in for
+    // the chart on a client that cannot draw one, where the picture is shown.
+    if m.parts.iter().any(|p| matches!(p, Part::Chart { .. })) {
+        return Some("Chart".into());
+    }
+    m.parts.iter().find_map(|p| match p {
+        Part::Attachment { attachment, .. } => Some(attachment_line(attachment)),
+        _ => None,
+    })
+}
+
+fn attachment_line(a: &Attachment) -> String {
+    if a.is_sticker() {
+        return "Sticker".into();
+    }
+    match a.kind() {
+        AttachmentKind::Image if is_gif(a) => "GIF".into(),
+        AttachmentKind::Image => "Photo".into(),
+        AttachmentKind::Video => "Video".into(),
+        AttachmentKind::Audio => "Voice message".into(),
+        _ => a.title().to_owned(),
+    }
+}
+
+fn is_gif(a: &Attachment) -> bool {
+    a.mime.eq_ignore_ascii_case("image/gif") || a.name.to_ascii_lowercase().ends_with(".gif")
 }
 
 pub fn last_activity(state: &AppState, space: &Project) -> u64 {
@@ -587,6 +630,12 @@ pub(crate) fn preview_for_tests(state: &AppState, space: &Project) -> String {
     preview(state, space)
 }
 
+/// `media_line` for the headless tests.
+#[cfg(test)]
+pub(crate) fn media_line_for_tests(m: &Message) -> Option<String> {
+    media_line(m)
+}
+
 fn preview(state: &AppState, space: &Project) -> String {
     let Some(m) = latest(state, space) else {
         if space.is_people() {
@@ -604,6 +653,9 @@ fn preview(state: &AppState, space: &Project) -> String {
     };
     let text = m.plain_text();
     let line = text.lines().next().unwrap_or_default();
+    // A wordless row says what it carries ("GIF", "Photo") rather than nothing.
+    let media = line.trim().is_empty().then(|| media_line(m)).flatten();
+    let line = media.as_deref().unwrap_or(line);
     let who = if space.is_people() {
         if state.is_mine(m) {
             "You".to_string()
@@ -4779,5 +4831,221 @@ mod pin_tests {
         );
         shell.update(vcx, |sh, cx| sh.finish_pin_drag(cx));
         assert!(sent_pins(&cmds).is_empty(), "a second drop is a no-op");
+    }
+}
+
+/// The chat list's preview line and the row's time, when the newest message carries a
+/// picture and no words ([feedback gif-send-and-playback-2026-11-05]: "when the latest
+/// message is a GIF, the chat list preview shows the text message before it instead").
+/// The line used to need prose, so a GIF row was skipped twice over: the list showed the
+/// older text message, and — because `last_activity` reads the same message — the chat
+/// kept the older row's time and its place in the sort.
+#[cfg(test)]
+mod chat_list_preview_tests {
+    use futures::future::BoxFuture;
+    use gpui::{AppContext as _, TestAppContext};
+    use tokio::sync::mpsc;
+
+    use crate::app::AppState;
+    use crate::model::{Chat, Message, Project, SpaceKind};
+    use crate::sync::{ClientCommand, SyncEvent, SyncSource};
+    use crate::ui::motion::PulseClock;
+    use crate::ui::theme::{Surface, Theme};
+
+    struct Idle;
+
+    impl SyncSource for Idle {
+        fn name(&self) -> &'static str {
+            "idle"
+        }
+
+        fn run(
+            self: Box<Self>,
+            _events: mpsc::UnboundedSender<SyncEvent>,
+            _commands: mpsc::UnboundedReceiver<ClientCommand>,
+        ) -> BoxFuture<'static, anyhow::Result<()>> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    /// A row with one attachment part and no text, as both clients write a picked GIF:
+    /// no `ref` (nothing is stored), the provider's URL, its numeric id for a file name.
+    fn gif(id: &str, chat: &str, at: u64) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "chatId": chat, "role": "user", "sender": "user", "status": "done",
+            "createdAt": at, "completedAt": at,
+            "parts": [{ "id": format!("{id}-a"), "kind": "attachment", "attachment": {
+                "name": "6178590884800169.gif", "mime": "image/gif", "kind": "image",
+                "url": "https://cdn.klipy.com/6178590884800169.gif",
+                "source": { "provider": "KLIPY", "id": "6178590884800169",
+                            "pageUrl": "https://klipy.com/gif/6178590884800169" },
+            } }],
+        }))
+        .expect("gif message")
+    }
+
+    fn attachment(id: &str, chat: &str, at: u64, file: serde_json::Value) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "chatId": chat, "role": "user", "sender": "user", "status": "done",
+            "createdAt": at, "completedAt": at,
+            "parts": [{ "id": format!("{id}-a"), "kind": "attachment", "attachment": file }],
+        }))
+        .expect("attachment message")
+    }
+
+    fn text(id: &str, chat: &str, at: u64, body: &str) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "chatId": chat, "role": "user", "sender": "user", "status": "done",
+            "createdAt": at, "completedAt": at,
+            "parts": [{ "id": format!("{id}-t"), "kind": "text", "text": body }],
+        }))
+        .expect("text message")
+    }
+
+    fn chat(id: &str, project: &str, at: u64) -> Chat {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "project_id": project, "title": "Main", "is_pinned": false,
+            "is_system": false, "unread": false, "last_message_at": at,
+        }))
+        .expect("chat")
+    }
+
+    /// What a wordless row reads as, with no app state in the way.
+    #[test]
+    fn a_wordless_row_is_named_by_what_it_carries() {
+        let line = |m: &Message| super::media_line_for_tests(m);
+        assert_eq!(line(&gif("g", "c", 10)).as_deref(), Some("GIF"));
+        // A GIF from somewhere other than the picker: the file name decides.
+        assert_eq!(
+            line(&attachment(
+                "a",
+                "c",
+                10,
+                serde_json::json!({ "name": "dance.GIF", "mime": "application/octet-stream", "ref": "b1" })
+            ))
+            .as_deref(),
+            Some("GIF"),
+        );
+        assert_eq!(
+            line(&attachment(
+                "a",
+                "c",
+                10,
+                serde_json::json!({ "name": "IMG_0042.jpeg", "mime": "image/jpeg", "ref": "b1", "kind": "image" })
+            ))
+            .as_deref(),
+            Some("Photo"),
+        );
+        assert_eq!(
+            line(&attachment(
+                "a",
+                "c",
+                10,
+                serde_json::json!({ "name": "hug.png", "mime": "image/png", "ref": "b1", "kind": "sticker" })
+            ))
+            .as_deref(),
+            Some("Sticker"),
+        );
+        assert_eq!(
+            line(&attachment(
+                "a",
+                "c",
+                10,
+                serde_json::json!({ "name": "clip.mp4", "mime": "video/mp4", "ref": "b1", "kind": "video" })
+            ))
+            .as_deref(),
+            Some("Video"),
+        );
+        assert_eq!(
+            line(&attachment(
+                "a",
+                "c",
+                10,
+                serde_json::json!({ "name": "memo.m4a", "mime": "audio/mp4", "ref": "b1", "kind": "audio" })
+            ))
+            .as_deref(),
+            Some("Voice message"),
+        );
+        // A document keeps its name, which is the useful thing about it.
+        assert_eq!(
+            line(&attachment(
+                "a",
+                "c",
+                10,
+                serde_json::json!({ "name": "Q3 plan.pdf", "mime": "application/pdf", "ref": "b1", "kind": "pdf" })
+            ))
+            .as_deref(),
+            Some("Q3 plan.pdf"),
+        );
+        assert_eq!(line(&text("t", "c", 10, "hi")), None, "words, not media");
+    }
+
+    /// The reported bug, on `AppState`: a DM whose newest message is a GIF.
+    #[gpui::test]
+    fn a_newest_gif_is_the_preview_line_and_the_rows_time(cx: &mut TestAppContext) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio");
+        let handle = rt.handle().clone();
+        cx.update(|cx| {
+            gpui_tokio::init_from_handle(cx, handle);
+            cx.set_global(Theme::dark(Surface::Matte));
+            if !cx.has_global::<PulseClock>() {
+                PulseClock::init(cx);
+            }
+        });
+        let state = cx.new(|cx| AppState::new(Box::new(Idle), cx));
+        let (older, newest) = (1_762_000_000_000, 1_762_000_060_000);
+        let space = state.update(cx, |s, _| {
+            let space = Project {
+                id: "dm-sam".into(),
+                name: "Sam Rivera".into(),
+                kind: SpaceKind::Dm,
+                ..Project::default()
+            };
+            s.projects.push(space.clone());
+            s.chats
+                .insert("dm-sam".into(), vec![chat("room-sam", "dm-sam", older)]);
+            s.messages.insert(
+                "room-sam".into(),
+                vec![
+                    text("t1", "room-sam", older, "Sending you something"),
+                    gif("g1", "room-sam", newest),
+                ],
+            );
+            space
+        });
+
+        let (line, at) = state.read_with(cx, |s, _| {
+            (
+                super::preview_for_tests(s, &space),
+                super::last_activity(s, &space),
+            )
+        });
+        assert_eq!(
+            line, "You: GIF",
+            "the GIF is the newest row, so it previews"
+        );
+        assert_eq!(
+            at, newest,
+            "and the row's time is the GIF's, not the text's"
+        );
+
+        // A caption still wins: the words are what the reader recognises.
+        state.update(cx, |s, _| {
+            let mut captioned = gif("g2", "room-sam", newest + 1_000);
+            let text_part = serde_json::from_value(serde_json::json!({
+                "id": "g2-t", "kind": "text", "text": "this is you"
+            }))
+            .expect("text part");
+            captioned.parts.push(text_part);
+            s.messages
+                .get_mut("room-sam")
+                .expect("messages")
+                .push(captioned);
+        });
+        let line = state.read_with(cx, |s, _| super::preview_for_tests(s, &space));
+        assert_eq!(line, "You: this is you");
     }
 }

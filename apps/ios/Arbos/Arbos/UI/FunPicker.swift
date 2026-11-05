@@ -215,7 +215,11 @@ struct StickerBubble: View {
 
     var body: some View {
         ZStack {
-            if let image {
+            if let image, (image.images?.count ?? 0) > 1 {
+                // An animated sticker plays its frames (`AnimatedImage`); a still does not
+                // need the UIKit view ([feedback gif-send-and-playback-2026-11-05]).
+                AnimatedImage(image: image, playing: true)
+            } else if let image {
                 Image(uiImage: image).resizable().scaledToFit()
             } else if failed {
                 Image(systemName: "photo").font(theme.font(28)).foregroundStyle(theme.muted)
