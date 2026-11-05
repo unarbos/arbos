@@ -1517,6 +1517,7 @@ mod glass_tests {
             assert!(contrast >= 4.5, "white on the pill: {contrast:.2}:1");
         }
         // Over the flat Matte page the pill is a step above it, not a plate.
+        // glass-lint: allow (a contrast measurement in a test; it paints nothing)
         let lift = (over(style.fill, theme.bg).to_rgb().r - theme.bg.to_rgb().r) * 255.0;
         assert!(
             (6.0..=24.0).contains(&lift),

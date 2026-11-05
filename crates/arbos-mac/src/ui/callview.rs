@@ -86,6 +86,8 @@ fn tile(
         .min_h(px(if big { 260.0 } else { 160.0 }))
         .rounded(px(24.0))
         .overflow_hidden()
+        // glass-lint: allow (a participant tile on the call's own opaque stage; it stands in for
+        // a camera frame, so it is a dark card by design)
         .bg(theme.surface_1)
         .border_2()
         .border_color(if p.speaking {
@@ -419,6 +421,8 @@ pub fn screen(shell: &Shell, active: &ActiveCall, cx: &mut Context<Shell>) -> Di
         .flex()
         .flex_col()
         .items_center()
+        // glass-lint: allow (the call's own stage, absolute over the whole window: a video call
+        // is a document surface and the desktop must not show through it)
         .bg(theme.bg)
         .child(
             div()
