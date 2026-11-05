@@ -448,7 +448,7 @@ nomac_covers() {
 # at the merge-window.sh call), so returning early from here would turn a clear answer into a vague
 # one. A lane that wants to stop on an already-merged PR reads the sha named below.
 mergeability() {
-  local pr=$1 ms st i
+  local pr=$1 ms st
   ms=$(gh pr view "$pr" -R $R --json mergeable,isDraft --jq '"\(.mergeable) \(.isDraft)"') \
     || { echo "UNREADABLE (gh exited non-zero reading mergeable)"; return; }
   case "$ms" in
@@ -463,7 +463,7 @@ mergeability() {
     CLOSED*)  echo "CLOSED without merging — reopen it before asking for a window"; return ;;
   esac
   # OPEN: a cold field. Bounded, and short — the measured case resolved in three seconds.
-  for i in 1 2 3 4; do
+  for _ in 1 2 3 4; do
     sleep 3
     ms=$(gh pr view "$pr" -R $R --json mergeable,isDraft --jq '"\(.mergeable) \(.isDraft)"') \
       || { echo "UNREADABLE (gh exited non-zero re-reading mergeable)"; return; }
