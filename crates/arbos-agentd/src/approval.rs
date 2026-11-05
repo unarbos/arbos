@@ -1285,6 +1285,22 @@ impl Agent {
         self.store.job_for_subagent(session_id).ok().flatten()
     }
 
+    /// Where a card went, by a name a person can be sent to.
+    ///
+    /// A ULID is not a place anyone can be asked to go, so this is what a caller may say out
+    /// loud; the id travels beside it for exactness. A chat with no title falls back to a
+    /// pointer to the main chat, which is where `approval_chat` puts a card with nowhere better
+    /// to go.
+    pub(crate) fn card_chat_name(&self, chat_id: &str) -> String {
+        self.store
+            .chat(chat_id)
+            .ok()
+            .flatten()
+            .map(|c| c.title)
+            .filter(|t| !t.trim().is_empty())
+            .unwrap_or_else(|| "your main chat".to_owned())
+    }
+
     /// One expired card ends the job that raised it: the worker is stopped, the job is failed
     /// with the reason the result turn relays, and the next gated call of that job is refused
     /// without another card. Four cards, each expiring after fourteen minutes, was the livelock.
@@ -1385,17 +1401,10 @@ impl Agent {
             .await
         {
             Ok(id) => {
+                // Where the card is, by name: a card goes to the chat the owner reads, which is
+                // rarely the chat the call came from.
+                let where_it_is = self.card_chat_name(&chat_id);
                 if let Some(j) = &job {
-                    // Where the card is, by name: a job's card goes to the chat the owner reads,
-                    // which is rarely the chat the job runs in.
-                    let where_it_is = self
-                        .store
-                        .chat(&chat_id)
-                        .ok()
-                        .flatten()
-                        .map(|c| c.title)
-                        .filter(|t| !t.trim().is_empty())
-                        .unwrap_or_else(|| "your main chat".to_owned());
                     self.note_job_awaits_approval(
                         j,
                         &chat_id,
@@ -1404,7 +1413,13 @@ impl Agent {
                     )
                     .await;
                 }
-                json!({ "ok": true, "state": "pending", "approvalId": id, "title": title, "why": hit.why, "waitMs": wait_ms, "park": parks })
+                // `chat` and `chatId` are the card's location, for the one session that can act
+                // on it. This reply goes to the session whose call was gated, which is the
+                // session that otherwise tells the user "the card is in this chat" — true only
+                // when the two happen to coincide. The name is what it may say; the id is there
+                // so it is exact. The model is told nothing about location anywhere else.
+                json!({ "ok": true, "state": "pending", "approvalId": id, "title": title, "why": hit.why,
+                    "waitMs": wait_ms, "park": parks, "chat": where_it_is, "chatId": chat_id })
             }
             Err(e) => json!({ "ok": false, "error": e.to_string() }),
         }
@@ -2212,6 +2227,76 @@ mod park_tests {
             "a hidden row takes the card away from the user who has to answer it"
         );
         drop(h);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod card_location_tests {
+    use super::*;
+    use crate::status::tests::test_agent;
+
+    const MAIN: &str = "01TESTCHATCARDWHERE0MAIN00";
+    const SIDE: &str = "01TESTCHATCARDWHERE0SIDE00";
+
+    /// The model is never told where its card went, so it says "the card is in this chat" —
+    /// true only when the asking chat and the card's chat happen to coincide. `approval_chat`
+    /// sends a card to the chat the owner reads, so for a side-chat call they usually do not.
+    ///
+    /// The reply to the gated call is the right channel because it reaches exactly the session
+    /// that tripped the gate, which is the session that writes the false line. The name is what
+    /// it can say to the user; the id is beside it so it is exact. No prompt text changes.
+    #[tokio::test]
+    async fn the_session_that_asked_is_told_which_chat_the_card_is_in() {
+        let (agent, root) = test_agent().await;
+        agent.store.upsert_chat(MAIN, "Main", true, 0).unwrap();
+        agent
+            .store
+            .upsert_chat(SIDE, "Trip planning", false, 1)
+            .unwrap();
+        let _main = agent.sync.open_room(MAIN).await.unwrap();
+        let _side = agent.sync.open_room(SIDE).await.unwrap();
+
+        let v = agent
+            .hook_approval("bash", &json!({ "command": "rm -rf /opt/x" }), SIDE, "main")
+            .await;
+        assert_eq!(v["state"], "pending", "{v}");
+
+        // The geometry first, so this fixture cannot quietly collapse into one chat and then
+        // pass whatever the reply says.
+        let row = agent
+            .store
+            .approval(v["approvalId"].as_str().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            row.chat_id, MAIN,
+            "the card goes to the chat the owner reads"
+        );
+        assert_ne!(row.chat_id, SIDE, "not to the chat the call came from");
+
+        assert_eq!(v["chat"], "Main", "a name the model can say out loud: {v}");
+        assert_eq!(v["chatId"], MAIN, "and the id, so it is exact: {v}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A chat with no title would otherwise put a raw ULID where a place name belongs, and the
+    /// model reads whatever it is given out to the user.
+    #[tokio::test]
+    async fn an_untitled_chat_is_named_rather_than_spelled_out() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATCARDWHERE0BLANK0";
+        agent.store.upsert_chat(chat, "", true, 0).unwrap();
+        let _host = agent.sync.open_room(chat).await.unwrap();
+
+        let v = agent
+            .hook_approval("bash", &json!({ "command": "rm -rf /opt/x" }), chat, "main")
+            .await;
+        assert_eq!(v["chat"], "your main chat", "{v}");
+        assert!(
+            !v["chat"].as_str().unwrap().contains(chat),
+            "a ULID is not a place a person can be sent to: {v}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }
