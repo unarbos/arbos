@@ -1666,8 +1666,12 @@ async fn poll_me_pushes(shared: &Arc<Shared>) {
             | PushEventDto::SecretRequest(_)
             | PushEventDto::SecretsPaused(_)
             | PushEventDto::SecretExpiring(_)
-            | PushEventDto::MessageRedacted(_)
             | PushEventDto::CallMissed(_) => {}
+            PushEventDto::MessageRedacted(payload) => {
+                let _ = shared.events.send(SyncEvent::MessageRedacted {
+                    chat_id: payload.chat_id.clone(),
+                });
+            }
             PushEventDto::PinsChanged(payload) => {
                 // Another device of mine replaced the list: the push carries the whole list.
                 apply_pins(shared, payload.pins.clone(), None);
