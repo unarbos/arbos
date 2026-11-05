@@ -1466,6 +1466,13 @@ mod tests {
     #[derive(Default)]
     struct FakeRelay {
         rooms: std::sync::Mutex<HashMap<String, FakeRoom>>,
+        /// Wire bytes the relay sent to the box, and the box sent to the relay. Frame payloads
+        /// only, so the figure is comparable with the box's own interface counters.
+        to_box: std::sync::atomic::AtomicU64,
+        from_box: std::sync::atomic::AtomicU64,
+        /// Frames sent to the box, by type: count and bytes. This is what answers "what is an
+        /// idle room actually receiving", which no counter outside the process can show.
+        to_box_by_type: std::sync::Mutex<HashMap<String, (u64, u64)>>,
     }
 
     #[derive(Default)]
@@ -1503,6 +1510,30 @@ mod tests {
         fn open_sockets(&self) -> i64 {
             self.rooms.lock().unwrap().values().map(|r| r.sockets).sum()
         }
+        fn bytes_to_box(&self) -> u64 {
+            self.to_box.load(std::sync::atomic::Ordering::Relaxed)
+        }
+        fn bytes_from_box(&self) -> u64 {
+            self.from_box.load(std::sync::atomic::Ordering::Relaxed)
+        }
+        fn note_frame(&self, ty: FrameType, bytes: u64) {
+            let mut m = self.to_box_by_type.lock().unwrap();
+            let e = m.entry(format!("{ty:?}")).or_insert((0, 0));
+            e.0 += 1;
+            e.1 += bytes;
+        }
+        /// `(type, frames, bytes)` sent to the box, heaviest first.
+        fn to_box_breakdown(&self) -> Vec<(String, u64, u64)> {
+            let mut v: Vec<_> = self
+                .to_box_by_type
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(k, (c, b))| (k.clone(), *c, *b))
+                .collect();
+            v.sort_by_key(|(_, _, b)| std::cmp::Reverse(*b));
+            v
+        }
     }
 
     /// Start the fake relay on `rt` and return it with its port.
@@ -1539,9 +1570,19 @@ mod tests {
             r.sockets += 1;
             r.peak_sockets = r.peak_sockets.max(r.sockets);
         });
-        async fn send(socket: &mut axum::extract::ws::WebSocket, f: Frame) -> bool {
+        async fn send_counted(
+            socket: &mut axum::extract::ws::WebSocket,
+            relay: &FakeRelay,
+            f: Frame,
+        ) -> bool {
+            let ty = f.ty;
+            let bytes = f.encode();
+            relay
+                .to_box
+                .fetch_add(bytes.len() as u64, std::sync::atomic::Ordering::Relaxed);
+            relay.note_frame(ty, bytes.len() as u64);
             socket
-                .send(axum::extract::ws::Message::Binary(f.encode()))
+                .send(axum::extract::ws::Message::Binary(bytes))
                 .await
                 .is_ok()
         }
@@ -1549,6 +1590,9 @@ mod tests {
             let axum::extract::ws::Message::Binary(b) = msg else {
                 continue;
             };
+            relay
+                .from_box
+                .fetch_add(b.len() as u64, std::sync::atomic::Ordering::Relaxed);
             let Ok(Some(f)) = Frame::decode(b) else {
                 continue;
             };
@@ -1574,7 +1618,7 @@ mod tests {
                         serde_json::to_value(st).unwrap(),
                         Bytes::new(),
                     );
-                    if !send(&mut socket, f).await {
+                    if !send_counted(&mut socket, &relay, f).await {
                         break;
                     }
                 }
@@ -1594,7 +1638,7 @@ mod tests {
                         })
                         .unwrap();
                         let f = Frame::new(FrameType::Row, header, Bytes::from(payload.clone()));
-                        ok = send(&mut socket, f).await;
+                        ok = send_counted(&mut socket, &relay, f).await;
                         if !ok {
                             break;
                         }
@@ -1607,7 +1651,7 @@ mod tests {
                         json!({ "headSeq": rows.len() as i64 }),
                         Bytes::new(),
                     );
-                    if !send(&mut socket, f).await {
+                    if !send_counted(&mut socket, &relay, f).await {
                         break;
                     }
                 }
@@ -1628,13 +1672,13 @@ mod tests {
                         dup: false,
                     })
                     .unwrap();
-                    if !send(&mut socket, Frame::new(FrameType::Ack, ack, Bytes::new())).await {
+                    if !send_counted(&mut socket, &relay, Frame::new(FrameType::Ack, ack, Bytes::new())).await {
                         break;
                     }
                 }
                 FrameType::Probe => {
                     let f = Frame::new(FrameType::ProbeOk, json!({}), Bytes::new());
-                    if !send(&mut socket, f).await {
+                    if !send_counted(&mut socket, &relay, f).await {
                         break;
                     }
                 }
@@ -1867,24 +1911,50 @@ mod tests {
         std::thread::sleep(Duration::from_secs(settle_secs));
         let window = Duration::from_secs(secs);
         let mut prev = proc_sample();
+        let mut prev_rx = bx.relay.bytes_to_box();
+        let mut prev_tx = bx.relay.bytes_from_box();
         let mut cores = Vec::new();
+        let mut per_room_rx = Vec::new();
         for n in 1..=samples {
             std::thread::sleep(window);
             let now = proc_sample();
             let d = |a: f64, b: f64| (b - a) / window.as_secs_f64();
             let box_cores = d(prev.box_cpu_s, now.box_cpu_s);
             cores.push(box_cores);
+            let (rx, tx) = (bx.relay.bytes_to_box(), bx.relay.bytes_from_box());
+            let open = bx.relay.open_sockets().max(1) as f64;
+            let rx_rate = (rx - prev_rx) as f64 / window.as_secs_f64();
+            per_room_rx.push(rx_rate / open);
             println!(
                 "sample {n}: box {:.3} cores, relay {:.3} cores, other {:.3} cores, \
-                 {} relay sockets, {} process fds, {:.0} MiB rss",
+                 {} relay sockets, {} process fds, {:.0} MiB rss, \
+                 rx {:.2} KB/s ({:.3} KB/s per room), tx {:.2} KB/s",
                 box_cores,
                 d(prev.relay_cpu_s, now.relay_cpu_s),
                 d(prev.other_cpu_s, now.other_cpu_s),
                 bx.relay.open_sockets(),
                 now.fds,
                 now.rss_mib,
+                rx_rate / 1024.0,
+                rx_rate / open / 1024.0,
+                (tx - prev_tx) as f64 / window.as_secs_f64() / 1024.0,
             );
             prev = now;
+            prev_rx = rx;
+            prev_tx = tx;
+        }
+        {
+            let mut p = per_room_rx.clone();
+            p.sort_by(f64::total_cmp);
+            println!(
+                "median steady-state inbound per open room: {:.1} B/s ({:.3} KB/s)",
+                p[p.len() / 2],
+                p[p.len() / 2] / 1024.0
+            );
+            println!("frames sent to the box, by type (cumulative, heaviest first):");
+            for (ty, count, bytes) in bx.relay.to_box_breakdown() {
+                println!("    {ty:<10} {count:>8} frames  {bytes:>12} bytes");
+            }
         }
         let open = bx.relay.open_sockets();
         let median = {
