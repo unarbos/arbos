@@ -4640,6 +4640,46 @@ final class ComposerEdge: ObservableObject {
     }
 }
 
+/// The composer bar's press flash: raised by the touch that opens the keyboard and lowered
+/// one beat later (`Theme.composerFlashRise` / `Fall`), so the bar answers the finger before
+/// the keyboard is up (Grok's composer, Jacob 2026-11-04).
+///
+/// Its own object, observed by the pill's background alone, because raising it must not
+/// re-render the field. `MentionTextView.updateUIView` ends in `syncFocus`, and a `syncFocus`
+/// that lands between UIKit making the field first responder and the binding hearing about it
+/// reads "not focused, but first responder" and resigns the field UIKit has just focused. The
+/// first cut of this flash held the level in the field's own `@State` and cost
+/// `BackSwipeUITests.testAgentChatEdgeSwipeGoesHomeWithTheKeyboardUp` its keyboard in gate run
+/// 41760500997, with its two sibling cases passing — the shape of a race, not of a break.
+@MainActor
+final class ComposerFlash: ObservableObject {
+    @Published private(set) var on = false
+    private var fall: Task<Void, Never>?
+
+    /// The fall is on a timer, not on the finger lifting: a tap lifts sooner than the eye can
+    /// read a highlight, and a hold is not meant to keep the bar lit. A second touch during
+    /// the fall restarts the pulse rather than finishing the first one's fade.
+    func pulse() {
+        fall?.cancel()
+        withAnimation(.easeOut(duration: Theme.composerFlashRise)) { on = true }
+        fall = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(Theme.composerFlashRise * 1_000_000_000))
+            guard !Task.isCancelled, let self else { return }
+            withAnimation(.easeIn(duration: Theme.composerFlashFall)) { self.on = false }
+        }
+    }
+}
+
+/// The wash over the field's surface, the only view that observes the flash.
+private struct ComposerFlashLayer<S: InsettableShape>: View {
+    @ObservedObject var flash: ComposerFlash
+    let shape: S
+
+    var body: some View {
+        ComposerPressFlash(shape: shape, on: flash.on || DebugHooks.composerFlashHeld)
+    }
+}
+
 /// The fade the chat bar floats on, with its ramp placed on the composer that was measured.
 private struct ChatBarFade: View {
     @ObservedObject var bar: ChatBarHeight
@@ -4827,6 +4867,12 @@ private struct ComposerField: View {
     /// Pictures / files pasted into the field ([feedback copy-image-messages-ios-2026-10-27]).
     var onPasteMedia: (([AppModel.PendingAttachment]) -> Void)? = nil
 
+    /// The press flash's level. Plain `@State`, so this view holds it without observing it —
+    /// `ComposerFlashLayer` does, the way the fade layer alone observes `ComposerEdge`. Nothing
+    /// here re-renders when the bar brightens, which is what keeps the flash clear of the
+    /// keyboard coming up (see `ComposerFlash`).
+    @State private var flash = ComposerFlash()
+
     private var canSend: Bool {
         !draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || hasPending
     }
@@ -4981,7 +5027,8 @@ private struct ComposerField: View {
                                 agentProject: { model.agent(member: $0, chatId: chatId) },
                                 onPasteMedia: onPasteMedia,
                                 onDeleteBackwardEmpty: onDeleteBackwardEmpty,
-                                onPasteImage: onPasteImage)
+                                onPasteImage: onPasteImage,
+                                onFirstTouchDown: { flash.pulse() })
                     .fixedSize(horizontal: false, vertical: true)
             }
             // Grok's trailing cluster: mic glyph centre 24 pt before the pill, the pill
@@ -5029,7 +5076,15 @@ private struct ComposerField: View {
         // The family's field: solid on Matte; on Glass the clear system glass and nothing of
         // ours on it, so the transcript reads through the pill ([feedback
         // iphone-composer-glass-2026-10-28]). Rim below.
-        .background(PillSurface(shape: fieldShape)) // control-size: source (the family's field, rim below)
+        // The flash sits in the background, over the surface: a wash in front of the
+        // field would dim the words it is meant to acknowledge, and would have to be
+        // taken out of hit testing to let the touch through at all.
+        .background {
+            ZStack {
+                PillSurface(shape: fieldShape) // control-size: source (the family's field, rim below)
+                ComposerFlashLayer(flash: flash, shape: fieldShape)
+            }
+        }
         .overlay(ComposerRim(shape: fieldShape, tint: rimTint))
         .alert("Microphone access is off", isPresented: $recorder.permissionDenied) {
             Button("OK", role: .cancel) { }

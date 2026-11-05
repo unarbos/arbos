@@ -28,6 +28,11 @@ enum DebugHooks {
     /// Rig (#1596): text put in the composer of the opened chat at appear, caret at the end —
     /// `@s` leaves the mention picker open, `@sam deck ready?` shows the resolved chip.
     static var composerDraft: String? { value("ARBOS_COMPOSER_DRAFT").flatMap { $0.isEmpty ? nil : $0 } }
+    /// Rig: hold the composer's touch-down flash at its peak (`held`), so a still shows the
+    /// brightening. The flash lasts about a quarter of a second — no screenshot can be timed
+    /// to land inside it, and a long-press does not extend it, because the fall is on a timer
+    /// rather than on the finger lifting.
+    static var composerFlashHeld: Bool { value("ARBOS_COMPOSER_FLASH") == "held" }
     /// Rig (#1596): print each people-chat send's text and `mentions` ids to the console.
     static var traceSends: Bool { value("ARBOS_TRACE_SENDS") == "1" }
     /// Rig (#2404): print what moves the transcript around a reveal — the target's place in
