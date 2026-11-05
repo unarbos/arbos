@@ -1189,8 +1189,24 @@ pub(crate) mod tests {
         test_agent_with(axum::Router::new()).await
     }
 
+    /// Same, with a real `pi_bin`, so `start_pi` and its supervisor run as they do on a box.
+    ///
+    /// Every other test box points `pi_bin` at nothing, which leaves the agent with no main
+    /// session and no supervisor at all — bug Y's tests need the production loop itself, so
+    /// they give it a scripted child to supervise.
+    pub(crate) async fn test_agent_with_pi(pi_bin: &str) -> (Arc<Agent>, std::path::PathBuf) {
+        test_agent_full(axum::Router::new(), pi_bin).await
+    }
+
     /// Same, with extra mock-relay routes merged in (`/box/secrets/…` for the hand-off tests).
     pub(crate) async fn test_agent_with(extra: axum::Router) -> (Arc<Agent>, std::path::PathBuf) {
+        test_agent_full(extra, "/nonexistent/pi").await
+    }
+
+    async fn test_agent_full(
+        extra: axum::Router,
+        pi_bin: &str,
+    ) -> (Arc<Agent>, std::path::PathBuf) {
         let app = axum::Router::new()
             .merge(extra)
             .route(
@@ -1222,7 +1238,7 @@ pub(crate) mod tests {
             bind: "127.0.0.1".into(),
             port: 0,
             local_box: true,
-            pi_bin: "/nonexistent/pi".into(),
+            pi_bin: pi_bin.into(),
             prime_bin: "/nonexistent/prime-agent".into(),
             claude_bin: "/nonexistent/claude".into(),
             pi_ext_override: None,
