@@ -518,6 +518,10 @@ impl Model {
 #[derive(Default)]
 pub struct LinkIcons {
     pub by_host: HashMap<String, Option<Arc<RenderImage>>>,
+    /// The fill a host's mark needs so it does not vanish on the bubble
+    /// ([`crate::ui::link_tile::flip_fill`] of the tone measured at decode); absent for a
+    /// host whose picture is legible as it is, which is most of them.
+    pub fills: HashMap<String, Hsla>,
 }
 
 impl LinkIcons {
@@ -527,6 +531,10 @@ impl LinkIcons {
 
     pub fn picture(&self, host: &str) -> Option<Arc<RenderImage>> {
         self.by_host.get(host).cloned().flatten()
+    }
+
+    pub fn fill(&self, host: &str) -> Option<Hsla> {
+        self.fills.get(host).copied()
     }
 }
 
@@ -540,6 +548,8 @@ pub const LINK_ICON_GAP: f32 = 4.0;
 pub struct LinkIcon {
     pub range: Range<usize>,
     pub picture: Option<Arc<RenderImage>>,
+    /// Painted under the picture when its mark would otherwise vanish on the bubble.
+    pub fill: Option<Hsla>,
 }
 
 /// The per-render snapshot of the selection, plus what a text block needs to
@@ -1048,6 +1058,7 @@ impl SelectableText {
             .map(|(range, host)| LinkIcon {
                 range,
                 picture: pictures.picture(&host),
+                fill: pictures.fill(&host),
             })
             .collect();
         self
@@ -1432,6 +1443,19 @@ fn paint_link_icon(layout: &TextLayout, icon: &LinkIcon, placeholder: Hsla, wind
     PAINTED_LINK_ICONS.with(|n| n.set(n.get() + 1));
     match &icon.picture {
         Some(image) => {
+            // A dark mark on the dark bubble (or a light one on the light) is painted over
+            // its own flipped chip, the same rule the tile follows; every other picture sits
+            // straight on the bubble as before.
+            if let Some(fill) = icon.fill {
+                window.paint_quad(gpui::quad(
+                    bounds,
+                    radii,
+                    fill,
+                    gpui::Edges::all(px(0.0)),
+                    gpui::transparent_black(),
+                    gpui::BorderStyle::default(),
+                ));
+            }
             let _ = window.paint_image(bounds, radii, image.clone(), 0, false);
         }
         None => window.paint_quad(gpui::quad(
