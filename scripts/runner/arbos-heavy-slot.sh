@@ -11,6 +11,8 @@
 #       granted by then, it clears its own marker and exits 75 with nothing printed. It is never promoted over
 #       the cap and does not signal the owner.
 #   arbos-heavy-slot.sh release <slot-path>
+#       Refuses and deletes nothing (exit 2) on a path that is not a *.slot under the slots directory, and on a
+#       slot whose recorded owner is a live process other than this caller's — it has been handed to someone else.
 #   arbos-heavy-slot.sh status
 #
 # Call it from a rig in this shape, not as a bare `slot=$(… acquire …)`. The bare form makes the acquire a child
@@ -435,9 +437,50 @@ status_line() {
   done
 }
 
+# owner_is_mine <pid>: 0 when pid is this process or one of its ancestors. ps, not kill -0, for the reason
+# live_slots gives. Walked rather than compared against $$ because a lane releases from a later step than it
+# acquired in: ios.yml, ios-capture.yml and release.yml pass --pid "$PPID" (the Runner.Worker), which is the
+# grandparent of the release step's script, and rust-gate.sh and perf-rig.sh pass their own $$, the parent.
+owner_is_mine() {
+  local want=$1 pid=$$
+  while [[ -n "$pid" ]] && (( pid > 1 )); do
+    [[ "$pid" == "$want" ]] && return 0
+    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+  done
+  return 1
+}
+
+# release <slot>: free a slot this caller still holds. It is an rm -rf of a computed path, so it refuses
+# (exit 2, naming what it found) rather than deleting in two cases:
+#   - the path is empty or is not a *.slot directly under $SLOTS_DIR. Every caller computes it — a
+#     $GITHUB_OUTPUT that was never written, an unexported ARBOS_HEAVY_SLOT, a parsed `status` line — so the
+#     containment is checked here rather than left to the five call sites that happen to pass a good path.
+#   - the slot's recorded owner is a live process that is not this caller's. Slot paths are minted per
+#     acquisition (<epoch>-<pid>-<name>.slot), so a stale path can name a live slot only when a second
+#     acquisition lands in the same second under the same pid — and then the deletion takes the Mac from
+#     whoever holds it now.
+# A dead owner is a stale slot and is released, as live_slots would, so a refusal cannot leak a slot past
+# its owner's exit. A path already gone stays a no-op: the always() release steps run after each other.
 release() {
-  [[ -z "${1:-}" || "$1" == "none" ]] && return 0
-  rm -rf "$1" 2>/dev/null || true
+  local slot="${1:-}" root="${SLOTS_DIR%/}" owner name
+  [[ "$slot" == "none" ]] && return 0
+  if [[ -z "$slot" ]]; then
+    echo "$(ts) heavy-slot: refusing to release an empty slot path — the caller resolved it to nothing" >&2
+    return 2
+  fi
+  if [[ "$slot" != "$root"/*.slot ]] || [[ "$(dirname "$slot")" != "$root" ]]; then
+    echo "$(ts) heavy-slot: refusing to release '$slot' — not a *.slot directly under $root" >&2
+    return 2
+  fi
+  [[ -d "$slot" ]] || return 0
+  owner=$(cat "$slot/pid" 2>/dev/null || echo "")
+  if [[ -n "$owner" ]] && ps -p "$owner" >/dev/null 2>&1 && ! owner_is_mine "$owner"; then
+    name=$(cat "$slot/name" 2>/dev/null || echo "?")
+    echo "$(ts) heavy-slot: refusing to release $(basename "$slot") — $name still holds it (owner pid $owner is alive and is not this caller, pid $$)" >&2
+    logger -t arbos-heavy-slot "refused release of $(basename "$slot"): owner pid $owner live and unrelated to pid $$" 2>/dev/null || true
+    return 2
+  fi
+  rm -rf "$slot" 2>/dev/null || true
 }
 
 case "${1:-}" in
