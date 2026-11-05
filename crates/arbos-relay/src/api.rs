@@ -1,7 +1,7 @@
 //! REST surface (crdt-sync §9): pairing, devices, projects, chats, box lifecycle, usage.
 
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;
@@ -108,6 +108,66 @@ fn disk_json() -> serde_json::Value {
 
 // ---- pairing (D35) ----------------------------------------------------------------------------
 
+/// Failed redemptions `POST /pair` serves inside [`PAIR_FAIL_WINDOW_MS`] before it starts
+/// refusing with `429`.
+///
+/// A pairing code is six decimal digits — one million values, about 20 bits — and until this
+/// budget existed nothing anywhere counted a wrong guess, so an unauthenticated caller who could
+/// reach the port could sweep the space. The prize is not small: `redeem_pairing_code` omits
+/// `devices.user_id`, the column defaults to `u_default`, and on a self-hosted relay that account
+/// owns the projects and the vault. The window that matters is not an operator pairing a phone but
+/// the bootstrap code a zero-device relay mints for itself, which lives an hour with nobody
+/// present.
+///
+/// 10 per 30 s caps a guesser near 1,200 an hour, so roughly 0.12 % of the space inside that
+/// hour-long window, and leaves an operator who mistypes a digit waiting half a minute.
+const PAIR_FAIL_BUDGET: usize = 10;
+const PAIR_FAIL_WINDOW_MS: i64 = 30_000;
+
+/// Seconds to wait before `POST /pair` will read the database again, or `None` when it may.
+/// Prunes as it reads, so the window slides instead of resetting on a fixed boundary.
+async fn pair_cooldown_s(state: &AppState) -> Option<i64> {
+    let now = now_ms();
+    let mut fails = state.pair_failures.lock().await;
+    while fails
+        .front()
+        .is_some_and(|t| now - t >= PAIR_FAIL_WINDOW_MS)
+    {
+        fails.pop_front();
+    }
+    let oldest = *fails.front()?;
+    if fails.len() < PAIR_FAIL_BUDGET {
+        return None;
+    }
+    Some(((PAIR_FAIL_WINDOW_MS - (now - oldest)) / 1000 + 1).max(1))
+}
+
+/// Charge one wrong guess. Bounded by the budget itself: nothing is pushed once the window is
+/// full, so a sustained attack cannot grow this queue.
+async fn charge_pair_failure(state: &AppState) {
+    let now = now_ms();
+    let mut fails = state.pair_failures.lock().await;
+    if fails.len() < PAIR_FAIL_BUDGET {
+        fails.push_back(now);
+    }
+}
+
+/// `ApiResult`'s `Err` is a bare `(StatusCode, String)` with nowhere to put a header, so a
+/// refusal that carries `Retry-After` has to be built as an `Ok` response — the same shape
+/// `people::rate_limited` uses, so the two throttles answer alike.
+fn pair_rate_limited(retry_s: i64) -> Response {
+    let mut r = crate::signin::api_error(
+        StatusCode::TOO_MANY_REQUESTS,
+        "rate_limited",
+        "too many pairing attempts",
+    );
+    r.headers_mut().insert(
+        header::RETRY_AFTER,
+        retry_s.to_string().parse().expect("retry-after"),
+    );
+    r
+}
+
 /// In GitHub mode the pairing-code path is closed (self-hosters keep it with
 /// `ARBOS_AUTH_MODE=paircode`).
 fn pair_enabled(state: &AppState) -> Result<(), (StatusCode, String)> {
@@ -142,6 +202,10 @@ pub struct PairBody {
 
 pub async fn pair(State(state): State<AppState>, Json(b): Json<PairBody>) -> ApiResult {
     pair_enabled(&state)?;
+    // Before the read, so a guesser in cooldown never reaches `pairing_codes` at all.
+    if let Some(retry_s) = pair_cooldown_s(&state).await {
+        return Ok(pair_rate_limited(retry_s));
+    }
     let token = mint(TokenKind::Device);
     let device_id = ulid();
     let ok = state
@@ -154,6 +218,7 @@ pub async fn pair(State(state): State<AppState>, Json(b): Json<PairBody>) -> Api
         )
         .map_err(internal)?;
     if !ok {
+        charge_pair_failure(&state).await;
         return Err((
             StatusCode::UNAUTHORIZED,
             "invalid or expired pairing code".into(),
@@ -2937,5 +3002,121 @@ mod agent_avatar_version_tests {
         )
         .await;
         assert_eq!(r.status(), StatusCode::NOT_FOUND);
+    }
+}
+
+#[cfg(test)]
+mod pairing_budget_tests {
+    //! `POST /pair` redeems a six-digit code with no caller identity, so the attempt budget is
+    //! the only thing standing between the open port and `u_default`, the account a self-hosted
+    //! relay's projects and vault belong to. These tests pin the two halves that make it a
+    //! control rather than a gesture: a wrong guess is charged even when it matches no row, and
+    //! a cooled-down caller is refused before the database is read.
+
+    use axum::extract::State;
+    use axum::http::{header, StatusCode};
+    use axum::Json;
+
+    use arbos_core::ids::now_ms;
+
+    use super::*;
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    async fn guess(state: &AppState, code: &str) -> ApiResult {
+        pair(
+            State(state.clone()),
+            Json(PairBody {
+                code: code.to_owned(),
+                name: None,
+            }),
+        )
+        .await
+    }
+
+    /// The budget is global by necessity. A wrong guess matches no row in `pairing_codes`, so
+    /// there is no code to charge it against — a per-code `attempts` column would count only
+    /// the guesses that had already found a live code, and never fire for the sweep it exists
+    /// to stop. Measured here with the table empty, where a per-code counter has nothing to
+    /// increment at all.
+    #[tokio::test]
+    async fn wrong_guesses_are_charged_with_no_code_in_the_table() {
+        let state = test_state(AuthMode::Paircode);
+        assert_eq!(state.pair_failures.lock().await.len(), 0);
+
+        for i in 0..PAIR_FAIL_BUDGET {
+            let r = guess(&state, &format!("{i:06}")).await;
+            assert_eq!(
+                r.err().map(|(s, _)| s),
+                Some(StatusCode::UNAUTHORIZED),
+                "guess {i} is a plain 401, so an operator mistyping a digit is not cut off early"
+            );
+        }
+        assert_eq!(state.pair_failures.lock().await.len(), PAIR_FAIL_BUDGET);
+
+        let r = guess(&state, "999999").await.unwrap();
+        assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
+        let retry = r
+            .headers()
+            .get(header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<i64>().ok())
+            .expect("the refusal says how long to wait");
+        assert!(
+            (1..=PAIR_FAIL_WINDOW_MS / 1000 + 1).contains(&retry),
+            "retry-after {retry}s is inside the window"
+        );
+    }
+
+    /// The cooldown is what removes the attack, so it has to hold against a *correct* code:
+    /// a guesser who happens to hit one while refused must still be turned away, and the code
+    /// must survive to be redeemed afterwards. That also pins the ordering — the refusal is
+    /// returned before `redeem_pairing_code` runs, so nothing is consumed while cooling down.
+    #[tokio::test]
+    async fn a_live_code_is_refused_while_cooling_down_and_still_works_after() {
+        let state = test_state(AuthMode::Paircode);
+        state.db.new_pairing_code("424242", 60 * 60 * 1000).unwrap();
+        for i in 0..PAIR_FAIL_BUDGET {
+            guess(&state, &format!("{i:06}")).await.ok();
+        }
+
+        let refused = guess(&state, "424242").await.unwrap();
+        assert_eq!(refused.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            state.db.device_count().unwrap(),
+            0,
+            "a refused redemption mints no device"
+        );
+
+        // The window slides rather than resetting on a boundary: age the failures past it and
+        // the same code redeems. Written rather than slept so the test is deterministic.
+        {
+            let mut fails = state.pair_failures.lock().await;
+            let stale = now_ms() - PAIR_FAIL_WINDOW_MS - 1;
+            for f in fails.iter_mut() {
+                *f = stale;
+            }
+        }
+        let ok = guess(&state, "424242").await.unwrap();
+        assert_eq!(ok.status(), StatusCode::OK);
+        assert_eq!(state.db.device_count().unwrap(), 1);
+        assert_eq!(
+            state.pair_failures.lock().await.len(),
+            0,
+            "the aged failures are pruned by the read that let this through"
+        );
+    }
+
+    /// GitHub mode closes the route, and that rejection is not a wrong guess: it must not spend
+    /// budget, or an attacker could use a closed route to deny pairing on a relay that later
+    /// switches to paircode mode.
+    #[tokio::test]
+    async fn the_github_mode_rejection_spends_no_budget() {
+        let state = test_state(AuthMode::Github);
+        for i in 0..PAIR_FAIL_BUDGET + 5 {
+            let r = guess(&state, &format!("{i:06}")).await;
+            assert_eq!(r.err().map(|(s, _)| s), Some(StatusCode::GONE));
+        }
+        assert_eq!(state.pair_failures.lock().await.len(), 0);
     }
 }

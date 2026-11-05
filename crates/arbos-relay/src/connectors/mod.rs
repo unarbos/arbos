@@ -928,6 +928,7 @@ mod tests {
             upgrade_refused: Arc::new(Mutex::new(HashMap::new())),
             local_conns: Arc::new(Mutex::new(HashMap::new())),
             refresh_grace: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            pair_failures: Arc::new(tokio::sync::Mutex::new(std::collections::VecDeque::new())),
             push: Arc::new(crate::push::Push::capture(db.clone())),
             focus: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             fallback_sent: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),

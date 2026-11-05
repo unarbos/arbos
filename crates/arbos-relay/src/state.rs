@@ -1,6 +1,6 @@
 //! Shared relay state: db, config, per-room broadcast channels, box providers.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -324,6 +324,11 @@ pub struct AppState {
     /// `signin::REFRESH_GRACE_MS` the old token gets that same pair again instead of counting
     /// as a replay, so concurrent refreshers from one device converge on one rotation.
     pub refresh_grace: Arc<Mutex<HashMap<String, (i64, serde_json::Value)>>>,
+    /// When each recent failed `POST /pair` redemption happened, oldest first (`api::pair`).
+    /// Per relay rather than per code or per client: a wrong guess matches no row in
+    /// `pairing_codes`, so it cannot be charged to a code, and the route takes no principal,
+    /// so the only client identity available is an address behind a reverse proxy.
+    pub pair_failures: Arc<Mutex<VecDeque<i64>>>,
     /// Message notifications transport (APNs, a capture list in tests, or off).
     pub push: Arc<crate::push::Push>,
     /// device_id → the chat its presence says is on screen (suppresses that chat's pushes).
@@ -707,6 +712,7 @@ pub(crate) mod test_support {
             stale_bounces: Arc::new(Mutex::new(HashMap::new())),
             local_conns: Arc::new(Mutex::new(HashMap::new())),
             refresh_grace: Arc::new(Mutex::new(HashMap::new())),
+            pair_failures: Arc::new(Mutex::new(std::collections::VecDeque::new())),
             push: Arc::new(crate::push::Push::capture(db.clone())),
             focus: Arc::new(Mutex::new(HashMap::new())),
             fallback_sent: Arc::new(Mutex::new(HashMap::new())),
