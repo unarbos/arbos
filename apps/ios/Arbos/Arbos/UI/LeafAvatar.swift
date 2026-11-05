@@ -289,33 +289,36 @@ struct NeutralAvatar: View {
     }
 }
 
-/// A server's picture: the leaf picked on its Create screen (D92 amendment), else D79 initials
-/// — or the neutral initial (Jacob, 2026-10-25).
+/// A server's picture — the resolver's server case, like `GroupAvatar`: the uploaded / generated
+/// picture through `AvatarImageCache` (cache-first, retried, the sized copy), the neutral initial
+/// while it loads; else the leaf picked on its Create screen (D92 amendment), else D79 initials —
+/// or the neutral initial (Jacob, 2026-10-25). What is drawn is the model's copy of the server,
+/// not the value a list happened to hold.
 struct ServerAvatar: View {
     @EnvironmentObject private var model: AppModel
     @ObservedObject private var flag = LeafAvatarsFlag.shared
     let server: Server
     var size: CGFloat = Theme.avatar
 
+    /// The tokenised blob route under the `servers:` slot; the key names the upload, so a changed
+    /// picture is a new URL.
+    static func pictureURL(_ server: Server, model: AppModel) -> String? {
+        guard let key = server.imageKey, !key.isEmpty else { return nil }
+        return model.blobURL(projectId: "servers:\(server.id)", key: key)?.absoluteString
+    }
+
     var body: some View {
-        if let key = server.imageKey, let url = model.blobURL(projectId: "servers:\(server.id)", key: key) {
+        let server = model.server(self.server.id) ?? self.server
+        if let url = Self.pictureURL(server, model: model) {
             // D92 amendment: the uploaded / generated picture wins over the leaf.
-            AsyncImage(url: url) { phase in // avatar-lint: allow (server picture, one copy)
-                if let image = phase.image {
-                    image.resizable().scaledToFill()
-                } else {
-                    fallback
-                }
-            }
-            .frame(width: size, height: size)
-            .clipShape(Circle())
+            AgentPicture(url: url, size: size) { NeutralAvatar(name: server.name, size: size) }
         } else {
-            fallback
+            fallback(server)
         }
     }
 
     @ViewBuilder
-    private var fallback: some View {
+    private func fallback(_ server: Server) -> some View {
         if server.isNeutralAvatar {
             NeutralAvatar(name: server.name, size: size)
         } else if let pick = server.leafPick, flag.on {
