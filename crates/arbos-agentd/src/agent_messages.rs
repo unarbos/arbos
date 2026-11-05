@@ -165,11 +165,11 @@ impl Agent {
     /// `/hook/send_message`, but scripts may not call it (`DIRECT_ONLY_TOOLS`), which left the
     /// MCP tool as the only text surface a script had.
     ///
-    /// The row itself is written by `hook_send_message`, whose host lookup
-    /// (`sync.host(&t.chat_id)`) refuses with "no room for this chat" when the room is shut.
-    /// That arm is unreachable while rooms never close, and #2395 makes it reachable, so this
-    /// path reopens the room through `Agent::room` (host-or-`open_room`) first, outside every
-    /// lock, rather than leaving a closed room to swallow the answer.
+    /// The row itself is written by `hook_send_message`, which opens the room itself now, for
+    /// the writers that reach it without coming through here. This path still opens first, and
+    /// the reason is the ordering rather than the outcome: here it happens **outside every
+    /// lock**, where `hook_send_message` resolves under the turn lock, so the common case is a
+    /// live host by the time it looks.
     async fn post_to_this_chat_from_turn(self: &Arc<Self>, text: &str) -> Result<String> {
         let chars = text.chars().count();
         let chat_id = self
@@ -1218,6 +1218,63 @@ mod tests {
             );
             assert!(!note.contains("@bob talk to @bubble"), "{note}");
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The guard, on the writer that holds no handle: `hooks.rs` calls `hook_send_message`
+    /// directly, so after `close_room` has taken the host out of the hub there is nothing for
+    /// this writer to consult but the hub's own record. Reopening here is #1440's 403 every 16 s.
+    #[tokio::test]
+    async fn a_handle_less_hook_send_does_not_reopen_a_room_the_agent_left() {
+        let (agent, root) = crate::status::tests::test_agent().await;
+        let chat = "01TESTCHATHOOKLEFT000001";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        agent.sync.persist(&host).await.unwrap();
+        drop(host);
+
+        agent.sync.close_room(chat).await;
+        assert!(agent.sync.host(chat).await.is_none(), "premise: no handle");
+
+        let got = agent
+            .hook_send_message("One message, as asked.", None, None)
+            .await;
+        let err = got.expect_err("a hook send reopened a chat the agent was removed from");
+        assert!(
+            err.contains("not in chat"),
+            "the refusal must come from the record, not from a missing host: {err}"
+        );
+        assert!(
+            !agent.sync.is_open(chat).await,
+            "and it left no room open to redial the relay with"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The other half, and the reason the guard cannot simply be "never reopen": the same writer
+    /// must reopen a room the idle close or the room cap merely took, or #2367's own eviction
+    /// swallows the message it was supposed to keep.
+    #[tokio::test]
+    async fn a_handle_less_hook_send_reopens_a_room_that_went_cold() {
+        let (agent, root) = crate::status::tests::test_agent().await;
+        let chat = "01TESTCHATHOOKCOLD000001";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        agent.sync.persist(&host).await.unwrap();
+        drop(host);
+
+        agent.sync.test_close_cold(chat).await;
+        assert!(agent.sync.host(chat).await.is_none(), "premise: no handle");
+        assert!(agent.sync.may_open(chat).await, "premise: nothing recorded");
+
+        agent
+            .hook_send_message("One message, as asked.", None, None)
+            .await
+            .expect("a cold room is reopened, not a refusal the model reads as a limit");
+        assert!(
+            agent.sync.is_open(chat).await,
+            "the message went somewhere nothing will push it"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }

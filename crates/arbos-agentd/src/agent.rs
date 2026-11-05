@@ -9089,8 +9089,14 @@ impl Agent {
         let Some(t) = tl.as_mut() else {
             return Err("no turn is running".into());
         };
-        let Some(host) = self.sync.host(&t.chat_id).await else {
-            return Err("no room for this chat".into());
+        // The idle close and the room cap make "no open room" a live state here (#2367), and
+        // this is the writer that holds nothing: `hooks.rs` calls straight in, so there is no
+        // handle to ask and a refusal would simply swallow the message. Opening is safe because
+        // the hub refuses a chat the agent was removed from — the judgement is the record's, not
+        // this site's, which is why #1440's 403 loop cannot come back through here.
+        let host = match self.room(&t.chat_id).await {
+            Ok(h) => h,
+            Err(e) => return Err(format!("no room for this chat: {e}")),
         };
         // Silence is an outcome, not a message: a bubble that only says the agent is not
         // answering never reaches a shared chat. The tool answers as if posted, so the model
