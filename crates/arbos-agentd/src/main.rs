@@ -15,6 +15,8 @@ mod eval;
 mod feedback;
 mod forced_job;
 #[cfg(test)]
+mod forced_job_burst_tests;
+#[cfg(test)]
 mod forced_job_tests;
 mod goals;
 mod groups;

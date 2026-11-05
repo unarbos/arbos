@@ -1104,6 +1104,12 @@ pub(crate) mod tests {
     /// The user text that makes the stub answer like Opus 5.5: reasoning cannot be turned off.
     pub(crate) const REASONING_MANDATORY_ASK: &str = "what is going on with the mandatory one?";
 
+    /// The user text that makes the stub return a `[status]` tag with no words after it, which
+    /// is what `quick reply could not stand as a status line; silent queue … chars 0` is: the
+    /// call came back, the tag parsed, and there was no sentence to post. Jacob's Test5 round 11
+    /// logged it before every stalled message of `r11burst`.
+    pub(crate) const EMPTY_STATUS_ASK: &str = "what is going on with the empty one?";
+
     async fn mock_quick(axum::Json(body): axum::Json<Value>) -> axum::response::Response {
         use axum::response::IntoResponse;
         tokio::time::sleep(Duration::from_millis(300)).await;
@@ -1132,7 +1138,9 @@ pub(crate) mod tests {
             }))
             .into_response();
         }
-        let (content, finish) = if user.contains("stop at 20, not 40") {
+        let (content, finish) = if user.contains(EMPTY_STATUS_ASK) {
+            ("[status]\n", "stop")
+        } else if user.contains("stop at 20, not 40") {
             // The b7 shape: a guide whose one line has no full stop.
             (
                 "[guide]\nStopping the run at 20 instead of 40 as you asked",

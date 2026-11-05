@@ -214,10 +214,17 @@ impl SendOrder {
 /// One message's place in its chat's queue, held until this is dropped.
 ///
 /// Whichever lane answers the message owns the ticket. The main session keeps it for the length
-/// of `Agent::handle_command`; a job that takes the ask moves it into the spawned task, so the
-/// queue advances when the job's answer is posted and not when the command handler returns.
-/// Dropping it on any path — an error, a cancelled turn, a panic unwinding the task — releases
-/// the place, so a failed message can never hold the chat.
+/// of `Agent::handle_command`; a plain subagent run beside a busy turn moves it into the spawned
+/// task, so the queue advances when that subagent's bubble is posted and not when the command
+/// handler returns. Dropping it on any path — an error, a cancelled turn, a panic unwinding the
+/// task — releases the place, so a failed message can never hold the chat.
+///
+/// **A place is held for an answer, never for the work behind one.** A job used to hold its ask's
+/// place until its *result* row, which is minutes of work away, and bug AA is the bill: twelve
+/// later messages queued behind four workers, each paying the whole of [`SEND_ORDER_WAIT`] and
+/// coming back out of order, while the result turn that would have freed those places was itself
+/// waiting for the same messages to go quiet. A job now answers its ask with a receipt at job
+/// start and releases the place there; the result is a later row this queue does not order.
 pub(crate) struct SendTicket {
     order: Arc<SendOrder>,
     chat_id: String,
