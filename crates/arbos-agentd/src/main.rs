@@ -28,6 +28,9 @@ mod identity;
 mod inspect;
 mod isolation;
 #[cfg(test)]
+mod job_background_claim_tests;
+mod job_backgrounded;
+#[cfg(test)]
 mod job_cancel_tests;
 #[cfg(test)]
 mod job_leftover_tests;
