@@ -224,12 +224,91 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb-xkb-dev libasound2-dev libssl-dev libgl1-mesa-dev libfontconfig-dev libstdc++-14-dev libglib2.0-dev
       # Calls v1: the `livekit` crate links a prebuilt libwebrtc whose hermetic libc++
       # needs clang ≥ 21 to compile the cxx bridge (webrtc-sys refuses GCC / older clang).
+      # The runner image carries clang 16, 17 and 18 only, so the toolchain has to come from
+      # somewhere, and webrtc-sys 0.3.49's build.rs reads the floor out of the artifact's
+      # `__configuration/compiler.h` and panics below it: "the hermetic libc++ shipped with this
+      # libwebrtc requires clang 21 or later".
+      #
+      # This was `wget https://apt.llvm.org/llvm.sh && bash llvm.sh 21`, which put apt.llvm.org on
+      # the critical path of every rust job — once for the script, again for the packages. On run
+      # 41981350095 that host went away: wget exited 4, its network-failure code, three seconds in,
+      # the step died before any cargo command ran, and a pull request whose entire diff was this
+      # file went red for a reason nothing in the diff could cause.
+      #
+      # So take the toolchain from a host the job already cannot run without. `actions/checkout`,
+      # every `uses:` and this release asset all come from github.com, so a fetch that was a
+      # second single point of failure becomes one that fails only when the job was dead anyway.
+      # The release is pinned and the digest is the one the GitHub release API reports for the
+      # asset, so a changed byte is a failed checksum rather than a mystery compiler.
+      #
+      # The cost, measured on ubuntu-24.04 against the old step on the same fleet minutes apart:
+      # 54 s (1.88 GiB fetched and verified in 7, unpacked in 47) against 18 s, so +36 s on a job
+      # that runs for tens of minutes. Decompression is the bill, and it is already as cheap as
+      # it gets: the stream is 447 xz blocks, so `xz -T0` parallelises it; single-threaded the
+      # same unpack is 106 s.
+      #
+      # Zero Actions cache bytes, deliberately. The repository holds 10.60 GB of active cache
+      # against a 10 GB budget, 4 of its 5 entries being ~2.29 GB rust dependency caches that
+      # save minutes each, so an entry here would evict one of those. It would also be a lie:
+      # a cold key or an eviction would fall straight back to apt.llvm.org, leaving the fallback
+      # path both load-bearing and unobserved.
+      #
+      # The archive expands to 10.45 GiB, almost all of it static LLVM libraries nothing here
+      # links, and this job already reclaims disk to fit the small fleet. Extract four paths
+      # instead: the clang driver, its resource directory, and libclang.so, which is what
+      # `clang-sys` loads for the bindgen in this tree and what the apt layout put at this same
+      # path. 543 MiB lands on disk against the 923 MiB `clang-21 lldb-21 lld-21 clangd-21`
+      # reported, and the 1.88 GiB tarball is deleted in the same step, well before the ~19 GiB
+      # clippy and test peak this job's FLOOR is set for.
       - name: clang 21 for webrtc-sys
+        env:
+          # github.com/llvm/llvm-project/releases/tag/llvmorg-21.1.8, the last 21.x. The digest is
+          # the release API's own `assets[].digest` for this file, not one computed from a
+          # download, so it is an independent statement of what the asset should be.
+          LLVM_RELEASE: 21.1.8
+          LLVM_SHA256: b3b7f2801d15d50736acea3c73982994d025b01c2f035b91ae3b49d1b575732b
         run: |
-          wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
-          sudo bash /tmp/llvm.sh 21 >/dev/null
-          echo "CC=/usr/lib/llvm-21/bin/clang" >> "$GITHUB_ENV"
-          echo "CXX=/usr/lib/llvm-21/bin/clang++" >> "$GITHUB_ENV"
+          set -euo pipefail
+          major="${LLVM_RELEASE%%.*}"
+          prefix="LLVM-${LLVM_RELEASE}-Linux-X64"
+          url="https://github.com/llvm/llvm-project/releases/download/llvmorg-${LLVM_RELEASE}/${prefix}.tar.xz"
+          rc=0
+          for attempt in 1 2 3; do
+            rc=0
+            curl -fsSL --connect-timeout 20 --max-time 900 -o /tmp/llvm.tar.xz "$url" || rc=$?
+            if [ "$rc" -eq 0 ]; then
+              break
+            fi
+            echo "attempt $attempt of 3 for $url failed with curl exit $rc"
+            if [ "$attempt" -lt 3 ]; then
+              sleep "$((attempt * 10))"
+            fi
+          done
+          if [ "$rc" -ne 0 ]; then
+            echo "::error title=clang 21::Could not fetch $url in three attempts (curl exit $rc). curl 22 means the pin names an asset that is not there; a network code means github.com itself is unreachable from this runner, which would have killed checkout too."
+            exit "$rc"
+          fi
+          echo "${LLVM_SHA256}  /tmp/llvm.tar.xz" | sha256sum -c -
+          sudo mkdir -p "/usr/lib/llvm-${major}"
+          sudo tar -I 'xz -T0 -d' -xf /tmp/llvm.tar.xz --strip-components=1 \
+            -C "/usr/lib/llvm-${major}" --wildcards \
+            "${prefix}/bin/clang" \
+            "${prefix}/bin/clang++" \
+            "${prefix}/bin/clang-${major}" \
+            "${prefix}/lib/clang/${major}" \
+            "${prefix}/lib/libclang.so*"
+          rm -f /tmp/llvm.tar.xz
+          # build.rs decides with `-dM -E` on an empty translation unit, so ask the same question
+          # here. A toolchain that cannot answer it should fail in this step, where the log says
+          # which fetch produced which compiler, not a hundred lines into a libc++ header.
+          got=$("/usr/lib/llvm-${major}/bin/clang++" -dM -E -x c++ /dev/null | awk '$2 == "__clang_major__" {print $3}')
+          if [ "$got" != "$major" ]; then
+            echo "::error title=clang 21::$prefix unpacked to a compiler reporting __clang_major__ $got, not $major."
+            exit 1
+          fi
+          echo "$("/usr/lib/llvm-${major}/bin/clang++" --version | head -1), from $prefix"
+          echo "CC=/usr/lib/llvm-${major}/bin/clang" >> "$GITHUB_ENV"
+          echo "CXX=/usr/lib/llvm-${major}/bin/clang++" >> "$GITHUB_ENV"
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
