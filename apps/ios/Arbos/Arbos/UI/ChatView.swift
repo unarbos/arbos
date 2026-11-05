@@ -357,14 +357,22 @@ struct ChatSession: View {
     /// messages also get a soft accent wash while the keyword is set
     /// ([feedback app-01M5Z0GE2GV4ZJ5RH28QBT7H12]).
     private var visibleRows: [Row] {
-        let q = searchText.trimmingCharacters(in: .whitespaces)
+        let q = Self.searchKeyword(searchText)
         guard showSearch, !q.isEmpty else { return rows }
-        return rows.filter { m_text($0).localizedCaseInsensitiveContains(q) }
+        return rows.filter { Self.searchMatches(m_text($0), keyword: q) }
+    }
+
+    /// The typed text as the filter compares it. Empty means no filter at all.
+    static func searchKeyword(_ typed: String) -> String { typed.trimmingCharacters(in: .whitespaces) }
+
+    /// Does one message body hold the keyword?
+    static func searchMatches(_ text: String, keyword: String) -> Bool {
+        keyword.isEmpty || text.localizedCaseInsensitiveContains(keyword)
     }
 
     /// True while Search-in-chat has a keyword: every filtered message is a hit.
     private var searchHitsActive: Bool {
-        showSearch && !searchText.trimmingCharacters(in: .whitespaces).isEmpty
+        showSearch && !Self.searchKeyword(searchText).isEmpty
     }
 
     /// What the transcript draws above its rows. At most one of these is in the lazy stack at a
