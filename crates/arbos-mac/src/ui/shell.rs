@@ -3100,6 +3100,23 @@ impl Shell {
         cx.notify();
     }
 
+    /// ⌫ in the bar's field with nothing to delete (the field propagates it
+    /// then): the pinned sender chip goes, the same press the composer's strip
+    /// takes its last staged attachment on — one press, no select-first step.
+    /// With text in the field the key is the field's own, even with the caret
+    /// at the start where it deletes nothing; the chip is the only token the
+    /// bar can hold, and the offered chip needs typed text, so there is never
+    /// a second token to take or a wrong one to reach. Unpinning re-runs the
+    /// search (`chat_search_unpin_sender` → `chat_search_recompute`), so no
+    /// filter outlives its chip.
+    pub(crate) fn chat_search_backspace(&mut self, cx: &mut Context<Self>) {
+        if !self.chat_search_input.read(cx).text().is_empty() {
+            return;
+        }
+        self.state
+            .update(cx, |s, cx| s.chat_search_unpin_sender(cx));
+    }
+
     /// ↑ / ↓ in the palette field (`ComposerInput::on_arrow`).
     pub(crate) fn palette_step(&mut self, delta: i32, cx: &mut Context<Self>) {
         if !self.palette.open {
