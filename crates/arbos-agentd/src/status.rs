@@ -2032,6 +2032,418 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Bug I follow-up, the half the tool result cannot reach. The acknowledgement row the main
+    /// agent posts before `start_job` is closed and pushed by then, and the jobs prompt has the
+    /// turn end on that call, so a queued job's state can only reach the user if the box says it
+    /// itself. T9 in Jacob's Test5 round 2 sat queued ten minutes behind T8 while its own interim
+    /// said it was starting a blobless clone.
+    #[tokio::test]
+    async fn a_queued_job_tells_the_chat_itself() {
+        use crate::agent::JobSpec;
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATQUEUEDROW00000001";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        let holder = JobSpec {
+            id: "job-holder".into(),
+            title: "Building NYC taxi Flask app".into(),
+            kind: "code".into(),
+            brief: "Build a small Flask app in taxi_app/ serving the stats.".into(),
+            touches: vec!["path:/".into(), "git".into()],
+            attempt: 0,
+        };
+        agent
+            .store
+            .insert_job(
+                &holder.id,
+                chat,
+                "m-busy",
+                &holder.title,
+                "code",
+                &holder.brief,
+                &holder.touches,
+            )
+            .unwrap();
+        assert!(!agent.acquire_job_locks(&holder).await.is_empty());
+        // The interim the model posts before `start_job`, as the prompt has it: already a closed
+        // row, and wrong the moment the job turns out to be queued.
+        agent
+            .hook_send_message("I'll start with a blobless clone of pandas.", None, None)
+            .await
+            .unwrap();
+        agent
+            .hook_start_job(
+                "Analyzing pandas repository",
+                "Blobless clone pandas, compute commits per month, and write out/pandas_commits.csv.",
+                "code",
+                vec![],
+            )
+            .await
+            .unwrap();
+        let said: Vec<String> = reply_rows(&host, "m-busy")
+            .iter()
+            .map(|r| r.text().trim().to_owned())
+            .filter(|t| !t.is_empty())
+            .collect();
+        assert!(
+            said.iter().any(|t| t
+                == "\"Analyzing pandas repository\" is queued behind \"Building NYC taxi Flask \
+                    app\" — it starts when that one frees what they both need."),
+            "the box must say the job is queued without waiting for the model: {said:?}"
+        );
+        assert_eq!(
+            said.iter().filter(|t| t.contains("queued behind")).count(),
+            1,
+            "one line, not one per surface: {said:?}"
+        );
+        agent.release_job_locks("job-holder").await;
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// #2770 retires every row a turn opened and left wordless. The queued notice is a row the
+    /// box writes during a turn, so it has to be shown not to be swept — otherwise the notice
+    /// #2761 exists to post would vanish again, and silently.
+    ///
+    /// Three grounds, and the test leans on the first two rather than on reading the predicate.
+    /// Its id never enters `rows_opened`, because only `open_row` and the turn driver's own
+    /// `TurnState` literal push there and `post_chat_line` is neither. It is never wordless,
+    /// because its text goes in before it is finished. And there is no window in between: the
+    /// row is built under one `host` lock, which is the same lock every caller of
+    /// `retire_wordless_rows` holds, so no sweep can observe it half-written.
+    #[tokio::test]
+    async fn the_queued_notice_survives_the_wordless_sweep() {
+        use crate::agent::{retire_wordless_rows, JobSpec};
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATQUEUEDSWEEP00001";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        let holder = JobSpec {
+            id: "job-holder".into(),
+            title: "Building NYC taxi Flask app".into(),
+            kind: "code".into(),
+            brief: "Build a small Flask app in taxi_app/ serving the stats.".into(),
+            touches: vec!["path:/".into(), "git".into()],
+            attempt: 0,
+        };
+        agent
+            .store
+            .insert_job(
+                &holder.id,
+                chat,
+                "m-busy",
+                &holder.title,
+                "code",
+                &holder.brief,
+                &holder.touches,
+            )
+            .unwrap();
+        assert!(!agent.acquire_job_locks(&holder).await.is_empty());
+        agent
+            .hook_start_job(
+                "Analyzing pandas repository",
+                "Blobless clone pandas and write out/pandas_commits.csv.",
+                "code",
+                vec![],
+            )
+            .await
+            .unwrap();
+        // The notice row, found the way a client would: by the delivery key it carries.
+        let notice = {
+            let h = host.lock().await;
+            h.doc
+                .messages()
+                .into_iter()
+                .find(|m| {
+                    m.rest
+                        .get("deliveryKey")
+                        .and_then(Value::as_str)
+                        .is_some_and(|k| k.starts_with("job:") && k.ends_with(":queued"))
+                })
+                .expect("the queued notice was posted")
+        };
+        assert!(
+            notice.text().contains("is queued behind"),
+            "the row carries its words from the start: {:?}",
+            notice.text()
+        );
+        let (rows_opened, trailing) = {
+            let tl = agent.turn.lock().await;
+            let t = tl.as_ref().unwrap();
+            (t.rows_opened.clone(), t.assistant_msg_id.clone())
+        };
+        // Ground one: the sweep never sees this row, because only `open_row` enrols rows.
+        assert!(
+            !rows_opened.contains(&notice.id),
+            "the notice is not one of the turn's opened rows: {rows_opened:?}"
+        );
+        // Ground two: handed to the sweep anyway, it is kept — so enrolling it later, by
+        // routing the notice through `open_row`, would still not lose it.
+        let forced: Vec<String> = vec![notice.id.clone()];
+        assert_eq!(
+            {
+                let h = host.lock().await;
+                retire_wordless_rows(&h.doc, &forced, &trailing)
+            },
+            0,
+            "the notice is not wordless, so the sweep leaves it alone"
+        );
+        {
+            let h = host.lock().await;
+            let after = h.doc.message(&notice.id).unwrap();
+            assert_ne!(
+                after.rest.get("hidden").and_then(Value::as_bool),
+                Some(true),
+                "the notice is still in the chat"
+            );
+            assert!(after.text().contains("is queued behind"));
+        }
+        agent.release_job_locks("job-holder").await;
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The other half of the same rule: a job that waits for nothing says nothing, so an ordinary
+    /// start is not narrated twice.
+    #[tokio::test]
+    async fn a_job_that_waits_for_nothing_posts_no_queued_line() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATNOQUEUEDROW00001";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        agent
+            .hook_start_job(
+                "Charting the zones",
+                "Chart the top ten pickup zones from out/nyc_taxi_summary.csv and post it.",
+                "code",
+                vec![],
+            )
+            .await
+            .unwrap();
+        let said: Vec<String> = reply_rows(&host, "m-busy")
+            .iter()
+            .map(|r| r.text().trim().to_owned())
+            .filter(|t| !t.is_empty())
+            .collect();
+        assert!(
+            !said.iter().any(|t| t.contains("queued behind")),
+            "nothing held a key, so nothing was queued: {said:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Two code jobs in two folders of *one* repo take turns on that repo's index — `git` writes
+    /// `.git/index.lock` whichever subfolder it runs from — while their file work still overlaps.
+    /// Only the git key rises to the repo root; the path key stays on the named folder, which is
+    /// what keeps the parallelism this default exists to win.
+    #[tokio::test]
+    async fn one_repo_two_folders_take_turns_on_git_but_not_on_files() {
+        use crate::agent::JobSpec;
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATONEREPOTWODIRS01";
+        let _host = agent.sync.open_room(chat).await.unwrap();
+        let project = agent.cfg.work_dir.clone();
+        // One repo at the project root, with the two folders a refactor would name.
+        std::fs::create_dir_all(project.join(".git")).unwrap();
+        std::fs::create_dir_all(project.join("src")).unwrap();
+        std::fs::create_dir_all(project.join("tests")).unwrap();
+        let code_job = |id: &str, title: &str, brief: &str| JobSpec {
+            id: id.into(),
+            title: title.into(),
+            kind: "code".into(),
+            brief: brief.into(),
+            touches: vec![],
+            attempt: 0,
+        };
+        let on_src = code_job(
+            "job-src",
+            "Refactoring the parser",
+            "Rework the parser in src/ and commit it.",
+        );
+        let on_tests = code_job(
+            "job-tests",
+            "Widening the suite",
+            "Add the missing cases in tests/ and commit them.",
+        );
+        // The git key is the repo root for both; the path keys stay on the two folders.
+        assert_eq!(
+            agent.job_lock_keys(&on_src),
+            vec![
+                format!("path:{}/src", project.display()),
+                format!("git:{}", project.display()),
+            ],
+            "only git rises to the repo root"
+        );
+        assert_eq!(
+            agent.job_lock_keys(&on_tests),
+            vec![
+                format!("path:{}/tests", project.display()),
+                format!("git:{}", project.display()),
+            ]
+        );
+        for j in [&on_src, &on_tests] {
+            agent
+                .store
+                .insert_job(
+                    &j.id, chat, "m-busy", &j.title, "code", &j.brief, &j.touches,
+                )
+                .unwrap();
+        }
+        agent.acquire_job_locks(&on_src).await;
+        // Half one: the second job's git work waits, because one index cannot take two.
+        let agent2 = agent.clone();
+        let waiter = tokio::spawn(async move { agent2.acquire_job_locks(&on_tests).await });
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(
+            !waiter.is_finished(),
+            "two jobs must not run git against one index at once"
+        );
+        // Half two: file work in the other folder is not held up — the path lock never rose, so
+        // `tests/` is free while `src/` is taken. A fix that locked the whole project would pass
+        // the assertion above and fail this one.
+        let files_only = JobSpec {
+            touches: vec!["path:tests".into()],
+            ..code_job("job-files", "Formatting the suite", "Run the formatter.")
+        };
+        agent
+            .store
+            .insert_job(
+                &files_only.id,
+                chat,
+                "m-busy",
+                &files_only.title,
+                "code",
+                &files_only.brief,
+                &files_only.touches,
+            )
+            .unwrap();
+        tokio::time::timeout(
+            Duration::from_millis(500),
+            agent.acquire_job_locks(&files_only),
+        )
+        .await
+        .expect("file work in another folder of the same repo still runs side by side");
+        agent.release_job_locks("job-files").await;
+        agent.release_job_locks("job-src").await;
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(3), waiter)
+                .await
+                .unwrap()
+                .unwrap(),
+            vec![
+                format!("path:{}/tests", project.display()),
+                format!("git:{}", project.display()),
+            ],
+            "the waiting job takes its turn once the index is free"
+        );
+        agent.release_job_locks("job-tests").await;
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Bug I, measured against the round-2 traces. Each brief below carries the folder token its
+    /// real brief carried (`t4`/`t5` and `t8`/`t9` in `test5/*.events.json`), and in the run T5
+    /// waited 6.5 min behind T4 and T9 waited about 10 min behind T8. None of these folders
+    /// exists when its job starts — each job is the thing that creates it — so the pair only runs
+    /// side by side when a named-but-absent folder scopes both the path and the git lock.
+    #[tokio::test]
+    async fn the_round_two_traces_run_side_by_side() {
+        use crate::agent::JobSpec;
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATTRACEREPLAY00001";
+        let _host = agent.sync.open_room(chat).await.unwrap();
+        let project = agent.cfg.work_dir.clone();
+        // By the time T8 and T9 ran, `out/` was on disk: T4 and T5 had written into it hours
+        // earlier. Their own folders — humanize, data, taxi_app — were still absent.
+        std::fs::create_dir_all(project.join("out")).unwrap();
+        // The run's project folder was a plain workspace, not a repo: every git command in the
+        // dumps is run from a subfolder, and the only one at the root is `git clone`. So no repo
+        // root sits above these folders, and the four git keys below are each the folder itself.
+        // Were the repo lookup to resolve somewhere shared, these assertions would catch it.
+        assert!(!project.join(".git").exists());
+        let code_job = |id: &str, title: &str, brief: &str| JobSpec {
+            id: id.into(),
+            title: title.into(),
+            kind: "code".into(),
+            brief: brief.into(),
+            touches: vec![],
+            attempt: 0,
+        };
+        // T4 and T5: the clone target and the download target, neither on disk yet.
+        let t4 = code_job(
+            "job-t4",
+            "Hunting a humanize bug",
+            "git clone https://github.com/python-humanize/humanize into humanize/. Write the \
+             failing test output to out/humanize_before.txt.",
+        );
+        let t5 = code_job(
+            "job-t5",
+            "Analyzing NYC taxi data",
+            "Download the parquet files into data/nyc_tlc/ (verify sizes). Save the script to \
+             out/nyc_taxi.py.",
+        );
+        // T8 and T9: the app folder and, for T9, the output folder, since T9 names its clone
+        // target as a bare word with no slash.
+        let t8 = code_job(
+            "job-t8",
+            "Building NYC taxi Flask app",
+            "Build a small Flask app in taxi_app/ serving the stats already computed in \
+             out/nyc_taxi_summary.csv.",
+        );
+        let t9 = code_job(
+            "job-t9",
+            "Analyzing pandas repository",
+            "Blobless clone: git clone --filter=blob:none https://github.com/pandas-dev/pandas \
+             pandas. Commits per month to out/pandas_commits_per_month.csv.",
+        );
+        for j in [&t4, &t5, &t8, &t9] {
+            agent
+                .store
+                .insert_job(
+                    &j.id, chat, "m-busy", &j.title, "code", &j.brief, &j.touches,
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            agent.job_lock_keys(&t4),
+            vec![
+                format!("path:{}/humanize", project.display()),
+                format!("git:{}/humanize", project.display()),
+            ],
+            "T4 works in the folder it clones into"
+        );
+        assert_eq!(
+            agent.job_lock_keys(&t5),
+            vec![
+                format!("path:{}/data", project.display()),
+                format!("git:{}/data", project.display()),
+            ],
+            "T5 works in the folder it downloads into"
+        );
+        assert_eq!(
+            agent.job_lock_keys(&t8),
+            vec![
+                format!("path:{}/taxi_app", project.display()),
+                format!("git:{}/taxi_app", project.display()),
+            ]
+        );
+        assert_eq!(
+            agent.job_lock_keys(&t9),
+            vec![
+                format!("path:{}/out", project.display()),
+                format!("git:{}/out", project.display()),
+            ],
+            "T9 names no folder for its clone, so its first named folder is the output one"
+        );
+        // T4 is the stalled job: it never releases in this test.
+        agent.acquire_job_locks(&t4).await;
+        tokio::time::timeout(Duration::from_millis(500), agent.acquire_job_locks(&t5))
+            .await
+            .expect("T5 waited 6.5 min behind T4 in the run; it must start at once now");
+        agent.acquire_job_locks(&t8).await;
+        tokio::time::timeout(Duration::from_millis(500), agent.acquire_job_locks(&t9))
+            .await
+            .expect("T9 waited about 10 min behind T8 in the run; it must start at once now");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// py-06 on image 0.1.121 (parity after-run, 2026-10-25 02:11 UTC): an `act` turn computed the
     /// answer and wrote it as prose; the ack ("Checking the file now.") sat on the working row,
     /// counted as "posted", and the fallback never ran — the user got an empty row. An act ack is
