@@ -17,6 +17,10 @@ set -u
 D=$(cd "$(dirname "$0")" && pwd)
 # shellcheck source=scripts/merge/checks.sh
 source "$D/checks.sh"
+# opread.sh defines functions and does nothing else. Block 12 drives them against a FAKE op on a sandbox
+# PATH with a placeholder token, so sourcing it here still reads no credential and reaches no network.
+# shellcheck source=scripts/merge/opread.sh
+source "$D/opread.sh"
 
 # R is the repository every API path in checks.sh is built from. Nothing here calls the API —
 # each case stubs the fetch — but a stubbed function is still CALLED with its arguments built
@@ -703,6 +707,233 @@ if printf '%s\n' "$after_src" | sed -n '/^\s*NOPLAN\*)/,/;;/p' | grep -q 'WAIT';
   bad "after()'s NOPLAN arm says WAIT — that is the exact instruction this verdict exists to stop giving"
 else
   ok "after()'s NOPLAN arm does not tell the operator to wait"
+fi
+
+echo
+# 12. Setup, policy and credential are three different answers, and the exit code is which one you got.
+#
+# The three defects of 2026-11-05 were each a setup gap wearing one of the other two faces, and each one had
+# a message that looked right:
+#
+#   - No /tmp/k on the host: "REFUSED: no merge list at /tmp/k/merge-allow", which reads exactly like a
+#     coordinator who has not cleared you. A lane read it that way, fell back to `gh pr merge`, and landed a
+#     merge inside a closed release window. That is the failure this block exists to prevent recurring.
+#   - No `op` binary, token present: every gate read, a clean GO, and then "PAT read failed" with exit 4 —
+#     the code for a credential refusal — from `exec: op: not found`.
+#   - opread's error file: opread's own scrub unsets MERGE_KIT before the redirect expands it, so the path
+#     was /tmp/k/op-last.err for every kit however MERGE_KIT was set. With no /tmp/k the REDIRECT failed, op
+#     never ran, and merge.sh reported the empty file as a 1Password refusal.
+#
+# These cases assert the EXIT CODE and the presence or absence of each other class's sentence, not the new
+# wording. Asserting that "SETUP" appears somewhere would pass just as happily in the broken state, which is
+# the point made at the top of this file.
+echo "merge.sh tells a setup gap from a policy refusal:"
+
+# The sandbox PATH carries bash and the text tools merge.sh needs to read an allow-list, and NOTHING that can
+# reach the network: no gh, no git, no curl. That absence is load-bearing twice over. It keeps these cases
+# hermetic, and it is how "the op check happens up front" is pinned without a stopwatch — if the check moved
+# back to where it used to be, below the GO, these runs would die on a missing gh instead of printing a setup
+# refusal, and every case here would go red.
+sandbox=$(mktemp -d) || exit 1
+trap 'rm -rf "$repo" "$sandbox"' EXIT
+mkdir -p "$sandbox/bin" "$sandbox/fake" "$sandbox/kit" "$sandbox/kit-noallow"
+for t in bash dirname sed tr grep cat cut head awk sort date mktemp; do
+  p=$(command -v "$t") && ln -sf "$p" "$sandbox/bin/$t" || bad "no $t on PATH, so the sandbox cannot be built"
+done
+# `op` is simulated and never the real binary, so these cases hold on a runner that has never installed it —
+# and so no case here can spend a request out of the account's shared 1,000/day budget.
+# It writes a stdout sentinel and two stderr lines; block 12c reads all three.
+printf '%s\n' '#!/bin/bash' \
+  'printf "FAKE-OP argv:%s\n" "$*" >&2' \
+  'printf "FAKE-OP exported:%s\n" "$(compgen -e | sort | tr "\n" " ")" >&2' \
+  'printf "SECRET-SENTINEL-ON-STDOUT\n"' \
+  'exit 1' > "$sandbox/fake/op"
+chmod +x "$sandbox/fake/op"
+NOOP_PATH=$sandbox/bin            # op absent
+WITHOP_PATH=$sandbox/bin:$sandbox/fake   # op present
+# Never the session's real token. Every run below is handed a placeholder through `env -i`, so no case can
+# read the live credential out of the ambient environment even by accident, and nothing any case writes to
+# disk could contain one.
+FAKE_TOKEN=placeholder-not-a-real-token
+SHA40=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef
+printf '9999 1234  # the coordinator cleared these\n' > "$sandbox/kit/merge-allow"
+
+MRC=0; MOUT=""
+mrun() {  # <path> <merge-kit> <pr> — runs merge.sh with nothing from this shell, sets MRC and MOUT
+  MOUT=$(env -i PATH="$1" HOME=/tmp MERGE_KIT="$2" OP_SERVICE_ACCOUNT_TOKEN="$FAKE_TOKEN" \
+           bash "$D/merge.sh" "$3" "$SHA40" 2>&1); MRC=$?
+}
+says()  { printf '%s\n' "$MOUT" | grep -qF "$1"; }
+
+# (a) The kit directory is not there. Setup: nothing was read, so nothing was cleared or declined.
+mrun "$WITHOP_PATH" "$sandbox/absent-kit" 9999
+a_rc=$MRC; a_out=$MOUT
+if [ "$a_rc" -eq 5 ]; then ok "a missing kit directory exits 5 (setup)"
+else bad "a missing kit directory exits $a_rc, not 5 — it is being reported as one of the other classes: $MOUT"; fi
+if says "$sandbox/absent-kit does not exist"; then ok "the refusal names the directory that is missing"
+else bad "the refusal does not name the missing directory, so the reader cannot tell what to create: $MOUT"; fi
+for sentence in "not in the coordinator's merge list" "PAT read failed"; do
+  if says "$sentence"; then bad "a missing kit directory says '$sentence' — that is another class's answer"
+  else ok "a missing kit directory does not say '$sentence'"; fi
+done
+
+# (b) The directory is there and the allow-list is not. Still setup, and a different thing to fix.
+mrun "$WITHOP_PATH" "$sandbox/kit-noallow" 9999
+if [ "$MRC" -eq 5 ]; then ok "a missing allow-list file exits 5 (setup)"
+else bad "a missing allow-list file exits $MRC, not 5: $MOUT"; fi
+if says "$sandbox/kit-noallow/merge-allow"; then ok "the refusal names the file to write"
+else bad "the refusal does not name $sandbox/kit-noallow/merge-allow: $MOUT"; fi
+if [ "$MOUT" != "$a_out" ]; then ok "a missing directory and a missing file are not the same message"
+else bad "a missing directory and a missing allow-list print the same thing, so one fix is attempted for the other"; fi
+
+# (c) The allow-list is present and does not name this pull request. POLICY, and it must not be code 5.
+#     This pair is the defect: (a) and (c) used to be the same sentence and the same code.
+mrun "$WITHOP_PATH" "$sandbox/kit" 8888
+c_rc=$MRC
+if [ "$c_rc" -eq 2 ]; then ok "an allow-list that does not name the PR exits 2 (policy)"
+else bad "an allow-list that does not name the PR exits $c_rc, not 2: $MOUT"; fi
+if says "#8888 is not in the coordinator's merge list"; then ok "the refusal says the list does not name this PR"
+else bad "the policy refusal does not say the list fails to name #8888: $MOUT"; fi
+if says "1234"; then ok "the refusal shows the list it did read"
+else bad "the refusal does not show the allow-list it read, so it cannot be told from a list it never read: $MOUT"; fi
+if [ "$a_rc" -ne "$c_rc" ]; then
+  ok "THE DEFECT: a missing kit ($a_rc) and an uncleared PR ($c_rc) are different exit codes"
+else
+  bad "a missing kit directory and an uncleared pull request both exit $a_rc. These are setup and policy, they call for opposite actions — create a directory, or go and ask the coordinator — and a lane that cannot tell them apart routes around this script. That is exactly what happened on 2026-11-05."
+fi
+
+# (d) op is not installed, everything else is ready. Setup, reported BEFORE any gate runs.
+#     Not exit 4: nothing has been read, denied or rate-limited, and the service account is fine.
+mrun "$NOOP_PATH" "$sandbox/kit" 9999
+if [ "$MRC" -eq 5 ]; then ok "a missing op binary exits 5 (setup), not 4 (credential)"
+else bad "a missing op binary exits $MRC — 4 would be a credential refusal and 3 a verdict, and neither happened: $MOUT"; fi
+if says "op) is not on PATH"; then ok "the refusal says which binary is missing"
+else bad "the refusal does not name op as the missing binary: $MOUT"; fi
+if says "op_linux_amd64"; then ok "the refusal says how to install it"
+else bad "the refusal gives no install command, so the reader has to go and find one: $MOUT"; fi
+for sentence in "PAT read failed" "VERDICT" "NO-GO"; do
+  if says "$sentence"; then bad "a missing op binary printed '$sentence' — a gate or the vault was reached before the binary was checked for"
+  else ok "a missing op binary reaches no '$sentence'"; fi
+done
+
+# (e) The other direction, which this preflight could create: a host that IS set up must get past it. With
+#     no gh on the sandbox PATH the run then fails further down, and that is the proof — it got further.
+mrun "$WITHOP_PATH" "$sandbox/kit" 9999
+if [ "$MRC" -ne 5 ] && ! says "SETUP:"; then ok "a kit with op, a token and a clearance passes the preflight"
+else bad "a correctly set up host still reads as a setup gap (rc=$MRC), so the preflight refuses everything: $MOUT"; fi
+
+echo
+echo "opread writes op's stderr to the CONFIGURED kit, and runs op either way:"
+# 12c. The redirect, driven through the real opread against the fake op. A unit test of op_err_file alone
+# would pass against the broken version: the defect was never in the path, it was that opread's scrub
+# unsets MERGE_KIT before the subshell expands it, so only calling opread can see it.
+oprun() {  # <merge-kit> — calls opread with a canary exported; sets OSTDOUT, ORC, OERR
+  OERR=$(MERGE_KIT=$1 op_err_file)
+  rm -f "$OERR"
+  OSTDOUT=$(PATH=$WITHOP_PATH MERGE_KIT=$1 OP_SERVICE_ACCOUNT_TOKEN=$FAKE_TOKEN \
+            SELFTEST_CANARY=exported-by-the-caller bash -c "source '$D/opread.sh'; opread 'op://fixture/ref'" 2>/dev/null)
+  ORC=$?
+}
+oprun "$sandbox/kit"
+if [ "$OERR" = "$sandbox/kit/op-last.err" ]; then ok "op_err_file resolves to the configured kit"
+else bad "op_err_file resolved to '$OERR', not $sandbox/kit/op-last.err"; fi
+if grep -qF 'FAKE-OP argv:' "$OERR" 2>/dev/null; then
+  ok "op's stderr landed in the configured kit, so MERGE_KIT survived the scrub"
+else
+  bad "nothing from op reached $OERR. Either the redirect went to /tmp/k again — MERGE_KIT is unset by opread's own scrub before the redirect expands it, so it must be resolved in the caller — or op never ran at all."
+fi
+# The secret goes to stdout and must stay there. The error file is reported verbatim to the operator and is
+# written with no special permissions, so a secret reaching it would be a secret published twice over.
+if [ "$OSTDOUT" = "SECRET-SENTINEL-ON-STDOUT" ]; then ok "the caller captures op's stdout"
+else bad "opread did not hand op's stdout back to the caller (got '$OSTDOUT'), so no secret could be read"; fi
+# op's own exit status, which is what merge.sh's `&&` tests. The fake refuses, so a zero here would mean a
+# failed read reaching the merge call with an empty token.
+if [ "$ORC" -ne 0 ]; then ok "opread returns op's non-zero status when op refuses"
+else bad "opread returned 0 for an op that exited 1, so a failed read would read as a successful one"; fi
+if grep -qF 'SECRET-SENTINEL-ON-STDOUT' "$OERR" 2>/dev/null; then
+  bad "op's STDOUT reached the error file. That file is printed verbatim in merge.sh's refusal, so the redirect must take stderr only."
+else
+  ok "op's stdout is not in the error file — the redirect takes stderr only"
+fi
+if grep -qF "$FAKE_TOKEN" "$OERR" 2>/dev/null; then
+  bad "the token value is in the error file"
+else
+  ok "the token value is not in the error file"
+fi
+if grep -qF 'argv:--cache=false read op://fixture/ref' "$OERR" 2>/dev/null; then
+  ok "op's argv is the flag and the reference, and carries no secret"
+else
+  bad "op's argv is not what this kit promises: $(head -2 "$OERR" 2>/dev/null)"
+fi
+# The scrub itself. The canary proves it still removes things; _operr proves the fix for the redirect did not
+# become the next thing it leaks. PWD and SHLVL are set by the fake op's own bash and carry nothing.
+exported=$(sed -n 's/^FAKE-OP exported://p' "$OERR" 2>/dev/null)
+if [ -z "$exported" ]; then
+  bad "the fake op reported no exported variables, so the scrub is unasserted"
+else
+  stray=""
+  for v in $exported; do
+    case $v in PATH | HOME | OP_SERVICE_ACCOUNT_TOKEN | DBUS_SESSION_BUS_ADDRESS | OP_CACHE | PWD | SHLVL) ;;
+      *) stray="$stray $v" ;;
+    esac
+  done
+  if [ -z "$stray" ]; then ok "op sees only PATH, HOME, the token and the two the subshell sets"
+  else bad "op's environment also carries:$stray — the scrub is leaking, and SELFTEST_CANARY proves it is reaching variables the caller set"; fi
+fi
+
+# With no kit directory at all, op must still RUN. This is the live failure of 2026-11-05 in full: the
+# redirect was the thing that failed, so op never started, and its silence was reported as a refusal.
+oprun "$sandbox/absent-kit"
+case "$OERR" in
+  "$sandbox/absent-kit/op-last.err") bad "op_err_file still points inside a directory that does not exist, so the redirect is what fails and op never runs" ;;
+  *) [ -d "$(dirname "$OERR")" ] && ok "with no kit directory, the error file falls back to one that exists ($OERR)" \
+       || bad "the fallback error file $OERR is in a directory that does not exist either" ;;
+esac
+if [ "$OSTDOUT" = "SECRET-SENTINEL-ON-STDOUT" ]; then
+  ok "with no kit directory, op still ran and its output still reached the caller"
+else
+  bad "with no kit directory, opread returned '$OSTDOUT' — op did not run. The redirect failed before it started, and merge.sh reports that as a PAT read failure, which is a setup gap wearing a credential refusal's face."
+fi
+
+echo
+echo "merge.sh re-reads main rather than trusting mergeable:"
+# 12d. MERGEABLE is a statement about text, not about tests, so it cannot settle whether a verdict is stale.
+# The kit's defence is three live reads of main's head around the GO, compared against each other. The reads
+# themselves need the network; what can be asserted here is that they are made, that each one refuses, and
+# that nothing in this file has started inferring staleness from the rollup's mergeable fields instead.
+mcode=$(nocomment <"$D/merge.sh")
+if printf '%s\n' "$mcode" | grep -qE 'mergeable|mergeStateStatus'; then
+  bad "merge.sh reads mergeable/mergeStateStatus. main has no branch protection, so that field reports on text and not on tests, and a MERGEABLE pull request 20 commits behind reads identically to a current one."
+else
+  ok "merge.sh never consults mergeable or mergeStateStatus"
+fi
+reads=$(printf '%s\n' "$mcode" | grep -c '=\$(main_head)')
+if [ "$reads" -eq 3 ]; then
+  ok "main's head is read three times: before the GO, after it, and just before the merge call"
+else
+  bad "main's head is read $reads time(s), expected 3 — each read closes part of the window in which main can move under a GO, and the one before the merge call is the narrowest this tool can give"
+fi
+if [ "$(printf '%s\n' "$mcode" | grep -c 'main_refuse "\$main0"')" -eq 2 ]; then
+  ok "both post-GO reads refuse through main_refuse, anchored at the main the GO judged"
+else
+  bad "the comparisons no longer both go through main_refuse \"\$main0\" — a read that is taken and not compared to the main GO judged is a read that proves nothing"
+fi
+# And the refusal itself, executed. A refusal that does not name the commits sends the operator to the PR to
+# guess, which is what a stale verdict already looks like from there.
+mr_src=$(sed -n '/^main_refuse() {/,/^}/p' "$D/merge.sh")
+if [ -z "$mr_src" ]; then
+  bad "no main_refuse() in merge.sh — it was renamed or removed and the cases above test nothing"
+else
+  eval "$mr_src"
+  main_moved() { echo "    STUBBED commit list for $1..$2"; }
+  mr_out=$(main_refuse 1111111111111111111111111111111111111111 2222222222222222222222222222222222222222 "during the GO check")
+  unset -f main_moved
+  for want in 111111111 222222222 "STUBBED commit list" "again for a fresh GO"; do
+    case "$mr_out" in
+      *"$want"*) ok "the stale-main refusal carries '$want'" ;;
+      *) bad "the stale-main refusal does not carry '$want': $mr_out" ;;
+    esac
+  done
 fi
 
 echo

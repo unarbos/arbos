@@ -2,17 +2,21 @@
 # check3.sh <version> — release object, DMG (downloaded, digest-matched), feed:
 # authority = appcast.xml asset on the GitHub release (and the latest release), mirror = arbos.life copy.
 set -u
-V=$1; T=v$V; R=unarbos/arbos; K=${MERGE_KIT:-/tmp/k}
+V=$1; T=v$V; R=unarbos/arbos
 echo "== $T"
 gh api repos/$R/releases/tags/$T --jq '"release: draft=\(.draft) prerelease=\(.prerelease) published_at=\(.published_at) assets=\(.assets|length) url=\(.html_url)"' || echo "release: MISSING"
 dmg=$(gh api repos/$R/releases/tags/$T --jq '.assets[]|select(.name|endswith(".dmg"))|"\(.name) \(.state) \(.size) \(.digest) \(.browser_download_url)"' 2>/dev/null)
 echo "dmg asset: ${dmg:-MISSING}"
 if [ -n "$dmg" ]; then
   url=$(echo "$dmg" | awk '{print $5}'); dig=$(echo "$dmg" | awk '{print $4}' | sed 's/^sha256://')
-  curl -sSL -o "$K/check.dmg" "$url"
-  got=$(sha256sum "$K/check.dmg" | cut -d' ' -f1); sz=$(stat -c %s "$K/check.dmg")
+  # A temp file, not $MERGE_KIT/check.dmg. With no kit directory on disk the download had nowhere to land,
+  # sha256sum read nothing, and the line came out "MISMATCH" — a healthy release reported as a broken one
+  # because of a missing directory. check_published() turns that line into a NO-GO.
+  f=$(mktemp) || { echo "dmg download: cannot create a temporary file to download into"; exit 1; }
+  curl -sSL -o "$f" "$url"
+  got=$(sha256sum "$f" | cut -d' ' -f1); sz=$(stat -c %s "$f")
   [ "$got" = "$dig" ] && echo "dmg download: sha256 ${got:0:8}…${got: -6} size $sz = GitHub digest" || echo "dmg download: MISMATCH got $got want $dig size $sz"
-  rm -f "$K/check.dmg"
+  rm -f "$f"
 fi
 feedcheck() {  # <label> <url>
   local x top
