@@ -4858,9 +4858,7 @@ impl Agent {
         ) {
             {
                 let h = host.lock().await;
-                if let Err(e) = h.doc.delete_message(&assistant_msg_id) {
-                    tracing::warn!(chat_id, error = %e, "quiet turn: could not remove the empty row");
-                }
+                retire_row(&h.doc, &assistant_msg_id);
             }
             if turn.activity.is_some() {
                 self.post_activity(chat_id, None);
@@ -4930,9 +4928,7 @@ impl Agent {
                             ack_row,
                             &[("modelFailedAfterAck", json!(m.code()))],
                         );
-                        if let Err(e) = h.doc.delete_message(&assistant_msg_id) {
-                            tracing::warn!(chat_id, error = %e, "model failure after ack: could not remove the result row");
-                        }
+                        retire_row(&h.doc, &assistant_msg_id);
                         merged_into_ack = true;
                     }
                     _ => {
@@ -9944,7 +9940,39 @@ pub(crate) fn wordless_row(m: &arbos_core::doc::MessageView) -> (bool, bool) {
     (wordless, only_empty)
 }
 
-/// Remove or hide the turn's trailing wordless row (see the call site). Returns what was done.
+/// Take a row the box wrote out of the chat, without deleting it.
+///
+/// **Never `delete_message` on a row that may have been pushed.** The relay refuses a removal
+/// whose recorded author is not the pusher (`arbos-relay` `push_guard.rs`), and agentd's rows
+/// have *no* recorded author at all: `start_assistant_message` wrote the bare sender `agent`,
+/// while `Pusher::BoxOf::owns` only accepts `agent:<project_id>`, so `attribution` returned
+/// `None` and nothing was recorded. Every such removal comes back `not_yours`, and a refused
+/// op blocks the whole push queue behind it — 231 refusals on Jacob's box on 2026-11-04, and
+/// a reply that never reached the relay at all.
+///
+/// Hiding is a plain field write, which the guard allows. Both apps skip the row: on iPhone
+/// the row builder skips a `hidden` message outright, and on the Mac a row with no visible
+/// part contributes no row (`transcript.rs`, `shows_nothing`).
+///
+/// The row is also finished. A hidden row left `streaming` still feeds the iPhone's working
+/// line, which scans `status` parts for `working` / `step` on streaming rows within a
+/// fifteen-minute window — so an abandoned row could drive "Working…" long after its turn.
+///
+/// It is finished `Done` even where the turn failed — the model-failure site below retires a
+/// row whose failure has just been written onto the ack row instead. `Error` would be the
+/// more literal word and it is the wrong one, because `MessageStatus::Error` is load-bearing
+/// rather than descriptive: the Mac's `retry_send_error` takes the *last* errored row in the
+/// chat (`app.rs`, `list.iter().rev().find(|m| m.status == MessageStatus::Error)`) and that
+/// scan filters on neither `hidden` nor role. An invisible row marked `Error` would therefore
+/// capture the retry meant for the person's own failed message, and because the hidden row
+/// has no text to re-send, the retry would quietly do nothing at all. The failure is already
+/// recorded where someone can act on it; this row only needs to stop being live.
+pub(crate) fn retire_row(doc: &arbos_core::doc::ChatDoc, msg_id: &str) {
+    doc.set_message_fields(msg_id, &[("hidden", json!(true))]);
+    doc.finish_message(msg_id, MessageStatus::Done);
+}
+
+/// Hide the turn's trailing wordless row (see the call site). Returns what was done.
 pub(crate) fn trim_wordless_result_row(
     doc: &arbos_core::doc::ChatDoc,
     msg_id: &str,
@@ -9956,17 +9984,7 @@ pub(crate) fn trim_wordless_result_row(
     if !wordless {
         return "kept";
     }
-    // Hidden, never deleted — including the row that holds nothing at all, which used to be
-    // deleted. The relay's push guard refuses a removal whose recorded author it cannot match
-    // to the pusher (`arbos-relay` `push_guard.rs`), and on 2026-11-04 it refused 2 of agentd's
-    // 11 trims; each refusal cost a 10 s `PUSH_ACK_TIMEOUT` and a reconnect, delaying whatever
-    // else was in that batch. A field write that is not an identity field passes the guard.
-    //
-    // The transcript does not change. A row whose parts draw nothing contributes no row at all
-    // (`arbos-mac` `transcript.rs`, `shows_nothing`), and the stock "didn't answer" line is
-    // already withheld when another row of the same turn carries words or a card
-    // (`turn_answered_elsewhere`) — which is exactly what the caller checks before trimming.
-    doc.set_message_fields(msg_id, &[("hidden", json!(true))]);
+    retire_row(doc, msg_id);
     // The two shapes stay apart in `trailing_wordless_row` so the fleet count still says which
     // one happened; `deleted` leaving the metric is how this change shows up there.
     if only_empty {

@@ -531,6 +531,10 @@ impl SyncHub {
                 d
             }
         };
+        // Every assistant row this box opens is signed with the agent it belongs to, not the
+        // bare `agent`. The relay can only attribute `agent:<project_id>` to a box
+        // (`push_guard.rs`), and an unattributed row is one the box may never edit again.
+        doc.set_assistant_sender(&format!("agent:{}", self.cfg.project_id));
         let acked_vv = acked.as_deref().and_then(decode_vv).unwrap_or_default();
         let host = Arc::new(Mutex::new(DocHost {
             chat_id: chat_id.to_owned(),
@@ -1775,6 +1779,92 @@ mod tests {
             status("theirs"),
             "streaming",
             "the other agent's live row is left alone"
+        );
+    }
+
+    /// Pins the reason a refused batch is re-offered rather than skipped, so nobody
+    /// re-proposes dropping it on the strength of how obviously that would clear the jam.
+    ///
+    /// A replica's ops must reach the relay gap-free and in causal order. Skip one batch and
+    /// every later batch from this box parks instead of applying — silently and permanently,
+    /// which is strictly worse than the stall it would be curing.
+    #[test]
+    fn a_batch_the_relay_never_received_parks_everything_after_it() {
+        let doc = ChatDoc::new(Some(7), true);
+        doc.start_assistant_message("r1", "", "box");
+        doc.delete_message("r1").unwrap();
+        let first_mark = doc.oplog_vv();
+        let first = doc.export_updates_since(&VersionVector::default());
+        doc.append_user_message(
+            "m2",
+            "pong",
+            "mac",
+            &arbos_core::doc::UserMessageOpts::default(),
+        )
+        .unwrap();
+        let second = doc.export_updates_since(&first_mark);
+
+        let mut whole = ChatDoc::new(Some(99), true);
+        whole.import(&first).unwrap();
+        whole.import(&second).unwrap();
+        assert!(
+            whole.message("m2").is_some(),
+            "sanity: in order, the reply lands"
+        );
+
+        // What a relay that refused the first batch would see.
+        let mut gapped = ChatDoc::new(Some(98), true);
+        let status = gapped.import(&second).unwrap();
+        assert!(
+            gapped.message("m2").is_none(),
+            "a gap did not park the reply, so skipping a refused batch may be viable after all"
+        );
+        assert!(
+            status.pending.is_some(),
+            "the ops were parked pending their missing dependencies"
+        );
+    }
+
+    /// The whole reason agentd may hide its trailing wordless row instead of deleting it is
+    /// that both apps skip a row carrying `hidden` — the Mac because such a row draws nothing,
+    /// the iPhone because its row builder skips it outright. Neither has a backstop if the
+    /// flag goes missing: the row comes back as a finished, wordless assistant row, which is
+    /// Jacob's 2026-10-25 "didn't answer" bug. So the flag has to survive the push, not only
+    /// the renderers. This takes the bytes `next_push` hands the relay and reads them back the
+    /// way a client does.
+    #[test]
+    fn the_hidden_flag_is_in_the_bytes_the_relay_receives() {
+        let doc = ChatDoc::new(Some(7), true);
+        let mut host = host_with(doc);
+        host.doc
+            .append_user_message(
+                "u1",
+                "run bubble sort",
+                "mac",
+                &arbos_core::doc::UserMessageOpts::default(),
+            )
+            .unwrap();
+        host.doc.start_assistant_message("r1", "u1", "box");
+        host.doc
+            .finish_message("r1", arbos_core::doc::MessageStatus::Done);
+        crate::agent::trim_wordless_result_row(&host.doc, "r1");
+
+        let (_batch, bytes) = host.next_push().expect("something to push");
+        let mut far_side = ChatDoc::new(Some(9), true);
+        far_side
+            .import(&bytes)
+            .expect("the relay applies the batch");
+
+        let m = far_side.message("r1").expect("the row crossed the wire");
+        assert_eq!(
+            m.rest.get("hidden").and_then(serde_json::Value::as_bool),
+            Some(true),
+            "the flag both apps rely on did not survive the push"
+        );
+        assert_eq!(
+            m.status.as_str(),
+            "done",
+            "and it arrives finished, so the phone's working line ignores it"
         );
     }
 }
