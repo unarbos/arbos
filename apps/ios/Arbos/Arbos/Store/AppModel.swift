@@ -2948,7 +2948,7 @@ final class AppModel: ObservableObject {
                 let key = AppModel.blobKey(for: a.name)
                 let done = sent, size = a.bytes
                 do {
-                    _ = try await api.putBlob(projectId: slot, key: key, mime: a.mime, data: data) { [weak self] part in
+                    _ = try await sendBlob(slot: slot, key: key, mime: a.mime, data: data) { [weak self] part in
                         guard total > 0 else { return }
                         self?.setOutboxProgress(messageId, Double(done + Int64(part * Double(size))) / Double(total))
                     }
@@ -2966,6 +2966,51 @@ final class AppModel: ObservableObject {
             postOutbox(entry, attachments: uploaded)
         }
     }
+
+    /// One attachment up to the relay, reporting 0…1 of *its own* bytes as it goes.
+    ///
+    /// The seam exists for the screenshot rig. On the fixture there is no relay, and on a
+    /// hosted runner the unauthenticated `PUT` is refused in milliseconds, so the progress
+    /// ring has no window anyone can photograph. `ARBOS_FIXTURE_UPLOAD` opens one.
+    private func sendBlob(slot: Id, key: String, mime: String, data: Data,
+                          onProgress: @escaping @MainActor @Sendable (Double) -> Void) async throws -> String {
+        #if DEBUG
+        // Fixture only, as the variable's name says: on a paired build this would return a
+        // key the relay never saw and write a `ref` that resolves to nothing.
+        if isFixture, let hook = AppModel.fixtureUpload {
+            // Capture scaffolding, and the reason it waits in steps rather than once: it
+            // drives the same `onProgress` the relay does, so the ring's position is the
+            // real arithmetic over real elapsed time. A seam that moved the ring itself
+            // would hand the rig a picture of the seam.
+            let steps = max(1, hook.ms / 80)
+            for i in 1...steps {
+                try await Task.sleep(nanoseconds: UInt64(hook.ms) * 1_000_000 / UInt64(steps))
+                onProgress(Double(i) / Double(steps))
+            }
+            if hook.fails {
+                throw RelayError(status: 0, message: "The upload failed.")
+            }
+            return key
+        }
+        #endif
+        return try await api.putBlob(projectId: slot, key: key, mime: mime, data: data, onProgress: onProgress)
+    }
+
+    #if DEBUG
+    /// `ARBOS_FIXTURE_UPLOAD=slow:<ms>[,fails]` — the slow connection and the bad one, with
+    /// no relay in either. The Mac's equivalent is `ARBOS_FIXTURE_UPLOAD_FAILS`
+    /// (`crates/arbos-mac/src/sync/fixture.rs`); this adds the holding half iPhone shots need.
+    private static var fixtureUpload: (ms: Int, fails: Bool)? {
+        guard let raw = DebugHooks.fixtureUpload else { return nil }
+        var ms = 0
+        var fails = false
+        for part in raw.split(separator: ",").map({ $0.trimmingCharacters(in: .whitespaces) }) {
+            if part == "fails" { fails = true }
+            if part.hasPrefix("slow:") { ms = Int(part.dropFirst(5)) ?? 0 }
+        }
+        return (max(0, ms), fails)
+    }
+    #endif
 
     /// Move the ring on one outbox entry. Small steps are dropped: this is called per body
     /// chunk, and every published change rebuilds that chat's rows.

@@ -1655,6 +1655,7 @@ struct ChatSession: View {
         .onChange(of: model.caughtUp.contains(chatId), initial: true) { _, ready in
             model.repaintIfBlank(chatId)
             handleCaughtUpAutoSend(ready)
+            handleCaughtUpRigSendMedia(ready)
         }
     }
 
@@ -1783,6 +1784,22 @@ struct ChatSession: View {
                 }
             }
         }
+    }
+
+    /// Rig media send once the chat is caught up (`ARBOS_RIG_SEND_MEDIA=<caption>`).
+    ///
+    /// Capture scaffolding, not product behaviour. The rig drives the app through
+    /// `shot / tap / type / press / drag`, none of which can reach an attachment: the plus
+    /// button opens the system photo picker, a separate process over a simulator library
+    /// with nothing in it. This puts one synthetic clip in the composer and presses send,
+    /// which is the only way a shot of a message that carries a file can exist.
+    private func handleCaughtUpRigSendMedia(_ ready: Bool) {
+        guard ready, !sentOnce, !DebugHooks.liveDemo, let caption = DebugHooks.rigSendMedia,
+              DebugHooks.openPeople == chatId || DebugHooks.openChat == chatId else { return }
+        pending = [AppModel.PendingAttachment(name: "clip.mp4", mime: "video/mp4",
+                                              data: Data(count: DebugHooks.rigMediaBytes))]
+        composerDraft.text = caption
+        send()
     }
 
     /// Rig / DebugHooks `ARBOS_SHOW=…` cases for chat appear (kept out of the
