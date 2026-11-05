@@ -798,6 +798,12 @@ impl Agent {
                 "quick reply: no bubble, working row only"
             );
         } else {
+            // The one row that does not wait for the chat's send order (bug O, `send_order.rs`).
+            // A status answer is about the agent *now* and is marked `quick`; holding it behind
+            // the older messages it is asking about would answer a stale question after the work
+            // it asked about had finished, and the gate it must land inside is
+            // `FIRST_REPLY_GATE_SECS`, not a turn. Every other row the lanes write — a main-turn
+            // reply, a job's answer, a job's failure line — is ordered.
             let row_id = ulid();
             let h = host.lock().await;
             h.doc
@@ -1132,11 +1138,21 @@ pub(crate) mod tests {
                 "stop",
             )
         };
-        assert_eq!(
-            body["reasoning"]["enabled"],
-            json!(false),
-            "reasoning is off for quick calls"
-        );
+        // The invariant belongs to the quick lane, and the quick lane is the caller whose system
+        // prompt asks for the tag. Other callers reach this stub as well — `send_order_tests`
+        // drives a real job result, which is a plain `complete` with no `reasoning` key at all —
+        // and asserting on those says nothing about #1411.
+        if body["messages"][0]["content"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Start your reply with exactly one tag")
+        {
+            assert_eq!(
+                body["reasoning"]["enabled"],
+                json!(false),
+                "reasoning is off for quick calls"
+            );
+        }
         axum::Json(json!({
             "choices": [{ "message": { "role": "assistant", "content": content }, "finish_reason": finish }],
             "usage": { "prompt_tokens": 400, "completion_tokens": 30 }
@@ -3794,8 +3810,16 @@ pub(crate) mod tests {
         let host = agent.sync.open_room(chat).await.unwrap();
         let _busy = agent.test_hold_turn(chat).await;
         let (msg_id, cmd) = send_cmd(&host, "also count the files in the project folder");
-        let took = agent.start_job_for_send(chat, &host, &cmd).await.unwrap();
+        let mut ticket = agent.send_order.join(chat, &msg_id);
+        let took = agent
+            .start_job_for_send(chat, &host, &cmd, &mut ticket)
+            .await
+            .unwrap();
         assert!(took, "the ask runs as a job beside the running turn");
+        assert!(
+            ticket.is_none(),
+            "the job keeps the ask's place in the chat's send order"
+        );
         assert_eq!(
             agent.jobs_running.load(std::sync::atomic::Ordering::SeqCst),
             1
@@ -3808,7 +3832,10 @@ pub(crate) mod tests {
         );
         let (_m2, cmd2) = send_cmd(&host, "and list the biggest one");
         assert!(
-            !agent.start_job_for_send(chat, &host, &cmd2).await.unwrap(),
+            !agent
+                .start_job_for_send(chat, &host, &cmd2, &mut None)
+                .await
+                .unwrap(),
             "cap reached: queue"
         );
         agent.turn.lock().await.as_mut().unwrap().reply_only = true;
@@ -3816,7 +3843,10 @@ pub(crate) mod tests {
             .jobs_running
             .store(0, std::sync::atomic::Ordering::SeqCst);
         assert!(
-            !agent.start_job_for_send(chat, &host, &cmd2).await.unwrap(),
+            !agent
+                .start_job_for_send(chat, &host, &cmd2, &mut None)
+                .await
+                .unwrap(),
             "relay turn: queue"
         );
         let _ = std::fs::remove_dir_all(&root);
