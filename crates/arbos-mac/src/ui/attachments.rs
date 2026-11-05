@@ -42,6 +42,14 @@ const DOC_H: f32 = 27.0;
 const DISC: f32 = 28.0;
 /// A picker sticker's square (ARB-544): no bubble, no hairline, fixed size.
 pub const STICKER_SIZE: f32 = 128.0;
+/// How many pictures one message needs before its cards collapse into one tile
+/// (Jacob 2026-11-03: two pictures stacked as two full cards).
+pub const STACK_MIN: usize = 2;
+/// The scrim over the stack tile's picture, so the "+N" reads on a bright chart.
+/// PROVISIONAL — Grok's reference image has not reached us; measure and revisit.
+pub const STACK_DIM: f32 = 0.45;
+/// The "+N" overlay's point size. PROVISIONAL, same reason as `STACK_DIM`.
+pub const STACK_LABEL_SIZE: f32 = 34.0;
 
 /// The doc glyph's colour by kind: Grok's Docs yellow for documents, PDF red,
 /// Sheets green, Slides orange; media and the rest stay neutral.
@@ -92,6 +100,16 @@ pub fn picture_size(w: f32, h: f32) -> (f32, f32) {
         dh = (dh * s).min(PICTURE_MAX_HEIGHT);
     }
     (dw.round(), dh.round())
+}
+
+/// What the "+N" overlay on a stack tile says.
+///
+/// `n` is **every** picture of the message, not the ones hiding behind the
+/// first. Jacob's report of 2026-11-03 describes a two-picture message as
+/// carrying "+2", so the count is the total. Read it as the remainder and a
+/// two-picture message would say "+1".
+pub fn stack_label(count: usize) -> String {
+    format!("+{count}")
 }
 
 /// The ↓ disc: 28 pt, black 55 %, white glyph; the caller shows it on hover.
@@ -155,6 +173,81 @@ pub fn card(
             theme,
         )
     }
+}
+
+/// Several pictures in one message as one tile (Jacob 2026-11-03: two pictures
+/// drew as two full-size cards stacked down the chat). The first picture fills
+/// the tile under a scrim, with "+N" over it; a click opens the gallery on the
+/// message's own pictures.
+///
+/// The scrim weight and the overlay's size are PROVISIONAL (`STACK_DIM`,
+/// `STACK_LABEL_SIZE`): Grok's reference image has not reached us yet.
+pub fn stack_card(
+    row_id: &str,
+    count: usize,
+    preview: Preview,
+    forwarded_from: Option<&str>,
+    quote_header: Option<AnyElement>,
+    open: Option<OpenFn>,
+    theme: &Theme,
+) -> AnyElement {
+    let (w, h) = match &preview {
+        Preview::Ready(image) => {
+            let size = image.size(0);
+            picture_size(size.width.0 as f32, size.height.0 as f32)
+        }
+        _ => PICTURE_PLACEHOLDER,
+    };
+    let mut tile = div()
+        .id(SharedString::from(row_id.to_owned()))
+        .relative()
+        .w(px(w))
+        .h(px(h))
+        .max_w_full()
+        .rounded(px(BUBBLE_RADIUS))
+        .overflow_hidden()
+        .border_1()
+        .border_color(theme.border_strong)
+        .bg(theme.bubble_assistant)
+        .flex()
+        .items_center()
+        .justify_center();
+    if let Preview::Ready(image) = preview {
+        tile = tile.child(
+            img(image)
+                .w(px(w))
+                .h(px(h))
+                .rounded(px(BUBBLE_RADIUS))
+                .object_fit(ObjectFit::Cover),
+        );
+    }
+    tile = tile.child(
+        div()
+            .absolute()
+            .inset_0()
+            .bg(Theme::with_alpha(gpui::black(), STACK_DIM))
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_size(px(STACK_LABEL_SIZE))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(gpui::white())
+            .child(stack_label(count)),
+    );
+    if let Some(open) = open {
+        tile = tile.cursor_pointer().on_click(move |_, _, cx| open(cx));
+    }
+    let mut out = div().flex().flex_col().gap(px(4.0));
+    if let Some(from) = forwarded_from {
+        let by = from.strip_prefix(FORWARDED_FROM_PREFIX).unwrap_or(from);
+        out = out.child(div().pl(px(6.0)).max_w(px(w)).child(
+            crate::ui::transcript::forwarded_header(by.to_owned(), theme.text),
+        ));
+    }
+    if let Some(quote) = quote_header {
+        out = out.child(div().pl(px(6.0)).max_w(px(w)).child(quote));
+    }
+    out.child(tile).into_any_element()
 }
 
 /// A sticker (ARB-544): the picture alone on the chat background at a fixed square —
@@ -513,6 +606,14 @@ mod tests {
         assert!(h <= PICTURE_MAX_HEIGHT);
         // Unknown size → the placeholder.
         assert_eq!(picture_size(0.0, 0.0), PICTURE_PLACEHOLDER);
+    }
+
+    #[test]
+    fn the_stack_overlay_counts_every_picture() {
+        // Jacob's two-picture message reads "+2", not "+1".
+        assert_eq!(stack_label(2), "+2");
+        assert_eq!(stack_label(5), "+5");
+        assert_eq!(STACK_MIN, 2);
     }
 
     #[test]

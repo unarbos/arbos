@@ -692,6 +692,11 @@ pub enum RowKind {
         /// reply quotes like a text one ([feedback picture-reply-quote-mac-2026-10-28]);
         /// the caption bubble under it then carries none.
         quote: Option<Quote>,
+        /// How many pictures this row stands for. `1` is a plain card. From
+        /// `attachments::STACK_MIN` up, the row is the one "+N" stack tile the
+        /// message's pictures collapsed into (Jacob 2026-11-03); `attachment`
+        /// and `part_id` are then the first picture's.
+        stack: usize,
     },
     /// S8: the agent asked a question.
     AskUser {
@@ -3322,6 +3327,7 @@ impl Transcript {
                 time,
                 forwarded_from,
                 quote,
+                stack,
             } => {
                 // The blob `ref`, or `url:<url>` for a picked GIF that lives with its
                 // provider (ARB-544) — the sync layer fetches either.
@@ -3363,16 +3369,28 @@ impl Transcript {
                         &row.message_id,
                         cx,
                     )
-                    .child(attachments::card(
-                        &row.id,
-                        &attachment,
-                        preview,
-                        forwarded_from.as_deref(),
-                        quote_header,
-                        open,
-                        self.state.clone(),
-                        &theme,
-                    ));
+                    .child(if stack >= attachments::STACK_MIN {
+                        attachments::stack_card(
+                            &row.id,
+                            stack,
+                            preview,
+                            forwarded_from.as_deref(),
+                            quote_header,
+                            open,
+                            &theme,
+                        )
+                    } else {
+                        attachments::card(
+                            &row.id,
+                            &attachment,
+                            preview,
+                            forwarded_from.as_deref(),
+                            quote_header,
+                            open,
+                            self.state.clone(),
+                            &theme,
+                        )
+                    });
                 let (row_el, reveal) = self.hover_row(&row.id, &row.id, now, window, cx);
                 let actions = self.hover_rail(&row.id, &row.message_id, reveal, &theme, cx);
                 if mine {
@@ -4582,7 +4600,27 @@ pub fn build_rows_with_cache(
                                 .map(|id| Quote::for_reply(id, messages))
                         })
                 };
-                for (ix, (part_id, attachment)) in attachment_parts.iter().enumerate() {
+                // Two or more pictures in one message are one "+N" stack tile, not
+                // one full-size card each (Jacob 2026-11-03). Files keep their own
+                // cards; the tile takes the place of the message's first picture.
+                let pictures = attachment_parts
+                    .iter()
+                    .filter(|(_, a)| a.kind() == AttachmentKind::Image)
+                    .count();
+                let stacked = pictures >= attachments::STACK_MIN;
+                let mut cards: Vec<(&(String, Attachment), usize)> = Vec::new();
+                for part in attachment_parts.iter() {
+                    if stacked && part.1.kind() == AttachmentKind::Image {
+                        if cards.iter().any(|(_, stack)| *stack > 1) {
+                            continue;
+                        }
+                        cards.push((part, pictures));
+                    } else {
+                        cards.push((part, 1));
+                    }
+                }
+                let card_count = cards.len();
+                for (ix, ((part_id, attachment), stack)) in cards.into_iter().enumerate() {
                     let forwarded = forwarded.clone().filter(|_| ix == 0);
                     let quote = quote.clone().filter(|_| ix == 0);
                     let has_thumb = attachment
@@ -4593,7 +4631,7 @@ pub fn build_rows_with_cache(
                     // their name on the first card when the run changes sender.
                     let sender = from.clone().map(AttachmentSender::Person);
                     let card_named = named && ix == 0;
-                    let disc = run_start && !show_text && ix + 1 == attachment_parts.len();
+                    let disc = run_start && !show_text && ix + 1 == card_count;
                     rows.push(Row {
                         version: hash_version(
                             &(
@@ -4608,6 +4646,7 @@ pub fn build_rows_with_cache(
                                 card_named,
                                 disc,
                                 &quote,
+                                stack,
                             ),
                             false,
                         ),
@@ -4623,6 +4662,7 @@ pub fn build_rows_with_cache(
                             time: clock_label(message.created_at),
                             forwarded_from: forwarded.clone(),
                             quote,
+                            stack,
                         },
                     });
                 }
@@ -4837,14 +4877,46 @@ pub fn build_rows_with_cache(
                 let bubble_texts = BubbleText::for_blocks(&bubble_blocks, false);
                 let mut block_ix = 0usize;
                 let mut had_prose = false;
+                // An agent's pictures collapse into one "+N" stack tile the same way a
+                // send of mine does (Jacob 2026-11-03). A chart's fallback picture is
+                // not one of them: this app draws the chart instead.
+                let stack_pictures: Vec<usize> = message
+                    .parts
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, p)| match p {
+                        Part::Attachment { attachment, .. } => {
+                            attachment.kind() == AttachmentKind::Image
+                                && !attachment
+                                    .chart_part
+                                    .as_deref()
+                                    .is_some_and(|cp| message.has_chart_part(cp))
+                        }
+                        _ => false,
+                    })
+                    .map(|(pix, _)| pix)
+                    .collect();
+                let stacked = stack_pictures.len() >= attachments::STACK_MIN;
+                // The pictures the tile swallowed draw no card of their own.
+                let swallowed = |pix: usize| {
+                    stacked && stack_pictures.contains(&pix) && stack_pictures[0] != pix
+                };
                 // The message's last card that draws (a chart's fallback picture does not).
-                let last_card_part = message.parts.iter().rposition(|p| match p {
-                    Part::Attachment { attachment, .. } => !attachment
-                        .chart_part
-                        .as_deref()
-                        .is_some_and(|cp| message.has_chart_part(cp)),
-                    _ => false,
-                });
+                let last_card_part =
+                    message
+                        .parts
+                        .iter()
+                        .enumerate()
+                        .rposition(|(pix, p)| match p {
+                            Part::Attachment { attachment, .. } => {
+                                !attachment
+                                    .chart_part
+                                    .as_deref()
+                                    .is_some_and(|cp| message.has_chart_part(cp))
+                                    && !swallowed(pix)
+                            }
+                            _ => false,
+                        });
                 // The sender's name goes on the message's first row — a picture that
                 // comes before the prose takes it, and the first text block then does
                 // not repeat it ([feedback forward-attachments-mac-2026-10-27]).
@@ -4999,7 +5071,15 @@ pub fn build_rows_with_cache(
                                 .chart_part
                                 .as_deref()
                                 .is_some_and(|cp| message.has_chart_part(cp)) => {}
+                        Part::Attachment { id, attachment } if swallowed(pix) => {
+                            let _ = (id, attachment);
+                        }
                         Part::Attachment { id, attachment } => {
+                            let stack = if stacked && stack_pictures[0] == pix {
+                                stack_pictures.len()
+                            } else {
+                                1
+                            };
                             let has_thumb = attachment
                                 .blob_ref
                                 .as_deref()
@@ -5024,6 +5104,7 @@ pub fn build_rows_with_cache(
                                         &lane,
                                         card_named,
                                         disc,
+                                        stack,
                                     ),
                                     false,
                                 ),
@@ -5041,6 +5122,7 @@ pub fn build_rows_with_cache(
                                     time: clock_label(message.created_at),
                                     forwarded_from: None,
                                     quote: None,
+                                    stack,
                                 },
                             })
                         }
@@ -10852,6 +10934,105 @@ mod system_line_tests {
             ],
         }))
         .expect("picture reply")
+    }
+
+    /// A send of mine carrying `names` as pictures, in that order.
+    fn picture_send(names: &[&str], at: u64) -> Message {
+        let parts: Vec<serde_json::Value> = names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                serde_json::json!({
+                    "id": format!("a{i}-{at}"),
+                    "kind": "attachment",
+                    "attachment": { "name": name, "mime": "image/png", "ref": format!("blob-{i}") },
+                })
+            })
+            .collect();
+        serde_json::from_value(serde_json::json!({
+            "id": format!("m-{at}"),
+            "chatId": "chat_testing",
+            "role": "user",
+            "sender": "user:gh_me",
+            "status": "done",
+            "createdAt": at,
+            "parts": parts,
+        }))
+        .expect("picture send")
+    }
+
+    /// Jacob 2026-11-03: a send of two pictures drew two full-size cards down the
+    /// chat. It is one "+N" tile now, and "+N" counts every picture — his two-picture
+    /// send reads "+2", not "+1".
+    #[test]
+    fn two_pictures_in_one_send_collapse_into_one_stack_tile() {
+        let t = 1_700_000_000_000u64;
+        let (spoken, failed) = (HashSet::new(), HashMap::new());
+        let rows_for = |names: &[&str]| {
+            build_rows(
+                &[picture_send(names, t)],
+                false,
+                speech(&spoken, &failed),
+                "gh_me",
+                &HashSet::new(),
+                &Mentions::empty(),
+                false,
+            )
+        };
+        let stacks = |rows: &[Row]| -> Vec<usize> {
+            rows.iter()
+                .filter_map(|r| match &r.kind {
+                    RowKind::Attachment { stack, .. } => Some(*stack),
+                    _ => None,
+                })
+                .collect()
+        };
+        // Jacob's case, by his own file names.
+        assert_eq!(
+            stacks(&rows_for(&["flip-credit.png", "weights-v9.png"])),
+            [2],
+            "one row, standing for both pictures"
+        );
+        assert_eq!(stacks(&rows_for(&["a.png", "b.png", "c.png"])), [3]);
+        // One picture is still its own card.
+        assert_eq!(stacks(&rows_for(&["only.png"])), [1]);
+    }
+
+    /// A file keeps its own card beside the tile: only pictures collapse.
+    #[test]
+    fn a_file_beside_two_pictures_keeps_its_card() {
+        let t = 1_700_000_000_000u64;
+        let mut m = picture_send(&["a.png", "b.png"], t);
+        let doc: Part = serde_json::from_value(serde_json::json!({
+            "id": "d-1",
+            "kind": "attachment",
+            "attachment": { "name": "deck.pdf", "mime": "application/pdf", "ref": "blob-pdf" },
+        }))
+        .expect("file part");
+        m.parts.push(doc);
+        let (spoken, failed) = (HashSet::new(), HashMap::new());
+        let rows = build_rows(
+            &[m],
+            false,
+            speech(&spoken, &failed),
+            "gh_me",
+            &HashSet::new(),
+            &Mentions::empty(),
+            false,
+        );
+        let cards: Vec<(usize, String)> = rows
+            .iter()
+            .filter_map(|r| match &r.kind {
+                RowKind::Attachment {
+                    stack, attachment, ..
+                } => Some((*stack, attachment.name.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            cards,
+            [(2, "a.png".to_string()), (1, "deck.pdf".to_string())]
+        );
     }
 
     /// Per row: `("attachment" | "user", quote text)`.
