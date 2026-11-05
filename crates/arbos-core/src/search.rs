@@ -105,7 +105,13 @@ pub fn fold(s: &str) -> String {
     out
 }
 
-fn push_folded(c: char, out: &mut String) {
+/// One char folded onto the end of `out`, by the table [`fold`] itself uses.
+/// A caller that needs offsets back into the original text folds char by char
+/// through this and keeps its own map (`arbos_mac::search::snippet`), because
+/// a fold can grow (`ß` → `ss`) or vanish (a combining mark) and [`fold`]
+/// also trims, so neither offsets nor whitespace survive a whole-string call.
+/// Folding lives here and nowhere else: a second copy of the table drifts.
+pub fn push_folded(c: char, out: &mut String) {
     match c {
         'ß' | 'ẞ' => out.push_str("ss"),
         'ø' | 'Ø' => out.push('o'),
