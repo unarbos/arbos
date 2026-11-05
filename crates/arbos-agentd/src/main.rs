@@ -517,6 +517,21 @@ async fn boot() -> Result<()> {
             }
         });
     }
+    // Box-wide room ceiling (30 s): the per-workspace cap bounds each hub's rooms and nothing
+    // bounds their sum, so this is the only pass that can see a box over its CPU quota with
+    // every workspace inside its own cap. A box under the ceiling pays one cheap count for it.
+    //
+    // A sweep rather than a check on the open path, because the sum moves for reasons no single
+    // open knows about: a workspace being added puts the box over without any room opening.
+    {
+        let sup2 = sup.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                sup2.enforce_box_room_ceiling().await;
+            }
+        });
+    }
     // Idle keep-alive heartbeat (turn_running=false lets the relay restore auto-stop).
     {
         let sup2 = sup.clone();

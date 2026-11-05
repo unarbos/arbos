@@ -649,7 +649,28 @@ pub async fn box_state(sup: &Supervisor) -> Value {
         "resources": resources,
         "held": sup.held.read().await.iter().cloned().collect::<Vec<_>>(),
         "warnings_in_ring": warnings,
+        "rooms": rooms_json(sup).await,
         "workspaces": workspaces,
+    })
+}
+
+/// The box's whole room budget in one place, because no per-workspace `links` block can show it:
+/// the ceiling bounds the sum across workspaces, and the sum is what a box over its CPU quota is
+/// over by.
+///
+/// `exempt` is here to settle a question that has only ever been inferred. `keep_open` rooms —
+/// the project doc of each workspace and every `people/` room — are skipped by the idle close and
+/// by both caps, so they are the part of a box's socket count that no bound can reclaim. How
+/// large that part is on a loaded box decides how much the ceiling is worth, and until now it
+/// could only be guessed at from the workspace count.
+async fn rooms_json(sup: &Supervisor) -> Value {
+    let (open, exempt) = sup.room_counts().await;
+    json!({
+        "open": open,
+        "exempt": exempt,
+        "ceiling": crate::sync::max_box_rooms(),
+        "per_workspace_cap": crate::sync::max_open_rooms(),
+        "cores": crate::resources::box_cores(),
     })
 }
 
