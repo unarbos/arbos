@@ -691,6 +691,59 @@ async fn a_held_delivery_takes_no_place_in_the_chats_send_order() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// **A cancel that lands inside the hold is honoured (bug S's rule, bug Z's lane).**
+///
+/// The hold put up to twenty seconds between "is this job cancelled" and the upload, and the
+/// question was asked only on the near side. So a user who stopped a job while its file was
+/// waiting got the file anyway, which is the thing `media::deliver` refuses on every other path
+/// — and bug Z's cancel, which kills the job's process group and reports what survived, says
+/// nothing of a cancelled job reaches the chat. `write_job_result` asks on both sides of its own
+/// wait for exactly this reason; this asks on both sides of ours.
+///
+/// Cancelled through `Agent::stop_jobs`, the path the model's `stop_job` takes, so the state the
+/// delivery reads is the state a real cancel writes.
+#[tokio::test]
+async fn a_job_cancelled_while_its_file_is_held_posts_nothing() {
+    let (agent, root) = test_agent().await;
+    let host = agent.sync.open_room(CHAT9).await.unwrap();
+    hold_for(&agent, HOLD_MS);
+    a_job_in(&agent, &host, CHAT9, JOB9, WORKER9, ASK9, ROW9).await;
+
+    // A message of this chat is being routed, so the worker's file waits.
+    let _routing = agent.steer_gate.routing(CHAT9, &ulid());
+    let path = a_file(&agent, "cancelled.csv", "rank,name\n1,a\n");
+    let delivery = {
+        let agent = agent.clone();
+        tokio::spawn(async move { worker_delivers_as(&agent, WORKER9, &path).await })
+    };
+    tokio::time::sleep(Duration::from_millis(HOLD_MS / 4)).await;
+    assert!(!delivery.is_finished(), "the file is not being held");
+
+    // "stop that" — mid-hold, which is where the old code could not see it.
+    agent.stop_jobs(CHAT9, Some(JOB9)).await;
+    assert_eq!(
+        agent.store.job(JOB9).unwrap().unwrap().state,
+        "cancelled",
+        "the stop did not cancel the job, so this test is not testing a cancel"
+    );
+
+    let out = tokio::time::timeout(Duration::from_millis(HOLD_MS * 10), delivery)
+        .await
+        .expect("the held delivery never returned after the cancel")
+        .unwrap();
+    assert_eq!(
+        out["isError"],
+        json!(true),
+        "the file of a job the user stopped went out when the hold ended: {out}"
+    );
+    assert!(
+        cards(&host).is_empty(),
+        "a cancelled job put a file in the chat: {:?}",
+        cards(&host)
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// Same shape as [`a_running_job`], for the tests that need their own chat.
 #[allow(clippy::too_many_arguments)]
 async fn a_job_in(
@@ -772,6 +825,12 @@ const JOB5: &str = "01TESTJOBSTEERRACE00000005";
 const WORKER5: &str = "01TESTWORKERSTEERRACE00005";
 const ASK5: &str = "01TESTASKJOBSTEERRACE00005";
 const ROW5: &str = "01TESTROWJOBSTEERWORKER005";
+
+const CHAT9: &str = "01TESTCHATJOBSTEERRACE0009";
+const JOB9: &str = "01TESTJOBSTEERRACE00000009";
+const WORKER9: &str = "01TESTWORKERSTEERRACE00009";
+const ASK9: &str = "01TESTASKJOBSTEERRACE00009";
+const ROW9: &str = "01TESTROWJOBSTEERWORKER009";
 
 const CHAT8: &str = "01TESTCHATJOBSTEERRACE0008";
 const JOB8: &str = "01TESTJOBSTEERRACE00000008";

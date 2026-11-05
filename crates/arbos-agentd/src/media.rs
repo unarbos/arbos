@@ -471,6 +471,15 @@ pub async fn deliver(
             if hold == crate::steer_gate::Hold::SteerFirst {
                 return Err(anyhow::Error::new(crate::steer_gate::SteerFirst));
             }
+            // And again on the far side, the way `write_job_result` asks on both sides of its
+            // own wait: the hold is seconds long and the cancel that bug Z kills a job's
+            // processes for can land anywhere in it. The check above was made before the user
+            // stopped the job.
+            if a.job_is_cancelled(job_id) {
+                anyhow::bail!(
+                    "this job was cancelled while the file waited, so nothing more of it goes into the chat; the file was NOT posted"
+                );
+            }
         }
         if let Some(message_id) = a.job_file_posted(job_id, &key).await {
             // Only a card that is still in the chat may stand in for this one; if it went, the

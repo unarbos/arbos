@@ -39,6 +39,18 @@
 //! `write_job_result` writes directly are both main-lane writes, and the main turn is exempt from
 //! the hold because it is the lane that does the routing. `job_steer_race_tests` asks the code
 //! rather than trusting the reading.
+//!
+//! **A cancel inside the hold (bug Z's lane, #2790).** Nothing here outlives the job it holds for
+//! and nothing here needs the job to exist. [`RouteMark`]'s `Drop` is owned by `handle_command`
+//! and keyed by chat and message, so a job dying under a held delivery cannot strand a mark;
+//! [`SteerGate::look`] reads marks and steer counts only, never the job row, so a delivery whose
+//! job has just been killed still decides within `cap`; and `forget_job` runs on both of
+//! `run_subagent`'s settle paths, the cancelled one included, so the counts go with the job.
+//!
+//! What the hold *did* break is bug S's rule. It put up to twenty seconds between
+//! `media::deliver`'s "is this job cancelled" and the upload, and the question was asked only on
+//! the near side, so a job stopped mid-hold posted its file anyway when the hold ended. Both held
+//! surfaces now ask again on the far side, as `write_job_result` does around its own wait.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

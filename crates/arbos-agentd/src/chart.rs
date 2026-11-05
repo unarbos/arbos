@@ -110,6 +110,12 @@ pub async fn post(
             if hold == crate::steer_gate::Hold::SteerFirst {
                 anyhow::bail!(crate::steer_gate::SteerFirst);
             }
+            // Asked again after the wait, as in `media::deliver`: a cancel can land inside it.
+            if a.job_is_cancelled(job_id) {
+                anyhow::bail!(
+                    "this job was cancelled while the chart waited, so nothing more of it goes into the chat; the chart was NOT posted"
+                );
+            }
         }
     }
     let credit = PictureCredit {
