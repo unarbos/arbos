@@ -127,6 +127,7 @@ fn title_of(page: &ProfilePage, state: &AppState) -> String {
             .find(|p| &p.id == space_id)
             .map(|p| p.name.clone())
             .unwrap_or_default(),
+        ProfilePage::AgentLog { .. } => "Session log".to_string(),
         ProfilePage::Me => "You".to_string(),
         ProfilePage::Server { server_id } => state
             .servers
@@ -346,6 +347,7 @@ pub(crate) fn share_disc_allowed(page: &ProfilePage) -> bool {
         | ProfilePage::Server { .. }
         | ProfilePage::Channel { .. }
         | ProfilePage::User { .. }
+        | ProfilePage::AgentLog { .. }
         | ProfilePage::Me => false,
     }
 }

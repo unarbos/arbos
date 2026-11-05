@@ -157,6 +157,9 @@ pub const FALLBACKS: &[(&str, &str)] = &[
     ("pin", "pin"),
     ("pin.slash", "pin-slash"),
     ("pin.fill", "pin-fill"),
+    // The Session log page's hero (#2232); the pack has no list glyph, so the ruled lines
+    // stand in off macOS.
+    ("list.bullet.rectangle", "text-align-left"),
 ];
 
 /// The pack glyph that stands in for `name`, if `name` is a registered symbol.
