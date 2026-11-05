@@ -663,6 +663,57 @@ async fn a_relay_turn_for_an_already_cancelled_job_does_not_wait_for_its_turn() 
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// Bug T opens a second door from a job into its chat: `send_message` with no `to`, which posts
+/// a standalone row through `post_to_job_chat`. A cancelled job may not use that one either.
+///
+/// Nothing in `run_subagent` covers it. Those checks run after the worker's turn has returned;
+/// this path is called from *inside* that turn by the worker's own script, so the only thing
+/// between it and the chat is the question it asks itself.
+#[tokio::test]
+async fn a_cancelled_job_cannot_post_a_progress_note_either() {
+    let (agent, root) = test_agent().await;
+    let host = agent.sync.open_room(CHAT).await.unwrap();
+    a_running_job(&agent, &host).await;
+
+    let stopped = agent.stop_jobs(CHAT, Some(JOB)).await;
+    assert_eq!(stopped.len(), 1);
+    assert_eq!(stopped[0].state, "cancelled");
+    let after_cancel = visible_assistant_rows(&host);
+
+    // The worker's script, mid-run, reaching for the chat the way bug T made possible.
+    let refused = agent
+        .post_to_job_chat(WORKER, "Still polling the log; nothing new yet.")
+        .await
+        .expect_err("a cancelled job must not post a progress note");
+    let said = refused.to_string();
+    assert!(
+        said.contains("cancelled") && said.contains("NOT posted"),
+        "and the worker is told why, so it stops rather than retrying: {said}"
+    );
+    assert_eq!(
+        visible_assistant_rows(&host),
+        after_cancel,
+        "the progress note left a row in the chat"
+    );
+
+    // The refusal is read off the job's state before the room is touched, so a cancelled job
+    // does not even reopen a chat to be turned away from it. The cold shape is the one
+    // `a_cancel_retires_the_jobs_rows_on_a_chat_whose_room_went_cold` pins: persisted, out of
+    // the hub's map, and not `closed`.
+    agent.sync.persist(&host).await.unwrap();
+    agent.sync.hosts.lock().await.remove(CHAT);
+    agent
+        .post_to_job_chat(WORKER, "Still polling the log; nothing new yet.")
+        .await
+        .expect_err("still refused with the room cold");
+    assert!(
+        agent.sync.host(CHAT).await.is_none(),
+        "a cancelled job's note reopened the room it was refused from"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// The answer bubbles a job wrote in reply to `msg_id`. `decision: "job"` is what
 /// `write_job_result` stamps on the one row it posts, which is the row a cancel must prevent —
 /// the worker's own hidden progress row replies to the same message and is not one.
