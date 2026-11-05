@@ -4,7 +4,6 @@ mod app;
 mod audio;
 mod auth;
 mod calls;
-mod chat_search;
 mod draft_dm;
 mod image_picker;
 mod jobtabs;
@@ -19,6 +18,10 @@ mod sign_in;
 mod sync;
 mod ui;
 mod update;
+
+// Search-in-chat's rules are shared with the iPhone (`arbos_core::chat_search`),
+// so they are re-exported under the path this crate's views and state already read.
+pub(crate) use arbos_core::chat_search;
 
 use gpui::{
     point, px, size, App, AppContext as _, Bounds, KeyBinding, Menu, MenuItem, OsAction,

@@ -5,7 +5,7 @@
 //! count says, and which bytes of a rendered text to mark.
 //!
 //! A query is a keyword (folded like every other search in the app —
-//! `arbos_core::search::fold`) and an optional pinned sender; a message hits
+//! [`crate::search::fold`]) and an optional pinned sender; a message hits
 //! when it is from that sender AND its text contains the keyword (an empty
 //! keyword with a pinned sender = all of that sender's messages). Hits keep
 //! the transcript's order (1 = the oldest loaded) like Find; the cursor starts
@@ -13,15 +13,19 @@
 //! loaded hit asks for older rows when the chat may have some
 //! ([`Step::PageOlder`]). While typing, a name or @handle that matches someone
 //! in the chat is offered as a sender chip (the shared matcher of #1918,
-//! `arbos_core::search::match_entity`); ⇥ or a click pins it.
+//! [`crate::search::match_entity`]); ⇥ or a click pins it.
 //!
-//! The view lives in `ui::chat_search`; the state in `AppState::chat_search`.
+//! Both clients read these rules from here, so neither can drift from the
+//! other: the Mac re-exports the module as `crate::chat_search` (its view is
+//! `ui::chat_search`, its state `AppState::chat_search`), and the iPhone reaches
+//! it through `arbos-ffi`.
 
 use std::ops::Range;
 
-use arbos_core::search::{fold, match_entity, normalize_query, Match};
+use crate::search::{fold, match_entity, normalize_query, Match};
 
-use crate::model::Id;
+/// A message id — the clients' own `Id`, which is a `String` on both.
+type Id = String;
 
 /// Someone who posted in the chat: the chip's name and handle, and the key
 /// a message's sender is compared by.
