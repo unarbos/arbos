@@ -502,8 +502,8 @@ impl Agent {
             tl.as_ref().map(|t| t.chat_id.clone())
         };
         if let Some(tc) = turn_chat {
-            if self.approval_pending_for(&tc).await {
-                snap.activity = Some("Waiting for approval".into());
+            if let Some(label) = self.approval_wait_label(&tc) {
+                snap.activity = Some(label);
             }
         }
         let live: std::collections::HashSet<String> =
@@ -3882,6 +3882,92 @@ pub(crate) mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         };
         assert!(seen.starts_with("Steering: Change of plan"), "{seen}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Test5 round 5, bug R, part 3. While a wait is parked the chat has to say what it is
+    /// waiting for, and name it: "Waiting for approval" said that a decision was wanted without
+    /// saying which, and the turn-end sweep then cleared even that, leaving the chat looking
+    /// idle while it was in fact waiting on the person.
+    ///
+    /// The tool here is deliberately a one-off name, because the stub relay's activity log is
+    /// process-wide and every shell card shares the title "Run a destructive command (…)".
+    #[tokio::test]
+    async fn a_parked_approval_leaves_the_chat_saying_what_it_waits_for() {
+        const TOOL: &str = "publish_parkstatus_probe";
+        let want = format!("Waiting for your approval: {TOOL} (tool-send)");
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATPARKSTATUS000000";
+        agent.store.upsert_chat(chat, "Main", true, 0).unwrap();
+        let host = agent.sync.open_room(chat).await.unwrap();
+
+        let id = {
+            let _busy = agent.test_hold_turn(chat).await;
+            {
+                let mut tl = agent.turn.lock().await;
+                let t = tl.as_mut().unwrap();
+                agent.test_open_row(&host, t).await;
+            }
+            let v = agent
+                .hook_approval(TOOL, &json!({ "to": "someone" }), chat, "main")
+                .await;
+            assert_eq!(v["state"], "pending", "{v}");
+            // The running turn's own row says it too, in place of "Running a command…".
+            let row = agent
+                .turn
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .assistant_msg_id
+                .clone();
+            assert_eq!(
+                host.lock()
+                    .await
+                    .doc
+                    .message(&row)
+                    .unwrap()
+                    .rest
+                    .get("activity")
+                    .and_then(Value::as_str),
+                Some(want.as_str()),
+                "the working row must name the card, not the gated tool"
+            );
+            v["approvalId"].as_str().unwrap().to_owned()
+        };
+        assert_eq!(agent.park_approval(&id).await["parked"], json!(true));
+
+        // The turn ends here, which is where the line used to be dropped. Every presence post is
+        // a spawned HTTP call to the in-process stub, so let the earlier ones land before
+        // clearing: without that the card's own post arrives after the clear and stands in for
+        // the one under test.
+        *agent.turn.lock().await = None;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        ACTIVITY_LOG.lock().unwrap().clear();
+        agent.refresh_job_activity(chat).await;
+        let t0 = Instant::now();
+        loop {
+            if ACTIVITY_LOG.lock().unwrap().contains(&want) {
+                break;
+            }
+            assert!(
+                t0.elapsed() < Duration::from_secs(5),
+                "the chat went silent while it was waiting on the user; posted {:?}",
+                ACTIVITY_LOG.lock().unwrap()
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        // Answering the card is what clears it.
+        agent
+            .decide_approval(
+                &id,
+                arbos_core::approval::ApprovalOutcome::Rejected { reason: None },
+                "dev-mac",
+            )
+            .await
+            .unwrap();
+        assert_eq!(agent.approval_wait_label(chat), None);
         let _ = std::fs::remove_dir_all(&root);
     }
 

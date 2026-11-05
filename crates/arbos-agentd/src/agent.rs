@@ -9064,6 +9064,12 @@ impl Agent {
                 t
             }
         });
+        // Nothing running, but a card of this chat still waiting: the chat is waiting on the
+        // person, so it must not be left looking idle. A parked approval wait outlives the turn
+        // that raised it (`approval::park_approval`), and this is the turn-end sweep it would
+        // otherwise be cleared by. A running job keeps precedence — #2759 sets that job's own
+        // step to "Waiting for approval" when the card belongs to it.
+        let text = text.or_else(|| self.approval_wait_label(chat_id));
         if text.is_some() || self.turn.lock().await.is_none() {
             self.post_activity_with_jobs(chat_id, text, chip);
         }

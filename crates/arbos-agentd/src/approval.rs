@@ -189,6 +189,29 @@ fn canonical(v: &Value) -> String {
     }
 }
 
+/// The chat's status while a card of it waits: `Waiting for your approval: <card title>`.
+///
+/// It names the card, because the line it replaces — a bare "Waiting for approval" — said that
+/// a decision was wanted without saying which, and with two cards in a chat it named neither.
+///
+/// Clipped, because this is a presence chip and a one-line working row rather than a transcript
+/// sentence. That is also why it is not `approval_wait_line`: #2759's line is a full sentence
+/// for a transcript row and names the chat the card is in, which is the wrong shape and the
+/// wrong length for a status line in the very chat the person is already looking at.
+pub(crate) fn wait_status_line(title: &str) -> String {
+    const TITLE_MAX: usize = 56;
+    let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
+    let title = if title.chars().count() > TITLE_MAX {
+        format!("{}…", title.chars().take(TITLE_MAX - 1).collect::<String>())
+    } else {
+        title
+    };
+    if title.is_empty() {
+        return "Waiting for your approval".to_owned();
+    }
+    format!("Waiting for your approval: {title}")
+}
+
 /// What the harness tells the model when its gated call is parked.
 ///
 /// Three things it has to carry, because each was got wrong somewhere in Test5: nothing ran, so
@@ -439,10 +462,10 @@ impl Agent {
                 waiter,
             },
         );
-        // Working line / quick-reply status: "Waiting for approval", not the gated tool's
-        // label ("Removing files") — nothing has run yet.
+        // Working line / quick-reply status: the card's own title, not the gated tool's label
+        // ("Removing files") — nothing has run yet.
         if !optional {
-            self.set_approval_wait_activity(chat_id, true).await;
+            self.set_approval_wait_activity(chat_id).await;
         }
         self.expire_at_deadline(&approval_id, expires_in_ms);
         Ok(approval_id)
@@ -469,21 +492,57 @@ impl Agent {
         });
     }
 
-    /// Activity while a card of `chat_id` waits for Approve/Reject (or clear when none do).
-    async fn set_approval_wait_activity(&self, chat_id: &str, waiting: bool) {
-        let label = waiting.then(|| "Waiting for approval".to_owned());
-        let (msg_id, row_closed) = {
+    /// The chat's status while one of its cards waits, or `None` when none does.
+    ///
+    /// Read from the store rather than taken as an argument, so the line always names a card
+    /// that is really still waiting: answer one of two and the line moves to the other instead
+    /// of going stale on the one just decided. `pending_approvals` is ordered by `created_at`,
+    /// so the card named is the one that has waited longest.
+    ///
+    /// An optional card (the secret hand-off's "that looks like a key" offer) asks nothing of
+    /// the chat and is skipped, the same exemption `begin_approval` makes for it.
+    pub(crate) fn approval_wait_label(&self, chat_id: &str) -> Option<String> {
+        self.store
+            .pending_approvals()
+            .unwrap_or_default()
+            .into_iter()
+            .find(|r| {
+                r.chat_id == chat_id
+                    && r.payload.get("optional").and_then(Value::as_bool) != Some(true)
+            })
+            .map(|r| wait_status_line(&r.title))
+    }
+
+    /// Show (or clear) `chat_id`'s waiting-approval status.
+    ///
+    /// Two things changed here for Test5 round 5 bug R, part 3.
+    ///
+    /// The label names the card, because "Waiting for approval" said that a decision was wanted
+    /// without saying which — and with two cards in a chat it named neither.
+    ///
+    /// And it no longer gives up when no turn is running. A parked wait outlives the turn that
+    /// raised it, which is the whole point of parking, so the chat would otherwise look idle
+    /// while it was in fact waiting on the person. The turn's own field is still only touched
+    /// when there is a turn to touch; the relay's presence line is posted either way.
+    ///
+    /// The `sync.host` lookup below has a `None` arm that is unreachable today and becomes live
+    /// under #2395 (rooms that actually close). It is reached only with a turn on the lock whose
+    /// row is still open, so the room is one the turn itself is holding; and a closed room would
+    /// cost the row's `activity` field only, never the presence line, which needs no host.
+    async fn set_approval_wait_activity(&self, chat_id: &str) {
+        let label = self.approval_wait_label(chat_id);
+        let turn_row = {
             let mut tl = self.turn.lock().await;
-            let Some(t) = tl.as_mut().filter(|t| t.chat_id == chat_id) else {
-                return;
-            };
-            if t.activity == label {
-                return;
+            match tl.as_mut().filter(|t| t.chat_id == chat_id) {
+                Some(t) if t.activity == label => return,
+                Some(t) => {
+                    t.activity = label.clone();
+                    Some((t.assistant_msg_id.clone(), t.row_closed))
+                }
+                None => None,
             }
-            t.activity = label.clone();
-            (t.assistant_msg_id.clone(), t.row_closed)
         };
-        if !row_closed {
+        if let Some((msg_id, false)) = turn_row {
             if let Some(host) = self.sync.host(chat_id).await {
                 let h = host.lock().await;
                 h.doc.set_activity(&msg_id, label.as_deref());
@@ -649,10 +708,9 @@ impl Agent {
                     .set_message_fields(&msg_id, &[("waitingApproval", json!(false))]);
             }
         }
-        // Drop the waiting activity once this chat has no undecided cards left.
-        if !self.approval_pending_for(&chat_id).await {
-            self.set_approval_wait_activity(&chat_id, false).await;
-        }
+        // Re-read the waiting status: it clears when this chat has no undecided card left, and
+        // otherwise names the next one rather than staying on the card just decided.
+        self.set_approval_wait_activity(&chat_id).await;
         let _ = self.store.t3_append(
             &chat_id,
             None,
@@ -1402,7 +1460,7 @@ impl Agent {
         if !parked {
             return json!({ "ok": true, "state": row.state, "parked": false });
         }
-        self.set_approval_wait_activity(&row.chat_id, true).await;
+        self.set_approval_wait_activity(&row.chat_id).await;
         let _ = self.store.t3_append(
             &row.chat_id,
             None,
