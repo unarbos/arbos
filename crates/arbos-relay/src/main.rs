@@ -89,9 +89,13 @@ mod state;
 mod stickers;
 mod unfurl;
 mod upgrade;
+#[cfg(test)]
+mod upgrade_box_fake;
 mod upgrade_carry;
 #[cfg(test)]
 mod upgrade_rollback_tests;
+#[cfg(test)]
+mod upgrade_room_tests;
 mod vault;
 mod vaults;
 mod voice;
