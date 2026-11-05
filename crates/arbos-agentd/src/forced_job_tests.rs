@@ -155,7 +155,7 @@ async fn a_forced_ask_skips_the_quick_lane_and_a_status_question_still_takes_it(
     );
     assert!(
         agent
-            .start_job_for_send(chat, &host, &cmd)
+            .start_job_for_send(chat, &host, &cmd, &mut None)
             .await
             .expect("job start"),
         "the queued forced ask becomes a job"
@@ -163,6 +163,164 @@ async fn a_forced_ask_skips_the_quick_lane_and_a_status_question_still_takes_it(
     let jobs = agent.store.jobs_for_chat(chat).unwrap();
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].ask_message_id, forced);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The ticket contract of bug O (`crate::send_order`): whoever owes the answer holds that
+/// message's place in its chat's send order until it is no longer owed. The bound is the owning
+/// **task**, not the answer's row — release is `SendTicket`'s `Drop`, and the ticket is a local
+/// of the spawned body, so every ending releases it, including one that posts nothing. The test
+/// below this one covers that ending.
+///
+/// A forced job is the case that makes the contract bite. `handle_command` returns having posted
+/// nothing at all — the four-job test above asserts exactly that — so the answer to the ask is
+/// the job's own result turn, which runs minutes later inside the job's task. The ticket
+/// therefore travels with the job (`spawn_subagent_task`) instead of being dropped when
+/// `handle_command` returns.
+///
+/// This test asserts the guarantee rather than the job count, in both directions. Were the
+/// ticket dropped at the end of `handle_command`, the ask would leave the queue at job start:
+/// `waiting` would read 1 instead of 2, the result turn would be free to post in front of the
+/// older message, and — the sharpest of the three — the younger message would become the head
+/// the moment the older one answered, with the forced answer still unposted. That is bug O
+/// restored for the one path users ask for in words.
+#[tokio::test]
+async fn a_forced_jobs_answer_keeps_its_place_in_the_send_order() {
+    let (agent, root) = test_agent().await;
+    let chat = "01TESTCHATFORCEDJOB000004";
+    let host = agent.sync.open_room(chat).await.unwrap();
+    let _busy = agent.test_hold_turn(chat).await;
+    // An older message, still owed its answer by whichever lane took it. ULIDs carry send order
+    // in their timestamp, so each id here is minted a millisecond after the last.
+    let older = ulid();
+    tokio::time::sleep(Duration::from_millis(2)).await;
+    let older_ticket = agent.send_order.join(chat, &older).expect("the older ask");
+    let (forced, cmd) = send_cmd(
+        &host,
+        "Install pluggy and report its version, as a background job (not inline).",
+    );
+    agent.handle_command(chat, cmd).await.unwrap();
+    assert_eq!(
+        agent.store.jobs_for_chat(chat).unwrap().len(),
+        1,
+        "the ask became a job"
+    );
+    assert_eq!(
+        agent.send_order.waiting(chat),
+        2,
+        "the ask is still owed an answer after handle_command returned, so it keeps its place"
+    );
+    // Its own answer waits behind the older message.
+    assert!(!agent.send_order.is_turn(chat, &forced));
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(300),
+            agent.await_send_order(chat, &forced, "job_result"),
+        )
+        .await
+        .is_err(),
+        "the job's result turn must not post in front of a message sent before it"
+    );
+    // A younger message waits behind the forced ask, not just behind the older one.
+    tokio::time::sleep(Duration::from_millis(2)).await;
+    let younger = ulid();
+    let _younger_ticket = agent
+        .send_order
+        .join(chat, &younger)
+        .expect("the younger ask");
+    assert_eq!(agent.send_order.ahead(chat, &younger), 2);
+    // The older message is answered. The forced ask takes the floor; the younger one still waits
+    // for it, because the answer it is waiting for has not been posted yet.
+    drop(older_ticket);
+    assert!(
+        agent.send_order.is_turn(chat, &forced),
+        "the forced ask is the head once the older message is answered"
+    );
+    assert!(
+        !agent.send_order.is_turn(chat, &younger),
+        "a younger message cannot answer in front of a forced job whose answer is still owed"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The other end of the same contract: the place is held for as long as the job's task lives,
+/// and no longer. A job that ends without posting anything — a failed start, a refusal, a cancel
+/// — must still let the chat move, because nobody owes that ask an answer any more.
+///
+/// The cancel is the ending that is quick and certain to produce no answer: cancelled before its
+/// worker could start, the task settles its rows, skips the inline fallback that would otherwise
+/// answer the ask, and ends. The job row is asserted to still read `cancelled` so a lost race
+/// (the worker failing first, which writes `failed`) cannot leave this test quietly passing on
+/// the wrong path.
+///
+/// Were the place released only where an answer's row is posted, this test would hang on the
+/// five-second timeout: the forced ask would hold its place for the life of the process and the
+/// younger message behind it would never get the floor.
+#[tokio::test]
+async fn a_forced_jobs_place_is_released_when_its_task_ends_without_an_answer() {
+    let (agent, root) = test_agent().await;
+    let chat = "01TESTCHATFORCEDJOB000005";
+    let host = agent.sync.open_room(chat).await.unwrap();
+    let _busy = agent.test_hold_turn(chat).await;
+    let (_forced, cmd) = send_cmd(
+        &host,
+        "Install markupsafe and report its version, as a background job (not inline).",
+    );
+    agent.handle_command(chat, cmd).await.unwrap();
+    let job = agent.store.jobs_for_chat(chat).unwrap().remove(0);
+    assert_eq!(
+        agent.send_order.waiting(chat),
+        1,
+        "the handler has returned and the place is held by the job's task"
+    );
+    // Cancelled before the worker could fail of its own accord, which is what makes the ending
+    // certain: a failed worker would run the inline fallback and answer the ask after all.
+    agent
+        .store
+        .set_job_state(&job.id, "cancelled", None)
+        .unwrap();
+    // A message sent after the forced ask, which cannot take the floor until that ask's place
+    // is released.
+    let younger = ulid();
+    let _younger_ticket = agent
+        .send_order
+        .join(chat, &younger)
+        .expect("the younger ask");
+    let freed = tokio::time::timeout(Duration::from_secs(5), async {
+        while !agent.send_order.is_turn(chat, &younger) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await;
+    assert!(
+        freed.is_ok(),
+        "the job's task ended, so the chat must move on: waiting={}",
+        agent.send_order.waiting(chat)
+    );
+    assert_eq!(
+        agent
+            .store
+            .job(&job.id)
+            .unwrap()
+            .expect("the job row")
+            .state,
+        "cancelled",
+        "the job ended by the cancel, which is the ending that posts no answer"
+    );
+    let spoken: Vec<String> = {
+        let h = host.lock().await;
+        h.doc
+            .messages()
+            .into_iter()
+            .filter(|m| m.role == "assistant")
+            .map(|m| m.text().trim().to_owned())
+            .filter(|t| !t.is_empty())
+            .collect()
+    };
+    assert!(
+        spoken.is_empty(),
+        "the place was released without any answer being posted: {spoken:?}"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -196,7 +354,7 @@ async fn the_per_chat_cap_refuses_the_models_fourth_job_and_not_the_users() {
     );
     assert!(
         agent
-            .start_job_for_send(chat, &host, &cmd)
+            .start_job_for_send(chat, &host, &cmd, &mut None)
             .await
             .expect("job start"),
         "the user asked for this one in words"

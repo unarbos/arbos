@@ -3845,12 +3845,22 @@ impl Agent {
                 data_heavy,
                 escalated,
                 None,
+                None,
             );
         }
         result
     }
 
     /// Run the subagent in the background and report a start failure into the chat.
+    ///
+    /// `ticket` is the user message's place in its chat's send order (bug O), when this task is
+    /// the one that owes that message its answer — a job the user asked for in words
+    /// (`forced_job.rs`), whose answer is this job's result turn and nothing earlier. The
+    /// contract is the one in [`crate::send_order`]: whoever posts the answer holds the ticket
+    /// until that answer's row is posted, so it is moved into the task and only dropped when the
+    /// task ends. A fresh worker after a failed one carries it on, because the answer is still
+    /// owed. Every other caller passes `None`: a model-started job's ask was already answered by
+    /// the acknowledgement its main turn posted, and that turn held the ticket for it.
     #[allow(clippy::too_many_arguments)]
     fn spawn_subagent_task(
         self: &Arc<Self>,
@@ -3865,6 +3875,7 @@ impl Agent {
         data_heavy: bool,
         escalated: bool,
         job: Option<JobSpec>,
+        ticket: Option<crate::send_order::SendTicket>,
     ) {
         let me = self.clone();
         let chat = chat_id.to_owned();
@@ -3949,6 +3960,9 @@ impl Agent {
                             attempt: j.attempt + 1,
                             ..j.clone()
                         }),
+                        // The answer is still owed, so the place in the send order goes to the
+                        // worker that will post it.
+                        ticket,
                     );
                     return;
                 }
@@ -4029,6 +4043,10 @@ impl Agent {
                     tracing::warn!(error = %e2, "result turn after a failed start");
                 }
             }
+            // The answer is posted, or this task has given up on it: either way the ask is no
+            // longer owed one from here, so its place in the chat's send order is released and
+            // the next message may go. A fresh worker took the ticket with it above.
+            drop(ticket);
         });
     }
 
@@ -5468,6 +5486,15 @@ impl Agent {
             title: job.map_or_else(|| name.to_owned(), |j| j.title.clone()),
             result: result.to_owned(),
         };
+        // The other half of the ticket contract (`crate::send_order`): holding a message's place
+        // only makes younger messages wait: this is where the held message waits its own turn,
+        // after the work and before the row. It bites for a job the user asked for in words
+        // (`forced_job.rs`), whose answer is this turn and nothing earlier, so its ask is still
+        // queued here. For a job the model started it is a no-op by construction — that ask was
+        // answered by the acknowledgement its main turn posted, so it is no longer in the queue
+        // and `place` returns `None`.
+        self.await_send_order(chat_id, user_msg_id, "job_result")
+            .await;
         let Some(outcome) = self
             .drive_relay_turn(chat_id, host, user_msg_id, &prompt, kind, None)
             .await?
@@ -6716,6 +6743,8 @@ impl Agent {
                 kind,
                 Vec::new(),
                 crate::forced_job::forces_a_job(user_text),
+                // The ack bubble this turn already posted is the ask's answer.
+                &mut None,
             )
             .await
         {
@@ -6889,6 +6918,8 @@ impl Agent {
                 .map(|m| m.text())
                 .is_some_and(|t| crate::forced_job::forces_a_job(&t))
         };
+        // No ticket: this job's ask was answered by the acknowledgement this very turn posted,
+        // and the main lane holds that message's place for as long as the turn runs.
         self.start_job(
             &chat_id,
             &host,
@@ -6898,6 +6929,7 @@ impl Agent {
             kind,
             touches,
             forced,
+            &mut None,
         )
         .await
     }
@@ -6923,6 +6955,7 @@ impl Agent {
         kind: &str,
         touches: Vec<String>,
         forced: bool,
+        ticket: &mut Option<crate::send_order::SendTicket>,
     ) -> Result<Value, String> {
         let title = title.to_owned();
         let open_here = self
@@ -7007,6 +7040,10 @@ impl Agent {
             false,
             false,
             Some(spec),
+            // Taken only now: the caps are past, the row exists and the worker is going, so this
+            // task is the one that owes the ask its answer. A refusal above leaves the ticket
+            // with the caller, whose own lane still answers the message.
+            ticket.take(),
         );
         let no_slot = self.subagent_slots.available_permits() == 0;
         let mut out = json!({
@@ -8277,7 +8314,7 @@ impl Agent {
         // the forced ask starts a real job here instead.
         if crate::forced_job::forces_a_job(&user_text) {
             return self
-                .start_forced_job(chat_id, host, &user_msg_id, &user_text)
+                .start_forced_job(chat_id, host, &user_msg_id, &user_text, ticket)
                 .await;
         }
         let cap = self
@@ -8418,6 +8455,7 @@ impl Agent {
         host: &SharedHost,
         user_msg_id: &str,
         user_text: &str,
+        ticket: &mut Option<crate::send_order::SendTicket>,
     ) -> Result<bool> {
         let recent = self.recent_turns_for_brief(chat_id);
         let title = crate::forced_job::title_for(user_text);
@@ -8434,6 +8472,7 @@ impl Agent {
                 "other",
                 Vec::new(),
                 true,
+                ticket,
             )
             .await
         {
@@ -9622,6 +9661,9 @@ impl Agent {
                     false,
                     false,
                     Some(spec),
+                    // A job reclaimed after a restart: whatever place its ask had in the send
+                    // order went with the process that died.
+                    None,
                 );
             }
         }
