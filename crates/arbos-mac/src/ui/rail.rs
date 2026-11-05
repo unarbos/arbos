@@ -133,6 +133,33 @@ pub(crate) fn badge(working: bool, unread: bool, selected: bool) -> Option<RailB
     }
 }
 
+/// The fill behind a rail picture: the highlight token's selected / hover
+/// step (`ui::highlight`), the tile being its own pill (Grok's 54 pt,
+/// radius 12).
+pub(crate) fn tile_fill(selected: bool, hovered: bool, theme: &Theme) -> gpui::Hsla {
+    let fills = highlight::fills(theme);
+    if selected {
+        fills.selected
+    } else if hovered {
+        fills.hover
+    } else {
+        gpui::transparent_black()
+    }
+}
+
+/// The fill of the selected row's card while it travels between the expanded
+/// row and its rail tile ([`render_overlay`]): the step both ends wear, so the
+/// selected chat holds its appearance across the morph ([feedback
+/// mac-sidebar-selected-blink-2026-11-05], Scout: "the selected chat blinks
+/// dark grey once when the sidebar collapses or expands"). It was the opaque
+/// `surface_2` — one of the Matte slabs Glass replaced with washes ([feedback
+/// mac-glass-adaptive-2026-10-26]) and the last one left on the sidebar: over
+/// chrome the desktop shows through, a solid dark grey for the length of the
+/// animation, in both directions.
+pub(crate) fn morph_card_fill(theme: &Theme) -> gpui::Hsla {
+    tile_fill(true, false, theme)
+}
+
 /// A strip disc's resting top in the rail.
 pub(crate) fn disc_top(control: StripControl) -> f32 {
     match control {
@@ -368,17 +395,8 @@ pub(crate) fn render(shell: &Shell, cx: &mut Context<Shell>) -> gpui::Stateful<D
         let is_hover = hovered.as_ref() == Some(&id);
         let badge = badge(entry.working(), entry.unread(), selected);
         let unread_count = entry.unread_count();
-        // The highlight token's selected / hover steps (`ui::highlight`); the
-        // tile is its own pill (Grok's 54 pt, radius 12), hover tracked here
-        // because the name tip beside the rail follows it.
-        let fills = highlight::fills(&theme);
-        let tile_fill = if selected {
-            fills.selected
-        } else if is_hover {
-            fills.hover
-        } else {
-            gpui::transparent_black()
-        };
+        // Hover is tracked here because the name tip beside the rail follows it.
+        let tile_fill = tile_fill(selected, is_hover, &theme);
         // The badge's ring is the tile's colour as painted on the sidebar.
         let ring = highlight::over(theme.sidebar, tile_fill);
         let picture = entry.picture(shell, metrics::AVATAR, &theme, cx);
@@ -650,7 +668,7 @@ pub(crate) fn render_overlay(
                         .w(b.size.width)
                         .h(b.size.height)
                         .rounded(px(radius))
-                        .bg(theme.surface_2),
+                        .bg(morph_card_fill(&theme)),
                 );
             }
         }
@@ -713,7 +731,7 @@ mod tests {
     use super::metrics::*;
     use super::*;
     use crate::ui::sidebar::{FOOTER_BOTTOM, FOOTER_HEIGHT, STRIP_BUTTON, STRIP_INSET};
-    use crate::ui::theme::{AVATAR_ROW, CONTROL_LINE, HEADER_HEIGHT};
+    use crate::ui::theme::{Surface, AVATAR_ROW, CONTROL_LINE, HEADER_HEIGHT};
 
     /// Grok Bot's rail (`jacob-ref-grok-collapsed-rail-2.png`, 2 px/pt) and
     /// the approved mock (`mock-mac-sidebar-rail-collapsed-dark.png`).
@@ -903,6 +921,50 @@ mod tests {
         assert_eq!(badge(false, true, false), Some(RailBadge::Unread));
         assert_eq!(badge(false, true, true), None);
         assert_eq!(badge(false, false, false), None);
+    }
+
+    /// Scout on v0.6.4xx ([feedback mac-sidebar-selected-blink-2026-11-05]):
+    /// "the selected chat blinks dark grey once when the sidebar collapses or
+    /// expands". The selection is one fill on all three legs of the morph —
+    /// the expanded row at rest, the card travelling between the two, the rail
+    /// tile it lands on — so it holds its appearance the whole way, in both
+    /// directions. The travelling card used to be the opaque `surface_2`
+    /// slab: on Glass the sidebar is a wash the desktop shows through, so for
+    /// the animation's length the selected chat went a solid dark grey.
+    #[test]
+    fn the_selected_chat_keeps_one_fill_across_the_collapse() {
+        for surface in [Surface::Matte, Surface::Glass] {
+            for theme in [Theme::dark(surface), Theme::light(surface)] {
+                let card = morph_card_fill(&theme);
+                let what = format!("{surface:?} light={}", theme.is_light());
+                // Leg 1 → 2: the expanded row's resting fill is the card's.
+                assert_eq!(
+                    card,
+                    highlight::fills(&theme).rest(true),
+                    "the card leaves the row unchanged on {what}"
+                );
+                // Leg 2 → 3: the rail tile it lands on is the same fill.
+                assert_eq!(
+                    card,
+                    tile_fill(true, false, &theme),
+                    "the card lands on the tile unchanged on {what}"
+                );
+                // Never the opaque slab that blinked: a wash of the text
+                // colour, so the sidebar it sits on still reads through it.
+                assert_ne!(card, theme.surface_2, "no opaque slab on {what}");
+                assert!(card.a < 1.0, "a wash, not a slab, on {what}");
+                assert_eq!(
+                    (card.h, card.s, card.l),
+                    (theme.text.h, theme.text.s, theme.text.l),
+                    "the highlight token's wash on {what}"
+                );
+            }
+        }
+        // An unselected tile wears the hover step or nothing — the card only
+        // ever travels for the selected row.
+        let theme = Theme::dark(Surface::Matte);
+        assert_eq!(tile_fill(false, true, &theme), highlight::fills(&theme).hover);
+        assert_eq!(tile_fill(false, false, &theme).a, 0.0);
     }
 
     /// The morph: progress from the visible width, text gone by half-way,
