@@ -41,6 +41,40 @@ enum HomeListFilter: String, CaseIterable, Identifiable {
     }
 }
 
+/// What the home list puts above the "Hidden chats  N  ›" footer, and whether that footer
+/// is there — the two decisions `homeList` makes, out where `HomeListLayoutTests` can read
+/// them. The footer is a sibling of the body and never one of its arms: the Mac sidebar
+/// draws the empty-segment copy in an `else if rows.is_empty()` and the footer in a later,
+/// independent `if hidden_count > 0` (`crates/arbos-mac/src/ui/sidebar.rs`), so an empty
+/// segment there keeps its footer. Home read as a three-way choice instead and lost the
+/// footer with the last row ([feedback affinity-hidden-chats-2026-11-05]: archiving the
+/// only server took "Hidden chats 1" away while two chats were still hidden).
+struct HomeListLayout: Equatable {
+    enum Body: Equatable {
+        /// No agents, people or servers on the account at all: the first-run card.
+        case noChats
+        /// Nothing under this segment though other segments have rows: `emptyCopy`.
+        case filterEmpty
+        /// The ordinary populated list.
+        case rows
+    }
+
+    let body: Body
+    let showsHiddenFooter: Bool
+
+    static func of(hasAnyChat: Bool, visibleRows: Int, hiddenCount: Int) -> HomeListLayout {
+        let body: Body
+        if !hasAnyChat {
+            body = .noChats
+        } else if visibleRows == 0 {
+            body = .filterEmpty
+        } else {
+            body = .rows
+        }
+        return HomeListLayout(body: body, showsHiddenFooter: hiddenCount > 0)
+    }
+}
+
 struct HomeView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
@@ -79,6 +113,16 @@ struct HomeView: View {
     }
 
     private var hiddenCount: Int { hiddenProjects.count + hiddenPeople.count + hiddenServers.count }
+
+    /// The body `homeList` draws and whether the hidden footer sits under it.
+    private var listLayout: HomeListLayout {
+        HomeListLayout.of(
+            hasAnyChat: !(model.projects.isEmpty && model.peopleChats.isEmpty && model.servers.isEmpty),
+            visibleRows: homeRows.count,
+            hiddenCount: hiddenCount
+        )
+    }
+
     @FocusState private var searchFocused: Bool
 
     /// Folded query (case + diacritics, leading `@` stripped) so "@robert" and "Zoe" find their rows.
@@ -554,12 +598,14 @@ struct HomeView: View {
                         .listRowSeparator(.hidden)
                         .listRowBackground(Color.clear)
                         .accessibilityHidden(true)
-                    if model.projects.isEmpty && model.peopleChats.isEmpty && model.servers.isEmpty {
+                    let layout = listLayout
+                    switch layout.body {
+                    case .noChats:
                         emptyState
                             .listRowInsets(EdgeInsets())
                             .listRowSeparator(.hidden)
                             .listRowBackground(Color.clear)
-                    } else if homeRows.isEmpty {
+                    case .filterEmpty:
                         Text(listFilter.emptyCopy)
                             .font(theme.font(Theme.small))
                             .foregroundStyle(theme.muted)
@@ -569,7 +615,7 @@ struct HomeView: View {
                             .listRowSeparator(.hidden)
                             .listRowBackground(Color.clear)
                             .accessibilityIdentifier("home-filter-empty")
-                    } else {
+                    case .rows:
                         if let update = model.availableUpdate {
                             UpdateCard(update: update)
                                 .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
@@ -603,12 +649,6 @@ struct HomeView: View {
                         ForEach(restRows) { entry in
                             homeRow(entry)
                         }
-                        if hiddenCount > 0 {
-                            hiddenFooter
-                                .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
-                                .listRowSeparator(.hidden)
-                                .listRowBackground(theme.bg)
-                        }
                         // Launch timing: the populated list is on screen.
                         Color.clear.frame(height: 1)
                             .listRowInsets(EdgeInsets())
@@ -616,6 +656,12 @@ struct HomeView: View {
                             .listRowBackground(Color.clear)
                             .accessibilityHidden(true)
                             .onAppear { LaunchClock.mark("first-content", detail: "source=\(model.contentOrigin) rows=\(homeRows.count)") }
+                    }
+                    if layout.showsHiddenFooter {
+                        hiddenFooter
+                            .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
+                            .listRowSeparator(.hidden)
+                            .listRowBackground(theme.bg)
                     }
                     // The last row at rest sits above the bottom fade (`BottomBarFadeView`).
                     Color.clear.frame(height: HomeChrome.listBottom)
