@@ -94,6 +94,9 @@ pub struct User {
     pub name: Option<String>,
     pub created_at: i64,
     pub last_login_at: Option<i64>,
+    /// `user` when `name` came from `PATCH /me`, `github` when it was seeded from the
+    /// profile — including an `invited` placeholder another person's invite created.
+    pub name_source: String,
     /// Daily debit cap in USD; `None` = unlimited (admin).
     pub daily_cap_usd: Option<f64>,
     pub allow_negative: bool,
@@ -216,10 +219,11 @@ fn user_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<User> {
         daily_cap_usd: if unlimited != 0 { None } else { Some(cap) },
         allow_negative: r.get::<_, i64>(9)? != 0,
         test: r.get::<_, i64>(10)? != 0,
+        name_source: r.get(11)?,
     })
 }
 
-const USER_COLS: &str = "id, github_id, login, avatar_url, name, created_at, last_login_at, spend_cap_usd, cap_unlimited, allow_negative, test";
+const USER_COLS: &str = "id, github_id, login, avatar_url, name, created_at, last_login_at, spend_cap_usd, cap_unlimited, allow_negative, test, name_source";
 
 impl Db {
     // ---- users --------------------------------------------------------------------------------

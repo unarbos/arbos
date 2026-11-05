@@ -19,8 +19,15 @@ public struct AccountUserDto: Codable {
 	public let name: String??
 	public let created_at: Int64?
 	public let last_login_at: Int64??
+	/// Where `name` came from: `"user"` (the person set it through `PATCH /me`) or
+	/// `"github"` (seeded from the GitHub profile, including the `invited` placeholder
+	/// someone else created). A client that must decide whether to ask the person to
+	/// name themselves reads this, not `name`: an invited account arrives with a name
+	/// already filled in, so a non-empty `name` does not mean the person chose it.
+	/// `"user"` with a null `name` is a deliberate clear — do not ask again.
+	public let name_source: String?
 
-	public init(id: String, github_id: Int64??, login: String??, avatar_url: String??, name: String??, created_at: Int64?, last_login_at: Int64??) {
+	public init(id: String, github_id: Int64??, login: String??, avatar_url: String??, name: String??, created_at: Int64?, last_login_at: Int64??, name_source: String?) {
 		self.id = id
 		self.github_id = github_id
 		self.login = login
@@ -28,6 +35,7 @@ public struct AccountUserDto: Codable {
 		self.name = name
 		self.created_at = created_at
 		self.last_login_at = last_login_at
+		self.name_source = name_source
 	}
 }
 
