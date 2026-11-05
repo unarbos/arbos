@@ -34,6 +34,9 @@ pub enum Incoming {
         /// Milliseconds from the room being opened to this, the point commands in it can run.
         open_ms: i64,
     },
+    /// The relay says this project's push queue is not empty, on a socket that was open
+    /// anyway. Nothing rides on the frame: it only brings the next drain forward.
+    PushesWaiting,
     /// The relay reported a box status change (informational).
     Status {
         chat_id: String,
@@ -976,6 +979,13 @@ impl SyncHub {
                         FrameType::Status => {
                             if let Ok(s) = serde_json::from_value::<wire::StatusHeader>(f.header) {
                                 let _ = self.incoming.send(Incoming::Status { chat_id: chat_id.clone(), state: s.box_state }).await;
+                            }
+                        }
+                        FrameType::Nudge => {
+                            // One kind today. An unknown kind is ignored rather than guessed at,
+                            // so the relay can add one before every box understands it.
+                            if f.header.get("kind").and_then(|v| v.as_str()) == Some(wire::NUDGE_PUSHES) {
+                                let _ = self.incoming.send(Incoming::PushesWaiting).await;
                             }
                         }
                         FrameType::Error => {

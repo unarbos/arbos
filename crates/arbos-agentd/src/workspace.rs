@@ -385,30 +385,7 @@ impl Supervisor {
             tasks.push(tokio::spawn(async move {
                 let mut rx = rx;
                 while let Some(inc) = rx.recv().await {
-                    match inc {
-                        Incoming::Command { chat_id, cmd } => {
-                            let agent = agent2.clone();
-                            tokio::spawn(async move {
-                                let _ = agent.handle_command(&chat_id, cmd).await;
-                            });
-                        }
-                        Incoming::CaughtUp {
-                            chat_id,
-                            head_seq,
-                            open_ms,
-                        } => {
-                            tracing::info!(chat_id, head_seq, open_ms, "room caught up");
-                        }
-                        Incoming::Status { chat_id, state } => {
-                            tracing::debug!(chat_id, ?state, "relay status");
-                        }
-                        Incoming::ProjectDocChanged => {
-                            let agent = agent2.clone();
-                            tokio::spawn(async move {
-                                agent.settings_from_doc().await;
-                            });
-                        }
-                    }
+                    dispatch_incoming(&agent2, inc);
                 }
             }));
         }
@@ -646,6 +623,39 @@ impl Workspace {
     pub async fn sync_chats(&self, chats: &[Value]) {
         for c in chats {
             open_listed_chat(&self.cfg, &self.store, &self.sync, &self.project_id, c).await;
+        }
+    }
+}
+
+/// One thing the rooms brought in. Each lands on its own task where it can block; the loop
+/// itself never waits, so one slow command cannot hold up the next room's traffic.
+pub(crate) fn dispatch_incoming(agent: &Arc<Agent>, inc: Incoming) {
+    match inc {
+        Incoming::Command { chat_id, cmd } => {
+            let agent = agent.clone();
+            tokio::spawn(async move {
+                let _ = agent.handle_command(&chat_id, cmd).await;
+            });
+        }
+        Incoming::CaughtUp {
+            chat_id,
+            head_seq,
+            open_ms,
+        } => {
+            tracing::info!(chat_id, head_seq, open_ms, "room caught up");
+        }
+        Incoming::PushesWaiting => {
+            let agent = agent.clone();
+            tokio::spawn(async move { agent.drain_pushes("nudge").await });
+        }
+        Incoming::Status { chat_id, state } => {
+            tracing::debug!(chat_id, ?state, "relay status");
+        }
+        Incoming::ProjectDocChanged => {
+            let agent = agent.clone();
+            tokio::spawn(async move {
+                agent.settings_from_doc().await;
+            });
         }
     }
 }

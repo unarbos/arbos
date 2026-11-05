@@ -113,6 +113,7 @@ pub async fn write_doc_as(
             from_conn: 0,
             bytes: frame,
             seq,
+            boxes_only: false,
         });
         state.matrix.touch_rows(state, chat_id, project_id);
     }

@@ -608,7 +608,9 @@ async fn run(
             | FrameType::RowsReq
             | FrameType::Push
             | FrameType::Probe
-            | FrameType::Wake => {}
+            | FrameType::Wake
+            // Addressed to boxes; the relay does not send it to a device socket.
+            | FrameType::Nudge => {}
         }
     }
     s.persist()?;

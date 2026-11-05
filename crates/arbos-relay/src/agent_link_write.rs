@@ -575,6 +575,7 @@ pub async fn typing(
         from_conn: 0,
         bytes: frame,
         seq: 0,
+        boxes_only: false,
     });
     // In the log but not in `record_audit`: typing is not a change to the conversation, and
     // mirroring 120 of them an hour into the settings audit would bury the writes that matter.

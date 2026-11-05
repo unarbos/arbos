@@ -1271,13 +1271,27 @@ pub(crate) mod tests {
     /// Same, pointed at a relay the caller serves itself. The model-stub tests count the TCP
     /// connections the box opens, which `axum::serve` cannot report.
     pub(crate) async fn test_agent_on_relay(relay_url: &str) -> (Arc<Agent>, std::path::PathBuf) {
-        test_agent_on(relay_url.to_owned(), "/nonexistent/pi").await
+        let (agent, root, _incoming) = test_agent_on(relay_url.to_owned(), "/nonexistent/pi").await;
+        (agent, root)
     }
 
     async fn test_agent_full(
         extra: axum::Router,
         pi_bin: &str,
     ) -> (Arc<Agent>, std::path::PathBuf) {
+        let (agent, root, _incoming) = test_agent_parts(extra, pi_bin).await;
+        (agent, root)
+    }
+
+    /// The mock relay and a box pointed at it, with the rooms' receiver still attached.
+    async fn test_agent_parts(
+        extra: axum::Router,
+        pi_bin: &str,
+    ) -> (
+        Arc<Agent>,
+        std::path::PathBuf,
+        tokio::sync::mpsc::Receiver<crate::sync::Incoming>,
+    ) {
         let app = axum::Router::new()
             .merge(extra)
             .route(
@@ -1301,7 +1315,27 @@ pub(crate) mod tests {
         test_agent_on(format!("http://127.0.0.1:{port}"), pi_bin).await
     }
 
-    async fn test_agent_on(relay_url: String, pi_bin: &str) -> (Arc<Agent>, std::path::PathBuf) {
+    /// Same, keeping the rooms' `Incoming` receiver so a test can run the real dispatch loop.
+    /// Every other test box drops it, which is why a frame that only produces an `Incoming`
+    /// has nowhere to arrive.
+    pub(crate) async fn test_agent_with_incoming(
+        extra: axum::Router,
+    ) -> (
+        Arc<Agent>,
+        std::path::PathBuf,
+        tokio::sync::mpsc::Receiver<crate::sync::Incoming>,
+    ) {
+        test_agent_parts(extra, "/nonexistent/pi").await
+    }
+
+    async fn test_agent_on(
+        relay_url: String,
+        pi_bin: &str,
+    ) -> (
+        Arc<Agent>,
+        std::path::PathBuf,
+        tokio::sync::mpsc::Receiver<crate::sync::Incoming>,
+    ) {
         let root = std::env::temp_dir().join(format!("arbos-quick-{}", ulid()));
         std::fs::create_dir_all(&root).unwrap();
         let bx = crate::config::BoxConfig {
@@ -1329,10 +1363,10 @@ pub(crate) mod tests {
         std::fs::create_dir_all(cfg.state_dir.join("agentd")).unwrap();
         let store =
             crate::store::Store::open(&cfg.state_dir.join("agentd").join("agentd.db")).unwrap();
-        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
         let sync = crate::sync::SyncHub::new(cfg.clone(), store.clone(), tx);
         let agent = Agent::new(cfg, store, sync, Arc::new(tokio::sync::Semaphore::new(4)));
-        (agent, root)
+        (agent, root, rx)
     }
 
     /// Shorten the act-ack promotion threshold for one agent only. The knob file lives in this

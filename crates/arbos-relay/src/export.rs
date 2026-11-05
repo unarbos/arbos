@@ -551,6 +551,7 @@ pub async fn send_message(
         from_conn: 0,
         bytes: frame,
         seq,
+        boxes_only: false,
     });
     let chat = ChatRef::people(&id);
     // What the socket path does after a person's row (rooms.rs): the sender's own cursor moves

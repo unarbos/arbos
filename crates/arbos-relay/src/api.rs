@@ -1770,7 +1770,7 @@ pub async fn create_chat(
     // The box opens the new room from this push (its 3 s listing is the fallback) and a
     // sleeping box wakes: the first message is usually seconds away (#2120).
     if !crate::outside::is_outside(&state, &p.id) {
-        boxes::chat_created(&state, &chat);
+        boxes::chat_created(&state, &chat).await;
         boxes::ensure_awake(&state, &p.user_id, "api").await;
     }
     Ok(Json(

@@ -148,6 +148,9 @@ pub struct RoomBroadcast {
     pub bytes: Bytes,
     /// Row seq for `ROW` frames; 0 for presence/status/error frames, which pass straight through.
     pub seq: i64,
+    /// Send this only to the box sockets in the room. A nudge is addressed to the box; a phone
+    /// holding the same room has no use for it and should never have to decode it.
+    pub boxes_only: bool,
 }
 
 /// A per-room value computed from the stored doc, valid for one `(head, floor)` — a checkpoint
@@ -610,6 +613,7 @@ impl AppState {
                     from_conn: 0,
                     bytes: frame.clone(),
                     seq: 0,
+                    boxes_only: false,
                 });
             }
         }

@@ -24,7 +24,14 @@ pub enum FrameType {
     Error = 0x0b,
     Status = 0x0c,
     Wake = 0x0d,
+    /// S→C: something is waiting for the box on an HTTP endpoint, named by `kind` in the
+    /// header. The box's polls are what fetch it; this only says "now" instead of "within the
+    /// poll interval". Carries no payload, so nothing depends on it being delivered.
+    Nudge = 0x0e,
 }
+
+/// `Nudge` kinds. The queue at `GET /projects/{id}/pushes` has something in it.
+pub const NUDGE_PUSHES: &str = "pushes";
 
 impl FrameType {
     pub fn from_u8(b: u8) -> Option<Self> {
@@ -42,6 +49,7 @@ impl FrameType {
             0x0b => Self::Error,
             0x0c => Self::Status,
             0x0d => Self::Wake,
+            0x0e => Self::Nudge,
             _ => return None,
         })
     }
@@ -226,3 +234,38 @@ pub fn room_name(project_id: &str, chat_id: &str) -> String {
 }
 
 pub const PROJECT_DOC_CHAT_ID: &str = "project";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// A nudge is a hint carried on a socket that is open anyway: it tells the box something
+    /// is waiting for it on an HTTP endpoint, and carries none of the thing itself. A build
+    /// that predates the frame must ignore it and keep its session, which is what lets the
+    /// relay send it before every box has been upgraded.
+    #[test]
+    fn a_nudge_round_trips_and_an_older_client_ignores_it() {
+        let encoded = Frame::new(
+            FrameType::Nudge,
+            json!({ "kind": NUDGE_PUSHES }),
+            Bytes::new(),
+        )
+        .encode();
+        let back = Frame::decode(encoded.clone())
+            .expect("decodes")
+            .expect("a known type");
+        assert_eq!(back.ty, FrameType::Nudge);
+        assert_eq!(back.header["kind"], NUDGE_PUSHES);
+        assert!(back.payload.is_empty(), "a nudge carries no payload");
+
+        let mut unknown = encoded.to_vec();
+        unknown[0] = 0x7f;
+        assert!(
+            Frame::decode(Bytes::from(unknown))
+                .expect("not an error")
+                .is_none(),
+            "an unknown type is skipped, never fatal to the session"
+        );
+    }
+}

@@ -546,7 +546,7 @@ async fn run(
             out = rx.recv() => {
                 match out {
                     Ok(b) => {
-                        if b.from_conn == conn_id {
+                        if b.from_conn == conn_id || (b.boxes_only && !is_box) {
                             continue;
                         }
                         if b.seq == 0 {
@@ -843,6 +843,7 @@ async fn handle_frame(
                     from_conn: conn_id,
                     bytes: row,
                     seq,
+                    boxes_only: false,
                 });
                 if !is_heal {
                     // A link in a finished message gets its preview card (#2064), off the
@@ -946,6 +947,7 @@ async fn handle_frame(
                 from_conn: conn_id,
                 bytes: out,
                 seq: 0,
+                boxes_only: false,
             });
         }
         FrameType::Probe => {
@@ -980,7 +982,8 @@ async fn handle_frame(
         | FrameType::Ack
         | FrameType::ProbeOk
         | FrameType::Error
-        | FrameType::Status => {
+        | FrameType::Status
+        | FrameType::Nudge => {
             // Server-to-client types; a client sending them is ignored (never fatal).
         }
     }
@@ -3108,6 +3111,7 @@ mod revoked_socket_tests {
                 )
                 .encode(),
                 seq: 0,
+                boxes_only: false,
             });
 
         for mut ws in sockets {

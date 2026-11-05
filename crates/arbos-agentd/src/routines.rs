@@ -398,32 +398,46 @@ impl Agent {
     /// Poll the relay push queue. Pushes arriving while the box is up (cross-project messages,
     /// routine runs, channel messages) come this way; the ones queued while it slept come with
     /// `box/hello`.
+    ///
+    /// The timer is the floor, not the only way: a `Nudge` frame on any open room socket says
+    /// the queue is not empty now, and drains it without waiting for the next tick.
     pub fn spawn_push_poller(self: &Arc<Self>) {
         let agent = self.clone();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(PUSH_POLL).await;
-                let resp = agent
-                    .http_client()
-                    .get(format!(
-                        "{}/projects/{}/pushes",
-                        agent.cfg.relay_url, agent.cfg.project_id
-                    ))
-                    .bearer_auth(&agent.cfg.box_token)
-                    .send()
-                    .await;
-                let Ok(r) = resp else { continue };
-                if !r.status().is_success() {
-                    continue;
-                }
-                let Ok(v) = r.json::<Value>().await else {
-                    continue;
-                };
-                for p in v.as_array().cloned().unwrap_or_default() {
-                    agent.dispatch_push(p);
-                }
+                agent.drain_pushes("poll").await;
             }
         });
+    }
+
+    /// Take whatever the relay is holding for this project and dispatch it. Safe to call from
+    /// anywhere and at any rate: the queue is the authority, an empty answer costs one request,
+    /// and `via` only says what asked.
+    pub async fn drain_pushes(self: &Arc<Self>, via: &'static str) {
+        let resp = self
+            .http_client()
+            .get(format!(
+                "{}/projects/{}/pushes",
+                self.cfg.relay_url, self.cfg.project_id
+            ))
+            .bearer_auth(&self.cfg.box_token)
+            .send()
+            .await;
+        let Ok(r) = resp else { return };
+        if !r.status().is_success() {
+            return;
+        }
+        let Ok(v) = r.json::<Value>().await else {
+            return;
+        };
+        let pushes = v.as_array().cloned().unwrap_or_default();
+        if !pushes.is_empty() {
+            tracing::info!(via, n = pushes.len(), "pushes drained");
+        }
+        for p in pushes {
+            self.dispatch_push(p);
+        }
     }
 
     /// Each push runs on its own task; `send`-like work still serialises on the turn lock.

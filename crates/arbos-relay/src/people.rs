@@ -1506,6 +1506,7 @@ pub async fn chat_delete(
         .send(crate::state::RoomBroadcast {
             from_conn: 0,
             seq: 0,
+            boxes_only: false,
             bytes: wire::Frame::new(
                 wire::FrameType::Error,
                 json!({ "code": "chat_deleted", "message": "this chat was deleted" }),
