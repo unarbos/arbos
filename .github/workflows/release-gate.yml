@@ -30,6 +30,13 @@ name: Release gate
 # publishes nothing is handled inside the step, which still runs and still says so. Keep it that
 # way, and do not add `continue-on-error` to anything in this file.
 #
+# The same constraint binds every gate in checks.sh's GATES list, and scripts/merge/gate-shape.py
+# reads all of them: this file is sound by the shape its jobs already have — none of them carries
+# an `if:`, so none can skip — while swift-core-check.yml, whose macOS job must stay conditional
+# because the pool allows five jobs at once, reaches it through an `always()` verdict job instead.
+# Do not add a verdict job here. An `if:` on any job in this file, including `if: always()`, is
+# what the check below refuses, so the attempt would fail this gate closed on every pull request.
+#
 # That constraint used to be prose. It is now enforced twice: every job's first step is
 # scripts/release/gate-can-decide.sh, which refuses an event that carries no pull request, and
 # release-gate.py reads this file on every run and fails closed if any job has lost that step,

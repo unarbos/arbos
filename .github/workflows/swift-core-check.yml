@@ -161,3 +161,33 @@ jobs:
           path: apps/ios/Arbos/build/xcodebuild-*.log
           if-no-files-found: ignore
           retention-days: 14
+
+  # scripts/merge/checks.sh reads this workflow's RUN conclusion, and GitHub concludes a run
+  # `success` when every job is success-or-skipped. A skipped macOS job therefore clears the gate
+  # unless something in the run refuses, and twice in one night it did clear it: once when `decide`
+  # succeeded beside a deferred `check` (6f3061016), and once when `decide` could answer
+  # "not applicable" on a narrower pattern list than the kit asks about. Both were a job that could
+  # succeed while the job the gate is about did not run.
+  #
+  # So the run no longer concludes on the absence of a refusal. This job is the only thing that
+  # reports success here, and it reports it only for a commit something actually tested.
+  #
+  # `always()` is what makes it fail-closed: it runs when `check` failed, was cancelled, or was
+  # skipped, which is exactly when a run would otherwise conclude on its siblings. The one case it
+  # must NOT run is the same-repo deferral, where the whole run is meant to skip so the kit reads
+  # no verdict and waits for the push run — hence the `decide` result test rather than a bare
+  # `always()`. `decide` is the root every job here hangs off, so skipping it skips the run whole.
+  verdict:
+    name: Swift verdict
+    needs: [decide, check]
+    if: always() && needs.decide.result != 'skipped'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Did anything actually test this commit?
+        env:
+          DECIDE_RESULT: ${{ needs.decide.result }}
+          DECIDE_APPLIES: ${{ needs.decide.outputs.applies }}
+          CHECK_RESULT: ${{ needs.check.result }}
+        run: ./scripts/release/swift-gate-applies.sh verdict

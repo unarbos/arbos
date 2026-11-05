@@ -561,6 +561,23 @@ else
   ok "after()'s NOPLAN arm does not tell the operator to wait"
 fi
 
+
+# Whether a gated workflow's job graph can conclude `success` without the job the gate is about.
+#
+# gate_state above reads a RUN's conclusion, which is only a verdict while no job in the workflow
+# can succeed beside a skipped gating job. That property lives in the workflow files, not here, so
+# it is asserted against them rather than left to the comment on gate_state that describes it.
+# gate-shape.py carries the reasoning and its own fixtures; both of its modes run, because a
+# checker that has stopped refusing the bad shapes would otherwise pass this silently.
+for mode in selftest check; do
+  if out=$("$D/gate-shape.py" "$mode" 2>&1); then
+    ok "gate-shape.py $mode: $(printf '%s\n' "$out" | grep -c '^  ok') case(s) hold"
+  else
+    bad "gate-shape.py $mode found a gate whose run can conclude without a verdict:"
+    printf '%s\n' "$out" | sed 's/^/        /'
+  fi
+done
+
 echo
 if [ "$fail" -eq 0 ]; then echo "selftest: PASS"; else echo "selftest: FAIL"; fi
 exit "$fail"
