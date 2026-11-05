@@ -668,9 +668,15 @@ impl Store {
         })
     }
 
-    /// Move a job to `state`; `running` stamps `started_at`, a final state stamps `ended_at`,
-    /// and a job put back in the queue for a fresh worker loses the `ended_at` of the attempt
-    /// that failed — it has not ended, and `elapsed_s` reads that stamp.
+    /// Move a job to `state`. `ended_at` is the moment the job ended, and it holds that moment:
+    /// the first terminal state stamps it, a later terminal state leaves it alone, and a job put
+    /// back in the queue for a fresh worker clears it, because it has not ended.
+    ///
+    /// The `IS NULL` guard is the same one `started_at` has always had, and it matters for the
+    /// same reason. A cancelled job's worker settles some time afterwards and writes its own
+    /// terminal state; unguarded, that write moved the end of the job to the settle — 1 618 s
+    /// past the start for bug S's job. `elapsed_s` reads this stamp, so a moved one is a wrong
+    /// elapsed time.
     ///
     /// A cancel also writes the step, because a cancelled job's worker is gone and writes no
     /// more steps: the line it was last on ("Reading >") would otherwise stand for ever as what
@@ -681,7 +687,7 @@ impl Store {
             c.execute(
                 "UPDATE jobs SET state = ?2, error = COALESCE(?3, error),
                     started_at = CASE WHEN ?2 = 'running' AND started_at IS NULL THEN ?4 ELSE started_at END,
-                    ended_at = CASE WHEN ?2 IN ('done','failed','cancelled','interrupted') THEN ?4
+                    ended_at = CASE WHEN ?2 IN ('done','failed','cancelled','interrupted') AND ended_at IS NULL THEN ?4
                                     WHEN ?2 IN ('queued','running') THEN NULL
                                     ELSE ended_at END,
                     last_step = CASE WHEN ?2 = 'cancelled' THEN ?5 ELSE last_step END,
@@ -1740,6 +1746,84 @@ mod tests {
             );
             assert_eq!(row.last_step, "Reading >");
         }
+    }
+
+    /// A cancelled job's worker settles some time afterwards and writes its own terminal state.
+    /// The end of the job is the cancel, not that settle: bug S's job settled 1 618 s past its
+    /// start, which is the elapsed time an unguarded `ended_at` would report for it.
+    #[test]
+    fn a_second_terminal_write_leaves_the_end_of_the_job_alone() {
+        let store = job_store();
+        running_job(&store, "job-x");
+        age_job(&store, "job-x", 5_000);
+        store
+            .set_job_state("job-x", "cancelled", Some("stopped by the user"))
+            .unwrap();
+        let at_cancel = store.job("job-x").unwrap().unwrap().ended_at.unwrap();
+
+        age_job(&store, "job-x", 1_613_000);
+        store.set_job_state("job-x", "done", None).unwrap();
+        let row = store.job("job-x").unwrap().unwrap();
+        assert_eq!(
+            row.ended_at,
+            Some(at_cancel - 1_613_000),
+            "the settle moved the end of the job: {row:?}"
+        );
+        assert!(
+            (3..=7).contains(&row.elapsed_s()),
+            "the job ran 5 s before the cancel, got {} s",
+            row.elapsed_s()
+        );
+        assert_eq!(row.last_step, "Cancelled");
+    }
+
+    /// The retry branch requeues a job whose worker died, waits up to `PI_RESPAWN_WAIT` for a
+    /// live pi child, then reads the state again and gives up if the user cancelled inside that
+    /// window (bug V). The cancel is the first terminal write of the job's life, because the
+    /// requeue cleared the stamp, and it is the one the job keeps: the write it races is the one
+    /// that guard prevents, and a cancelled job is not open, so no path requeues it back.
+    #[test]
+    fn a_cancel_inside_the_respawn_wait_is_the_end_the_job_keeps() {
+        let store = job_store();
+        running_job(&store, "job-x");
+        age_job(&store, "job-x", 5_000);
+
+        store
+            .set_job_state("job-x", "queued", Some("child exited"))
+            .unwrap();
+        let requeued = store.job("job-x").unwrap().unwrap();
+        assert_eq!(
+            requeued.ended_at, None,
+            "a requeued job has not ended: {requeued:?}"
+        );
+
+        age_job(&store, "job-x", 40_000);
+        store
+            .set_job_state("job-x", "cancelled", Some("stopped by the user"))
+            .unwrap();
+        let at_cancel = store.job("job-x").unwrap().unwrap();
+        let end = at_cancel.ended_at.expect("the cancel stamps the end");
+        assert_eq!(at_cancel.last_step, "Cancelled");
+        assert!(
+            (43..=47).contains(&at_cancel.elapsed_s()),
+            "45 s of work before the cancel, got {} s",
+            at_cancel.elapsed_s()
+        );
+        assert!(
+            !at_cancel.is_open(),
+            "a cancelled job is not open, so nothing requeues it and clears the stamp: {at_cancel:?}"
+        );
+
+        age_job(&store, "job-x", 300_000);
+        store
+            .set_job_state("job-x", "failed", Some("the worker settled late"))
+            .unwrap();
+        let after = store.job("job-x").unwrap().unwrap();
+        assert_eq!(
+            after.ended_at,
+            Some(end - 300_000),
+            "a late settle moved the end of the job: {after:?}"
+        );
     }
 
     /// A failed attempt stamps `ended_at`, and a job put back in the queue for a fresh worker
