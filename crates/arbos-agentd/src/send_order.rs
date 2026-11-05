@@ -93,6 +93,9 @@ pub(crate) struct SendOrder {
     chats: Mutex<HashMap<String, Vec<Entry>>>,
     arrivals: AtomicU64,
     changed: Notify,
+    /// Turns asked for per chat, counting the ones refused. Read only by tests; see
+    /// [`SendOrder::turn_asks`] for what it is for and why production does not want it.
+    asks: Mutex<HashMap<String, u64>>,
 }
 
 impl SendOrder {
@@ -153,6 +156,12 @@ impl SendOrder {
     /// `msg_id` may be answered now, and this lane takes the floor for it so a message that
     /// joins afterwards cannot be put in front of the answer being written.
     fn try_claim(&self, chat_id: &str, msg_id: &str) -> bool {
+        *self
+            .asks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(chat_id.to_owned())
+            .or_default() += 1;
         let mut chats = self.chats.lock().unwrap_or_else(|e| e.into_inner());
         let Some(q) = chats.get_mut(chat_id) else {
             return true;
@@ -165,6 +174,30 @@ impl SendOrder {
             }
             Some(_) => false,
         }
+    }
+
+    /// How many turns have been asked for in `chat_id`, refusals included.
+    ///
+    /// For the tests that have to see a lane *parked in* [`Self::wait_turn`] rather than merely
+    /// not finished yet. The two are different claims and only one of them is the ordering under
+    /// test: a writer still inside its own model call has also written no row, so "nothing is in
+    /// the chat" cannot tell them apart. `wait_turn` polls every [`ORDER_POLL`], so a count that
+    /// keeps rising while the head is held is a writer asking for a turn it cannot have — the one
+    /// positive observation that the pause was reached.
+    ///
+    /// Per chat, because the tests of this crate run beside each other in one process and a
+    /// box-wide figure would be moved by all of them.
+    ///
+    /// Production has no use for it: a lane that gets its turn is logged where it matters, and a
+    /// lane that is still waiting is not an event.
+    #[cfg(test)]
+    pub(crate) fn turn_asks(&self, chat_id: &str) -> u64 {
+        self.asks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(chat_id)
+            .copied()
+            .unwrap_or(0)
     }
 
     /// The read [`Self::try_claim`] makes, without taking the floor. For tests: a lane that asks

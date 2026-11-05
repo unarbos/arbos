@@ -4463,6 +4463,46 @@ impl Agent {
         ))
     }
 
+    /// The job of `chat_id` that answers `ask_message_id`, in whatever state it is in.
+    ///
+    /// [`Self::cancelled_job_for_ask`] asks the same question of the cancel; this one is for the
+    /// correction, which has to be asked of a job that is `done` — by the time an answer is in
+    /// the chat's send order its worker has finished, so "cancelled" and "running" both miss it.
+    pub(crate) fn job_for_ask(
+        &self,
+        chat_id: &str,
+        ask_message_id: &str,
+    ) -> Option<crate::store::JobRow> {
+        self.store
+            .jobs_for_chat(chat_id)
+            .unwrap_or_default()
+            .into_iter()
+            .find(|j| j.ask_message_id == ask_message_id)
+    }
+
+    /// How many corrections `job_id`'s row carries right now.
+    pub(crate) fn job_steer_count(&self, job_id: &str) -> usize {
+        self.store
+            .job(job_id)
+            .ok()
+            .flatten()
+            .map_or(0, |r| r.steers.len())
+    }
+
+    /// Has a correction for `job_id` landed since its row carried `since` of them?
+    ///
+    /// The before-and-after reading a writer parked in the chat's send order needs, and the
+    /// reason it is a **count** rather than "is `steers` empty": the list also holds the
+    /// corrections the worker already read and applied, so emptiness would withhold every
+    /// correctly corrected answer as well as the stale ones. What makes an answer stale is a
+    /// correction arriving *after* the work that produced it.
+    ///
+    /// `None` is a write with no job behind it — a plain subagent's answer — and nothing can
+    /// correct that through `steer_job`.
+    pub(crate) fn ask_was_corrected_since(&self, job_id: Option<&str>, since: usize) -> bool {
+        job_id.is_some_and(|id| self.job_steer_count(id) > since)
+    }
+
     /// The title of a job of `chat_id` that is still `queued` or `running`, for the guard that
     /// refuses a reply reporting a cancel the job rows do not agree with.
     pub(crate) fn open_job_title(&self, chat_id: &str) -> Option<String> {
@@ -4619,9 +4659,7 @@ impl Agent {
         );
         // One ask, one file. If this job has already put a card in the chat, the corrected file
         // replaces it rather than appending to it (r12steer's three CSVs).
-        let superseded = self
-            .supersede_posted_file_of_running_job(chat_id, &job.id)
-            .await;
+        let superseded = self.supersede_posted_file(chat_id, &job.id).await;
         tracing::info!(chat_id, job = %job.id, superseded = ?superseded, "job steered");
         let mut out = json!({ "job_id": job.id, "title": job.title, "state": "steered" });
         if let Some(card_id) = superseded {
@@ -4664,25 +4702,25 @@ impl Agent {
             .ok_or(err)
     }
 
-    /// A correction for a *running* job that has already put a file in the chat: mark that card
-    /// superseded, so the corrected file which follows replaces it rather than standing beside it.
+    /// A correction for a job that has already put a file in the chat: mark that card superseded,
+    /// so the corrected file which follows replaces it rather than standing beside it.
     ///
-    /// [`Self::replace_just_posted_job`] does this for a job that has already finished, and has to
-    /// reopen the job to get a corrected file at all. A running job needs no reopening — the
-    /// correction has just reached its worker — but it has the same duplicate to answer for.
     /// Round 12's `r12steer` put **three** CSVs in the chat for one ask (13:10:15, 13:10:19,
     /// 13:10:32): a correction arriving after a card is written leaves that card standing, and the
     /// corrected file is appended beside it. The steer gate suppresses the stale delivery when the
     /// correction beats the row (`steer_gate.rs`); this is the other side of that line, for the
     /// corrections that arrive after it.
     ///
-    /// Only inside [`crate::config::STEER_REPLACE_WINDOW_MS`] of the card, and only while the card
-    /// is still in the chat — a correction minutes after a file is a new ask, not a replacement.
-    async fn supersede_posted_file_of_running_job(
-        &self,
-        chat_id: &str,
-        job_id: &str,
-    ) -> Option<String> {
+    /// Both callers need exactly this and nothing more: a *running* job needs no reopening,
+    /// because the correction has just reached its worker, while
+    /// [`Self::replace_just_posted_job`] has to reopen a finished one to get a corrected file at
+    /// all. The duplicate they answer for is the same.
+    ///
+    /// `None` when this job has put nothing in the chat, or when what it put is older than
+    /// [`crate::config::STEER_REPLACE_WINDOW_MS`] or already gone — a correction minutes after a
+    /// file is a new ask, not a replacement. For a job answering in **text** it is always `None`,
+    /// and that is not a refusal: there is simply nothing on screen to supersede yet.
+    async fn supersede_posted_file(&self, chat_id: &str, job_id: &str) -> Option<String> {
         let (card_id, posted_at) = self.job_last_file(job_id).await?;
         if arbos_core::ids::now_ms() - posted_at > crate::config::STEER_REPLACE_WINDOW_MS {
             return None;
@@ -4711,15 +4749,27 @@ impl Agent {
         })
     }
 
-    /// A correction for a job that finished and put a file in the chat moments ago: mark that
-    /// card superseded, reopen the job with the correction on its row, and send the same worker
-    /// session back for the corrected file. `None` when this job is not a replace case, and then
-    /// the caller refuses the steer as before.
+    /// A correction for a job that finished moments ago and whose answer the user is either
+    /// looking at or about to: supersede what is on screen, reopen the job with the correction on
+    /// its row, and send the same worker session back for the corrected answer. `None` when this
+    /// job is not a replace case, and then the caller refuses the steer as before.
     ///
-    /// Only a `done` job, only inside [`crate::config::STEER_REPLACE_WINDOW_MS`] of both the end
-    /// and the card, and only while the card is still in the chat: "replace" is about the file
-    /// the user is looking at, not about restarting yesterday's work. A `failed` or `cancelled`
-    /// job is not replaced either — it has no answer to supersede.
+    /// Only a `done` job, and only inside [`crate::config::STEER_REPLACE_WINDOW_MS`] of the end:
+    /// "replace" is about the answer in front of the user, not about restarting yesterday's work.
+    /// A `failed` or `cancelled` job is not replaced either — it has no answer to supersede.
+    ///
+    /// Within that, there are two ways to be correctable, and a job answering in **text** only
+    /// ever has the second:
+    ///
+    /// - **A card still in the chat**, which [`Self::supersede_posted_file`] marks replaced. This
+    ///   is `r10steer`'s case: a file the user can see, corrected nine seconds later.
+    /// - **An answer still in the chat's send order**, which has not been written at all. Both
+    ///   text paths spend up to [`crate::send_order::SEND_ORDER_WAIT`] there with their answer
+    ///   already composed, and `run_subagent` sets the row to `done` before either of them
+    ///   starts — so without this the correction was refused as "is done" while the thing it
+    ///   corrects was still two minutes from the screen.
+    ///
+    /// With neither, the job is finished *and* delivered and the correction is a new ask.
     async fn replace_just_posted_job(
         self: &Arc<Self>,
         chat_id: &str,
@@ -4729,18 +4779,11 @@ impl Agent {
         if job.state != "done" || !Self::ended_inside_replace_window(job) {
             return None;
         }
-        let (card_id, posted_at) = self.job_last_file(&job.id).await?;
-        if arbos_core::ids::now_ms() - posted_at > crate::config::STEER_REPLACE_WINDOW_MS {
-            return None;
-        }
         let sid = job.subagent_id.clone()?;
         let host = self.sync.host(chat_id).await?;
-        {
-            let h = host.lock().await;
-            // The card has to still be there to be superseded; a row that went is a new delivery.
-            h.doc.message(&card_id)?;
-            h.doc
-                .set_message_fields(&card_id, &[("superseded", json!(true))]);
+        let superseded = self.supersede_posted_file(chat_id, &job.id).await;
+        if superseded.is_none() && !self.steer_gate.answer_pending(&job.id) {
+            return None;
         }
         let _ = self.store.append_job_steer(&job.id, text);
         let _ = self.store.set_job_state(&job.id, "running", None);
@@ -4754,7 +4797,7 @@ impl Agent {
             "job_steer_replace",
             Some("user"),
             text,
-            Some(&json!({ "job_id": job.id, "superseded_message_id": card_id })),
+            Some(&json!({ "job_id": job.id, "superseded_message_id": superseded })),
         );
         let steers = self
             .store
@@ -4763,11 +4806,14 @@ impl Agent {
             .flatten()
             .map(|r| r.steers)
             .unwrap_or_default();
-        let brief = format!(
-            "{}\n\nYou posted the answer to this already and the user then corrected it, so that file is marked superseded in the chat and the corrected one has to take its place. Do the work again with the correction applied and post the corrected file with deliver_file — one file, not a second copy of the old one. Say in one line what changed.{}",
-            job.brief,
-            job_steers_note(&steers)
-        );
+        // What the worker is sent back for depends on whether the user is looking at the stale
+        // answer or has never seen it. Telling a worker to replace a card that is not there would
+        // have it post a correction to nothing.
+        let redo = match &superseded {
+            Some(_) => "You posted the answer to this already and the user then corrected it, so that file is marked superseded in the chat and the corrected one has to take its place. Do the work again with the correction applied and post the corrected file with deliver_file — one file, not a second copy of the old one. Say in one line what changed.",
+            None => "You finished this and the user corrected it before your answer reached them, so nothing of it is in the chat and the answer they get must be the corrected one. Do the work again with the correction applied. Nothing has been said to the user yet, so answer the ask as asked rather than describing a change.",
+        };
+        let brief = format!("{}\n\n{redo}{}", job.brief, job_steers_note(&steers));
         self.spawn_subagent_task(
             chat_id,
             &host,
@@ -4787,23 +4833,31 @@ impl Agent {
                 touches: job.touches.clone(),
                 attempt: 0,
             }),
-            // The ask this job answers was answered when the first file went out; nothing in the
-            // chat's send order is waiting on this run.
+            // No place in the chat's send order either way: the card case answered the ask when
+            // its file went out, and the withheld-answer case released the place it was holding
+            // when it returned without a row. So this run waits for nothing and `place` finds
+            // nothing to wait behind.
             None,
         );
         tracing::info!(
             chat_id,
             job = %job.id,
-            card = %card_id,
-            "job steered after it posted; the earlier file is superseded and the job goes again"
+            card = ?superseded,
+            "job steered after it finished; it goes again for the corrected answer"
         );
-        Some(json!({
+        let mut out = json!({
             "job_id": job.id,
             "title": job.title,
             "state": "replacing",
-            "superseded_message_id": card_id,
-            "note": "This job had already posted its file, so the correction replaces it: the earlier card is marked superseded and the job is running again for the corrected one. Tell the user the corrected file is on its way and that the old card no longer counts. Do not post anything yourself.",
-        }))
+        });
+        out["note"] = json!(match &superseded {
+            Some(_) => "This job had already posted its file, so the correction replaces it: the earlier card is marked superseded and the job is running again for the corrected one. Tell the user the corrected file is on its way and that the old card no longer counts. Do not post anything yourself.",
+            None => "This job had finished but its answer had not reached the user yet, so it was withheld rather than posted: nothing of the uncorrected answer is in the chat, and the job is running again for the corrected one. Tell the user it is on its way. Do not say anything was replaced or retracted, because they never saw it.",
+        });
+        if let Some(card_id) = superseded {
+            out["superseded_message_id"] = json!(card_id);
+        }
+        Some(out)
     }
 
     /// `stop_job(job_id | "latest" | "all")` from the main turn.
@@ -7394,6 +7448,17 @@ impl Agent {
             tracing::info!(chat_id, job = %j.id, "the job was cancelled before its result turn; nothing delivered");
             return Ok(());
         }
+        // The correction question, the same pair `write_job_result` opens here and for the same
+        // reasons: a count to compare against, because `steers` also holds what the worker
+        // already applied, and a mark saying this answer is composed but not in the chat, without
+        // which `steer_job_in` refuses the correction as "is done".
+        let answered_job = job.map(|j| j.id.clone());
+        let answering = answered_job
+            .as_deref()
+            .map(|id| self.steer_gate.answering(id));
+        let steers_before = answered_job
+            .as_deref()
+            .map_or(0, |id| self.job_steer_count(id));
         let ask = {
             let h = host.lock().await;
             h.doc
@@ -7489,6 +7554,20 @@ impl Agent {
             tracing::info!(chat_id, job = %j.id, "the job was cancelled while its result turn waited its turn; nothing delivered");
             return Ok(());
         }
+        // And the correction, on the same side of the same wait. The prompt above was built from
+        // the worker's output, so a correction that landed while this turn queued would have the
+        // main agent narrate the answer the user has already replaced.
+        if self.ask_was_corrected_since(answered_job.as_deref(), steers_before) {
+            tracing::info!(chat_id, job = ?answered_job, "the user corrected this ask while its result turn waited its turn; nothing delivered");
+            return Ok(());
+        }
+        // Dropped before the turn runs rather than after it. A relay turn's row is opened deep
+        // inside `drive_turn`, so this path cannot take the last look under the lock that writes
+        // it the way `write_job_result` does, and holding the mark across `relay_slot` would let
+        // a correction be accepted for an answer this turn has already started posting. What is
+        // left open is `relay_slot`'s own wait, which is bug AA's unbounded one — recorded rather
+        // than half-closed, and it needs `drive_relay_turn`'s retry loop to carry the question.
+        drop(answering);
         let Some(outcome) = self
             .drive_relay_turn(chat_id, host, user_msg_id, &prompt, kind, None)
             .await?
@@ -11723,6 +11802,24 @@ impl Agent {
         raw: &str,
         error: Option<&str>,
     ) -> Result<()> {
+        // The correction question, opened here and closed under the room lock below. Two parts:
+        //
+        // `steers_before` is the reading everything after it is compared against. It is taken now
+        // rather than after the wait because `steers` also holds the corrections the worker
+        // already applied — the thing that makes *this* answer stale is a correction arriving
+        // after the work that produced it, so the window has to start before the model call too.
+        //
+        // The mark says this answer exists but is not in the chat, which is the only thing that
+        // tells `steer_job_in` a `done` job is still correctable: `run_subagent` set the row to
+        // `done` and dropped this job's steer counts before calling us, so without it the
+        // correction is refused as "is done" and there is nothing for the looks below to find.
+        let answered_job = self.job_for_ask(chat_id, in_reply_to).map(|j| j.id);
+        let answering = answered_job
+            .as_deref()
+            .map(|id| self.steer_gate.answering(id));
+        let steers_before = answered_job
+            .as_deref()
+            .map_or(0, |id| self.job_steer_count(id));
         let ask = {
             let h = host.lock().await;
             h.doc
@@ -11824,11 +11921,35 @@ impl Agent {
             tracing::info!(chat_id, job = %job_id, "the job was cancelled while its answer waited its turn; not posted");
             return Ok(());
         }
+        // The correction on the far side too, and for the same reason the cancel is asked twice:
+        // the wait above is up to two minutes long and a correction can land anywhere in it. The
+        // answer composed before one is the squared answer the user has already asked to be
+        // cubed — the rule `run_job_fallback_turn` has followed since bug V, which reads its
+        // `steers` *after* its own `await_send_order` for exactly this reason. The corrected
+        // answer comes from the worker this correction sent back (`replace_just_posted_job`), so
+        // withholding this row is one answer per ask rather than none.
+        if self.ask_was_corrected_since(answered_job.as_deref(), steers_before) {
+            tracing::info!(chat_id, job = ?answered_job, "the user corrected this ask while its answer waited its turn; the uncorrected answer was not posted");
+            return Ok(());
+        }
         // This task resolved its handle before the job ran, which is minutes ago and a wait ago.
         let host = &self.room_for_reply(chat_id, host).await;
         let row_id = ulid();
         let room = {
             let h = host.lock().await;
+            // The counter, not the door (`steer_gate.rs`). `room_for_reply` and this lock are
+            // both awaits, and the lane that routes a correction takes this same lock, so a
+            // delivery is routinely parked here while a correction is being routed — which is
+            // what made round 12's race ordinary rather than unlucky. Asked without awaiting:
+            // the read is synchronous, so it cannot wait on the routing that holds this lock.
+            if self.ask_was_corrected_since(answered_job.as_deref(), steers_before) {
+                tracing::info!(chat_id, job = ?answered_job, "the user corrected this ask between its answer's last look and the row; the uncorrected answer was not posted");
+                return Ok(());
+            }
+            // From here the row exists, so this answer can no longer be withheld and a correction
+            // arriving now is the card-replacing case instead. Released before the write and not
+            // after it, so one ask cannot be answered twice.
+            drop(answering);
             h.doc
                 .start_assistant_message(&row_id, in_reply_to, &self.cfg.device_id);
             if let Some(attr) = self.people_reply_fields(chat_id) {
