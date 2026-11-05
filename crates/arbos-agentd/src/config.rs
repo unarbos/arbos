@@ -136,6 +136,41 @@ pub fn pi_backoff_start_ms_with(files: &[std::path::PathBuf]) -> u64 {
         .unwrap_or(PI_BACKOFF_START_MS_DEFAULT)
 }
 
+/// Override file for the steer hold: `.arbos/steer-hold-ms`, how long a job's file delivery waits
+/// for a user message of that chat to finish routing (`steer_gate.rs`, bug AB), in milliseconds.
+///
+/// It exists for the tests. The shipped 20 s is the user-facing figure — long enough for the quick
+/// lane and the main lane to decide whether a message is a correction, short enough that a file
+/// held behind one still arrives while the user is looking — and no suite can spend it per case.
+/// Every branch of the hold is the same code at either scale.
+pub const STEER_HOLD_MS_FILE: &str = "steer-hold-ms";
+/// How long a job's delivery waits for a correction that may be on its way. Round 10's gap
+/// between the correction arriving and `steer_job` being called was five seconds.
+pub const STEER_HOLD_MS_DEFAULT: u64 = 20_000;
+
+/// The steer hold in milliseconds: override files (project, then box), then `ARBOS_STEER_HOLD_MS`,
+/// then the default. `0` turns the hold off.
+pub fn steer_hold_ms_with(files: &[std::path::PathBuf]) -> u64 {
+    files
+        .iter()
+        .find_map(|f| {
+            std::fs::read_to_string(f)
+                .ok()
+                .and_then(|s| s.trim().parse::<u64>().ok())
+        })
+        .or_else(|| {
+            std::env::var("ARBOS_STEER_HOLD_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+        })
+        .unwrap_or(STEER_HOLD_MS_DEFAULT)
+}
+
+/// How long after a job posted its file a correction for that job still replaces it rather than
+/// being refused (`steer_gate.rs`, bug AB). Thirty seconds: r10steer's third correction landed
+/// nine seconds after the card and was simply lost.
+pub const STEER_REPLACE_WINDOW_MS: i64 = 30_000;
+
 /// Override file for the research-job worker model: `.arbos/research-worker-model` holding a model
 /// id, or `off` to run research jobs on the subagent model like every other kind.
 pub const RESEARCH_WORKER_MODEL_FILE: &str = "research-worker-model";
@@ -654,6 +689,12 @@ impl Config {
     /// Seconds before an act ack is promoted to a bubble; project file, box file, env, default.
     pub fn act_ack_bubble_after(&self) -> std::time::Duration {
         act_ack_bubble_after_with(&self.knob_files(ACT_ACK_BUBBLE_SECS_FILE))
+    }
+
+    /// How long a job's file delivery waits for a user message of that chat to finish routing
+    /// (bug AB); project file, box file, env, default.
+    pub fn steer_hold(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(steer_hold_ms_with(&self.knob_files(STEER_HOLD_MS_FILE)))
     }
 
     /// The first wait after a lost main pi child; project file, box file, default.
