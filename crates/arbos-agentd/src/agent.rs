@@ -13882,7 +13882,19 @@ impl Agent {
         {
             Ok(Ok(c)) if !c.text.trim().is_empty() => {
                 tracing::info!(chat_id, name, ms = c.latency_ms, "job result written");
-                ProseFilter::clean_prose(c.text.trim())
+                // No prose filter on a job's result, on either branch. `ProseFilter` is for a
+                // streamed turn, and round 14's r14notes is what it does to this one: the draft
+                // opened "The user asked for the six steps with their values." with its table on
+                // the next line, and `strip_leading_thought_paragraphs` drops a whole blank-line
+                // paragraph when any sentence in it is thought-shaped — so the table went with the
+                // opener and the chat final was the closing line alone, "It ran as a real
+                // background job, not inline.". The same draft keeps its table when it streams,
+                // because `take_line` judges one line at a time. `normalize_tables` stays because
+                // `clean_prose` ended with it and the apps draw nothing else as a table; it
+                // rewrites table and link syntax only, never a sentence. The paragraph stripper is
+                // a defect in its own right, with `hook_send_message` and `post_to_job_chat`
+                // behind it, and is not this change.
+                crate::markdown_tables::normalize_tables(c.text.trim())
             }
             // Named, because the three ways to get here want three different repairs and the old
             // line could not tell them apart.

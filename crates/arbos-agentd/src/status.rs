@@ -1163,6 +1163,25 @@ pub(crate) mod tests {
     /// 01M6PJABNVZ84YXHHFY9HV3FAK (bug AC, `job_handoff_leak_tests.rs`).
     pub(crate) const EMPTY_JOB_RESULT_ASK: &str = "what came out of the empty job one?";
 
+    /// The ask that makes the stub answer a job-result call with round 14's r14notes draft: an
+    /// opening sentence in the register `ProseFilter::strip_leading_thought_paragraphs` judges
+    /// thought-shaped, a GFM table **glued** to it with no blank line, and a closing line in its
+    /// own paragraph. A table written that way is inside that paragraph, so the paragraph stripper
+    /// takes the answer with the opener and leaves the closing line as the whole message —
+    /// r14notes' chat final at 16:14:55, "ran as a real background job, not inline".
+    pub(crate) const GLUED_TABLE_JOB_RESULT_ASK: &str = "what came out of the six-step table one?";
+
+    /// That draft, as the summariser writes it.
+    pub(crate) const GLUED_TABLE_DRAFT: &str = "The user asked for the six steps with their values.
+| step | value |
+| --- | --- |
+| 1 | 32000 |
+| 2 | 22857 |
+| 3 | 14545 |
+| 4 | 1365346133360000 |
+
+It ran as a real background job, not inline.";
+
     async fn mock_quick(axum::Json(body): axum::Json<Value>) -> axum::response::Response {
         use axum::response::IntoResponse;
         tokio::time::sleep(Duration::from_millis(300)).await;
@@ -1231,6 +1250,8 @@ pub(crate) mod tests {
             ("[status]\n", "stop")
         } else if user.contains(EMPTY_JOB_RESULT_ASK) {
             ("", "stop")
+        } else if user.contains(GLUED_TABLE_JOB_RESULT_ASK) {
+            (GLUED_TABLE_DRAFT, "stop")
         } else if user.contains("stop at 20, not 40") {
             // The b7 shape: a guide whose one line has no full stop.
             (

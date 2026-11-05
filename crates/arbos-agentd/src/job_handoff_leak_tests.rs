@@ -41,7 +41,7 @@ use serde_json::Value;
 
 use crate::agent::{relay_fallback_line, TurnKind};
 use crate::llm::{extract_return_contract, strip_return_contract};
-use crate::status::tests::{test_agent, Journal, EMPTY_JOB_RESULT_ASK};
+use crate::status::tests::{test_agent, Journal, EMPTY_JOB_RESULT_ASK, GLUED_TABLE_JOB_RESULT_ASK};
 use crate::sync::SharedHost;
 
 /// The human half of round 12's worker answer.
@@ -98,18 +98,19 @@ fn visible_replies(host: &SharedHost, msg_id: &str) -> Vec<MessageView> {
 /// warnings. The ask carries [`EMPTY_JOB_RESULT_ASK`], which is what makes the model stub answer
 /// the job-result call with nothing.
 async fn posted_on_the_empty_summary_path(chat: &str, raw: &str) -> (String, String) {
+    posted_for_ask(chat, EMPTY_JOB_RESULT_ASK, raw).await
+}
+
+/// What the chat got for `ask`, with the box's own warnings. The ask text is what the model stub
+/// answers from, so it chooses which branch of `write_job_result` the case drives.
+async fn posted_for_ask(chat: &str, ask_text: &str, raw: &str) -> (String, String) {
     let (agent, root) = test_agent().await;
     let host = agent.sync.open_room(chat).await.unwrap();
     let ask = ulid();
     host.lock()
         .await
         .doc
-        .append_user_message(
-            &ask,
-            EMPTY_JOB_RESULT_ASK,
-            "dev-mac",
-            &UserMessageOpts::default(),
-        )
+        .append_user_message(&ask, ask_text, "dev-mac", &UserMessageOpts::default())
         .unwrap();
     let journal = Journal::default();
     {
@@ -187,6 +188,53 @@ async fn a_job_result_fallback_keeps_the_workers_first_and_last_sentence() {
     );
     // And still no contract: the two faults are fixed together or not at all.
     assert!(!posted.contains("```json"), "{posted}");
+}
+
+/// Round 14's r14notes, driven through the **success** branch: the summary call answers, and what
+/// lands in the chat is the whole answer rather than its last line.
+///
+/// Red before the fix with r14notes' chat final, byte for byte: the row was
+/// "It ran as a real background job, not inline." and the table was gone.
+///
+/// The cost of taking `clean_prose` off this branch is visible in the second assertion: a draft
+/// that opens in the model's thought register now ships with that sentence. That is the rule this
+/// path is held to — a prose filter is for a streamed turn, not for a job's result — and it is
+/// what the fallback branch has done since round 13, so the two branches of one function no longer
+/// disagree about whether a job's answer gets filtered.
+#[tokio::test]
+async fn a_job_results_table_survives_an_opener_the_prose_filter_would_eat() {
+    let (posted, logged) = posted_for_ask(
+        "01TESTCHATHANDOFFLEAK00004",
+        GLUED_TABLE_JOB_RESULT_ASK,
+        PROSE,
+    )
+    .await;
+
+    // The fallback cannot run without logging that warning, so its absence is what says this case
+    // took the model branch (the journal captures at WARN, and the success log is info).
+    assert!(
+        !logged.contains("job result call gave nothing"),
+        "this case is the model path, not the fallback: {logged}"
+    );
+    assert_ne!(
+        posted.trim(),
+        "It ran as a real background job, not inline.",
+        "round 14's one-line chat final, byte for byte"
+    );
+    for row in [
+        "| step | value |",
+        "| 1 | 32000 |",
+        "| 4 | 1365346133360000 |",
+    ] {
+        assert!(
+            posted.contains(row),
+            "the answer's table was eaten with its opening sentence ({row}): {posted}"
+        );
+    }
+    assert!(
+        posted.contains("It ran as a real background job, not inline."),
+        "the closing line is part of the answer too: {posted}"
+    );
 }
 
 /// A worker whose answer *is* JSON (the user asked for the response body) keeps it. The strip is
