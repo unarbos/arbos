@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import UIKit.UIGestureRecognizerSubclass
 
 /// Long-press on a bubble (Grok Bot / iMessage shape, Jacob 2026-10-23): the chat
 /// blurs, the bubble stays where it is, the **reaction capsule** sits above it
@@ -63,9 +64,9 @@ struct RowFrameKey: PreferenceKey {
 }
 
 /// Where the thumb that opened the menu is, while it is still down
-/// (feedback iphone-bubble-menu-slide-to-pick-2026-11-05). Points are in `.global`
-/// space, because the gesture reporting them belongs to the transcript row, not to
-/// the overlay — see `MessageRowGestures` for why it cannot belong to the overlay.
+/// (feedback iphone-bubble-menu-slide-to-pick-2026-11-05). Points are in window
+/// space, because the recogniser reporting them is attached to the screen root, not
+/// to the overlay — see `MessageActionsTouchHost` for why it cannot be the overlay.
 enum MessageActionsSlide: Equatable {
     /// No thumb down: the menu was opened and released, and is being used by tapping.
     case idle
@@ -86,7 +87,7 @@ struct MessageActionsOverlay<Bubble: View>: View {
     /// Emoji I already hold on this message (tinted in the capsule).
     let held: Set<String>
     let items: [MessageMenuItem]
-    /// The thumb still down from the long press, if it is (`MessageRowGestures`).
+    /// The thumb still down from the long press, if it is (`MessageActionsTouchHost`).
     var slide: MessageActionsSlide = .idle
     let onReact: (String) -> Void
     let onMenu: (MessageMenuItem) -> Void
@@ -441,62 +442,27 @@ final class EmojiTextField: UITextField {
     override var textInputContextIdentifier: String? { "arbos.reaction.emoji" }
 }
 
-/// The long press and the slide out of it are **one** gesture, sequenced, so the
-/// samples that arrive after the menu opens land on a recogniser that is already
-/// receiving this touch (feedback iphone-bubble-menu-slide-to-pick-2026-11-05).
-///
-/// Nothing else can receive it. UIKit routes a touch to the view it hit-tested when
-/// the finger went *down*, and the overlay is added afterwards, as a sibling, while
-/// the finger is still on the bubble — so the capsule's cells and the menu's rows are
-/// not on this touch's delivery path, and a tracker placed on them would never be
-/// called however it was written. The bubble's own gesture is the one place
-/// guaranteed to be on that path, because it is the gesture whose long press opened
-/// the menu: the menu cannot exist unless this recogniser already holds the touch.
-///
-/// Nothing claims earlier and no threshold moves. The first stage is the same 0.35 s
-/// `LongPressGesture` and `onLongPress` still fires the moment it succeeds; the
-/// second takes a `minimumDistance` of 0, so it adds no threshold of its own. The fix
-/// is acting on samples that were already arriving and being thrown away.
-private struct MessageRowGestures: ViewModifier {
-    let onLongPress: () -> Void
-    let onSlide: (MessageActionsSlide) -> Void
-    let onDoubleTap: () -> Void
-
-    /// The long press has already fired for the touch that is still down.
-    @State private var open = false
-    /// …and it opened the menu rather than reading a chart value, so its slide counts.
-    @State private var tracking = false
-
-    func body(content: Content) -> some View {
-        content
+extension View {
+    /// A message bubble: long-press → actions overlay; double-tap → ❤️ reaction.
+    /// Any other row (date / system / channel line) keeps a plain Copy context menu.
+    ///
+    /// Sliding out of the long press onto an item is **not** here, deliberately. It is
+    /// tempting to sequence a `DragGesture` after the long press, and it works — but a
+    /// SwiftUI drag claims the touch, however late it claims, and that takes the pan
+    /// away from the chat `ScrollView` and kills scrolling everywhere. The slide is
+    /// read by `MessageActionsTouchHost`, which observes without ever claiming.
+    @ViewBuilder
+    func messageRowGestures(isMessage: Bool, onLongPress: @escaping () -> Void,
+                            onDoubleTap: @escaping () -> Void,
+                            onCopyMenu: @escaping (MessageMenuItem) -> Void) -> some View {
+        if isMessage {
             // simultaneous so the chat ScrollView keeps vertical pans that start
             // on a bubble; exclusive onLongPressGesture eats the scroll
             // ([feedback app-01M5Q1N6C1HAKHC6P2XPEWMRSS]).
             // A hold on a chart plot reads a value instead (`ChartTouch`).
-            .simultaneousGesture(
+            simultaneousGesture(
                 LongPressGesture(minimumDuration: 0.35)
-                    .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .global))
-                    .onChanged { value in
-                        guard case .second(true, let drag) = value else { return }
-                        if !open {
-                            open = true
-                            tracking = !ChartTouch.holding
-                            if tracking { onLongPress() }
-                            // The overlay is not on screen until the next pass, and it
-                            // only sees a slide that *changes* after it appears — so the
-                            // sample that opened it is deliberately not reported.
-                            return
-                        }
-                        guard tracking, let drag else { return }
-                        onSlide(.moved(drag.location))
-                    }
-                    .onEnded { value in
-                        let slid = tracking
-                        open = false
-                        tracking = false
-                        guard slid, case .second(true, let drag) = value, let drag else { return }
-                        onSlide(.lifted(drag.location))
-                    },
+                    .onEnded { _ in if !ChartTouch.holding { onLongPress() } },
                 enabled: ChatGestures.longPress
             )
             // Double-tap toggles a heart under the bubble (Telegram / iMessage;
@@ -505,22 +471,155 @@ private struct MessageRowGestures: ViewModifier {
                 TapGesture(count: 2)
                     .onEnded { onDoubleTap() }
             )
-    }
-}
-
-extension View {
-    /// A message bubble: long-press → actions overlay, with the thumb free to stay down
-    /// and slide onto an item (`onSlide`); double-tap → ❤️ reaction. Any other row
-    /// (date / system / channel line) keeps a plain Copy context menu.
-    @ViewBuilder
-    func messageRowGestures(isMessage: Bool, onLongPress: @escaping () -> Void,
-                            onSlide: @escaping (MessageActionsSlide) -> Void,
-                            onDoubleTap: @escaping () -> Void,
-                            onCopyMenu: @escaping (MessageMenuItem) -> Void) -> some View {
-        if isMessage {
-            modifier(MessageRowGestures(onLongPress: onLongPress, onSlide: onSlide, onDoubleTap: onDoubleTap))
         } else {
             contextMenu { MessageMenuContent(items: MessageMenu.copyOnly, action: onCopyMenu) }
         }
+    }
+}
+
+/// Reports the touch that opened the actions overlay, **without ever claiming it**.
+///
+/// The overlay itself can never receive that touch: UIKit routes a touch to the view
+/// it hit-tested when the finger went down, and the overlay is added afterwards, as a
+/// sibling, while the finger is still on the bubble. So the capsule's cells and the
+/// menu's rows are not on this touch's delivery path and a tracker placed on them
+/// would never be called. A recogniser on an **ancestor** of the rows is, because
+/// UIKit delivers a touch to the recognisers on the hit-test view *and every ancestor
+/// of it* — so this sees the touch by construction, whichever bubble was pressed.
+///
+/// The recogniser never leaves `.possible` and ends by failing itself, which is the
+/// whole point: a recogniser that never begins cancels nothing, so the transcript
+/// keeps its scroll and every other recogniser is untouched. A SwiftUI `DragGesture`
+/// cannot do this — it claims, and claiming here stops the chat scrolling at all.
+///
+/// Samples are only forwarded while the overlay is up (`active`), so an ordinary
+/// scroll costs one comparison per touch and no state change.
+struct MessageActionsTouchHost: UIViewRepresentable {
+    /// The overlay is open, so this touch's samples mean something.
+    let active: Bool
+    let onSlide: (MessageActionsSlide) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeUIView(context: Context) -> HostView {
+        let v = HostView()
+        v.isUserInteractionEnabled = false
+        v.backgroundColor = .clear
+        v.coordinator = context.coordinator
+        return v
+    }
+
+    func updateUIView(_ uiView: HostView, context: Context) {
+        context.coordinator.active = active
+        context.coordinator.onSlide = onSlide
+    }
+
+    final class HostView: UIView {
+        weak var coordinator: Coordinator?
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            guard window != nil else { return }
+            // The screen's root: the first ancestor whose next responder is a view
+            // controller — the same anchor `FullScreenBackHost` uses.
+            var node: UIView? = superview
+            while let current = node {
+                if current.next is UIViewController {
+                    coordinator?.attach(to: current)
+                    return
+                }
+                node = current.superview
+            }
+        }
+    }
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        var active = false
+        var onSlide: (MessageActionsSlide) -> Void = { _ in }
+        private weak var root: UIView?
+        private var recognizer: TouchObserverRecognizer?
+
+        func attach(to root: UIView) {
+            guard self.root !== root else { return }
+            if let old = recognizer { old.view?.removeGestureRecognizer(old) }
+            self.root = root
+            // No target/action: it never recognizes, so an action would never fire.
+            let gr = TouchObserverRecognizer(target: nil, action: nil)
+            gr.delegate = self
+            gr.onSample = { [weak self] phase, point in
+                guard let self, self.active else { return }
+                switch phase {
+                case .moved: self.onSlide(.moved(point))
+                case .ended: self.onSlide(.lifted(point))
+                case .cancelled: self.onSlide(.idle)
+                }
+            }
+            root.addGestureRecognizer(gr)
+            recognizer = gr
+        }
+
+        // It never begins, so it never competes; saying so explicitly keeps it that way
+        // if anyone later gives it a state.
+        func gestureRecognizer(_ g: UIGestureRecognizer,
+                               shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }
+    }
+}
+
+/// A recognizer that only watches, built on `DirectionalSwipeRecognizer`'s shape but
+/// with the decision removed: there is nothing to decide, because it never claims.
+///
+/// It reports each sample in the **window**, for the reason `DirectionalSwipeRecognizer`
+/// spells out at `startInWindow`: the window is the one frame in this hierarchy that a
+/// running transition cannot move.
+///
+/// Three properties keep it harmless, and all three are set rather than inherited so
+/// that giving it a state later is a visible change and not a silent one:
+/// `cancelsTouchesInView = false` means the view it sits on keeps its touches, and the
+/// two `delaysTouches` flags mean nothing waits on it.
+final class TouchObserverRecognizer: UIGestureRecognizer {
+    enum Phase { case moved, ended, cancelled }
+
+    /// Called for every sample of the tracked touch, in the window.
+    var onSample: ((_ phase: Phase, _ point: CGPoint) -> Void)?
+
+    private var tracked: UITouch?
+
+    override init(target: Any?, action: Selector?) {
+        super.init(target: target, action: action)
+        cancelsTouchesInView = false
+        delaysTouchesBegan = false
+        delaysTouchesEnded = false
+    }
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+        // One finger only; a second one is not the one that opened the menu.
+        guard tracked == nil, touches.count == 1, let t = touches.first else { return }
+        tracked = t
+    }
+
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
+        guard let t = tracked, touches.contains(t) else { return }
+        onSample?(.moved, t.location(in: nil))
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
+        guard let t = tracked, touches.contains(t) else { return }
+        onSample?(.ended, t.location(in: nil))
+        tracked = nil
+        // `.failed` rather than `.ended`: ending would recognize, and recognizing is the
+        // one thing this must never do.
+        state = .failed
+    }
+
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) {
+        guard let t = tracked, touches.contains(t) else { return }
+        onSample?(.cancelled, t.location(in: nil))
+        tracked = nil
+        state = .failed
+    }
+
+    override func reset() {
+        super.reset()
+        tracked = nil
     }
 }
