@@ -263,6 +263,19 @@ impl Agent {
                 };
                 let mut chat = payload.clone();
                 chat["id"] = Value::String(chat_id.to_owned());
+                // Rows the relay already holds for this chat. A push that names them means a
+                // turn is owed as soon as the room catches up, so pi's session switch — which
+                // needs no room at all — runs beside the connect instead of after it.
+                let pending = payload
+                    .get("pending_rows")
+                    .and_then(Value::as_array)
+                    .map_or(0, Vec::len);
+                let prefetch = (pending > 0).then(|| {
+                    let agent = self.clone();
+                    let chat_id = chat_id.to_owned();
+                    tokio::spawn(async move { agent.prefetch_chat_session(&chat_id).await })
+                });
+                let t0 = std::time::Instant::now();
                 crate::workspace::open_listed_chat(
                     &self.cfg,
                     &self.store,
@@ -271,7 +284,16 @@ impl Agent {
                     &chat,
                 )
                 .await;
-                tracing::info!(chat_id, reason = ?payload.get("reason"), "chat_open push: room opened");
+                tracing::info!(
+                    chat_id,
+                    reason = ?payload.get("reason"),
+                    open_ms = t0.elapsed().as_millis() as i64,
+                    pending,
+                    "chat_open push: room opened"
+                );
+                if let Some(task) = prefetch {
+                    let _ = task.await;
+                }
             }
             // F5: the library changed on the relay; refetch the index now rather than at the
             // next 60 s tick.

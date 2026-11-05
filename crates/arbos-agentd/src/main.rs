@@ -47,6 +47,8 @@ mod relay_error;
 mod reply;
 mod resources;
 mod responders;
+#[cfg(test)]
+mod room_marks_tests;
 mod routines;
 mod rpc_child;
 mod selfref;

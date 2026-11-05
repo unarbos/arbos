@@ -28,7 +28,12 @@ pub enum Incoming {
     /// A pending command appeared in a chat doc (from a client row or a resumed doc).
     Command { chat_id: String, cmd: CommandView },
     /// A room finished its catch-up.
-    CaughtUp { chat_id: String, head_seq: i64 },
+    CaughtUp {
+        chat_id: String,
+        head_seq: i64,
+        /// Milliseconds from the room being opened to this, the point commands in it can run.
+        open_ms: i64,
+    },
     /// The relay reported a box status change (informational).
     Status {
         chat_id: String,
@@ -76,6 +81,9 @@ pub struct DocHost {
     /// Room link state for debugging readers (`/box/state`, `inspect`): is the relay session
     /// up, since when, when it last fell, how many sessions so far.
     pub link: LinkState,
+    /// When this host was opened, so the legs of a cold chat — opened, connected, caught up —
+    /// are durations in the journal rather than timestamps a reader has to subtract.
+    pub opened_at: std::time::Instant,
 }
 
 /// What a room's relay session is doing right now (2026-10-23 #1575: two rooms came back
@@ -581,6 +589,7 @@ impl SyncHub {
             me: format!("agent:{}", self.cfg.project_id),
             joined_at_ms: 0,
             link: LinkState::default(),
+            opened_at: std::time::Instant::now(),
         }));
         self.hosts
             .lock()
@@ -598,6 +607,13 @@ impl SyncHub {
             old.abort();
         }
         Ok(host)
+    }
+
+    /// How long ago this room was opened, or `None` when it is not open here.
+    pub async fn open_ms(&self, chat_id: &str) -> Option<i64> {
+        let host = self.hosts.lock().await.get(chat_id).cloned()?;
+        let ms = host.lock().await.opened_at.elapsed().as_millis() as i64;
+        Some(ms)
     }
 
     /// The agent was (re-)added to this chat while the workspace was running: what happened in
@@ -794,6 +810,10 @@ impl SyncHub {
             h.link.last_error = None;
             if h.link.sessions > 1 {
                 tracing::info!(room = %room, sessions = h.link.sessions, cursor, unacked = h.doc.oplog_vv() != h.acked_vv, "room session reconnected");
+            } else {
+                // The first leg of a cold chat: told to open, now talking to the relay. What
+                // follows it is the catch-up, which `room caught up` times from the same clock.
+                tracing::info!(room = %room, connect_ms = h.opened_at.elapsed().as_millis() as i64, "room socket up");
             }
             h.chat_id.clone()
         };
@@ -905,7 +925,7 @@ impl SyncHub {
                                     }
                                 }
                             }
-                            let (covered, cmds) = {
+                            let (covered, cmds, open_ms) = {
                                 let mut h = host.lock().await;
                                 h.caught_up = true;
                                 if !h.ever_caught_up {
@@ -918,10 +938,11 @@ impl SyncHub {
                                     // The walk re-covered any parked range and parked nothing.
                                     h.first_pending_seq = None;
                                 }
-                                (h.resume_cursor(), h.new_pending())
+                                let open_ms = h.opened_at.elapsed().as_millis() as i64;
+                                (h.resume_cursor(), h.new_pending(), open_ms)
                             };
                             let _ = self.persist(host).await;
-                            let _ = self.incoming.send(Incoming::CaughtUp { chat_id: chat_id.clone(), head_seq: head }).await;
+                            let _ = self.incoming.send(Incoming::CaughtUp { chat_id: chat_id.clone(), head_seq: head, open_ms }).await;
                             for cmd in cmds {
                                 let _ = self.incoming.send(Incoming::Command { chat_id: chat_id.clone(), cmd }).await;
                             }
@@ -1092,6 +1113,7 @@ mod tests {
             me: "agent:ME".into(),
             joined_at_ms: 0,
             link: LinkState::default(),
+            opened_at: std::time::Instant::now(),
         }
     }
 

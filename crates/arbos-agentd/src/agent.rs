@@ -3082,6 +3082,30 @@ impl Agent {
         self.switch_session_to(chat_id, &path).await
     }
 
+    /// Switch pi to a chat before the turn that needs it arrives (a `chat_open` push that named
+    /// rows already waiting). The room's connect and catch-up do not need pi, so the two run
+    /// beside each other instead of in series.
+    ///
+    /// Only when the lease is free: a turn in flight owns pi's session for its whole length,
+    /// and switching under one would answer it against another chat's window. A prefetch that
+    /// cannot take the lease is simply not done — the turn's own `ensure_chat_session` still
+    /// runs, exactly as before.
+    pub(crate) async fn prefetch_chat_session(self: &Arc<Self>, chat_id: &str) -> bool {
+        let Ok(_lease) = self.pi_lease.try_lock() else {
+            tracing::info!(chat_id, "session prefetch skipped: a turn holds pi");
+            return false;
+        };
+        let t0 = Instant::now();
+        let ok = self.ensure_chat_session(chat_id).await.is_ok();
+        tracing::info!(
+            chat_id,
+            ok,
+            ms = t0.elapsed().as_millis() as i64,
+            "session prefetch"
+        );
+        ok
+    }
+
     /// Replace the chat's model window: a fresh pi session file, switched to at once. Used when
     /// the current window is stuck — a provider refusal bound to its content, or a turn that
     /// settled with no route and no prose (the same session keeps failing the same way).

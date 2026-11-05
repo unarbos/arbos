@@ -392,8 +392,12 @@ impl Supervisor {
                                 let _ = agent.handle_command(&chat_id, cmd).await;
                             });
                         }
-                        Incoming::CaughtUp { chat_id, head_seq } => {
-                            tracing::info!(chat_id, head_seq, "room caught up");
+                        Incoming::CaughtUp {
+                            chat_id,
+                            head_seq,
+                            open_ms,
+                        } => {
+                            tracing::info!(chat_id, head_seq, open_ms, "room caught up");
                         }
                         Incoming::Status { chat_id, state } => {
                             tracing::debug!(chat_id, ?state, "relay status");
