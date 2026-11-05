@@ -12,6 +12,7 @@ pub mod highlight;
 pub mod ids;
 pub mod local;
 pub mod markdown;
+pub mod presence;
 pub mod redact;
 pub mod route;
 pub mod rpc;

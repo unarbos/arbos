@@ -566,8 +566,8 @@ mod job_tests {
             "Searching for surf schools"
         );
         assert_eq!(
-            Job::strip_count_suffix("Sam is typing… · Lium is working"),
-            "Sam is typing… · Lium is working",
+            Job::strip_count_suffix("Sam is typing · Lium is working"),
+            "Sam is typing · Lium is working",
             "only a trailing count goes"
         );
     }
