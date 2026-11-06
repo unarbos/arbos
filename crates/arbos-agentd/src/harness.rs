@@ -72,6 +72,18 @@ pub struct StartRequest {
     pub thinking: String,
 }
 
+/// One worker this adapter still holds a child for, as a retention pass reads it.
+///
+/// `idle_ms` is the child's own clock ([`RpcChild::idle_ms`]), not a store column. See that
+/// field for why a store-derived clock cannot answer this question.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetainedWorker {
+    pub session_id: String,
+    /// The child's pid, for a reading of its size. `None` where the adapter never had one.
+    pub pid: Option<u32>,
+    pub idle_ms: u64,
+}
+
 /// The full adapter surface from the design; M0 drives start/resume/prompt/stream/read_history.
 #[allow(dead_code)]
 #[async_trait]
@@ -117,6 +129,64 @@ pub trait HarnessAdapter: Send + Sync {
     /// not group leaders; the cancel then falls back to the cgroup alone.
     async fn child_pgid(&self, _session_id: &str) -> Option<u32> {
         None
+    }
+
+    /// Every worker this adapter still holds a child for, with each child's own idle clock, for
+    /// [`crate::agent::Agent::retire_idle_workers`].
+    ///
+    /// **An adapter that cannot read its own map answers with no candidates.** Same three-state
+    /// discipline as [`Self::is_open`], collapsed the safe way: a read that could not look knows
+    /// nothing about any session, and the only thing it is allowed to do with that is retire
+    /// nothing. There is no variant for "I could not look" because every caller would have to
+    /// treat it as an empty list anyway.
+    ///
+    /// The default is the empty list, which is a **keep**, so an adapter that does not implement
+    /// this has every worker spared. That is the polarity
+    /// [`crate::isolation::orphan_marked_procs`] argues for, pointing the other way: here the
+    /// list is of candidates to close, so omission costs memory and never a process.
+    fn retained(&self) -> Vec<RetainedWorker> {
+        Vec::new()
+    }
+
+    /// Close this session's child, but only if it is **still** idle; `true` when it was closed.
+    ///
+    /// The re-check is the point and it happens under the same lock that guards the map, so a
+    /// session something took between the caller's decision and this call keeps its child. This
+    /// is [`crate::agent::Agent`]'s `pi_parked` double-check applied to workers: the park reads
+    /// `pi_idle_ms` a second time inside `pi.lock()` for exactly this reason.
+    ///
+    /// The default refuses, for the same reason the default above is empty.
+    async fn stop_if_idle(&self, _session_id: &str, _min_idle_ms: u64) -> bool {
+        false
+    }
+
+    /// Hold a child this box's harness binary could not have spawned, for the retention cases.
+    ///
+    /// The child comes from the caller through [`RpcChild::spawn`], so the process, the
+    /// `ARBOS_WORKER` mark and the cgroup leaf are production's; only the program differs. It
+    /// goes into the map through the same [`RpcSessions::attach`] a real start uses.
+    #[cfg(test)]
+    async fn test_attach_child(&self, _session_id: &str, _child: Arc<RpcChild>) {}
+
+    /// Put one held child's idle clock `ms` into the past; [`None`] when it is not held.
+    ///
+    /// The clock moves and nothing else, so a case using this still closes a real process through
+    /// the real path and still exercises the comparison in `retire_idle_workers` — which a
+    /// test-only override of the bound would not.
+    #[cfg(test)]
+    async fn test_age_idle_clock(&self, _session_id: &str, _ms: u64) -> Option<()> {
+        None
+    }
+
+    /// Take the children map, say so on `ready`, and hold it until `release` fires, so a case can
+    /// measure what a contended read does. This is the state a sibling session's `stop` puts the
+    /// map in for up to five seconds.
+    #[cfg(test)]
+    async fn test_hold_children_until(
+        &self,
+        _ready: tokio::sync::oneshot::Sender<()>,
+        _release: tokio::sync::oneshot::Receiver<()>,
+    ) {
     }
 }
 
@@ -340,6 +410,67 @@ impl RpcSessions {
             .get(session_id)
             .cloned()
             .ok_or_else(|| anyhow!("session {session_id} is not open"))
+    }
+
+    /// Live children with their own idle clocks. A contended lock yields nothing, never a guess.
+    fn retained(&self) -> Vec<RetainedWorker> {
+        let Ok(children) = self.children.try_lock() else {
+            return Vec::new();
+        };
+        children
+            .iter()
+            .filter(|(_, ch)| ch.is_alive())
+            .map(|(session_id, ch)| RetainedWorker {
+                session_id: session_id.clone(),
+                pid: ch.pid(),
+                idle_ms: ch.idle_ms(),
+            })
+            .collect()
+    }
+
+    /// Remove and close this session's child if its clock is still at least `min_idle_ms` old.
+    ///
+    /// The clock is re-read **inside** the lock, which is what makes this safe to call from a
+    /// pass that decided to evict some milliseconds ago: a session prompted in that window has a
+    /// clock of nearly zero and is kept, so the resume branch at `run_subagent` is never raced
+    /// into prompting a child that is being closed underneath it.
+    ///
+    /// `shutdown` runs after the removal and outside the lock. Holding the map across its
+    /// five-second wait would stall every other session's `prompt`, and the child is already
+    /// unreachable once it is out of the map.
+    async fn stop_if_idle(&self, session_id: &str, min_idle_ms: u64) -> bool {
+        let child = {
+            let mut children = self.children.lock().await;
+            match children.get(session_id) {
+                Some(ch) if ch.idle_ms() >= min_idle_ms => children.remove(session_id),
+                _ => None,
+            }
+        };
+        match child {
+            Some(ch) => {
+                ch.shutdown().await;
+                true
+            }
+            None => false,
+        }
+    }
+
+    #[cfg(test)]
+    async fn test_age_idle_clock(&self, session_id: &str, ms: u64) -> Option<()> {
+        self.children.lock().await.get(session_id).map(|ch| {
+            ch.test_age_idle_clock(ms);
+        })
+    }
+
+    #[cfg(test)]
+    async fn test_hold_children_until(
+        &self,
+        ready: tokio::sync::oneshot::Sender<()>,
+        release: tokio::sync::oneshot::Receiver<()>,
+    ) {
+        let _held = self.children.lock().await;
+        let _ = ready.send(());
+        let _ = release.await;
     }
 }
 
@@ -657,6 +788,14 @@ impl HarnessAdapter for PrimeAdapter {
     async fn child_pgid(&self, session_id: &str) -> Option<u32> {
         self.sessions.pgid(session_id).await
     }
+
+    fn retained(&self) -> Vec<RetainedWorker> {
+        self.sessions.retained()
+    }
+
+    async fn stop_if_idle(&self, session_id: &str, min_idle_ms: u64) -> bool {
+        self.sessions.stop_if_idle(session_id, min_idle_ms).await
+    }
 }
 
 // ---- PiAdapter ---------------------------------------------------------------------------------
@@ -964,6 +1103,33 @@ impl HarnessAdapter for PiAdapter {
 
     async fn child_pgid(&self, session_id: &str) -> Option<u32> {
         self.sessions.pgid(session_id).await
+    }
+
+    fn retained(&self) -> Vec<RetainedWorker> {
+        self.sessions.retained()
+    }
+
+    async fn stop_if_idle(&self, session_id: &str, min_idle_ms: u64) -> bool {
+        self.sessions.stop_if_idle(session_id, min_idle_ms).await
+    }
+
+    #[cfg(test)]
+    async fn test_attach_child(&self, session_id: &str, child: Arc<RpcChild>) {
+        self.sessions.attach(session_id, child, false).await;
+    }
+
+    #[cfg(test)]
+    async fn test_age_idle_clock(&self, session_id: &str, ms: u64) -> Option<()> {
+        self.sessions.test_age_idle_clock(session_id, ms).await
+    }
+
+    #[cfg(test)]
+    async fn test_hold_children_until(
+        &self,
+        ready: tokio::sync::oneshot::Sender<()>,
+        release: tokio::sync::oneshot::Receiver<()>,
+    ) {
+        self.sessions.test_hold_children_until(ready, release).await
     }
 }
 

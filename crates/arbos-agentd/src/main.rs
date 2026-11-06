@@ -111,6 +111,8 @@ mod turn_marks_tests;
 mod vault;
 mod voice;
 mod web;
+#[cfg(test)]
+mod worker_retention_tests;
 mod workspace;
 
 use std::time::{Duration, Instant};
