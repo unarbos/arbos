@@ -19,7 +19,7 @@ use tokio::sync::{oneshot, Mutex};
 use arbos_core::approval::{
     classify_tool_with, describe_tool, may_dispatch, resolve_path, ApprovalOutcome,
     ApprovalRequest, ApprovalState, PathClass, PathFacts, Risk, RiskMatch, ShellGrant,
-    APPROVAL_TTL_MS, GRANTABLE_CLASSES,
+    GRANTABLE_CLASSES,
 };
 
 /// The box's view for the classifier (#1719): a truncation idiom (`: > f`, `> f`,
@@ -47,15 +47,9 @@ use crate::agent::{Agent, TurnKind};
 use crate::connectors;
 use crate::store::{ApprovalRow, JobRow};
 
-/// A re-run of a gated call is pre-approved for this long after the user approved it late.
-const GRANT_TTL_MS: i64 = 10 * 60 * 1000;
-
 /// The job step while one of its cards waits: what `list_jobs`, the rollout view and the chat's
 /// presence row show, since the card itself is posted in the owner's main chat.
 const APPROVAL_WAIT_STEP: &str = "Waiting for approval";
-
-/// The step of a job that stopped because nobody answered its card.
-const APPROVAL_EXPIRED_STEP: &str = "Stopped: needs your approval";
 
 /// Harness tools whose call writes the file it names (`path` / `file_path`). An edit is in the
 /// list because the file it names may not exist yet; one that does is not recorded either way.
@@ -72,18 +66,6 @@ const WRITE_TOOLS: &[&str] = &[
 /// Most paths one job's "it wrote this itself" list holds. A job that writes more than this
 /// keeps the cards it used to get for the rest; the list never grows without a bound.
 const JOB_WRITES_MAX: usize = 512;
-
-/// The error a job carries when one of its own cards expired unanswered. The job stops there:
-/// no second card, no fresh worker, and the result turn tells the user why (Test5 round 2 bug H
-/// — T8 sat through four cards, each expiring after the extension's 14-minute wait, because
-/// every refusal was retried).
-pub(crate) const APPROVAL_EXPIRED_ERROR: &str =
-    "an approval card for this job expired unanswered, so the job stopped; it was not retried";
-
-/// Whether this job stopped because a card of its own expired.
-pub(crate) fn stopped_by_expired_approval(job: &JobRow) -> bool {
-    job.error.as_deref() == Some(APPROVAL_EXPIRED_ERROR)
-}
 
 /// The one line a job's own surfaces get while a card of that job waits in another chat: what
 /// is waiting, and which chat to answer it in.
@@ -130,17 +112,9 @@ pub struct PendingApproval {
     pub waiter: Option<oneshot::Sender<ApprovalOutcome>>,
 }
 
-struct Grant {
-    tool: String,
-    args_hash: String,
-    approval_id: String,
-    until: i64,
-}
-
 #[derive(Default)]
 pub struct Approvals {
     pending: Mutex<HashMap<String, PendingApproval>>,
-    grants: Mutex<Vec<Grant>>,
     /// Standing shell grants from the relay (#1544), refreshed on `shell_grants_changed`.
     shell_grants: Mutex<Vec<ShellGrant>>,
     /// Per job id, the absolute paths that job's own writes created: deleting one of those
@@ -150,6 +124,46 @@ pub struct Approvals {
 
 /// `approve` payload field a card option B/C sets: the path class to allow from now on.
 pub const GRANT_FIELD: &str = "grant";
+
+/// What a parked worker is being resumed with.
+#[derive(Debug, Clone, Copy)]
+enum Decision<'a> {
+    Approved { tool: &'a str },
+    Rejected { reason: Option<&'a str> },
+}
+
+impl Decision<'_> {
+    fn job_step(&self) -> &'static str {
+        match self {
+            Decision::Approved { .. } => "Approved; carrying on",
+            Decision::Rejected { .. } => "Not approved; deciding what to do",
+        }
+    }
+
+    /// What the resumed worker is told. It is a prompt into a session that still holds the whole
+    /// thread, so it says what changed and nothing the session already knows.
+    fn brief(&self, title: &str, approval_id: &str) -> String {
+        match self {
+            Decision::Approved { tool } => format!(
+                "[Arbos] The user approved \"{title}\" (approval {approval_id}), so the step you \
+                 stopped at can go ahead. Call `{tool}` once more with exactly the same \
+                 arguments — it is pre-approved this one time and will not ask again — then \
+                 carry on with the work from there.",
+            ),
+            Decision::Rejected { reason } => format!(
+                "[Arbos] The user did not approve \"{title}\" (approval {approval_id}){}. That \
+                 step did not run and must not be retried. Carry on without it if the work can \
+                 be finished another way; if it cannot, stop and say in one sentence what is \
+                 blocked and why.",
+                reason
+                    .map(str::trim)
+                    .filter(|r| !r.is_empty())
+                    .map(|r| format!(", saying: {r}"))
+                    .unwrap_or_default()
+            ),
+        }
+    }
+}
 
 /// The standing options a destructive-shell card offers, in order, for the card renderer:
 /// `[{ path_class, label, detail }]`. Empty for anything a standing grant cannot cover.
@@ -236,46 +250,27 @@ fn parked_reason(approval_id: &str) -> String {
     )
 }
 
-/// How long a card is answerable when nothing shorter than the TTL bounds the wait for it:
-/// `APPROVAL_TTL_MS` (24 h), or `ARBOS_APPROVAL_TIMEOUT_SECS` where a box shortens it.
-pub(crate) fn approval_ttl_ms() -> i64 {
-    std::env::var("ARBOS_APPROVAL_TIMEOUT_SECS")
-        .ok()
-        .and_then(|s| s.parse::<i64>().ok())
-        .map(|secs| secs.saturating_mul(1000))
-        .filter(|ms| *ms > 0)
-        .unwrap_or(APPROVAL_TTL_MS)
-}
-
-/// How long the harness blocks a gated tool call while it polls `/hook/approval-status`
-/// (`ARBOS_APPROVAL_WAIT_MS`, 14 minutes), after which the call is refused and nothing runs.
+/// How long *anybody* blocks on a card before the call is parked and the card left open
+/// (`ARBOS_APPROVAL_PARK_AFTER_MS`).
 ///
-/// agentd owns this number and hands it to the extension in the `/hook/approval` reply, because
-/// the card's deadline has to be the same one the waiter uses. The extension kept its own copy
-/// of the default, and that is the whole of Test5 round 5 bug R: card
-/// `01M6MRB89V75ZEX909EDWQJRDV` advertised `expires_at` at +24 h and was expired by
-/// `arbos:timeout` at +14 min, the moment the extension stopped polling. Round 4 shows the same
-/// fourteen minutes, which is what tells you it was a fixed cap rather than a slow user.
-pub(crate) fn harness_wait_cap_ms() -> i64 {
-    std::env::var("ARBOS_APPROVAL_WAIT_MS")
-        .ok()
-        .and_then(|s| s.parse::<i64>().ok())
-        .filter(|ms| *ms > 0)
-        .unwrap_or(14 * 60 * 1000)
-}
-
-/// How long a main-session gated call blocks inside the harness hook before it is parked and the
-/// chat's turn released (`ARBOS_APPROVAL_PARK_AFTER_MS`).
+/// **This is the only time bound left on the approval path, and it bounds a wait rather than a
+/// card.** There used to be three numbers — the card's 24 h TTL, the extension's 14-minute
+/// polling cap, and this grace — and every pair of them could disagree. Test5 round 5 bug R is
+/// what that cost: card `01M6MRB89V75ZEX909EDWQJRDV` advertised `expiresAt` at +24 h and was
+/// closed by `arbos:timeout` at +14 min, the moment the extension stopped polling. The fix for
+/// a disagreement between three numbers is one number.
 ///
-/// Short, because every millisecond of it is a millisecond the chat cannot hold a conversation:
-/// the main turn is held for the whole wait, so a new message in that chat can only reach the
-/// quick lane. Round 5 held a side chat's turn this way for fourteen minutes.
+/// Short, because every millisecond of it is a millisecond the caller cannot do anything else:
+/// a main-session call holds the chat's turn, so a new message in that chat can only reach the
+/// quick lane, and a worker's call holds a `subagent_slots` permit and a live child.
 ///
 /// Not zero, because approving straight away is the common case, and answering inside the grace
 /// keeps that case on its original tool call — nothing is parked, nothing is re-run, and no
-/// second model call is spent. Ten seconds buys that and still frees the turn long before
+/// second model call is spent. Ten seconds buys that and still frees the caller long before
 /// anyone has typed a follow-up.
-fn park_after_ms() -> i64 {
+///
+/// Nothing happens to the card when it passes. The card is answerable until it is answered.
+pub(crate) fn park_after_ms() -> i64 {
     std::env::var("ARBOS_APPROVAL_PARK_AFTER_MS")
         .ok()
         .and_then(|s| s.parse::<i64>().ok())
@@ -354,19 +349,18 @@ impl Agent {
 
     /// Post the card and register the pending entry. Returns the approval id.
     ///
-    /// `expires_in_ms` is the deadline this card gets, and it is the caller's statement of when
-    /// its own wait stops. The two cannot be chosen separately: a card is answerable only while
-    /// something is still prepared to act on the answer, so whatever cancels the wait *is* the
-    /// expiry, and `expires_at` has to say so. Round 5 is what happens when they drift — the
-    /// card advertised 24 h to the user while the harness gave up at 14 minutes
-    /// ([`harness_wait_cap_ms`]) and expired it.
+    /// **The card gets no deadline, and no caller may give it one.** A card is a question put to
+    /// a person, and the honest answer to "when does it stop being answerable" is "when it is
+    /// answered". The parameter that used to say otherwise was the root of the stall this change
+    /// removes: whatever cancelled the waiter also closed the card, so an owner who was asleep
+    /// came back to work that had quietly stopped. A caller still bounds *its own* wait — see
+    /// [`park_after_ms`] — but that is a property of the caller, not of the card.
     pub async fn begin_approval(
         self: &Arc<Self>,
         chat_id: &str,
         req: ApprovalRequest,
         mode: WaitMode,
         waiter: Option<oneshot::Sender<ApprovalOutcome>>,
-        expires_in_ms: i64,
     ) -> Result<String> {
         let host = self
             .sync
@@ -374,7 +368,6 @@ impl Agent {
             .await
             .ok_or_else(|| anyhow!("approval: chat {chat_id} has no doc"))?;
         let approval_id = ulid();
-        let expires_at = now_ms() + expires_in_ms.max(1);
         // An optional card (the secret hand-off's "that looks like a key" offer) asks nothing
         // of the turn: no waiting status, no composer lock, no "Waiting for approval" line.
         let optional = req
@@ -417,7 +410,7 @@ impl Agent {
                 }
             };
             h.doc
-                .add_approval_part(&msg_id, &approval_id, &req, expires_at);
+                .add_approval_part(&msg_id, &approval_id, &req, None);
             if !optional {
                 h.doc
                     .add_status_part(&msg_id, "waiting_approval", &req.title);
@@ -436,7 +429,6 @@ impl Agent {
             &req.title,
             req.risk.as_str(),
             &req.payload,
-            expires_at,
         );
         let _ = self.store.t3_append(
             chat_id,
@@ -453,7 +445,7 @@ impl Agent {
                 "approval_id": approval_id, "chat_id": chat_id, "message_id": msg_id,
                 "title": req.title, "summary": req.summary, "risk": req.risk.as_str(),
                 "payload_kind": req.payload.get("kind").cloned().unwrap_or(Value::Null),
-                "input_hash": args_hash("approval", &req.payload), "expires_at": expires_at,
+                "input_hash": args_hash("approval", &req.payload),
             }),
         );
         tracing::info!(approval_id, chat_id, title = %req.title, risk = req.risk.as_str(), ?mode, "approval requested");
@@ -473,29 +465,7 @@ impl Agent {
         if !optional {
             self.set_approval_wait_activity(chat_id).await;
         }
-        self.expire_at_deadline(&approval_id, expires_in_ms);
         Ok(approval_id)
-    }
-
-    /// Expire this card when its own `expires_at` arrives.
-    ///
-    /// The minute sweep (`expire_approvals`) is the backstop that survives a restart; it cannot
-    /// be the deadline, because a card is then expired up to a minute after the time the user
-    /// was shown. This timer is what makes `expires_at` the answer to "when does it stop being
-    /// answerable" rather than a rounded-down hint.
-    ///
-    /// Firing twice is harmless: `Store::decide_approval` only updates a row still `pending`, so
-    /// the first decision wins and a later one returns `Err` here, where it is dropped.
-    fn expire_at_deadline(self: &Arc<Self>, approval_id: &str, expires_in_ms: i64) {
-        let me = self.clone();
-        let id = approval_id.to_owned();
-        let wait = Duration::from_millis(expires_in_ms.max(1) as u64);
-        tokio::spawn(async move {
-            tokio::time::sleep(wait).await;
-            let _ = me
-                .decide_approval(&id, ApprovalOutcome::Expired, "arbos:expiry")
-                .await;
-        });
     }
 
     /// The chat's status while one of its cards waits, or `None` when none does.
@@ -557,44 +527,47 @@ impl Agent {
         self.post_activity(chat_id, label);
     }
 
-    /// The shared entry point (brief §4): write the card, wait for `approve`/`reject` (or the
-    /// 24 h expiry / `ARBOS_APPROVAL_TIMEOUT_SECS`), update its state, audit the decision.
+    /// The shared entry point (brief §4): write the card, wait a short while for
+    /// `approve`/`reject`, and return what was decided — or `None`, meaning **nothing was
+    /// decided and the card is still open**.
     ///
-    /// The wait and the card's deadline are the same `approval_ttl_ms()`, so this caller cannot
-    /// cancel a card that still looks answerable. It used to time out on
-    /// `ARBOS_APPROVAL_TIMEOUT_SECS` while the card advertised the fixed 24 h TTL, which on a
-    /// box that set that variable was round 5's bug with a different number in it.
+    /// `None` is not a refusal of the action and must not be reported as one. It says only that
+    /// this caller stopped waiting, which it must: an MCP tool call held open indefinitely is
+    /// the same stall as a card that expires, just with the agent frozen instead of the work
+    /// cancelled. So the wait is bounded by [`park_after_ms`] and the card is not: the user can
+    /// still answer it, and the decision is picked up by `follow_up`.
+    ///
+    /// Callers refuse on `None` ([`may_dispatch`]) and say the card is still waiting.
     pub async fn request_approval(
         self: &Arc<Self>,
         chat_id: &str,
         req: ApprovalRequest,
-    ) -> ApprovalOutcome {
+    ) -> Option<ApprovalOutcome> {
         let (tx, rx) = oneshot::channel();
-        let ttl = approval_ttl_ms();
         let approval_id = match self
-            .begin_approval(chat_id, req, WaitMode::Inline, Some(tx), ttl)
+            .begin_approval(chat_id, req, WaitMode::Inline, Some(tx))
             .await
         {
             Ok(id) => id,
             Err(e) => {
                 tracing::warn!(error = %e, "approval card could not be posted; refusing");
-                return ApprovalOutcome::Rejected {
+                return Some(ApprovalOutcome::Rejected {
                     reason: Some(format!("approval card could not be posted: {e}")),
-                };
+                });
             }
         };
-        // A second of slack past the card's own deadline, so the expiry that lands is the card's
-        // (`expire_at_deadline`, `decided_by = arbos:expiry`) and this is only the backstop for
-        // a waiter whose card somehow never settled.
-        let backstop = Duration::from_millis(ttl.saturating_add(1_000) as u64);
-        match tokio::time::timeout(backstop, rx).await {
-            Ok(Ok(outcome)) => outcome,
-            Ok(Err(_)) => ApprovalOutcome::Expired,
+        let grace = Duration::from_millis(park_after_ms().max(1) as u64);
+        match tokio::time::timeout(grace, rx).await {
+            Ok(Ok(outcome)) => Some(outcome),
+            // The sender was dropped without a decision — `decide_approval` took the deferred
+            // path. The card is open either way, so this is the same answer as the timeout.
+            Ok(Err(_)) => None,
             Err(_) => {
-                let _ = self
-                    .decide_approval(&approval_id, ApprovalOutcome::Expired, "arbos:timeout")
-                    .await;
-                ApprovalOutcome::Expired
+                // Hand the card over to the deferred path, exactly as a polled caller's park
+                // does, so the decision runs `follow_up` instead of being delivered to a waiter
+                // that has gone.
+                self.park_approval(&approval_id).await;
+                None
             }
         }
     }
@@ -676,7 +649,7 @@ impl Agent {
         let state = outcome.state();
         let reason = match &outcome {
             ApprovalOutcome::Rejected { reason } => reason.clone(),
-            ApprovalOutcome::Approved | ApprovalOutcome::Expired => None,
+            ApprovalOutcome::Approved | ApprovalOutcome::Cancelled => None,
         };
         let row = self
             .store
@@ -695,9 +668,9 @@ impl Agent {
             Some(p) => (p.chat_id.clone(), p.msg_id.clone()),
             None => (row.chat_id.clone(), row.message_id.clone()),
         };
-        // An approval waits up to 24 h for its decision, far past the idle window, so by now the
-        // room is very likely closed (#2367). Without opening it the card in the chat would stay
-        // "pending" for ever even though the decision landed.
+        // A card waits as long as the user takes, which is far past the idle window, so by now
+        // the room is very likely closed (#2367). Without opening it the card in the chat would
+        // stay "pending" for ever even though the decision landed.
         if let Ok(host) = self.room(&chat_id).await {
             let h = host.lock().await;
             h.doc
@@ -752,9 +725,6 @@ impl Agent {
             decided_by,
             "approval decided"
         );
-        if state == ApprovalState::Expired {
-            self.fail_job_on_expired_approval(&row).await;
-        }
 
         let request = pending
             .as_ref()
@@ -788,7 +758,7 @@ impl Agent {
             })
             | None => true,
         };
-        if deferred && state != ApprovalState::Expired {
+        if deferred {
             let me = self.clone();
             let id = approval_id.to_owned();
             tokio::spawn(async move {
@@ -827,7 +797,10 @@ impl Agent {
                     .map(|r| format!(" with the reason: {r}"))
                     .unwrap_or_default()
             ),
-            ApprovalOutcome::Expired => return,
+            // The work was called off, so there is nothing to follow up: whoever cancelled it
+            // said so where they cancelled it, and a second notice here would be telling the
+            // user about a card they closed themselves.
+            ApprovalOutcome::Cancelled => return,
         };
         match (kind.as_str(), &outcome) {
             ("draft_message", ApprovalOutcome::Approved) => {
@@ -850,16 +823,42 @@ impl Agent {
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_owned();
-                let args = request.payload.get("input").cloned().unwrap_or(Value::Null);
-                self.approvals.grants.lock().await.push(Grant {
-                    tool: tool.clone(),
-                    args_hash: args_hash(&tool, &args),
-                    approval_id: approval_id.to_owned(),
-                    until: now_ms() + GRANT_TTL_MS,
-                });
-                prompt.push_str(&format!(" The original `{tool}` call was not executed because the turn had already ended. Route `act`, call it again now with exactly the same arguments (it is pre-approved for 10 minutes), then tell the user the result."));
+                // No grant is recorded here: the approved row *is* the grant (`take_grant`), so
+                // the permission is as durable as the decision and survives everything between
+                // this moment and the re-run.
+                //
+                // A card raised by a worker goes back to that worker's own session instead of
+                // being answered in the owner's chat, because the work and its context are
+                // there. That path acquires the worker permits, which is what keeps a user
+                // answering six cards at once from starting six workers at once.
+                if let Some(session_id) = request
+                    .payload
+                    .get("session_id")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                {
+                    self.resume_worker_after_approval(session_id, approval_id, &title, &tool)
+                        .await;
+                    return;
+                }
+                prompt.push_str(&format!(" The original `{tool}` call was not executed because the turn had already ended. Route `act`, call it again now with exactly the same arguments (it is pre-approved once), then tell the user the result."));
             }
-            ("tool_call", ApprovalOutcome::Rejected { .. }) => {
+            ("tool_call", ApprovalOutcome::Rejected { reason }) => {
+                if let Some(session_id) = request
+                    .payload
+                    .get("session_id")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                {
+                    self.resume_worker_after_rejection(
+                        session_id,
+                        approval_id,
+                        &title,
+                        reason.as_deref(),
+                    )
+                    .await;
+                    return;
+                }
                 prompt.push_str(" The call was not executed. Route `reply` and tell the user; do not retry it unchanged.");
             }
             (_, ApprovalOutcome::Approved) => {
@@ -868,7 +867,7 @@ impl Agent {
             (_, ApprovalOutcome::Rejected { .. }) => {
                 prompt.push_str(" Route `reply` and acknowledge in one sentence.");
             }
-            (_, ApprovalOutcome::Expired) => return,
+            (_, ApprovalOutcome::Cancelled) => return,
         }
         if let Err(e) = self
             .run_approval_turn(chat_id, in_reply_to, approval_id, &title, &prompt)
@@ -1117,32 +1116,105 @@ impl Agent {
                 "path_class": hit.path_class.map(PathClass::as_str), "grant_options": grant_options(&hit) }),
         };
         let outcome = self.request_approval(&chat_id, req).await;
-        if may_dispatch(Some(&outcome)) {
+        if may_dispatch(outcome.as_ref()) {
             return Ok(());
         }
         Err(match outcome {
-            ApprovalOutcome::Rejected { reason } => format!(
+            Some(ApprovalOutcome::Rejected { reason }) => format!(
                 "the user rejected this action{}; do not retry it unchanged",
                 reason
                     .filter(|r| !r.trim().is_empty())
                     .map(|r| format!(" ({r})"))
                     .unwrap_or_default()
             ),
-            ApprovalOutcome::Expired => "the approval expired before the user decided".into(),
-            ApprovalOutcome::Approved => unreachable!("approved outcomes dispatch"),
+            Some(ApprovalOutcome::Cancelled) => {
+                "this work was cancelled, so the approval card was closed unanswered".into()
+            }
+            // Undecided: the card is open and the user can still answer it. Said as a wait
+            // rather than as a refusal, because reporting it as "denied" is a lie the model
+            // would pass on to the user.
+            None => "nothing ran: this needs the user's approval and the card is still waiting \
+                     for them. Do not retry it — Arbos runs the call when they approve"
+                .into(),
+            Some(ApprovalOutcome::Approved) => unreachable!("approved outcomes dispatch"),
         })
     }
 
     /// Consume a late-approval grant for an identical re-run (tool + canonical args hash).
+    ///
+    /// The grant is the approval row, claimed with one conditional update, and every gate reaches
+    /// it through here — `gate_tool`, `hook_approval`, `connectors` and `local` — so there is no
+    /// second copy of this rule for one of them to get wrong.
+    ///
+    /// It is single-use and has **no lifetime**. A ten-minute in-memory grant was the previous
+    /// answer and it re-carded the user twice over: once on a restart, and once when the re-run
+    /// queued behind a busy box's worker slots, which `run_subagent` itself documents as "a wait
+    /// of unbounded length". A deadline on a grant is the same mistake as a deadline on a card.
+    ///
+    /// The match is exact — same tool, same canonical arguments — so what runs is the call the
+    /// user read on the card and nothing adjacent to it.
     pub(crate) async fn take_grant(&self, tool: &str, args: &Value) -> Option<String> {
-        let now = now_ms();
         let h = args_hash(tool, args);
-        let mut grants = self.approvals.grants.lock().await;
-        grants.retain(|g| g.until > now);
-        let ix = grants
-            .iter()
-            .position(|g| g.tool == tool && g.args_hash == h)?;
-        Some(grants.remove(ix).approval_id)
+        // Compared in Rust rather than in SQL: there are only ever a handful of unclaimed
+        // grants, and the hash is over the canonical form of the payload's `input`, which is
+        // not something SQLite's JSON functions can reproduce.
+        let row = self
+            .store
+            .unconsumed_grants()
+            .unwrap_or_default()
+            .into_iter()
+            .find(|r| {
+                r.payload.get("tool").and_then(Value::as_str) == Some(tool)
+                    && r.payload
+                        .get("input")
+                        .map(|input| args_hash(tool, input) == h)
+                        .unwrap_or(false)
+            })?;
+        // Lost the race to another caller claiming the same row: that one runs the call, this
+        // one is carded, which is the single-use fence doing its job.
+        self.store.consume_grant(&row.id).ok()?.then_some(row.id)
+    }
+
+    /// The open card this session already has for this exact call, if any.
+    ///
+    /// Scoped to the session, because two sessions wanting the same thing are two questions: the
+    /// user is being told who wants to do it, and answering for a worker should not silently
+    /// authorize the main agent as well.
+    fn open_card_for(&self, tool: &str, args: &Value, session_id: &str) -> Option<ApprovalRow> {
+        let h = args_hash(tool, args);
+        self.store
+            .pending_approvals()
+            .unwrap_or_default()
+            .into_iter()
+            .find(|r| {
+                r.payload.get("session_id").and_then(Value::as_str) == Some(session_id)
+                    && r.payload.get("tool").and_then(Value::as_str) == Some(tool)
+                    && r.payload
+                        .get("input")
+                        .map(|input| args_hash(tool, input) == h)
+                        .unwrap_or(false)
+            })
+    }
+
+    /// The grant for this exact call that has already been used, if there is one.
+    ///
+    /// Only for telling the user why they are being asked twice. A re-run that died part-way
+    /// through is indistinguishable at this gate from one that never started — the gate sees the
+    /// call, never its result — so a second attempt is carded again rather than waved through on
+    /// the strength of an answer given about the first. The card says so.
+    fn spent_grant_for(&self, tool: &str, args: &Value) -> Option<ApprovalRow> {
+        let h = args_hash(tool, args);
+        self.store
+            .consumed_grants()
+            .unwrap_or_default()
+            .into_iter()
+            .find(|r| {
+                r.payload.get("tool").and_then(Value::as_str) == Some(tool)
+                    && r.payload
+                        .get("input")
+                        .map(|input| args_hash(tool, input) == h)
+                        .unwrap_or(false)
+            })
     }
 
     /// Remember the files this call of a job is about to create, for `PathFacts::created_here`:
@@ -1320,42 +1392,133 @@ impl Agent {
             .unwrap_or_else(|| "your main chat".to_owned())
     }
 
-    /// One expired card ends the job that raised it: the worker is stopped, the job is failed
-    /// with the reason the result turn relays, and the next gated call of that job is refused
-    /// without another card. Four cards, each expiring after fourteen minutes, was the livelock.
-    async fn fail_job_on_expired_approval(self: &Arc<Self>, row: &ApprovalRow) {
-        let Some(job) = row
-            .payload
-            .get("session_id")
-            .and_then(Value::as_str)
-            .and_then(|sid| self.job_of_session(sid))
-            .filter(JobRow::is_open)
-        else {
+    /// A worker's card was answered: send the worker's **own session** back to finish the work.
+    ///
+    /// This is the other half of parking a worker. The park ended the worker's run so the card
+    /// would not pin a slot, a child process and a job for however long the user took; the
+    /// answer has to start a run again, and it goes to the session that was doing the work so
+    /// the thread, the files it had open and the plan it was following are all still there.
+    ///
+    /// It goes through `spawn_subagent_task` → `run_subagent` rather than through
+    /// `run_approval_turn`, and that is load-bearing rather than incidental: `run_subagent`
+    /// acquires `subagent_slots` and `box_slots` before it runs anything, so a user who comes
+    /// back and answers six cards at once starts them at the concurrency the box allows instead
+    /// of six workers at once. `run_approval_turn` acquires nothing, which is correct for a
+    /// notice in the owner's chat and wrong for a worker.
+    ///
+    /// The job goes back to `running` from the `queued` it was parked in. Nothing else needs to
+    /// change: the row never left the open set, so it stayed listed, stayed cancellable, and
+    /// kept its place in the per-chat cap the whole time it was waiting.
+    async fn resume_worker_after_approval(
+        self: &Arc<Self>,
+        session_id: &str,
+        approval_id: &str,
+        title: &str,
+        tool: &str,
+    ) {
+        let decision = Decision::Approved { tool };
+        self.resume_worker_with(session_id, approval_id, title, decision)
+            .await;
+    }
+
+    /// The same resume for a card the user turned down: the worker is told, and decides what to
+    /// do about it.
+    ///
+    /// Telling the worker beats failing the job here. The gate refused one step; whether the
+    /// work can continue without it is a question about the work, and the only thing holding
+    /// enough context to answer it is the session that was doing it.
+    async fn resume_worker_after_rejection(
+        self: &Arc<Self>,
+        session_id: &str,
+        approval_id: &str,
+        title: &str,
+        reason: Option<&str>,
+    ) {
+        self.resume_worker_with(session_id, approval_id, title, Decision::Rejected { reason })
+            .await;
+    }
+
+    async fn resume_worker_with(
+        self: &Arc<Self>,
+        session_id: &str,
+        approval_id: &str,
+        title: &str,
+        decision: Decision<'_>,
+    ) {
+        let Some(sub) = self.store.subagent(session_id).ok().flatten() else {
+            tracing::warn!(
+                approval_id,
+                session_id,
+                "the card's worker session is gone; nothing to resume"
+            );
             return;
         };
-        let _ = self
-            .store
-            .set_job_state(&job.id, "failed", Some(APPROVAL_EXPIRED_ERROR));
-        let _ = self.store.set_job_step(&job.id, APPROVAL_EXPIRED_STEP);
-        if let Some(sid) = job.subagent_id.as_deref() {
-            let _ = self.store.t3_append(
-                sid,
-                Some(sid),
-                Some(sid),
-                "approval",
-                Some("system"),
-                &format!("Your approval expired, so this stopped: {}", row.title),
-                Some(&json!({ "approval_id": row.id, "job_id": job.id, "state": "expired" })),
-            );
-            let adapter = self.adapter(arbos_core::route::Harness::Pi);
-            if let Err(e) = adapter.cancel(sid).await {
-                tracing::debug!(job = %job.id, error = %e, "expired card: falling back to stop");
-                let _ = adapter.stop(sid).await;
-            }
+        let job = self.job_of_session(session_id);
+        // A job the user cancelled while its card waited is not restarted by answering the
+        // card. The cancel is the later instruction and it already closed the work down.
+        if let Some(j) = job.as_ref().filter(|j| !j.is_open()) {
+            tracing::info!(job = %j.id, approval_id, state = %j.state, "the card's job is closed; the answer starts nothing");
+            return;
         }
-        self.release_job_locks(&job.id).await;
-        self.refresh_job_activity(&job.chat_id).await;
-        tracing::warn!(job = %job.id, approval_id = %row.id, "a card of this job expired unanswered; the job stops and is not retried");
+        let Some(chat_id) = job
+            .as_ref()
+            .map(|j| j.chat_id.clone())
+            .or_else(|| sub.chat_id.clone())
+        else {
+            tracing::warn!(
+                approval_id,
+                session_id,
+                "the card's worker belongs to no chat; nothing to resume into"
+            );
+            return;
+        };
+        let Some(host) = self.sync.host(&chat_id).await else {
+            tracing::warn!(approval_id, chat_id, "no doc for the card's chat; cannot resume");
+            return;
+        };
+        let brief = decision.brief(title, approval_id);
+        let _ = self.store.t3_append(
+            session_id,
+            Some(session_id),
+            Some(session_id),
+            "approval",
+            Some("system"),
+            &brief,
+            Some(&json!({ "approval_id": approval_id, "resumed": true })),
+        );
+        if let Some(j) = &job {
+            let _ = self.store.set_job_state(&j.id, "running", None);
+            let _ = self.store.set_job_step(&j.id, decision.job_step());
+        }
+        let in_reply_to = job
+            .as_ref()
+            .map(|j| j.ask_message_id.clone())
+            .unwrap_or_default();
+        self.spawn_subagent_task(
+            &chat_id,
+            &host,
+            &in_reply_to,
+            Some(session_id.to_owned()),
+            String::new(),
+            job.as_ref().map(|j| j.title.clone()).unwrap_or_default(),
+            brief,
+            Some(arbos_core::route::Harness::Pi),
+            false,
+            false,
+            job.as_ref().map(|j| crate::agent::JobSpec {
+                id: j.id.clone(),
+                title: j.title.clone(),
+                kind: j.kind.clone(),
+                brief: j.brief.clone(),
+                touches: j.touches.clone(),
+                attempt: 0,
+            }),
+            // The ask this job answers is not waiting on this run: the worker was already
+            // speaking for itself before the card, and the result turn it finishes with is what
+            // the chat is ordered on.
+            None,
+        );
+        tracing::info!(approval_id, session_id, job = ?job.as_ref().map(|j| &j.id), "a card was answered; its worker is resumed");
     }
 
     /// `/hook/approval` (pi-ext `tool_call`): classify a harness tool call; risky ones get a card
@@ -1368,12 +1531,6 @@ impl Agent {
         role: &str,
     ) -> Value {
         let job = self.job_of_session(session_id);
-        // A job whose card already expired asks nothing again: the refusal is immediate, so the
-        // worker cannot spend another fourteen minutes on a card nobody will answer.
-        if let Some(j) = job.as_ref().filter(|j| stopped_by_expired_approval(j)) {
-            tracing::warn!(job = %j.id, tool, "a card of this job expired; refusing without another");
-            return json!({ "ok": true, "state": ApprovalState::Expired.as_str(), "approvalId": "", "why": APPROVAL_EXPIRED_ERROR });
-        }
         let Some(hit) = self.classify_tool_for_job(tool, input, job.as_ref()).await else {
             return json!({ "ok": true, "state": "allowed" });
         };
@@ -1389,34 +1546,68 @@ impl Agent {
         {
             return json!({ "ok": true, "state": "allowed", "grantId": g.id });
         }
+        // This session already has a card waiting for this exact call, so it is pointed at that
+        // one rather than asked the same question twice.
+        //
+        // This is what carries Test5 round 2's bug H now that a card cannot close itself. Four
+        // cards went to T8, each one a retry of the same refused call, because the previous card
+        // had expired and the call was tried again. A card that waits for ever removes the
+        // expiry half of that; this removes the other half, which is the one that was actually
+        // the bug: the user is asked once per question, not once per attempt.
+        //
+        // After the grant checks above, both of them, because an open card must not stand in
+        // the way of a permission the user has already given: a standing shell grant recorded
+        // while a card was waiting lets the call run, and the card it leaves behind is closed
+        // when the work it belonged to finishes or is cancelled.
+        if let Some(open) = self.open_card_for(tool, input, session_id) {
+            let where_it_is = self.card_chat_name(&open.chat_id);
+            tracing::info!(approval_id = %open.id, tool, session_id, "this call already has a card waiting; no second one is raised");
+            return json!({ "ok": true, "state": "pending", "approvalId": open.id, "title": open.title,
+                "why": hit.why, "waitMs": park_after_ms(), "park": true, "chat": where_it_is, "chatId": open.chat_id });
+        }
         let (title, summary) = describe_tool(tool, input, &hit);
+        // A second card for a call that was already approved once says so, rather than reading
+        // as a fresh request the user has never seen. The grant is single-use on purpose — the
+        // gate sees the call and never its result, so a re-run that died part-way through is
+        // indistinguishable from one that never started, and a half-finished destructive
+        // command is exactly where a person should look again.
+        let prior = self.spent_grant_for(tool, input);
+        let retry_note = prior.as_ref().map(|_| {
+            "This exact call was approved once already and was attempted; it did not report back, \
+             so it needs approving again."
+        });
+        let mut payload = json!({ "kind": "tool_call", "tool": tool, "input": input, "class": hit.class, "why": hit.why, "session_id": session_id, "role": role,
+            "path_class": hit.path_class.map(PathClass::as_str), "grant_options": grant_options(&hit) });
+        // `job_id` beside `session_id`, so "is this job parked on a card" is a direct read. The
+        // two are different questions at different grains and both have callers: the job for the
+        // capacity cap and the boot reclaim, the session for the retained-worker bound.
+        if let Some(j) = &job {
+            payload["job_id"] = json!(j.id);
+        }
+        if let Some(p) = &prior {
+            payload["prior_approval_id"] = json!(p.id);
+            payload["prior_consumed_at"] = json!(p.grant_consumed_at);
+        }
         let req = ApprovalRequest {
             title: title.clone(),
-            summary: summary.clone(),
+            summary: match retry_note {
+                Some(note) if summary.is_empty() => note.to_owned(),
+                Some(note) => format!("{summary} — {note}"),
+                None => summary.clone(),
+            },
             risk: hit.risk,
-            payload: json!({ "kind": "tool_call", "tool": tool, "input": input, "class": hit.class, "why": hit.why, "session_id": session_id, "role": role,
-                "path_class": hit.path_class.map(PathClass::as_str), "grant_options": grant_options(&hit) }),
+            payload,
         };
-        // How long the caller blocks, and therefore what bounds this card.
+        // **Every** gated call parks, which is the change: the caller waits out the grace and
+        // then lets go, and the card stays open for the user however long they take.
         //
-        // A main-session call is parked when the grace passes (`park_approval`): the turn is
-        // released and the decision is picked up later, so nothing is waiting on a clock and the
-        // card keeps the full TTL. A worker's call is not parked — it has no chat turn to release
-        // and its job is ended by one expired card (`fail_job_on_expired_approval`) — so it is
-        // still bounded by the extension's cap, and the card says so.
-        let parks = role == "main" && job.is_none();
-        let wait_ms = if parks {
-            park_after_ms()
-        } else {
-            harness_wait_cap_ms()
-        };
-        let expires_in = if parks {
-            approval_ttl_ms()
-        } else {
-            harness_wait_cap_ms()
-        };
+        // A worker used to be excluded here, on the reasoning that it had no chat turn to
+        // release. But it holds more than a turn — a `subagent_slots` permit, a `box_slots`
+        // permit, a live harness child and an open job — and it held all of them for the
+        // extension's fourteen-minute cap, after which the card was closed and the job failed
+        // unasked. Releasing the worker and keeping the card is the inversion of that.
         match self
-            .begin_approval(&chat_id, req, WaitMode::Polled, None, expires_in)
+            .begin_approval(&chat_id, req, WaitMode::Polled, None)
             .await
         {
             Ok(id) => {
@@ -1437,8 +1628,15 @@ impl Agent {
                 // session that otherwise tells the user "the card is in this chat" — true only
                 // when the two happen to coincide. The name is what it may say; the id is there
                 // so it is exact. The model is told nothing about location anywhere else.
+                if let Some(p) = &prior {
+                    self.append_audit(
+                        "approval_recarded",
+                        json!({ "approval_id": id, "prior_approval_id": p.id, "chat_id": chat_id,
+                            "tool": tool, "session_id": session_id, "job_id": job.as_ref().map(|j| &j.id) }),
+                    );
+                }
                 json!({ "ok": true, "state": "pending", "approvalId": id, "title": title, "why": hit.why,
-                    "waitMs": wait_ms, "park": parks, "chat": where_it_is, "chatId": chat_id })
+                    "waitMs": park_after_ms(), "park": true, "chat": where_it_is, "chatId": chat_id })
             }
             Err(e) => json!({ "ok": false, "error": e.to_string() }),
         }
@@ -1454,23 +1652,31 @@ impl Agent {
             .any(|p| p.chat_id == chat_id)
     }
 
-    /// `/hook/approval-park`: the harness stopped blocking a main-session call and the turn is
-    /// about to end, but the card is left answerable for its full deadline.
+    /// `/hook/approval-park`: the caller stopped blocking on this card and is letting go of
+    /// whatever it was holding. **The card is untouched and stays answerable.**
     ///
-    /// This is Test5 round 5 bug R's second half. The gated call used to hold the chat's main
-    /// turn for the whole wait — fourteen minutes in rounds 4 and 5 — so a message arriving in
-    /// that chat meanwhile could only get a quick-lane answer. Nothing about an approval needs
-    /// the turn to stay open: the card is in the chat, and the user answers the card.
+    /// This is Test5 round 5 bug R's second half, now applied to every caller rather than to the
+    /// main session alone. A gated call used to hold its caller for the whole wait — fourteen
+    /// minutes in rounds 4 and 5 — and nothing about an approval needs that: the card is in the
+    /// chat, and the user answers the card.
     ///
-    /// So the mode moves from `Polled` to `Deferred`, which is the whole mechanism. Everything
-    /// that finishes the work already exists for the late-approval case and is reached by that
-    /// one change:
+    /// What the caller lets go of depends on who it is, and the worker is why this matters:
+    ///
+    /// - a **main-session** call holds the chat's turn, so a message arriving meanwhile could
+    ///   only get a quick-lane answer;
+    /// - a **worker** holds a `subagent_slots` permit, a `box_slots` permit, a live harness
+    ///   child and an open job. Parking returns all four, so an unanswered card costs the box
+    ///   nothing while it waits and the retained-worker bound can evict the idle worker.
+    ///
+    /// The mode moves to `Deferred`, which is the whole mechanism. Everything that finishes the
+    /// work already exists for the late-approval case and is reached by that one change:
     ///
     /// - `decide_approval` treats a `Deferred` entry as deferred, so the decision runs
     ///   `follow_up` instead of handing the outcome to a waiter that has gone;
-    /// - `follow_up`'s `("tool_call", Approved)` arm records a `Grant` for the identical call and
-    ///   starts a turn in the card's chat telling the agent to run it again;
-    /// - `take_grant` lets that re-run through without a second card.
+    /// - `follow_up` either prompts the card's chat, or — for a worker's card — resumes that
+    ///   worker's own session through `run_subagent` (`resume_worker_after_approval`);
+    /// - `take_grant` claims the approved row's single-use grant, so the re-run goes through
+    ///   without a second card no matter how long it was between the two.
     ///
     /// Nothing here is a new waiting state, and `draft_message` has used this path since S18.
     pub async fn park_approval(self: &Arc<Self>, approval_id: &str) -> Value {
@@ -1484,7 +1690,10 @@ impl Agent {
         let parked = {
             let mut pending = self.approvals.pending.lock().await;
             match pending.get_mut(approval_id) {
-                Some(p) if p.mode == WaitMode::Polled => {
+                // `Inline` as well as `Polled`: an inline waiter that ran out of grace hands its
+                // card over the same way, so a gated MCP call does not hold its tool call open
+                // for as long as the user takes either.
+                Some(p) if p.mode != WaitMode::Deferred => {
                     p.mode = WaitMode::Deferred;
                     true
                 }
@@ -1509,24 +1718,10 @@ impl Agent {
         );
         self.append_audit(
             "approval_parked",
-            json!({ "approval_id": approval_id, "chat_id": row.chat_id, "title": row.title,
-                "expires_at": row.expires_at }),
+            json!({ "approval_id": approval_id, "chat_id": row.chat_id, "title": row.title }),
         );
-        tracing::info!(approval_id, chat_id = %row.chat_id, "approval parked; the turn is released until the card is decided");
+        tracing::info!(approval_id, chat_id = %row.chat_id, "approval parked; the caller is released and the card stays open");
         json!({ "ok": true, "state": row.state, "parked": true, "reason": parked_reason(approval_id) })
-    }
-
-    /// `/hook/approval-abandon`: the extension stopped polling (its wait cap passed) and the
-    /// blocked call was not executed. Expire the card so the UI surfaces the timeout promptly
-    /// instead of leaving a pending card and a "still working" status for hours.
-    pub async fn abandon_approval(self: &Arc<Self>, approval_id: &str) -> Value {
-        match self
-            .decide_approval(approval_id, ApprovalOutcome::Expired, "arbos:timeout")
-            .await
-        {
-            Ok(()) => json!({ "ok": true, "state": "expired" }),
-            Err(e) => json!({ "ok": false, "error": e.to_string() }),
-        }
     }
 
     pub async fn approval_status(&self, approval_id: &str) -> Value {
@@ -1539,14 +1734,30 @@ impl Agent {
         }
     }
 
-    /// Sweep pending cards past `expiresAt` (every minute from `main.rs`).
-    pub async fn expire_approvals(self: &Arc<Self>) {
-        let now = now_ms();
-        for row in self.store.pending_approvals().unwrap_or_default() {
-            if row.expires_at <= now {
-                let _ = self
-                    .decide_approval(&row.id, ApprovalOutcome::Expired, "arbos:expiry")
-                    .await;
+    /// Close every open card of `chat_id`, or of one job, as `cancelled`: the work was called
+    /// off, so there is nothing left to approve.
+    ///
+    /// `cancelled` rather than `rejected`, because the user refused nothing — they stopped the
+    /// work — and telling the agent it was turned down would be a different fact. And rather
+    /// than `expired`, which no longer happens and which meant "nobody answered in time".
+    ///
+    /// This is the only thing that closes a card without an answer, and it is always something
+    /// the user did.
+    pub(crate) async fn cancel_approvals_for_job(self: &Arc<Self>, job_id: &str) {
+        let open: Vec<String> = self
+            .store
+            .pending_approvals()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| r.payload.get("job_id").and_then(Value::as_str) == Some(job_id))
+            .map(|r| r.id)
+            .collect();
+        for id in open {
+            if let Err(e) = self
+                .decide_approval(&id, ApprovalOutcome::Cancelled, "arbos:cancelled")
+                .await
+            {
+                tracing::debug!(approval_id = %id, error = %e, "a cancelled job's card was already decided");
             }
         }
     }
@@ -2009,36 +2220,60 @@ mod job_approval_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// The livelock: every expired card was retried, so T8 waited four times fourteen minutes.
-    /// One expired card ends the job — it is failed with the reason the result turn relays, its
-    /// own view says so, no second card is raised, and no fresh worker is given.
+    /// The inversion of `one_expired_card_fails_the_job_instead_of_raising_another`.
+    ///
+    /// That test asserted the old answer to the livelock — one unanswered card *failed* the job
+    /// so no fresh worker could raise a fifth card — and the livelock it guarded against is
+    /// still covered here, by the part that was the actual defect: no second card is raised for
+    /// the same call. What changes is everything built on the card closing itself. An unanswered
+    /// worker card now **parks**: the card stays open and answerable, the job stays open and
+    /// cancellable, and nothing fails.
     #[tokio::test]
-    async fn one_expired_card_fails_the_job_instead_of_raising_another() {
+    async fn an_unanswered_worker_card_parks_the_job_instead_of_failing_it() {
         let (agent, _host, root) = agent_running_a_job().await;
         let cmd = json!({ "command": "rm -rf /work/p/exports" });
         let v = agent.hook_approval("bash", &cmd, WORKER, "subagent").await;
         let id = v["approvalId"].as_str().expect("a card").to_owned();
-        // The extension stopped waiting after its 14-minute cap.
-        assert_eq!(agent.abandon_approval(&id).await["state"], "expired");
+        // Every role parks now, and the wait the caller is told to make is the grace rather than
+        // a cap on the card.
+        assert_eq!(v["park"], json!(true), "{v}");
+        assert_eq!(v["waitMs"], json!(park_after_ms()), "{v}");
+        // The worker stopped waiting. Under the old behaviour this expired the card; now it
+        // releases the caller and leaves the question standing.
+        let parked = agent.park_approval(&id).await;
+        assert_eq!(parked["parked"], json!(true), "{parked}");
+        assert_eq!(parked["state"], "pending", "{parked}");
+        let row = agent.store.approval(&id).unwrap().unwrap();
+        assert_eq!(row.state, "pending");
+        assert_eq!(row.decided_by, None, "nothing decided this card");
+        // The job did not fail and did not end. It is open, so it is still listed and still
+        // cancellable, and its step says what it is waiting for.
         let job = agent.store.job(JOB).unwrap().unwrap();
-        assert_eq!(job.state, "failed");
-        assert_eq!(job.error.as_deref(), Some(APPROVAL_EXPIRED_ERROR));
-        assert!(
-            approval_lines(&agent)
-                .iter()
-                .any(|l| l.starts_with("Your approval expired")),
-            "the job's own view says why it stopped: {:?}",
-            approval_lines(&agent)
-        );
-        // The next gated call of that job is refused at once, with no second card.
-        let again = agent.hook_approval("bash", &cmd, WORKER, "subagent").await;
-        assert_eq!(again["state"], "expired", "{again}");
-        assert!(again["approvalId"].as_str().unwrap_or_default().is_empty());
-        assert!(agent.store.pending_approvals().unwrap().is_empty());
-        // And the job is not handed a fresh worker to raise the same card again.
+        assert!(job.is_open(), "a parked job stays open: {}", job.state);
+        assert_eq!(job.error, None);
+        // The payload carries both grains, which is what the bound and the reclaim read.
+        assert_eq!(row.payload["session_id"], json!(WORKER));
+        assert_eq!(row.payload["job_id"], json!(JOB));
         assert_eq!(
-            crate::agent::worker_failure(Some(APPROVAL_EXPIRED_ERROR), "", 3, "done").map(|f| f.1),
-            Some(false)
+            agent
+                .store
+                .pending_approval_for_session(WORKER)
+                .unwrap()
+                .map(|r| r.id),
+            Some(id.clone())
+        );
+        assert_eq!(
+            agent.store.pending_approval_for_job(JOB).unwrap().map(|r| r.id),
+            Some(id.clone())
+        );
+        // The same call again does not raise a second card: the one that is waiting is reused,
+        // which is the half of the old test that was really about the livelock.
+        let again = agent.hook_approval("bash", &cmd, WORKER, "subagent").await;
+        assert_eq!(again["state"], "pending", "{again}");
+        assert_eq!(
+            agent.store.pending_approvals().unwrap().len(),
+            1,
+            "one open card for this call, not one per attempt"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -2161,47 +2396,88 @@ mod park_tests {
         json!({ "command": "rm -rf /opt/x" })
     }
 
-    /// The main session's wait is a short grace, and because the call is parked rather than
-    /// refused at the end of it, nothing shorter than the TTL bounds the card any more — so the
-    /// card goes back to advertising the full TTL, and that is again the truth.
+    /// Every wait is a short grace, and the card it leaves behind has **no deadline at all**.
+    ///
+    /// Widened from the main session to both roles, which is the change: a worker used to be
+    /// given the extension's fourteen-minute cap as both its wait and its card's lifetime. And
+    /// "keeps the full deadline" became "keeps no deadline", because a card that closes itself
+    /// is the stall.
     #[tokio::test]
-    async fn a_main_session_wait_is_short_and_the_card_keeps_the_full_deadline() {
+    async fn every_wait_is_a_short_grace_and_no_card_gets_a_deadline() {
         let (agent, root) = test_agent().await;
         let chat = "01TESTCHATAPPROVALPARK0000";
         agent.store.upsert_chat(chat, "Main", true, 0).unwrap();
         let _host = agent.sync.open_room(chat).await.unwrap();
 
-        let before = now_ms();
-        let v = agent.hook_approval("bash", &rm(), chat, "main").await;
-        assert_eq!(v["state"], "pending", "{v}");
-        assert_eq!(v["park"], json!(true), "a main-session call parks: {v}");
-        let wait = v["waitMs"].as_i64().unwrap();
-        assert!(
-            wait < 30_000,
-            "the turn must be free before a follow-up message arrives: {wait} ms"
-        );
-        assert!(
-            wait < harness_wait_cap_ms(),
-            "round 5 blocked for the whole {} ms cap",
-            harness_wait_cap_ms()
-        );
-        let row = agent
-            .store
-            .approval(v["approvalId"].as_str().unwrap())
-            .unwrap()
-            .unwrap();
-        let life = row.expires_at - before;
-        assert!(
-            (life - approval_ttl_ms()).abs() < 5_000,
-            "a parked card is bounded by nothing but its TTL: {life} ms"
-        );
+        for (role, session) in [("main", chat), ("subagent", "01TESTWORKERPARKSESSION00")] {
+            let v = agent.hook_approval("bash", &rm(), session, role).await;
+            assert_eq!(v["state"], "pending", "{v}");
+            assert_eq!(v["park"], json!(true), "{role} parks: {v}");
+            let wait = v["waitMs"].as_i64().unwrap();
+            assert!(
+                wait < 30_000,
+                "{role} must let go before a follow-up message arrives: {wait} ms"
+            );
+            assert_eq!(wait, park_after_ms(), "one number bounds every wait: {v}");
+            let row = agent
+                .store
+                .approval(v["approvalId"].as_str().unwrap())
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                row.expires_at, 0,
+                "a card has no deadline, and 0 says so rather than naming a time"
+            );
+            agent
+                .decide_approval(
+                    v["approvalId"].as_str().unwrap(),
+                    ApprovalOutcome::Cancelled,
+                    "test",
+                )
+                .await
+                .unwrap();
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// The owner's third test: approving before `expires_at` runs the command and the result
-    /// comes back in the same chat. Parking moves the entry to `Deferred`, which is what hands
-    /// the decision to `follow_up` — the late-approval path that records a `Grant` for the
-    /// identical call and starts a turn to run it. No second card is raised.
+    /// The deadline is gone from what the user is shown, too: no `expiresAt` on the card part.
+    ///
+    /// Absent rather than zero on purpose. Both clients model it as an `Option` that nothing
+    /// renders, so absent reads as "no deadline"; a `0` would be a 1970 date for any later
+    /// reader that decided to draw one.
+    #[tokio::test]
+    async fn the_card_in_the_chat_advertises_no_deadline() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATAPPROVALPARK0003";
+        agent.store.upsert_chat(chat, "Main", true, 0).unwrap();
+        let host = agent.sync.open_room(chat).await.unwrap();
+
+        let v = agent.hook_approval("bash", &rm(), chat, "main").await;
+        let id = v["approvalId"].as_str().unwrap().to_owned();
+        let h = host.lock().await;
+        let part = h
+            .doc
+            .messages()
+            .iter()
+            .flat_map(|m| m.parts.clone())
+            .find(|p| p.get("approvalId").and_then(Value::as_str) == Some(id.as_str()))
+            .expect("the card part");
+        assert_eq!(part.get("state").and_then(Value::as_str), Some("pending"));
+        assert!(
+            part.get("expiresAt").is_none(),
+            "no deadline is advertised to the user: {part}"
+        );
+        drop(h);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The owner's third test: approving a parked card runs the command and the result comes
+    /// back in the same chat. Parking moves the entry to `Deferred`, which is what hands the
+    /// decision to `follow_up`, and the grant that lets the re-run through is the approved row
+    /// itself. No second card is raised.
+    ///
+    /// The grant assertion is now made on the row rather than on an in-memory map, which is
+    /// strictly stronger: it is the same state a restarted agentd would read.
     #[tokio::test]
     async fn a_parked_card_approved_later_runs_the_call_without_a_second_card() {
         let (agent, root) = test_agent().await;
@@ -2239,31 +2515,92 @@ mod park_tests {
             .await
             .unwrap();
 
-        // `follow_up` runs on its own task; the grant it records is the observable half.
-        let mut granted = None;
-        for _ in 0..100 {
-            if let Some(g) = agent
-                .approvals
-                .grants
-                .lock()
-                .await
-                .iter()
-                .find(|g| g.approval_id == id)
-            {
-                granted = Some(g.tool.clone());
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        // The decision itself is the grant, so it is readable the moment the row is approved —
+        // no task has to have run first, and nothing expires while the re-run waits its turn.
+        let row = agent.store.approval(&id).unwrap().unwrap();
+        assert_eq!(row.state, "approved");
         assert_eq!(
-            granted.as_deref(),
-            Some("bash"),
-            "an approved parked call is pre-approved for its re-run"
+            row.grant_consumed_at, None,
+            "unclaimed until the re-run takes it"
+        );
+        assert_eq!(
+            agent
+                .store
+                .unconsumed_grants()
+                .unwrap()
+                .into_iter()
+                .map(|r| r.id)
+                .collect::<Vec<_>>(),
+            vec![id.clone()]
         );
         assert_eq!(
             agent.hook_approval("bash", &rm(), chat, "main").await["state"],
             "allowed",
             "the re-run must not raise a second card"
+        );
+        assert!(
+            agent
+                .store
+                .approval(&id)
+                .unwrap()
+                .unwrap()
+                .grant_consumed_at
+                .is_some(),
+            "and the grant is spent by that one re-run"
+        );
+        // Single use: the same call a second time is carded again, and the new card says it is a
+        // second attempt at something already approved rather than a fresh request.
+        let again = agent.hook_approval("bash", &rm(), chat, "main").await;
+        assert_eq!(again["state"], "pending", "{again}");
+        let second = agent
+            .store
+            .approval(again["approvalId"].as_str().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.payload["prior_approval_id"], json!(id));
+        assert!(
+            second.payload["prior_consumed_at"].as_i64().is_some(),
+            "when the first attempt was authorized: {}",
+            second.payload
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The grant outlives a restart, which the ten-minute in-memory one could not.
+    ///
+    /// Jacob's requirement is that answering a card finishes the work; a grant that lives in one
+    /// process means answering a card and then restarting asks the user to answer it again. The
+    /// store is reopened on the same file here, which is as close to a restart as a unit test
+    /// gets, and the re-run is still admitted — once.
+    #[tokio::test]
+    async fn an_approved_calls_grant_survives_a_restart_and_is_still_single_use() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATAPPROVALPARK0004";
+        agent.store.upsert_chat(chat, "Main", true, 0).unwrap();
+        let _host = agent.sync.open_room(chat).await.unwrap();
+
+        let v = agent.hook_approval("bash", &rm(), chat, "main").await;
+        let id = v["approvalId"].as_str().unwrap().to_owned();
+        assert_eq!(agent.park_approval(&id).await["parked"], json!(true));
+        agent
+            .decide_approval(&id, ApprovalOutcome::Approved, "dev-mac")
+            .await
+            .unwrap();
+
+        let reopened = crate::store::Store::open(
+            &agent.cfg.state_dir.join("agentd").join("agentd.db"),
+        )
+        .unwrap();
+        let grants = reopened.unconsumed_grants().unwrap();
+        assert_eq!(
+            grants.iter().map(|r| r.id.clone()).collect::<Vec<_>>(),
+            vec![id.clone()],
+            "a fresh process reads the grant from the row"
+        );
+        assert!(reopened.consume_grant(&id).unwrap(), "the first claim wins");
+        assert!(
+            !reopened.consume_grant(&id).unwrap(),
+            "and the second finds it spent, with no lock held in between"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -2411,18 +2748,16 @@ mod deadline_tests {
     /// (19:19:17 → 19:33:18), which is what says "fixed cap" rather than "slow user": the
     /// extension stops polling at `ARBOS_APPROVAL_WAIT_MS` and nothing told the card.
     ///
-    /// The card now carries the deadline its own waiter enforces, and the reply hands that
-    /// waiter the number instead of letting it keep a second copy of the default.
+    /// **Inverted.** Round 5's drift was between three numbers; there is now one, and it bounds
+    /// a wait rather than a card, so the drift is unrepresentable. The card advertises no
+    /// deadline at all and the reply hands the waiter agentd's own grace.
     #[tokio::test]
-    async fn a_gated_card_advertises_the_deadline_its_waiter_enforces() {
+    async fn a_gated_card_advertises_no_deadline_and_one_number_bounds_the_wait() {
         let (agent, root) = test_agent().await;
         let chat = "01TESTCHATAPPROVALTTL00000";
         agent.store.upsert_chat(chat, "Main", true, 0).unwrap();
         let _host = agent.sync.open_room(chat).await.unwrap();
 
-        // A worker's call is not parked — it has no chat turn to release — so the extension's cap
-        // is still what bounds it, and the card has to say so rather than claim 24 hours.
-        let before = now_ms();
         let v = agent
             .hook_approval(
                 "bash",
@@ -2434,37 +2769,35 @@ mod deadline_tests {
         assert_eq!(v["state"], "pending", "{v}");
         assert_eq!(
             v["park"],
-            json!(false),
-            "a worker's call is not parked: {v}"
+            json!(true),
+            "a worker's call parks too, which is what frees its slot: {v}"
         );
         let row = agent
             .store
             .approval(v["approvalId"].as_str().unwrap())
             .unwrap()
             .unwrap();
-        let life = row.expires_at - before;
-        assert!(
-            (life - harness_wait_cap_ms()).abs() < 5_000,
-            "the card must expire when its waiter stops waiting: {life} ms"
-        );
-        assert!(
-            life < APPROVAL_TTL_MS,
-            "round 5 advertised the whole 24 h TTL on a card capped at 14 minutes: {life} ms"
+        assert_eq!(
+            row.expires_at, 0,
+            "round 5 could only happen because a card had a deadline; it has none"
         );
         assert_eq!(
             v["waitMs"].as_i64(),
-            Some(harness_wait_cap_ms()),
-            "the waiter reads agentd's cap, so the two cannot drift apart again: {v}"
+            Some(park_after_ms()),
+            "the waiter reads agentd's number, so no second copy can drift: {v}"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// The owner's first test: leave a card undecided and its real expiry matches `expires_at`
-    /// within five seconds. The minute sweep cannot answer that on its own — it would expire a
-    /// card up to 60 s after the time the user was shown — so each card carries a timer for its
-    /// own deadline and the sweep stays the restart backstop.
+    /// **Inverted**, and this is the assertion Jacob's ruling turns on: an undecided card is
+    /// still `pending` and still answerable long past every deadline that used to close it.
+    ///
+    /// The three old numbers are all tried — the 24 h TTL, the extension's 14-minute cap, and a
+    /// run of the minute sweep — because each was a separate way for the card to close itself,
+    /// and the sweep is checked by the only means left: it no longer exists, so a card is read
+    /// again after the time one would have fired.
     #[tokio::test]
-    async fn an_undecided_card_expires_at_the_time_it_advertises() {
+    async fn an_undecided_card_stays_answerable_past_every_old_deadline() {
         let (agent, root) = test_agent().await;
         let chat = "01TESTCHATAPPROVALTTL00001";
         agent.store.upsert_chat(chat, "Main", true, 0).unwrap();
@@ -2477,20 +2810,67 @@ mod deadline_tests {
             payload: json!({ "kind": "tool_call", "tool": "bash" }),
         };
         let id = agent
-            .begin_approval(chat, req, WaitMode::Polled, None, 200)
+            .begin_approval(chat, req, WaitMode::Polled, None)
             .await
             .unwrap();
-        let row = agent.store.approval(&id).unwrap().unwrap();
-        assert_eq!(agent.approval_status(&id).await["state"], "pending");
+        // Time is moved past all three rather than waited out: `tokio`'s clock is paused in
+        // test, so this is the 24-hour case as well as the 14-minute one.
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_millis(
+            (arbos_core::approval::APPROVAL_TTL_MS + 14 * 60 * 1000) as u64 + 60_000,
+        ))
+        .await;
+        tokio::time::resume();
+        tokio::task::yield_now().await;
 
-        tokio::time::sleep(Duration::from_millis(900)).await;
         let after = agent.store.approval(&id).unwrap().unwrap();
-        assert_eq!(after.state, "expired", "the deadline must be enforced");
-        let late = after.decided_at.unwrap() - row.expires_at;
-        assert!(
-            late.abs() < 5_000,
-            "expired {late} ms away from the advertised deadline"
+        assert_eq!(
+            after.state, "pending",
+            "a day and a half later the question is still in front of the user"
         );
+        assert_eq!(after.decided_by, None, "and nothing has answered it");
+        assert_eq!(agent.approval_status(&id).await["state"], "pending");
+        // Still answerable, which is the half that makes the waiting worth anything.
+        agent
+            .decide_approval(&id, ApprovalOutcome::Approved, "dev-mac")
+            .await
+            .unwrap();
+        assert_eq!(
+            agent.store.approval(&id).unwrap().unwrap().state,
+            "approved"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A cancel closes an open card as `cancelled`: the work was called off, so the question
+    /// goes with it rather than standing in the chat for ever now that nothing expires.
+    ///
+    /// `cancelled` and not `rejected`, because the user refused nothing — and not `expired`,
+    /// which is the state this change stopped producing.
+    #[tokio::test]
+    async fn cancelling_the_work_closes_its_card_as_cancelled() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATAPPROVALTTL00002";
+        agent.store.upsert_chat(chat, "Main", true, 0).unwrap();
+        let _host = agent.sync.open_room(chat).await.unwrap();
+
+        let req = ApprovalRequest {
+            title: "Run a destructive command (file.delete)".into(),
+            summary: "rm -rf /opt/x".into(),
+            risk: Risk::Destructive,
+            payload: json!({ "kind": "tool_call", "tool": "bash", "job_id": "01TESTJOBCANCELCARD000000" }),
+        };
+        let id = agent
+            .begin_approval(chat, req, WaitMode::Polled, None)
+            .await
+            .unwrap();
+        agent
+            .cancel_approvals_for_job("01TESTJOBCANCELCARD000000")
+            .await;
+        let row = agent.store.approval(&id).unwrap().unwrap();
+        assert_eq!(row.state, "cancelled", "not expired, and not rejected");
+        assert_eq!(row.decided_by.as_deref(), Some("arbos:cancelled"));
+        assert!(agent.store.pending_approvals().unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&root);
     }
 }

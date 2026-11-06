@@ -300,6 +300,12 @@ async fn approval_status(State(a): State<S>, headers: HeaderMap, Json(b): Json<V
     Json(a.approval_status(id).await).into_response()
 }
 
+/// An older extension that stopped polling and wants the card closed. **It is not closed.**
+///
+/// Kept as a route so a box running a harness build from before this change does not get a 404
+/// on it, and answered with the card's real state so that extension carries on correctly. The
+/// behaviour it is asking for — expire the card, fail the work behind it — is the stall this
+/// change removes, and an old client asking for it is not a reason to do it.
 async fn approval_abandon(
     State(a): State<S>,
     headers: HeaderMap,
@@ -309,11 +315,12 @@ async fn approval_abandon(
         return StatusCode::UNAUTHORIZED.into_response();
     }
     let id = b.get("approvalId").and_then(Value::as_str).unwrap_or("");
-    Json(a.abandon_approval(id).await).into_response()
+    // The same park a current extension asks for by name: let go of the call, keep the card.
+    Json(a.park_approval(id).await).into_response()
 }
 
-/// The main session stopped blocking on a card and its turn is ending; the card stays
-/// answerable and the decision resumes the work (`Agent::park_approval`).
+/// The caller stopped blocking on a card and is letting go of the turn, slot or child it held;
+/// the card stays answerable and the decision resumes the work (`Agent::park_approval`).
 async fn approval_park(State(a): State<S>, headers: HeaderMap, Json(b): Json<Value>) -> Response {
     if authed(&a, &headers).is_none() {
         return StatusCode::UNAUTHORIZED.into_response();

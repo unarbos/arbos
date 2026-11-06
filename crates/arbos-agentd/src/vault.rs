@@ -1086,7 +1086,10 @@ async fn settle_card(agent: &Arc<Agent>, approval_id: Option<&str>, status: &str
         "denied" => ApprovalOutcome::Rejected {
             reason: Some("denied by the owner".into()),
         },
-        _ => ApprovalOutcome::Expired,
+        // The relay's own request expired or was withdrawn, so there is nothing left to ask
+        // about and the chat card is closed to match. `Cancelled` rather than a card expiry:
+        // what ran out was the relay's secret request, not this card's patience.
+        _ => ApprovalOutcome::Cancelled,
     };
     // The decision rides in `decidedBy` so clients can show which row was picked.
     let _ = agent
@@ -1136,7 +1139,11 @@ async fn wait_decision(
                     // The client forwards the approval to the relay; keep polling.
                     Ok(ApprovalOutcome::Approved) => {}
                     Ok(ApprovalOutcome::Rejected { .. }) => break Ok(Some("denied".into())),
-                    Ok(ApprovalOutcome::Expired) | Err(_) => break Ok(Some("expired".into())),
+                    Ok(ApprovalOutcome::Cancelled) => break Ok(Some("cancelled".into())),
+                    // The card's waiter was dropped because the card was parked: it is still
+                    // open and the relay row is still pending, so this wait ends undecided
+                    // rather than deciding anything. `None` is the caller's "still pending".
+                    Err(_) => break Ok(None),
                 }
             }
             _ = tokio::time::sleep(POLL) => {}
@@ -1319,13 +1326,7 @@ async fn obtain_grant(
             None => chat_id.to_owned(),
         };
         match agent
-            .begin_approval(
-                &card_chat,
-                req,
-                WaitMode::Inline,
-                Some(tx),
-                crate::approval::approval_ttl_ms(),
-            )
+            .begin_approval(&card_chat, req, WaitMode::Inline, Some(tx))
             .await
         {
             Ok(id) => (Some(id), Some(rx)),

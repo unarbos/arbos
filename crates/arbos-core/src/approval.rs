@@ -5,7 +5,11 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// Pending cards expire after this long (`expiresAt`).
+/// How long an *outside-agent* approval window may be, at most (`arbos-relay`'s `outside`): a
+/// request from an agent outside the box, where a bounded window is a security property.
+///
+/// It is no longer the owner's own card deadline. An approval card raised on the box does not
+/// expire at all — see `ApprovalState::Expired`.
 pub const APPROVAL_TTL_MS: i64 = 24 * 60 * 60 * 1000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -51,7 +55,21 @@ pub enum ApprovalState {
     Pending,
     Approved,
     Rejected,
+    /// **Legacy, and no longer produced on the box.** A card used to expire unanswered, which
+    /// stalled the agent that raised it: nobody answered, the card closed itself, and the work
+    /// stopped without the user ever being told. Cards now stay `Pending` for as long as it
+    /// takes.
+    ///
+    /// The variant stays because rows in existing databases hold it and the relay still writes
+    /// it for the outside-agent window (`APPROVAL_TTL_MS`), so every client has to keep drawing
+    /// it. Nothing in agentd writes it.
     Expired,
+    /// The work this card belonged to was called off, so there is nothing left to approve.
+    ///
+    /// Distinct from `Rejected`, which is the user refusing *this action*: a cancel says
+    /// nothing about whether the action was wanted, and conflating them would tell the agent it
+    /// was turned down. Distinct from `Expired`, which is the deadline this change removed.
+    Cancelled,
 }
 
 impl ApprovalState {
@@ -61,6 +79,7 @@ impl ApprovalState {
             ApprovalState::Approved => "approved",
             ApprovalState::Rejected => "rejected",
             ApprovalState::Expired => "expired",
+            ApprovalState::Cancelled => "cancelled",
         }
     }
 }
@@ -78,13 +97,20 @@ pub struct ApprovalRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
+/// What was *decided* about a card — nothing else.
+///
+/// There is deliberately no "my wait ended" variant. A waiter that stops waiting has learned
+/// nothing about the card, which is still open and still answerable, so that case is `None`
+/// rather than an outcome; see [`may_dispatch`]. Folding the two together is what let an
+/// unanswered card read as a refusal.
 pub enum ApprovalOutcome {
     Approved,
     Rejected {
         #[serde(default)]
         reason: Option<String>,
     },
-    Expired,
+    /// The work was called off, so the card was closed without an answer.
+    Cancelled,
 }
 
 impl ApprovalOutcome {
@@ -92,7 +118,7 @@ impl ApprovalOutcome {
         match self {
             ApprovalOutcome::Approved => ApprovalState::Approved,
             ApprovalOutcome::Rejected { .. } => ApprovalState::Rejected,
-            ApprovalOutcome::Expired => ApprovalState::Expired,
+            ApprovalOutcome::Cancelled => ApprovalState::Cancelled,
         }
     }
 
@@ -102,7 +128,10 @@ impl ApprovalOutcome {
 }
 
 /// The dispatch rule every gate shares: a risky action runs only after an `Approved` outcome.
-/// `None` (no card was ever decided) is a refusal, never a pass.
+///
+/// `None` is the undecided card — a waiter gave up, or the card is still open — and it is a
+/// refusal, never a pass. That is the fail-closed half of removing the expiry: the wait may end
+/// whenever it likes, and the only thing that dispatches is an answer.
 pub fn may_dispatch(outcome: Option<&ApprovalOutcome>) -> bool {
     matches!(outcome, Some(ApprovalOutcome::Approved))
 }
@@ -1645,13 +1674,16 @@ mod tests {
     }
 
     /// Invariant: a `send`-kind action with no `approved` outcome is never dispatched.
+    ///
+    /// `None` is the case that matters now that cards do not expire: a waiter that stopped
+    /// waiting on a card still open must refuse, exactly as a refusal does.
     #[test]
     fn send_without_approval_never_dispatches() {
         assert!(!may_dispatch(None));
         assert!(!may_dispatch(Some(&ApprovalOutcome::Rejected {
             reason: Some("no".into())
         })));
-        assert!(!may_dispatch(Some(&ApprovalOutcome::Expired)));
+        assert!(!may_dispatch(Some(&ApprovalOutcome::Cancelled)));
         assert!(may_dispatch(Some(&ApprovalOutcome::Approved)));
     }
 }
