@@ -67,6 +67,8 @@ cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings
 cd harness && pnpm install && pnpm -r typecheck
 ```
 
+On a bare Linux box those need system libraries first — `scripts/workspace-test-deps.sh` installs exactly what CI installs. The usual failure is `webrtc-sys` refusing to build against clang older than 21, not the missing fonts it is often blamed on, so reach for the script rather than narrowing to `cargo test -p <crate>`.
+
 Run the Mac app against the hosted relay, a fixture, or your own relay:
 
 ```bash
