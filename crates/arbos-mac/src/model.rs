@@ -4002,6 +4002,40 @@ pub struct BoxReport {
     pub workspaces: Vec<BoxWorkspace>,
 }
 
+/// What one agent still owes its owner (`work_outstanding`): the work it is doing and the work
+/// waiting on an answer from them.
+///
+/// Both halves are counted from the box's store, which is why they are trustworthy where
+/// [`BoxWorkspace::asks_running`] is not: that counter counts asks answered beside a running
+/// turn, never job rows, and a worker parked on an approval card decrements it. The two halves
+/// stay apart rather than being summed because one job row can hold both — a job waiting on a
+/// card is one open row and one open card — and a single total would count it twice.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Outstanding {
+    /// Job rows still `queued` or `running`.
+    pub jobs: u64,
+    /// Approval cards nobody has answered. No deadline closes these: the owner does.
+    pub approvals: u64,
+}
+
+impl Outstanding {
+    /// This agent owes its owner nothing at all.
+    pub fn is_clear(&self) -> bool {
+        self.jobs == 0 && self.approvals == 0
+    }
+
+    /// `work_outstanding` as the box reports it; `None` when it does not (an older agentd, or a
+    /// store it could not read), so a reader draws nothing instead of "none".
+    fn from_json(v: &serde_json::Value) -> Option<Outstanding> {
+        let jobs = v["jobs"].as_u64();
+        let approvals = v["approvals"].as_u64();
+        (jobs.is_some() || approvals.is_some()).then(|| Outstanding {
+            jobs: jobs.unwrap_or(0),
+            approvals: approvals.unwrap_or(0),
+        })
+    }
+}
+
 /// One agent's workspace on the box.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct BoxWorkspace {
@@ -4013,8 +4047,15 @@ pub struct BoxWorkspace {
     /// How long the current turn has run (`turn.current.elapsed_ms`).
     pub elapsed_ms: Option<u64>,
     pub tool_calls: Option<u64>,
-    /// Background jobs (sub-agents) running for this agent (`jobs_running`, agentd ≥ 0.6.277).
-    pub jobs_running: Option<u64>,
+    /// Asks answered beside a running turn (`jobs_running`, agentd ≥ 0.6.277). **Not** a job
+    /// count, whatever the wire calls it: those runs write their answer straight into the chat
+    /// with no job row at all, so this is zero on a workspace running three jobs. Nothing draws
+    /// it; [`BoxWorkspace::outstanding`] is what the Machine page shows.
+    pub asks_running: Option<u64>,
+    /// What this agent still owes its owner: open job rows and unanswered approval cards
+    /// (`work_outstanding`). `None` on an agentd that does not report it, and then the Machine
+    /// page draws no row at all rather than "None".
+    pub outstanding: Option<Outstanding>,
     /// Its share of the box (`usage`, from the workspace cgroup and a cached `du`).
     pub cpu_pct: Option<f64>,
     pub mem_mb: Option<u64>,
@@ -4081,7 +4122,8 @@ impl BoxReport {
                         running: w["turn"]["running"].as_bool().unwrap_or(false),
                         elapsed_ms: w["turn"]["current"]["elapsed_ms"].as_u64(),
                         tool_calls: w["turn"]["current"]["tool_calls"].as_u64(),
-                        jobs_running: w["jobs_running"].as_u64(),
+                        asks_running: w["jobs_running"].as_u64(),
+                        outstanding: Outstanding::from_json(&w["work_outstanding"]),
                         cpu_pct: w["usage"]["cpu_pct"].as_f64(),
                         mem_mb: w["usage"]["mem_mb"].as_u64(),
                         pids: w["usage"]["pids"].as_u64(),
@@ -4110,14 +4152,18 @@ impl BoxReport {
         rows
     }
 
-    /// Background jobs running across every workspace, when any workspace reports the count.
-    pub fn jobs_running(&self) -> Option<u64> {
-        let counts: Vec<u64> = self
+    /// Work outstanding across every workspace, when any workspace reports it: open job rows
+    /// and unanswered approval cards, each summed in its own column.
+    pub fn outstanding(&self) -> Option<Outstanding> {
+        let counts: Vec<Outstanding> = self
             .workspaces
             .iter()
-            .filter_map(|w| w.jobs_running)
+            .filter_map(|w| w.outstanding)
             .collect();
-        (!counts.is_empty()).then(|| counts.iter().sum())
+        (!counts.is_empty()).then(|| Outstanding {
+            jobs: counts.iter().map(|o| o.jobs).sum(),
+            approvals: counts.iter().map(|o| o.approvals).sum(),
+        })
     }
 
     /// The workspace of one agent, if the box lists it.

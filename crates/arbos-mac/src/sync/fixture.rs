@@ -3550,7 +3550,13 @@ fn emit_box_report(shared: &Shared) {
                 running,
                 elapsed_ms: running.then_some(42_000),
                 tool_calls: running.then_some(7),
-                jobs_running: Some(if running && i == 0 { 1 } else { 0 }),
+                asks_running: Some(0),
+                // The second agent is idle with a card open: the state the Machine page has to
+                // draw as outstanding rather than as "Idle" / "None".
+                outstanding: Some(crate::model::Outstanding {
+                    jobs: if running && i == 0 { 1 } else { 0 },
+                    approvals: if !running && i == 1 { 1 } else { 0 },
+                }),
                 cpu_pct: Some(cpu),
                 mem_mb: Some(mem),
                 pids: Some(if running { 40 } else { 12 }),

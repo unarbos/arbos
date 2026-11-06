@@ -112,6 +112,8 @@ mod vault;
 mod voice;
 mod web;
 #[cfg(test)]
+mod work_outstanding_tests;
+#[cfg(test)]
 mod worker_retention_tests;
 mod workspace;
 
