@@ -1882,6 +1882,12 @@ pub struct Agent {
     /// again, so the user read one ask and got the same card two or three times. Bounded by
     /// [`JOB_FILES_MAX`].
     job_files: Mutex<Vec<JobFile>>,
+    /// Test seam: `(job id, brief)` for every worker a job has been started with, in order. See
+    /// [`Agent::spawn_subagent_task`] for why the brief is read here and not off the job row.
+    /// A `std` lock, not the `tokio` one the rest of this struct uses: the spawn it is written
+    /// from is not an `async fn`.
+    #[cfg(test)]
+    worker_briefs: std::sync::Mutex<Vec<(String, String)>>,
     /// Message ids of rows this box wrote itself as the ask for a turn: a routine firing, a
     /// voice line, a bound channel's message. Bounded; see `OWN_ROWS_MAX`.
     ///
@@ -2151,6 +2157,8 @@ impl Agent {
             cancel_leftovers: Mutex::new(HashMap::new()),
             posted_ledger: Mutex::new(HashMap::new()),
             job_files: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            worker_briefs: std::sync::Mutex::new(Vec::new()),
             own_rows: std::sync::Mutex::new(OwnRows::default()),
             groups: crate::groups::GroupState::default(),
             people: crate::people::PeopleState::default(),
@@ -4576,6 +4584,19 @@ impl Agent {
             return Err("nothing to steer with".into());
         }
         let job = self.resolve_steer_target(chat_id, job_id)?;
+        if job.state == "queued" {
+            // Bug AB (round 14). A queued job exists and has no worker, so there was no session
+            // to steer and no branch below that matched: the correction was refused with "is
+            // queued: steer a running job, or start a new one" and nothing was written — no row,
+            // no `steers` entry, not even a log line. That window is not seconds. A job queued
+            // behind the per-chat cap or a folder lock waits as long as the job ahead of it runs,
+            // and `start_job` says so to the user ("queued behind …, it starts when that one
+            // frees what they both need") while silently dropping corrections to it.
+            //
+            // The row is the carrier. The worker reads `steers` when it starts (`start_job`), so
+            // a correction parked here is applied by the first worker rather than waited for.
+            return Ok(self.correction_reached_queued_job(chat_id, &job, text));
+        }
         if job.state != "running" {
             // Bug AB: a correction that reached a job seconds after it posted its file was told
             // "is done" and dropped, so the user kept the file they had just corrected
@@ -4660,14 +4681,65 @@ impl Agent {
         out
     }
 
+    /// A correction to a job that exists but has not started yet: durable on the row, with no
+    /// session to put it in.
+    ///
+    /// Deliberately not the three things [`Self::correction_reached_worker`] does beside the row:
+    ///
+    /// - No `steer_gate.steer_delivered`. That gate stops a *worker* posting an answer composed
+    ///   before the correction. A queued job has no worker and has posted nothing, and the first
+    ///   worker reads this correction out of `steers` as part of its brief — so there is no stale
+    ///   answer to hold back, and counting one here would spend a later delivery's one refusal
+    ///   against a correction that was never unread.
+    /// - No worker-thread `t3` row: there is no subagent id to write it under yet.
+    /// - No `supersede_posted_file_of_running_job`: nothing of this job is in the chat to replace.
+    fn correction_reached_queued_job(
+        &self,
+        chat_id: &str,
+        job: &crate::store::JobRow,
+        text: &str,
+    ) -> Value {
+        let _ = self.store.append_job_steer(&job.id, text);
+        let _ = self
+            .store
+            .set_job_step(&job.id, "Starting with your correction applied");
+        let _ = self.store.t3_append(
+            chat_id,
+            None,
+            Some(chat_id),
+            "job_steer",
+            Some("user"),
+            text,
+            Some(&json!({ "job_id": job.id, "queued": true })),
+        );
+        tracing::info!(
+            chat_id,
+            job = %job.id,
+            "a correction reached a queued job; it is on the row and the first worker starts with it"
+        );
+        json!({
+            "job_id": job.id,
+            "title": job.title,
+            "state": "steered",
+            "note": "This job has not started yet, so your correction is part of what it starts \
+                     with rather than something it has to be interrupted for. Tell the user it \
+                     will be applied from the beginning.",
+        })
+    }
+
     /// The job a `steer_job` is about: a running one as [`Self::resolve_job`] finds it, or — for
     /// `latest` / an empty id with nothing running — the newest job of this chat that finished
-    /// inside [`crate::config::STEER_REPLACE_WINDOW_MS`].
+    /// inside [`crate::config::STEER_REPLACE_WINDOW_MS`], or one still queued.
     ///
     /// Without that fallback `steer_job("latest")` cannot name the job the user is correcting at
     /// all: the file is in the chat, the user is talking about it, and the only job that matches
     /// their words finished two seconds ago. `stop_job` keeps the stricter rule — there is
     /// nothing to stop about a job that has ended.
+    ///
+    /// The finished job is tried before the queued one, which keeps every case that resolved
+    /// before resolving to the same job: a job that just posted a file is what the user is
+    /// almost certainly correcting, and a queued job has produced nothing to talk about yet. The
+    /// queued match only answers the case that used to have no answer at all.
     fn resolve_steer_target(
         &self,
         chat_id: &str,
@@ -4681,11 +4753,11 @@ impl Agent {
         if !id.is_empty() && !id.eq_ignore_ascii_case("latest") {
             return Err(err);
         }
-        self.store
-            .jobs_for_chat(chat_id)
-            .unwrap_or_default()
-            .into_iter()
+        let open = self.store.jobs_for_chat(chat_id).unwrap_or_default();
+        open.iter()
             .find(|j| j.state == "done" && Self::ended_inside_replace_window(j))
+            .or_else(|| open.iter().find(|j| j.state == "queued"))
+            .cloned()
             .ok_or(err)
     }
 
@@ -5760,6 +5832,17 @@ impl Agent {
         job: Option<JobSpec>,
         ticket: Option<crate::send_order::SendTicket>,
     ) {
+        // Test seam: what a worker was actually started with. The brief a job's *first* worker
+        // gets is composed in `start_job` and then handed straight to a spawned task, so a test
+        // that reads the job row instead would be checking the ingredients and not the meal —
+        // which is how the missing `job_steers_note` on this path survived three rounds.
+        #[cfg(test)]
+        if let Some(j) = job.as_ref() {
+            self.worker_briefs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((j.id.clone(), brief.clone()));
+        }
         let me = self.clone();
         let chat = chat_id.to_owned();
         let host2 = host.clone();
@@ -9016,6 +9099,25 @@ impl Agent {
         self.store
             .insert_job(&job_id, chat_id, user_msg_id, &title, kind, brief, &touches)
             .map_err(|e| e.to_string())?;
+        // After the insert, never at the top of this function. The row is the only thing a
+        // correction can attach to, so a read taken before `insert_job` leaves the same hole one
+        // call deeper: a correction arriving between that read and the insert is seen by neither,
+        // and is dropped exactly as it is today. #2819 paid for this distinction once already — a
+        // gate consulted strictly before the window it exists to cover. The caps above are
+        // synchronous today, which narrows that gap without closing it; ordering the read after
+        // the insert is what closes it, and keeps it closed when a line above here grows an await.
+        let inherited = steers_to_inherit(&host.lock().await.doc, user_msg_id);
+        if !inherited.is_empty() {
+            tracing::info!(
+                chat_id,
+                job = %job_id,
+                corrections = inherited.len(),
+                "corrections that arrived before this job existed are inherited onto its row"
+            );
+        }
+        for text in &inherited {
+            let _ = self.store.append_job_steer(&job_id, text);
+        }
         let slug: String = title
             .split_whitespace()
             .take(4)
@@ -9107,6 +9209,30 @@ impl Agent {
             Some(&json!({ "job_id": job_id, "kind": kind, "message_id": user_msg_id })),
         );
         tracing::info!(chat_id, job = %job_id, %title, kind, open_here, "job started");
+        // The corrections this job starts with, read here rather than where they were written.
+        //
+        // Bug AB (round 14, `r14race`): every path that gives a job a *fresh* worker folds this
+        // note in — the restart, the worker after a pi death ("the user's corrections outlive the
+        // worker they were spoken to"), the inline fallback — and the first worker, the only one
+        // most jobs ever have, did not. So a correction on the row had nowhere to go: the row
+        // kept it and the worker never saw it.
+        //
+        // Read at the spawn and not at the insert, for the reason #2819 cost a round: the row
+        // exists from `insert_job` onward, so a correction can reach it through `steer_job` while
+        // this function is still working through the lines between, and the worker about to start
+        // is the last thing that can carry it.
+        let brief = format!(
+            "{brief}{}",
+            job_steers_note(
+                &self
+                    .store
+                    .job(&job_id)
+                    .ok()
+                    .flatten()
+                    .map(|r| r.steers)
+                    .unwrap_or_default()
+            )
+        );
         self.spawn_subagent_task(
             chat_id,
             host,
@@ -9114,7 +9240,7 @@ impl Agent {
             None,
             name,
             title.clone(),
-            brief.to_owned(),
+            brief,
             Some(Harness::Pi),
             false,
             false,
@@ -13028,16 +13154,13 @@ const SEND_HANDOVER_MS: i64 = 5_000;
 pub(crate) const RELAY_SLOT_LOST: &str =
     "relay slot lost: a user message is owed its first assistant row";
 
-/// A user message whose first assistant row this box still owes, and whose `send` command only
-/// just reached the doc. Returns the message id.
+/// The user messages this box still owes a first assistant row: the ids an assistant row claims
+/// through `inReplyTo`, inverted.
 ///
-/// A command row reaches the doc before agentd can act on it, which is the gap bug M's notice
-/// landed in: the message was there, nothing had claimed it yet, and the relay turn read the
-/// chat as quiet. Only fresh `pending` commands count — once one is claimed,
-/// `Agent::sends_in_flight` covers it for as long as its turn runs.
-fn fresh_unanswered_send(doc: &ChatDoc) -> Option<String> {
-    let answered: HashSet<String> = doc
-        .messages()
+/// One definition of "answered", shared by [`fresh_unanswered_send`] and
+/// [`steers_to_inherit`], so the two cannot disagree about the same row.
+fn answered_message_ids(doc: &ChatDoc) -> HashSet<String> {
+    doc.messages()
         .into_iter()
         .filter(|m| m.role == "assistant")
         .filter_map(|m| {
@@ -13046,7 +13169,80 @@ fn fresh_unanswered_send(doc: &ChatDoc) -> Option<String> {
                 .and_then(Value::as_str)
                 .map(str::to_owned)
         })
+        .collect()
+}
+
+/// The user's corrections to `ask_message_id` that arrived before the job answering it existed.
+///
+/// Bug AB (Jacob, Test5 rounds 13 and 14). In `r14race` the job started at 16:20:14, the
+/// correction had arrived at 16:20:11 — three seconds *before the job existed* — and the
+/// uncorrected CSV went out at 16:20:24. `steer_job` could not help: it resolves a running job,
+/// or a done one inside the replace window, so a correction that lands between the model
+/// composing a brief and `start_job` executing it has nothing to attach to. Round 13 was the
+/// same shape with the correction landing in `job_start`'s own second.
+///
+/// Which rows count is decided by how the chat **routed** them, not by reading them:
+///
+/// - `steer` / `guide` is, by construction, a correction aimed at the turn that is running right
+///   now — and the turn calling `start_job` is the one answering `ask_message_id`.
+/// - A `send` got, or will get, a turn of its own. Inheriting one would be this job doing work
+///   another turn is already doing, which is the only way this can duplicate anything.
+///
+/// Routing already made that call, so this reads a field instead of judging text.
+///
+/// What it does **not** try to decide is whether the model already folded the correction into the
+/// brief, because that is not knowable from here: pi dequeues a steer only at a tool boundary, so
+/// a correction injected before the model emitted `start_job` can still arrive after the brief was
+/// composed, and there is no main-session equivalent of `steer_gate`'s drained count to settle it.
+/// These go onto the row as `steers`, so the brief stays byte-identical to what the model wrote
+/// and the worker reads them labelled as corrections. The cost of being wrong is then a
+/// constraint stated twice, against a wrong artifact in the user's chat for missing one.
+///
+/// Bounded by the ask's own command: a correction issued before this ask belongs to whatever came
+/// before it, not here. With no command for the ask this inherits nothing, because an unbounded
+/// read of a chat's steers would hand this job every correction the user ever made.
+fn steers_to_inherit(doc: &ChatDoc, ask_message_id: &str) -> Vec<String> {
+    let commands = doc.commands();
+    let msg_id = |c: &CommandView| {
+        c.payload
+            .get("messageId")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    };
+    let Some(asked_at) = commands
+        .iter()
+        .find(|c| msg_id(c).is_some_and(|id| id == ask_message_id))
+        .map(|c| c.issued_at)
+    else {
+        return Vec::new();
+    };
+    let answered = answered_message_ids(doc);
+    let mut found: Vec<(i64, String)> = commands
+        .iter()
+        .filter(|c| matches!(c.kind.as_str(), "steer" | "guide"))
+        .filter(|c| c.issued_at >= asked_at)
+        .filter_map(|c| {
+            let id = msg_id(c)?;
+            if id == ask_message_id || answered.contains(&id) {
+                return None;
+            }
+            let text = doc.message(&id)?.text();
+            (!text.trim().is_empty()).then_some((c.issued_at, text))
+        })
         .collect();
+    found.sort_by_key(|(at, _)| *at);
+    found.into_iter().map(|(_, text)| text).collect()
+}
+
+/// A user message whose first assistant row this box still owes, and whose `send` command only
+/// just reached the doc. Returns the message id.
+///
+/// A command row reaches the doc before agentd can act on it, which is the gap bug M's notice
+/// landed in: the message was there, nothing had claimed it yet, and the relay turn read the
+/// chat as quiet. Only fresh `pending` commands count — once one is claimed,
+/// `Agent::sends_in_flight` covers it for as long as its turn runs.
+fn fresh_unanswered_send(doc: &ChatDoc) -> Option<String> {
+    let answered = answered_message_ids(doc);
     let now = now_ms();
     doc.commands().into_iter().find_map(|c| {
         if !matches!(c.kind.as_str(), "send" | "answer") || c.status != "pending" {
@@ -13618,8 +13814,11 @@ pub(crate) fn job_steers_note(steers: &[String]) -> String {
     if steers.is_empty() {
         return String::new();
     }
+    // Not "while it ran": a correction can reach the row before the job has a worker at all
+    // (inherited at `start_job`, or steered while the job was still queued), and a worker told
+    // that such a correction arrived mid-run has been handed a false fact to report back.
     let mut p = String::from(
-        "\nThe user corrected this work while it ran, in this order. These override the brief above wherever they disagree with it, and the answer you deliver must follow them:\n",
+        "\nThe user corrected this work, in this order. These override the brief above wherever they disagree with it, and the answer you deliver must follow them:\n",
     );
     for (n, s) in steers.iter().enumerate() {
         p.push_str(&format!("{}. {s}\n", n + 1));
@@ -13862,6 +14061,18 @@ impl Agent {
     /// the quick-reply snapshot can read. Dropping the guard frees the lock; the state stays.
     pub(crate) async fn test_hold_turn(&self, chat_id: &str) -> tokio::sync::MutexGuard<'_, ()> {
         self.test_hold_turn_for(chat_id, "m-busy").await
+    }
+
+    /// The brief `job_id`'s first worker was started with, as [`Agent::spawn_subagent_task`]
+    /// received it. `None` until the spawn has happened.
+    #[cfg(test)]
+    pub(crate) fn test_first_worker_brief(&self, job_id: &str) -> Option<String> {
+        self.worker_briefs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .find(|(id, _)| id == job_id)
+            .map(|(_, brief)| brief.clone())
     }
 
     /// Same, for a named user message: the send-order tests need the held turn to be the turn of
@@ -14497,12 +14708,14 @@ mod tests {
         assert!(p.contains("Do not call start_job"));
         assert!(p.contains("do not ask whether to try again"));
         assert!(!p.contains("What the last worker had written"));
-        assert!(!p.contains("corrected this work while it ran"));
+        assert!(!p.contains("corrected this work"));
         let p2 = job_fallback_prompt(&job, "m-ask", "", "", &[], "child exited", "Soda Tapia — ");
         assert!(p2.contains("(see the brief)"));
         assert!(p2.contains("Soda Tapia"));
-        // Bug V: a correction the user sent while the job ran is the instruction the fallback
-        // follows, and the brief it overrides is still shown above it.
+        // Bug V: a correction the user sent is the instruction the fallback follows, and the
+        // brief it overrides is still shown above it. The heading does not say when the
+        // correction arrived, because bug AB's inherited ones reach the row before the job has a
+        // worker at all and a worker told otherwise would report a false fact.
         let steered = job_fallback_prompt(
             &job,
             "m-ask",
@@ -14513,8 +14726,12 @@ mod tests {
             "",
         );
         assert!(
-            steered.contains("corrected this work while it ran"),
+            steered.contains("The user corrected this work"),
             "{steered}"
+        );
+        assert!(
+            !steered.contains("while it ran"),
+            "no claim about when it arrived: {steered}"
         );
         assert!(steered.contains("1. only places under $20"), "{steered}");
         assert!(steered.contains("override the brief above"), "{steered}");
