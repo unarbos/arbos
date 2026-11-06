@@ -45,14 +45,25 @@ OP_FLOOR=2.30.0
 GH_FLOOR=2.103.0
 GIT_FLOOR=2.43.0
 
-# tool_version <tool>: the bare version string, or empty when it cannot be read.
+# tool_version <tool> [binary]: the bare version string, or empty when it cannot be read. With a
+# second argument the binary is run by path instead of through PATH, which is what lets the drift
+# recovery below re-read the version of the binary it is considering rather than trust the baseline.
 tool_version() {
+  local b=${2:-$1}
   case $1 in
-    op)  op --version 2>/dev/null | tr -d '\r' ;;
-    gh)  gh --version 2>/dev/null | sed -n 's/^gh version \([0-9.]*\).*/\1/p' | head -1 ;;
-    git) git --version 2>/dev/null | sed -n 's/^git version \([0-9.]*\).*/\1/p' | head -1 ;;
+    op)  "$b" --version 2>/dev/null | tr -d '\r' ;;
+    gh)  "$b" --version 2>/dev/null | sed -n 's/^gh version \([0-9.]*\).*/\1/p' | head -1 ;;
+    git) "$b" --version 2>/dev/null | sed -n 's/^git version \([0-9.]*\).*/\1/p' | head -1 ;;
   esac
 }
+
+# looks_like_a_version: digits and dots and nothing else. Emptiness is not the only way a version read
+# can fail — the selftest's fake op answers --version with a sentinel on stdout, and `sort -V` ranks a
+# word above every number, so an unvalidated garbage string reads as NEWER than any floor and sails
+# through. Anything that is not a version is treated as "cannot be read", which is the honest answer.
+looks_like_a_version() { case $1 in ''|*[!0-9.]*) return 1 ;; *) return 0 ;; esac; }
+
+tool_floor() { case $1 in op) echo "$OP_FLOOR" ;; gh) echo "$GH_FLOOR" ;; git) echo "$GIT_FLOOR" ;; esac; }
 
 # older_than <have> <floor>: true when <have> sorts below <floor>. sort -V, so 2.9 < 2.10.
 older_than() { [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -1)" = "$1" ] && [ "$1" != "$2" ]; }
@@ -68,11 +79,13 @@ host_facts() {
   printf 'container=%s\n' "$(sed -n '1s/.*/&/p' /proc/1/cgroup 2>/dev/null)"
 }
 
-baseline_file() {
-  local d=$K_T
-  [ -d "$d" ] && [ -w "$d" ] || d=${TMPDIR:-/tmp}
-  printf '%s/tools-baseline' "$d"
-}
+# The baseline is kit state and lives in the kit, with NO fallback. op_err_file falls back to a
+# directory that always exists because a failed redirect there used to be the thing that broke, and a
+# stray error file is harmless. This is different: the baseline is what a later run RECOVERS onto, so
+# writing it outside the kit would let a run on one kit recover onto a reading taken for another, and
+# a host with no kit would quietly accumulate state in /tmp. No kit, no baseline, no recovery — which
+# refuses, and refusing is the conservative answer.
+baseline_file() { printf '%s/tools-baseline' "$K_T"; }
 
 # bf_field <file> <key>: the last value recorded for <key>, or empty. awk and not `sed | tail`, because the
 # sandbox PATH the selftest runs this under carries a deliberately small tool set and `tail` is not in it —
@@ -106,6 +119,58 @@ diagnose() {
   echo "      host now: $(host_facts | tr '\n' ' ')"
 }
 
+# tools_selfheal <tool>: recover from PATH DRIFT, and from nothing else.
+#
+# When the baseline was recorded by THIS running host — boot_id unchanged — and the binary it recorded
+# is still executable and still reports a version at or above the floor, put its directory back on
+# PATH and carry on. Today's incident becomes a recorded note instead of exit 5.
+#
+# WHY THIS IS NOT THE THING THE KIT REFUSES TO DO. opread.sh declines to ACQUIRE credential tooling,
+# and that still stands: `repair` is an operator's word. This acquires nothing. There is no missing
+# binary to fetch — the one we recorded is still on the disk we recorded it from. Refusing here would
+# stop a merge over a PATH entry a previous shell set by hand, and the repair a refusal invites is the
+# WRONG repair for this cause: installing a second op would paper over a PATH problem by acquiring a
+# duplicate credential tool, which is the audit problem the refusal exists to prevent.
+#
+# Deletion and reimage still refuse, because those genuinely need something fetched.
+#
+# It re-reads the version AT the recorded path rather than trusting the recorded version, and applies
+# the same floor, so a path whose binary has since been replaced by an older one does not slip in
+# under a recovery.
+#
+# KNOWN LIMIT, stated rather than left for a reader to find. A recorded path under a world-writable
+# directory such as /tmp can be replaced by any process on the host between two runs; the boot_id test
+# proves the same boot, not the same bytes. On a single-tenant pod that is a small risk and the
+# alternative is refusing every drift. On a shared host, pin the tools where only root can write.
+tools_selfheal() {
+  local tool=$1 bf had_path had_boot now_boot v floor
+  bf=$(baseline_file); [ -r "$bf" ] || return 1
+  had_boot=$(bf_field "$bf" boot_id); now_boot=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)
+  [ -n "$had_boot" ] && [ "$had_boot" = "$now_boot" ] || return 1
+  had_path=$(bf_field "$bf" "${tool}_path"); [ -n "$had_path" ] && [ -x "$had_path" ] || return 1
+  v=$(tool_version "$tool" "$had_path")
+  looks_like_a_version "$v" || {
+    echo "NOTE: $tool is off PATH and the baseline's $had_path will not report a version."
+    echo "  Not recovering from it: a recovery onto a binary the kit cannot identify is worse than the drift."
+    return 1
+  }
+  floor=$(tool_floor "$tool")
+  if older_than "$v" "$floor"; then
+    echo "NOTE: $tool is off PATH and the baseline's $had_path is $v, below the $floor floor."
+    echo "  Not recovering from it: a drift recovery that quietly downgrades the tool is worse than the drift."
+    return 1
+  fi
+  PATH="$(dirname "$had_path"):$PATH"; export PATH
+  # This note is the ONLY trace a later reader gets of a run that would previously have exited 5, so it
+  # names the cause it diagnosed and the exact path it went on to use, not merely that it recovered.
+  echo "RECOVERED: cause diagnosed as PATH DRIFT — continuing on $had_path ($tool $v)."
+  echo "  $tool was not on PATH. The baseline recorded it at that path, the file is still executable and"
+  echo "  still reports $v, and boot_id is unchanged, so this is the same running host and nothing is"
+  echo "  missing. Its directory is back on PATH for this run only."
+  echo "  Nothing was installed, fetched or acquired. A deletion or a reimage would still refuse here."
+  return 0
+}
+
 # tools_preflight: every gap and every drift in ONE pass, so one run names the whole problem instead
 # of one layer of it per run. Returns 1 only when a tool is UNUSABLE; version drift below a floor is
 # printed and does not refuse, because a floor here is an exercised version and not a proven minimum.
@@ -113,6 +178,9 @@ tools_preflight() {
   local miss=0 t v p rec="" bf
   for t in op gh git; do
     p=$(command -v "$t" 2>/dev/null)
+    # PATH drift is recovered from BEFORE it is reported as missing, because in that one case nothing
+    # is missing. Everything else falls through to the refusal below.
+    [ -n "$p" ] || { tools_selfheal "$t" && p=$(command -v "$t" 2>/dev/null); }
     if [ -z "$p" ]; then
       echo "SETUP: $t is not on PATH, so the kit cannot run it on this host."
       echo "  This is a MISSING TOOL, not a refusal and not a verdict: nothing has been read or judged."
@@ -122,13 +190,15 @@ tools_preflight() {
       continue
     fi
     v=$(tool_version "$t")
-    if [ -z "$v" ]; then
-      echo "SETUP: $t is at $p but will not report a version, so the kit cannot tell what it is talking to."
+    if ! looks_like_a_version "$v"; then
+      echo "SETUP: $t is at $p and answers --version with \"$v\", which is not a version, so the kit"
+      echo "  cannot tell what it is talking to. Treated as unreadable rather than compared, because"
+      echo "  'sort -V' ranks any word above every number and would read a word as newer than any floor."
       miss=1
       continue
     fi
     rec="$rec${t}_path=$p"$'\n'"${t}_version=$v"$'\n'
-    local floor; case $t in op) floor=$OP_FLOOR ;; gh) floor=$GH_FLOOR ;; git) floor=$GIT_FLOOR ;; esac
+    local floor; floor=$(tool_floor "$t")
     if older_than "$v" "$floor"; then
       echo "NOTE: $t is $v at $p, below the $floor this kit has been run with."
       echo "  Not a refusal: below an exercised version is UNKNOWN, not proven broken. Worth knowing before"
@@ -141,6 +211,7 @@ tools_preflight() {
   # Only a clean pass writes the baseline. A run that could not read a tool must not overwrite the
   # last reading that worked, because that reading is the only thing the next failure can compare to.
   bf=$(baseline_file)
+  [ -d "$K_T" ] && [ -w "$K_T" ] || return 0
   { printf 'recorded=%s\n' "$(date -u +%FT%TZ)"; printf '%s' "$rec"; host_facts; } > "$bf" 2>/dev/null || true
   return 0
 }

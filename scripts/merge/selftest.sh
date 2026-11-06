@@ -760,7 +760,13 @@ chmod +x "$sandbox/bin/gh" "$sandbox/bin/git"
 # `op` is simulated and never the real binary, so these cases hold on a runner that has never installed it —
 # and so no case here can spend a request out of the account's shared 1,000/day budget.
 # It writes a stdout sentinel and two stderr lines; block 12c reads all three.
+# The --version arm comes first and returns before the sentinel. tools.sh validates that a version read is
+# digits and dots, because `sort -V` ranks any word above every number and an unvalidated garbage string would
+# therefore read as NEWER than any floor. This fake answered --version with the sentinel and so was never a
+# version-reporting op at all; the read cases below call `read` and `service-account ratelimit`, never
+# --version, so giving it one changes nothing they assert.
 printf '%s\n' '#!/bin/bash' \
+  '[ "${1:-}" = --version ] && { printf "2.30.3\n"; exit 0; }' \
   'printf "FAKE-OP argv:%s\n" "$*" >&2' \
   'printf "FAKE-OP exported:%s\n" "$(compgen -e | sort | tr "\n" " ")" >&2' \
   'printf "SECRET-SENTINEL-ON-STDOUT\n"' \
@@ -821,6 +827,11 @@ fi
 
 # (d) op is not installed, everything else is ready. Setup, reported BEFORE any gate runs.
 #     Not exit 4: nothing has been read, denied or rate-limited, and the service account is fine.
+#     PRECONDITION, and it is load-bearing rather than housekeeping: no baseline. tools.sh recovers from
+#     PATH drift by continuing on a recorded path that is still executable, so with a baseline left over
+#     from an earlier case this host would RECOVER instead of refusing, and the case would assert nothing.
+#     The refusal being tested is the one a host with no prior good reading gets. (d2) tests the other side.
+rm -f "$sandbox/kit/tools-baseline"
 mrun "$NOOP_PATH" "$sandbox/kit" 9999
 if [ "$MRC" -eq 5 ]; then ok "a missing op binary exits 5 (setup), not 4 (credential)"
 else bad "a missing op binary exits $MRC — 4 would be a credential refusal and 3 a verdict, and neither happened: $MOUT"; fi
@@ -839,8 +850,20 @@ mrun "$WITHOP_PATH" "$sandbox/kit" 9999
 if [ "$MRC" -ne 5 ] && ! says "SETUP:"; then ok "a kit with op, a token and a clearance passes the preflight"
 else bad "a correctly set up host still reads as a setup gap (rc=$MRC), so the preflight refuses everything: $MOUT"; fi
 
+# (d2) The 2026-11-06 incident itself, end to end through merge.sh. op is off PATH, and the baseline this kit
+#      recorded names a path that is still executable on the same boot. That is PATH DRIFT, nothing is missing,
+#      and the run must CONTINUE on the recorded path rather than exit 5. Before the recovery existed this was
+#      a setup refusal, four merges after a lane had been using op from a hand-added directory.
+printf 'recorded=2026-11-06T00:00:00Z\nop_path=%s\nop_version=2.30.3\ngh_path=%s\ngh_version=2.103.0\ngit_path=%s\ngit_version=2.43.0\nboot_id=%s\n' \
+  "$sandbox/fake/op" "$sandbox/bin/gh" "$sandbox/bin/git" "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" > "$sandbox/kit/tools-baseline"
+mrun "$NOOP_PATH" "$sandbox/kit" 9999
+if [ "$MRC" -ne 5 ] && says "PATH DRIFT"; then ok "op off PATH with a usable baseline recovers and the run continues past the preflight"
+else bad "op off PATH with a usable baseline still exits $MRC instead of continuing on the recorded path: $MOUT"; fi
+if says "$sandbox/fake/op"; then ok "the recovered run names the path it continued on"
+else bad "the recovered run does not name the path it continued on: $MOUT"; fi
+
 echo
-echo "tools.sh checks the kit's own tools by version, and tells three causes apart:"
+echo "tools.sh checks the kit's own tools by version, tells three causes apart, and recovers from one:"
 # On 2026-11-06 four merges ran with op resolving to /tmp/opbin/op at 2.30.0, from a directory an earlier shell
 # had put on PATH by hand. The next shell did not inherit it, so `command -v op` found nothing and the kit said
 # MISSING TOOL. That was true of the host it could see and useless as a diagnosis: the binary had not been
@@ -860,7 +883,10 @@ mkdir -p "$sandbox/nogh"; for t in bash sed tr grep cat cut head awk sort date m
   p=$(command -v "$t") && ln -sf "$p" "$sandbox/nogh/$t"
 done
 ln -sf "$sandbox/bin/git" "$sandbox/nogh/git"; ln -sf "$sandbox/fake/op" "$sandbox/nogh/op"
-mrun "$sandbox/nogh" "$sandbox/kit" 9999
+# Same precondition as (d), for the same reason: with a baseline recording gh at a path that still exists,
+# this host would recover rather than refuse. A fresh kit so the refusal is the thing under test.
+mkdir -p "$sandbox/kit-nobase"; cp "$sandbox/kit/merge-allow" "$sandbox/kit-nobase/merge-allow"
+mrun "$sandbox/nogh" "$sandbox/kit-nobase" 9999
 if [ "$MRC" -eq 5 ] && says "gh is not on PATH"; then ok "a missing gh exits 5 (setup) and names gh"
 else bad "a missing gh exits $MRC and does not name gh, so it is not reported as the setup gap it is: $MOUT"; fi
 for sentence in "VERDICT" "NO-GO" "PAT read failed"; do
@@ -880,19 +906,58 @@ else bad "a clean check left no usable baseline, so the next failure has nothing
 
 # (h) A FAILING check must not overwrite a good baseline. If it did, the first failure would destroy the
 #     reading that explains it, and every cause below would collapse into "no baseline on this host".
+#     The failure has to be one the recovery cannot rescue, or there is no failing check to test: a recorded
+#     path that is GONE is a deletion, and deletions refuse by design.
+printf 'recorded=2026-11-06T00:00:00Z\nop_path=%s\nop_version=2.30.3\nboot_id=%s\n' "$sandbox/absent/op" "$now_boot" > "$tkit/tools-baseline"
 good=$(cat "$tkit/tools-baseline")
-trun "$sandbox/nogh" "$tkit"
+trun "$NOOP_PATH" "$tkit"
+if [ "$TRC" -ne 0 ]; then ok "a deletion is a failing check, so there is something for this case to test"
+else bad "the check passed, so this case asserts nothing about a failing one: $TOUT"; fi
 if [ "$(cat "$tkit/tools-baseline")" = "$good" ]; then ok "a failing check leaves the last good baseline intact"
 else bad "a failing check overwrote the baseline, destroying the evidence that explains the failure"; fi
 
 # (i) PATH DRIFT: the recorded binary is still on disk and executable, and PATH no longer reaches it. This is
-#     the one that actually happened, and the one a presence check reports as a deletion.
-printf 'recorded=2026-11-06T00:00:00Z\nop_path=%s\nop_version=2.30.0\nboot_id=%s\n' "$sandbox/fake/op" "$now_boot" > "$tkit/tools-baseline"
+#     the one that actually happened. It RECOVERS rather than refuses: nothing is missing, so there is nothing
+#     to fetch, and the repair a refusal would invite — installing a second op — papers over a PATH problem by
+#     acquiring a duplicate credential tool, which is the thing opread.sh refuses to do. Deletion and reimage
+#     still refuse, and the cases below hold that line.
+mkdir -p "$sandbox/drifted"
+printf '%s\n' '#!/bin/bash' '[ "${1:-}" = --version ] && { echo "2.30.3"; exit 0; }' \
+  'echo "DRIFTED-OP refuses: $*" >&2; exit 1' > "$sandbox/drifted/op"
+chmod +x "$sandbox/drifted/op"
+printf 'recorded=2026-11-06T00:00:00Z\nop_path=%s\nop_version=2.30.3\nboot_id=%s\n' "$sandbox/drifted/op" "$now_boot" > "$tkit/tools-baseline"
 trun "$NOOP_PATH" "$tkit"
-if tsays "PATH DRIFT"; then ok "a binary still on disk but off PATH is diagnosed as PATH drift"
-else bad "a binary still on disk but off PATH is not diagnosed as PATH drift: $TOUT"; fi
+if [ "$TRC" -eq 0 ]; then ok "PATH drift recovers and the check passes instead of exiting 5"
+else bad "PATH drift still refuses (rc=$TRC), so a run with nothing missing is stopped anyway: $TOUT"; fi
+if tsays "PATH DRIFT"; then ok "the recovery names the cause it diagnosed"
+else bad "the recovery does not name PATH drift as the cause, leaving no trace of why a run continued: $TOUT"; fi
+if tsays "$sandbox/drifted/op"; then ok "the recovery names the exact path it continued on"
+else bad "the recovery does not name the path it continued on, which is the only trace a later reader gets: $TOUT"; fi
 if tsays "DELETED" || tsays "REIMAGE"; then bad "PATH drift was also reported as a deletion or a reimage, so the three are not separated: $TOUT"
 else ok "PATH drift is not also reported as a deletion or a reimage"; fi
+
+# (i2) The recovery must not reach for a binary it cannot identify. This stub answers --version with a word,
+#      and `sort -V` ranks a word above every number — so an unvalidated read would make it look NEWER than
+#      any floor and recover onto it. Validation is what stops that, and this is the case that holds it.
+mkdir -p "$sandbox/mutedrift"
+printf '%s\n' '#!/bin/bash' '[ "${1:-}" = --version ] && { echo "NOT-A-VERSION"; exit 0; }' 'exit 1' > "$sandbox/mutedrift/op"
+chmod +x "$sandbox/mutedrift/op"
+printf 'recorded=2026-11-06T00:00:00Z\nop_path=%s\nop_version=2.30.3\nboot_id=%s\n' "$sandbox/mutedrift/op" "$now_boot" > "$tkit/tools-baseline"
+trun "$NOOP_PATH" "$tkit"
+if [ "$TRC" -ne 0 ] && ! tsays "RECOVERED"; then ok "a recorded binary that will not report a version is not recovered onto"
+else bad "the recovery accepted a binary whose version it could not read, so a word ranked above every floor: $TOUT"; fi
+
+# (i3) The recovery must not quietly DOWNGRADE. A recorded path whose binary is now below the floor is worse
+#      than the drift it would fix, so it declines and says which version it found.
+mkdir -p "$sandbox/olddrifted"
+printf '%s\n' '#!/bin/bash' '[ "${1:-}" = --version ] && { echo "2.9.0"; exit 0; }' 'exit 1' > "$sandbox/olddrifted/op"
+chmod +x "$sandbox/olddrifted/op"
+printf 'recorded=2026-11-06T00:00:00Z\nop_path=%s\nop_version=2.30.3\nboot_id=%s\n' "$sandbox/olddrifted/op" "$now_boot" > "$tkit/tools-baseline"
+trun "$NOOP_PATH" "$tkit"
+if [ "$TRC" -ne 0 ] && ! tsays "RECOVERED"; then ok "a recorded binary below the floor is not recovered onto"
+else bad "the recovery downgraded the tool to a version below its floor: $TOUT"; fi
+if tsays "2.9.0"; then ok "the declined recovery says which version it found"
+else bad "the declined recovery does not say what it found, so the reader cannot tell why it declined: $TOUT"; fi
 
 # (j) DELETED: same running host, recorded path gone from it. Worth knowing WHAT removed it before reinstalling.
 printf 'recorded=2026-11-06T00:00:00Z\nop_path=%s\nop_version=2.30.0\nboot_id=%s\n' "$sandbox/absent/op" "$now_boot" > "$tkit/tools-baseline"
