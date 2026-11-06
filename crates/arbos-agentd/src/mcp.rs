@@ -965,13 +965,7 @@ async fn call_tool(
                 payload: json!({ "kind": "draft_message", "channel": channel, "to": to, "subject": subject, "body": body }),
             };
             match a
-                .begin_approval(
-                    &chat_for_scratch,
-                    req,
-                    WaitMode::Deferred,
-                    None,
-                    crate::approval::approval_ttl_ms(),
-                )
+                .begin_approval(&chat_for_scratch, req, WaitMode::Deferred, None)
                 .await
             {
                 Ok(id) => text_result(format!(

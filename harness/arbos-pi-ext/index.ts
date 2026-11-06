@@ -182,10 +182,12 @@ export function stopJobText(result: StopJobResult | undefined): string {
 // Mirrors `arbos_core::approval::SHELL_TOOLS`; the classification itself happens in agentd.
 const SHELL_TOOLS = new Set(["bash", "shell", "run_command", "execute_command"]);
 const APPROVAL_POLL_MS = Number(process.env.ARBOS_APPROVAL_POLL_MS ?? 1500);
-// Fallback only: agentd sends the real cap as `waitMs` on the pending reply, because the card's
-// `expires_at` has to be the same number the waiter uses. Keeping a second copy of the default
-// here is what made a card advertise 24 hours and die at 14 minutes (Test5 round 5, bug R).
-const APPROVAL_WAIT_MS = Number(process.env.ARBOS_APPROVAL_WAIT_MS ?? 14 * 60 * 1000); // under the turn deadline
+// Fallback only: agentd sends the real grace as `waitMs` on the pending reply. Keeping a second
+// copy of the default here is what made a card advertise 24 hours and die at 14 minutes (Test5
+// round 5, bug R), so this one matches agentd's park grace rather than being a cap of its own.
+// It bounds how long this call waits; it has never bounded the card, and the card no longer has
+// a deadline at all.
+const APPROVAL_WAIT_MS = Number(process.env.ARBOS_APPROVAL_WAIT_MS ?? 10_000);
 // Code mode (D86): agentd sets ARBOS_CODE_MODE=on|off per pi spawn (flag file / box env, default off).
 const CODE_MODE = (process.env.ARBOS_CODE_MODE ?? "off").trim().toLowerCase() === "on";
 // Default deadline of a `codemode` script when the model sets none (code mode on): the turn deadline.
@@ -201,7 +203,10 @@ const STABLE_PREFIX = (process.env.ARBOS_STABLE_PREFIX ?? "off").trim().toLowerC
 const CONTEXT_OPEN = "[Arbos context for this turn — working set, skills, project memory. Not from the user.]";
 const CONTEXT_CLOSE = "[End of Arbos context]";
 
-type ApprovalState = "allowed" | "pending" | "approved" | "rejected" | "expired";
+// `expired` is legacy: agentd stopped producing it when cards stopped expiring, but a stored row
+// from before that can still carry it. `cancelled` is a card closed because the work was called
+// off.
+type ApprovalState = "allowed" | "pending" | "approved" | "rejected" | "expired" | "cancelled";
 
 type HookResponse = { ok: boolean; error?: string; terminate?: boolean; text?: string; [k: string]: unknown };
 
@@ -487,11 +492,13 @@ export default function arbosPiExt(pi: ExtensionAPI) {
         if (typeof cur.reason === "string") reason = cur.reason;
       }
     }
-    if (state === "pending" && first.park === true) {
-      // A main-session call: stop holding the chat's turn. The card stays answerable for its
-      // full deadline and agentd runs the call itself once it is approved, so this is a park
-      // rather than a failure. Holding the turn for the whole wait is Test5 round 5 bug R —
-      // fourteen minutes in which that chat could only answer from the quick lane.
+    if (state === "pending") {
+      // Nobody answered inside the grace, so stop holding things: a main-session call is
+      // holding the chat's turn, and a worker is holding a slot, a child process and an open
+      // job. The card stays answerable — it has no deadline — and agentd runs the call itself
+      // once it is approved, so this is a park rather than a failure. Holding on for the whole
+      // wait is Test5 round 5 bug R: fourteen minutes in which that chat could only answer from
+      // the quick lane, and the card was then closed unanswered.
       const parked = await hook("/hook/approval-park", { approvalId });
       if (parked?.ok && parked.parked === true) {
         audit({ kind: "approval_parked", session: sessionId, tool, call_id: callId, approval_id: approvalId });
@@ -499,9 +506,6 @@ export default function arbosPiExt(pi: ExtensionAPI) {
       }
       // Decided inside the grace, or already gone: fall through on the state agentd reports.
       if (typeof parked?.state === "string") state = parked.state as ApprovalState;
-    } else if (state === "pending") {
-      // Stopped waiting: agentd expires the card so the UI shows the timeout promptly.
-      void hook("/hook/approval-abandon", { approvalId });
     }
     audit({ kind: "approval_result", session: sessionId, tool, call_id: callId, approval_id: approvalId, state });
     switch (state) {
@@ -513,11 +517,16 @@ export default function arbosPiExt(pi: ExtensionAPI) {
           block: true,
           reason: `The user rejected this action (approval ${approvalId})${reason ? `: ${reason}` : ""}. Do not retry it unchanged; tell the user.`,
         };
+      case "cancelled":
+        return {
+          block: true,
+          reason: `This work was cancelled, so its approval card (${approvalId}) was closed and nothing ran. Whatever it was meant to post, send or change is NOT done.`,
+        };
       case "expired":
       case "pending":
         return {
           block: true,
-          reason: `The approval for this action (${approvalId}) was not decided in time. Nothing ran and nothing will run or "confirm" later: whatever it was meant to post, send or change is NOT done. Tell the user it needs their approval; never say it was posted or sent.`,
+          reason: `Nothing ran: this needs the user's approval and card ${approvalId} is waiting for them. Do not call it again and do not wait for it — say in one short sentence that it needs their approval, then end your turn. When they approve, Arbos runs the call and gives you the result. Whatever it was meant to post, send or change is NOT done yet; never say it was posted or sent.`,
         };
       default: {
         const _exhaustive: never = state;

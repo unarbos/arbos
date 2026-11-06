@@ -336,6 +336,19 @@ impl Store {
         if !has_steers {
             c.execute_batch("ALTER TABLE jobs ADD COLUMN steers TEXT NOT NULL DEFAULT '[]'")?;
         }
+        // Additive migration: when a late approval's re-run was let through without a second
+        // card. This is the whole of the grant — it used to be a ten-minute entry in memory,
+        // which a restart lost and a long wait for a worker slot outlived, both of which asked
+        // the user to approve the same thing twice. Nullable, because "never used" is the state
+        // most rows are in, and a row that predates this column has not been used either.
+        let has_grant_consumed: bool = c
+            .prepare("PRAGMA table_info(approvals)")?
+            .query_map([], |r| r.get::<_, String>(1))?
+            .filter_map(Result::ok)
+            .any(|n| n == "grant_consumed_at");
+        if !has_grant_consumed {
+            c.execute_batch("ALTER TABLE approvals ADD COLUMN grant_consumed_at INTEGER")?;
+        }
         Ok(Self(Arc::new(Mutex::new(c))))
     }
 
@@ -1601,7 +1614,12 @@ impl Store {
 
     // ---- approvals (feature approve) ------------------------------------------------------------
 
-    #[allow(clippy::too_many_arguments)]
+    /// `expires_at` is written `0`: this card has no deadline and never gets one.
+    ///
+    /// The column stays because rows written before this change hold a real time in it and the
+    /// relay's outside-agent window still has deadlines of its own. `0` is the honest value for
+    /// "no deadline" and is in the past, so a legacy reader that compares it against the clock
+    /// draws a closed card rather than inventing a future one.
     pub fn insert_approval(
         &self,
         id: &str,
@@ -1610,12 +1628,11 @@ impl Store {
         title: &str,
         risk: &str,
         payload: &Value,
-        expires_at: i64,
     ) -> Result<()> {
         self.with(|c| {
             c.execute(
-                "INSERT INTO approvals(id, chat_id, message_id, title, risk, payload, created_at, expires_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
-                params![id, chat_id, message_id, title, risk, payload.to_string(), now_ms(), expires_at],
+                "INSERT INTO approvals(id, chat_id, message_id, title, risk, payload, created_at, expires_at) VALUES (?1,?2,?3,?4,?5,?6,?7,0)",
+                params![id, chat_id, message_id, title, risk, payload.to_string(), now_ms()],
             )
             .map(|_| ())
         })
@@ -1624,7 +1641,7 @@ impl Store {
     pub fn approval(&self, id: &str) -> Result<Option<ApprovalRow>> {
         self.with(|c| {
             c.query_row(
-                "SELECT id, chat_id, message_id, title, risk, payload, state, created_at, expires_at, decided_at, decided_by, reason FROM approvals WHERE id = ?1",
+                "SELECT id, chat_id, message_id, title, risk, payload, state, created_at, expires_at, decided_at, decided_by, reason, grant_consumed_at FROM approvals WHERE id = ?1",
                 params![id],
                 approval_row,
             )
@@ -1634,9 +1651,74 @@ impl Store {
 
     pub fn pending_approvals(&self) -> Result<Vec<ApprovalRow>> {
         self.with(|c| {
-            let mut st = c.prepare("SELECT id, chat_id, message_id, title, risk, payload, state, created_at, expires_at, decided_at, decided_by, reason FROM approvals WHERE state = 'pending' ORDER BY created_at")?;
+            let mut st = c.prepare("SELECT id, chat_id, message_id, title, risk, payload, state, created_at, expires_at, decided_at, decided_by, reason, grant_consumed_at FROM approvals WHERE state = 'pending' ORDER BY created_at")?;
             let rows = st.query_map([], approval_row)?;
             rows.collect()
+        })
+    }
+
+    /// The open card one **worker session** is waiting on, if any.
+    ///
+    /// Worker grain, deliberately. The retained-worker bound asks this about one session id, and
+    /// a job-shaped answer would be wrong there: `job_worker_ids` is every worker a job has ever
+    /// been given, so "this job has a card" names a lineage rather than the worker that is
+    /// actually parked on it.
+    pub fn pending_approval_for_session(&self, session_id: &str) -> Result<Option<ApprovalRow>> {
+        Ok(self.pending_approvals()?.into_iter().find(|r| {
+            r.payload.get("session_id").and_then(Value::as_str) == Some(session_id)
+        }))
+    }
+
+    /// The open card a **job** is parked on, if any: it has no worker running and will not get
+    /// one until the user answers.
+    ///
+    /// Job grain, for the two questions that really are about the job rather than a worker — the
+    /// per-agent capacity cap, and the boot reclaim that must leave a parked job alone instead
+    /// of restarting its work from the brief.
+    pub fn pending_approval_for_job(&self, job_id: &str) -> Result<Option<ApprovalRow>> {
+        Ok(self
+            .pending_approvals()?
+            .into_iter()
+            .find(|r| r.payload.get("job_id").and_then(Value::as_str) == Some(job_id)))
+    }
+
+    /// Every approved card whose single-use grant is still unclaimed, newest first.
+    ///
+    /// This is the grant: there is no second copy of it in memory to fall out of step, and it is
+    /// as durable as the decision itself, so a restart or a long wait for a worker slot between
+    /// the answer and the re-run cannot ask the user to approve the same call twice.
+    pub fn unconsumed_grants(&self) -> Result<Vec<ApprovalRow>> {
+        self.with(|c| {
+            let mut st = c.prepare("SELECT id, chat_id, message_id, title, risk, payload, state, created_at, expires_at, decided_at, decided_by, reason, grant_consumed_at FROM approvals WHERE state = 'approved' AND grant_consumed_at IS NULL ORDER BY decided_at DESC")?;
+            let rows = st.query_map([], approval_row)?;
+            rows.collect()
+        })
+    }
+
+    /// Every approved card whose grant has already been claimed, newest use first. Read only to
+    /// explain a second card for the same call: that first attempt was approved and did not
+    /// finish.
+    pub fn consumed_grants(&self) -> Result<Vec<ApprovalRow>> {
+        self.with(|c| {
+            let mut st = c.prepare("SELECT id, chat_id, message_id, title, risk, payload, state, created_at, expires_at, decided_at, decided_by, reason, grant_consumed_at FROM approvals WHERE state = 'approved' AND grant_consumed_at IS NOT NULL ORDER BY grant_consumed_at DESC")?;
+            let rows = st.query_map([], approval_row)?;
+            rows.collect()
+        })
+    }
+
+    /// Claim an approved card's grant. `true` means this caller got it; `false` means the row was
+    /// not approved, or somebody else already used it.
+    ///
+    /// Single use is enforced by the database rather than by holding a lock across the re-run:
+    /// the same conditional-update idiom as [`Store::decide_approval`], where the first writer
+    /// wins and every later one sees zero rows affected.
+    pub fn consume_grant(&self, id: &str) -> Result<bool> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE approvals SET grant_consumed_at = ?2 WHERE id = ?1 AND state = 'approved' AND grant_consumed_at IS NULL",
+                params![id, now_ms()],
+            )
+            .map(|n| n > 0)
         })
     }
 
@@ -1687,10 +1769,14 @@ pub struct ApprovalRow {
     pub payload: Value,
     pub state: String,
     pub created_at: i64,
+    /// `0` for every card this version writes: a card has no deadline. Legacy rows carry the
+    /// time they were going to be closed at.
     pub expires_at: i64,
     pub decided_at: Option<i64>,
     pub decided_by: Option<String>,
     pub reason: Option<String>,
+    /// When this card's single-use grant was claimed by a re-run, if it has been.
+    pub grant_consumed_at: Option<i64>,
 }
 
 fn approval_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ApprovalRow> {
@@ -1707,6 +1793,7 @@ fn approval_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ApprovalRow> {
         decided_at: r.get(9)?,
         decided_by: r.get(10)?,
         reason: r.get(11)?,
+        grant_consumed_at: r.get(12)?,
     })
 }
 
