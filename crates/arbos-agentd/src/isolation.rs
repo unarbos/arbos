@@ -421,6 +421,133 @@ fn marked_procs(mark: &str) -> Vec<u32> {
     out
 }
 
+/// Every process carrying a worker mark, with the value it carries.
+///
+/// [`marked_procs`] answers "where is this worker's tree", which a cancel asks because it has a
+/// job row naming the worker. This answers the question a cancel cannot ask: **whose** is this
+/// process, for a process nobody named. Bug AK left a loop running under a worker that had died,
+/// with no job row to reach it by — the mark was the only thing that still said where it came
+/// from, and nothing read marks it had not been given.
+///
+/// Same `/proc` read and the same skip-what-cannot-be-read rule as [`marked_procs`].
+pub fn marked_procs_all() -> Vec<(u32, String)> {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    let prefix = format!("{WORKER_MARK_ENV}=");
+    let mut out = Vec::new();
+    for e in entries.flatten() {
+        let Ok(pid) = e.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        let Ok(environ) = std::fs::read(e.path().join("environ")) else {
+            continue;
+        };
+        let found = environ.split(|b| *b == 0).find_map(|entry| {
+            let text = std::str::from_utf8(entry).ok()?;
+            text.strip_prefix(&prefix).map(str::to_owned)
+        });
+        if let Some(mark) = found {
+            out.push((pid, mark));
+        }
+    }
+    out
+}
+
+/// The session id a mark names, for a mark that names one at all.
+///
+/// Marks are written in exactly one place ([`crate::rpc_child::RpcChild::spawn`]) and come in
+/// two kinds: `<harness>:<session id>` for a worker, and a bare name for a child that is not a
+/// session — `pi-main` for the box's own agent, `fake-pi` and `fake-pi-<tag>` in tests. The bare
+/// names are why this returns an `Option` instead of the caller splitting on `:` and hoping.
+pub fn session_of(mark: &str) -> Option<&str> {
+    let (_harness, session) = mark.split_once(':')?;
+    (!session.is_empty()).then_some(session)
+}
+
+/// Processes whose worker mark names a session that is **provably** a worker's and **provably**
+/// over: work nobody can ever reach again, because the only handle that could have named it
+/// died with its worker.
+///
+/// `is_dead_session` is the caller's, because only the box knows which sessions it still holds
+/// children for. Deriving the keep set this way rather than listing exclusions is what makes it
+/// safe to extend: another job's tree is spared because its session is live, not because
+/// someone remembered to add it to a list.
+///
+/// **The polarity is the safety property.** Nothing is collected without positive evidence on
+/// both halves — that the mark names a session at all, and that the session is over. Everything
+/// else is kept, including a mark this function has never seen. The alternative, exempting
+/// known-safe names, is one catastrophe per name anybody forgets: the main pi child is spawned
+/// through `RpcChild` exactly like a worker, so it and **everything it runs** carry the mark
+/// `pi-main`, and a classifier that looked that up as a worker session, found nothing and called
+/// it garbage would SIGKILL the box's own agent mid-turn. `pi-main` is not special here. It is
+/// simply one of the marks that never proves itself dead, which is also true of every name a
+/// future caller invents.
+pub fn orphan_marked_procs(is_dead_session: impl Fn(&str) -> bool) -> Vec<(u32, String)> {
+    let me = std::process::id();
+    let mut out: Vec<(u32, String)> = marked_procs_all()
+        .into_iter()
+        .filter(|(pid, mark)| {
+            *pid > 1 && *pid != me && session_of(mark).is_some_and(&is_dead_session)
+        })
+        .collect();
+    out.sort_unstable();
+    out
+}
+
+/// Kill every process left by a worker whose session is over, and read the kernel back to say
+/// what is still alive.
+///
+/// The same discipline as [`ProcessTree::kill`], and for the same reason: the survivors are the
+/// output that matters. Bug AE was a cancel reporting a clean kill from a sweep that never
+/// looked, so a reaper that cannot account for a process must name it rather than let the box
+/// go on claiming everything is accounted for.
+///
+/// Re-enumerated between rounds, so a process the set forks while it is dying is caught on the
+/// next pass instead of slipping between the read and the signal.
+pub fn reap_orphan_workers(is_dead_session: impl Fn(&str) -> bool) -> Sweep {
+    let found = orphan_pids(&is_dead_session);
+    let witnesses: Vec<Witness> = found.iter().copied().filter_map(Witness::of).collect();
+    for pid in &found {
+        signal(*pid);
+    }
+    let mut alive = Vec::new();
+    for attempt in 0..REAP_TRIES {
+        if found.is_empty() {
+            break;
+        }
+        std::thread::sleep(REAP_WAIT);
+        alive = still_alive(&witnesses);
+        for pid in orphan_pids(&is_dead_session) {
+            if !alive.contains(&pid) {
+                alive.push(pid);
+            }
+        }
+        if alive.is_empty() {
+            break;
+        }
+        if attempt < REAP_TRIES - 1 {
+            for pid in &alive {
+                signal(*pid);
+            }
+        }
+    }
+    alive.sort_unstable();
+    Sweep {
+        found: found.len(),
+        killed: found.iter().filter(|p| !alive.contains(p)).count(),
+        survivors: alive,
+        checked: true,
+    }
+}
+
+fn orphan_pids(is_dead_session: &impl Fn(&str) -> bool) -> Vec<u32> {
+    orphan_marked_procs(is_dead_session)
+        .into_iter()
+        .map(|(pid, _)| pid)
+        .collect()
+}
+
 #[derive(Debug, Clone)]
 pub struct Isolation {
     pub enabled: bool,
