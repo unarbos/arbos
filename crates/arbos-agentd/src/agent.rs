@@ -5039,6 +5039,17 @@ impl Agent {
             .ok_or(err)
     }
 
+    /// Whether a correction sent into this chat right now has a job to reach: one that
+    /// [`Self::steer_job_in`] would accept, so running, or finished so recently that the file it
+    /// posted can still be replaced.
+    ///
+    /// The quick lane asks before it decides whether a `[guide]` can stay one (bug AG). It is
+    /// this resolver and not a plainer "is a job open" so the lane and `handle_steer` cannot
+    /// disagree: a correction the lane keeps has somewhere to land by construction.
+    pub(crate) fn correction_has_a_job_to_reach(&self, chat_id: &str) -> bool {
+        self.resolve_steer_target(chat_id, "latest").is_ok()
+    }
+
     /// A correction for a *running* job that has already put a file in the chat: mark that card
     /// superseded, so the corrected file which follows replaces it rather than standing beside it.
     ///
@@ -5699,9 +5710,6 @@ impl Agent {
         Ok(())
     }
 
-    /// `steer` / `guide` runs out of band (no turn lock): inject the user's words into the
-    /// currently running pi turn via `RpcCommand::Steer`. When nothing is running, fall back to
-    /// a normal `send` so a late Guide still lands.
     /// This agent as the reply-to note names it (own rows vs. another agent's).
     fn reply_me(&self) -> crate::reply::Me<'_> {
         crate::reply::Me {
@@ -5710,6 +5718,10 @@ impl Agent {
         }
     }
 
+    /// `steer` / `guide` runs out of band (no turn lock): inject the user's words into the
+    /// currently running pi turn via `RpcCommand::Steer`. When no turn of this chat is running,
+    /// offer them to the chat's job instead, and fall back to a normal `send` only when there is
+    /// nothing at all to take them, so a late Guide still lands.
     pub(crate) async fn handle_steer(
         self: &Arc<Self>,
         chat_id: &str,
@@ -5737,8 +5749,29 @@ impl Agent {
             let tl = self.turn.lock().await;
             matches!(tl.as_ref(), Some(t) if t.chat_id == chat_id)
         };
+        let body = match &reply_note {
+            Some(note) => format!("{note}{user_text}"),
+            None => user_text.clone(),
+        };
         if !running_here {
-            tracing::info!(chat_id, "steer: no turn running; falling back to send");
+            // No turn of this chat to steer does not mean nothing is holding the work. Bug AG:
+            // rounds 13–16 each ended with about one CSV per correction for an ask that said
+            // "exactly ONE", because a correction that arrived while a *job* held the task had
+            // nowhere to go. It fell through to `handle_send`, `start_job_for_send` gave it its
+            // own worker, and that worker redid the task from scratch and posted its own file.
+            // A job's worker takes a correction the same way a turn does, and `steer_job_in`
+            // then supersedes the card the job already posted — "one ask, one file".
+            match self.steer_job_in(chat_id, "latest", &body).await {
+                Ok(out) => {
+                    tracing::info!(chat_id, %out, "steer: the chat's job took the correction");
+                    return Ok(());
+                }
+                Err(e) => tracing::info!(
+                    chat_id,
+                    why = %e,
+                    "steer: no turn and no job to take it; falling back to send"
+                ),
+            }
             return self.handle_send(chat_id, host, cmd).await;
         }
         let _ = self.store.t3_append(
@@ -5751,10 +5784,6 @@ impl Agent {
             Some(&json!({ "message_id": user_msg_id, "steer": true })),
         );
         let pi = self.pi().await?;
-        let body = match reply_note {
-            Some(note) => format!("{note}{user_text}"),
-            None => user_text,
-        };
         self.steer_running_turn(chat_id, &pi, &body).await
     }
 
