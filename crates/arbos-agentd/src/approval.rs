@@ -19,7 +19,7 @@ use tokio::sync::{oneshot, Mutex};
 use arbos_core::approval::{
     classify_tool_with, describe_tool, may_dispatch, resolve_path, ApprovalOutcome,
     ApprovalRequest, ApprovalState, PathClass, PathFacts, Risk, RiskMatch, ShellGrant,
-    APPROVAL_TTL_MS, GRANTABLE_CLASSES, WORKSPACE_ROOT,
+    APPROVAL_TTL_MS, GRANTABLE_CLASSES,
 };
 
 /// The box's view for the classifier (#1719): a truncation idiom (`: > f`, `> f`,
@@ -31,8 +31,14 @@ fn file_has_content(path: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn classify_tool(tool: &str, args: &Value) -> Option<RiskMatch> {
-    classify_tool_with(tool, args, PathFacts::with_content(&file_has_content))
+/// `workspace_root` is this agent's own project folder, which is what the deletion rule is
+/// scoped to: `Config::work_dir`, never the `/work` the pure matcher falls back to.
+fn classify_tool(tool: &str, args: &Value, workspace_root: &str) -> Option<RiskMatch> {
+    classify_tool_with(
+        tool,
+        args,
+        PathFacts::with_content(&file_has_content).in_workspace(workspace_root),
+    )
 }
 use arbos_core::doc::MessageStatus;
 use arbos_core::ids::{now_ms, ulid};
@@ -1085,7 +1091,7 @@ impl Agent {
         args: &Value,
         chat_hint: &str,
     ) -> Result<(), String> {
-        let Some(hit) = classify_tool(tool, args) else {
+        let Some(hit) = classify_tool(tool, args, &self.own_workspace_root()) else {
             return Ok(());
         };
         if let Some(granted) = self.take_grant(tool, args).await {
@@ -1148,13 +1154,12 @@ impl Agent {
     /// - a target that already exists is never recorded (an overwrite is not a creation);
     /// - a shell command the matcher reads as deleting anything records nothing, so no gated
     ///   command can widen its own exemption;
-    /// - what is recorded is one exact absolute path per spelling the matcher can produce for
-    ///   that file — relative to the workspace root, which is how `delete_targets` resolves a
-    ///   relative target, and relative to this project's own folder, which is where the file
-    ///   really is. Each spelling is checked against the disk on its own.
+    /// - what is recorded is one exact absolute path, resolved against this project's own
+    ///   folder: where the file really is, and the working directory both the harness child and
+    ///   the matcher read a relative target against. It is checked against the disk on its own.
     pub(crate) async fn note_job_write(&self, job_id: &str, tool: &str, input: &Value) {
         let tool = crate::activity::bare_tool_name(tool);
-        let work_dir = self.cfg.work_dir.to_string_lossy().to_string();
+        let work_dir = self.own_workspace_root();
         let targets: Vec<String> = if WRITE_TOOLS.contains(&tool) {
             let Some(path) = ["path", "file_path"]
                 .iter()
@@ -1162,10 +1167,7 @@ impl Agent {
             else {
                 return;
             };
-            [WORKSPACE_ROOT, &work_dir]
-                .iter()
-                .map(|cwd| resolve_path(cwd, path))
-                .collect()
+            vec![resolve_path(&work_dir, path)]
         } else if arbos_core::approval::SHELL_TOOLS.contains(&tool) {
             let cmd = ["command", "cmd"]
                 .iter()
@@ -1174,10 +1176,7 @@ impl Agent {
             if arbos_core::approval::delete_targets(cmd).is_some() {
                 return;
             }
-            [WORKSPACE_ROOT, &work_dir]
-                .iter()
-                .flat_map(|cwd| arbos_core::approval::redirect_targets(cwd, cmd))
-                .collect()
+            arbos_core::approval::redirect_targets(&work_dir, cmd)
         } else {
             return;
         };
@@ -1200,8 +1199,9 @@ impl Agent {
         args: &Value,
         job: Option<&JobRow>,
     ) -> Option<RiskMatch> {
+        let workspace_root = self.own_workspace_root();
         let Some(job) = job else {
-            return classify_tool(tool, args);
+            return classify_tool(tool, args, &workspace_root);
         };
         let mine = self
             .approvals
@@ -1217,8 +1217,19 @@ impl Agent {
             PathFacts {
                 has_content: &file_has_content,
                 created_here: &|p| mine.contains(p),
+                workspace_root: &workspace_root,
             },
         )
+    }
+
+    /// This agent's own workspace: the folder its harness children run in, and the boundary the
+    /// deletion rule is scoped to.
+    ///
+    /// Normalized, because the matcher compares it against paths it has normalized itself: a
+    /// configured root carrying a `.` or `..` segment would match none of them and would read
+    /// as a box this agent owns no part of.
+    pub(crate) fn own_workspace_root(&self) -> String {
+        resolve_path("/", &self.cfg.work_dir.to_string_lossy())
     }
 
     /// A job's card is posted where the owner can answer it — their main chat — so the job's own
@@ -1568,11 +1579,13 @@ mod shell_grant_tests {
         let chat = "01TESTCHATSHELLGRANT000000";
         agent.store.upsert_chat(chat, "Main", true, 0).unwrap();
         let _host = agent.sync.open_room(chat).await.unwrap();
-        let ws = json!({ "command": "rm -rf build" });
+        // Outside the agent's workspace, because that is the only thing a file-delete card is
+        // raised for now: a delete inside `/work/<project>` never reaches a grant.
+        let outside = json!({ "command": "rm -rf /opt/cache" });
         let any = json!({ "command": "rm -rf /etc/x" });
 
-        // No grant: the card is raised and offers "workspace" then "anywhere".
-        let v = agent.hook_approval("bash", &ws, chat, "main").await;
+        // No grant: the card is raised and offers "anywhere" alone.
+        let v = agent.hook_approval("bash", &outside, chat, "main").await;
         assert_eq!(v["state"], "pending", "{v}");
         let first = agent
             .store
@@ -1585,37 +1598,38 @@ mod shell_grant_tests {
             .iter()
             .map(|o| o["path_class"].as_str().unwrap())
             .collect();
-        assert_eq!(opts, ["workspace", "anywhere"]);
-        assert_eq!(first.payload["path_class"], "workspace");
+        assert_eq!(opts, ["anywhere"]);
+        assert_eq!(first.payload["path_class"], "anywhere");
 
-        // A scratch-only grant does not cover the workspace; a workspace grant does, and not /etc.
-        *agent.approvals.shell_grants.lock().await = vec![grant(PathClass::Scratch, None)];
-        assert_eq!(
-            agent.hook_approval("bash", &ws, chat, "main").await["state"],
-            "pending"
-        );
-        *agent.approvals.shell_grants.lock().await = vec![grant(PathClass::Workspace, None)];
-        let v = agent.hook_approval("bash", &ws, chat, "main").await;
+        // Neither a scratch nor a workspace grant reaches outside the workspace; "anywhere"
+        // does.
+        for narrow in [PathClass::Scratch, PathClass::Workspace] {
+            *agent.approvals.shell_grants.lock().await = vec![grant(narrow, None)];
+            assert_eq!(
+                agent.hook_approval("bash", &outside, chat, "main").await["state"],
+                "pending",
+                "a {} grant must not cover /opt",
+                narrow.as_str()
+            );
+        }
+        *agent.approvals.shell_grants.lock().await = vec![grant(PathClass::Anywhere, None)];
+        let v = agent.hook_approval("bash", &outside, chat, "main").await;
         assert_eq!(v["state"], "allowed", "{v}");
-        assert_eq!(v["grantId"], "g-workspace");
-        assert_eq!(
-            agent.hook_approval("bash", &any, chat, "main").await["state"],
-            "pending"
-        );
-        assert!(agent.gate_tool("bash", &ws, chat).await.is_ok());
+        assert_eq!(v["grantId"], "g-anywhere");
+        assert!(agent.gate_tool("bash", &outside, chat).await.is_ok());
 
         // Per-chat grant: only that chat.
         *agent.approvals.shell_grants.lock().await =
             vec![grant(PathClass::Anywhere, Some("other"))];
         assert_eq!(
-            agent.hook_approval("bash", &ws, chat, "main").await["state"],
+            agent.hook_approval("bash", &outside, chat, "main").await["state"],
             "pending"
         );
 
         // Revoked (the relay's list no longer has it): the card is back.
         agent.approvals.shell_grants.lock().await.clear();
         assert_eq!(
-            agent.hook_approval("bash", &ws, chat, "main").await["state"],
+            agent.hook_approval("bash", &any, chat, "main").await["state"],
             "pending"
         );
 
@@ -1642,35 +1656,36 @@ mod shell_grant_tests {
         let chat = "01TESTCHATSHELLGRANT000001";
         agent.store.upsert_chat(chat, "Main", true, 0).unwrap();
         let _host = agent.sync.open_room(chat).await.unwrap();
-        let ws = json!({ "command": "cd /work/app && rm -rf node_modules" });
-        let v = agent.hook_approval("bash", &ws, chat, "main").await;
+        let outside = json!({ "command": "cd /opt/app && rm -rf node_modules" });
+        let v = agent.hook_approval("bash", &outside, chat, "main").await;
         let id = v["approvalId"].as_str().unwrap().to_owned();
         agent
             .decide_approval_from_command(
                 &id,
                 ApprovalOutcome::Approved,
                 "dev-mac",
-                &json!({ "approvalId": id, GRANT_FIELD: "workspace" }),
+                &json!({ "approvalId": id, GRANT_FIELD: "anywhere" }),
             )
             .await
             .unwrap();
         assert_eq!(agent.approval_status(&id).await["state"], "approved");
         let grants = agent.approvals.shell_grants.lock().await.clone();
         assert_eq!(grants.len(), 1);
-        assert_eq!(grants[0].path_class, PathClass::Workspace);
+        assert_eq!(grants[0].path_class, PathClass::Anywhere);
         assert_eq!(grants[0].granted_by, "dev-mac");
         assert_eq!(grants[0].chat_id, None);
         let v = agent
-            .hook_approval("bash", &json!({ "command": "rm -rf dist" }), chat, "main")
+            .hook_approval(
+                "bash",
+                &json!({ "command": "rm -rf /opt/dist" }),
+                chat,
+                "main",
+            )
             .await;
         assert_eq!(v["state"], "allowed", "{v}");
-        assert_eq!(
-            agent
-                .hook_approval("bash", &json!({ "command": "rm -rf /opt/x" }), chat, "main")
-                .await["state"],
-            "pending"
-        );
-        // A plain approve (option A) adds nothing.
+        // A plain approve (option A) adds nothing. The grant just recorded would cover this
+        // command, so it is dropped first to get a card at all.
+        agent.approvals.shell_grants.lock().await.clear();
         let v = agent
             .hook_approval("bash", &json!({ "command": "rm -rf /opt/y" }), chat, "main")
             .await;
@@ -1684,7 +1699,7 @@ mod shell_grant_tests {
             )
             .await
             .unwrap();
-        assert_eq!(agent.approvals.shell_grants.lock().await.len(), 1);
+        assert!(agent.approvals.shell_grants.lock().await.is_empty());
         let _ = std::fs::remove_dir_all(&root);
     }
 }
@@ -1704,7 +1719,18 @@ mod job_approval_tests {
 
     /// An agent with one running job in a pinned chat, as `start_job` leaves it.
     async fn agent_running_a_job() -> (Arc<Agent>, SharedHost, std::path::PathBuf) {
-        let (agent, root) = test_agent().await;
+        job_agent(test_agent().await).await
+    }
+
+    /// The same, on a box whose workspace is not inside a scratch root, for the tests that are
+    /// about where the workspace boundary falls.
+    async fn agent_running_a_job_outside_scratch() -> (Arc<Agent>, SharedHost, std::path::PathBuf) {
+        job_agent(crate::status::tests::test_agent_outside_scratch().await).await
+    }
+
+    async fn job_agent(
+        (agent, root): (Arc<Agent>, std::path::PathBuf),
+    ) -> (Arc<Agent>, SharedHost, std::path::PathBuf) {
         agent.store.upsert_chat(CHAT, "Main", true, 0).unwrap();
         let host = agent.sync.open_room(CHAT).await.unwrap();
         agent
@@ -1834,27 +1860,33 @@ mod job_approval_tests {
     }
 
     /// The deletion rule flagged files the job itself had just made. T8's own outputs —
-    /// `out/taxi_app_curl.txt` written by a shell redirect, `out/taxi_app.zip` written by the
-    /// write tool — are exempt now. Everything around them still raises a card: a file the job
-    /// did not write, the folder holding its file, a glob, the `find … -exec rm -rf` walk, a
-    /// write over a file that was already there, a command that deletes while it redirects, and
-    /// the same delete from a session that is no job of ours.
+    /// `out/taxi_app_curl.txt`, `out/taxi_app.zip` — are not even a question now: they sit in
+    /// the job's own workspace, and nothing in there is carded.
+    ///
+    /// So what this holds is the half of #1719 that still does work. A job may also write
+    /// outside its workspace, and there a file it created itself is exempt while everything
+    /// around it keeps its card: a file the job did not write, the folder holding its file, a
+    /// glob, a write over a file that was already there, a command that deletes while it
+    /// redirects, and the same delete from a session that is no job of ours.
     #[tokio::test]
     async fn a_job_deleting_a_file_it_created_itself_raises_no_card() {
-        let (agent, _host, root) = agent_running_a_job().await;
+        let (agent, _host, root) = agent_running_a_job_outside_scratch().await;
+        // A folder beside this agent's workspace: another project's, as far as the rule is
+        // concerned, so a delete in it needs a card unless the exemption carries it.
+        let outside = root.join("01TESTOTHERPROJECT00000000").join("out");
+        let out = |name: &str| outside.join(name).to_string_lossy().to_string();
         agent
             .note_job_write(
                 JOB,
                 "bash",
-                &json!({ "command": "curl -sS https://example.invalid/x > out/taxi_app_curl.txt" }),
+                &json!({ "command": format!("curl -sS https://example.invalid/x > {}", out("taxi_app_curl.txt")) }),
             )
             .await;
         agent
-            .note_job_write(JOB, "write", &json!({ "path": "out/taxi_app.zip" }))
+            .note_job_write(JOB, "write", &json!({ "path": out("taxi_app.zip") }))
             .await;
-        let state = |cmd: &str| {
+        let state = |cmd: String| {
             let agent = agent.clone();
-            let cmd = cmd.to_owned();
             async move {
                 agent
                     .hook_approval("bash", &json!({ "command": cmd }), WORKER, "subagent")
@@ -1864,57 +1896,116 @@ mod job_approval_tests {
                     .to_owned()
             }
         };
-        assert_eq!(state("rm -f out/taxi_app_curl.txt").await, "allowed");
-        assert_eq!(state("rm -f out/taxi_app.zip").await, "allowed");
-        assert_eq!(state("rm -f out/vendor.zip").await, "pending");
         assert_eq!(
-            state("rm -f out/taxi_app.zip out/vendor.zip").await,
+            state(format!("rm -f {}", out("taxi_app_curl.txt"))).await,
+            "allowed"
+        );
+        assert_eq!(
+            state(format!("rm -f {}", out("taxi_app.zip"))).await,
+            "allowed"
+        );
+        assert_eq!(
+            state(format!("rm -f {}", out("vendor.zip"))).await,
+            "pending"
+        );
+        assert_eq!(
+            state(format!(
+                "rm -f {} {}",
+                out("taxi_app.zip"),
+                out("vendor.zip")
+            ))
+            .await,
             "pending",
             "one file it did not write keeps the card"
         );
         assert_eq!(
-            state("rm -rf out").await,
+            state(format!("rm -rf {}", outside.display())).await,
             "pending",
             "the folder that holds its file is not its file"
         );
         assert_eq!(
-            state("rm -f out/*.zip").await,
+            state(format!("rm -f {}", out("*.zip"))).await,
             "pending",
             "a glob is not an exact path"
-        );
-        assert_eq!(
-            state("find . -name __pycache__ -exec rm -rf {} +").await,
-            "pending",
-            "a walk over a tree names no file this job can be shown to have written"
         );
         // A command that deletes records nothing, so no gated command widens its own exemption.
         agent
             .note_job_write(
                 JOB,
                 "bash",
-                &json!({ "command": "rm -f out/old.zip > out/clean.log" }),
+                &json!({ "command": format!("rm -f {} > {}", out("old.zip"), out("clean.log")) }),
             )
             .await;
-        assert_eq!(state("rm -f out/clean.log").await, "pending");
+        assert_eq!(
+            state(format!("rm -f {}", out("clean.log"))).await,
+            "pending"
+        );
         // A write over a file that is already there creates nothing, so it records nothing —
         // this crate's own manifest stands in for a file the job found rather than made.
         let already_there = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml");
         agent
             .note_job_write(JOB, "write", &json!({ "path": already_there }))
             .await;
-        assert_eq!(state(&format!("rm -f {already_there}")).await, "pending");
+        assert_eq!(state(format!("rm -f {already_there}")).await, "pending");
         // The same delete from a session that is no job of ours: nothing is exempt.
         assert_eq!(
             agent
                 .hook_approval(
                     "bash",
-                    &json!({ "command": "rm -f out/taxi_app.zip" }),
+                    &json!({ "command": format!("rm -f {}", out("taxi_app.zip")) }),
                     CHAT,
                     "main"
                 )
                 .await["state"],
             "pending"
         );
+        // The job's own workspace needs no exemption at all: these were never recorded as its
+        // writes, and they are allowed because of where they are.
+        assert_eq!(state("rm -rf out".into()).await, "allowed");
+        assert_eq!(state("rm -f out/vendor.zip".into()).await, "allowed");
+        assert_eq!(
+            state("find . -name __pycache__ -exec rm -rf {} +".into()).await,
+            "allowed"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Jacob's stall, at the gate rather than in the matcher: the agent's own `rm` inside
+    /// `/work/<project>` is allowed outright, and the guard still cards a delete in another
+    /// project's folder and in a system path. Both halves, because the permissive one alone
+    /// would pass with the rule deleted.
+    #[tokio::test]
+    async fn the_gate_allows_the_agents_own_workspace_and_cards_everything_else() {
+        let (agent, _host, root) = agent_running_a_job_outside_scratch().await;
+        let state = |cmd: String| {
+            let agent = agent.clone();
+            async move {
+                agent
+                    .hook_approval("bash", &json!({ "command": cmd }), WORKER, "subagent")
+                    .await["state"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned()
+            }
+        };
+        // The command from the incident, as the harness sent it.
+        let incident = "sed -i 's/limit = 1000/limit = 10000/' p018.py; for f in p*.py; do python3 \"$f\" >> results.csv; done; du -sh .; rm d*.html.bak";
+        assert_eq!(state(incident.into()).await, "allowed");
+        assert_eq!(
+            state(format!("rm -rf {}/build", agent.cfg.work_dir.display())).await,
+            "allowed"
+        );
+        // Another project's folder, the box's own state, and the system.
+        let other = root.join("01TESTOTHERPROJECT00000000");
+        assert_eq!(
+            state(format!("rm -rf {}/exports", other.display())).await,
+            "pending"
+        );
+        assert_eq!(
+            state(format!("rm -f {}/.arbos/audit.jsonl", root.display())).await,
+            "pending"
+        );
+        assert_eq!(state("rm -rf /etc/ssh".into()).await, "pending");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1997,7 +2088,7 @@ mod job_approval_tests {
         let v = agent
             .hook_approval(
                 "bash",
-                &json!({ "command": "git clean -fdX" }),
+                &json!({ "command": "git -C /opt/repo clean -fdX" }),
                 SIDE_WORKER,
                 "subagent",
             )
@@ -2019,7 +2110,7 @@ mod job_approval_tests {
         let rows = waiting_rows(&side);
         assert_eq!(rows.len(), 1, "one row in the job's own chat: {rows:?}");
         assert!(
-            rows[0].contains("git clean -fdX"),
+            rows[0].contains("git -C /opt/repo clean -fdX"),
             "the notice names the work, as bug M taught: {}",
             rows[0]
         );
