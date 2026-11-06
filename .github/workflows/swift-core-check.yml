@@ -40,8 +40,21 @@ permissions:
 # Unfiltered pushes also repair this group. A push that created no run joined no group and so
 # displaced nothing: run 41918138101 was still building c187a9c00 forty-five minutes after that sha
 # stopped being the branch tip, holding a runner to judge superseded content.
+#
+# main gets one group per commit, for the reason ci.yml sets out at length. `cancel-in-progress`
+# governs only the run that is already RUNNING. A run still PENDING is evicted the moment a newer run
+# joins its group, whatever the flag says, because GitHub keeps exactly one pending run per group. So
+# a single `swift-core-check-refs/heads/main` never protected main: it made each push queue behind the
+# last, and queueing is precisely what got it evicted.
+#
+# Measured over main's last 60 runs. Thirteen ended `cancelled` holding ZERO jobs, and every one of
+# the thirteen ended 1-2 s after the next main run was created — 41955344354, 41956850035,
+# 41961696311, 41964304636, 42097308479, 42098818203, 42104333539, 42106233057, 42108010666,
+# 42112177873, 42117199568, 42137566683, 42159522725. A zero-job run schedules nothing, so it tests
+# nothing, and merge.sh reads a cancelled gate as a refusal. Each one is therefore a main commit this
+# gate can never answer for. ci.yml took this same fix; this file was missed.
 concurrency:
-  group: swift-core-check-${{ github.ref }}
+  group: swift-core-check-${{ github.ref == 'refs/heads/main' && format('main-{0}', github.sha) || github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
