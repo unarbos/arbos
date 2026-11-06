@@ -1670,10 +1670,13 @@ snap, mid-slide reversal, no slide on a page swap or a width drag) and
 
 **The Create New Agent / Group / Server sheets offer exactly two picture
 options — the agent avatar picker's own Upload and Generate — and never a
-colour grid. An entity created with neither gets the name's first letter on a
-neutral grey disc; no colour is ever auto-assigned.**
+colour grid. An entity created with neither stores no colour at all and draws
+the automatic one derived from its id** (Jacob 2026-11-06, superseding the
+neutral grey disc this rule originally asked for: no default avatar is grey).
 Existing agents, groups and servers keep the avatars they have (stored or
-automatic colour, picture): nothing is migrated or re-rendered.
+automatic colour, picture) and nothing is migrated — including a row still
+holding the `255` sentinel, which is never rewritten, but which now resolves to
+its id's automatic colour rather than drawing grey.
 
 | Item | Rule |
 |---|---|
@@ -1689,7 +1692,7 @@ Pinned by `create_entity::tests` (options, stored value, geometry) and
 `create_entity::render_tests` (headless render of both sheets: the two
 capsules, no Bot tab, no coloured disc, the footer where the constants say,
 nothing picked → no picture sent), `avatar_picker::tests::the_draft_offers_upload_and_generate_only_and_hands_over_its_pick`,
-`avatars::tests::neutral_pick_is_the_core_value_and_identity_carries_it`,
+`avatars::tests::a_stored_neutral_resolves_to_the_same_vivid_disc_as_the_other_surfaces`,
 `arbos_core::avatar::disc::tests::neutral_is_its_own_value_…` and the relay's
 `avatar::tests::neutral_pick_is_accepted_and_the_rest_still_validates`.
 Rig: `ARBOS_OPEN_NEW_AGENT=1` / `ARBOS_OPEN_CREATE=group|server` with
