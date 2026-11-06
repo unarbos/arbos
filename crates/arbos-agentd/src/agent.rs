@@ -1919,6 +1919,11 @@ pub struct Agent {
     turn_lock: Mutex<()>,
     /// FIFO gate on concurrent subagent runs in this workspace (`SUBAGENT_MAX_CONCURRENT`).
     pub(crate) subagent_slots: Arc<Semaphore>,
+    /// Row-less asks held between their creation and their start, by chat.
+    ///
+    /// An ask that forced no job has no job row, so `stop_jobs` iterates `jobs_for_chat` and
+    /// finds nothing to name it by. This is what a stop names instead. Bug AL.
+    pending_asks: Mutex<HashMap<String, HashSet<String>>>,
     /// Box-wide gate shared by every workspace (`workspace::BOX_MAX_SUBAGENTS`).
     box_slots: Arc<Semaphore>,
     http: reqwest::Client,
@@ -2215,6 +2220,7 @@ impl Agent {
             shutting_down: AtomicBool::new(false),
             turn_lock: Mutex::new(()),
             subagent_slots: Arc::new(Semaphore::new(SUBAGENT_MAX_CONCURRENT)),
+            pending_asks: Mutex::new(HashMap::new()),
             box_slots,
             http: reqwest::Client::new(),
             settings: crate::settings::Settings::new(&cfg_for_settings, models),
@@ -4264,6 +4270,14 @@ impl Agent {
         }
         let turn = self.handle_stop(chat_id).await;
         let stopped = self.stop_jobs(chat_id, None).await;
+        // A stop with no job named reaches the chat's row-less asks too, which `stop_jobs`
+        // cannot see. Bug AL.
+        let pending = self.cancel_pending_asks(chat_id).await;
+        if !pending.is_empty() {
+            tracing::info!(asks = ?pending, "asks cancelled before they started");
+        }
+        // In order of when the work exists: rows that are running, asks that have not started,
+        // then whatever a dead worker left behind that no row can name (bug AI, #2847).
         let unreachable = self.reap_and_note_unreachable(chat_id).await;
         self.write_stop_line(chat_id, &anchor, &stopped, &unreachable)
             .await;
@@ -4306,12 +4320,63 @@ impl Agent {
         h.doc.finish_message(&id, MessageStatus::Done);
     }
 
+    /// Hold a row-less ask from its creation until it starts, so a stop can reach it.
+    async fn hold_pending_ask(&self, chat_id: &str, subagent_id: &str) {
+        self.pending_asks
+            .lock()
+            .await
+            .entry(chat_id.to_owned())
+            .or_default()
+            .insert(subagent_id.to_owned());
+    }
+
+    async fn release_pending_ask(&self, chat_id: &str, subagent_id: &str) {
+        let mut held = self.pending_asks.lock().await;
+        if let Some(waiting) = held.get_mut(chat_id) {
+            waiting.remove(subagent_id);
+            if waiting.is_empty() {
+                held.remove(chat_id);
+            }
+        }
+    }
+
+    /// Stop every row-less ask of this chat that has not started yet, and return their session
+    /// ids so the cancel can say what it reached.
+    ///
+    /// Written to the store rather than kept here, because the ask reads it from the task that
+    /// is parked on the slot semaphore and not from the turn that ran the stop.
+    pub(crate) async fn cancel_pending_asks(&self, chat_id: &str) -> Vec<String> {
+        let waiting: Vec<String> = self
+            .pending_asks
+            .lock()
+            .await
+            .get(chat_id)
+            .map(|held| held.iter().cloned().collect())
+            .unwrap_or_default();
+        for id in &waiting {
+            let _ = self.store.set_subagent_status(id, "cancelled");
+        }
+        waiting
+    }
+
+    /// Has a stop landed on this ask while it waited to start?
+    fn ask_was_cancelled(&self, subagent_id: &str) -> bool {
+        self.store
+            .subagent(subagent_id)
+            .ok()
+            .flatten()
+            .is_some_and(|row| row.status == "cancelled")
+    }
+
     /// Cancel running or queued jobs of `chat_id` — one when `only` names it, else all. Returns
     /// one [`StoppedJob`] per job, each carrying the state read back after the stop.
     ///
     /// The job is marked `cancelled`, its worker's turn and in-flight tool call are ended, its
     /// locks are freed, its live rows are retired and the status line is refreshed. No result
     /// turn runs for a cancelled job and nothing it produces afterwards reaches the chat.
+    ///
+    /// It reaches jobs only. An ask that forced no job owns no row for this to iterate, so a
+    /// chat-wide stop must also call [`Agent::cancel_pending_asks`] (bug AL).
     pub(crate) async fn stop_jobs(
         self: &Arc<Self>,
         chat_id: &str,
@@ -5131,16 +5196,60 @@ impl Agent {
                 .map(|t| t.chat_id.clone())
                 .ok_or("no turn is running")?
         };
-        let stopped = if job_id.trim().eq_ignore_ascii_case("all") {
-            self.stop_jobs(&chat_id, None).await
+        let all = job_id.trim().eq_ignore_ascii_case("all");
+        let (stopped, pending) = if all {
+            let stopped = self.stop_jobs(&chat_id, None).await;
+            let pending = self.cancel_pending_asks(&chat_id).await;
+            if !pending.is_empty() {
+                tracing::info!(asks = ?pending, "asks cancelled before they started");
+            }
+            (stopped, pending)
         } else {
             let job = self.resolve_job(&chat_id, job_id)?;
-            self.stop_jobs(&chat_id, Some(&job.id)).await
+            (self.stop_jobs(&chat_id, Some(&job.id)).await, Vec::new())
         };
-        if stopped.is_empty() {
+        // Bug AL: "nothing matched" is false once a row-less ask has been cancelled. Reporting
+        // the failure here is what made round 18's cancel unprovable — the stop had reached
+        // nothing, said so truthfully, and the ask it could not see started anyway.
+        if stopped.is_empty() && pending.is_empty() {
             return Err("no running job matched; list_jobs shows what is open in this chat".into());
         }
         let unreachable = self.reap_and_note_unreachable(&chat_id).await;
+        if stopped.is_empty() {
+            // Bug AL: no sweep is claimed for a cancelled ask, and the omission is deliberate.
+            // An ask stopped before it started has no process tree, so there is nothing that
+            // could have been checked, and the answer carries no `processes_checked` rather
+            // than a vacuously true one.
+            //
+            // `Evidence::Nothing` is the exact answer here and not a convenience: no worker was
+            // ever started, so no process of this ask can exist. It is logged rather than
+            // skipped so that every `hook_stop_job` call still leaves one `stop_job answered`
+            // line for the canary to read — a path that returns silently would be a hole in the
+            // guard's record even though its own claim is honest.
+            let note = "No job was running. This chat had asks that owned no job row — they were \
+                        cancelled before they started, so their work never begins, and no process \
+                        of theirs was swept because none existed yet. Tell the user the request \
+                        was stopped; do not report that nothing was found.";
+            let evidence = Evidence::Nothing;
+            tracing::info!(
+                jobs = 0,
+                asks = pending.len(),
+                %evidence,
+                checked = evidence.proven(),
+                found = 0,
+                killed = 0,
+                survivors = ?unreachable.survivors,
+                note = %note,
+                "stop_job answered"
+            );
+            return Ok(json!({
+                "stopped": [],
+                "asks_cancelled": pending.len(),
+                "unnamed_processes_still_alive": unreachable.survivors,
+                "all_cancelled": true,
+                "note": note,
+            }));
+        }
         let note = stop_job_note(&stopped, &unreachable);
         // Verbatim, into agentd's own log, beside the sweep it was built from.
         //
@@ -5190,6 +5299,7 @@ impl Agent {
                     row
                 })
                 .collect::<Vec<_>>(),
+            "asks_cancelled": pending.len(),
             "all_cancelled": stopped.iter().all(StoppedJob::cancelled),
             // Work this cancel found running that belongs to no job row at all (bug AK). Kept
             // apart from the per-job numbers above because no job is answerable for it.
@@ -11319,6 +11429,11 @@ impl Agent {
             h.doc
                 .add_status_part(&msg_id, "working", "Waiting for a free slot…");
         }
+        // Bug AL: an ask that forced no job owns no job row, so from here until it starts it is
+        // invisible to `stop_jobs`. Held by session id for exactly that window.
+        if job.is_none() {
+            self.hold_pending_ask(chat_id, &subagent_id).await;
+        }
         self.write_threads_index().await;
         if let Some(j) = &job {
             let keys = self.acquire_job_locks(j).await;
@@ -11355,6 +11470,22 @@ impl Agent {
         if let Some(j) = &job {
             if self.job_was_cancelled(&j.id) {
                 self.stop_before_starting(&j.id, host, &msg_id).await;
+                return Ok(());
+            }
+        }
+        // The same wait, for an ask that has no row for the check above to read. Bug AL, Jacob's
+        // Test5 round 18: `status18g` forced no job, so nothing in `list_jobs` named it, the
+        // user's cancel reached four of its siblings and said truthfully that it had killed
+        // nothing of `g` — and `g` started nineteen seconds later and ran to completion.
+        if job.is_none() {
+            self.release_pending_ask(chat_id, &subagent_id).await;
+            if self.ask_was_cancelled(&subagent_id) {
+                // Back to idle: the stop ends this ask, it does not retire the session.
+                let _ = self.store.set_subagent_status(&subagent_id, "idle");
+                tracing::info!(subagent = %subagent_id, "ask was cancelled before it started");
+                let h = host.lock().await;
+                h.doc.add_status_part(&msg_id, "stopped", "Stopped");
+                h.doc.finish_message(&msg_id, MessageStatus::Cancelled);
                 return Ok(());
             }
         }
