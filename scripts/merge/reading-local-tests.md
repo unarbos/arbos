@@ -268,6 +268,26 @@ consequence is large: a Mac-only change triggers no TestFlight build.
 A false confirmation is worse than no answer, because nobody re-checks a question they believe is
 settled. Read the block.
 
+## "Did the release land?" is a question about ancestry
+
+When the lane is frozen waiting for a release to reach `main`, test it with ancestry and nothing
+else:
+
+```sh
+git fetch -q origin main && git merge-base --is-ancestor "$BUMP_SHA" origin/main
+```
+
+A commit titled `release: X.Y.Z` is not evidence, and neither is the tag. `auto-stable.sh` pushes
+the tag unconditionally on its own line **before** attempting the `main` push, and that second
+push is unforced inside an `if` — so when `main` moves during the debounce the bump ends up
+reachable from its tag alone, on no branch. Both outcomes produce the tag and a commit with that
+title, and the log line leads with the word *released* either way.
+
+The consequence to recognise on sight: the next release takes its number from the **tags**, so a
+tag-only bump spends that number. The following successful release comes out one patch higher and
+the spent version is published but on no branch. And because `ios.yml` triggers on a push to
+`main`, a tag-only bump produces no TestFlight build — the tag cannot substitute for one.
+
 ## A push during an iOS or Mac leg is a seventy-minute decision
 
 The branch's concurrency group cancels the in-flight run when a new commit lands on it. Before an
