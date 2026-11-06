@@ -463,6 +463,12 @@ mod unread_dot_tests {
     /// so the slot the cell exists to hold still was never still.
     #[test]
     fn the_pill_never_fitted_the_cell() {
-        assert!(UNREAD_PILL_H > CELL_W);
+        let pill = UNREAD_PILL_H;
+        let cell = CELL_W;
+        assert!(
+            pill > cell,
+            "the pill is {pill} wide before its digits against a {cell} cell, \
+             so it always widened the row"
+        );
     }
 }
