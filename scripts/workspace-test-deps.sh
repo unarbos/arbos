@@ -24,11 +24,51 @@
 # Idempotent: re-running skips the LLVM download when clang 21 is already unpacked.
 set -euo pipefail
 
-# github.com/llvm/llvm-project/releases/tag/llvmorg-21.1.8, the last 21.x. The digest is the
-# release API's own `assets[].digest` for this asset, not one computed from a download, so it is
-# an independent statement of what the file should be.
-LLVM_RELEASE="${LLVM_RELEASE:-21.1.8}"
-LLVM_SHA256="${LLVM_SHA256:-b3b7f2801d15d50736acea3c73982994d025b01c2f035b91ae3b49d1b575732b}"
+# The pin is READ OUT OF ci.yml, not copied here. This script used to carry its own copy of the
+# release and digest under a comment asking a human to keep it in step with the workflow. That is
+# a value which is right today and silently wrong the day CI bumps — and the failure is quiet in
+# the worst direction: the script keeps installing a compiler the project no longer builds with,
+# everything still compiles, and "it builds locally" stops meaning "it builds the way CI builds".
+#
+# So there is one assertion of the pin in this repository, in the workflow that actually runs it,
+# and this derives from it. A ci.yml this cannot parse is an ERROR rather than a fallback to a
+# remembered value: zero pins and two pins both refuse. Drift becomes a refusal somebody reads.
+#
+# The digest in that workflow is the release API's own `assets[].digest` for the asset, not one
+# computed from a download, so it is an independent statement of what the file should be. It is
+# not a signature, and it attests the asset rather than the LLVM project's intent.
+#
+# LLVM_RELEASE / LLVM_SHA256 in the environment still win, so a one-off against another release
+# needs no edit. Both must then be set together: a release with somebody else's digest fails the
+# checksum, which is the right answer but a confusing way to arrive at it.
+CI_YML="${CI_YML:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/.github/workflows/ci.yml}"
+
+say() { printf '\n==> %s\n' "$*"; }
+die() { printf '\nERROR: %s\n' "$*" >&2; exit 1; }
+
+read_pin_from_ci() {
+  local key="$1" pat="$2" n
+  [ -r "$CI_YML" ] || die "cannot read ${CI_YML}, so the LLVM pin is unknown.
+     This script derives the pin from the workflow rather than keeping a second copy of it.
+     Set ${key} in the environment to override, or point CI_YML at the workflow."
+  n="$(grep -cE "^[[:space:]]*${key}:[[:space:]]*${pat}[[:space:]]*$" "$CI_YML")"
+  [ "$n" = 1 ] || die "${CI_YML} has ${n} ${key} lines; expected exactly one.
+     Zero means the 'clang 21 for webrtc-sys' step was renamed or removed and this script would
+     be guessing. More than one means two jobs pin different builds, and picking either would be
+     a coin toss. Not falling back to a remembered pin: a second copy of the pin is the thing
+     this derivation exists to remove."
+  sed -nE "s/^[[:space:]]*${key}:[[:space:]]*(${pat})[[:space:]]*$/\1/p" "$CI_YML"
+}
+
+LLVM_RELEASE="${LLVM_RELEASE:-$(read_pin_from_ci LLVM_RELEASE '[0-9][0-9.]*')}"
+LLVM_SHA256="${LLVM_SHA256:-$(read_pin_from_ci LLVM_SHA256 '[0-9a-f]{64}')}"
+# die() runs inside the command substitutions above, so its exit kills the subshell and not this
+# script. Without this postcondition a failed read leaves the pin EMPTY and everything downstream
+# carries on: the skip path reports success against a blank version, and the download path builds
+# a URL with no release in it. An unset pin must stop the script, not decorate it.
+[ -n "$LLVM_RELEASE" ] && [ -n "$LLVM_SHA256" ] \
+  || die "the LLVM pin came back empty from ${CI_YML}, so nothing below can be trusted.
+     Set LLVM_RELEASE and LLVM_SHA256 together in the environment to override."
 MAJOR="${LLVM_RELEASE%%.*}"
 LLVM_DIR="/usr/lib/llvm-${MAJOR}"
 
@@ -51,9 +91,6 @@ GPUI_PKGS=(
   libstdc++-14-dev
   libglib2.0-dev
 )
-
-say() { printf '\n==> %s\n' "$*"; }
-die() { printf '\nERROR: %s\n' "$*" >&2; exit 1; }
 
 SUDO=""
 if [ "$(id -u)" -ne 0 ]; then
@@ -78,12 +115,62 @@ $SUDO apt-get install -y -qq "${GPUI_PKGS[@]}"
 
 # ---- 2. clang 21 for webrtc-sys, which is the part that actually blocks the build ---------------
 
-if [ "$(clang_major "${LLVM_DIR}/bin/clang++" || true)" = "$MAJOR" ]; then
-  say "clang ${MAJOR} already at ${LLVM_DIR}, skipping the download"
+# Look across the whole host before fetching ~2 GB, and judge what is found against the FLOOR.
+#
+# Two separate bugs are being avoided here, and they pull in opposite directions. Checking only
+# ${LLVM_DIR} misses a usable toolchain installed anywhere else — on 2026-11-06 a worker
+# downloaded the asset onto a host that already had a working clang at /usr/lib/llvm-21, merely
+# not as the default compiler. And testing `= "$MAJOR"` rejects a host NEWER than the pin and
+# sends it to fetch an older compiler it does not need; webrtc-sys asks for "21 or later", so
+# equality is the wrong comparison in both directions.
+#
+# Highest major first, so a host carrying several toolchains gets the newest rather than whatever
+# the glob listed first. The default compiler is considered last and on its merits: it is the one
+# webrtc-sys already rejected on this repo, so it is the least likely to clear the floor.
+# The C driver beside it is required, not assumed. Section 3 derives CC from the directory this
+# returns, and the unpacked tree always carries both — but a host compiler found on PATH need not.
+# Accepting a clang++ whose sibling clang is missing would hand the build a CC that does not
+# exist, which is a worse failure than downloading: it surfaces as a broken cc-rs invocation
+# somewhere unrelated rather than as a missing compiler here.
+# CLANG_SEARCH_GLOB is overridable so the selftest can point the search at a tree of stubs. The
+# floor and the precedence are the parts worth testing, and testing them against /usr/lib would
+# mean installing real compilers in order to assert about them.
+CLANG_SEARCH_GLOB="${CLANG_SEARCH_GLOB:-/usr/lib/llvm-*/bin/clang++}"
+
+find_usable_clang() {
+  local c m
+  # shellcheck disable=SC2086 # the glob is a search pattern and must stay unquoted to expand
+  for c in $(ls -d $CLANG_SEARCH_GLOB 2>/dev/null | sort -rV) "$(command -v clang++ 2>/dev/null)"; do
+    [ -n "$c" ] && [ -x "$c" ] && [ -x "${c%++}" ] || continue
+    m="$(clang_major "$c" || true)"
+    case "$m" in ''|*[!0-9]*) continue ;; esac
+    [ "$m" -ge "$WEBRTC_MIN_CLANG" ] && { printf '%s\n' "$c"; return 0; }
+  done
+  return 1
+}
+
+if found_cxx="$(find_usable_clang)"; then
+  LLVM_DIR="$(cd "$(dirname "$found_cxx")/.." && pwd)"
+  say "clang $(clang_major "$found_cxx") already at ${found_cxx}, skipping the download"
+  # Clearing the floor is what lets the workspace build, and it is a weaker claim than matching
+  # CI. Say so, so nobody reports a local build as having used the toolchain CI runs.
+  # An unreadable version disclaims too. Silence here would mean a compiler whose build cannot be
+  # identified is reported as if it matched the pin, which is the one direction that must not be
+  # quiet: unknown is not the same as equal.
+  found_ver="$("$found_cxx" --version 2>/dev/null | sed -n '1s/.*clang version \([0-9.]*\).*/\1/p')"
+  if [ "$found_ver" != "$LLVM_RELEASE" ]; then
+    say "note: CI pins ${LLVM_RELEASE}; this is ${found_ver:-an unreadable version}.
+    It clears webrtc-sys' floor of ${WEBRTC_MIN_CLANG}, which is what the build needs, but it is
+    not CI's build — don't report a compile here as having used CI's toolchain."
+  fi
 else
   prefix="LLVM-${LLVM_RELEASE}-Linux-X64"
   url="https://github.com/llvm/llvm-project/releases/download/llvmorg-${LLVM_RELEASE}/${prefix}.tar.xz"
-  say "downloading ${prefix} (~1 GB; most of the one-time cost)"
+  # 1.88 GiB (2,019,005,384 bytes, the release API's size for the asset; ci.yml's own note agrees)
+  # and 543 MiB once the extract list below is unpacked. This said "~1 GB", understating the
+  # download by about half — and it is the figure anyone deciding whether to call this script
+  # reasons from, so it is worth being the measured one.
+  say "downloading ${prefix} (1.88 GiB, 543 MiB unpacked; most of the one-time cost)"
 
   rc=0
   for attempt in 1 2 3; do
@@ -103,6 +190,15 @@ else
 
   echo "${LLVM_SHA256}  /tmp/llvm.tar.xz" | sha256sum -c -
 
+  # The driver, the resource directory and libclang, and nothing else — the hermetic libc++ comes
+  # from libwebrtc, so unpacking the full toolchain would cost disk for files no build here reads.
+  #
+  # DO NOT TRIM THIS FURTHER WITHOUT READING THE NEXT SENTENCE. What is already absent is a C++
+  # standard library: clang unpacked this way is inert on its own, and `libstdc++-14-dev` from the
+  # apt half above is what makes it usable. Measured on an A/B with the apt step skipped, the
+  # first failure is not the version guard but `'algorithm' file not found` — a missing header
+  # that names neither clang nor this list, which is why it is recorded here, where someone
+  # deciding what else to drop will be looking.
   say "unpacking to ${LLVM_DIR}"
   $SUDO mkdir -p "$LLVM_DIR"
   $SUDO tar -I 'xz -T0 -d' -xf /tmp/llvm.tar.xz --strip-components=1 \
