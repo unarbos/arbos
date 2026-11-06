@@ -1,7 +1,10 @@
-# Reading a local test run before a gate
+# Reading a run before a gate
 
-A gate is only as good as the run behind it. These are the ways a local run has lied to this lane,
+A gate is only as good as the run behind it. These are the ways a run has lied to this lane,
 written down so the next reader does not rediscover them one merge at a time.
+
+They share a shape: a correctness that holds by accident, or depends on something nobody would
+guess was load-bearing. None of them has a failing test to announce it when it goes.
 
 ## The rule: a test that depends on a path's class must assert that class
 
@@ -66,6 +69,25 @@ silently removes is worth more as a warning than as a passing test.
 Run agentd suites from a checkout outside `/tmp`. That is a consequence of the rule, not the rule.
 Record the worktree path beside any local test count reported as gate evidence, so a number can be
 re-read later against the class it was measured in.
+
+## `image.yml`: the step that always fails is load-bearing
+
+`Register the Daytona snapshot` in `image.yml` has failed on **every** image run since 0.1.183 —
+30 of 30 at one count — with `image/register-snapshot.sh: line 25: DAYTONA_API_KEY: DAYTONA_API_KEY
+is required`. **That is expected and does not block a roll.** CI does not register the snapshot at
+all: the deploy worker registers it host-side on the relay, running the same script with the key
+read from `/etc/arbos/relay.env`. So the key is correctly absent from repo secrets, and an
+`image-v0.1.*` tag builds, pushes to GHCR, passes its local smoke, fails that one step, and still
+produces a registered snapshot afterwards from the host.
+
+**Do not approve a PR that deletes the step without changing the deploy worker in the same PR.**
+A step that fails every single time looks like dead weight, and removing it is the obvious tidy-up.
+But the installed deploy worker's fallback — used when the jobs API returns no steps — greps the
+job log for the literal `Run image/register-snapshot.sh` and reads the build as **passed only when
+it finds it**. Delete the step and the worker reads every good build as failed.
+
+So the failing step is doing two jobs: the one it appears to do, which it never completes, and
+carrying a string another system keys on. Only the second one matters.
 
 ## See also
 
