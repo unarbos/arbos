@@ -17,8 +17,40 @@ name: Swift core check
 # whether the macOS job is needed. The pull_request list stays: checks.sh reads the quoted patterns
 # under this `on:` block to learn the gate's scope and BLOCKS on a block it can read but finds
 # empty, so this is the one declaration of what the gate covers.
+#
+# THE BASELINE TRIGGERS, `schedule` AND `workflow_dispatch`, ASK A DIFFERENT QUESTION.
+#
+# Everything above decides whether SOMEBODY'S CHANGE needs a verdict. Nobody's change needs one on a
+# quiet main, so main's macOS job ran once in main's last 40 runs here — 29 skipped, 9 cancelled
+# with no job at all, one real execution (run 42095537743). The gate is right to skip: on main
+# swift-gate-applies.sh judges the merge commit's first-parent diff, and most merged pull requests
+# do not touch iOS. What is missing is not a verdict about a change, it is a verdict about the
+# suite. Without one the suite's health is only ever measured underneath somebody's branch, so every
+# flake lands on whoever happens to be in the runner pool and that lane has to disprove authorship.
+#
+# These two triggers therefore run the macOS job unconditionally. The bypass lives in
+# swift-gate-applies.sh's `decide`, NOT in a trigger filter here, so the per-change path is byte for
+# byte what it was: the push trigger still filters nothing and the pull_request list below is still
+# the one declaration of the gate's scope. A `paths:` on `schedule` would be meaningless anyway and
+# a `branches:` would not change which ref the cron fires on — GitHub only ever fires `schedule`
+# from the workflow file on the default branch, which is also why a temporary cron on a branch
+# cannot be used to test this and `workflow_dispatch` exists below to be tested instead.
 on:
   push:
+  schedule:
+    # 10:41 UTC daily. Measured, not picked: over the 453 macOS jobs this workflow actually executed
+    # between 2026-10-31 and 2026-11-05, the mean number of the pool's five slots it held per hour
+    # peaks at 4.73 in the 22:00 hour and bottoms out across 10:00–14:00 at 1.61, with 12:00 the
+    # single lowest at 1.32. Commit times on main agree from the other side: they peak 16:00–04:00
+    # and trough 09:00–15:00. Those same jobs took a median 61 min and a p90 82 min, on a queue
+    # measured at 84–126 min tonight, so a 10:41 start lands its verdict around 14:50 at the p90 of
+    # both — inside the trough, and clear of the 18:00 ramp. The minute is 41 and not 00 because
+    # GitHub's scheduler is most oversubscribed on the hour and delays crons there first.
+    - cron: "41 10 * * *"
+  # The same baseline on demand, and the only way to prove the baseline path works without waiting a
+  # day for it. It takes the identical route through `decide`, the identical concurrency group and
+  # the identical report job, so what it proves transfers to the cron.
+  workflow_dispatch:
   pull_request:
     paths:
       - "crates/arbos-core/**"
@@ -40,9 +72,25 @@ permissions:
 # Unfiltered pushes also repair this group. A push that created no run joined no group and so
 # displaced nothing: run 41918138101 was still building c187a9c00 forty-five minutes after that sha
 # stopped being the branch tip, holding a runner to judge superseded content.
+#
+# BASELINE RUNS GET THEIR OWN GROUP, and that is a correctness requirement rather than tidiness.
+#
+# `cancel-in-progress: false` does not mean "cancels nothing". GitHub cancels any already-PENDING
+# run in a group the moment a newer one queues there, whatever that flag says, and on this pool
+# pending is where a run spends 84 to 126 minutes. A nightly sharing `refs/heads/main`'s group
+# would therefore be able to kill a queued push run on main, or be killed by one, and the lane
+# waiting on that verdict would see a cancelled run with no job in it — indistinguishable from the
+# state this whole workflow exists to prevent. The hazard is not hypothetical: a re-run on a stale
+# head nearly took out a live gate run tonight because both landed in one group.
+#
+# Keying on the event CLASS rather than on the ref keeps the two populations apart on every ref,
+# which matters for the dispatch-on-a-branch rehearsal too: that run must not cancel the push run
+# for the same branch.
 concurrency:
-  group: swift-core-check-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  group: swift-core-check-${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'baseline' || 'change' }}-${{ github.ref }}
+  # A baseline run is never superseded the way a branch head is, and it is the only measurement of
+  # the suite anyone gets that day, so it is never cancelled either.
+  cancel-in-progress: ${{ github.event_name != 'schedule' && github.event_name != 'workflow_dispatch' && github.ref != 'refs/heads/main' }}
 
 jobs:
   decide:
@@ -74,6 +122,12 @@ jobs:
           fetch-depth: 0
       - name: The screen's own invariants
         run: ./scripts/release/swift-gate-applies.sh selftest
+      # The baseline reporter's own invariants, run here rather than only in the nightly so that
+      # the change that breaks it is the change that goes red. This is the ONLY step the baseline
+      # work adds to the per-change path. It reads nothing but its own fixtures in a temporary
+      # directory, so it cannot red a run on account of anything in the tree except itself.
+      - name: The baseline reporter's own invariants
+        run: ./scripts/ci/macos-baseline-report.py selftest
       - name: Does the gate apply to this commit?
         id: applies
         run: ./scripts/release/swift-gate-applies.sh decide
@@ -161,3 +215,71 @@ jobs:
           path: apps/ios/Arbos/build/xcodebuild-*.log
           if-no-files-found: ignore
           retention-days: 14
+
+  # WHAT THE NIGHTLY IS FOR, AND WHY READING THE JOB'S COLOUR IS NOT ENOUGH.
+  #
+  # Baseline runs only. The gate is a required check on a repository draining a serialised merge
+  # queue, and a new reader of the test log is a new way for every lane's gate to go red. So the
+  # per-change path keeps exactly the two jobs it had, and this third job exists only for
+  # `schedule` and `workflow_dispatch`. Once the nightly has a run of clean history behind it the
+  # same step can be promoted onto `check` for everyone; that is a later change with its own proof.
+  #
+  # It reads the LOG, not the conclusion. `** TEST SUCCEEDED **` means every case xcodebuild ran
+  # passed, and says nothing about how many ran. Run 42095537743 — the one real macOS execution
+  # main got in its last forty runs here — concluded success over a suite that never ran at all,
+  # because project.pbxproj gives TranscriptSpacingUITests.swift and AvatarBackSwipeUITests.swift
+  # the same two object ids and Xcode resolves by id. scripts/ci/macos-baseline-report.py explains
+  # that fault and carries the selftest that proves the scanner fires on it.
+  #
+  # `if: always()` with no result guard is deliberate. The failure this whole change exists to
+  # remove is the macOS job being SKIPPED, and a job that only runs when `check` succeeded could
+  # never report it. The first step below turns that skip into the loudest failure in the run.
+  baseline-report:
+    name: Nightly baseline report
+    needs: [decide, check]
+    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      # Only this job, and only so it can reach the tracking issue. The macOS job stays read-only.
+      issues: write
+    steps:
+      - name: The macOS job must have executed
+        env:
+          DECIDE: ${{ needs.decide.result }}
+          CHECK: ${{ needs.check.result }}
+        run: |
+          set -euo pipefail
+          echo "decide: $DECIDE, check: $CHECK"
+          case "$CHECK" in
+            success|failure) ;;
+            *)
+              echo "::error::the macOS job did not execute on a baseline run (decide=$DECIDE," \
+                   "check=$CHECK). A baseline that skips measures nothing, and measuring nothing" \
+                   "is the exact state this run exists to replace." >&2
+              exit 1 ;;
+          esac
+      - uses: actions/checkout@v4
+      - name: Fetch the xcodebuild logs
+        id: logs
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: swift-core-check-logs-${{ github.sha }}
+          path: logs
+      # --post reaches the tracking issue, and only a cron on main gets it. Everything else prints
+      # the identical body behind a DRY RUN banner, which is what makes the reporting path provable
+      # from a branch without leaving an issue in a shared repository behind as the proof.
+      - name: Read the verdict out of the log
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          post=""
+          if [ "$GITHUB_EVENT_NAME" = schedule ] && [ "$GITHUB_REF" = refs/heads/main ]; then
+            post=--post
+          fi
+          ./scripts/ci/macos-baseline-report.py report \
+            --log logs/xcodebuild-test.log \
+            --tests apps/ios/Arbos/ArbosTests apps/ios/Arbos/ArbosUITests \
+            $post

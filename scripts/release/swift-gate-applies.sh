@@ -136,8 +136,30 @@ match() {
   return 1
 }
 
+# A baseline run is not asking the scope question, so it does not get the scope answer.
+#
+# `schedule` and `workflow_dispatch` exist on this workflow to measure the SUITE, not to judge a
+# change. Sending them through the diff below would answer "does not apply" on almost every night —
+# on main `changed()` reads the merge commit's first-parent diff, and most merged pull requests do
+# not touch iOS — and a baseline that skips is the exact defect it was added to remove. So the
+# answer is forced here, where it is one case statement under a comment, rather than by widening
+# what the gate covers for everyone else. Nothing on the pull_request or push path reads this.
+baseline_event() {
+  case "${GITHUB_EVENT_NAME:-}" in
+    schedule|workflow_dispatch) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 decide() {
   local pats files
+  if baseline_event; then
+    echo "applies=true"
+    [ -n "${GITHUB_OUTPUT:-}" ] && echo "applies=true" >> "$GITHUB_OUTPUT"
+    echo "$GITHUB_EVENT_NAME is a baseline run: it measures the suite rather than a change, so the" \
+         "gate's scope does not decide it and the macOS job always runs." >&2
+    return 0
+  fi
   pats=$(patterns)
   if [ -z "$pats" ]; then
     echo "$WF declares no quoted path patterns under its \`on:\` block. That block is where" \
@@ -252,6 +274,74 @@ selftest() {
     ok "the same-repo deferral is on \`decide\`, so a deferred run skips whole and still reads as no verdict"
   else
     bad "the same-repo deferral is not on \`decide\` — a deferred run would conclude success with nothing built, which checks.sh reads as a pass"
+  fi
+
+  # 8. The baseline triggers must be declared. Without them main measures the suite only when
+  #    somebody's change happens to drag the macOS job along, which is the state this answered:
+  #    main's macOS job executed once in main's last 40 runs.
+  #
+  #    Cases 8 to 10 read the workflow file, so each one is also run against a body with the
+  #    violation injected. A screen that passes because it is reading nothing is this repo's
+  #    recurring lint failure, and the only defence is making it fire on demand. `probe` runs one
+  #    check against one body and reports whether it held.
+  probe() { printf '%s\n' "$2" | eval "$1"; }
+
+  # Both triggers, and at least one cron under the schedule.
+  check_baseline_triggers='awk "
+    /^on:/{o=1;next} /^[^[:space:]]/{o=0}
+    o && /^  schedule:/{s=1} o && /^  workflow_dispatch:/{d=1} o && /^ *- cron: \"/{c=1}
+    END{exit !(s && d && c)}"'
+  if probe "$check_baseline_triggers" "$body"; then
+    ok "the \`on:\` block declares both baseline triggers and a cron"
+  else
+    bad "no \`schedule:\` cron and \`workflow_dispatch:\` under \`on:\` — nothing measures this suite except somebody's change, and on a quiet main that is almost never"
+  fi
+  if probe "$check_baseline_triggers" "$(printf '%s\n' "$body" | grep -v '^  schedule:')"; then
+    bad "case 8 passed a body with \`schedule:\` deleted, so it is not reading the file"
+  else
+    ok "case 8 fires when \`schedule:\` is removed"
+  fi
+
+  # 9. The cron must not reach the gated path list. patterns_in and checks.sh's gate_patterns match
+  #    `^ *- *"` inside the `on:` block, and `- cron: "41 10 * * *"` escapes it only because the
+  #    quote is not adjacent to the dash. Written the other way round — `- "41 10 * * *"` under a
+  #    bare `schedule:` — the cron string becomes a path pattern, and a pattern with a `*` in the
+  #    middle makes gate_applies return 2, which checks.sh turns into BLOCKED on every open pull
+  #    request. Case 5 would catch that too; this one says why it must be looked for here.
+  if printf '%s\n' "$(patterns)" | grep -q '[0-9] [0-9*]'; then
+    bad "a cron expression has leaked into the gated path list — checks.sh would read it as a path pattern and BLOCK"
+  else
+    ok "the cron stays out of the gated path list that checks.sh reads"
+  fi
+
+  # 10. Baseline runs must sit in their own concurrency group and must never be cancelled.
+  #     `cancel-in-progress: false` does not stop GitHub cancelling an already-PENDING run when a
+  #     newer one joins the group, and on this pool pending is 84 to 126 minutes. Sharing a group
+  #     with the change runs therefore lets a nightly kill a queued push run a lane is waiting on,
+  #     or be killed by one. Both halves are textual: this asserts the group branches on the event
+  #     at all and that neither baseline event can be cancelled.
+  check_group_splits='awk "/^concurrency:/{c=1;next} /^[^[:space:]]/{c=0}
+    c && /^  group:/ && /github.event_name/{g=1}
+    c && /^  cancel-in-progress:/ && /event_name != .schedule./ && /event_name != .workflow_dispatch./{k=1}
+    END{exit !(g && k)}"'
+  if probe "$check_group_splits" "$body"; then
+    ok "baseline runs get their own concurrency group and are never cancelled"
+  else
+    bad "the concurrency group does not separate baseline runs from change runs, or lets one be cancelled — a nightly can then cancel a queued gate run, which reads as a run with no job in it"
+  fi
+  if probe "$check_group_splits" "$(printf '%s\n' "$body" | sed 's/^  group: swift-core-check-.*/  group: swift-core-check-${{ github.ref }}/')"; then
+    bad "case 10 passed a body whose group was reverted to the ref-only key, so it is not reading the file"
+  else
+    ok "case 10 fires when the group is reverted to the ref-only key"
+  fi
+
+  # 11. The bypass must be the one in this file. A trigger-level filter would be the old defect
+  #     wearing a new hat, and a second copy of the decision is a second thing to drift.
+  if GITHUB_EVENT_NAME=schedule GITHUB_OUTPUT='' decide 2>/dev/null | grep -qx 'applies=true' &&
+     GITHUB_EVENT_NAME=workflow_dispatch GITHUB_OUTPUT='' decide 2>/dev/null | grep -qx 'applies=true'; then
+    ok "both baseline events decide applies=true here, without consulting any diff"
+  else
+    bad "a baseline event does not force applies=true — the nightly would skip the macOS job, which is the whole defect it exists to fix"
   fi
 
   echo
