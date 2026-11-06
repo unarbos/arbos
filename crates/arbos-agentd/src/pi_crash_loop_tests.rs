@@ -1272,3 +1272,39 @@ async fn the_oldest_owed_send_is_recorded_when_the_queue_overflows() {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// A size reading is only ever reported against the child it was taken from (bug AJ).
+///
+/// The reason this needs a test rather than a reviewer's trust: the sample is kept across
+/// deaths on purpose, because it is the only record of a child that is now unmeasurable. A
+/// crash loop replaces the child every couple of seconds, so a reading that answered to any pid
+/// would quietly hand the dead predecessor's size to the exit report of the one that replaced
+/// it — and it would be believed, because nothing else in the record disagrees.
+#[tokio::test]
+async fn a_pi_size_reading_is_never_read_as_another_childs() {
+    let (agent, root) = test_agent().await;
+    let live = std::process::id();
+
+    agent.sample_pi_rss(Some(live));
+    let (sample, age) = agent
+        .pi_rss_for(Some(live))
+        .expect("a live process can be measured");
+    assert!(sample.rss_kb > 0, "a running process has a resident size");
+    assert!(
+        sample.peak_kb >= sample.rss_kb,
+        "the high-water mark cannot be under the current size: {sample:?}"
+    );
+    assert!(age < 60_000, "the reading is this run's, not a stale one");
+
+    // The replacement child in a crash loop. Nothing was read for it, and the answer is that
+    // nothing was read for it — not the size of the child it replaced.
+    assert!(
+        agent.pi_rss_for(Some(live.wrapping_add(1))).is_none(),
+        "a reading taken from {live} must not answer for another pid"
+    );
+    assert!(
+        agent.pi_rss_for(None).is_none(),
+        "nor for a child whose pid the box never had"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
