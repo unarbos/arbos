@@ -5962,19 +5962,31 @@ impl Agent {
             // could have been checked, and the answer carries no `processes_checked` rather
             // than a vacuously true one.
             //
-            // `Evidence::Nothing` is the exact answer here and not a convenience: no worker was
-            // ever started, so no process of this ask can exist. It is logged rather than
-            // skipped so that every `hook_stop_job` call still leaves one `stop_job answered`
-            // line for the canary to read — a path that returns silently would be a hole in the
-            // guard's record even though its own claim is honest.
+            // `Evidence::Nothing` is the exact answer about **the ask**: no worker was ever
+            // started, so no process of it can exist. It is logged rather than skipped so that
+            // every `hook_stop_job` call still leaves one `stop_job answered` line for the
+            // canary to read — a path that returns silently would be a hole in the guard's
+            // record even though its own claim is honest.
+            //
+            // It is not the answer about the **sweep**, and this line reports both. The sweep
+            // above is box-wide and ran before any of this was decided, so it can have killed
+            // work or failed to read a session while this ask had nothing of its own. Printing
+            // the ask's `nothing_to_check` as the line's verdict made that a positive all-clear
+            // over a sweep that had earned no such thing — and `survivors` being the sweep's
+            // meant the line was already mixing the two subjects, with only the field that is
+            // empty in the common case telling the truth.
+            //
+            // So the two are combined rather than one chosen: `Evidence::and` is exactly this
+            // reading, where `Unconfirmed` wins over everything and `Nothing` yields to it.
             let note = "No job was running. This chat had asks that owned no job row — they were \
                         cancelled before they started, so their work never begins, and no process \
                         of theirs was swept because none existed yet. Tell the user the request \
                         was stopped; do not report that nothing was found.";
-            let evidence = Evidence::Nothing;
+            let evidence = Evidence::Nothing.and(unreachable.evidence);
             let mut answer = json!({
                 "stopped": [],
                 "asks_cancelled": pending.len(),
+                "unnamed_processes_killed": unreachable.killed,
                 "unnamed_processes_still_alive": unreachable.survivors,
                 "all_cancelled": true,
                 "note": note,
@@ -5986,8 +5998,8 @@ impl Agent {
                 asks = pending.len(),
                 %evidence,
                 checked = evidence.proven(),
-                found = 0,
-                killed = 0,
+                found = unreachable.found,
+                killed = unreachable.killed,
                 survivors = ?unreachable.survivors,
                 unconfirmed_because = ?unread.map(|u| u.cause.as_str()),
                 sessions_not_read = ?unread.map(|u| u.sessions.as_slice()).unwrap_or(&[]),
