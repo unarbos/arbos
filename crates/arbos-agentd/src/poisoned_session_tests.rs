@@ -154,13 +154,13 @@ async fn a_benign_message_refused_in_a_poisoned_session_recovers_on_a_fresh_cont
         );
 
         for benign in [FOOD_IDENTIFICATION, BLOG_POST, OUTPUT_PREFERENCE] {
-            let probe = probe(&llm, benign).await;
+            let verdict = probe(&llm, benign).await;
             assert_eq!(
-                probe,
+                verdict,
                 Probe::Answered,
                 "a benign message must be answered on its own: {benign}"
             );
-            let cause = cause_of(probe);
+            let cause = cause_of(verdict);
             assert_eq!(cause, RefusalCause::SessionHistory);
             assert_eq!(
                 recovery_for(cause),
@@ -180,13 +180,13 @@ async fn an_adversarial_message_stays_refused_and_reaches_no_recovery() {
     for shape in [Refuse::OnMessage, Refuse::FinishReason, Refuse::HttpBody] {
         let llm = scripted_provider(shape).await;
         for adversarial in [RISK_OS_OPERATION, SKILL_INJECTION] {
-            let probe = probe(&llm, adversarial).await;
+            let verdict = probe(&llm, adversarial).await;
             assert_eq!(
-                probe,
+                verdict,
                 Probe::Refused,
                 "an adversarial message is refused on its own: {adversarial}"
             );
-            let cause = cause_of(probe);
+            let cause = cause_of(verdict);
             assert_eq!(cause, RefusalCause::MessageAlone);
             assert_eq!(
                 recovery_for(cause),

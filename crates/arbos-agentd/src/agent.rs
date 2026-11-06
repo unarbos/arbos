@@ -11478,6 +11478,15 @@ impl Agent {
         m: &ModelError,
     ) -> Option<Result<()>> {
         tracing::warn!(chat_id, detail = %m.detail, "provider refusal; the message passes on its own, so this chat's context is what was declined");
+        if let Err(e) = self
+            .rotate_chat_session(chat_id, "refusal_session_poisoned")
+            .await
+        {
+            tracing::warn!(chat_id, error = %e, "fresh session after a poisoned-session refusal failed; the refusal falls to the narrower same-session retry");
+            return None;
+        }
+        // Counted only once the window was actually replaced, so the fleet number is recoveries
+        // run rather than verdicts reached.
         self.append_audit(
             "refusal_session_poisoned",
             json!({
@@ -11488,13 +11497,6 @@ impl Agent {
         let _ = self
             .post_timing("refusal_session_poisoned", 1, Some("fresh_context"))
             .await;
-        if let Err(e) = self
-            .rotate_chat_session(chat_id, "refusal_session_poisoned")
-            .await
-        {
-            tracing::warn!(chat_id, error = %e, "fresh session after a poisoned-session refusal");
-            return None;
-        }
         {
             let mut tl = self.turn.lock().await;
             let t = tl.as_mut()?;
