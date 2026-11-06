@@ -120,6 +120,22 @@ impl Sweep {
     pub fn clean(&self) -> bool {
         self.checked && self.survivors.is_empty()
     }
+
+    /// Two sweeps of one cancel, read as one answer.
+    ///
+    /// A job can have left processes under more than one worker (bug AO), and the user is owed a
+    /// single statement about the job. `checked` is the conjunction and not the disjunction: one
+    /// tree the cancel could not read with is enough to make "every process is dead" a claim the
+    /// box cannot support, however well the others went.
+    pub fn and(mut self, other: Self) -> Self {
+        self.found += other.found;
+        self.killed += other.killed;
+        self.checked &= other.checked;
+        self.survivors.extend(other.survivors);
+        self.survivors.sort_unstable();
+        self.survivors.dedup();
+        self
+    }
 }
 
 /// One process as it was when the kill started: its pid and the start time that tells it from a
