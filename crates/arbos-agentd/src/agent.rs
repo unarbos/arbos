@@ -4278,10 +4278,67 @@ impl Agent {
                 sweep,
             });
         }
+        // Bug AK. A cancel that only walks job rows cannot see work whose row never existed,
+        // and in `r17status` that was the whole of it. The survivors go to the same place a
+        // job's do, so a `kill` the user aims at one is allowed rather than refused — bug AE's
+        // guarantee must not weaken just because the process had no row to be named in.
+        let unreachable = self.reap_unreachable_workers().await;
+        if !unreachable.survivors.is_empty() {
+            self.note_cancel_leftovers(chat_id, &unreachable.survivors)
+                .await;
+        }
+        if unreachable.found > 0 {
+            tracing::warn!(
+                found = unreachable.found,
+                killed = unreachable.killed,
+                survivors = ?unreachable.survivors,
+                "work left by a dead worker that no job row named"
+            );
+        }
         if !stopped.is_empty() {
             self.refresh_job_activity(chat_id).await;
         }
         stopped
+    }
+
+    /// Kill what a dead worker left running that no job row can name (bug AK).
+    ///
+    /// Test5 round 17, `r17status`: a worker died after a pi OOM kill and its backgrounded loop
+    /// carried on as PID 23536 with no job row, so `stop_jobs` — which iterates
+    /// `jobs_for_chat` — could not reach it by construction. The mark its worker left in its
+    /// environment is the only handle still pointing at it.
+    ///
+    /// Nothing is killed without positive evidence on both halves: the store holds a subagent
+    /// row for the session, so it really was a worker's, and no adapter still holds a child for
+    /// it, so it really is over. Everything else is kept — another job's tree because its
+    /// session is live, the box's own agent because `pi-main` is no session at all. Deriving
+    /// the keep set this way is the point: an exclusion list is one catastrophe per name a
+    /// future caller forgets, and the main pi child would have been the first of them.
+    pub(crate) async fn reap_unreachable_workers(&self) -> Sweep {
+        let mut dead: HashSet<String> = HashSet::new();
+        for (_pid, mark) in crate::isolation::marked_procs_all() {
+            let Some(session) = crate::isolation::session_of(&mark) else {
+                continue;
+            };
+            if dead.contains(session) {
+                continue;
+            }
+            let was_a_worker = matches!(self.store.subagent(session), Ok(Some(_)));
+            let still_open = self.adapters.values().any(|a| a.is_open(session));
+            if was_a_worker && !still_open {
+                dead.insert(session.to_owned());
+            }
+        }
+        if dead.is_empty() {
+            return Sweep::nothing_to_check();
+        }
+        // Blocking: the reap signals, sleeps and re-reads `/proc`, which must not sit on a
+        // runtime thread the rest of the box shares.
+        tokio::task::spawn_blocking(move || {
+            crate::isolation::reap_orphan_workers(|session| dead.contains(session))
+        })
+        .await
+        .unwrap_or_default()
     }
 
     /// Remember pids a cancel could not kill, so the agent's `kill` on one of them is allowed
@@ -7742,6 +7799,9 @@ impl Agent {
             loop {
                 t.tick().await;
                 let _ = me.keepalive(true).await;
+                // Bug AK: nobody could have cancelled `status18b`, so the timer is the half
+                // that actually reaches work a dead worker left behind.
+                let _ = me.reap_unreachable_workers().await;
             }
         })
     }
