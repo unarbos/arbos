@@ -12833,6 +12833,14 @@ impl Agent {
             }
             if job_retry.is_some() {
                 // Back in the queue, not ended: the fresh worker continues the same job row.
+                //
+                // **The worker leaves `running` first, and the order is the point.** A job's
+                // worker is the one its `subagent_id` names, and that still names this dead one
+                // until the fresh worker replaces it. Requeue first and the pair reads "queued
+                // job, running worker" — a job whose worker has just died, described as one
+                // whose worker is coming up. The settling below writes `idle` again, which is
+                // the same answer; what it cannot do is write it in time.
+                let _ = self.store.set_subagent_status(&subagent_id, "idle");
                 let _ = self.store.bump_job_restarts(&j.id);
                 let _ = self
                     .store
