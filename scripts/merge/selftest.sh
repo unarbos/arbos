@@ -1107,6 +1107,55 @@ else
   done
 fi
 
+# 17. swiftcount.sh. Gate 4 adjudicates DROPPED TEST NAMES, so a miscount here does not produce a
+#     wrong number — it produces a phantom dropped test, or hides a real one by filling its slot.
+#     Both constraints are asserted as behaviour rather than read out of the source: a count must
+#     not be emitted while a line is unaccounted for, and an ambiguous recovery must be an error
+#     rather than a pick.
+echo "swiftcount — a count is refused rather than approximated:"
+sc="$D/swiftcount.sh"
+if [ ! -f "$sc" ]; then
+  bad "no swiftcount.sh beside the kit — case 17 is testing nothing"
+else
+  scd=$(mktemp -d); trap 'rm -rf "$scd"' EXIT
+  # Both report formats the same log mixes, plus the performance line that carries no verdict.
+  cat > "$scd/clean.log" <<'SCLOG'
+Test Case '-[S testA]' started.
+Test Case '-[S testA]' passed (1.000 seconds).
+Test Case '-[S testB]' skipped (0.100 seconds).
+/x/y.swift:3: Test Case '-[S testPerf]' measured [Time, s] average: 1.0
+Test case 'S.testC()' passed on 'Clone 1' (0.010 seconds)
+Test case 'S.testD()' failed on 'Clone 1' (0.020 seconds)
+SCLOG
+  got=$(bash "$sc" counts "$scd/clean.log" 2>&1)
+  if [ "$got" = "passed=2 failed=1 skipped=1 total=4" ]; then
+    ok "both line formats are counted and the measurement line is not mistaken for a result"
+  else bad "a clean log counts as '$got', expected passed=2 failed=1 skipped=1 total=4"; fi
+
+  # The defect this exists for: an interleaved write bisects one result line.
+  cp "$scd/clean.log" "$scd/cut.log"
+  cat >> "$scd/cut.log" <<'SCCUT'
+Test case 'S.testEveryListedSettingsPa2026-11-06 20:22:31.541 xcodebuild[1:2] [MT] note
+SCCUT
+  got=$(bash "$sc" counts "$scd/cut.log" 2>&1); rc=$?
+  if [ "$rc" -ne 0 ]; then ok "a truncated result line refuses the count"
+  else bad "a truncated result line still produced a count, which is the whole defect: $got"; fi
+  case "$got" in
+    *passed=*) bad "the refusal still printed a count, so a reader can quote it: $got" ;;
+    *) ok "the refusal prints NO count, so there is no number to quote" ;;
+  esac
+
+  # Recovery names the test when one declared name fits, and refuses when two do.
+  printf 'testEveryListedSettingsPageIsIndexedWithARoute\ntestSomethingUnrelated\n' > "$scd/one.list"
+  if bash "$sc" recover "$scd/cut.log" "$scd/one.list" 2>&1 | grep -q "testEveryListedSettingsPageIsIndexedWithARoute"; then
+    ok "a fragment that fits one declared name recovers it"
+  else bad "the fragment did not recover its one declared name"; fi
+  printf 'testEveryListedSettingsPageIsIndexedWithARoute\ntestEveryListedSettingsPageIsIndexedWithASlug\n' > "$scd/two.list"
+  got=$(bash "$sc" recover "$scd/cut.log" "$scd/two.list" 2>&1); rc=$?
+  if [ "$rc" -ne 0 ]; then ok "a fragment that fits two declared names is an error, not a pick"
+  else bad "an ambiguous fragment was resolved anyway, which invents a gate-4 verdict: $got"; fi
+fi
+
 echo
 if [ "$fail" -eq 0 ]; then echo "selftest: PASS"; else echo "selftest: FAIL"; fi
 exit "$fail"
