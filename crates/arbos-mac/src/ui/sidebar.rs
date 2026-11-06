@@ -762,16 +762,16 @@ pub(crate) struct RowView {
     pub(crate) unread_count: usize,
     pub(crate) typing: bool,
     pub(crate) preview: String,
-    pub(crate) time: String,
     pub(crate) person_image: Option<Arc<RenderImage>>,
     pub(crate) guests: people::PeopleWithAvatars,
     /// In the Pinned section ([feedback sidebar-pinning-mac-2026-10-28]): the row carries
-    /// the muted `pin.fill` before its time.
+    /// the muted `pin.fill` at the end of its name line.
     pub(crate) pinned: bool,
 }
 
-/// A server in the chat list (D88 rule 1): the same row as a group — disc, name, preview,
-/// time, unread dot — sorted among the chats by last activity.
+/// A server in the chat list (D88 rule 1): disc, name, preview, time, unread count pill —
+/// sorted among the chats by last activity. Unlike a chat row it keeps its time and its
+/// count (`docs/mac-design-rules.md` § Row contents): a server is not in the reference.
 pub(crate) struct ServerRowView {
     pub(crate) server: ServerInfo,
     pub(crate) selected: bool,
@@ -969,7 +969,6 @@ fn unsorted_entries(shell: &Shell, cx: &Context<Shell>) -> Vec<ListEntry> {
                 .sum(),
             typing: !state.typing_in(&p.id).is_empty(),
             preview: hit.reason.unwrap_or_else(|| preview(state, p)),
-            time: time_label(last_activity(state, p)),
             person_image: p.person().and_then(|x| state.avatar(&x.avatar_url)),
             guests: shown_people
                 .into_iter()
@@ -2317,9 +2316,6 @@ fn render_row(
         unread_count: _,
         typing,
         preview,
-        // The chat row no longer prints a time (`docs/mac-design-rules.md`
-        // § Row contents). `RowView` keeps it for the rows that still do.
-        time: _,
         person_image: _,
         guests: _,
         pinned,
@@ -4057,18 +4053,39 @@ mod row_pitch_tests {
     }
 
     /// What we shipped, so the size of the change is on the record and a
-    /// later "correction" back toward it is a deliberate act.
-    #[test]
-    fn the_reference_is_the_denser_of_the_two_designs() {
+    /// later "correction" back toward it is a deliberate act. Counted off a
+    /// laid-out column rather than off the constants, so it is the rendering
+    /// that has to hold, not the arithmetic.
+    #[gpui::test]
+    fn the_reference_is_the_denser_of_the_two_designs(cx: &mut TestAppContext) {
         const SHIPPED_PITCH: f32 = 69.5;
+        let (_view, vcx) = cx.add_window_view(|_, _| Rows);
+        vcx.run_until_parked();
+        let first: f32 = vcx
+            .debug_bounds("pitch-row-0")
+            .expect("row")
+            .origin
+            .y
+            .into();
+        let second: f32 = vcx
+            .debug_bounds("pitch-row-1")
+            .expect("row")
+            .origin
+            .y
+            .into();
+        let pitch = second - first;
+
+        // The height a dozen of the old rows filled.
+        let column = 12.0 * SHIPPED_PITCH;
+        let fits = (column / pitch).floor();
         assert!(
-            ROW_PITCH < SHIPPED_PITCH,
-            "the reference is denser than what we shipped, not taller"
+            pitch < SHIPPED_PITCH,
+            "rows draw {pitch} apart; the reference is denser than the {SHIPPED_PITCH} \
+             we shipped, not taller"
         );
-        let list = 12.0 * SHIPPED_PITCH;
         assert!(
-            (list / ROW_PITCH).floor() >= 14.0,
-            "the height that held twelve rows should now hold fourteen"
+            fits >= 14.0,
+            "the column that held twelve rows now holds {fits}, expected fourteen"
         );
     }
 }
