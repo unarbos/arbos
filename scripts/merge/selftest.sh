@@ -185,8 +185,9 @@ fi
 #    ancestry question and a stub would be asserting my idea of git's answer.
 echo "nomac_covers — an ancestor is covered, anything else is not:"
 # The SHIPPED function, lifted out and evaluated — not retyped. merge-window.sh
-# ends in a top-level `case` dispatch so it cannot be sourced, which is the same
-# bind auto-stable-selftest.sh is in with is_hotfix, and this is its answer.
+# ends in a top-level `case` dispatch so it cannot be sourced. auto-stable.sh is
+# in the same bind with release_marker(), and answers it the other way: its cases
+# live inside the script, behind `--self-test`.
 #
 # A copy here would be worse than no case at all: every mutation of the real
 # function would leave the copy untouched, so the whole of case 8 would pass
