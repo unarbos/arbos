@@ -50,7 +50,7 @@ const APART: Duration = Duration::from_secs(2);
 
 #[tokio::test]
 async fn four_forced_job_asks_two_seconds_apart_give_four_jobs() {
-    let (agent, root) = test_agent().await;
+    let (agent, _root) = test_agent().await;
     let chat = "01TESTCHATFORCEDJOB000001";
     let host = agent.sync.open_room(chat).await.unwrap();
     // A turn holds the lock for the whole burst, as the first ask's turn did.
@@ -120,7 +120,6 @@ async fn four_forced_job_asks_two_seconds_apart_give_four_jobs() {
             "one receipt names the {pkg} job and says it is running: {spoken:?}"
         );
     }
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// The quick lane is what swallowed two of the four, so it has to stand aside for a forced ask
@@ -129,7 +128,7 @@ async fn four_forced_job_asks_two_seconds_apart_give_four_jobs() {
 /// job.
 #[tokio::test]
 async fn a_forced_ask_skips_the_quick_lane_and_a_status_question_still_takes_it() {
-    let (agent, root) = test_agent().await;
+    let (agent, _root) = test_agent().await;
     let chat = "01TESTCHATFORCEDJOB000002";
     let host = agent.sync.open_room(chat).await.unwrap();
     let _busy = agent.test_hold_turn(chat).await;
@@ -177,7 +176,6 @@ async fn a_forced_ask_skips_the_quick_lane_and_a_status_question_still_takes_it(
     let jobs = agent.store.jobs_for_chat(chat).unwrap();
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].ask_message_id, forced);
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// The ticket contract of bug O (`crate::send_order`): whoever owes the answer holds that
@@ -197,7 +195,7 @@ async fn a_forced_ask_skips_the_quick_lane_and_a_status_question_still_takes_it(
 /// younger message would be stuck behind a worker — which is bug AA restored.
 #[tokio::test]
 async fn a_forced_asks_place_is_released_by_the_receipt_at_job_start() {
-    let (agent, root) = test_agent().await;
+    let (agent, _root) = test_agent().await;
     let chat = "01TESTCHATFORCEDJOB000004";
     let host = agent.sync.open_room(chat).await.unwrap();
     let _busy = agent.test_hold_turn(chat).await;
@@ -250,7 +248,6 @@ async fn a_forced_asks_place_is_released_by_the_receipt_at_job_start() {
         agent.send_order.is_turn(chat, &younger),
         "the older message answered, so the younger one is the head — a running job orders nothing"
     );
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// A job's result is not posted when the job was cancelled, and cancelling it still leaves the
@@ -263,7 +260,7 @@ async fn a_forced_asks_place_is_released_by_the_receipt_at_job_start() {
 /// the wrong path.
 #[tokio::test]
 async fn a_cancelled_forced_job_adds_nothing_to_its_receipt_and_holds_no_place() {
-    let (agent, root) = test_agent().await;
+    let (agent, _root) = test_agent().await;
     let chat = "01TESTCHATFORCEDJOB000005";
     let host = agent.sync.open_room(chat).await.unwrap();
     let _busy = agent.test_hold_turn(chat).await;
@@ -337,7 +334,6 @@ async fn a_cancelled_forced_job_adds_nothing_to_its_receipt_and_holds_no_place()
         1,
         "under the ask it answered"
     );
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// Assistant rows under `msg_id` that hold words.
@@ -360,7 +356,7 @@ fn visible_replies_to(host: &SharedHost, msg_id: &str) -> Vec<String> {
 /// in words passes it; a job the model starts off its own judgement still meets it.
 #[tokio::test]
 async fn the_per_chat_cap_refuses_the_models_fourth_job_and_not_the_users() {
-    let (agent, root) = test_agent().await;
+    let (agent, _root) = test_agent().await;
     let chat = "01TESTCHATFORCEDJOB000003";
     let host = agent.sync.open_room(chat).await.unwrap();
     let _busy = agent.test_hold_turn(chat).await;
@@ -394,5 +390,4 @@ async fn the_per_chat_cap_refuses_the_models_fourth_job_and_not_the_users() {
     let jobs = agent.store.jobs_for_chat(chat).unwrap();
     assert_eq!(jobs.len(), 4);
     assert!(jobs.iter().any(|j| j.ask_message_id == msg_id));
-    let _ = std::fs::remove_dir_all(&root);
 }

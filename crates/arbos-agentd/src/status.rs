@@ -1210,7 +1210,40 @@ pub(crate) mod tests {
         axum::http::StatusCode::NO_CONTENT
     }
 
-    pub(crate) async fn test_agent() -> (Arc<Agent>, std::path::PathBuf) {
+    /// A test box's work root, removed when the test that holds it drops it.
+    ///
+    /// This used to be a plain `PathBuf`, and clearing it was left to each test remembering to
+    /// call `remove_dir_all` on its last line. Most do. It is not enough: a test that panics
+    /// never reaches that line, and a test that binds the root as `_root` because it has no use
+    /// for it never had one to reach. Each root is around 129 MB, so a repeat-run measurement
+    /// of a flaky test — 1,200 runs while pinning the bug-AJ pair — left 3,704 directories
+    /// behind and filled a 254 GB disk, which then failed the runs it was measuring.
+    ///
+    /// Dropping is the one step a panic cannot skip, so the root clears itself now. It derefs
+    /// to [`std::path::Path`], so the tests that do their own clean-up keep working and simply
+    /// repeat a removal that has already happened, which `remove_dir_all` ignores.
+    pub(crate) struct TestRoot(std::path::PathBuf);
+
+    impl std::ops::Deref for TestRoot {
+        type Target = std::path::Path;
+        fn deref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl AsRef<std::path::Path> for TestRoot {
+        fn as_ref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TestRoot {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    pub(crate) async fn test_agent() -> (Arc<Agent>, TestRoot) {
         test_agent_with(axum::Router::new()).await
     }
 
@@ -1276,25 +1309,22 @@ pub(crate) mod tests {
     /// Every other test box points `pi_bin` at nothing, which leaves the agent with no main
     /// session and no supervisor at all — bug Y's tests need the production loop itself, so
     /// they give it a scripted child to supervise.
-    pub(crate) async fn test_agent_with_pi(pi_bin: &str) -> (Arc<Agent>, std::path::PathBuf) {
+    pub(crate) async fn test_agent_with_pi(pi_bin: &str) -> (Arc<Agent>, TestRoot) {
         test_agent_full(axum::Router::new(), pi_bin).await
     }
 
     /// Same, with extra mock-relay routes merged in (`/box/secrets/…` for the hand-off tests).
-    pub(crate) async fn test_agent_with(extra: axum::Router) -> (Arc<Agent>, std::path::PathBuf) {
+    pub(crate) async fn test_agent_with(extra: axum::Router) -> (Arc<Agent>, TestRoot) {
         test_agent_full(extra, "/nonexistent/pi").await
     }
 
     /// Same, pointed at a relay the caller serves itself. The model-stub tests count the TCP
     /// connections the box opens, which `axum::serve` cannot report.
-    pub(crate) async fn test_agent_on_relay(relay_url: &str) -> (Arc<Agent>, std::path::PathBuf) {
+    pub(crate) async fn test_agent_on_relay(relay_url: &str) -> (Arc<Agent>, TestRoot) {
         test_agent_on(relay_url.to_owned(), "/nonexistent/pi").await
     }
 
-    async fn test_agent_full(
-        extra: axum::Router,
-        pi_bin: &str,
-    ) -> (Arc<Agent>, std::path::PathBuf) {
+    async fn test_agent_full(extra: axum::Router, pi_bin: &str) -> (Arc<Agent>, TestRoot) {
         let app = axum::Router::new()
             .merge(extra)
             .route(
@@ -1318,7 +1348,7 @@ pub(crate) mod tests {
         test_agent_on(format!("http://127.0.0.1:{port}"), pi_bin).await
     }
 
-    async fn test_agent_on(relay_url: String, pi_bin: &str) -> (Arc<Agent>, std::path::PathBuf) {
+    async fn test_agent_on(relay_url: String, pi_bin: &str) -> (Arc<Agent>, TestRoot) {
         let root = std::env::temp_dir().join(format!("arbos-quick-{}", ulid()));
         std::fs::create_dir_all(&root).unwrap();
         let bx = crate::config::BoxConfig {
@@ -1349,7 +1379,7 @@ pub(crate) mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(64);
         let sync = crate::sync::SyncHub::new(cfg.clone(), store.clone(), tx);
         let agent = Agent::new(cfg, store, sync, Arc::new(tokio::sync::Semaphore::new(4)));
-        (agent, root)
+        (agent, TestRoot(root))
     }
 
     /// Shorten the act-ack promotion threshold for one agent only. The knob file lives in this
@@ -1401,7 +1431,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn busy_agent_answers_a_status_question_within_the_gate() {
-        let (agent, root) = test_agent().await;
+        let (agent, _root) = test_agent().await;
         let chat = "01TESTCHATQUICKREPLY000000";
         let host = agent.sync.open_room(chat).await.unwrap();
         let _busy = agent.test_hold_turn(chat).await;
@@ -1422,7 +1452,6 @@ pub(crate) mod tests {
         let note = agent.take_side_notes(chat).expect("side note");
         assert!(note.contains("what is going on now?") && note.contains("benchmark"));
         assert!(agent.take_side_notes(chat).is_none());
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Jacob on Test5 (2026-11-04, agentd 0.1.191, chat 01M6M0G9257SCE4RRQDW2GXFS9): the quick
@@ -1438,7 +1467,7 @@ pub(crate) mod tests {
     async fn a_quick_reply_survives_an_endpoint_that_demands_reasoning() {
         *REASONING_REFUSALS.lock().unwrap() = 0;
         *REASONING_SERVED.lock().unwrap() = 0;
-        let (agent, root) = test_agent().await;
+        let (agent, _root) = test_agent().await;
         let chat = "01TESTCHATQUICKREPLY000018";
         let host = agent.sync.open_room(chat).await.unwrap();
         let _busy = agent.test_hold_turn(chat).await;
@@ -1477,7 +1506,6 @@ pub(crate) mod tests {
             "the model is remembered, so the next quick reply skips the refused attempt"
         );
         assert!(agent.take_side_notes(chat).is_some());
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// #1431 (GigChadAgent): after the relay renames the project, the system prompt, the quick
@@ -1562,7 +1590,7 @@ pub(crate) mod tests {
     /// is the only row the message ever gets.
     #[tokio::test]
     async fn busy_agent_queues_a_new_task_without_a_placeholder_row() {
-        let (agent, root) = test_agent().await;
+        let (agent, _root) = test_agent().await;
         *agent.job_cap.lock().unwrap() = Some(0);
         let chat = "01TESTCHATQUICKREPLY000001";
         let host = agent.sync.open_room(chat).await.unwrap();
@@ -1595,7 +1623,6 @@ pub(crate) mod tests {
         );
         waiting.abort();
         drop(busy);
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Jacob's screenshot (TestAgent, 2026-10-23 23:58 UTC): "On it." as a bubble above the
@@ -1604,7 +1631,7 @@ pub(crate) mod tests {
     /// a tool starts before any ack.
     #[tokio::test]
     async fn act_turn_writes_no_ack_row_only_the_result() {
-        let (agent, root) = test_agent().await;
+        let (agent, _root) = test_agent().await;
         let chat = "01TESTCHATQUICKREPLY000006";
         let host = agent.sync.open_room(chat).await.unwrap();
         let _busy = agent.test_hold_turn(chat).await;
@@ -1659,7 +1686,6 @@ pub(crate) mod tests {
         assert_eq!(rows.len(), 1);
         let all_text: String = rows.iter().map(|r| r.text()).collect();
         assert!(!all_text.contains("On it"), "{all_text}");
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Duplex step 1 (`docs/duplex-agent-design.md` §2.1): with the send tool on, prose the
@@ -1669,7 +1695,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn send_tool_holds_leftover_prose_and_posts_the_fallback_once() {
         use crate::config::SendTool;
-        let (agent, root) = test_agent().await;
+        let (agent, _root) = test_agent().await;
         let chat = "01TESTCHATQUICKREPLY000007";
         let host = agent.sync.open_room(chat).await.unwrap();
         let _busy = agent.test_hold_turn(chat).await;
@@ -1772,7 +1798,6 @@ pub(crate) mod tests {
             Some(user_msg),
             "send_message(reply_to) threads the bubble under the ask"
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Feedback app-01M5WGH5…: in a people chat an empty `route reply` plus leftover prose
@@ -1781,7 +1806,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn empty_reply_in_people_chat_discards_staying_silent_fallback() {
         use crate::config::SendTool;
-        let (agent, root) = test_agent().await;
+        let (agent, _root) = test_agent().await;
         let chat = "01TESTCHATQUIETFALLBACK0001";
         let me = format!("agent:{}", agent.cfg.project_id);
         agent.people.test_insert(
@@ -1842,14 +1867,13 @@ pub(crate) mod tests {
             .filter(|s| !s.is_empty())
             .collect();
         assert!(posted.is_empty(), "no 'staying silent' bubble: {posted:?}");
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Duplex step 2: `start_job` returns at once with a job row the working set and `list_jobs`
     /// show; the per-chat cap refuses the fourth job with a reason the model can relay.
     #[tokio::test]
     async fn start_job_returns_at_once_and_caps_per_chat() {
-        let (agent, root) = test_agent().await;
+        let (agent, _root) = test_agent().await;
         let chat = "01TESTCHATQUICKREPLY000008";
         let _host = agent.sync.open_room(chat).await.unwrap();
         let _busy = agent.test_hold_turn(chat).await;
@@ -1892,7 +1916,6 @@ pub(crate) mod tests {
         assert_eq!(row.len(), 3);
         assert_eq!(row[0].kind, "research");
         assert_eq!(row[0].ask_message_id, "m-busy");
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Duplex D5 / D7: two jobs on the same path queue behind each other and the second runs
@@ -1901,7 +1924,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn job_locks_queue_and_stop_all_cancels_the_chat_jobs() {
         use crate::agent::JobSpec;
-        let (agent, root) = test_agent().await;
+        let (agent, _root) = test_agent().await;
         let chat = "01TESTCHATQUICKREPLY000009";
         let host = agent.sync.open_room(chat).await.unwrap();
         let a = JobSpec {
@@ -2002,7 +2025,6 @@ pub(crate) mod tests {
             text.contains("fixing the tests") && text.contains("renaming a symbol"),
             "{text}"
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Jacob's Test5 round 2, bug I: a code job that declares no `touches` used to take
@@ -2013,7 +2035,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn a_code_job_locks_its_own_subfolder_not_the_whole_project() {
         use crate::agent::JobSpec;
-        let (agent, root) = test_agent().await;
+        let (agent, _root) = test_agent().await;
         let chat = "01TESTCHATJOBLOCKSCOPE0001";
         let _host = agent.sync.open_room(chat).await.unwrap();
         // Two repos, one per folder, as a box that cloned two projects has them.
@@ -2122,7 +2144,6 @@ pub(crate) mod tests {
             }),
             vec![format!("path:{}/alpha", project.display())]
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Bug I, second half: `start_job` used to answer `state: "running"` whenever a worker slot
@@ -2131,7 +2152,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn start_job_says_it_is_queued_behind_the_job_holding_the_files() {
         use crate::agent::JobSpec;
-        let (agent, root) = test_agent().await;
+        let (agent, _root) = test_agent().await;
         let chat = "01TESTCHATQUEUEDBEHIND0001";
         let _host = agent.sync.open_room(chat).await.unwrap();
         let _busy = agent.test_hold_turn(chat).await;
@@ -2179,7 +2200,6 @@ pub(crate) mod tests {
             "the reply must name what the job waits for: {note}"
         );
         agent.release_job_locks("job-holder").await;
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Bug I follow-up, the half the tool result cannot reach. The acknowledgement row the main
@@ -2190,7 +2210,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn a_queued_job_tells_the_chat_itself() {
         use crate::agent::JobSpec;
-        let (agent, root) = test_agent().await;
+        let (agent, _root) = test_agent().await;
         let chat = "01TESTCHATQUEUEDROW00000001";
         let host = agent.sync.open_room(chat).await.unwrap();
         let _busy = agent.test_hold_turn(chat).await;
@@ -2247,7 +2267,6 @@ pub(crate) mod tests {
             "one line, not one per surface: {said:?}"
         );
         agent.release_job_locks("job-holder").await;
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// #2770 retires every row a turn opened and left wordless. The queued notice is a row the
@@ -2263,7 +2282,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn the_queued_notice_survives_the_wordless_sweep() {
         use crate::agent::{retire_wordless_rows, JobSpec};
-        let (agent, root) = test_agent().await;
+        let (agent, _root) = test_agent().await;
         let chat = "01TESTCHATQUEUEDSWEEP00001";
         let host = agent.sync.open_room(chat).await.unwrap();
         let _busy = agent.test_hold_turn(chat).await;
@@ -2348,14 +2367,13 @@ pub(crate) mod tests {
             assert!(after.text().contains("is queued behind"));
         }
         agent.release_job_locks("job-holder").await;
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The other half of the same rule: a job that waits for nothing says nothing, so an ordinary
     /// start is not narrated twice.
     #[tokio::test]
     async fn a_job_that_waits_for_nothing_posts_no_queued_line() {
-        let (agent, root) = test_agent().await;
+        let (agent, _root) = test_agent().await;
         let chat = "01TESTCHATNOQUEUEDROW00001";
         let host = agent.sync.open_room(chat).await.unwrap();
         let _busy = agent.test_hold_turn(chat).await;
@@ -2377,7 +2395,6 @@ pub(crate) mod tests {
             !said.iter().any(|t| t.contains("queued behind")),
             "nothing held a key, so nothing was queued: {said:?}"
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Two code jobs in two folders of *one* repo take turns on that repo's index — `git` writes
@@ -2387,7 +2404,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn one_repo_two_folders_take_turns_on_git_but_not_on_files() {
         use crate::agent::JobSpec;
-        let (agent, root) = test_agent().await;
+        let (agent, _root) = test_agent().await;
         let chat = "01TESTCHATONEREPOTWODIRS01";
         let _host = agent.sync.open_room(chat).await.unwrap();
         let project = agent.cfg.work_dir.clone();
@@ -2485,7 +2502,6 @@ pub(crate) mod tests {
             "the waiting job takes its turn once the index is free"
         );
         agent.release_job_locks("job-tests").await;
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Bug I, measured against the round-2 traces. Each brief below carries the folder token its
@@ -2496,7 +2512,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn the_round_two_traces_run_side_by_side() {
         use crate::agent::JobSpec;
-        let (agent, root) = test_agent().await;
+        let (agent, _root) = test_agent().await;
         let chat = "01TESTCHATTRACEREPLAY00001";
         let _host = agent.sync.open_room(chat).await.unwrap();
         let project = agent.cfg.work_dir.clone();
@@ -2591,7 +2607,6 @@ pub(crate) mod tests {
         tokio::time::timeout(Duration::from_millis(500), agent.acquire_job_locks(&t9))
             .await
             .expect("T9 waited about 10 min behind T8 in the run; it must start at once now");
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// py-06 on image 0.1.121 (parity after-run, 2026-10-25 02:11 UTC): an `act` turn computed the
@@ -2601,7 +2616,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn act_ack_on_the_working_row_does_not_swallow_the_fallback() {
         use crate::config::SendTool;
-        let (agent, root) = test_agent().await;
+        let (agent, _root) = test_agent().await;
         let chat = "01TESTCHATQUICKREPLY000010";
         let host = agent.sync.open_room(chat).await.unwrap();
         let _busy = agent.test_hold_turn(chat).await;
@@ -2639,7 +2654,6 @@ pub(crate) mod tests {
             rows.iter().filter(|r| !r.text().trim().is_empty()).count(),
             1
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Parity after steps 1–3 (0.1.125): `ack_first` 0/13 because an act ack is working-row status
@@ -2648,7 +2662,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn long_act_turn_promotes_its_ack_to_a_bubble() {
         use crate::config::SendTool;
-        let (agent, root) = test_agent().await;
+        let (agent, _root) = test_agent().await;
         promote_act_ack_after_1s(&agent);
         let chat = "01TESTCHATQUICKREPLY000011";
         let host = agent.sync.open_room(chat).await.unwrap();
@@ -2695,7 +2709,6 @@ pub(crate) mod tests {
             assert!(t.ack_posted);
             assert!(!t.row_closed, "a fresh result row is open for the answer");
         }
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Duplex step 4: an act turn that has run a web tool and is still going at the threshold
@@ -2705,7 +2718,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn long_web_act_turn_converts_to_a_job() {
         use crate::config::SendTool;
-        let (agent, root) = test_agent().await;
+        let (agent, _root) = test_agent().await;
         let chat = "01TESTCHATQUICKREPLY000012";
         let host = agent.sync.open_room(chat).await.unwrap();
         let _busy = agent.test_hold_turn(chat).await;
@@ -2843,7 +2856,6 @@ pub(crate) mod tests {
             "{:?}",
             rows.iter().map(|r| r.text()).collect::<Vec<_>>()
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Jacob, Test5, 2026-11-04, T2 (agentd 0.1.192): an act turn searched the web, posted the
@@ -2854,7 +2866,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn an_act_turn_that_already_answered_is_not_converted_to_a_job() {
         use crate::config::SendTool;
-        let (agent, root) = test_agent().await;
+        let (agent, _root) = test_agent().await;
         let chat = "01TESTCHATQUICKREPLY000013";
         let host = agent.sync.open_room(chat).await.unwrap();
         let _busy = agent.test_hold_turn(chat).await;
@@ -2913,7 +2925,6 @@ pub(crate) mod tests {
             let tl = agent.turn.lock().await;
             assert!(!tl.as_ref().unwrap().act_to_job);
         }
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Round 2 of the same stress run: the answer to "make me the CSV" is the CSV. That turn
@@ -2923,7 +2934,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn an_act_turn_that_delivered_a_file_is_not_converted_to_a_job() {
         use crate::config::SendTool;
-        let (agent, root) = test_agent().await;
+        let (agent, _root) = test_agent().await;
         let chat = "01TESTCHATQUICKREPLY000017";
         let host = agent.sync.open_room(chat).await.unwrap();
         let _busy = agent.test_hold_turn(chat).await;
@@ -2975,7 +2986,6 @@ pub(crate) mod tests {
             let tl = agent.turn.lock().await;
             assert!(!tl.as_ref().unwrap().act_to_job);
         }
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// #1776 (run 6 on 0.1.131: x3, c6, m9, c7, l1, g5): the act ack had been promoted to a
@@ -2986,7 +2996,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn prose_after_a_promoted_act_ack_still_becomes_the_result_bubble() {
         use crate::config::SendTool;
-        let (agent, root) = test_agent().await;
+        let (agent, _root) = test_agent().await;
         promote_act_ack_after_1s(&agent);
         let chat = "01TESTCHATQUICKREPLY000013";
         let host = agent.sync.open_room(chat).await.unwrap();
@@ -3050,7 +3060,6 @@ pub(crate) mod tests {
             result_row.rest.get("turnRole").and_then(Value::as_str),
             Some("ack")
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Jacob, "run bubble sort" (Mac, 2026-10-25 18:08 UTC, image 0.1.132): the answer went out as
@@ -3068,7 +3077,7 @@ pub(crate) mod tests {
     async fn wordless_row_after_a_bubble_is_hidden_never_deleted() {
         use crate::agent::trim_wordless_result_row;
         use crate::config::SendTool;
-        let (agent, root) = test_agent().await;
+        let (agent, _root) = test_agent().await;
         let chat = "01TESTCHATQUICKREPLY000014";
         let host = agent.sync.open_room(chat).await.unwrap();
         let _busy = agent.test_hold_turn(chat).await;
@@ -3171,7 +3180,6 @@ pub(crate) mod tests {
             h.doc.finish_message(&id, MessageStatus::Done);
             assert_eq!(trim_wordless_result_row(&h.doc, &id), "kept");
         }
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Test5 round 4 (2026-11-04, agentd 0.1.193): during the thirty-message burst six assistant
@@ -3187,7 +3195,7 @@ pub(crate) mod tests {
     async fn every_wordless_row_the_turn_left_behind_is_retired() {
         use crate::agent::{retire_wordless_rows, trim_wordless_result_row};
         use crate::config::SendTool;
-        let (agent, root) = test_agent().await;
+        let (agent, _root) = test_agent().await;
         let chat = "01TESTCHATQUICKREPLY000024";
         let host = agent.sync.open_room(chat).await.unwrap();
         let _busy = agent.test_hold_turn(chat).await;
@@ -3299,7 +3307,6 @@ pub(crate) mod tests {
             .collect();
         assert_eq!(visible.len(), 1, "the answer, and no empty 'done' rows");
         assert_eq!(visible[0].text().trim(), "Sorted: 1, 2, 3, 5, 8.");
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Test5 round 5: the same empty `done` row outside any burst. A request that runs as an
@@ -3317,7 +3324,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn an_inline_subagent_row_that_shows_nothing_is_retired() {
         use crate::agent::{retire_if_wordless, wordless_row};
-        let (agent, root) = test_agent().await;
+        let (agent, _root) = test_agent().await;
         let chat = "01TESTCHATQUICKREPLY000026";
         let host = agent.sync.open_room(chat).await.unwrap();
         let _busy = agent.test_hold_turn(chat).await;
@@ -3413,7 +3420,6 @@ pub(crate) mod tests {
             );
             assert!(h.doc.message(failed).unwrap().rest.get("hidden").is_none());
         }
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Bubble in Arbonites (2026-10-28 21:50 UTC, agentd 0.6.338): `route reply` with a first
@@ -3422,7 +3428,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn send_message_after_route_reply_line_is_its_own_bubble() {
         use crate::config::SendTool;
-        let (agent, root) = test_agent().await;
+        let (agent, _root) = test_agent().await;
         let chat = "01TESTCHATQUICKREPLY000015";
         let host = agent.sync.open_room(chat).await.unwrap();
         let _busy = agent.test_hold_turn(chat).await;
@@ -3453,7 +3459,6 @@ pub(crate) mod tests {
             vec![first.to_owned(), part1.to_owned(), part2.to_owned()],
             "each line is one bubble, none glued onto another"
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// @mwbob on a scratch box (2026-10-29 02:43 UTC, agentd 0.1.181): the relay turn for
@@ -3462,7 +3467,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn send_message_repeating_the_route_reply_posts_once() {
         use crate::config::SendTool;
-        let (agent, root) = test_agent().await;
+        let (agent, _root) = test_agent().await;
         let chat = "01TESTCHATQUICKREPLY000016";
         let host = agent.sync.open_room(chat).await.unwrap();
         let _busy = agent.test_hold_turn(chat).await;
@@ -3498,7 +3503,6 @@ pub(crate) mod tests {
             vec![line.to_owned(), more.to_owned()],
             "a line already posted in this turn is not posted again"
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The send-tool switch: default on, `off` restores streamed prose, `strict` drops the fallback.
@@ -3516,7 +3520,7 @@ pub(crate) mod tests {
     /// limit line is written once.
     #[tokio::test]
     async fn relay_turns_only_reply_and_notices_are_not_doubled() {
-        let (agent, root) = test_agent().await;
+        let (agent, _root) = test_agent().await;
         let chat = "01TESTCHATQUICKREPLY000003";
         let host = agent.sync.open_room(chat).await.unwrap();
         let _busy = agent.test_hold_turn(chat).await;
@@ -3552,7 +3556,6 @@ pub(crate) mod tests {
             );
             assert_eq!(t.streamed_text.matches("smaller steps").count(), 1);
         }
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Jacob on Test5 (2026-11-04 13:13:30 CR, agentd 0.1.192): research job
@@ -3569,7 +3572,7 @@ pub(crate) mod tests {
         use crate::config::SendTool;
         use crate::media::{deliver_file, out_dir};
 
-        let (agent, root) = test_agent().await;
+        let (agent, _root) = test_agent().await;
         let chat = "01TESTCHATQUICKREPLY000017";
         let host = agent.sync.open_room(chat).await.unwrap();
         {
@@ -3708,7 +3711,6 @@ pub(crate) mod tests {
             !said.contains("did not finish"),
             "a partial job never reads as a failure: {said}"
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Jacob on Test5 (2026-11-04, agentd 0.1.191, chat 01M6M0G9257SCE4RRQDW2GXFS9): a relay
@@ -3725,7 +3727,7 @@ pub(crate) mod tests {
         use crate::agent::{relay_fallback_line, TurnKind};
         use crate::config::SendTool;
 
-        let (agent, root) = test_agent().await;
+        let (agent, _root) = test_agent().await;
         let chat = "01TESTCHATQUICKREPLY000019";
         let host = agent.sync.open_room(chat).await.unwrap();
         {
@@ -3809,7 +3811,6 @@ pub(crate) mod tests {
             ],
             "the answer stands alone: no failure line under it"
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// #1355: an act turn that closes with a second `route reply {reply: …}` must show that text
@@ -3818,7 +3819,7 @@ pub(crate) mod tests {
     /// run before the argument deltas are folded, so the decision is made at turn end only.
     #[tokio::test]
     async fn route_reply_text_is_written_once_at_turn_end() {
-        let (agent, root) = test_agent().await;
+        let (agent, _root) = test_agent().await;
         let chat = "01TESTCHATQUICKREPLY000004";
         let host = agent.sync.open_room(chat).await.unwrap();
         let _busy = agent.test_hold_turn(chat).await;
@@ -3887,7 +3888,6 @@ pub(crate) mod tests {
             );
             assert!(t.route_reply_text.is_none());
         }
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// #1411 end to end: the model's answer comes back cut by the cap. No fragment and no
@@ -3895,7 +3895,7 @@ pub(crate) mod tests {
     /// and gets its real answer there; the transcript shows nothing meanwhile.
     #[tokio::test]
     async fn capped_quick_reply_queues_instead_of_a_fragment_or_placeholder() {
-        let (agent, root) = test_agent().await;
+        let (agent, _root) = test_agent().await;
         *agent.job_cap.lock().unwrap() = Some(0);
         let chat = "01TESTCHATQUICKREPLY000005";
         let host = agent.sync.open_room(chat).await.unwrap();
@@ -3917,7 +3917,6 @@ pub(crate) mod tests {
         );
         waiting.abort();
         drop(busy);
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Jacob (2026-10-23): a new ask while a user turn runs is answered beside it, not after it.
@@ -3925,7 +3924,7 @@ pub(crate) mod tests {
     /// queues; a relay turn holding the lock does not count as "busy with the user".
     #[tokio::test]
     async fn new_ask_during_a_user_turn_runs_as_a_job_within_the_cap() {
-        let (agent, root) = test_agent().await;
+        let (agent, _root) = test_agent().await;
         *agent.job_cap.lock().unwrap() = Some(1);
         let chat = "01TESTCHATQUICKREPLY000007";
         let host = agent.sync.open_room(chat).await.unwrap();
@@ -3970,7 +3969,6 @@ pub(crate) mod tests {
                 .unwrap(),
             "relay turn: queue"
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// #1648 / #1446: the model answered in plain text without `route`; pi re-prompts and the
@@ -3978,7 +3976,7 @@ pub(crate) mod tests {
     /// answer — the corrective route's `reply` adds nothing, streamed or from the call.
     #[tokio::test]
     async fn route_first_correction_does_not_write_a_second_answer() {
-        let (agent, root) = test_agent().await;
+        let (agent, _root) = test_agent().await;
         let chat = "01TESTCHATQUICKREPLY000008";
         let host = agent.sync.open_room(chat).await.unwrap();
         let _busy = agent.test_hold_turn(chat).await;
@@ -4053,14 +4051,13 @@ pub(crate) mod tests {
         let rows = reply_rows(&host, "m-busy");
         let text: String = rows.iter().map(|r| r.text()).collect();
         assert_eq!(text.matches("Staging host").count(), 1, "{text}");
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// #1657: a tool with no plain-words label (`sleep 25 && echo ok`) must not clear the working
     /// row — the act ack stays as the activity; with no ack, a generic line is posted.
     #[tokio::test]
     async fn unlabelled_tool_keeps_the_working_row_activity() {
-        let (agent, root) = test_agent().await;
+        let (agent, _root) = test_agent().await;
         let chat = "01TESTCHATQUICKREPLY000009";
         let host = agent.sync.open_room(chat).await.unwrap();
         let _busy = agent.test_hold_turn(chat).await;
@@ -4110,7 +4107,6 @@ pub(crate) mod tests {
                 .as_deref(),
             Some("Running a command")
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The exact b7 shape (#1657): a foreground turn runs; the user writes "stop at 20, not 40";
@@ -4118,7 +4114,7 @@ pub(crate) mod tests {
     /// steered (not queued as a job) and the working row must say "Steering: …".
     #[tokio::test]
     async fn b7_guide_without_full_stop_is_steered_and_shown_on_the_working_row() {
-        let (agent, root) = test_agent().await;
+        let (agent, _root) = test_agent().await;
         let chat = "01TESTCHATQUICKREPLY000010";
         let host = agent.sync.open_room(chat).await.unwrap();
         let _busy = agent.test_hold_turn(chat).await;
@@ -4158,7 +4154,6 @@ pub(crate) mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         };
         assert!(seen.starts_with("Steering: Change of plan"), "{seen}");
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Test5 round 5, bug R, part 3. While a wait is parked the chat has to say what it is
@@ -4172,7 +4167,7 @@ pub(crate) mod tests {
     async fn a_parked_approval_leaves_the_chat_saying_what_it_waits_for() {
         const TOOL: &str = "publish_parkstatus_probe";
         let want = format!("Waiting for your approval: {TOOL} (tool-send)");
-        let (agent, root) = test_agent().await;
+        let (agent, _root) = test_agent().await;
         let chat = "01TESTCHATPARKSTATUS000000";
         agent.store.upsert_chat(chat, "Main", true, 0).unwrap();
         let host = agent.sync.open_room(chat).await.unwrap();
@@ -4244,12 +4239,11 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(agent.approval_wait_label(chat), None);
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[tokio::test]
     async fn idle_agent_takes_the_normal_path() {
-        let (agent, root) = test_agent().await;
+        let (agent, _root) = test_agent().await;
         let chat = "01TESTCHATQUICKREPLY000002";
         let host = agent.sync.open_room(chat).await.unwrap();
         let (_msg_id, cmd) = send_cmd(&host, "what is going on now?");
@@ -4257,7 +4251,6 @@ pub(crate) mod tests {
             agent.quick_reply(chat, &host, &cmd).await,
             QuickOutcome::NotBusy
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Jacob, Test5 T7 (agentd 0.1.192): a research job ran for 5 min 04 s and the "ETA?" asked
@@ -4271,7 +4264,7 @@ pub(crate) mod tests {
     /// snapshot the quick call reads, so the lane has something true to answer with.
     #[tokio::test]
     async fn a_status_question_during_a_background_job_takes_the_quick_path() {
-        let (agent, root) = test_agent().await;
+        let (agent, _root) = test_agent().await;
         let chat = "01TESTCHATQUICKREPLY000019";
         let host = agent.sync.open_room(chat).await.unwrap();
         agent
@@ -4336,6 +4329,5 @@ pub(crate) mod tests {
             agent.take_side_notes(chat).is_some(),
             "the main session is told once and never answers it again"
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 }

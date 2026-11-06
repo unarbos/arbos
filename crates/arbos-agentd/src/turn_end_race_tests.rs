@@ -224,7 +224,7 @@ async fn a_message_sent_as_the_pi_child_dies_is_answered_and_the_finished_row_st
     // did between the ack row at 00:09:35.298 and the warning 165 ms later.
     let dying = scripted_pi(&root, "act", FIRST_REPLY, true).await;
     agent.test_set_pi(Some(dying), chat).await;
-    let _supervisor = stand_in_supervisor(&agent, root.clone(), chat, SECOND_REPLY);
+    let _supervisor = stand_in_supervisor(&agent, root.to_path_buf(), chat, SECOND_REPLY);
 
     let (first_msg, first_cmd) = send_cmd(&host, "make a CSV of n squared up to 5000").await;
     let _ = agent.handle_command(chat, first_cmd).await;
@@ -309,7 +309,6 @@ async fn a_message_sent_as_the_pi_child_dies_is_answered_and_the_finished_row_st
         0,
         "both messages released their place in the chat's send order"
     );
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// The act turn's words. Plain statement prose: the boilerplate filter drops tool narration, so
@@ -424,7 +423,6 @@ async fn a_job_whose_worker_dies_with_the_main_pi_child_waits_for_it_and_keeps_t
         brief.contains("override the brief above"),
         "and it is told which of the two wins: {brief}"
     );
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// The correction Jacob sent, in the shape r7correct used.
@@ -478,7 +476,7 @@ async fn three_messages_at_a_turn_end_are_all_answered_with_no_failed_rows() {
 
     let dying = scripted_pi(&root, "act3", FIRST_REPLY, true).await;
     agent.test_set_pi(Some(dying), chat).await;
-    let _supervisor = stand_in_supervisor(&agent, root.clone(), chat, SECOND_REPLY);
+    let _supervisor = stand_in_supervisor(&agent, root.to_path_buf(), chat, SECOND_REPLY);
 
     // An ask in the shape the replay used. It runs inline rather than as a job: the burst path
     // needs a user turn to be running, and this chat has none, so nothing here takes a second
@@ -515,5 +513,4 @@ async fn three_messages_at_a_turn_end_are_all_answered_with_no_failed_rows() {
     }
     let errors = error_parts(&host).await;
     assert!(errors.is_empty(), "0 turn_failed rows: {errors:?}");
-    let _ = std::fs::remove_dir_all(&root);
 }

@@ -166,7 +166,7 @@ async fn worker_delivers_as(agent: &Arc<Agent>, worker: &str, path: &str) -> Val
 /// with must be the corrected one.
 #[tokio::test]
 async fn a_steer_routed_after_the_delivery_started_still_lands_first() {
-    let (agent, root) = test_agent().await;
+    let (agent, _root) = test_agent().await;
     let host = agent.sync.open_room(CHAT).await.unwrap();
     hold_for(&agent, HOLD_MS);
     a_running_job(&agent, &host).await;
@@ -240,7 +240,6 @@ async fn a_steer_routed_after_the_delivery_started_still_lands_first() {
             .unwrap_or_default()
     };
     assert!(body.is_empty() || !body.contains("superseded"), "{body}");
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// `r11steer`: two corrections two seconds apart, and the job answered with **two CSVs** —
@@ -257,7 +256,7 @@ async fn a_steer_routed_after_the_delivery_started_still_lands_first() {
 /// a sleep hint. Checked by making that change and watching this stay green.
 #[tokio::test]
 async fn two_corrections_two_seconds_apart_answer_with_one_csv() {
-    let (agent, root) = test_agent().await;
+    let (agent, _root) = test_agent().await;
     let host = agent.sync.open_room(CHAT7).await.unwrap();
     hold_for(&agent, HOLD_MS);
     a_job_in(&agent, &host, CHAT7, JOB7, WORKER7, ASK7, ROW7).await;
@@ -308,7 +307,6 @@ async fn two_corrections_two_seconds_apart_answer_with_one_csv() {
         "one ask, one CSV: {:?}",
         cards(&host)
     );
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// The first thing to be careful about: **the cap must hold.** A hold on delivery that can be
@@ -319,7 +317,7 @@ async fn two_corrections_two_seconds_apart_answer_with_one_csv() {
 /// hold and then posts, once, with the cap crossing logged.
 #[tokio::test]
 async fn a_routing_mark_that_never_clears_delays_the_file_by_the_cap_and_no_more() {
-    let (agent, root) = test_agent().await;
+    let (agent, _root) = test_agent().await;
     let host = agent.sync.open_room(CHAT2).await.unwrap();
     hold_for(&agent, HOLD_MS);
     a_job_in(&agent, &host, CHAT2, JOB2, WORKER2, ASK2, ROW2).await;
@@ -352,7 +350,6 @@ async fn a_routing_mark_that_never_clears_delays_the_file_by_the_cap_and_no_more
         "it waited {waited:?}; the cap is {HOLD_MS} ms and must bound the wait"
     );
     assert_eq!(cards(&host).len(), 1, "and the card is there once");
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// The second failure path: **a steer the worker never reads must not block the file for ever.**
@@ -363,7 +360,7 @@ async fn a_routing_mark_that_never_clears_delays_the_file_by_the_cap_and_no_more
 /// is the old behaviour (the file arrives) and never silence.
 #[tokio::test]
 async fn an_unread_steer_blocks_one_delivery_and_never_the_next() {
-    let (agent, root) = test_agent().await;
+    let (agent, _root) = test_agent().await;
     let host = agent.sync.open_room(CHAT3).await.unwrap();
     hold_for(&agent, HOLD_MS);
     a_job_in(&agent, &host, CHAT3, JOB3, WORKER3, ASK3, ROW3).await;
@@ -397,7 +394,6 @@ async fn an_unread_steer_blocks_one_delivery_and_never_the_next() {
         Hold::Clear,
         "a correction the worker has taken is not a reason to refuse its file"
     );
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// The third failure path, and the one that decides whether any of this runs in production:
@@ -413,7 +409,7 @@ async fn an_unread_steer_blocks_one_delivery_and_never_the_next() {
 /// gone.
 #[tokio::test]
 async fn the_routing_mark_is_taken_by_the_command_and_released_however_it_ends() {
-    let (agent, root) = test_agent().await;
+    let (agent, _root) = test_agent().await;
     let host = agent.sync.open_room(CHAT4).await.unwrap();
     a_job_in(&agent, &host, CHAT4, JOB4, WORKER4, ASK4, ROW4).await;
     *agent.job_cap.lock().unwrap() = Some(0);
@@ -489,7 +485,6 @@ async fn the_routing_mark_is_taken_by_the_command_and_released_however_it_ends()
         "a quiet chat must not pay the hold: {:?}",
         t0.elapsed()
     );
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// `SteerGate::hold`, with the cap it is given enforced from outside as well. A hold that outlasts
@@ -521,7 +516,7 @@ async fn wait_until(bound: Duration, mut f: impl FnMut() -> bool) -> bool {
 /// it posted superseded, and goes again.
 #[tokio::test]
 async fn a_steer_for_a_job_that_just_posted_replaces_the_file_instead_of_failing() {
-    let (agent, root) = test_agent().await;
+    let (agent, _root) = test_agent().await;
     let host = agent.sync.open_room(CHAT5).await.unwrap();
     a_job_in(&agent, &host, CHAT5, JOB5, WORKER5, ASK5, ROW5).await;
 
@@ -570,14 +565,13 @@ async fn a_steer_for_a_job_that_just_posted_replaces_the_file_instead_of_failing
         "the correction is on the job row: {:?}",
         row.steers
     );
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// A job that finished long ago is still refused: "replace" is for the file the user is looking
 /// at, not for restarting yesterday's work.
 #[tokio::test]
 async fn a_steer_for_a_job_that_finished_long_ago_is_still_refused() {
-    let (agent, root) = test_agent().await;
+    let (agent, _root) = test_agent().await;
     let host = agent.sync.open_room(CHAT6).await.unwrap();
     a_job_in(&agent, &host, CHAT6, JOB6, WORKER6, ASK6, ROW6).await;
 
@@ -610,7 +604,6 @@ async fn a_steer_for_a_job_that_finished_long_ago_is_still_refused() {
         "done",
         "the job must not reopen"
     );
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// **The hold does not stack with the send order (bug AA's lane).** Asked of the real code,
@@ -628,7 +621,7 @@ async fn a_steer_for_a_job_that_finished_long_ago_is_still_refused() {
 /// delivery wait out the cap.
 #[tokio::test]
 async fn a_held_delivery_takes_no_place_in_the_chats_send_order() {
-    let (agent, root) = test_agent().await;
+    let (agent, _root) = test_agent().await;
     let host = agent.sync.open_room(CHAT8).await.unwrap();
     hold_for(&agent, HOLD_MS);
     a_job_in(&agent, &host, CHAT8, JOB8, WORKER8, ASK8, ROW8).await;
@@ -688,7 +681,6 @@ async fn a_held_delivery_takes_no_place_in_the_chats_send_order() {
     let _ = tokio::time::timeout(Duration::from_millis(HOLD_MS * 10), delivery)
         .await
         .expect("the worker's file never arrived");
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// **A cancel that lands inside the hold is honoured (bug S's rule, bug Z's lane).**
@@ -704,7 +696,7 @@ async fn a_held_delivery_takes_no_place_in_the_chats_send_order() {
 /// delivery reads is the state a real cancel writes.
 #[tokio::test]
 async fn a_job_cancelled_while_its_file_is_held_posts_nothing() {
-    let (agent, root) = test_agent().await;
+    let (agent, _root) = test_agent().await;
     let host = agent.sync.open_room(CHAT9).await.unwrap();
     hold_for(&agent, HOLD_MS);
     a_job_in(&agent, &host, CHAT9, JOB9, WORKER9, ASK9, ROW9).await;
@@ -741,7 +733,6 @@ async fn a_job_cancelled_while_its_file_is_held_posts_nothing() {
         "a cancelled job put a file in the chat: {:?}",
         cards(&host)
     );
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// A relay that holds a blob upload open until the test lets it finish.
@@ -805,7 +796,7 @@ async fn a_relay_that_holds_the_upload() -> HeldRelay {
 #[tokio::test]
 async fn a_correction_that_lands_after_the_gate_but_before_the_row_still_wins() {
     let mut relay = a_relay_that_holds_the_upload().await;
-    let (agent, root) = crate::status::tests::test_agent_on_relay(&relay.url).await;
+    let (agent, _root) = crate::status::tests::test_agent_on_relay(&relay.url).await;
     let host = agent.sync.open_room(CHAT10).await.unwrap();
     hold_for(&agent, HOLD_MS);
     a_job_in(&agent, &host, CHAT10, JOB10, WORKER10, ASK10, ROW10).await;
@@ -874,7 +865,6 @@ async fn a_correction_that_lands_after_the_gate_but_before_the_row_still_wins() 
         "exactly one CSV reaches the chat for one ask: {:?}",
         cards(&host)
     );
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// **`r12steer`: four rapid corrections must answer with exactly one file, carrying the last of
@@ -890,7 +880,7 @@ async fn a_correction_that_lands_after_the_gate_but_before_the_row_still_wins() 
 #[tokio::test]
 async fn four_rapid_corrections_answer_with_one_file_carrying_the_last() {
     let mut relay = a_relay_that_holds_the_upload().await;
-    let (agent, root) = crate::status::tests::test_agent_on_relay(&relay.url).await;
+    let (agent, _root) = crate::status::tests::test_agent_on_relay(&relay.url).await;
     let host = agent.sync.open_room(CHAT11).await.unwrap();
     hold_for(&agent, HOLD_MS);
     a_job_in(&agent, &host, CHAT11, JOB11, WORKER11, ASK11, ROW11).await;
@@ -958,7 +948,6 @@ async fn four_rapid_corrections_answer_with_one_file_carrying_the_last() {
             .and_then(|m| m.rest.get("superseded").and_then(Value::as_bool))
     };
     assert_eq!(body, None, "the one card must not be a superseded one");
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// The other ordering of the same duplicate: the correction arrives **after** the card is already
@@ -970,7 +959,7 @@ async fn four_rapid_corrections_answer_with_one_file_carrying_the_last() {
 /// finished, so a running job fell between the two.
 #[tokio::test]
 async fn a_correction_after_a_running_jobs_file_supersedes_that_card() {
-    let (agent, root) = test_agent().await;
+    let (agent, _root) = test_agent().await;
     let host = agent.sync.open_room(CHAT12).await.unwrap();
     hold_for(&agent, HOLD_MS);
     a_job_in(&agent, &host, CHAT12, JOB12, WORKER12, ASK12, ROW12).await;
@@ -1005,7 +994,6 @@ async fn a_correction_after_a_running_jobs_file_supersedes_that_card() {
         Some(true),
         "the card the user is looking at is not marked replaced, so the chat shows two answers"
     );
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// Same shape as [`a_running_job`], for the tests that need their own chat.

@@ -122,7 +122,7 @@ async fn the_burst(agent: &Arc<crate::agent::Agent>, host: &SharedHost, chat: &s
 /// 08:40:16 and six and a half minutes of nothing in the chat.
 #[tokio::test]
 async fn the_r10_burst_answers_every_forced_ask_at_job_start() {
-    let (agent, root) = test_agent().await;
+    let (agent, _root) = test_agent().await;
     let chat = "01TESTCHATBURSTJOBACK00001";
     let host = agent.sync.open_room(chat).await.unwrap();
     // A turn holds the lock for the whole burst, which is the state that sent these four asks
@@ -160,8 +160,6 @@ async fn the_r10_burst_answers_every_forced_ask_at_job_start() {
             job.title
         );
     }
-
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// The twelve messages sent behind the burst are answered in send order, each on its turn.
@@ -171,7 +169,7 @@ async fn the_r10_burst_answers_every_forced_ask_at_job_start() {
 /// `SEND_ORDER_WAIT` and the answers came back scrambled.
 #[tokio::test]
 async fn the_twelve_messages_behind_the_r10_burst_are_answered_in_send_order() {
-    let (agent, root) = test_agent().await;
+    let (agent, _root) = test_agent().await;
     let chat = "01TESTCHATBURSTJOBACK00004";
     let host = agent.sync.open_room(chat).await.unwrap();
     let _busy = agent.test_hold_turn(chat).await;
@@ -221,8 +219,6 @@ async fn the_twelve_messages_behind_the_r10_burst_are_answered_in_send_order() {
         (1..=12).collect::<Vec<_>>(),
         "the twelve must be answered in the order they were sent"
     );
-
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// A forced job's result is posted while the chat is still busy, because it is written directly
@@ -233,7 +229,7 @@ async fn the_twelve_messages_behind_the_r10_burst_are_answered_in_send_order() {
 /// six and a half minutes and four finished answers waited it out.
 #[tokio::test]
 async fn a_forced_jobs_result_lands_in_a_busy_chat_and_a_relay_turn_does_not() {
-    let (agent, root) = test_agent().await;
+    let (agent, _root) = test_agent().await;
     let chat = "01TESTCHATBURSTJOBACK00002";
     let host = agent.sync.open_room(chat).await.unwrap();
     let _busy = agent.test_hold_turn(chat).await;
@@ -322,8 +318,6 @@ async fn a_forced_jobs_result_lands_in_a_busy_chat_and_a_relay_turn_does_not() {
         2,
         "and it wrote no row while it was held"
     );
-
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// The round-11 lead, settled: an empty quick reply strands nothing, so the stall is not its
@@ -346,7 +340,7 @@ async fn a_forced_jobs_result_lands_in_a_busy_chat_and_a_relay_turn_does_not() {
 /// small fault — a model call spent for no output — and it is not this one.
 #[tokio::test]
 async fn an_empty_quick_reply_queues_silently_and_strands_no_place() {
-    let (agent, root) = test_agent().await;
+    let (agent, _root) = test_agent().await;
     let chat = "01TESTCHATBURSTJOBACK00006";
     let host = agent.sync.open_room(chat).await.unwrap();
     let _busy = agent.test_hold_turn(chat).await;
@@ -394,8 +388,6 @@ async fn an_empty_quick_reply_queues_silently_and_strands_no_place() {
     );
     drop(ticket);
     assert_eq!(agent.send_order.waiting(chat), 0);
-
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// The selector that routes a result past the relay turn, read off the ask in the doc.
@@ -406,7 +398,7 @@ async fn an_empty_quick_reply_queues_silently_and_strands_no_place() {
 /// turns on does not.
 #[tokio::test]
 async fn the_result_routing_reads_the_forced_signal_off_the_ask() {
-    let (agent, root) = test_agent().await;
+    let (agent, _root) = test_agent().await;
     let chat = "01TESTCHATBURSTJOBACK00005";
     let host = agent.sync.open_room(chat).await.unwrap();
 
@@ -429,8 +421,6 @@ async fn the_result_routing_reads_the_forced_signal_off_the_ask() {
             .await,
         "a message that is gone forces nothing"
     );
-
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// `r10status`: "As a second background job …" and "As a third background job …" are background
@@ -441,7 +431,7 @@ async fn the_result_routing_reads_the_forced_signal_off_the_ask() {
 /// the longest" had nothing to cancel and was acted on after the work had already finished.
 #[tokio::test]
 async fn the_r10_status_asks_each_become_a_job_that_can_be_cancelled() {
-    let (agent, root) = test_agent().await;
+    let (agent, _root) = test_agent().await;
     let chat = "01TESTCHATBURSTJOBACK00003";
     let host = agent.sync.open_room(chat).await.unwrap();
     let _busy = agent.test_hold_turn(chat).await;
@@ -515,6 +505,4 @@ async fn the_r10_status_asks_each_become_a_job_that_can_be_cancelled() {
             == 2,
         "the other two keep running"
     );
-
-    let _ = std::fs::remove_dir_all(&root);
 }

@@ -2853,7 +2853,6 @@ mod tests {
             ROOMS
         );
         hub.close_all().await;
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// #2367, the question the whole change turns on: a message that arrives for a room this

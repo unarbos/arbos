@@ -644,13 +644,12 @@ mod tests {
                 "box work root after the save-this fast path (<project>/.arbos: agentd.db + wal, pi/, logs/, …) + agentd-journal.log (TRACE)\n",
             );
         }
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[tokio::test]
     async fn a_pasted_key_without_the_words_gets_an_optional_offer_card() {
         let (router, bodies, _) = relay_stub();
-        let (agent, root) = test_agent_with(router).await;
+        let (agent, _root) = test_agent_with(router).await;
         let chat = "01TESTCHATHANDOFF000000001";
         agent.store.upsert_chat(chat, "Main", true, 0).unwrap();
         let host = agent.sync.open_room(chat).await.unwrap();
@@ -728,7 +727,6 @@ mod tests {
         assert_eq!(bodies.len(), 1, "{bodies:?}");
         assert_eq!(bodies[0]["message_id"], msg_id);
         assert_eq!(bodies[0]["name"], "STRIPE_KEY");
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[tokio::test]
@@ -826,7 +824,6 @@ mod tests {
         if let Some(dir) = keep {
             copy_tree(&root, &dir.join("box"));
         }
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

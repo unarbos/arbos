@@ -66,7 +66,7 @@ fn visible(host: &SharedHost) -> Vec<String> {
 
 #[tokio::test]
 async fn a_three_step_job_posts_one_note_per_step_in_its_own_chat_and_creates_no_routine() {
-    let (agent, root) = crate::status::tests::test_agent().await;
+    let (agent, _root) = crate::status::tests::test_agent().await;
 
     let host = agent.sync.open_room(CHAT).await.unwrap();
     {
@@ -216,6 +216,4 @@ async fn a_three_step_job_posts_one_note_per_step_in_its_own_chat_and_creates_no
         said.contains(crate::routines::NOTE_PATH),
         "the refusal must send the job to the path it has just used: {said}"
     );
-
-    let _ = std::fs::remove_dir_all(&root);
 }

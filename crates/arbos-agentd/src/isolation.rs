@@ -961,7 +961,6 @@ mod tests {
         assert!(dir.is_dir());
         // Idempotent on an existing dir.
         ensure_worker_dir(&dir, None).unwrap();
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// D70 invariant: workspace A cannot read workspace B's folder. Needs root and `useradd`
@@ -988,6 +987,5 @@ mod tests {
             .prepare("01TESTB", &b_dir, &b_dir.join(".arbos"))
             .unwrap();
         assert!(Isolation::cross_read_blocked(&a, &b_dir).unwrap());
-        let _ = std::fs::remove_dir_all(&root);
     }
 }

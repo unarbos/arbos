@@ -87,7 +87,7 @@ fn job_answer(host: &SharedHost) -> String {
 
 #[tokio::test]
 async fn a_real_jobs_final_post_never_says_it_was_not_a_background_job() {
-    let (agent, root) = test_agent().await;
+    let (agent, _root) = test_agent().await;
     let host = agent.sync.open_room(CHAT).await.unwrap();
     {
         let h = host.lock().await;
@@ -188,6 +188,4 @@ async fn a_real_jobs_final_post_never_says_it_was_not_a_background_job() {
         None,
         "an ask with no job row is told nothing about backgrounding"
     );
-
-    let _ = std::fs::remove_dir_all(&root);
 }

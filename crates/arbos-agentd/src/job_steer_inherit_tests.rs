@@ -121,7 +121,7 @@ async fn brief_of_the_next_job(agent: &Arc<Agent>) -> String {
 /// keyed on one job id — so the follow-up began again from the original ask.
 #[tokio::test]
 async fn a_follow_up_job_inherits_a_correction_already_accepted() {
-    let (agent, root) = test_agent().await;
+    let (agent, _root) = test_agent().await;
     let _host = agent.sync.open_room(CHAT).await.unwrap();
     let _busy = agent.test_hold_turn(CHAT).await;
     a_corrected_job(&agent, FIRST, "only the top 50").await;
@@ -139,7 +139,6 @@ async fn a_follow_up_job_inherits_a_correction_already_accepted() {
          is the difference round 13 turned on — the second job read the original ask as still \
          authoritative and called its answer final: {brief}"
     );
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// The timing ablation, with the job boundary as the discriminator. This is the same store, the
@@ -150,7 +149,7 @@ async fn a_follow_up_job_inherits_a_correction_already_accepted() {
 /// the test above while failing this one.
 #[tokio::test]
 async fn a_correction_accepted_after_the_follow_up_job_started_is_not_in_it() {
-    let (agent, root) = test_agent().await;
+    let (agent, _root) = test_agent().await;
     let _host = agent.sync.open_room(CHAT).await.unwrap();
     let _busy = agent.test_hold_turn(CHAT).await;
     a_corrected_job(&agent, FIRST, "only the top 50").await;
@@ -181,7 +180,6 @@ async fn a_correction_accepted_after_the_follow_up_job_started_is_not_in_it() {
     // Not vacuous: the later correction was recorded, just not here.
     let steers = agent.store.job(FIRST).unwrap().unwrap().steers;
     assert_eq!(steers, vec!["only the top 50", "no capitals"]);
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// The window is wider than the one it would have been natural to borrow, and this is why.
@@ -197,7 +195,7 @@ async fn a_correction_accepted_after_the_follow_up_job_started_is_not_in_it() {
 /// which is what makes the widening a decision the suite holds rather than a number in a diff.
 #[tokio::test]
 async fn a_correction_still_binds_across_a_gap_wider_than_the_replace_window() {
-    let (agent, root) = test_agent().await;
+    let (agent, _root) = test_agent().await;
     let _host = agent.sync.open_room(CHAT).await.unwrap();
     let _busy = agent.test_hold_turn(CHAT).await;
     a_corrected_job(&agent, FIRST, "only the top 50").await;
@@ -216,7 +214,6 @@ async fn a_correction_still_binds_across_a_gap_wider_than_the_replace_window() {
         "a correction stopped binding across a gap the size of round 13's, so the fix would not \
          have fixed the round it was written for: {brief}"
     );
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// The far side of the same bound. These lines arrive as requirements, so a correction from
@@ -224,7 +221,7 @@ async fn a_correction_still_binds_across_a_gap_wider_than_the_replace_window() {
 /// failure than the one being fixed, and a harder one to see.
 #[tokio::test]
 async fn a_correction_from_finished_work_does_not_bind_an_unrelated_later_job() {
-    let (agent, root) = test_agent().await;
+    let (agent, _root) = test_agent().await;
     let _host = agent.sync.open_room(CHAT).await.unwrap();
     let _busy = agent.test_hold_turn(CHAT).await;
     a_corrected_job(&agent, FIRST, "only the top 50").await;
@@ -241,7 +238,6 @@ async fn a_correction_from_finished_work_does_not_bind_an_unrelated_later_job() 
         "a correction from work the chat had finished with was made binding on a later job: \
          {brief}"
     );
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// Drop one, by kind. An accepted correction is a turn of the chat, and the brief builder kept
@@ -249,7 +245,7 @@ async fn a_correction_from_finished_work_does_not_bind_an_unrelated_later_job() 
 /// promised a change was the one row it threw away.
 #[tokio::test]
 async fn an_accepted_correction_is_a_turn_a_brief_carries() {
-    let (agent, root) = test_agent().await;
+    let (agent, _root) = test_agent().await;
     let _ = agent.store.t3_append(
         CHAT,
         None,
@@ -272,7 +268,6 @@ async fn an_accepted_correction_is_a_turn_a_brief_carries() {
         "the correction is in the turns but reads like any other remark; a worker cannot tell a \
          change the user was promised from one they wondered aloud about: {turns}"
     );
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// Drop two, by budget. The twelve-row limit ran over every kind before the kind filter, so a
@@ -281,7 +276,7 @@ async fn an_accepted_correction_is_a_turn_a_brief_carries() {
 /// their place without taking one themselves.
 #[tokio::test]
 async fn a_jobs_own_bookkeeping_does_not_evict_the_users_turns() {
-    let (agent, root) = test_agent().await;
+    let (agent, _root) = test_agent().await;
     let _ = agent.store.t3_append(
         CHAT,
         None,
@@ -315,5 +310,4 @@ async fn a_jobs_own_bookkeeping_does_not_evict_the_users_turns() {
         "the bookkeeping rows are in the brief; they were supposed to be filtered, not carried: \
          {turns}"
     );
-    let _ = std::fs::remove_dir_all(&root);
 }

@@ -496,8 +496,6 @@ async fn cancelling_a_job_kills_the_backgrounded_tree_it_orphaned() {
         "the cancel killed nothing and still called itself a cancel: {:?}",
         stopped[0].sweep
     );
-
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// **Round 14.** The cancel reaches a descendant that left the worker's session by its own
@@ -549,8 +547,6 @@ async fn cancelling_a_job_kills_a_descendant_that_started_its_own_session() {
         stopped[0].sweep,
         worker.pids
     );
-
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// **The shape round 15 is running now**: five levels, stacking `setsid` on `nohup`.
@@ -592,8 +588,6 @@ async fn cancelling_a_job_kills_a_tree_that_stacks_setsid_on_nohup() {
         "{:?}",
         stopped[0].sweep
     );
-
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 // ---- bug AE ------------------------------------------------------------------------------
@@ -608,7 +602,7 @@ async fn cancelling_a_job_kills_a_tree_that_stacks_setsid_on_nohup() {
 /// had looked at nothing.
 #[tokio::test]
 async fn a_cancel_that_could_not_look_does_not_say_the_processes_are_dead() {
-    let (agent, root) = test_agent().await;
+    let (agent, _root) = test_agent().await;
     a_job_row(&agent).await;
     agent
         .store
@@ -645,7 +639,6 @@ async fn a_cancel_that_could_not_look_does_not_say_the_processes_are_dead() {
     );
 
     drop(turn);
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// **Bug AE, the read-back.** The survivor list is read from the kernel by pid, and it finds a
@@ -682,7 +675,6 @@ async fn the_read_back_finds_a_process_that_left_every_kernel_set() {
     assert!(sweep.checked);
 
     escapee.reap();
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// **Bug AE, the report.** A cancel that left a process running names it, and the guard's
@@ -697,7 +689,7 @@ async fn the_read_back_finds_a_process_that_left_every_kernel_set() {
 /// through the chat line, the model's note and the guard.
 #[tokio::test]
 async fn a_cancel_that_left_a_process_running_names_it_and_unlocks_the_guard() {
-    let (agent, root) = test_agent().await;
+    let (agent, _root) = test_agent().await;
     let _host = agent.sync.open_room(CHAT).await.unwrap();
     let turn = agent.test_hold_turn(CHAT).await;
 
@@ -767,7 +759,6 @@ async fn a_cancel_that_left_a_process_running_names_it_and_unlocks_the_guard() {
     }
 
     drop(turn);
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// A process that has left every set the kernel keeps for its worker: its own session, its own

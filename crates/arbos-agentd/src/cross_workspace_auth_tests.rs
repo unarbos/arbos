@@ -86,7 +86,7 @@ async fn post(url: &str, token: &str, body: Value) -> (u16, String) {
 /// tools act on B's chats, memory and working set.
 #[tokio::test]
 async fn workspace_a_token_is_refused_by_workspace_b_mcp_server() {
-    let (a, b, root) = two_workspaces();
+    let (a, b, _root) = two_workspaces();
     let b_mcp = serve(crate::mcp::router(b.clone())).await;
     let url = format!("{b_mcp}/mcp");
 
@@ -130,15 +130,13 @@ async fn workspace_a_token_is_refused_by_workspace_b_mcp_server() {
         status, 200,
         "workspace B's own subagent token must be accepted"
     );
-
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// The same for the hook API, and with a write: `remember` lands in the serving workspace's
 /// store, so acceptance is a cross-workspace write to B's scratchpad.
 #[tokio::test]
 async fn workspace_a_token_cannot_write_workspace_b_scratchpad() {
-    let (a, b, root) = two_workspaces();
+    let (a, b, _root) = two_workspaces();
     let b_hooks = serve(crate::hooks::router(b.clone())).await;
 
     let (status, body) = post(
@@ -168,8 +166,6 @@ async fn workspace_a_token_cannot_write_workspace_b_scratchpad() {
         b.store.scratch_get("chat-in-b", "planted").unwrap(),
         Some("by workspace B".to_owned()),
     );
-
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// `box_admin_authed` (`http.rs:274`) takes the box-wide `BoxConfig::mcp_token` on the box port,
@@ -208,8 +204,6 @@ async fn an_unset_box_token_does_not_authenticate_a_request_without_one() {
         401,
         "a request with no bearer was served as the main session"
     );
-
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// The tokens themselves: two workspaces of one box must not share them.
@@ -319,7 +313,6 @@ async fn an_unconfigured_box_refuses_the_computable_token_and_anonymous_alike() 
     );
 
     let _ = std::fs::remove_dir_all(&configured_root);
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// The derivation is keyed on the project and not on the workspace index, which comes from a
