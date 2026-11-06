@@ -1452,7 +1452,13 @@ impl AppState {
     fn apply_update(&mut self, event: UpdateEvent, cx: &mut Context<Self>) {
         match event {
             UpdateEvent::Checking => {
-                if matches!(self.update.phase, UpdatePhase::Idle | UpdatePhase::UpToDate) {
+                if matches!(
+                    self.update.phase,
+                    UpdatePhase::Idle
+                        | UpdatePhase::UpToDate
+                        | UpdatePhase::CheckFailed { .. }
+                        | UpdatePhase::FoundEarlier { .. }
+                ) {
                     self.update.phase = UpdatePhase::Checking;
                 }
             }
@@ -1460,6 +1466,20 @@ impl AppState {
                 self.update.last_checked_at = Some(now_ms());
                 if !self.update.busy() && self.pending_relaunch.is_none() {
                     self.update.phase = UpdatePhase::UpToDate;
+                }
+            }
+            // A check that did not finish is not good news. It must not overwrite a build we
+            // are already offering, and it must never read as "up to date".
+            UpdateEvent::CheckFailed(message) => {
+                // A failed check never withdraws what the app already knows. A version an
+                // earlier run found names the build, which is the more useful of the two
+                // things we could say; pressing "Check now" is what surfaces the reason.
+                if !self.update.busy()
+                    && self.pending_relaunch.is_none()
+                    && self.update.available().is_none()
+                    && !matches!(self.update.phase, UpdatePhase::FoundEarlier { .. })
+                {
+                    self.update.phase = UpdatePhase::CheckFailed { message };
                 }
             }
             UpdateEvent::Available(available) => {
@@ -1627,6 +1647,8 @@ impl AppState {
             UpdatePhase::Idle
             | UpdatePhase::Checking
             | UpdatePhase::UpToDate
+            | UpdatePhase::CheckFailed { .. }
+            | UpdatePhase::FoundEarlier { .. }
             | UpdatePhase::Available(_)
             | UpdatePhase::Downloading { .. }
             | UpdatePhase::Installing(_)
@@ -1762,7 +1784,14 @@ impl AppState {
             return;
         }
         match self.update.click_action() {
-            update::DiscAction::Hidden | update::DiscAction::Busy => {}
+            update::DiscAction::Hidden | update::DiscAction::Busy => {
+                // Used to be silent, which is how "I pressed update and nothing happened"
+                // left no trace at all in the update log.
+                update::log(format!(
+                    "install pressed with nothing to do: {}",
+                    self.update.status_line()
+                ));
+            }
             update::DiscAction::Relaunch => {
                 // "Restart now": the automatic install is done; skip the wait.
                 if let Some(installed) = self.pending_relaunch.take() {
@@ -13755,6 +13784,105 @@ mod update_restart_chain_tests {
             Some(version),
             "{version} waits for its relaunch"
         );
+    }
+
+    /// A failed check must not withdraw a build that is already offered, and on its own it must
+    /// not read as "up to date". Jacob's Mac (2026-11-03) found 0.6.380, was restarted, then met
+    /// only failing checks — and the old `UpToDate` report left the disc hidden with no way back.
+    #[gpui::test]
+    fn a_failed_check_neither_withdraws_an_offer_nor_claims_up_to_date(cx: &mut TestAppContext) {
+        let (_rt, state, mut rx) = mount(cx);
+        state.update(cx, |s, cx| {
+            s.update.auto = false;
+            s.apply_update(UpdateEvent::Available(Box::new(build("0.6.380"))), cx);
+        });
+        assert_eq!(installs(&mut rx), 0, "automatic updates off: nothing yet");
+
+        state.update(cx, |s, cx| {
+            s.apply_update(
+                UpdateEvent::CheckFailed("the server name could not be looked up".into()),
+                cx,
+            );
+        });
+        state.update(cx, |s, cx| {
+            assert_eq!(
+                s.update.click_action(),
+                update::DiscAction::Install,
+                "0.6.380 is still the build one click installs"
+            );
+            s.install_update(cx);
+        });
+        assert_eq!(installs(&mut rx), 1, "the click reached the worker");
+
+        // Nothing offered and a check that failed: say so, never "up to date".
+        let (_rt2, fresh, _rx2) = mount(cx);
+        fresh.update(cx, |s, cx| {
+            s.apply_update(
+                UpdateEvent::CheckFailed("the connection timed out".into()),
+                cx,
+            );
+            assert!(matches!(s.update.phase, UpdatePhase::CheckFailed { .. }));
+            let line = s.update.status_line();
+            assert!(!line.contains("up to date"), "{line}");
+        });
+    }
+
+    /// Whoever can write `<config>/update-offer.json` must not be able to start an install or
+    /// choose its bytes. Shown rather than asserted: a hostile file goes through the real
+    /// read-and-parse path, the phase it produces is handed to a running app with automatic
+    /// updates **on**, and the worker is sent nothing — the arm that installs needs an
+    /// `Available`, and the file cannot make one.
+    #[gpui::test]
+    fn an_offer_file_can_neither_start_an_install_nor_choose_its_bytes(cx: &mut TestAppContext) {
+        let path = std::env::temp_dir().join(format!(
+            "arbos-hostile-offer-{}-{:?}.json",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        // A version that was never offered, and bytes from this machine.
+        std::fs::write(
+            &path,
+            r#"{"version":"9.9.9","url":"http://127.0.0.1:8080/Arbos.tar.gz","length":1,"ed_signature":"x"}"#,
+        )
+        .expect("write the hostile file");
+        let phase =
+            update::phase_from_offer_file(&path, "0.6.333").expect("the file names a version");
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(
+            phase,
+            UpdatePhase::FoundEarlier {
+                version: "9.9.9".into()
+            },
+            "the version is all that survives the read"
+        );
+
+        let (_rt, state, mut rx) = mount(cx);
+        state.update(cx, |s, cx| {
+            assert!(s.update.auto, "the dangerous case: automatic updates on");
+            s.update.phase = phase;
+            // Everything that could carry the file into an install, in one place.
+            s.install_update(cx);
+            s.apply_update(UpdateEvent::CheckFailed("dns".into()), cx);
+            s.install_update(cx);
+        });
+        assert_eq!(
+            installs(&mut rx),
+            0,
+            "no path from the file reaches the worker"
+        );
+
+        state.update(cx, |s, _| {
+            assert!(s.update.available().is_none(), "nothing to download");
+            assert_eq!(s.update.click_action(), update::DiscAction::Hidden);
+            let line = s.update.status_line();
+            assert!(line.contains("9.9.9"), "the one effect, named: {line}");
+            assert!(!line.contains("127.0.0.1"), "{line}");
+            assert!(
+                matches!(s.update.phase, UpdatePhase::FoundEarlier { .. }),
+                "a failed check does not withdraw what an earlier run found"
+            );
+        });
     }
 
     #[gpui::test]
