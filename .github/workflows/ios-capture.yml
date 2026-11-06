@@ -371,10 +371,22 @@ jobs:
       # Separate from the capture, so a compile failure reads as a compile failure in the log
       # rather than as a screenshot that never appeared.
       # `ARBOS_SHOT_DIR` is what wakes CaptureRigUITests up; everything else is its instructions.
-      # `TEST_RUNNER_<name>=<value>` puts <name> in the UI test runner's own environment. They are
-      # given to BOTH xcodebuild calls on purpose: `build-for-testing` bakes them into the
-      # `.xctestrun` it writes, and the run below sets them again, so the capture gets them
-      # whichever of the two Xcode honours.
+      #
+      # `TEST_RUNNER_<name>` reaches the UI test runner's environment only when it is in
+      # XCODEBUILD'S OWN environment, which is why both calls below are prefixed with `env` — the
+      # form `scripts/ios-perf/perf-rig.sh` has always driven PerfBaselineUITests with, which reads
+      # its variables the same way. Written instead as a trailing `TEST_RUNNER_<name>=<value>`
+      # ARGUMENT it is parsed as a build setting and never delivered, and that is the shape this
+      # job shipped with: run 42095484867 echoed all four under `Build settings from command line`
+      # in both legs' logs, handed the runner none of them, and both legs skipped on
+      # "no ARBOS_SHOT_DIR" after reporting `** TEST EXECUTE SUCCEEDED **`.
+      #
+      # That echo is the trap. It reads exactly like delivery, which is how this reached main. Do
+      # not take a `TEST_RUNNER_` line in a log as proof the runner got it; the only honest proof
+      # is the test's own verdict, which is what the capture step's skip guard reads.
+      #
+      # They go to BOTH calls on purpose, so the capture gets them whichever of the two Xcode
+      # honours.
       - name: Build for testing
         env:
           ARBOS_SPM_DIR: ${{ github.workspace }}/apps/ios/Arbos/build/spm
@@ -384,14 +396,14 @@ jobs:
           set -euo pipefail
           cd "$APP_DIR"
           mkdir -p build
+          env TEST_RUNNER_ARBOS_SHOT_DIR="$SHOT_DIR" \
+              TEST_RUNNER_ARBOS_SHOT_TAG="${{ matrix.leg }}" \
+              TEST_RUNNER_ARBOS_SHOT_SCRIPT="$SHOT_SCRIPT" \
+              TEST_RUNNER_ARBOS_SHOT_LAUNCH_ENV="$SHOT_LAUNCH_ENV" \
           xcodebuild build-for-testing -project Arbos.xcodeproj -scheme Arbos -configuration Debug \
             -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.udid }}" \
             -derivedDataPath build/dd -clonedSourcePackagesDirPath "$ARBOS_SPM_DIR" \
-            -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO \
-            TEST_RUNNER_ARBOS_SHOT_DIR="$SHOT_DIR" \
-            TEST_RUNNER_ARBOS_SHOT_TAG="${{ matrix.leg }}" \
-            TEST_RUNNER_ARBOS_SHOT_SCRIPT="$SHOT_SCRIPT" \
-            TEST_RUNNER_ARBOS_SHOT_LAUNCH_ENV="$SHOT_LAUNCH_ENV" 2>&1 \
+            -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO 2>&1 \
             | tee build/xcodebuild-capture-build.log \
             | grep -E "error:|\*\* BUILD" || true
           grep -q "\*\* BUILD SUCCEEDED \*\*" build/xcodebuild-capture-build.log
@@ -424,14 +436,14 @@ jobs:
           mkdir -p "$SHOT_DIR"
           cd "$APP_DIR"
           log=build/xcodebuild-capture-test.log
+          env TEST_RUNNER_ARBOS_SHOT_DIR="$SHOT_DIR" \
+              TEST_RUNNER_ARBOS_SHOT_TAG="${{ matrix.leg }}" \
+              TEST_RUNNER_ARBOS_SHOT_SCRIPT="$SHOT_SCRIPT" \
+              TEST_RUNNER_ARBOS_SHOT_LAUNCH_ENV="$SHOT_LAUNCH_ENV" \
           xcodebuild test-without-building -project Arbos.xcodeproj -scheme Arbos -configuration Debug \
             -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.udid }}" \
             -derivedDataPath build/dd -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO \
-            -only-testing:ArbosUITests/CaptureRigUITests \
-            TEST_RUNNER_ARBOS_SHOT_DIR="$SHOT_DIR" \
-            TEST_RUNNER_ARBOS_SHOT_TAG="${{ matrix.leg }}" \
-            TEST_RUNNER_ARBOS_SHOT_SCRIPT="$SHOT_SCRIPT" \
-            TEST_RUNNER_ARBOS_SHOT_LAUNCH_ENV="$SHOT_LAUNCH_ENV" > "$log" 2>&1 &
+            -only-testing:ArbosUITests/CaptureRigUITests > "$log" 2>&1 &
           pid=$!
           start=$(date +%s); verdict=0
           while kill -0 "$pid" 2>/dev/null; do
@@ -449,6 +461,15 @@ jobs:
           wait "$pid" 2>/dev/null
           grep -E "ARBOS_CAPTURE|error: |Test Case .* (passed|failed)|was skipped|\*\* TEST" "$log" | tail -40 || true
           ls -la "$SHOT_DIR" || true
+          # The skip is the one failure that cannot be read off the invocation, because the
+          # invocation looks right in both the working and the broken form. `setUpWithError` skips
+          # when `ARBOS_SHOT_DIR` is absent, xcodebuild calls that a passing suite, and the no-PNG
+          # guard below then reports a delivery fault as a missing file and points at an artifact
+          # instead of naming the cause. Name it here, in the log the person is already reading.
+          if grep -q "no ARBOS_SHOT_DIR" "$log"; then
+            echo "::error title=The rig variables never reached the runner::CaptureRigUITests skipped, so nothing was shot. TEST_RUNNER_* must be in xcodebuild's OWN environment; written as a trailing KEY=VALUE argument it becomes a build setting, which xcodebuild echoes under 'Build settings from command line' and never delivers."
+            exit 1
+          fi
           # A leg with no PNG is a failed leg, whatever xcodebuild said.
           shopt -s nullglob
           shots=("$SHOT_DIR"/*.png)
