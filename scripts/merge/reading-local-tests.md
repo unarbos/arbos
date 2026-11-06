@@ -83,6 +83,31 @@ Run agentd suites from a checkout outside `/tmp`. That is a consequence of the r
 Record the worktree path beside any local test count reported as gate evidence, so a number can be
 re-read later against the class it was measured in.
 
+## Swift logs: the order on the page is not the order in time
+
+**Judge sequence by timestamps, never by position.** `xcodebuild` writes its own stdout into the
+same stream as the test reporter, and the two are not synchronised. So a line that reads like an
+ending can sit in the middle of the thing it appears to end.
+
+Measured: `** TEST SUCCEEDED **` lands *inside* `SearchSettingsTests`' run of verdicts, and in
+#2889's log the last unit verdict sits **148 lines after** it. In #2848's log an
+`iOSSimulator: … Failed to launch app` is stamped 20:23:25 — 54 seconds *after* the session
+completed at 20:22:31 — so it is teardown noise, though it is printed where a reader scanning
+downward will meet it as if it preceded the end.
+
+**This is the one that manufactures a false positive rather than merely hiding a count.** The
+other warnings here tell you a number may be short. This one invites the conclusion "the suite
+stopped early", which reads as a serious defect, is specific enough to sound researched, and
+would be acted on. It was nearly concluded from #2889's log for exactly this reason: verdicts
+appearing after `TEST SUCCEEDED` look like a run that was cut off mid-suite. They are not; they
+are a run whose output was reordered.
+
+**It is also the mechanism behind the truncation described in the next section.** Interleaving is
+one fact with two consequences: a status write that lands between two reporter lines reorders the
+log, and a status write that lands *within* a reporter line bisects it. Learn them together —
+a reader who knows only that counts can be short will still believe the order, and a reader who
+knows only that the order lies will still trust a count.
+
 ## Gate 4 on a Swift leg: a stable absence can be a counting artefact
 
 Gate 4 compares test **names** across a rebase and adjudicates anything missing as a dropped test.
@@ -143,6 +168,18 @@ cause of anything; it is whatever happened to be writing at that moment.
 
 619 = 606 + 13. Counting only clean lines gives 550 unit and so 605 passing and 618 declared —
 both one short, in the same term, with nothing in the log saying so.
+
+**Counting the declared side is its own hazard, and it was got wrong in both directions.** First
+an anchored `^\s*func test` missed `@MainActor func testCopyOfAMultiBlockBubbleIsTheWholeMessage()`,
+undercounting. Then the unanchored fix over-caught `AddMembersPlanTests.testingGroup`, a private
+helper returning a `PeopleChat` that XCTest never discovers as a test, overcounting by one back to
+the same wrong total. A declared count is a *guess at what the runner will discover*, made by a
+regex that does not implement XCTest's discovery rules — `@MainActor` and other attributes sit
+before `func`, and `testingGroup` matches `test…` while being a helper.
+
+Both errors were found by diffing declared names against observed verdicts, not by rereading the
+pattern. That is the general move: a count compared against a count hides a mistake that an
+itemised difference exposes by name.
 
 Checked against the source on 2026-11-06: `ArbosTests` declares **551** test cases (552 matches
 for `func test…(` less `AddMembersPlanTests.testingGroup`, a private helper returning a value that
