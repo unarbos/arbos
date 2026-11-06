@@ -127,10 +127,15 @@ $SUDO apt-get install -y -qq "${GPUI_PKGS[@]}"
 # Highest major first, so a host carrying several toolchains gets the newest rather than whatever
 # the glob listed first. The default compiler is considered last and on its merits: it is the one
 # webrtc-sys already rejected on this repo, so it is the least likely to clear the floor.
+# The C driver beside it is required, not assumed. Section 3 derives CC from the directory this
+# returns, and the unpacked tree always carries both — but a host compiler found on PATH need not.
+# Accepting a clang++ whose sibling clang is missing would hand the build a CC that does not
+# exist, which is a worse failure than downloading: it surfaces as a broken cc-rs invocation
+# somewhere unrelated rather than as a missing compiler here.
 find_usable_clang() {
   local c m
   for c in $(ls -d /usr/lib/llvm-*/bin/clang++ 2>/dev/null | sort -rV) "$(command -v clang++ 2>/dev/null)"; do
-    [ -n "$c" ] && [ -x "$c" ] || continue
+    [ -n "$c" ] && [ -x "$c" ] && [ -x "${c%++}" ] || continue
     m="$(clang_major "$c" || true)"
     case "$m" in ''|*[!0-9]*) continue ;; esac
     [ "$m" -ge "$WEBRTC_MIN_CLANG" ] && { printf '%s\n' "$c"; return 0; }
@@ -143,9 +148,12 @@ if found_cxx="$(find_usable_clang)"; then
   say "clang $(clang_major "$found_cxx") already at ${found_cxx}, skipping the download"
   # Clearing the floor is what lets the workspace build, and it is a weaker claim than matching
   # CI. Say so, so nobody reports a local build as having used the toolchain CI runs.
+  # An unreadable version disclaims too. Silence here would mean a compiler whose build cannot be
+  # identified is reported as if it matched the pin, which is the one direction that must not be
+  # quiet: unknown is not the same as equal.
   found_ver="$("$found_cxx" --version 2>/dev/null | sed -n '1s/.*clang version \([0-9.]*\).*/\1/p')"
-  if [ -n "$found_ver" ] && [ "$found_ver" != "$LLVM_RELEASE" ]; then
-    say "note: CI pins ${LLVM_RELEASE}; this is ${found_ver}.
+  if [ "$found_ver" != "$LLVM_RELEASE" ]; then
+    say "note: CI pins ${LLVM_RELEASE}; this is ${found_ver:-an unreadable version}.
     It clears webrtc-sys' floor of ${WEBRTC_MIN_CLANG}, which is what the build needs, but it is
     not CI's build — don't report a compile here as having used CI's toolchain."
   fi
