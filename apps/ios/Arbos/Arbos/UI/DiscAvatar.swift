@@ -31,11 +31,10 @@ enum DiscArt {
 
     /// "No picture" (Jacob, 2026-10-25): an entity created from the Create sheet without an
     /// uploaded or generated picture is stored with `avatar_disc_color` = 255
-    /// (`arbos_core::avatar::disc::NEUTRAL`) and draws as **the name's first letter on a
-    /// neutral grey disc** — never an automatic colour. Distinct from nil (= the id's automatic
-    /// colour), so every existing agent keeps the colour it has.
+    /// (`arbos_core::avatar::disc::NEUTRAL`), which resolves at read time to the id's own colour
+    /// through `disc::color_for`; the value is kept so stored rows stay recognisable. Distinct
+    /// from nil (= the id's automatic colour), so every existing agent keeps the colour it has.
     static let neutral = Int(discNeutralIndex())
-    static func isNeutral(_ color: Int?) -> Bool { color == neutral }
 
     /// The one letter a neutral disc carries: the first letter or digit of the name, upper-cased
     /// (`?` for an empty name) — the Mac's `disc::initial`.
