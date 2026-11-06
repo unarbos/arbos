@@ -57,6 +57,16 @@ final class AvatarPickerTabsTests: XCTestCase {
         XCTAssertEqual(DiscArt.initial("—"), "?")
     }
 
+    /// The iPhone leg of the cross-surface vector, taken through the FFI so it exercises the
+    /// same compiled `disc::color_for` the relay and the Mac call. The relay asserts the same
+    /// id and index in `arbos-relay/src/avatar.rs`, the Mac in `ui/avatars.rs`. This fails if
+    /// any surface stops resolving the sentinel, or if the seed stops being the bare id.
+    func testAStoredNeutralResolvesToTheSameVividDiscAsTheOtherSurfaces() {
+        XCTAssertEqual(DiscArt.pick(seed: "01M5AGENT", color: DiscArt.neutral), 7)
+        XCTAssertEqual(DiscArt.pick(seed: "01M5AGENT"), 7)
+        XCTAssertNotEqual(DiscArt.pick(seed: "agent:01M5AGENT"), 7)
+    }
+
     /// A group still carrying the old sentinel draws its id's colour, not a grey disc.
     func testAGroupStoredNeutralDrawsItsIdsColour() {
         var chat = PeopleChat(id: "g1", kind: "group", createdBy: "u", createdAt: 0, title: "Launch crew", pending: false,

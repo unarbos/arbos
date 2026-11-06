@@ -579,6 +579,19 @@ mod tests {
         assert!(who.disc_color < disc::COLOR_COUNT);
     }
 
+    /// The Mac leg of the cross-surface vector. The relay asserts the same id and index in
+    /// `arbos-relay/src/avatar.rs` and the iPhone asserts it through the FFI in
+    /// `AvatarPickerTabsTests.swift`. All three call `disc::color_for`, so a divergence in the
+    /// hash, the palette size or the shape of the seed fails here too.
+    #[test]
+    fn a_stored_neutral_resolves_to_the_same_vivid_disc_as_the_other_surfaces() {
+        assert_eq!(disc_color("01M5AGENT", Some(disc::NEUTRAL)), 7);
+        assert_eq!(disc_color("01M5AGENT", None), 7);
+        // The seed is the bare id. A prefixed sender would hash to something else, which is
+        // how the three surfaces would silently drift apart.
+        assert_ne!(disc_color("agent:01M5AGENT", None), 7);
+    }
+
     /// Every agent without a picture gets one of the ten colours, stable for its id.
     #[test]
     fn a_disc_colour_is_stable_and_in_range() {
