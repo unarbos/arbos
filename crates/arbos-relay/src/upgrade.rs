@@ -22,7 +22,8 @@
 //!             step already applied the same arithmetic to the snapshot's disk size), upload / verify / extract part by
 //!             part, count the tree against the plan, reset the per-workspace owner markers;
 //!   start   — the swap: the carried `/work` is flushed, the row now names the new box, which is
-//!             bounced so the entrypoint starts agentd on the carried `/work` and must say hello.
+//!             bounced — stopped gracefully, forced only if that does not land — so the entrypoint
+//!             starts agentd on the carried `/work` and must say hello.
 //! Progress is in `GET /machine` (`upgrade.phase`, e.g. `pack 3/16`). Any failure after pack rolls
 //! back (see [`rollback`]): the row is back on the source first, then the new box is deleted when it
 //! holds nothing of `/work`, else kept stopped in `box_history` for the sweeper.
@@ -526,6 +527,57 @@ async fn flush_before_bounce(dt: &crate::daytona::Daytona, user_id: &str, new_id
     }
 }
 
+/// How long the graceful stop has to land the new box in `Stopped` before the bounce forces it.
+/// Generous against a carry that has already run for minutes, and short enough that a box whose
+/// shutdown is going nowhere still gets the forced stop it used to get immediately.
+const GRACEFUL_STOP_S: u64 = 45;
+
+/// How long the forced stop is then given, unchanged from when it was the only stop.
+const FORCED_STOP_S: u64 = 120;
+
+/// Stop the new box for the bounce: ask Daytona to shut it down, and force it only if that does
+/// not land.
+///
+/// Every recorded wedge is on a stop the relay made with `force=true`. That is one-sided rather
+/// than measured — the graceful stop of the source is `let _ = dt.stop(source_id, false)`, whose
+/// result is discarded and never waited for, so a graceful wedge would leave no row anywhere —
+/// but the graceful stop is the one with a track record on this exact container state: agentd
+/// dead, `/work` just rewritten, 4 195 completed carries. The forced stop still runs wherever the
+/// graceful one does not finish, so this can only add attempts, never remove them.
+///
+/// A sandbox Daytona has already marked `Error` is not forced: that is the state in which the
+/// stop answers 400, and the caller's rollback is the honest outcome.
+async fn stop_for_bounce(dt: &crate::daytona::Daytona, user_id: &str, new_id: &str) -> Result<()> {
+    let graceful = match dt.stop(new_id, false).await {
+        Ok(_) => dt
+            .wait_for(new_id, Duration::from_secs(GRACEFUL_STOP_S), |s| {
+                s.state == SandboxState::Stopped
+            })
+            .await
+            .map(|_| ()),
+        Err(e) => Err(e),
+    };
+    let Err(e) = graceful else {
+        return Ok(());
+    };
+    tracing::warn!(
+        user = %user_id, sandbox = %new_id, error = %format!("{e:#}"),
+        "the new box did not stop gracefully for the bounce; forcing"
+    );
+    let state = dt.get(new_id).await?.state;
+    if matches!(state, SandboxState::Error | SandboxState::BuildFailed) {
+        return Err(anyhow!(
+            "the new box is {state:?} after the graceful stop; forcing it would only be refused"
+        ));
+    }
+    dt.stop(new_id, true).await?;
+    dt.wait_for(new_id, Duration::from_secs(FORCED_STOP_S), |s| {
+        s.state == SandboxState::Stopped
+    })
+    .await?;
+    Ok(())
+}
+
 /// The swap: the carried new box becomes the user's row, then it is bounced so the entrypoint
 /// starts agentd on the carried `/work`, and must say hello.
 async fn swap_and_start(
@@ -537,11 +589,7 @@ async fn swap_and_start(
 ) -> Result<()> {
     set_phase(state, user_id, "start").await;
     flush_before_bounce(dt, user_id, new_id).await;
-    dt.stop(new_id, true).await?;
-    dt.wait_for(new_id, Duration::from_secs(120), |s| {
-        s.state == SandboxState::Stopped
-    })
-    .await?;
+    stop_for_bounce(dt, user_id, new_id).await?;
     let mut row = new.clone();
     row.daytona_state = Some("stopped".into());
     state.db.upsert_box(&row)?;
