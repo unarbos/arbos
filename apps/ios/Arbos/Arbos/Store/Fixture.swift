@@ -666,8 +666,12 @@ extension AppModel {
             let usage: [String: Any] = on
                 ? ["cpu_pct": p.id == "fx-comms" ? 61.0 : 9.0, "mem_mb": p.id == "fx-comms" ? 1900 : 1100, "pids": 40, "disk_mb": p.id == "fx-comms" ? 2300 : 900]
                 : ["cpu_pct": 0.0, "mem_mb": 200 + 50 * i, "pids": 12, "disk_mb": i == 1 ? 1600 : 100 + 150 * i]
+            // The second agent is idle with a card open: the state the Machine page has to
+            // draw as outstanding rather than as "Idle" / "None".
             return ["project_id": p.id, "name": p.name, "healthy": true, "turn": turn,
-                    "jobs_running": on && p.id == "fx-comms" ? 1 : 0, "usage": usage]
+                    "jobs_running": 0, "usage": usage,
+                    "work_outstanding": ["jobs": on && p.id == "fx-comms" ? 1 : 0,
+                                         "approvals": !on && i == 1 ? 1 : 0]]
         }
         // `ARBOS_FIXTURE_MACHINE=near-limit`: disk 92 % and memory 88 % used, CPU 71 %.
         let (diskAvail, memUsed, cpuPct, rx, tx, rxToday, txToday): (Int, Int, Double, Double, Double, Int, Int) = nearLimit

@@ -3,7 +3,7 @@
 //!
 //! The page is one grouped list in the pane kit: the **Machine** card (where it runs, state with
 //! the uptime folded in, spec, machine time today), **Resources** (disk, memory and CPU as gauge
-//! rows with a 3 pt bar, then network), **Agents** (running now, background jobs, a "Per-agent
+//! rows with a 3 pt bar, then network), **Agents** (running now, outstanding work, a "Per-agent
 //! usage" row that unfolds one row per workspace) and the action card (request a bigger machine,
 //! restart). Near a limit — disk or memory at [`WARN_PCT`] or more — a warning card leads the page
 //! with the two ways out. Numbers come from `GET /machine` (`Machine`) and the box's own
@@ -16,7 +16,9 @@
 
 use gpui::{div, prelude::*, px, AnyElement, App, Div};
 
-use crate::model::{duration_s, size_mb, BoxReport, BoxWorkspace, Machine, MachineState};
+use crate::model::{
+    duration_s, size_mb, BoxReport, BoxWorkspace, Machine, MachineState, Outstanding,
+};
 use crate::ui::profiles::kit;
 use crate::ui::sf_symbols;
 use crate::ui::theme::{Theme, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
@@ -231,30 +233,52 @@ pub fn running_now(r: &BoxReport) -> String {
     format!("{n} of {total} agent{}", if total == 1 { "" } else { "s" })
 }
 
-/// "2 running" / "None".
-pub fn jobs_value(jobs: u64) -> String {
-    match jobs {
-        0 => "None".into(),
-        n => format!("{n} running"),
+/// What is outstanding, one phrase per kind: "2 jobs" / "1 waiting for you" /
+/// "2 jobs · 1 waiting for you". Empty when nothing is.
+///
+/// The two are never added together: a job waiting on a card is one open row and one open card,
+/// and a single number would count that job twice.
+fn outstanding_parts(o: Outstanding) -> Vec<String> {
+    let mut parts = Vec::new();
+    if o.jobs > 0 {
+        parts.push(format!(
+            "{} job{}",
+            o.jobs,
+            if o.jobs == 1 { "" } else { "s" }
+        ));
     }
+    if o.approvals > 0 {
+        parts.push(format!("{} waiting for you", o.approvals));
+    }
+    parts
 }
 
-/// "Working · 42 s · 1 job" / "Idle" (the tool count stays on the Computer tab; the
-/// breakdown row's right column needs the room).
+/// "2 jobs" / "1 waiting for you" / "2 jobs · 1 waiting for you" / "None".
+pub fn outstanding_value(o: Outstanding) -> String {
+    if o.is_clear() {
+        return "None".into();
+    }
+    outstanding_parts(o).join(" · ")
+}
+
+/// "Working · 42 s · 1 job" / "2 jobs · 1 waiting for you" / "Idle" (the tool count stays on the
+/// Computer tab; the breakdown row's right column needs the room).
+///
+/// "Idle" is said only when this agent owes its owner nothing. A card the owner has not answered
+/// is outstanding work on them, it has no deadline, and an agent that reads "Idle" beside one is
+/// telling them there is nothing to come back to.
 pub fn agent_status(w: &BoxWorkspace) -> String {
-    if !w.running {
-        return match w.jobs_running {
-            Some(j) if j > 0 => format!("Idle · {j} job{}", if j == 1 { "" } else { "s" }),
-            _ => "Idle".into(),
-        };
+    let o = w.outstanding.unwrap_or_default();
+    let mut parts = Vec::new();
+    if w.running {
+        parts.push("Working".to_string());
+        if let Some(ms) = w.elapsed_ms {
+            parts.push(duration_s(ms / 1000));
+        }
+    } else if o.is_clear() {
+        return "Idle".into();
     }
-    let mut parts = vec!["Working".to_string()];
-    if let Some(ms) = w.elapsed_ms {
-        parts.push(duration_s(ms / 1000));
-    }
-    if let Some(j) = w.jobs_running.filter(|j| *j > 0) {
-        parts.push(format!("{j} job{}", if j == 1 { "" } else { "s" }));
-    }
+    parts.extend(outstanding_parts(o));
     parts.join(" · ")
 }
 
@@ -297,7 +321,7 @@ pub enum Row {
     NotAnswering,
     // agents card
     RunningNow,
-    Jobs,
+    Outstanding,
     Breakdown,
     Agent,
     // action card
@@ -348,8 +372,8 @@ pub fn plan(machine: &Machine, report: Option<&BoxReport>, breakdown_open: bool)
                 p.resources.push(Row::Network);
             }
             p.agents.push(Row::RunningNow);
-            if r.jobs_running().is_some() {
-                p.agents.push(Row::Jobs);
+            if r.outstanding().is_some() {
+                p.agents.push(Row::Outstanding);
             }
             if !r.usage_rows().is_empty() {
                 p.agents.push(Row::Breakdown);
@@ -608,7 +632,11 @@ mod tests {
                     running: true,
                     elapsed_ms: Some(42_000),
                     tool_calls: Some(7),
-                    jobs_running: Some(1),
+                    asks_running: Some(0),
+                    outstanding: Some(Outstanding {
+                        jobs: 1,
+                        approvals: 0,
+                    }),
                     cpu_pct: Some(61.0),
                     mem_mb: Some(1_900),
                     pids: Some(40),
@@ -619,7 +647,8 @@ mod tests {
                     name: "Comms".into(),
                     healthy: true,
                     running: false,
-                    jobs_running: Some(0),
+                    asks_running: Some(0),
+                    outstanding: Some(Outstanding::default()),
                     cpu_pct: Some(0.0),
                     mem_mb: Some(600),
                     disk_mb: Some(400),
@@ -730,10 +759,13 @@ mod tests {
             p.resources,
             [Row::Disk, Row::Memory, Row::Cpu, Row::Network]
         );
-        assert_eq!(p.agents, [Row::RunningNow, Row::Jobs, Row::Breakdown]);
+        assert_eq!(
+            p.agents,
+            [Row::RunningNow, Row::Outstanding, Row::Breakdown]
+        );
         assert_eq!(p.actions, [Row::RequestBiggerMachine, Row::Restart]);
         assert_eq!(running_now(&r), "1 of 2 agents");
-        assert_eq!(jobs_value(r.jobs_running().unwrap()), "1 running");
+        assert_eq!(outstanding_value(r.outstanding().unwrap()), "1 job");
     }
 
     #[test]
@@ -744,7 +776,7 @@ mod tests {
             open.agents,
             [
                 Row::RunningNow,
-                Row::Jobs,
+                Row::Outstanding,
                 Row::Breakdown,
                 Row::Agent,
                 Row::Agent
@@ -763,10 +795,101 @@ mod tests {
         assert_eq!(agent_status(rows[1]), "Idle");
     }
 
+    /// The two cases the old counter missed, at both render sites.
+    ///
+    /// `jobs_running` counted asks answered beside a turn — runs with no job row — so a box
+    /// running three real jobs reported zero, and the row read "Background jobs: None" while the
+    /// breakdown read "Idle". The same counter is decremented when a worker parks on an approval
+    /// card, so cards open for days read the same way.
+    #[test]
+    fn jobs_and_cards_are_never_drawn_as_none_or_idle() {
+        // Three jobs, no ask running, no turn: what a user with three jobs actually has.
+        let jobs = Outstanding {
+            jobs: 3,
+            approvals: 0,
+        };
+        assert_eq!(outstanding_value(jobs), "3 jobs");
+        let idle_with_jobs = BoxWorkspace {
+            running: false,
+            asks_running: Some(0),
+            outstanding: Some(jobs),
+            ..Default::default()
+        };
+        assert_eq!(agent_status(&idle_with_jobs), "3 jobs");
+
+        // One card and nothing else — no job, no ask, no turn.
+        let card = Outstanding {
+            jobs: 0,
+            approvals: 1,
+        };
+        assert_eq!(outstanding_value(card), "1 waiting for you");
+        let idle_with_card = BoxWorkspace {
+            running: false,
+            asks_running: Some(0),
+            outstanding: Some(card),
+            ..Default::default()
+        };
+        assert_eq!(agent_status(&idle_with_card), "1 waiting for you");
+
+        // Both kinds at once, and a turn running over the top of them.
+        let both = Outstanding {
+            jobs: 2,
+            approvals: 3,
+        };
+        assert_eq!(outstanding_value(both), "2 jobs · 3 waiting for you");
+        let working = BoxWorkspace {
+            running: true,
+            elapsed_ms: Some(42_000),
+            outstanding: Some(both),
+            ..Default::default()
+        };
+        assert_eq!(
+            agent_status(&working),
+            "Working · 42 s · 2 jobs · 3 waiting for you"
+        );
+
+        // "None" and "Idle" are left for an agent that owes its owner nothing.
+        assert_eq!(outstanding_value(Outstanding::default()), "None");
+        assert_eq!(
+            agent_status(&BoxWorkspace {
+                running: false,
+                outstanding: Some(Outstanding::default()),
+                ..Default::default()
+            }),
+            "Idle"
+        );
+    }
+
+    /// The box-wide row sums each kind in its own column. A job parked on a card is one open row
+    /// and one open card; a single total would count that job twice.
+    #[test]
+    fn the_row_sums_each_kind_across_workspaces() {
+        let mut r = report(6_900, 5_300);
+        r.workspaces[0].outstanding = Some(Outstanding {
+            jobs: 2,
+            approvals: 1,
+        });
+        r.workspaces[1].outstanding = Some(Outstanding {
+            jobs: 1,
+            approvals: 2,
+        });
+        assert_eq!(
+            r.outstanding(),
+            Some(Outstanding {
+                jobs: 3,
+                approvals: 3
+            })
+        );
+        assert_eq!(
+            outstanding_value(r.outstanding().unwrap()),
+            "3 jobs · 3 waiting for you"
+        );
+    }
+
     #[test]
     fn an_older_image_draws_only_what_it_reports() {
         // agentd < 0.6.277: disk + memory (host's on Daytona, but that is what it says), no CPU,
-        // no network, no breakdown, no jobs.
+        // no network, no breakdown, nothing it can say about outstanding work.
         let r = BoxReport {
             reachable: true,
             disk_total_mb: Some(10_240),
@@ -787,7 +910,7 @@ mod tests {
         assert_eq!(p.resources, [Row::Disk, Row::Memory]);
         assert_eq!(p.agents, [Row::RunningNow]);
         assert!(r.usage_rows().is_empty());
-        assert_eq!(r.jobs_running(), None);
+        assert_eq!(r.outstanding(), None);
     }
 
     #[test]

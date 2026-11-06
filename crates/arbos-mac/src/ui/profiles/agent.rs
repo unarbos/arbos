@@ -1172,7 +1172,7 @@ mod tests {
         assert!(!r.load_is_host);
         assert_eq!(r.cpu_pct, None);
         assert!(r.usage_rows().is_empty());
-        assert_eq!(r.jobs_running(), None);
+        assert_eq!(r.outstanding(), None);
         assert_eq!(r.workspaces.len(), 2);
         assert_eq!(r.running().count(), 1);
         assert_eq!(r.workspace("p1").unwrap().tool_calls, Some(7));
@@ -1191,7 +1191,7 @@ mod tests {
 
     /// agentd ≥ 0.6.277 ([feedback machine-page-agentd-2026-10-26]): `resources` carries the
     /// cgroup cap (inside Daytona `/proc/meminfo` is the host's), `load_scope` says the load is
-    /// the host's, and every workspace has its share and job count.
+    /// the host's, and every workspace has its share, its ask count and what it owes its owner.
     #[test]
     fn box_report_reads_the_samplers_resources_and_per_workspace_usage() {
         let v: serde_json::Value = serde_json::json!({
@@ -1209,9 +1209,11 @@ mod tests {
                 },
                 "workspaces": [
                     { "project_id": "p1", "name": "Arbos", "healthy": true, "jobs_running": 1,
+                      "work_outstanding": { "jobs": 2, "approvals": 0 },
                       "usage": { "cpu_pct": 61.0, "mem_mb": 1900, "pids": 40, "disk_mb": 2300 },
                       "turn": { "running": true, "current": { "elapsed_ms": 42000, "tool_calls": 7 } } },
                     { "project_id": "p2", "name": "Comms", "healthy": true, "jobs_running": 0,
+                      "work_outstanding": { "jobs": 0, "approvals": 1 },
                       "usage": { "cpu_pct": 0.0, "mem_mb": 600, "pids": 12, "disk_mb": 400 },
                       "turn": { "running": false, "current": null } }
                 ]
@@ -1226,12 +1228,20 @@ mod tests {
         assert_eq!(r.inodes_avail, Some(93000));
         assert_eq!(r.net_rx_bps, Some(1_200_000.0));
         assert_eq!(r.net_tx_today, Some(100_000_000));
-        assert_eq!(r.jobs_running(), Some(1));
+        // `jobs_running` is read but never drawn: it counts asks beside a turn, not job rows.
+        assert_eq!(r.workspace("p1").unwrap().asks_running, Some(1));
+        assert_eq!(
+            r.outstanding(),
+            Some(crate::model::Outstanding {
+                jobs: 2,
+                approvals: 1
+            })
+        );
         let rows = r.usage_rows();
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].name, "Arbos");
         assert_eq!(rows[0].disk_mb, Some(2300));
-        assert_eq!(rows[1].jobs_running, Some(0));
+        assert_eq!(rows[1].asks_running, Some(0));
     }
 }
 

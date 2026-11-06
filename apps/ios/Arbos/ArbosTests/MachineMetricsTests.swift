@@ -6,15 +6,19 @@ import XCTest
 /// `crates/arbos-mac/src/ui/profiles/machine.rs` `tests`.
 final class MachineMetricsTests: XCTestCase {
     /// The `/machine/debug` body an agentd ≥ 0.6.277 answers (the sampler's `resources`,
-    /// `load_scope`, per-workspace `usage` + `jobs_running`).
-    private func debug(diskAvail: Int, memUsed: Int, cpu: Double? = 23.4, usage: Bool = true) -> [String: Any] {
+    /// `load_scope`, per-workspace `usage`, `jobs_running` and `work_outstanding`).
+    private func debug(diskAvail: Int, memUsed: Int, cpu: Double? = 23.4, usage: Bool = true,
+                       arbosOutstanding: [String: Int] = ["jobs": 1, "approvals": 0],
+                       commsOutstanding: [String: Int] = ["jobs": 0, "approvals": 0]) -> [String: Any] {
         var arbos: [String: Any] = ["project_id": "p1", "name": "Arbos", "healthy": true,
                                     "turn": ["running": true, "current": ["elapsed_ms": 42_000, "tool_calls": 7]]]
         var comms: [String: Any] = ["project_id": "p2", "name": "Comms", "healthy": true, "turn": ["running": false]]
         if usage {
             arbos["jobs_running"] = 1
+            arbos["work_outstanding"] = arbosOutstanding
             arbos["usage"] = ["cpu_pct": 61.0, "mem_mb": 1900, "pids": 40, "disk_mb": 2300]
             comms["jobs_running"] = 0
+            comms["work_outstanding"] = commsOutstanding
             comms["usage"] = ["cpu_pct": 0.0, "mem_mb": 600, "pids": 12, "disk_mb": 400]
         }
         var resources: [String: Any] = [
@@ -51,7 +55,9 @@ final class MachineMetricsTests: XCTestCase {
         XCTAssertEqual(r.memAvailableMb, 8192 - 2892, "memory comes from the cgroup cap, not /proc")
         XCTAssertEqual(r.inodesAvail, 93_000)
         XCTAssertEqual(r.netRxBps, 1_200_000)
-        XCTAssertEqual(r.jobsRunning, 1)
+        // `jobs_running` is read but never drawn: it counts asks beside a turn, not job rows.
+        XCTAssertEqual(r.workspace("p1")?.asksRunning, 1)
+        XCTAssertEqual(r.outstanding, Outstanding(jobs: 1, approvals: 0))
         let rows = r.usageRows
         XCTAssertEqual(rows.map(\.name), ["Arbos", "Comms"], "busy first, then biggest memory")
         XCTAssertEqual(rows[0].diskMb, 2300)
@@ -63,7 +69,7 @@ final class MachineMetricsTests: XCTestCase {
         XCTAssertFalse(old.loadIsHost)
         XCTAssertNil(old.cpuPct)
         XCTAssertTrue(old.usageRows.isEmpty)
-        XCTAssertNil(old.jobsRunning)
+        XCTAssertNil(old.outstanding)
     }
 
     func testThresholdsAre85AmberAnd90Red() {
@@ -125,17 +131,64 @@ final class MachineMetricsTests: XCTestCase {
         XCTAssertTrue(p.warning.isEmpty)
         XCTAssertEqual(p.machine, [.whereItRuns, .state, .spec, .machineTime, .sandbox])
         XCTAssertEqual(p.resources, [.disk, .memory, .cpu, .network])
-        XCTAssertEqual(p.agents, [.runningNow, .jobs, .breakdown])
+        XCTAssertEqual(p.agents, [.runningNow, .outstanding, .breakdown])
         XCTAssertEqual(p.actions, [.requestBiggerMachine, .restart])
         XCTAssertEqual(MachineMetrics.runningNow(r), "1 of 2 agents")
-        XCTAssertEqual(MachineMetrics.jobsValue(r.jobsRunning ?? 0), "1 running")
-        XCTAssertEqual(MachineMetrics.jobsValue(0), "None")
+        XCTAssertEqual(MachineMetrics.outstandingValue(r.outstanding ?? Outstanding()), "1 job")
+        XCTAssertEqual(MachineMetrics.outstandingValue(Outstanding()), "None")
+    }
+
+    /// The two cases the old counter missed, at both render sites. The Mac twin is
+    /// `jobs_and_cards_are_never_drawn_as_none_or_idle`.
+    ///
+    /// `jobs_running` counted asks answered beside a turn — runs with no job row — so a box
+    /// running three real jobs reported zero, and the row read "Background jobs: None" while
+    /// the breakdown read "Idle". The same counter is decremented when a worker parks on an
+    /// approval card, so cards open for days read the same way.
+    func testJobsAndCardsAreNeverDrawnAsNoneOrIdle() {
+        // Three jobs, no ask running, no turn: what a user with three jobs actually has.
+        let jobs = Outstanding(jobs: 3, approvals: 0)
+        XCTAssertEqual(MachineMetrics.outstandingValue(jobs), "3 jobs")
+        let idleWithJobs = BoxWorkspace(projectId: "p", name: "Arbos", healthy: true, running: false,
+                                        asksRunning: 0, outstanding: jobs)
+        XCTAssertEqual(MachineMetrics.agentStatus(idleWithJobs), "3 jobs")
+
+        // One card and nothing else — no job, no ask, no turn.
+        let card = Outstanding(jobs: 0, approvals: 1)
+        XCTAssertEqual(MachineMetrics.outstandingValue(card), "1 waiting for you")
+        let idleWithCard = BoxWorkspace(projectId: "p", name: "Arbos", healthy: true, running: false,
+                                        asksRunning: 0, outstanding: card)
+        XCTAssertEqual(MachineMetrics.agentStatus(idleWithCard), "1 waiting for you")
+
+        // Both kinds at once, and a turn running over the top of them.
+        let both = Outstanding(jobs: 2, approvals: 3)
+        XCTAssertEqual(MachineMetrics.outstandingValue(both), "2 jobs · 3 waiting for you")
+        let working = BoxWorkspace(projectId: "p", name: "Arbos", healthy: true, running: true,
+                                   elapsedMs: 42_000, outstanding: both)
+        XCTAssertEqual(MachineMetrics.agentStatus(working), "Working · 42 s · 2 jobs · 3 waiting for you")
+
+        // "None" and "Idle" are left for an agent that owes its owner nothing.
+        XCTAssertEqual(MachineMetrics.outstandingValue(Outstanding()), "None")
+        let clear = BoxWorkspace(projectId: "p", name: "Arbos", healthy: true, running: false,
+                                 outstanding: Outstanding())
+        XCTAssertEqual(MachineMetrics.agentStatus(clear), "Idle")
+    }
+
+    /// The box-wide row sums each kind in its own column. A job parked on a card is one open
+    /// row and one open card; a single total would count that job twice.
+    func testTheRowSumsEachKindAcrossWorkspaces() {
+        let r = BoxReport(debug: debug(diskAvail: 6900, memUsed: 2892,
+                                       arbosOutstanding: ["jobs": 2, "approvals": 1],
+                                       commsOutstanding: ["jobs": 1, "approvals": 2]), now: 5)
+        XCTAssertEqual(r.outstanding, Outstanding(jobs: 3, approvals: 3))
+        XCTAssertEqual(MachineMetrics.outstandingValue(r.outstanding ?? Outstanding()),
+                       "3 jobs · 3 waiting for you")
     }
 
     func testBreakdownExpandsToOneRowPerWorkspace() {
         let r = BoxReport(debug: debug(diskAvail: 6900, memUsed: 2892), now: 5)
         let open = MachineMetrics.plan(machine: hosted(), waitlisted: false, report: r, breakdownOpen: true)
-        XCTAssertEqual(open.agents, [.runningNow, .jobs, .breakdown, .agent("p1"), .agent("p2")])
+        XCTAssertEqual(open.agents, [.runningNow, .outstanding, .breakdown, .agent("p1"), .agent("p2")])
         let closed = MachineMetrics.plan(machine: hosted(), waitlisted: false, report: r, breakdownOpen: false)
         XCTAssertFalse(closed.agents.contains { if case .agent = $0 { return true } else { return false } })
         let rows = r.usageRows

@@ -82,6 +82,35 @@ struct Routine: Identifiable, Equatable {
 
 // MARK: - The box report (`GET /machine/debug`)
 
+/// What one agent still owes its owner (`work_outstanding`): the work it is doing and the
+/// work waiting on an answer from them.
+///
+/// Both halves are counted from the box's store, which is why they are trustworthy where
+/// `BoxWorkspace.asksRunning` is not: that counter counts asks answered beside a running
+/// turn, never job rows, and a worker parked on an approval card decrements it. The two
+/// halves stay apart rather than being summed because one job row can hold both — a job
+/// waiting on a card is one open row and one open card — and a single total would count it
+/// twice. The Mac twin is `Outstanding` in `crates/arbos-mac/src/model.rs`.
+struct Outstanding: Equatable {
+    /// Job rows still `queued` or `running`.
+    var jobs: Int64 = 0
+    /// Approval cards nobody has answered. No deadline closes these: the owner does.
+    var approvals: Int64 = 0
+
+    /// This agent owes its owner nothing at all.
+    var isClear: Bool { jobs == 0 && approvals == 0 }
+
+    /// `work_outstanding` as the box reports it; nil when it does not (an older agentd, or a
+    /// store it could not read), so a reader draws nothing instead of "none".
+    static func from(_ v: Any?) -> Outstanding? {
+        guard let d = v as? [String: Any] else { return nil }
+        let jobs = (d["jobs"] as? NSNumber)?.int64Value
+        let approvals = (d["approvals"] as? NSNumber)?.int64Value
+        if jobs == nil, approvals == nil { return nil }
+        return Outstanding(jobs: jobs ?? 0, approvals: approvals ?? 0)
+    }
+}
+
 /// One agent's workspace on the box.
 struct BoxWorkspace: Equatable {
     var projectId: Id
@@ -92,8 +121,15 @@ struct BoxWorkspace: Equatable {
     /// How long the current turn has run (`turn.current.elapsed_ms`).
     var elapsedMs: Int64?
     var toolCalls: Int64?
-    /// Background jobs (sub-agents) running for this agent (`jobs_running`, agentd ≥ 0.6.277).
-    var jobsRunning: Int64?
+    /// Asks answered beside a running turn (`jobs_running`, agentd ≥ 0.6.277). **Not** a job
+    /// count, whatever the wire calls it: those runs write their answer straight into the
+    /// chat with no job row at all, so this is zero on a workspace running three jobs.
+    /// Nothing draws it; `outstanding` is what the Machine page shows.
+    var asksRunning: Int64?
+    /// What this agent still owes its owner: open job rows and unanswered approval cards
+    /// (`work_outstanding`). Nil on an agentd that does not report it, and then the Machine
+    /// page draws no row at all rather than "None".
+    var outstanding: Outstanding?
     /// Its share of the box (`usage`: the workspace cgroup and a cached `du`).
     var cpuPct: Double?
     var memMb: Int64?
@@ -190,7 +226,8 @@ struct BoxReport: Equatable {
                 running: turn["running"] as? Bool ?? false,
                 elapsedMs: (current["elapsed_ms"] as? NSNumber)?.int64Value,
                 toolCalls: (current["tool_calls"] as? NSNumber)?.int64Value,
-                jobsRunning: (w["jobs_running"] as? NSNumber)?.int64Value,
+                asksRunning: (w["jobs_running"] as? NSNumber)?.int64Value,
+                outstanding: Outstanding.from(w["work_outstanding"]),
                 cpuPct: (usage["cpu_pct"] as? NSNumber)?.doubleValue,
                 memMb: (usage["mem_mb"] as? NSNumber)?.int64Value,
                 pids: (usage["pids"] as? NSNumber)?.int64Value,
@@ -211,10 +248,13 @@ struct BoxReport: Equatable {
             }
     }
 
-    /// Background jobs running across every workspace, when any workspace reports the count.
-    var jobsRunning: Int64? {
-        let counts = workspaces.compactMap(\.jobsRunning)
-        return counts.isEmpty ? nil : counts.reduce(0, +)
+    /// Work outstanding across every workspace, when any workspace reports it: open job rows
+    /// and unanswered approval cards, each summed in its own column.
+    var outstanding: Outstanding? {
+        let counts = workspaces.compactMap(\.outstanding)
+        guard !counts.isEmpty else { return nil }
+        return Outstanding(jobs: counts.reduce(Int64(0)) { $0 + $1.jobs },
+                           approvals: counts.reduce(Int64(0)) { $0 + $1.approvals })
     }
 
     /// The workspace of one agent, if the box lists it.
