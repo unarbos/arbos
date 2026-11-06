@@ -145,6 +145,26 @@ fn redial_gate() -> &'static tokio::sync::Semaphore {
 const ROOM_IDLE_SECS: i64 = 15 * 60;
 /// Default room cap of [`max_open_rooms`].
 const MAX_OPEN_ROOMS: usize = 64;
+/// Measured marginal CPU cost of one open room on a loaded production box: 161 rooms against
+/// 1.595 of a 2.00-core quota (the #2367 follow-up measurement, 2026-11-05). The figure checks
+/// out against itself — at this price 2.00 cores saturate at 205 rooms, and 161 of those is 78 %,
+/// against the 80 % of its quota the box separately measured busy.
+///
+/// A genuinely idle room against the in-tree fake relay costs 0.0015 cores, about a sixth of
+/// this. The production figure is the one to size against: it is what a room costs where the
+/// rooms actually are, and sizing against the idle figure would permit six times what a box can
+/// serve.
+const CORES_PER_ROOM: f64 = 0.0098;
+/// Share of the box's CPU quota that open rooms may cost once [`max_box_rooms`] is reached.
+///
+/// Rooms are overhead — a box exists to run turns, not socket timers — so half the quota is
+/// already generous. It is also the headroom: the ceiling lands at half the saturation point, so
+/// a box sitting exactly on it still has half its cores for work, and the idle close keeps
+/// pulling it below.
+const ROOM_CPU_SHARE: f64 = 0.5;
+/// Floor under [`max_box_rooms`]. A box with a small or misread quota still needs enough rooms to
+/// be useful, and below this the reopens would cost more than the sockets saved.
+const MIN_BOX_ROOMS: usize = 16;
 /// Work in a room's doc keeps the room open whatever its quiet window says. A row still marked
 /// `streaming` after this long is wreckage from a turn that died, not work (#2367: without a
 /// bound, one such row would pin its room open for the life of the box).
@@ -178,6 +198,122 @@ pub fn room_idle_ms() -> i64 {
 pub fn max_open_rooms() -> usize {
     static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *V.get_or_init(|| env_i64("ARBOS_MAX_OPEN_ROOMS", MAX_OPEN_ROOMS as i64) as usize)
+}
+
+/// At most this many non-exempt chat rooms stay open **across every workspace on the box**, sized
+/// from the box's own CPU quota and [`CORES_PER_ROOM`] rather than fixed at a number.
+///
+/// This is a second bound beside [`max_open_rooms`], not a replacement for it. That cap is per
+/// workspace, so a 16-workspace box permits 16 × 64 = 1024 rooms while its 2.00-core quota
+/// saturates near 205: each hub stays inside its own cap and nothing bounds their sum. A box can
+/// therefore sit far over its quota with every workspace apparently well behaved. This bounds the
+/// sum, at 102 rooms on that box.
+///
+/// **It counts the rooms [`DocHost::keep_open`] does not exempt, and only those** — the same
+/// population both existing bounds act on. This deliberately takes no view on who is in that
+/// exemption: it is defined there, the other two bounds read it from there, and so does this.
+///
+/// That membership is the figure to re-read before trusting any number here, because the
+/// exemption is the denominator. While it holds the project doc of every workspace **and** every
+/// `people/` room, the exempt set grows with people and has no bound of its own, so a box can be
+/// mostly exempt rooms and this ceiling will not bring it under quota — it bounds the part it can
+/// reach and no more. Should `people/` rooms become evictable, nothing here needs re-deriving:
+/// the ceiling is a count of rooms worth half the quota at [`CORES_PER_ROOM`] each, whoever they
+/// are, and it would simply cover most of the box instead of a fraction of it.
+///
+/// `ARBOS_MAX_BOX_ROOMS=0` lifts it; any other value overrides the computed figure.
+pub fn max_box_rooms() -> usize {
+    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        match std::env::var("ARBOS_MAX_BOX_ROOMS")
+            .ok()
+            .and_then(|v| v.trim().parse::<i64>().ok())
+        {
+            Some(n) => n.max(0) as usize,
+            None => {
+                let budget = crate::resources::box_cores() * ROOM_CPU_SHARE;
+                ((budget / CORES_PER_ROOM) as usize).max(MIN_BOX_ROOMS)
+            }
+        }
+    })
+}
+
+/// Rooms this box holds open, across every workspace: non-exempt ones, which [`max_box_rooms`]
+/// bounds, and `keep_open` ones, which no bound can close. Cheap — no room's doc is read.
+///
+/// The second number answers a question that has only ever been inferred. The exempt set is the
+/// part of a box's socket count that neither the idle close nor either cap can reclaim, and what
+/// share of a loaded box it is decides how much the ceiling is worth there. Until this, it could
+/// only be guessed at from the workspace count — and a guess is no use for judging a change to
+/// the exemption itself, which is the decision this number exists to inform.
+pub(crate) async fn box_room_counts(hubs: &[SyncHub]) -> (usize, usize) {
+    let mut open = 0usize;
+    let mut exempt = 0usize;
+    for h in hubs {
+        let s = h.survey_rooms(None, false).await;
+        open += s.open;
+        exempt += s.exempt;
+    }
+    (open, exempt)
+}
+
+/// Keep at most [`max_box_rooms`] non-exempt chat rooms open across every hub on the box,
+/// closing the coldest that hold no work until it is under.
+///
+/// This is the bound no workspace can enforce for itself. [`max_open_rooms`] caps each hub at 64
+/// and nothing caps their sum, so a 16-workspace box permits 1024 rooms against a CPU quota that
+/// saturates near 205: every hub can sit inside its own cap while the box is four times over its
+/// quota, and that is the state the measurement found.
+///
+/// Eviction ranks across the box for the same reason the count does. Were each hub to shed its
+/// own coldest room whenever the box was over, a workspace with two warm rooms would keep paying
+/// for a sibling sitting on a hundred cold ones.
+///
+/// A box whose every remaining room holds work stays over and says so. Dropping work to meet a
+/// number would be worse than the sockets — the same choice [`SyncHub::enforce_room_cap`] makes.
+///
+/// Returns the open count before the sweep and how many rooms it closed.
+pub(crate) async fn enforce_box_room_ceiling(hubs: &[SyncHub]) -> (usize, usize) {
+    let ceiling = max_box_rooms();
+    let (open, _) = box_room_counts(hubs).await;
+    if ceiling == 0 || open <= ceiling {
+        return (open, 0);
+    }
+    // Over, and only now worth reading every room's doc to find which of them hold work.
+    let mut cold: Vec<(ColdRoom, &SyncHub)> = Vec::new();
+    for h in hubs {
+        for c in h.survey_rooms(None, true).await.cold {
+            cold.push((c, h));
+        }
+    }
+    cold.sort_by_key(|(c, _)| c.last_active_ms);
+    let mut closed = 0usize;
+    for (c, h) in cold {
+        if open.saturating_sub(closed) <= ceiling {
+            break;
+        }
+        if h.close_for_box_ceiling(&c).await {
+            closed += 1;
+        }
+    }
+    let left = open.saturating_sub(closed);
+    if left > ceiling {
+        tracing::warn!(
+            open = left,
+            ceiling,
+            closed,
+            "box room ceiling: still over; every room left holds work in flight"
+        );
+    } else if closed > 0 {
+        tracing::info!(
+            was = open,
+            open = left,
+            ceiling,
+            closed,
+            "box room ceiling: closed the coldest rooms on the box"
+        );
+    }
+    (open, closed)
 }
 
 /// A pending people-chat `send` older than this at catch-up is history, not work: nobody asked
@@ -591,6 +727,26 @@ impl DocHost {
 
 pub type SharedHost = Arc<Mutex<DocHost>>;
 
+/// A room that holds no work and could be closed now, with the timestamp the two bounds rank by.
+/// The per-workspace cap picks the coldest of one hub's; the box ceiling picks across every hub.
+pub(crate) struct ColdRoom {
+    pub last_active_ms: i64,
+    pub chat_id: String,
+    pub host: SharedHost,
+}
+
+/// What one pass over a workspace's open rooms found ([`SyncHub::survey_rooms`]).
+#[derive(Default)]
+pub(crate) struct RoomSurvey {
+    /// Non-exempt rooms open here: the ones both caps bound.
+    pub open: usize,
+    /// `keep_open` rooms open here: the ones no bound may close.
+    pub exempt: usize,
+    /// Non-exempt rooms that could be closed right now. Empty unless the caller asked for them,
+    /// because finding them reads every room's doc.
+    pub cold: Vec<ColdRoom>,
+}
+
 #[derive(Clone)]
 pub struct SyncHub {
     pub cfg: Arc<Config>,
@@ -798,36 +954,20 @@ impl SyncHub {
             return;
         }
         loop {
-            let now = now_ms();
-            let hosts: Vec<(String, SharedHost)> = self
-                .hosts
-                .lock()
-                .await
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
-            let mut open = 0usize;
-            let mut coldest: Option<(i64, String, SharedHost)> = None;
-            for (id, h) in hosts {
-                // A room held by someone else is in use: counted, never closed.
-                let Ok(g) = h.try_lock() else {
-                    open += 1;
-                    continue;
-                };
-                if g.closed || g.keep_open {
-                    continue;
-                }
-                open += 1;
-                let (active, closable) = (g.last_active_ms, g.closable(now, false));
-                drop(g);
-                if id != keep && closable && coldest.as_ref().is_none_or(|(a, ..)| active < *a) {
-                    coldest = Some((active, id, h));
-                }
-            }
+            // Count before costing out the candidates: the collecting pass reads every room's
+            // doc (`work_in_flight`), and a workspace inside its cap should not pay for that on
+            // every room it opens.
+            let open = self.survey_rooms(Some(keep), false).await.open;
             if open <= cap {
                 return;
             }
-            let Some((_, id, host)) = coldest else {
+            let coldest = self
+                .survey_rooms(Some(keep), true)
+                .await
+                .cold
+                .into_iter()
+                .min_by_key(|c| c.last_active_ms);
+            let Some(cold) = coldest else {
                 tracing::warn!(
                     open,
                     cap,
@@ -835,10 +975,71 @@ impl SyncHub {
                 );
                 return;
             };
-            if !self.close_cold(&id, &host, "cap", false).await {
+            if !self
+                .close_cold(&cold.chat_id, &cold.host, "cap", false)
+                .await
+            {
                 return;
             }
         }
+    }
+
+    /// One pass over this workspace's rooms: how many non-exempt rooms are open, and — when
+    /// `candidates` — each one that could be closed right now.
+    ///
+    /// The two halves cost very different amounts. Counting only locks each host; collecting
+    /// calls [`DocHost::closable`], which reads the whole doc. Both callers count first and
+    /// collect only once they know they are over, so a box under its bounds pays nothing to be
+    /// checked.
+    ///
+    /// `keep_open` rooms are neither counted nor offered. No bound may close them
+    /// ([`DocHost::keep_open`]), so counting them against a budget that cannot reclaim them
+    /// would spend the budget evicting rooms that are not the problem.
+    pub(crate) async fn survey_rooms(&self, keep: Option<&str>, candidates: bool) -> RoomSurvey {
+        let now = now_ms();
+        let hosts: Vec<(String, SharedHost)> = self
+            .hosts
+            .lock()
+            .await
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let mut s = RoomSurvey::default();
+        for (id, h) in hosts {
+            // A room held by someone else is in use: counted, never closed.
+            let Ok(g) = h.try_lock() else {
+                s.open += 1;
+                continue;
+            };
+            if g.closed {
+                continue;
+            }
+            if g.keep_open {
+                s.exempt += 1;
+                continue;
+            }
+            s.open += 1;
+            if !candidates || Some(id.as_str()) == keep {
+                continue;
+            }
+            let (last_active_ms, closable) = (g.last_active_ms, g.closable(now, false));
+            drop(g);
+            if closable {
+                s.cold.push(ColdRoom {
+                    last_active_ms,
+                    chat_id: id,
+                    host: h,
+                });
+            }
+        }
+        s
+    }
+
+    /// Close a room the box ceiling picked. Re-checks closability under the lock, so a room that
+    /// took work between the survey and now stays open.
+    pub(crate) async fn close_for_box_ceiling(&self, cold: &ColdRoom) -> bool {
+        self.close_cold(&cold.chat_id, &cold.host, "box ceiling", false)
+            .await
     }
 
     /// Close one room that holds no work: persist it, drop it from the hub, and let its session
@@ -1794,6 +1995,20 @@ mod tests {
     /// cargo test --release -p arbos-agentd room_load_profile -- --ignored --nocapture
     /// ```
     ///
+    /// The box ceiling ([`max_box_rooms`]) is swept here on the same 30 s cadence `main.rs` uses,
+    /// so the harness measures the bounds the box actually runs. One workspace is the weakest
+    /// case for it — the per-workspace cap binds first unless that cap is lifted — so the arm
+    /// that isolates the ceiling lifts the other two bounds and leaves it the only one standing:
+    ///
+    /// ```text
+    /// # ceiling off: nothing bounds the rooms
+    /// ARBOS_MAX_OPEN_ROOMS=0 ARBOS_ROOM_IDLE_SECS=0 ARBOS_MAX_BOX_ROOMS=0 \
+    ///   cargo test --release -p arbos-agentd room_load_profile -- --ignored --nocapture
+    /// # ceiling on, alone: sized from this machine's CPU quota
+    /// ARBOS_MAX_OPEN_ROOMS=0 ARBOS_ROOM_IDLE_SECS=0 \
+    ///   cargo test --release -p arbos-agentd room_load_profile -- --ignored --nocapture
+    /// ```
+    ///
     /// This is a host-native harness, not the lt-eval box: it has no gVisor, no `pi`, and the
     /// fake relay shares the process. Read it as the room cost of one agentd process at the
     /// same room count, not as that box's figure.
@@ -1831,9 +2046,12 @@ mod tests {
         let known = bx.store.chats().unwrap();
         let to_open = crate::workspace::boot_rooms(&known);
         println!(
-            "#2367 room load profile: {} chats known, cap {}, quiet window {} s → {} rooms at boot",
+            "#2367 room load profile: {} chats known, cap {}, box ceiling {} ({:.2} cores), \
+             quiet window {} s → {} rooms at boot",
             known.len(),
             max_open_rooms(),
+            max_box_rooms(),
+            crate::resources::box_cores(),
             room_idle_ms() / 1000,
             to_open.len()
         );
@@ -1842,6 +2060,15 @@ mod tests {
             bx.hub.open_room(PROJECT_DOC_CHAT_ID).await.unwrap();
             for id in &to_open {
                 bx.hub.open_room(id).await.unwrap();
+            }
+        });
+        // The box ceiling, on the cadence `main.rs` sweeps it. One hub here; on a real box the
+        // supervisor hands it every workspace's.
+        let sweep_hub = bx.hub.clone();
+        box_rt.spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                enforce_box_room_ceiling(std::slice::from_ref(&sweep_hub)).await;
             }
         });
         // Let every room finish its handshake and catch-up first: the idle window must measure
@@ -1874,9 +2101,11 @@ mod tests {
             let d = |a: f64, b: f64| (b - a) / window.as_secs_f64();
             let box_cores = d(prev.box_cpu_s, now.box_cpu_s);
             cores.push(box_cores);
+            let (rooms, exempt) = box_rt.block_on(box_room_counts(std::slice::from_ref(&bx.hub)));
             println!(
                 "sample {n}: box {:.3} cores, relay {:.3} cores, other {:.3} cores, \
-                 {} relay sockets, {} process fds, {:.0} MiB rss",
+                 {rooms} rooms open ({exempt} exempt), {} relay sockets, {} process fds, \
+                 {:.0} MiB rss",
                 box_cores,
                 d(prev.relay_cpu_s, now.relay_cpu_s),
                 d(prev.other_cpu_s, now.other_cpu_s),

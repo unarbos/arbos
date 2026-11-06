@@ -18,7 +18,7 @@ use crate::agent::Agent;
 use crate::config::{BoxConfig, Config};
 use crate::isolation::Isolation;
 use crate::store::Store;
-use crate::sync::{Incoming, SyncHub};
+use crate::sync::{self, Incoming, SyncHub};
 use crate::{hooks, http, mcp, sites};
 
 /// Subagents running at once across the whole box (4 per workspace, see `agent.rs`).
@@ -120,6 +120,26 @@ impl Supervisor {
 
     pub async fn list(&self) -> Vec<Arc<Workspace>> {
         self.workspaces.read().await.values().cloned().collect()
+    }
+
+    /// How many chat rooms this box holds open: non-exempt ones, which the ceiling bounds, and
+    /// `keep_open` ones, which neither bound can touch. Cheap — no room's doc is read.
+    ///
+    /// The second number is the one worth watching. Nobody has measured what share of a loaded
+    /// box's rooms are exempt, and it decides how much of that box's socket count the ceiling can
+    /// reach at all, so the box reports it rather than leaving it to be inferred from the
+    /// workspace count.
+    pub async fn room_counts(&self) -> (usize, usize) {
+        let hubs: Vec<SyncHub> = self.list().await.iter().map(|w| w.sync.clone()).collect();
+        sync::box_room_counts(&hubs).await
+    }
+
+    /// Hold the box to [`sync::max_box_rooms`] non-exempt rooms, closing the coldest that hold
+    /// no work wherever on the box they are. `workspaces` is the registry that makes it possible:
+    /// no hub can see its siblings, so no hub can enforce a bound on their sum.
+    pub async fn enforce_box_room_ceiling(&self) -> (usize, usize) {
+        let hubs: Vec<SyncHub> = self.list().await.iter().map(|w| w.sync.clone()).collect();
+        sync::enforce_box_room_ceiling(&hubs).await
     }
 
     /// The workspace whose store knows this chat (legacy `/history/{chat}` without a project).
