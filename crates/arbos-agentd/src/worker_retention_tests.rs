@@ -487,15 +487,17 @@ fn rss_of(pid: u32) -> u64 {
 /// file, which is the same thing `test_agent_in_cgroup`'s other users rely on.
 #[tokio::test]
 async fn the_memory_bound_takes_only_what_the_share_needs() {
+    // The three children below are under the population cap, so a pass that evicts here can only
+    // be the memory bound and the two cannot be confused for one another. At compile time, so
+    // lowering the cap breaks the build rather than quietly turning this into a cap case.
+    const _: () = assert!(3 < Agent::WORKER_RETAINED_MAX);
+
     let _one = exclusive().await;
     let cgroup = std::env::temp_dir().join(format!("arbos-worker-mem-{}", ulid()));
     std::fs::create_dir_all(&cgroup).unwrap();
     std::fs::write(cgroup.join("cgroup.procs"), "").unwrap();
     let (agent, root) = test_agent_in_cgroup(&cgroup).await;
 
-    // Three, which is under the population cap — so a pass that evicts here can only be the
-    // memory bound, and the two bounds cannot be confused for one another.
-    assert!(3 < Agent::WORKER_RETAINED_MAX);
     let mut held = Vec::new();
     for age in [300_000u64, 200_000, 100_000] {
         let sid = ulid();
