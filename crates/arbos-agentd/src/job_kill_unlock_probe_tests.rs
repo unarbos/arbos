@@ -47,6 +47,7 @@ const ASK: &str = "01TESTASKKILLUNLOCK000001";
 /// namespace for the whole suite, so two tests sharing a mark would each find the other's tree
 /// and count it as a survivor of its own job — a flake that would look exactly like the bug.
 const WORKER_R15: &str = "01TESTWORKERKILLUNLOCK001";
+const WORKER_RESTART: &str = "01TESTWORKERKILLUNLOCK002";
 
 /// The env var a worker's descendants carry, by literal name so this file compiles against the
 /// tree that has no such constant yet as well as the one that does.
@@ -355,6 +356,44 @@ async fn a_cancel_leaves_nothing_alive_that_the_guard_will_not_let_the_agent_kil
         stopped[0].sweep.survivors,
         stopped[0].sweep.found,
         verdict.unwrap_err(),
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// An agentd restart does **not** reach the "could not check" branch, which is what #2833's
+/// note for that branch says reaches it.
+///
+/// A restart loses `worker_pgids`, which is an in-memory map, so the recorded session and group
+/// are gone. It loses nothing else the sweep needs: the mark is the subagent id, read from the
+/// file-backed store, and `marked_procs` finds the tree by scanning `/proc/<pid>/environ` for
+/// it. So the tree is not empty, the kill runs, and the sweep is `checked: true`.
+///
+/// This is the shape the note describes, and the cancel handles it completely.
+#[tokio::test]
+async fn an_agentd_restart_still_checks_because_the_mark_outlives_the_memory() {
+    let (agent, root) = test_agent().await;
+    let worker = DeepWorker::start(&root, WORKER_RESTART, &R15_LAUNCHERS);
+    worker.assert_is_round_15_shape();
+    a_running_job(&agent, worker.leader, WORKER_RESTART).await;
+
+    // The restart: the process ids agentd held in memory are gone. The store row and the mark
+    // the tree carries in its environment are not.
+    agent.worker_pgids.lock().await.clear();
+    let _turn = agent.test_hold_turn(CHAT).await;
+
+    let stopped = agent.stop_jobs(CHAT, Some(JOB)).await;
+    assert!(
+        stopped[0].sweep.checked,
+        "a restart left the cancel unable to check, so the note's case is real: {:?}",
+        stopped[0].sweep
+    );
+    std::thread::sleep(SETTLE);
+    assert_eq!(
+        worker.still_alive(),
+        Vec::<u32>::new(),
+        "the mark did not reach the tree after a restart (sessions {:?})",
+        worker.sessions()
     );
 
     let _ = std::fs::remove_dir_all(&root);
