@@ -214,7 +214,8 @@ pub const BUBBLE_RADIUS: f32 = 12.0;
 /// approved reference the body text's x-height clusters at 15.69 px over 17
 /// lines; ours clustered at 14.80 px, which on a known 13.5 pt body gives a
 /// ratio of 0.5481 against SF Pro's published 0.5459 — the method recovers a
-/// value we already knew to within 0.41 %. 15.69 px then implies **14.31 pt**,
+/// value we already knew to within 0.41 % (`chat_typography_tests` holds that
+/// control). 15.69 px then implies **14.31 pt**,
 /// and 14.25 is the representable value nearest it.
 ///
 /// The **pitch is unchanged**: 43.99 px on the reference against our 43.89,
@@ -226,10 +227,6 @@ pub const CHAT_BODY: f32 = 14.25;
 /// 57/58 had read 20) — [feedback bubble-markdown-2026-10-24] — and
 /// confirmed again on the 2026-11-05 reference at 43.99 px.
 pub const CHAT_LINE_HEIGHT: f32 = 22.0;
-/// SF Pro's x-height as a fraction of the em (1118 / 2048), published by the
-/// foundry. Used only to check a measurement against something already known
-/// — see [`CHAT_BODY`] and `chat_typography_tests`.
-pub const SF_PRO_X_HEIGHT: f32 = 1118.0 / 2048.0;
 pub const BUBBLE_PAD_X: f32 = 15.0;
 pub const BUBBLE_PAD_Y: f32 = 6.0;
 pub const PANEL_RADIUS: f32 = 14.0;
@@ -1867,8 +1864,12 @@ mod chat_typography_tests {
     //! of the whole transcript: 17 lines of 21 on the reference, 10 of 21 on
     //! ours.
 
-    use super::{CHAT_BODY, CHAT_LINE_HEIGHT, SF_PRO_X_HEIGHT};
+    use super::{CHAT_BODY, CHAT_LINE_HEIGHT};
 
+    /// SF Pro's x-height as a fraction of the em (1118 / 2048), published by
+    /// the foundry. It lives here because its only job is to check a
+    /// measurement against something already known.
+    const SF_PRO_X_HEIGHT: f32 = 1118.0 / 2048.0;
     const PX_PER_PT: f32 = 2.0;
     /// What our own transcript measured at a **known** 13.5 pt body.
     const OUR_OLD_BODY: f32 = 13.5;
