@@ -22,6 +22,19 @@ pub struct RpcChild {
     events: broadcast::Sender<Event>,
     seq: AtomicU64,
     pub exited: Arc<std::sync::atomic::AtomicBool>,
+    /// When this child last carried traffic in either direction, for
+    /// [`crate::agent::Agent::retire_idle_workers`].
+    ///
+    /// Both directions, and that is the whole reason it is here rather than derived from the
+    /// store. A job's worker is prompted **once** and then streams for as long as the job runs,
+    /// so every store-derived clock reads a busy worker as long idle: `last_seen_at` is written
+    /// by `set_subagent_status`, which a running job does not call again. A retention pass that
+    /// trusted that would evict workers mid-job.
+    ///
+    /// Written at spawn, in [`Self::call_timeout`] (the one funnel every command out passes
+    /// through), and in the reader loop for every record in — so a child that is only receiving
+    /// still reads as busy.
+    last_used_ms: AtomicU64,
     /// Kept from spawn: `Child::id` is `None` once the process has been reaped, and the pid is
     /// what tells a workspace cgroup's leftovers apart from the children the box still owns.
     pid: Option<u32>,
@@ -135,30 +148,37 @@ impl RpcChild {
             exited: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             pid,
             tree,
+            last_used_ms: AtomicU64::new(arbos_core::ids::now_ms() as u64),
         });
         let reader_me = me.clone();
         tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
             loop {
                 match lines.next_line().await {
-                    Ok(Some(line)) => match rpc::parse_line(&line) {
-                        Some(Record::Response(r)) => {
-                            if let Some(id) = &r.id {
-                                if let Some(tx) = reader_me.pending.lock().await.remove(id) {
-                                    let _ = tx.send(r);
-                                    continue;
+                    Ok(Some(line)) => {
+                        // Before the parse, so a line this build cannot read still counts as the
+                        // child doing something. An idle clock that only unparseable traffic
+                        // could not move is a clock that ages a working child.
+                        reader_me.touch();
+                        match rpc::parse_line(&line) {
+                            Some(Record::Response(r)) => {
+                                if let Some(id) = &r.id {
+                                    if let Some(tx) = reader_me.pending.lock().await.remove(id) {
+                                        let _ = tx.send(r);
+                                        continue;
+                                    }
                                 }
+                                tracing::debug!(child = %reader_me.name, cmd = %r.command, success = r.success, "uncorrelated response");
                             }
-                            tracing::debug!(child = %reader_me.name, cmd = %r.command, success = r.success, "uncorrelated response");
+                            Some(Record::Event(e)) => {
+                                let _ = reader_me.events.send(e);
+                            }
+                            Some(Record::Raw(v)) => {
+                                tracing::trace!(child = %reader_me.name, raw = %v, "raw record");
+                            }
+                            None => {}
                         }
-                        Some(Record::Event(e)) => {
-                            let _ = reader_me.events.send(e);
-                        }
-                        Some(Record::Raw(v)) => {
-                            tracing::trace!(child = %reader_me.name, raw = %v, "raw record");
-                        }
-                        None => {}
-                    },
+                    }
                     Ok(None) => break,
                     Err(e) => {
                         tracing::warn!(child = %reader_me.name, error = %e, "stdout read error");
@@ -190,6 +210,7 @@ impl RpcChild {
     }
 
     pub async fn call_timeout(&self, cmd: RpcCommand, timeout: Duration) -> Result<Response> {
+        self.touch();
         let id = cmd.id().to_owned();
         let id = id.as_str();
         let (tx, rx) = oneshot::channel();
@@ -241,6 +262,30 @@ impl RpcChild {
 
     pub fn is_alive(&self) -> bool {
         !self.exited.load(Ordering::SeqCst)
+    }
+
+    /// This child carried traffic just now.
+    fn touch(&self) {
+        self.last_used_ms
+            .store(arbos_core::ids::now_ms() as u64, Ordering::SeqCst);
+    }
+
+    /// How long since any traffic in either direction. Zero while traffic is flowing.
+    pub fn idle_ms(&self) -> u64 {
+        (arbos_core::ids::now_ms() as u64).saturating_sub(self.last_used_ms.load(Ordering::SeqCst))
+    }
+
+    /// Age this child's idle clock by `ms`, for a test that needs a long-idle worker without
+    /// waiting out the bound.
+    ///
+    /// It moves the clock and nothing else: the process stays exactly as it is, so a case using
+    /// this still kills a real child through the real path. The alternative — a test-only
+    /// override of the bound — would leave the comparison itself unexercised.
+    #[cfg(test)]
+    pub fn test_age_idle_clock(&self, ms: u64) {
+        let now = arbos_core::ids::now_ms() as u64;
+        self.last_used_ms
+            .store(now.saturating_sub(ms), Ordering::SeqCst);
     }
 
     pub fn pid(&self) -> Option<u32> {

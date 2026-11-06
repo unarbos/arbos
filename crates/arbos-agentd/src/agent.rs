@@ -1975,6 +1975,35 @@ pub(crate) struct PiRssSample {
     pub at_ms: u64,
 }
 
+/// One worker child [`Agent::retire_idle_workers`] may close, once gates 1 to 3 have passed.
+struct RetireCandidate {
+    harness: Harness,
+    session_id: String,
+    /// For a reading of the child's size. `None` where the adapter never had one.
+    pid: Option<u32>,
+    /// The child's own clock, from [`crate::rpc_child::RpcChild::idle_ms`].
+    idle_ms: u64,
+    /// `0` for a worker that finished, `1` for one waiting on a person's reply — so a session
+    /// somebody may be mid-answer on is the last of the two to lose its child.
+    rank: u8,
+}
+
+/// `VmRSS` of one process in bytes.
+///
+/// [`None`] where it cannot be read, which includes a child that has just died: a process with no
+/// `mm` has no `VmRSS` line at all (the same limit [`PiRssSample`] exists for).
+fn rss_bytes(pid: u32) -> Option<u64> {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    let kb: u64 = status
+        .lines()
+        .find_map(|l| l.strip_prefix("VmRSS:"))?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()?;
+    Some(kb * 1024)
+}
+
 /// What the workspace cgroup can still say about its memory once a child has died.
 ///
 /// Everything here survives the kill, which is the test each field had to pass: the kernel frees
@@ -2919,6 +2948,43 @@ impl Agent {
         (arbos_core::ids::now_ms() as u64)
             .saturating_sub(self.pi_last_use_ms.load(Ordering::SeqCst))
     }
+
+    /// A finished job's worker nothing has used for this long gives its process back; the next
+    /// brief for that thread resumes it from its session file.
+    ///
+    /// The same figure as [`Self::PI_PARK_IDLE_MS`], because it is the same trade on the same
+    /// box: a resident process against a restart of about a second.
+    pub(crate) const WORKER_RETIRE_IDLE_MS: u64 = 10 * 60_000;
+
+    /// How many worker children this workspace may hold at once, whatever their age.
+    ///
+    /// Above [`SUBAGENT_MAX_CONCURRENT`] on purpose. The two caps answer different questions —
+    /// that one gates how many workers *run*, this one bounds how many *exist* — and a
+    /// population cap at or below the concurrency gate would spend its time trying to evict
+    /// workers that are running. Forest reached 25 live `pi:` workers against a concurrency gate
+    /// of 4, which is the measurement this number answers.
+    pub(crate) const WORKER_RETAINED_MAX: usize = 6;
+
+    /// The share of this workspace's memory ceiling the live worker children may hold before the
+    /// longest-idle of them are asked to give it back, as a percentage.
+    ///
+    /// **Why this is a backstop and not the usual bound, with the arithmetic.** The ceiling is
+    /// [`Self::workspace_mem_max`], which `Isolation::detect` sets to half the box's own cgroup
+    /// limit. On the 3 GB box `Self::pi_parked`'s comment names, that is ~1536 MiB, so this share
+    /// is ~768 MiB; a retained pi worker measured ~140 MiB on Forest, so the share holds five and
+    /// the count cap of six is what binds first in all but the tightest case. On Forest and
+    /// Test5 — both large boxes — it never binds at all: Forest's 3505 MiB of retained workers is
+    /// a few per cent of any share of a 377 GiB box, and if such a box's container is unlimited
+    /// the ceiling reads as absent and this bound is skipped outright. So the count cap is what
+    /// would have cut Forest's 25 to six and Test5's 35 to six, and this exists for the small box
+    /// where six workers genuinely do not fit.
+    ///
+    /// **A quarter was the first figure and it was wrong.** On a 3 GB box a quarter is ~384 MiB,
+    /// which three ~140 MiB workers already exceed — so the memory path would have been the
+    /// normal case there rather than the exception. It is 50 % instead, and the response is
+    /// proportional: the pass evicts the fewest children that bring the set under the share, so
+    /// firing can never collapse retention to a fixed number.
+    pub(crate) const WORKER_RETAINED_RSS_PCT: u64 = 50;
 
     /// Consecutive losses before the box stops treating this as bad luck: it clears the
     /// workspace's leftovers, moves the chat to a fresh session file and says it is degraded.
@@ -4843,6 +4909,227 @@ impl Agent {
             }
         }
         all_answered.then_some(true)
+    }
+
+    /// Give back the processes of finished-job workers that nothing is using.
+    ///
+    /// # The defect this bounds
+    ///
+    /// A worker child is removed from an adapter's map by exactly one function, `stop` — and on
+    /// 0.1.200 every production caller of it was a failure or an exit: the cancel
+    /// ([`Self::end_cancelled_worker`]), a resumed session that died at its first prompt, an
+    /// expired approval card, and `shutdown_all` at daemon exit. **None is reached by a job
+    /// finishing normally.** A finished job writes its result, releases its locks and its slot,
+    /// sets the subagent `idle` — and leaves the child running.
+    ///
+    /// Nothing collected it either, and the reason is a circle. [`Self::reap_unreachable_workers`]
+    /// keys on [`Self::session_is_over`], which asks every adapter `is_open`, which answers "the
+    /// child is in my map and alive". So the worker was spared because it was alive, and it
+    /// stayed alive because nothing stopped it. `kill_workspace_leftovers` spared it identically
+    /// (measured twice on Forest as `killed=0`), and the two existing caps are concurrency gates
+    /// rather than population bounds: Forest held 25 live `pi:` workers at 3505 MiB against a
+    /// concurrency gate of 4 and the 3 GB budget [`Self::pi_parked`]'s comment names, and Test5
+    /// on 0.1.198 held 35 after 11.5 hours — so this is not a 0.1.200 regression.
+    ///
+    /// # What this is, and what it is not
+    ///
+    /// **Not a new killer.** This function is the fifth *caller* of `stop`, through
+    /// [`crate::harness::HarnessAdapter::stop_if_idle`]. It constructs no
+    /// [`crate::isolation::Sweep`], signals no pid, and reads no `/proc` to choose a victim. The
+    /// cancel path is untouched: nothing here is reachable from `stop_jobs`, `hook_stop_job` or
+    /// `end_cancelled_worker`, and it emits its own line rather than a `stop_job answered`.
+    ///
+    /// **Not a removal of the retention.** The retention is deliberate — the resume path at
+    /// `run_subagent` exists to reuse these threads — so this is a bound on it. A worker's thread
+    /// lives in its pi session file and its pack on disk, not in its process, and
+    /// `PiAdapter::resume` rebuilds the child from both. `run_subagent` reaches that branch on
+    /// exactly one condition, `is_open` being false, which is the state this creates. So a retired
+    /// worker's next brief pays a resume instead of finding a resident child, and neither file nor
+    /// store row is touched here.
+    ///
+    /// **`waiting_user` is retired too, and that is the user-visible part.** A session a person is
+    /// expected to reply to can lose its child, and their reply then comes back through a resume.
+    /// It is included because excluding it would leave the cap unbounded — a box could accumulate
+    /// `waiting_user` children without limit — and it is safe because that status is written
+    /// *after* the stream loop ends, so such a worker is as idle as an `idle` one. It is ranked
+    /// last among victims so it is the last to go.
+    ///
+    /// # The gates, every one of which must hold
+    ///
+    /// 1. The session is not in [`Self::subagent_msgs`], so no run is in flight. The same live-set
+    ///    gate [`Self::reclaim_orphan_subagents`] uses, written before the start or resume and
+    ///    cleared after the run.
+    /// 2. Its store row reads `idle` or `waiting_user` — both meaning the run has ended.
+    /// 3. No open job names it among [`Self::job_worker_ids`]. A job keeps one row across several
+    ///    workers (bug AO), so the current `subagent_id` alone is not the question.
+    /// 4. The child's **own** idle clock ([`crate::rpc_child::RpcChild::idle_ms`]) is old enough.
+    ///    The store cannot answer this: a worker is prompted once and then streams for as long as
+    ///    its job runs, so every store column reads a busy worker as long idle.
+    /// 5. Re-checked inside the adapter's own lock at the moment of removal, which is where
+    ///    `stop_if_idle` takes it. This is the `pi_parked` double-check applied to workers.
+    ///
+    /// # Why it runs before the reap
+    ///
+    /// Its caller runs it immediately before [`Self::reap_unreachable_workers`], and the order is
+    /// the point rather than a convenience: retiring takes the child out of the map, so
+    /// `session_is_over` finally answers `Some(true)` for that session, and the reap that already
+    /// exists collects anything it had left running. No second sweep is written — the existing one
+    /// starts being able to reach these sessions because the circle above is broken.
+    ///
+    /// Returns how many children were closed.
+    pub(crate) async fn retire_idle_workers(&self) -> usize {
+        let held: Vec<(Harness, crate::harness::RetainedWorker)> = self
+            .adapters
+            .iter()
+            .flat_map(|(h, a)| a.retained().into_iter().map(move |w| (*h, w)))
+            .collect();
+        if held.is_empty() {
+            return 0;
+        }
+        let in_flight: HashSet<String> = self.subagent_msgs.lock().await.keys().cloned().collect();
+        let claimed: HashSet<String> = self
+            .store
+            .open_jobs()
+            .unwrap_or_default()
+            .iter()
+            .flat_map(|j| self.job_worker_ids(j))
+            .collect();
+        // Gates 1 to 3, which are the same whichever bound ends up asking for the eviction.
+        let mut candidates: Vec<RetireCandidate> = held
+            .iter()
+            .filter(|(_, w)| !in_flight.contains(&w.session_id) && !claimed.contains(&w.session_id))
+            .filter_map(|(harness, w)| {
+                let row = self.store.subagent(&w.session_id).ok().flatten()?;
+                // Anything else — `running`, `queued`, a status a later version invents — is
+                // kept. The polarity is the safety property: a child is closed on positive
+                // evidence that its run has ended, never on the absence of evidence that it has
+                // not.
+                let rank = match row.status.as_str() {
+                    "idle" => 0,
+                    "waiting_user" => 1,
+                    _ => return None,
+                };
+                Some(RetireCandidate {
+                    harness: *harness,
+                    session_id: w.session_id.clone(),
+                    pid: w.pid,
+                    idle_ms: w.idle_ms,
+                    rank,
+                })
+            })
+            .collect();
+        if candidates.is_empty() {
+            return 0;
+        }
+        // `idle` before `waiting_user`, longest idle first inside each.
+        candidates.sort_by_key(|c| (c.rank, std::cmp::Reverse(c.idle_ms), c.session_id.clone()));
+
+        let over_cap = held.len().saturating_sub(Self::WORKER_RETAINED_MAX);
+        let over_budget = self.workers_over_rss_share(&held, &candidates);
+        // One quota, not two evictions: a child the age bound takes also counts against whatever
+        // the cap and the memory share were asking for.
+        let mut quota = over_cap.max(over_budget);
+        let mut victims: Vec<&RetireCandidate> = Vec::new();
+        for c in &candidates {
+            if c.idle_ms >= Self::WORKER_RETIRE_IDLE_MS {
+                victims.push(c);
+                quota = quota.saturating_sub(1);
+            } else if quota > 0 {
+                victims.push(c);
+                quota -= 1;
+            }
+        }
+
+        let mut retired: Vec<&str> = Vec::new();
+        for c in victims {
+            // The bound the child must still satisfy at the instant of the removal: no traffic
+            // newer than the reading this pass decided on. A brief that arrived in the meantime
+            // put the clock back to zero, so the child is kept and the resume branch in
+            // `run_subagent` is never raced into prompting a child being closed underneath it.
+            // `max(1)` so a candidate measured at zero is still re-checked rather than waved
+            // through.
+            let unused_since = c.idle_ms.max(1);
+            if self
+                .adapter(c.harness)
+                .stop_if_idle(&c.session_id, unused_since)
+                .await
+            {
+                retired.push(&c.session_id);
+            }
+        }
+        if !retired.is_empty() {
+            tracing::info!(
+                retired = retired.len(),
+                held = held.len(),
+                candidates = candidates.len(),
+                over_cap,
+                over_budget,
+                idle_bound_ms = Self::WORKER_RETIRE_IDLE_MS,
+                cap = Self::WORKER_RETAINED_MAX,
+                sessions = ?retired,
+                "idle workers retired; each thread resumes from its session file when it is next used"
+            );
+        }
+        retired.len()
+    }
+
+    /// How many of the longest-idle children must go for the live worker set to sit under
+    /// [`Self::WORKER_RETAINED_RSS_PCT`] of this workspace's memory ceiling.
+    ///
+    /// A count, not a selection: the caller takes that many from the front of its own
+    /// longest-idle-first order.
+    ///
+    /// Zero whenever the question cannot be asked, which is the common case and not a failure —
+    /// see [`Self::workspace_mem_max`]. Running children are counted in the total and are not
+    /// candidates, which is the accounting the ceiling actually cares about: a busy box sheds the
+    /// idle retention first and keeps the work.
+    fn workers_over_rss_share(
+        &self,
+        held: &[(Harness, crate::harness::RetainedWorker)],
+        candidates: &[RetireCandidate],
+    ) -> usize {
+        let Some(ceiling) = self.workspace_mem_max() else {
+            return 0;
+        };
+        let share = ceiling / 100 * Self::WORKER_RETAINED_RSS_PCT;
+        let mut total: u64 = held
+            .iter()
+            .filter_map(|(_, w)| w.pid)
+            .filter_map(rss_bytes)
+            .sum();
+        let mut n = 0;
+        for c in candidates {
+            if total <= share {
+                break;
+            }
+            // A child whose size cannot be read would be evicted for no measured gain, and a
+            // whole set of them would be swept for none at all. Skipped rather than counted; the
+            // population cap still bounds them.
+            let Some(bytes) = c.pid.and_then(rss_bytes).filter(|b| *b > 0) else {
+                continue;
+            };
+            total = total.saturating_sub(bytes);
+            n += 1;
+        }
+        n
+    }
+
+    /// This workspace's cgroup memory ceiling, read without disturbing anything.
+    ///
+    /// Deliberately **not** [`Self::workspace_memory`]: that function swaps `pi_oom_kills` and
+    /// `pi_mem_at_max` as a side effect of turning them into deltas, so calling it from a
+    /// five-minute timer would consume the counters the next pi exit report is built from and
+    /// leave that report reading zero.
+    ///
+    /// [`None`] is the ordinary answer on a large box and on every dev machine, not an error:
+    /// `Isolation::detect` writes `memory.max` only when the box's own cgroup has a limit to take
+    /// half of, and an unlimited ceiling reads as the literal `max`, which
+    /// [`crate::resources::parse_cgroup_u64`] answers `None` for. The memory bound is skipped
+    /// there and the population cap stands on its own.
+    fn workspace_mem_max(&self) -> Option<u64> {
+        let cgroup = self.cfg.run_as.as_ref()?.cgroup.as_ref()?;
+        let text = std::fs::read_to_string(cgroup.join("memory.max")).ok()?;
+        crate::resources::parse_cgroup_u64(&text)
     }
 
     /// Reap what no job row names, and remember any of it that would not die.
@@ -8653,6 +8940,13 @@ impl Agent {
             loop {
                 t.tick().await;
                 let _ = me.keepalive(true).await;
+                // Before the reap, and the order is load-bearing rather than tidy. Retiring takes
+                // a finished worker's child out of its adapter's map, so `session_is_over`
+                // answers `Some(true)` for that session — and the reap below is then able to
+                // collect whatever it had left running. While nothing ever closed these sessions
+                // the reap could not reach them at all: it keys on the session being over, and
+                // the only thing that ended one was a `stop` a normally finished job never calls.
+                me.retire_idle_workers().await;
                 // Bug AK: nobody could have cancelled `status18b`, so the timer is the half
                 // that actually reaches work a dead worker left behind.
                 let _ = me.reap_unreachable_workers().await;
