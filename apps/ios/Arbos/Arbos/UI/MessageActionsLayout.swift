@@ -163,6 +163,82 @@ extension ReactionCapsule {
     }
 }
 
+/// What a thumb that is still down after the long press is over, and so what it
+/// picks if it lifts there (feedback iphone-bubble-menu-slide-to-pick-2026-11-05).
+enum MessageActionsPick: Equatable {
+    case reaction(String)
+    /// The capsule's add-emoji cell: raises the emoji keyboard, exactly as a tap on it does.
+    case morePicker
+    case menu(MessageMenuItem)
+    /// Over the held bubble, a gap between the groups, or the backdrop. Lifting here
+    /// picks nothing; sliding across it does not end the slide. Spelt `nothing` rather
+    /// than `none` so it never reads as `Optional.none` at a call site.
+    case nothing
+}
+
+/// The two surfaces a slide out of the long press can cross, as rects in the
+/// overlay's space, and what a point over them picks.
+///
+/// They are genuinely two, which is the case a single hit test gets wrong: the
+/// capsule's cells are laid out in the capsule's own space and the menu's rows in
+/// the menu's, the two are different widths, and under `.menuBelow` the held bubble
+/// sits *between* them. So one slide from an emoji to a menu row crosses a third
+/// surface that is neither, and that surface must read as "nothing picked yet"
+/// rather than cancelling the slide or snapping to whichever item is nearest.
+///
+/// `pick` needs no special case for the bubble, and that is the point: anything
+/// that is not inside a surface is `.nothing`, however close to one it is.
+struct MessageActionsSurfaces: Equatable {
+    /// The capsule's content rect, inside its side padding (overlay space).
+    let capsule: CGRect
+    /// The menu's rect (overlay space).
+    let menu: CGRect
+    /// The held bubble's band. The overlay draws the bubble across the full width,
+    /// so this spans it. Named for the tests; `pick` never consults it.
+    let bubble: CGRect
+    /// The menu's rows in the menu's own space — the same geometry the menu draws and
+    /// hit-tests taps against, kept here so a slide resolves a sample without
+    /// rebuilding them.
+    let rows: MessageActionsMenuRows
+
+    /// Both groups hug the bubble's own side, `sideInset` in from that edge
+    /// (`MessageActionsOverlay` aligns them `.trailing` for my own messages).
+    static func compute(layout: MessageActionsLayout, width: CGFloat, menuWidth: CGFloat,
+                        items: [MessageMenuItem], mine: Bool,
+                        sideInset: CGFloat = 16) -> MessageActionsSurfaces {
+        func x(_ w: CGFloat) -> CGFloat { mine ? width - sideInset - w : sideInset }
+        let rows = MessageActionsMenuRows.compute(items: items, width: menuWidth)
+        return MessageActionsSurfaces(
+            capsule: CGRect(x: x(ReactionCapsule.width), y: layout.capsuleY,
+                            width: ReactionCapsule.width, height: ReactionCapsule.height),
+            menu: CGRect(x: x(menuWidth), y: layout.menuY, width: menuWidth, height: rows.height),
+            bubble: CGRect(x: 0, y: layout.bubbleY, width: width, height: layout.bubbleHeight),
+            rows: rows)
+    }
+
+    /// What `point` (overlay space) is over.
+    ///
+    /// Inside a surface the answer is never `.nothing`: the menu's rows tile it top to
+    /// bottom and the capsule's cells tile its content width, so a slide along either
+    /// cannot flicker through a dead stripe (the rule `MessageActionsHitAreaTests`
+    /// already holds taps to). The capsule is one row of cells, so inside it the
+    /// *column* decides and the 4 pt padding band above and below the cells belongs to
+    /// the column it is in.
+    func pick(at point: CGPoint) -> MessageActionsPick {
+        if capsule.contains(point) {
+            let column = (point.x - capsule.minX - ReactionCapsule.padding) / ReactionCapsule.cell
+            let i = min(ReactionCapsule.cellFrames.count - 1, max(0, Int(column.rounded(.down))))
+            return i < ReactionCapsule.palette.count ? .reaction(ReactionCapsule.palette[i]) : .morePicker
+        }
+        if menu.contains(point) {
+            let y = point.y - menu.minY
+            guard let row = rows.rows.first(where: { $0.hitRect.minY <= y && y < $0.hitRect.maxY }) else { return .nothing }
+            return .menu(row.item)
+        }
+        return .nothing
+    }
+}
+
 /// What happens to the composer's keyboard around the bubble menu
 /// (feedback iphone-bubble-menu-keyboard-2026-10-25): it goes down when the menu
 /// opens (iMessage / Grok Bot), the typed draft stays (`ComposerDraft` is its own

@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import UIKit.UIGestureRecognizerSubclass
 
 /// Long-press on a bubble (Grok Bot / iMessage shape, Jacob 2026-10-23): the chat
 /// blurs, the bubble stays where it is, the **reaction capsule** sits above it
@@ -62,6 +63,17 @@ struct RowFrameKey: PreferenceKey {
     }
 }
 
+/// Where the thumb that opened the menu is, while it is still down
+/// (feedback iphone-bubble-menu-slide-to-pick-2026-11-05). Points are in window
+/// space, because the recogniser reporting them is attached to the screen root, not
+/// to the overlay — see `MessageActionsTouchHost` for why it cannot be the overlay.
+enum MessageActionsSlide: Equatable {
+    /// No thumb down: the menu was opened and released, and is being used by tapping.
+    case idle
+    case moved(CGPoint)
+    case lifted(CGPoint)
+}
+
 struct MessageActionsOverlay<Bubble: View>: View {
     @Environment(\.theme) private var theme
     let row: Row
@@ -75,12 +87,17 @@ struct MessageActionsOverlay<Bubble: View>: View {
     /// Emoji I already hold on this message (tinted in the capsule).
     let held: Set<String>
     let items: [MessageMenuItem]
+    /// The thumb still down from the long press, if it is (`MessageActionsTouchHost`).
+    var slide: MessageActionsSlide = .idle
     let onReact: (String) -> Void
     let onMenu: (MessageMenuItem) -> Void
     let onDismiss: () -> Void
     @ViewBuilder let bubble: () -> Bubble
 
     @State private var pickOpen = false
+    /// What the sliding thumb is over now. Highlighted exactly as a finger resting on
+    /// that cell or row highlights it, so sliding between items feels like hovering.
+    @State private var highlight: MessageActionsPick = .nothing
     /// The bubble's frame when the press landed. The composer's keyboard goes down as
     /// the overlay opens and the transcript reflows under the blur; the held bubble
     /// stays where the finger is (iMessage) instead of following that reflow.
@@ -106,6 +123,9 @@ struct MessageActionsOverlay<Bubble: View>: View {
                 safeBottom: safeBottom,
                 keyboardInset: keyboard.inset(overlayFrame: geo.frame(in: .global))
             ))
+            let surfaces = MessageActionsSurfaces.compute(layout: layout, width: width, menuWidth: menuWidth,
+                                                          items: items, mine: mine)
+            let overlayOrigin = geo.frame(in: .global).origin
             ZStack(alignment: .topLeading) {
                 Rectangle()
                     .fill(.ultraThinMaterial)
@@ -129,6 +149,7 @@ struct MessageActionsOverlay<Bubble: View>: View {
             }
             .animation(.easeOut(duration: 0.2), value: layout)
             .onAppear { if pressedFrame == nil { pressedFrame = frame } }
+            .onChange(of: slide) { _, now in follow(now, surfaces: surfaces, origin: overlayOrigin) }
         }
         .ignoresSafeArea()
         .overlay {
@@ -140,6 +161,36 @@ struct MessageActionsOverlay<Bubble: View>: View {
             }
         }
         .transition(.opacity)
+    }
+
+    /// The thumb that opened the menu, still down. Each sample is resolved against the
+    /// group's own geometry — the same rects the menu hit-tests taps against — and
+    /// highlights whatever is under it, so sliding between items feels like hovering.
+    ///
+    /// A lift that is not on an item does nothing at all and leaves the overlay open,
+    /// which is exactly what a long press and a release do today. The two alternatives
+    /// are both worse: guessing at the nearest item picks something the thumb was only
+    /// passing over, and closing on any release would take away the press-then-tap the
+    /// menu has always supported.
+    private func follow(_ now: MessageActionsSlide, surfaces: MessageActionsSurfaces, origin: CGPoint) {
+        func local(_ p: CGPoint) -> CGPoint { CGPoint(x: p.x - origin.x, y: p.y - origin.y) }
+        switch now {
+        case .idle:
+            highlight = .nothing
+        case .moved(let p):
+            let next = surfaces.pick(at: local(p))
+            guard next != highlight else { return }
+            highlight = next
+            if next != .nothing { Haptics.pick() }
+        case .lifted(let p):
+            highlight = .nothing
+            switch surfaces.pick(at: local(p)) {
+            case .reaction(let emoji): onReact(emoji)
+            case .morePicker: pickOpen = true
+            case .menu(let item): onMenu(item)
+            case .nothing: break
+            }
+        }
     }
 
     // Every cell and every menu row is tappable over its WHOLE rect (feedback
@@ -161,7 +212,7 @@ struct MessageActionsOverlay<Bubble: View>: View {
                         .background(Circle().fill(held.contains(where: { MessageReaction.sameBase($0, emoji) }) ? theme.accent.opacity(0.22) : Color.clear))
                         .contentShape(Rectangle())
                 }
-                .buttonStyle(CapsuleCellButtonStyle(pressed: theme.text.opacity(0.1)))
+                .buttonStyle(CapsuleCellButtonStyle(pressed: theme.text.opacity(0.1), highlighted: highlight == .reaction(emoji)))
                 .accessibilityLabel("React \(emoji)")
             }
             Button {
@@ -179,7 +230,7 @@ struct MessageActionsOverlay<Bubble: View>: View {
                 .frame(width: ReactionCapsule.cell, height: ReactionCapsule.cell)
                 .contentShape(Rectangle())
             }
-            .buttonStyle(CapsuleCellButtonStyle(pressed: theme.text.opacity(0.1)))
+            .buttonStyle(CapsuleCellButtonStyle(pressed: theme.text.opacity(0.1), highlighted: highlight == .morePicker))
             .accessibilityLabel("More emoji")
         }
         .padding(ReactionCapsule.padding)
@@ -223,7 +274,8 @@ struct MessageActionsOverlay<Bubble: View>: View {
                     }
                     .contentShape(Rectangle())
                 }
-                .buttonStyle(MenuRowButtonStyle(pressed: theme.text.opacity(0.08), bandAbove: row.bandAbove))
+                .buttonStyle(MenuRowButtonStyle(pressed: theme.text.opacity(0.08), bandAbove: row.bandAbove,
+                                                highlighted: highlight == .menu(row.item)))
                 .accessibilityIdentifier("message-menu-\(row.item.label.lowercased().replacingOccurrences(of: " ", with: "-"))")
             }
         }
@@ -255,29 +307,34 @@ struct MessageActionsOverlay<Bubble: View>: View {
 }
 
 /// A menu row's pressed state: the label row tints, the destructive band above it does not.
+/// A thumb sliding over the row gets the same tint as one resting on it (`highlighted`).
 struct MenuRowButtonStyle: ButtonStyle {
     let pressed: Color
     let bandAbove: CGFloat
+    var highlighted = false
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .background(alignment: .bottom) {
-                if configuration.isPressed {
+                if configuration.isPressed || highlighted {
                     Rectangle().fill(pressed).frame(height: MessageActionsMenuRows.rowHeight)
                 }
             }
     }
 }
 
-/// A capsule cell's pressed state: a soft disc under the emoji.
+/// A capsule cell's pressed state: a soft disc under the emoji. A thumb sliding onto
+/// the cell gets the same disc and the same lift as one resting on it (`highlighted`).
 struct CapsuleCellButtonStyle: ButtonStyle {
     let pressed: Color
+    var highlighted = false
 
     func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .background(Circle().fill(configuration.isPressed ? pressed : Color.clear))
-            .scaleEffect(configuration.isPressed ? 1.12 : 1)
-            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+        let on = configuration.isPressed || highlighted
+        return configuration.label
+            .background(Circle().fill(on ? pressed : Color.clear))
+            .scaleEffect(on ? 1.12 : 1)
+            .animation(.easeOut(duration: 0.12), value: on)
     }
 }
 
@@ -388,6 +445,12 @@ final class EmojiTextField: UITextField {
 extension View {
     /// A message bubble: long-press → actions overlay; double-tap → ❤️ reaction.
     /// Any other row (date / system / channel line) keeps a plain Copy context menu.
+    ///
+    /// Sliding out of the long press onto an item is **not** here, deliberately. It is
+    /// tempting to sequence a `DragGesture` after the long press, and it works — but a
+    /// SwiftUI drag claims the touch, however late it claims, and that takes the pan
+    /// away from the chat `ScrollView` and kills scrolling everywhere. The slide is
+    /// read by `MessageActionsTouchHost`, which observes without ever claiming.
     @ViewBuilder
     func messageRowGestures(isMessage: Bool, onLongPress: @escaping () -> Void,
                             onDoubleTap: @escaping () -> Void,
@@ -411,5 +474,152 @@ extension View {
         } else {
             contextMenu { MessageMenuContent(items: MessageMenu.copyOnly, action: onCopyMenu) }
         }
+    }
+}
+
+/// Reports the touch that opened the actions overlay, **without ever claiming it**.
+///
+/// The overlay itself can never receive that touch: UIKit routes a touch to the view
+/// it hit-tested when the finger went down, and the overlay is added afterwards, as a
+/// sibling, while the finger is still on the bubble. So the capsule's cells and the
+/// menu's rows are not on this touch's delivery path and a tracker placed on them
+/// would never be called. A recogniser on an **ancestor** of the rows is, because
+/// UIKit delivers a touch to the recognisers on the hit-test view *and every ancestor
+/// of it* — so this sees the touch by construction, whichever bubble was pressed.
+///
+/// The recogniser never leaves `.possible` and ends by failing itself, which is the
+/// whole point: a recogniser that never begins cancels nothing, so the transcript
+/// keeps its scroll and every other recogniser is untouched. A SwiftUI `DragGesture`
+/// cannot do this — it claims, and claiming here stops the chat scrolling at all.
+///
+/// Samples are only forwarded while the overlay is up (`active`), so an ordinary
+/// scroll costs one comparison per touch and no state change.
+struct MessageActionsTouchHost: UIViewRepresentable {
+    /// The overlay is open, so this touch's samples mean something.
+    let active: Bool
+    let onSlide: (MessageActionsSlide) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeUIView(context: Context) -> HostView {
+        let v = HostView()
+        v.isUserInteractionEnabled = false
+        v.backgroundColor = .clear
+        v.coordinator = context.coordinator
+        return v
+    }
+
+    func updateUIView(_ uiView: HostView, context: Context) {
+        context.coordinator.active = active
+        context.coordinator.onSlide = onSlide
+    }
+
+    final class HostView: UIView {
+        weak var coordinator: Coordinator?
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            guard window != nil else { return }
+            // The screen's root: the first ancestor whose next responder is a view
+            // controller — the same anchor `FullScreenBackHost` uses.
+            var node: UIView? = superview
+            while let current = node {
+                if current.next is UIViewController {
+                    coordinator?.attach(to: current)
+                    return
+                }
+                node = current.superview
+            }
+        }
+    }
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        var active = false
+        var onSlide: (MessageActionsSlide) -> Void = { _ in }
+        private weak var root: UIView?
+        private var recognizer: TouchObserverRecognizer?
+
+        func attach(to root: UIView) {
+            guard self.root !== root else { return }
+            if let old = recognizer { old.view?.removeGestureRecognizer(old) }
+            self.root = root
+            // No target/action: it never recognizes, so an action would never fire.
+            let gr = TouchObserverRecognizer(target: nil, action: nil)
+            gr.delegate = self
+            gr.onSample = { [weak self] phase, point in
+                guard let self, self.active else { return }
+                switch phase {
+                case .moved: self.onSlide(.moved(point))
+                case .ended: self.onSlide(.lifted(point))
+                case .cancelled: self.onSlide(.idle)
+                }
+            }
+            root.addGestureRecognizer(gr)
+            recognizer = gr
+        }
+
+        // It never begins, so it never competes; saying so explicitly keeps it that way
+        // if anyone later gives it a state.
+        func gestureRecognizer(_ g: UIGestureRecognizer,
+                               shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }
+    }
+}
+
+/// A recognizer that only watches, built on `DirectionalSwipeRecognizer`'s shape but
+/// with the decision removed: there is nothing to decide, because it never claims.
+///
+/// It reports each sample in the **window**, for the reason `DirectionalSwipeRecognizer`
+/// spells out at `startInWindow`: the window is the one frame in this hierarchy that a
+/// running transition cannot move.
+///
+/// Three properties keep it harmless, and all three are set rather than inherited so
+/// that giving it a state later is a visible change and not a silent one:
+/// `cancelsTouchesInView = false` means the view it sits on keeps its touches, and the
+/// two `delaysTouches` flags mean nothing waits on it.
+final class TouchObserverRecognizer: UIGestureRecognizer {
+    enum Phase { case moved, ended, cancelled }
+
+    /// Called for every sample of the tracked touch, in the window.
+    var onSample: ((_ phase: Phase, _ point: CGPoint) -> Void)?
+
+    private var tracked: UITouch?
+
+    override init(target: Any?, action: Selector?) {
+        super.init(target: target, action: action)
+        cancelsTouchesInView = false
+        delaysTouchesBegan = false
+        delaysTouchesEnded = false
+    }
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+        // One finger only; a second one is not the one that opened the menu.
+        guard tracked == nil, touches.count == 1, let t = touches.first else { return }
+        tracked = t
+    }
+
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
+        guard let t = tracked, touches.contains(t) else { return }
+        onSample?(.moved, t.location(in: nil))
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
+        guard let t = tracked, touches.contains(t) else { return }
+        onSample?(.ended, t.location(in: nil))
+        tracked = nil
+        // `.failed` rather than `.ended`: ending would recognize, and recognizing is the
+        // one thing this must never do.
+        state = .failed
+    }
+
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) {
+        guard let t = tracked, touches.contains(t) else { return }
+        onSample?(.cancelled, t.location(in: nil))
+        tracked = nil
+        state = .failed
+    }
+
+    override func reset() {
+        super.reset()
+        tracked = nil
     }
 }

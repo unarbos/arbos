@@ -62,6 +62,7 @@
 		A1F50000000000000000E004 /* PerfBaselineUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F50000000000000000E003 /* PerfBaselineUITests.swift */; };
 		A1BB00000000000000000033 /* HomeFilterTabsUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000032 /* HomeFilterTabsUITests.swift */; };
 		A1BB00000000000000000035 /* ReactionPickerUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000034 /* ReactionPickerUITests.swift */; };
+		A1BB00000000000000000043 /* MessageSlideToPickUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000042 /* MessageSlideToPickUITests.swift */; };
 		A1BB00000000000000000037 /* ChatSearchCloseUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000036 /* ChatSearchCloseUITests.swift */; };
 		A1BB00000000000000000039 /* ChatSearchRevealLandingUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000038 /* ChatSearchRevealLandingUITests.swift */; };
 		A1BB0000000000000000003B /* ChatSearchResultJumpUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB0000000000000000003A /* ChatSearchResultJumpUITests.swift */; };
@@ -142,6 +143,7 @@
 		A1BC00000000000000000012 /* MessageActionsLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BC00000000000000000011 /* MessageActionsLayout.swift */; };
 		A1BC00000000000000000014 /* MessageActionsLayoutTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BC00000000000000000013 /* MessageActionsLayoutTests.swift */; };
 		A1BC00000000000000000016 /* MessageActionsHitAreaTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BC00000000000000000015 /* MessageActionsHitAreaTests.swift */; };
+		A1BC00000000000000000018 /* MessageActionsSlideTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BC00000000000000000017 /* MessageActionsSlideTests.swift */; };
 		A1BC00000000000000000008 /* ReactionCapsuleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BC00000000000000000007 /* ReactionCapsuleTests.swift */; };
 		A1BE00000000000000000002 /* LongTranscriptPerfTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BE00000000000000000001 /* LongTranscriptPerfTests.swift */; };
 		EC6500000000000000000002 /* RowStorageTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EC6500000000000000000001 /* RowStorageTests.swift */; };
@@ -319,6 +321,7 @@
 		A1F50000000000000000E003 /* PerfBaselineUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerfBaselineUITests.swift; sourceTree = "<group>"; };
 		A1BB00000000000000000032 /* HomeFilterTabsUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeFilterTabsUITests.swift; sourceTree = "<group>"; };
 		A1BB00000000000000000034 /* ReactionPickerUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReactionPickerUITests.swift; sourceTree = "<group>"; };
+		A1BB00000000000000000042 /* MessageSlideToPickUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageSlideToPickUITests.swift; sourceTree = "<group>"; };
 		A1BB00000000000000000036 /* ChatSearchCloseUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatSearchCloseUITests.swift; sourceTree = "<group>"; };
 		A1BB00000000000000000038 /* ChatSearchRevealLandingUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatSearchRevealLandingUITests.swift; sourceTree = "<group>"; };
 		A1BB0000000000000000003A /* ChatSearchResultJumpUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatSearchResultJumpUITests.swift; sourceTree = "<group>"; };
@@ -400,6 +403,7 @@
 		A1BC00000000000000000011 /* MessageActionsLayout.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageActionsLayout.swift; sourceTree = "<group>"; };
 		A1BC00000000000000000013 /* MessageActionsLayoutTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageActionsLayoutTests.swift; sourceTree = "<group>"; };
 		A1BC00000000000000000015 /* MessageActionsHitAreaTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageActionsHitAreaTests.swift; sourceTree = "<group>"; };
+		A1BC00000000000000000017 /* MessageActionsSlideTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageActionsSlideTests.swift; sourceTree = "<group>"; };
 		A1BC00000000000000000007 /* ReactionCapsuleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReactionCapsuleTests.swift; sourceTree = "<group>"; };
 		A1BE00000000000000000001 /* LongTranscriptPerfTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LongTranscriptPerfTests.swift; sourceTree = "<group>"; };
 		EC6500000000000000000001 /* RowStorageTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RowStorageTests.swift; sourceTree = "<group>"; };
@@ -744,6 +748,7 @@
 				A1BC00000000000000000007 /* ReactionCapsuleTests.swift */,
 				A1BC00000000000000000013 /* MessageActionsLayoutTests.swift */,
 				A1BC00000000000000000015 /* MessageActionsHitAreaTests.swift */,
+				A1BC00000000000000000017 /* MessageActionsSlideTests.swift */,
 				A1BD00000000000000000001 /* NewMessageSheetTests.swift */,
 				A1BE00000000000000000001 /* LongTranscriptPerfTests.swift */,
 				EC6500000000000000000001 /* RowStorageTests.swift */,
@@ -795,6 +800,7 @@
 				A1F50000000000000000E003 /* PerfBaselineUITests.swift */,
 				A1BB00000000000000000032 /* HomeFilterTabsUITests.swift */,
 				A1BB00000000000000000034 /* ReactionPickerUITests.swift */,
+				A1BB00000000000000000042 /* MessageSlideToPickUITests.swift */,
 				A1BB00000000000000000036 /* ChatSearchCloseUITests.swift */,
 				A1BB00000000000000000038 /* ChatSearchRevealLandingUITests.swift */,
 				A1BB0000000000000000003A /* ChatSearchResultJumpUITests.swift */,
@@ -1138,6 +1144,7 @@
 				A1BC00000000000000000008 /* ReactionCapsuleTests.swift in Sources */,
 				A1BC00000000000000000014 /* MessageActionsLayoutTests.swift in Sources */,
 				A1BC00000000000000000016 /* MessageActionsHitAreaTests.swift in Sources */,
+				A1BC00000000000000000018 /* MessageActionsSlideTests.swift in Sources */,
 				A1BD00000000000000000002 /* NewMessageSheetTests.swift in Sources */,
 				A1BE00000000000000000002 /* LongTranscriptPerfTests.swift in Sources */,
 				EC6500000000000000000002 /* RowStorageTests.swift in Sources */,
@@ -1189,6 +1196,7 @@
 				A1F50000000000000000E004 /* PerfBaselineUITests.swift in Sources */,
 				A1BB00000000000000000033 /* HomeFilterTabsUITests.swift in Sources */,
 				A1BB00000000000000000035 /* ReactionPickerUITests.swift in Sources */,
+				A1BB00000000000000000043 /* MessageSlideToPickUITests.swift in Sources */,
 				A1BB00000000000000000037 /* ChatSearchCloseUITests.swift in Sources */,
 				A1BB00000000000000000039 /* ChatSearchRevealLandingUITests.swift in Sources */,
 				A1BB0000000000000000003B /* ChatSearchResultJumpUITests.swift in Sources */,
