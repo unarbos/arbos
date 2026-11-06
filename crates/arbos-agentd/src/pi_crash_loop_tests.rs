@@ -39,7 +39,7 @@ use arbos_core::ids::{now_ms, ulid};
 use serde_json::{json, Value};
 
 use crate::agent::{Agent, PI_RESTARTING_LINE};
-use crate::status::tests::{test_agent, test_agent_with_pi};
+use crate::status::tests::{test_agent, test_agent_with_pi, test_agent_with_pi_and_prime};
 use crate::sync::SharedHost;
 
 /// The first respawn wait the tests run on. The shipped value is 2,000.
@@ -642,7 +642,12 @@ async fn the_turn_end_race_does_not_start_a_crash_loop_and_the_correction_lands(
         race: true,
         ..StubCfg::default()
     });
-    let (agent, _root) = test_agent_with_pi(&s.bin).await;
+    // A third message that arrives while the correction's turn holds the turn lock is answered
+    // by a job beside it (`start_job_for_send`), and that job runs on prime, not on pi. Whether
+    // the question below lands inside a held window is a race the crash loop decides, so the
+    // box needs a prime that works either way — as a real box has, pi dying or not.
+    let prime = stub_cfg(StubCfg::default());
+    let (agent, _root) = test_agent_with_pi_and_prime(&s.bin, &prime.bin).await;
     fast_backoff(&agent);
     let chat = "01TESTCHATPICRASHLOOP0004";
     agent
@@ -700,9 +705,12 @@ async fn the_turn_end_race_does_not_start_a_crash_loop_and_the_correction_lands(
         !answers.iter().any(|(_, t)| t.contains("squared")),
         "and it is the correction that ran, not the brief it replaced: {answers:?}"
     );
+    // Answered in words. A row on its own is not an answer: a job that failed to start leaves
+    // one, carrying an error part and no text, and an emptiness check passes on it.
+    let asked = visible_answers(&host, &question).await;
     assert!(
-        !visible_answers(&host, &question).await.is_empty(),
-        "the question sent 0.4 s later is answered too"
+        asked.iter().any(|(_, t)| !t.trim().is_empty()),
+        "the question sent 0.4 s later is answered too: {asked:?}"
     );
 
     // 2. Nothing in the chat says anything failed.
