@@ -251,10 +251,6 @@ pub enum Picture {
     },
     /// D92 solid-colour disc.
     Disc(u8),
-    /// The neutral disc (Jacob, 2026-10-25): the name's first letter on plain grey.
-    Neutral {
-        name: String,
-    },
 }
 
 pub struct Mention {
@@ -502,10 +498,7 @@ impl Mentions {
                 continue;
             }
             let picture = match server.avatar_disc_color {
-                Some(avatars::disc::NEUTRAL) => Picture::Neutral {
-                    name: server.name.clone(),
-                },
-                Some(color) => Picture::Disc(color),
+                Some(_) => Picture::Disc(avatars::disc_color(&server.id, server.avatar_disc_color)),
                 None => initials(
                     &server.id,
                     &server.name,
@@ -820,11 +813,6 @@ fn identity_picture(s: &AppState, a: &avatars::AgentIdentity) -> Picture {
     if let Some(image) = a.image_key.as_deref().and_then(|url| s.avatar(url)) {
         return Picture::Image(image);
     }
-    if a.neutral {
-        return Picture::Neutral {
-            name: a.name.clone(),
-        };
-    }
     Picture::Disc(a.disc_color)
 }
 
@@ -832,14 +820,9 @@ fn project_picture(s: &AppState, p: &Project, theme: &Theme) -> Picture {
     if let Some(image) = avatars::project_image(s, p) {
         return Picture::Image(image);
     }
-    if avatars::disc::is_neutral(p.avatar_disc_color) {
-        return Picture::Neutral {
-            name: p.name.clone(),
-        };
-    }
     if p.is_people_group() {
         return match p.avatar_disc_color {
-            Some(color) => Picture::Disc(color),
+            Some(_) => Picture::Disc(avatars::disc_color(&p.id, p.avatar_disc_color)),
             None => initials(&p.id, &p.name, p.avatar_color_index, theme),
         };
     }

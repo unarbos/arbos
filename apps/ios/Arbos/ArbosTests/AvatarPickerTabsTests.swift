@@ -30,26 +30,21 @@ final class AvatarPickerTabsTests: XCTestCase {
         XCTAssertEqual(Set(CreateEntityView.options).count, 2)
     }
 
-    /// An entity created without a pick is stored with the neutral value (255 — the relay's
-    /// `disc::NEUTRAL`), never an automatic colour; the apps draw it as the name's first letter
-    /// on a grey disc. Existing agents (nil = automatic colour) are untouched.
-    func testANewEntityIsStoredNeutralNeverWithAnAutomaticColour() {
-        let stored = CreateEntityView.storedDisc
-        XCTAssertEqual(Int(stored), DiscArt.neutral)
-        XCTAssertEqual(DiscArt.neutral, 255)
-        XCTAssertTrue(DiscArt.isNeutral(255))
-        XCTAssertFalse(DiscArt.isNeutral(nil), "nil stays the automatic colour")
-        XCTAssertFalse(DiscArt.isNeutral(3))
+    /// Jacob, 2026-11-06: no default avatar is grey. A new entity is stored with no colour at
+    /// all, and the colour follows from the id the relay assigns.
+    func testANewEntityStoresNoColourSoItsIdPicksOne() {
+        XCTAssertNil(CreateEntityView.storedDisc, "the sentinel is not stored any more")
         for seed in ["new-agent-0", "new-group-3", "new-server-1"] {
-            XCTAssertNotEqual(DiscArt.pick(seed: seed), stored, seed)
+            XCTAssertLessThan(DiscArt.pick(seed: seed), UInt8(DiscArt.colorCount), seed)
         }
-        // The shared resolver ignores the sentinel for the colour in effect (an older client
-        // draws the automatic colour); `agentProject` reads the neutral value off the card.
+        // A card still carrying the old sentinel resolves to a real palette colour, so stored
+        // data needs no migration.
         let card = AgentCard(id: "01N", name: "Field notes", handle: "field-notes",
                              discColor: UInt8(DiscArt.neutral), colorIndex: nil, imageKey: nil, avatarVersion: 0)
         let who = resolveAgent(sender: "agent:01N", handle: nil, name: nil, cards: [card])
         XCTAssertTrue(who.known)
         XCTAssertLessThan(who.discColor, UInt8(DiscArt.colorCount))
+        XCTAssertEqual(who.discColor, DiscArt.pick(seed: "01N"), "the id's own colour, not grey")
     }
 
     /// The letter on the neutral disc: the first letter or digit, upper-cased; `?` when empty.
@@ -62,20 +57,32 @@ final class AvatarPickerTabsTests: XCTestCase {
         XCTAssertEqual(DiscArt.initial("—"), "?")
     }
 
-    /// A group or server whose stored value is neutral draws no coloured disc, and says so.
-    func testNeutralGroupsAndServersDrawNoColouredDisc() {
+    /// The iPhone leg of the cross-surface vector, taken through the FFI so it exercises the
+    /// same compiled `disc::color_for` the relay and the Mac call. The relay asserts the same
+    /// id and index in `arbos-relay/src/avatar.rs`, the Mac in `ui/avatars.rs`. This fails if
+    /// any surface stops resolving the sentinel, or if the seed stops being the bare id.
+    func testAStoredNeutralResolvesToTheSameVividDiscAsTheOtherSurfaces() {
+        XCTAssertEqual(DiscArt.pick(seed: "01M5AGENT", color: DiscArt.neutral), 7)
+        XCTAssertEqual(DiscArt.pick(seed: "01M5AGENT"), 7)
+        XCTAssertNotEqual(DiscArt.pick(seed: "agent:01M5AGENT"), 7)
+    }
+
+    /// A group still carrying the old sentinel draws its id's colour, not a grey disc.
+    func testAGroupStoredNeutralDrawsItsIdsColour() {
         var chat = PeopleChat(id: "g1", kind: "group", createdBy: "u", createdAt: 0, title: "Launch crew", pending: false,
                               members: [], headSeq: 0, readSeq: 0, unread: false, lockState: "people_only", lastActivityAt: 0,
                               myRole: "owner", muted: false, silenced: false)
         chat.avatarDiscColor = DiscArt.neutral
-        XCTAssertTrue(chat.isNeutralAvatar, "the sentinel is the neutral initial, not a colour")
+        let resolved = DiscArt.pick(seed: chat.id, color: chat.avatarDiscColor)
+        XCTAssertLessThan(resolved, UInt8(DiscArt.colorCount))
+        XCTAssertEqual(resolved, DiscArt.pick(seed: "g1"), "the sentinel falls through to the id")
+        // An explicit pick still wins.
         chat.avatarDiscColor = 2
-        XCTAssertFalse(chat.isNeutralAvatar)
-        XCTAssertEqual(chat.avatarDiscColor, 2)
+        XCTAssertEqual(DiscArt.pick(seed: chat.id, color: chat.avatarDiscColor), 2)
     }
 
-    /// The Create sheet hands the create exactly what was picked: nothing (→ neutral), the photo
-    /// JPEG, or the generated key — never the other tab's choice.
+    /// The Create sheet hands the create exactly what was picked: nothing (→ no colour stored,
+    /// so the id picks one), the photo JPEG, or the generated key — never the other tab's choice.
     @MainActor
     func testTheDraftHandsOverItsPick() {
         let source = AvatarSourceState()

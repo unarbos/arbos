@@ -395,7 +395,7 @@ pub(super) fn page(
                             ))),
                             {
                                 let (ident, image) = &agent_pictures[ai];
-                                avatars::agent_picture(ident, image.clone(), kit::AVATAR, &theme)
+                                avatars::agent_picture(ident, image.clone(), kit::AVATAR)
                                     .into_any_element()
                             },
                             a.name.clone(),

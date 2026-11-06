@@ -6857,7 +6857,9 @@ final class AppModel: ObservableObject {
                 // relay to copy the source agent's project folder and memory.
                 _ = try await api.createProject(
                     name: name,
-                    discColor: DiscArt.isNeutral(project.avatarDiscColor) ? UInt8(clamping: DiscArt.neutral) : DiscArt.pick(project),
+                    // The fork keeps the source's disc colour, with a stored sentinel resolved
+                    // to the source id's own rather than carried across as grey.
+                    discColor: DiscArt.pick(project),
                     color: project.color,
                     description: project.description,
                     instructions: project.instructions,

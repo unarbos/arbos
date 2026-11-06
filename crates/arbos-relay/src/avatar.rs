@@ -396,6 +396,32 @@ mod tests {
         );
     }
 
+    /// Jacob, 2026-11-06. A stored `255` stays in the row and resolves on read, so the write
+    /// path must keep accepting it and the read path must keep turning it into a vivid disc.
+    ///
+    /// The pinned pair below is the cross-surface vector: the Mac asserts the same id and index
+    /// in `arbos-mac/src/ui/avatars.rs`, and the iPhone asserts it through the FFI in
+    /// `AvatarPickerTabsTests.swift`. All three call `disc::color_for`, so this fails the moment
+    /// one surface stops resolving, changes the hash, or feeds in a differently shaped seed.
+    #[test]
+    fn a_stored_neutral_survives_the_write_and_resolves_vivid_on_read() {
+        // Deployed clients send 255 to clear an avatar, so the write path still admits it.
+        assert!(check_disc_color(Some(i64::from(disc::NEUTRAL))).is_ok());
+
+        let stored: crate::db::Project = serde_json::from_value(json!({
+            "id": "01M5AGENT", "name": "A", "icon": "", "instructions": "",
+            "models": {}, "state": "ready", "created_at": 0, "last_active_at": 0,
+            "spend_cap_daily": 1.0, "color": "", "user_id": "u",
+            "workspace_state": "stopped", "avatar_leaf_color": i64::from(disc::NEUTRAL),
+        }))
+        .unwrap();
+
+        // Read time: the sentinel resolves to the id's own colour, never to a grey.
+        assert_eq!(effective_disc(&stored), disc::default_color("01M5AGENT"));
+        assert!(effective_disc(&stored) < disc::COLOR_COUNT);
+        assert_eq!(effective_disc(&stored), 7, "cross-surface vector");
+    }
+
     #[test]
     fn default_pair_dedupes_on_color_first() {
         let trees: Vec<String> = DEFAULT_SLUGS.iter().map(|s| (*s).to_owned()).collect();

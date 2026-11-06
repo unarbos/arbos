@@ -3568,7 +3568,7 @@ impl Composer {
                         cx.notify();
                     }
                 }))
-                .child(mention_picture(&c.picture, MENTION_ROW_PICTURE, &theme))
+                .child(mention_picture(&c.picture, MENTION_ROW_PICTURE))
                 .child(
                     div()
                         .text_size(px(TEXT_SMALL))
@@ -3654,8 +3654,8 @@ fn mention_match(query: &str, handle: &str, name: &str) -> Option<search::Match>
     search::match_entity(name, handle, None, &search::normalize_query(query))
 }
 
-/// A picker row's picture as an element: photo, D79 initials, a D92 disc or the neutral disc.
-fn mention_picture(picture: &mention::Picture, size: f32, theme: &Theme) -> gpui::AnyElement {
+/// A picker row's picture as an element: photo, D79 initials or a D92 disc.
+fn mention_picture(picture: &mention::Picture, size: f32) -> gpui::AnyElement {
     match picture {
         mention::Picture::Image(image) => img(crate::ui::picture_fit::fit(image, size))
             .size(px(size))
@@ -3682,9 +3682,6 @@ fn mention_picture(picture: &mention::Picture, size: f32, theme: &Theme) -> gpui
             .into_any_element(),
         mention::Picture::Disc(color) => {
             crate::ui::avatars::disc_element(*color, size).into_any_element()
-        }
-        mention::Picture::Neutral { name } => {
-            crate::ui::avatars::neutral_element(name, size, theme).into_any_element()
         }
     }
 }

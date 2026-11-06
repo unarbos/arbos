@@ -1745,7 +1745,7 @@ impl Shell {
         self.state.update(cx, |s, cx| {
             s.new_project_open = false;
             s.close_new_chat(cx);
-            s.create_project(name, color, Some(create_entity::stored_disc()), picture, cx);
+            s.create_project(name, color, create_entity::stored_disc(), picture, cx);
         });
         Composer::focus(&self.composer, window, cx);
     }
@@ -1863,7 +1863,7 @@ impl Shell {
                 self.state.update(cx, |s, cx| {
                     s.new_group_draft = Some(crate::app::GroupDraft {
                         title: name,
-                        disc_color: Some(create_entity::stored_disc()),
+                        disc_color: create_entity::stored_disc(),
                         picture,
                     });
                     s.open_new_group(cx);
@@ -1878,7 +1878,7 @@ impl Shell {
                 }
                 let picture = self.take_create_picture(cx);
                 self.state.update(cx, |s, cx| {
-                    s.create_server(name, Some(create_entity::stored_disc()), picture, cx)
+                    s.create_server(name, create_entity::stored_disc(), picture, cx)
                 });
             }
         }
@@ -2306,7 +2306,7 @@ impl Shell {
         };
         self.state.update(cx, |s, cx| match sheet {
             ServerSheet::NewServer => {
-                s.create_server(text, Some(create_entity::stored_disc()), picture, cx)
+                s.create_server(text, create_entity::stored_disc(), picture, cx)
             }
             ServerSheet::JoinServer => s.join_server(text, cx),
             ServerSheet::NewChannel { server_id } => {

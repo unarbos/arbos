@@ -84,10 +84,10 @@ struct AgentAvatar: View {
                 AgentPicture(url: url, size: size) {
                     NeutralAvatar(name: project.name, size: size)
                 }
-            } else if DiscArt.isNeutral(project.avatarDiscColor) {
-                // Jacob, 2026-10-25: created with no picture — the name's initial on a neutral disc.
-                NeutralAvatar(name: project.name, size: size)
             } else {
+                // Jacob, 2026-11-06: no default is grey. `DiscArt.pick` resolves the stored
+                // sentinel through the core, so an agent created with no picture draws its
+                // id's colour like any other.
                 DiscAvatar(color: DiscArt.pick(project), size: size)
             }
         }
@@ -160,12 +160,12 @@ struct GroupAvatar: View {
         return model.blobURL(projectId: "\(peopleSlot):\(chat.id)", key: key)?.absoluteString
     }
 
-    /// Picture URL, then neutral initial, then the disc colour, then placeholder — the order
-    /// every surface agrees on.
+    /// Picture URL, then the disc colour, then placeholder — the order every surface agrees on.
     static func resolution(_ chat: PeopleChat, model: AppModel) -> GroupAvatarResolution {
         if let url = pictureURL(chat, model: model) { return .picture(url) }
-        if chat.isNeutralAvatar { return .neutral }
-        if let color = chat.avatarDiscColor { return .disc(UInt8(clamping: color)) }
+        // A stored colour — including an older client's sentinel — resolves through the core,
+        // so a group created with no picture draws its id's colour rather than grey.
+        if chat.avatarDiscColor != nil { return .disc(DiscArt.pick(seed: chat.id, color: chat.avatarDiscColor)) }
         return .placeholder
     }
 
@@ -177,8 +177,6 @@ struct GroupAvatar: View {
         case .picture(let url):
             // While the picture loads the disc is the neutral initial — never a stale copy.
             AgentPicture(url: url, size: size) { NeutralAvatar(name: chat.title, size: size) }
-        case .neutral:
-            NeutralAvatar(name: chat.title, size: size)
         case .disc(let color):
             DiscAvatar(color: color, size: size)
         case .placeholder:
@@ -201,7 +199,6 @@ struct GroupAvatar: View {
 /// What `GroupAvatar` draws for a chat, in priority order.
 enum GroupAvatarResolution {
     case picture(String)
-    case neutral
     case disc(UInt8)
     case placeholder
 }

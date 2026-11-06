@@ -3025,16 +3025,12 @@ struct AvatarCluster: View {
     var imageUrl: String? = nil
     /// D92 amendment: the group's disc colour from the Create screen (a custom picture wins).
     var discColor: UInt8? = nil
-    /// Jacob, 2026-10-25: a group created with no picture shows its title's initial on grey.
-    var neutralName: String? = nil
 
     private var shown: [ChatMember] { Array(members.prefix(maxVisible)) }
     private var hasMore: Bool { members.count > maxVisible }
 
     var body: some View {
-        if let neutralName, imageUrl?.isEmpty ?? true {
-            NeutralAvatar(name: neutralName, size: size * 1.12)
-        } else if let discColor, imageUrl?.isEmpty ?? true {
+        if let discColor, imageUrl?.isEmpty ?? true {
             DiscAvatar(color: discColor, size: size * 1.12)
         } else if let imageUrl, !imageUrl.isEmpty {
             // Keep the group silhouette under the picture until it arrives so we

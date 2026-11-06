@@ -68,9 +68,8 @@ pub fn agent_glyph(
     chat: Option<&Project>,
     agent: &AgentMember,
     size: f32,
-    theme: &Theme,
 ) -> Div {
-    crate::ui::avatars::member_picture(state, chat, agent, size, theme)
+    crate::ui::avatars::member_picture(state, chat, agent, size)
 }
 
 /// The "New Message" sheet (iPhone / Telegram layout): Cancel · title, a
@@ -777,7 +776,7 @@ fn new_group_body(
                     .relative()
                     .when(!last, |el| el.child(kit::hairline_below(theme)))
                     .opacity(0.5)
-                    .child(avatars::agent_picture(ident, image.clone(), 40.0, theme))
+                    .child(avatars::agent_picture(ident, image.clone(), 40.0))
                     .child(
                         div()
                             .flex()
@@ -1109,7 +1108,7 @@ pub fn members_popover(
                         .rounded(px(6.0))
                         .cursor_pointer()
                         .map(|el| highlight::row(el, false, Shape::Own, &theme))
-                        .child(agent_glyph(s, Some(space), a, 22.0, &theme))
+                        .child(agent_glyph(s, Some(space), a, 22.0))
                         .on_click({
                             let pid = a.project_id.clone();
                             cx.listener(move |this, _, _, cx| {

@@ -1542,12 +1542,12 @@ struct GroupProfileView: View {
             }
         } else if !canEditGroupSettings {
             ViewablePicture(name: people?.title ?? "", url: groupImageURL) {
-                AvatarCluster(members: clusterMembers, size: 72, imageUrl: groupImageURL, discColor: people?.avatarDiscColor.map { UInt8(clamping: $0) }, neutralName: people?.isNeutralAvatar == true ? people?.title : nil)
+                AvatarCluster(members: clusterMembers, size: 72, imageUrl: groupImageURL, discColor: people.flatMap { p in p.avatarDiscColor != nil ? DiscArt.pick(seed: p.id, color: p.avatarDiscColor) : nil })
                     .frame(width: PaneKit.heroAvatar, height: PaneKit.heroAvatar)
             }
         } else {
             Button { showEdit = true } label: {
-                AvatarCluster(members: clusterMembers, size: 72, imageUrl: groupImageURL, discColor: people?.avatarDiscColor.map { UInt8(clamping: $0) }, neutralName: people?.isNeutralAvatar == true ? people?.title : nil)
+                AvatarCluster(members: clusterMembers, size: 72, imageUrl: groupImageURL, discColor: people.flatMap { p in p.avatarDiscColor != nil ? DiscArt.pick(seed: p.id, color: p.avatarDiscColor) : nil })
                     .frame(width: PaneKit.heroAvatar, height: PaneKit.heroAvatar)
                     .paneCrayon()
                     .contentShape(Rectangle())
@@ -2636,7 +2636,7 @@ struct GroupEditSheet: View {
                     // colour, Upload = a photo; changes apply on Set avatar).
                     Button { showAvatarPicker = true } label: {
                         ZStack(alignment: .bottomTrailing) {
-                            AvatarCluster(members: clusterMembers, size: 72, imageUrl: existingImageURL, discColor: people?.avatarDiscColor.map { UInt8(clamping: $0) }, neutralName: people?.isNeutralAvatar == true ? people?.title : nil)
+                            AvatarCluster(members: clusterMembers, size: 72, imageUrl: existingImageURL, discColor: people.flatMap { p in p.avatarDiscColor != nil ? DiscArt.pick(seed: p.id, color: p.avatarDiscColor) : nil })
                                 .frame(width: 112, height: 112)
                             GlassCircle(size: 36) { // control-size: exception rowIconTiles
                                 Image(systemName: "camera.fill")

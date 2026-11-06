@@ -10834,14 +10834,11 @@ impl AppState {
             &src.id,
             src.avatar_color_override.or(src.avatar_color_index),
         ));
-        // D92: the fork keeps the source's disc colour too — or its neutral disc.
-        let disc_color = Some(
-            if crate::ui::avatars::disc::is_neutral(src.avatar_disc_color) {
-                crate::ui::avatars::neutral_pick()
-            } else {
-                crate::ui::avatars::disc_color(&src.id, src.avatar_disc_color)
-            },
-        );
+        // D92: the fork keeps the source's disc colour too.
+        let disc_color = Some(crate::ui::avatars::disc_color(
+            &src.id,
+            src.avatar_disc_color,
+        ));
         self.awaiting_new_project = true;
         self.command(ClientCommand::CreateProject {
             name,

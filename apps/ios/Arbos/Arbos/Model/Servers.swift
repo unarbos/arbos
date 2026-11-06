@@ -129,10 +129,9 @@ struct Server: Identifiable, Equatable {
     var generalChannelId: String?
     /// D79 `avatar_color_index_effective` (nil → derived from `id`).
     var avatarColorIndex: Int?
-    /// D92 amendment: the server's disc colour from the Create screen; nil → initials (or the
-    /// neutral initial when `isNeutralAvatar`, Jacob 2026-10-25).
+    /// D92 amendment: the server's disc colour from the Create screen; nil → initials. A stored
+    /// value resolves through the core, so an older client's sentinel lands on the id's colour.
     var avatarDiscColor: Int? = nil
-    var isNeutralAvatar: Bool { DiscArt.isNeutral(avatarDiscColor) }
     /// Anyone on Arbos can search and join without an invite link.
     var isOpen: Bool
     /// Only for owner/admin.
