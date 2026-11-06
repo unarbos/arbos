@@ -6,6 +6,19 @@ written down so the next reader does not rediscover them one merge at a time.
 They share a shape: a correctness that holds by accident, or depends on something nobody would
 guess was load-bearing. None of them has a failing test to announce it when it goes.
 
+## The principle underneath all of them
+
+**Two measurements with the same failure mode are one measurement.**
+
+Internal agreement between two methods is not confirmation until you have asked what both could
+miss *together*. The worked case: a unique-name count and a verdict count of the same Swift log
+agreed exactly, and were offered as corroborating each other. They agreed because a truncated line
+is invisible to both — the agreement was the symptom, not the evidence. Two careful measurements,
+corroborating, both short by the same one, with no signal anywhere.
+
+Ask what the two methods share before you treat them as independent. If they read the same stream,
+parse the same shape, or trust the same absence, they are one measurement with two names.
+
 ## The rule: a test that depends on a path's class must assert that class
 
 `arbos-core/src/approval.rs` sorts every path into a **class** — `Scratch`, `Workspace`,
@@ -81,10 +94,12 @@ line — so a bisected line removes the test from the log entirely. It is invisi
 count **and** to a unique-name count, which is why two independent counts can agree with each
 other and both be short by the same one.
 
-**The victim is not arbitrary.** Measured across two logs from different pull requests, the cut
-line was the *same* test both times — `SearchSettingsTests.testEveryListedSettingsPa…`, at line
-12934 and line 12953, with different junk interleaved. It correlates with position in the run,
-where the end-of-testing status writes land.
+**The victim is not arbitrary, and the invariant is the test — not where it sits.** Across three
+logs the cut line was always
+`SearchSettingsTests.testEveryListedSettings…`, at lines 12934, 12953 and 12865, with both the
+truncation point and the interleaved junk varying. Line numbers differing by up to 88 rule out
+run position. Two earlier readings of this — "a different victim each time", then "it correlates
+with position in the run" — were both wrong, and are recorded here so neither is reinvented.
 
 That is what makes it dangerous here rather than merely annoying:
 
@@ -105,6 +120,16 @@ who it will usually be.
 
 A one-name discrepancy on a Swift leg is more likely to be this than a genuine drop.
 
+**Where to look first, as a hint and not as the mechanism.** Check
+`SearchSettingsTests.testEveryListedSettings…` by name. Key the hint on the **test identity**,
+never on a line offset: the offsets moved by 88 lines across three logs while the test did not.
+It is **not** a substitute for the general refusal — a named site goes stale the moment the suite
+changes, while refusing any unreadable line holds for the next victim, whoever it is.
+
+The overwriting text varies and carries no diagnosis: the end-of-testing status write in one log,
+an `iOSSimulator: … Failed to launch app with identifier` in another. Do not read the junk as the
+cause of anything; it is whatever happened to be writing at that moment.
+
 ### The worked arithmetic, from run 42277644010
 
 | | Figure |
@@ -118,6 +143,37 @@ A one-name discrepancy on a Swift leg is more likely to be this than a genuine d
 
 619 = 606 + 13. Counting only clean lines gives 550 unit and so 605 passing and 618 declared —
 both one short, in the same term, with nothing in the log saying so.
+
+Checked against the source on 2026-11-06: `ArbosTests` declares **551** test cases (552 matches
+for `func test…(` less `AddMembersPlanTests.testingGroup`, a private helper returning a value that
+XCTest does not discover), and **551 executed**.
+
+### Does a green Swift leg ever cover tests that did not run? Measured: no, in three logs
+
+The worry is a case that never ran and so has no failing verdict to find, which a name
+enumeration cannot see because the declared list is unaffected. Checked by diffing
+suite-qualified declared names against observed verdicts:
+
+| Log | Clones / PIDs | `Failed to launch app` | Declared vs observed |
+| --- | --- | --- | --- |
+| #2848 green | one, `(18475)` | 1, during teardown | 551 / 551 |
+| #2889 green | one, `(27228)` | 1, during teardown | 551 / 551 |
+| #2887 red | **two, `(23786)` then `(26149)`** | **0** | 551 / 551 |
+
+In every case the only declared-but-unobserved name was the truncated one, whose test did run.
+
+Two things follow. **A launch failure is not the mechanism to key on** — the red run has none and
+the green runs have one each, so it does not separate them, and in the green runs it lands in
+teardown after the session completed. **The mechanism worth checking is a crashed test host**: in
+the red log the clone PID changes mid-suite, which is a process dying and the harness respawning.
+On that one sample the respawn picked up every remaining case — nothing vanished with the dead
+process — but it is one sample, and the check that would catch the bad version is **per-clone
+verdict counts against declared suite membership**, not a grep for launch failures.
+
+Note while reading these logs that **textual order is not chronological**: xcodebuild's own stdout
+is interleaved with the test reporter's, so `** TEST SUCCEEDED **` appears in the middle of a
+suite's verdicts and the last unit verdict sits ~150 lines after it. Judge sequence by timestamps,
+never by position.
 
 ## `image.yml`: the step that always fails is load-bearing
 
