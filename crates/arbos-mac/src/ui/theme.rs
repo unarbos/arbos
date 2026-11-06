@@ -587,6 +587,12 @@ pub struct Theme {
     pub backdrop: Option<Backdrop>,
     pub bg: Hsla,
     /// The chat-list column (a shade off the conversation, as on Grok Mac).
+    ///
+    /// Dark is `#0E0E0E`, measured off the approved mock: the sidebar sits
+    /// *under* the page rather than over it. The selected row's tint follows
+    /// from it without a second token — the row is a 9 % wash of `text`, which
+    /// over `#0E0E0E` composites to 34.8 against the mock's 32
+    /// (`docs/mac-design-rules.md` § Sidebar rows).
     pub sidebar: Hsla,
     /// The grouped cards on the right pane (details, members, settings — the
     /// three-pane rule). The pane itself has no tone of its own any more: it
@@ -675,7 +681,7 @@ impl Theme {
             glass_opacity: GLASS_ALPHA,
             backdrop: None,
             bg: hex(0x141414),
-            sidebar: hex(0x1a1a1a),
+            sidebar: hex(0x0e0e0e),
             pane_card: hex(0x232323),
             pane_edge: hex(0x212121),
             surface_1: hex(0x1e1e1e),
@@ -1550,6 +1556,35 @@ mod glass_contrast_tests {
                 WindowBackgroundAppearance::Opaque
             );
         }
+    }
+
+    /// The sidebar sits **under** the page, and the selected row's tint comes
+    /// from that ground rather than from a tint value of its own
+    /// (`docs/mac-design-rules.md` § Sidebar rows). The arithmetic is the point
+    /// of the item: the row is the shared 9 % wash of `text`, so moving the
+    /// sidebar is what moves the tint.
+    #[test]
+    fn the_sidebar_is_darker_than_the_page_and_its_selected_row_follows() {
+        let theme = Theme::with(Appearance::Dark, Surface::Matte);
+        let step = |c: Hsla| (c.to_rgb().r * 255.0).round() as i32;
+
+        assert_eq!(step(theme.sidebar), 14, "the mock's #0E0E0E");
+        assert!(
+            step(theme.sidebar) < step(theme.bg),
+            "the sidebar is under the page, not over it: sidebar {} vs page {}",
+            step(theme.sidebar),
+            step(theme.bg)
+        );
+
+        // The selected row is a wash of `text`, not a colour: it composites off
+        // whatever it sits on. On this ground that lands within 3 steps of the
+        // mock's #202020 (32) with no second token.
+        let selected = composite(crate::ui::highlight::fills(&theme).selected, theme.sidebar);
+        let got = step(selected);
+        assert!(
+            (32..=37).contains(&got),
+            "selected row composites to {got}, expected near the mock's 32"
+        );
     }
 
     /// The window's background: a system material means GPUI paints nothing
