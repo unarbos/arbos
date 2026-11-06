@@ -4723,6 +4723,14 @@ async fn upload_outgoing(
             from_slot,
             attachment,
         } => {
+            // Forwarding a provider-hosted picture (a picked GIF, ARB-544) carries its `url`
+            // across: there is no blob in the source slot to copy, and the provider's terms
+            // allow no stored copy anyway ([feedback gif-send-and-playback-2026-10-30]).
+            if attachment.blob_ref.is_none()
+                && attachment.url.as_deref().is_some_and(|u| !u.is_empty())
+            {
+                return user_attachment_from_part(attachment);
+            }
             let bytes = match attachment.blob_ref.as_deref() {
                 Some(key) => fetch_blob_bytes(shared, &from_slot, key)
                     .await

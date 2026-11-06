@@ -65,8 +65,32 @@ final class PictureReplyQuoteTests: XCTestCase {
             "other look at this quote=-",
             "image quote=look at this caption=-",
             "image quote=look at this caption=same here",
-            "other nice shot quote=IMG_0042.jpeg",
+            "other nice shot quote=Image",
         ])
+    }
+
+    /// A reply to a picked GIF names it "GIF" and carries the GIF's own picture in the
+    /// header. The GIF is provider-hosted (ARB-544) — no `ref`, a `url` — so both used to
+    /// fall back to its file name, the provider's numeric id
+    /// ([feedback gif-send-and-playback-2026-10-30]).
+    func testGifReplyNamesTheKindAndCarriesItsPicture() {
+        let gif = Attachment(name: "6178590884800169.gif", mime: "image/gif", blobRef: nil, kind: "image",
+                             url: "https://static.klipy.com/ii/abc/f3/bd/G88BNBBL.gif",
+                             source: AttachmentSource(provider: "KLIPY", id: "6178590884800169",
+                                                      pageUrl: "https://klipy.com/gifs/pep-6"))
+        var sent = pictureReply(1, from: "user:fx-ben", caption: "", replyTo: "")
+        sent.parts[0] = .attachment(id: "m1-a", attachment: gif)
+        sent.replyTo = nil
+        let reply = text(2, from: me, "ha", replyTo: sent.id)
+        let out = rows([sent, reply])
+        XCTAssertEqual(shape(out), ["image quote=- caption=-", "user ha quote=GIF"])
+
+        var quote: Quote?
+        for row in out {
+            if case .user(_, _, let q, _) = row.kind { quote = q; break }
+        }
+        XCTAssertEqual(quote?.preview?.cacheKey, "url:" + gif.url!,
+                       "the header points at the GIF's own picture, not at a missing blob ref")
     }
 
     /// A non-captionable file (PDF + note) keeps its own text bubble; the quote still sits
