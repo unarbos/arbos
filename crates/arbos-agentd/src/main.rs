@@ -39,9 +39,9 @@ mod job_note_tests;
 #[cfg(test)]
 mod job_notice_tests;
 #[cfg(test)]
-mod job_reparent_tests;
+mod job_pre_start_steer_tests;
 #[cfg(test)]
-mod job_steer_inherit_tests;
+mod job_reparent_tests;
 #[cfg(test)]
 mod job_steer_race_tests;
 mod jobs_view;
