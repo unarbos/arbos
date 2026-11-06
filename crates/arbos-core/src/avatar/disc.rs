@@ -30,7 +30,10 @@ pub const NEUTRAL: u8 = 255;
 pub const NEUTRAL_DARK: (Rgb, Rgb) = (Rgb(0x3A, 0x3A, 0x3A), Rgb(0xE5, 0xE5, 0xE5));
 pub const NEUTRAL_LIGHT: (Rgb, Rgb) = (Rgb(0xE6, 0xE6, 0xE6), Rgb(0x4A, 0x4A, 0x4A));
 
-/// Is this stored pick the neutral one (no picture: initial on a grey disc)?
+/// Is this stored pick the neutral sentinel? Recognition only: no render path draws a grey disc
+/// any more, so nothing outside these tests calls this. Keep it anyway — existing rows still
+/// hold [`NEUTRAL`], the relay still admits it on write, and without a named predicate the next
+/// reader meets a bare `255` with nothing saying what it means.
 pub fn is_neutral(color: Option<u8>) -> bool {
     color == Some(NEUTRAL)
 }
