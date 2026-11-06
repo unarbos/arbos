@@ -1,5 +1,5 @@
 // The message stream, Grok Bot style: assistant bubbles (#202020) left, user
-// bubbles (#5C5C5C) right, centred muted system lines between them, file and
+// bubbles (#3C3C3C) right, centred muted system lines between them, file and
 // voice-memo cards, one "<Project> is working" line while a turn runs.
 // Prose only: tool calls, status noise, usage and JSON never render.
 

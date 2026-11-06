@@ -634,6 +634,64 @@ Code: `transcript.rs` `hover_time()` (returns nothing at opacity 0), pinned by
 `layout_tests::the_time_is_hidden_at_rest_and_beside_the_bubble_on_hover`;
 iPhone `Transcript.swift` `RowView` + `SenderNameRowTests`.
 
+## Two bubble tones (Jacob 2026-11-06, approved mock `design/grok-parity-2026-11-05/grok-reference.png`)
+
+**A transcript shows exactly two bubble fills: the user's, lighter; the agent's,
+darker. There is no third.** The `#5C5C5C` user bubble was the third in
+practice — a routine prompt is sent as a user message, so a long
+`Tell the user (reply_to 01M…)` drew as a mid-grey slab that read louder than
+every reply around it. On the before frame
+(`design/grok-parity-2026-11-05/arbos-current.png`) those slabs are **24.9 % of
+the whole transcript column**.
+
+Numbers below are sampled off the two frames in the project store, both 2272 ×
+1872 px at 2 px/pt, dark, Matte. Each is the modal colour of an area inside the
+fill, not one pixel.
+
+| Fill | Approved mock | Before | Now |
+|---|---|---|---|
+| Page under the transcript | `#121212` (18) | `#141414` (20) | `#141414` (20), unchanged — the page is not this rule |
+| **User bubble** | `#3D3D3D` (61) at the top to `#3B3B3B` (59) at the bottom, midpoint **`#3C3C3C` (60)** | `#5C5C5C` (92) | **`#3C3C3C` (60)** |
+| **Agent bubble** | flat per bubble, but 27 to 34 between bubbles in one frame; modal `#1F1F1F` (31) | Mac `#232323` (35), iPhone `#202020` (32) | unchanged — see below |
+| Bubble ink | `#F5F5F5` (245) | `#FFFFFF` (255) | unchanged — the ink is the typography item |
+
+**Only the user bubble is a gradient, and it is a shallow one.** Measured as the
+modal grey of each scanline across a bubble's own height, so that text pixels do
+not count: the mock's 70 px user bubble runs `#3D3D3D` (61) to `#3B3B3B` (59),
+monotonically, sextiles 61 · 61 · 60 · 60 · 59 · 59. `#3C3C3C` (60) is its
+midpoint, which is what we take.
+
+**The mock's agent bubbles are flat.** Each one holds a single grey down its
+whole height — a 304 px bubble reads 31 at every twelfth scanline, a 200 px
+bubble 31, a 68 px bubble 27. What varies is the grey *between* bubbles: 27, 28,
+29, 30, 31 and 34 on different bubbles in the same frame. That is a different
+phenomenon from a ramp, most likely translucency over differing page content,
+and it is why a naive sample that straddles two bubbles reads as a `#222222` to
+`#1B1B1B` gradient when no such gradient exists.
+
+**Why the agent bubble did not move with the user bubble.** It is 4 steps off
+the mock's modal 31 on the Mac and 1 on the iPhone, against the user bubble's
+32 — and the mock's own agent bubbles span 7 steps between themselves, so there
+is no single number to move it to. On the
+Mac `bubble_assistant` is also the fill of the sidebar card, the composer's
+reply-preview strip, the chat header's link pill, the chart card and the
+onboarding morph — surfaces that the sidebar, header and right-pane rules each
+re-measure in their own right. Moving a shared token by 4 steps to settle one
+of its six consumers would change the other five as a side effect.
+
+**The segmented pill does not follow the bubble.** `segment_on_fill()` read
+`bubble` on Matte purely because the two greys matched; the segmented pill grey
+is one of Jacob's open calls, so it now holds `#5C5C5C` / `#111111` as a
+constant of its own rather than following a change it was not part of.
+
+Delivery opacity is unaffected in kind and slightly better in degree: a pending
+bubble at `BUBBLE_ALPHA_PENDING` 0.5 composites to 4.1 : 1 on `#3C3C3C`, where
+it was 3.4 : 1 on `#5C5C5C` (§ Own-bubble delivery).
+
+Code: `theme.rs` `bubble` + `segment_on_fill()`, pinned by
+`theme::glass_contrast_tests::the_transcript_draws_two_bubble_tones_and_the_segment_keeps_its_own`;
+iPhone `Theme.swift` `bubbleUser`.
+
 ## Agent bubble width (Jacob 2026-10-24, [feedback bubble-width-2026-10-24])
 
 **An agent bubble is at most 560 pt wide, and never closer than 84 pt to the

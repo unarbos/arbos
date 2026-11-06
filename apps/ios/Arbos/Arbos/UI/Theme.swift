@@ -1,6 +1,6 @@
 // Grok Bot visual language, measured from the dark-mode references in
 // internal/refs/grokbot-ios (iPhone Air, 1260×2736 @3x): background #141414,
-// assistant bubble #202020, user bubble #5C5C5C, 17 pt SF Pro body with the
+// assistant bubble #202020, user bubble #3C3C3C, 17 pt SF Pro body with the
 // default 22 pt line height, 20 pt continuous corners, glass circles for the
 // header controls, system lines in #95959B.
 
@@ -75,7 +75,11 @@ struct Theme: Equatable {
     let bg: Color
     /// Assistant bubble.
     let bubbleAssistant: Color
-    /// User bubble.
+    /// User bubble. Dark is `#3C3C3C`, sampled off the approved mock
+    /// (`design/grok-parity-2026-11-05/grok-reference.png` in the project
+    /// store): the mock's own bubbles run `#3D3D3D` at the top to `#3B3B3B`
+    /// at the bottom, and `#3C3C3C` is that ramp's midpoint. It replaces the
+    /// `#5C5C5C` that made a routine prompt a slab.
     let bubbleUser: Color
     /// Composer field / glass circle fill.
     let field: Color
@@ -291,7 +295,7 @@ struct Theme: Equatable {
         isDark: true, surface: .matte,
         bg: Color(hex: "#141414")!,
         bubbleAssistant: Color(hex: "#202020")!,
-        bubbleUser: Color(hex: "#5C5C5C")!,
+        bubbleUser: Color(hex: "#3C3C3C")!,
         field: Color(hex: "#181818")!,
         // Grok dark draws no rim on the field or the glass circles; keep a whisper.
         fieldBorder: Color(hex: "#1A1A1A")!,
