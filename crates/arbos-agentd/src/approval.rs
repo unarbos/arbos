@@ -409,8 +409,7 @@ impl Agent {
                     (id, last_user, true)
                 }
             };
-            h.doc
-                .add_approval_part(&msg_id, &approval_id, &req, None);
+            h.doc.add_approval_part(&msg_id, &approval_id, &req, None);
             if !optional {
                 h.doc
                     .add_status_part(&msg_id, "waiting_approval", &req.title);
@@ -1434,8 +1433,13 @@ impl Agent {
         title: &str,
         reason: Option<&str>,
     ) {
-        self.resume_worker_with(session_id, approval_id, title, Decision::Rejected { reason })
-            .await;
+        self.resume_worker_with(
+            session_id,
+            approval_id,
+            title,
+            Decision::Rejected { reason },
+        )
+        .await;
     }
 
     async fn resume_worker_with(
@@ -1473,7 +1477,11 @@ impl Agent {
             return;
         };
         let Some(host) = self.sync.host(&chat_id).await else {
-            tracing::warn!(approval_id, chat_id, "no doc for the card's chat; cannot resume");
+            tracing::warn!(
+                approval_id,
+                chat_id,
+                "no doc for the card's chat; cannot resume"
+            );
             return;
         };
         let brief = decision.brief(title, approval_id);
@@ -2263,7 +2271,11 @@ mod job_approval_tests {
             Some(id.clone())
         );
         assert_eq!(
-            agent.store.pending_approval_for_job(JOB).unwrap().map(|r| r.id),
+            agent
+                .store
+                .pending_approval_for_job(JOB)
+                .unwrap()
+                .map(|r| r.id),
             Some(id.clone())
         );
         // The same call again does not raise a second card: the one that is waiting is reused,
@@ -2381,6 +2393,251 @@ mod job_approval_tests {
             "one row per card, not one per poll: {:?}",
             waiting_rows(&side)
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+/// What a parked job does to the rest of the machinery: the boot reclaim, the two job caps, and
+/// the burst of answers that arrives when the user finally comes back.
+#[cfg(test)]
+mod parked_job_tests {
+    use super::*;
+    use crate::status::tests::test_agent;
+
+    const CHAT: &str = "01TESTCHATPARKEDJOB0000000";
+
+    /// A parked job and its card, as a park leaves them: job open at `queued` with no worker
+    /// running, card `pending` naming both the worker and the job.
+    async fn a_parked_job(agent: &Arc<Agent>, n: usize) -> (String, String, String) {
+        let job = format!("01TESTPARKEDJOB00000000{n:03}");
+        let worker = format!("01TESTPARKEDWORKER00000{n:03}");
+        let card = format!("01TESTPARKEDCARD00000000{n:02}");
+        agent
+            .store
+            .insert_subagent(&worker, &format!("worker-{n}"), "work", "pi", CHAT)
+            .unwrap();
+        agent
+            .store
+            .set_subagent_status(&worker, "waiting_user")
+            .unwrap();
+        agent
+            .store
+            .insert_job(
+                &job,
+                CHAT,
+                "01TESTPARKEDASK00000000000",
+                "Clearing the old exports",
+                "code",
+                "Delete last month's export files.",
+                &[],
+            )
+            .unwrap();
+        agent.store.set_job_subagent(&job, &worker).unwrap();
+        agent.store.set_job_state(&job, "queued", None).unwrap();
+        agent
+            .store
+            .insert_approval(
+                &card,
+                CHAT,
+                "01TESTPARKEDCARDMESSAGE000",
+                "Run a destructive command (file-delete)",
+                "destructive",
+                &json!({ "kind": "tool_call", "tool": "bash",
+                    "input": { "command": format!("rm -rf /opt/x{n}") },
+                    "session_id": worker, "job_id": job }),
+            )
+            .unwrap();
+        (job, worker, card)
+    }
+
+    /// **The sharpest of the six sites.** `reclaim_interrupted_jobs` walks `open_jobs()` at boot
+    /// and marks every one `interrupted` with "box restart" — and a parked job is open.
+    ///
+    /// Left untouched, because it was not interrupted: it was waiting for the user before the
+    /// restart and is still waiting after, which is the survive-a-restart property the whole
+    /// change exists for. Without this the work would be restarted from the brief while the
+    /// card still stood, and the user's answer would arrive for a job that had moved on.
+    ///
+    /// A unit test rather than canary coverage: a canary catches this only if its scenario
+    /// happens to include a restart.
+    #[tokio::test]
+    async fn the_boot_reclaim_leaves_a_parked_job_parked() {
+        let (agent, root) = test_agent().await;
+        agent.store.upsert_chat(CHAT, "Main", true, 0).unwrap();
+        let _host = agent.sync.open_room(CHAT).await.unwrap();
+        let (parked, _w, card) = a_parked_job(&agent, 1).await;
+        // A job that really was cut off by the restart, so the sweep is doing its job here and
+        // the parked one is not simply being skipped along with everything else.
+        let cut_off = "01TESTCUTOFFJOB00000000001";
+        agent
+            .store
+            .insert_job(
+                cut_off,
+                CHAT,
+                "01TESTPARKEDASK00000000000",
+                "Mid-flight work",
+                "code",
+                "Do the thing.",
+                &[],
+            )
+            .unwrap();
+        agent.store.set_job_state(cut_off, "running", None).unwrap();
+
+        agent.reclaim_interrupted_jobs().await;
+
+        let row = agent.store.job(&parked).unwrap().unwrap();
+        assert_eq!(
+            row.state, "queued",
+            "a parked job is not interrupted by a restart"
+        );
+        assert_eq!(row.error, None, "and carries no 'box restart' reason");
+        assert_eq!(
+            agent.store.job(cut_off).unwrap().unwrap().state,
+            "interrupted",
+            "the sweep still reclaims a job that really was cut off"
+        );
+        assert_eq!(
+            agent.store.approval(&card).unwrap().unwrap().state,
+            "pending",
+            "and the card is still waiting, which is what it is all for"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The two job caps read a parked job differently, and the difference is deliberate.
+    ///
+    /// Per agent is capacity — a parked job consumes no permit, no worker and no memory — so
+    /// counting them would let a few unanswered cards stop the box starting any work at all,
+    /// which is the original stall by another route. Per chat still counts them, because piling
+    /// more work into the chat where the cards are is the wrong move and the person who can
+    /// clear them is reading it; what changes there is that the refusal names the cards instead
+    /// of saying "wait for one to finish", which is false for work waiting on the user.
+    #[tokio::test]
+    async fn parked_jobs_leave_the_capacity_cap_alone_and_the_per_chat_refusal_names_them() {
+        let (agent, root) = test_agent().await;
+        agent.store.upsert_chat(CHAT, "Main", true, 0).unwrap();
+        let host = agent.sync.open_room(CHAT).await.unwrap();
+        let cap_agent = crate::config::job_max_per_agent();
+        for n in 0..cap_agent + 2 {
+            a_parked_job(&agent, n).await;
+        }
+        assert!(
+            agent.store.open_jobs().unwrap().len() > cap_agent,
+            "the premise: more parked jobs than the capacity cap allows"
+        );
+
+        let mut ticket = None;
+        let refusal = agent
+            .start_job(
+                CHAT,
+                &host,
+                "01TESTPARKEDASK00000000000",
+                "New work",
+                "Do something else.",
+                "code",
+                Vec::new(),
+                // Not forced, so the per-chat cap answers first — which is where the parked
+                // jobs are counted and where the wording matters.
+                false,
+                &mut ticket,
+            )
+            .await
+            .expect_err("the per-chat cap refuses this");
+        assert!(
+            refusal.contains("waiting for the user") || refusal.contains("approval cards"),
+            "the refusal must name the cards rather than say to wait for work to finish: {refusal}"
+        );
+        assert!(
+            !refusal.contains("wait for one to finish"),
+            "that sentence is false for work that is waiting on the user: {refusal}"
+        );
+        // Forced past the soft per-chat cap, the hard capacity cap does not refuse either,
+        // because none of those jobs is using any capacity.
+        let started = agent
+            .start_job(
+                CHAT,
+                &host,
+                "01TESTPARKEDASK00000000000",
+                "New work",
+                "Do something else.",
+                "code",
+                Vec::new(),
+                true,
+                &mut ticket,
+            )
+            .await;
+        assert!(
+            started.is_ok(),
+            "parked jobs must not wedge the box: {started:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The answer burst: the user comes back and answers every card at once.
+    ///
+    /// This is the moment all three of the old bounds are absent together — the ask cap was
+    /// decremented by each park, the retained-worker bound keeps anything mid-run, and
+    /// `run_approval_turn` acquires no permits at all. So the resume is routed through
+    /// `run_subagent`, which acquires `subagent_slots` and `box_slots` before it runs anything.
+    ///
+    /// Asserted on the permits rather than on wall-clock ordering: with every slot held, each
+    /// resumed worker gets as far as writing `queued` and waits there. Nothing fans out.
+    #[tokio::test]
+    async fn answering_a_burst_of_cards_queues_on_the_worker_permits() {
+        let (agent, root) = test_agent().await;
+        agent.store.upsert_chat(CHAT, "Main", true, 0).unwrap();
+        let _host = agent.sync.open_room(CHAT).await.unwrap();
+        let mut cards = Vec::new();
+        for n in 0..3 {
+            let (_job, worker, card) = a_parked_job(&agent, n).await;
+            cards.push((worker, card));
+        }
+        // Every worker slot is taken, as a busy box's would be.
+        let held = agent
+            .subagent_slots
+            .clone()
+            .acquire_many_owned(agent.subagent_slots.available_permits() as u32)
+            .await
+            .unwrap();
+        assert_eq!(agent.subagent_slots.available_permits(), 0);
+
+        for (_worker, card) in &cards {
+            agent
+                .decide_approval(card, ApprovalOutcome::Approved, "dev-mac")
+                .await
+                .unwrap();
+        }
+
+        // Each resume reaches the slot wait and stops there, which is what `queued` records.
+        for _ in 0..200 {
+            let queued = cards
+                .iter()
+                .filter(|(w, _)| {
+                    agent
+                        .store
+                        .subagent(w)
+                        .unwrap()
+                        .is_some_and(|s| s.status == "queued")
+                })
+                .count();
+            if queued == cards.len() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        for (worker, _) in &cards {
+            let row = agent.store.subagent(worker).unwrap().unwrap();
+            assert_eq!(
+                row.status, "queued",
+                "a resumed worker waits for a slot like any other work"
+            );
+        }
+        assert_eq!(
+            agent.subagent_slots.available_permits(),
+            0,
+            "and none of them invented a slot of its own"
+        );
+        drop(held);
         let _ = std::fs::remove_dir_all(&root);
     }
 }
@@ -2587,10 +2844,9 @@ mod park_tests {
             .await
             .unwrap();
 
-        let reopened = crate::store::Store::open(
-            &agent.cfg.state_dir.join("agentd").join("agentd.db"),
-        )
-        .unwrap();
+        let reopened =
+            crate::store::Store::open(&agent.cfg.state_dir.join("agentd").join("agentd.db"))
+                .unwrap();
         let grants = reopened.unconsumed_grants().unwrap();
         assert_eq!(
             grants.iter().map(|r| r.id.clone()).collect::<Vec<_>>(),

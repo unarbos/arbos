@@ -1664,9 +1664,10 @@ impl Store {
     /// been given, so "this job has a card" names a lineage rather than the worker that is
     /// actually parked on it.
     pub fn pending_approval_for_session(&self, session_id: &str) -> Result<Option<ApprovalRow>> {
-        Ok(self.pending_approvals()?.into_iter().find(|r| {
-            r.payload.get("session_id").and_then(Value::as_str) == Some(session_id)
-        }))
+        Ok(self
+            .pending_approvals()?
+            .into_iter()
+            .find(|r| r.payload.get("session_id").and_then(Value::as_str) == Some(session_id)))
     }
 
     /// The open card a **job** is parked on, if any: it has no worker running and will not get

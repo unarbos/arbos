@@ -39,7 +39,9 @@ pub struct ApprovalRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApprovalOutcome {
     Approved,
-    Rejected { reason: String },
+    Rejected {
+        reason: String,
+    },
     /// The card is still open and nothing was decided: this caller stopped waiting, which is
     /// not an answer and must not be reported as a refusal.
     Undecided,
