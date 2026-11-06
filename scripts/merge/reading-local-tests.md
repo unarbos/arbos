@@ -256,6 +256,33 @@ follow-up that matters is what the reader does on failure: dropping one field is
 while dropping the enclosing record is data loss, and the two look identical in the producer's
 diff.
 
+### Answer a path-filter question by reading `paths:`, never by grepping the file
+
+Asking whether a workflow is triggered by a crate is a question about its `paths:` block, and a
+grep over the file will cheerfully answer it wrong. `grep arbos-mac .github/workflows/ios.yml`
+returns three hits, which reads as confirmation that the filter covers that crate. All three are
+the self-hosted runner label — `runs-on: ${{ inputs.runner || 'arbos-mac' }}` and two mentions of
+it in prose. The `paths:` list does not contain `crates/arbos-mac/**` at all, and the practical
+consequence is large: a Mac-only change triggers no TestFlight build.
+
+A false confirmation is worse than no answer, because nobody re-checks a question they believe is
+settled. Read the block.
+
+## A push during an iOS or Mac leg is a seventy-minute decision
+
+The branch's concurrency group cancels the in-flight run when a new commit lands on it. Before an
+iOS or Mac leg starts that costs nothing and two changes batch for free. Once `fastlane test` is
+running, a one-line push throws away the queue wait **and** the run — about seventy minutes,
+measured on 2026-11-06 when a worker pushed a small commit roughly forty minutes into
+`build-xcframework + fastlane test` and the group cancelled the leg.
+
+So the rule is about **when**, not whether: while a verdict is owed or a leg is in flight, the
+push waits; when several changes are coming, land them before the leg rather than during it.
+
+Nothing is lost in the cases where the next run is a superset and the PR is held anyway — but
+that is luck about which change it was, not a property of the decision. Treat the cancellation as
+the cost and batch around it.
+
 ## Gate 5 on a Mac-touching PR: look for the compiler before you fetch one
 
 `cargo test --workspace --no-run` fails on this repo under the clang most Linux images default to.
