@@ -757,6 +757,17 @@ impl Agent {
             })
             | None => true,
         };
+        // A caller that is still holding on runs the call itself, so the one execution this
+        // approval bought belongs to it and the row's grant is spent here.
+        //
+        // Without this the row would stay an unclaimed grant after the call had already run,
+        // and the next identical call would be waved through with no card: asked once, done
+        // twice. The claim belongs on this side of the branch rather than in the caller because
+        // both callers that reach it — an inline waiter and a polled harness that re-reads the
+        // state — would otherwise each need to remember.
+        if !deferred && matches!(outcome, ApprovalOutcome::Approved) {
+            let _ = self.store.consume_grant(approval_id);
+        }
         if deferred {
             let me = self.clone();
             let id = approval_id.to_owned();
@@ -1513,14 +1524,8 @@ impl Agent {
             Some(arbos_core::route::Harness::Pi),
             false,
             false,
-            job.as_ref().map(|j| crate::agent::JobSpec {
-                id: j.id.clone(),
-                title: j.title.clone(),
-                kind: j.kind.clone(),
-                brief: j.brief.clone(),
-                touches: j.touches.clone(),
-                attempt: 0,
-            }),
+            // The attempt count is carried, not reset: see `resumed_job_spec`.
+            job.as_ref().map(crate::agent::resumed_job_spec),
             // The ask this job answers is not waiting on this run: the worker was already
             // speaking for itself before the card, and the result turn it finishes with is what
             // the chat is ordered on.
@@ -2573,6 +2578,72 @@ mod parked_job_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A resumed worker keeps the attempt count its job has already spent.
+    ///
+    /// The crash budget (`JOB_WORKER_RETRIES`) exists to stop a job burning the box on a crash
+    /// loop — bug AJ, a pi child dying five times under a job burst. Answering a card says a
+    /// person approved an action; it says nothing about whether the thing that was crashing has
+    /// stopped. Reset the count here and a worker can crash through the budget, raise a card, be
+    /// answered, and start the budget over, with the loop detection reset each time: bounded by
+    /// the user's patience rather than by the box.
+    ///
+    /// Note the premise this case makes explicit — a parked worker's attempt is **not** always
+    /// zero, so the reset could not be defended as a no-op. A job whose first worker crashed is
+    /// given a retry worker, and that worker can reach a gated call and park exactly like the
+    /// first one.
+    ///
+    /// Pinned on the one place the resume builds a spec rather than through a real child, which
+    /// would need a worker that crashes on demand; the second assertion is what keeps the call
+    /// site honest, since a literal there is how this drifts back to zero.
+    #[tokio::test]
+    async fn a_resumed_worker_keeps_the_attempt_count_its_job_has_spent() {
+        let (agent, root) = test_agent().await;
+        agent.store.upsert_chat(CHAT, "Main", true, 0).unwrap();
+        let _host = agent.sync.open_room(CHAT).await.unwrap();
+        let (job, _worker, _card) = a_parked_job(&agent, 7).await;
+
+        let fresh = agent.store.job(&job).unwrap().unwrap();
+        assert_eq!(fresh.restarts, 0);
+        assert_eq!(
+            crate::agent::resumed_job_spec(&fresh).attempt,
+            0,
+            "a job that has spent nothing resumes with nothing spent"
+        );
+
+        // One worker of this job has already crashed and been replaced, which is what
+        // `bump_job_restarts` records. The resumed worker is the second, not a first.
+        agent.store.bump_job_restarts(&job).unwrap();
+        let spent = agent.store.job(&job).unwrap().unwrap();
+        assert_eq!(
+            crate::agent::resumed_job_spec(&spent).attempt,
+            crate::agent::JOB_WORKER_RETRIES,
+            "the budget is already spent, so the resume must not hand out another one"
+        );
+        // And the count is read from the row, so it survives the agentd restart a card now
+        // outlives — the in-memory `JobSpec` does not.
+        for _ in 0..4 {
+            agent.store.bump_job_restarts(&job).unwrap();
+        }
+        assert_eq!(
+            crate::agent::resumed_job_spec(&agent.store.job(&job).unwrap().unwrap()).attempt,
+            5
+        );
+
+        assert!(
+            !include_str!("approval.rs")
+                .split("fn resume_worker_with")
+                .nth(1)
+                .expect("the resume")
+                .split("\n    pub async fn")
+                .next()
+                .expect("its body")
+                .contains("attempt:"),
+            "the resume must build its spec through `resumed_job_spec`: an `attempt:` literal \
+             here is how the crash budget silently refreshes again"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// The answer burst: the user comes back and answers every card at once.
     ///
     /// This is the moment all three of the old bounds are absent together — the ask cap was
@@ -2694,6 +2765,81 @@ mod park_tests {
                 .await
                 .unwrap();
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An answer that arrives **inside** the grace reaches the waiter that is still holding on,
+    /// and the call runs on that outcome rather than being parked and re-run.
+    ///
+    /// Kept as a test of its own because the park took this assertion away from somewhere else.
+    /// `the_valve_releases_an_answer_held_by_an_inline_approval_wait` used to end by deciding the
+    /// card and watching the held call receive `Approved`; it now ends on the park, since its
+    /// clock is advanced well past the grace before anything is decided. Without this case
+    /// nothing would assert that a decision ever reaches a live waiter at all — every test would
+    /// be watching the timeout path, and a `begin_approval` that dropped the sender would pass
+    /// them all.
+    #[tokio::test]
+    async fn an_answer_inside_the_grace_reaches_the_waiter_still_holding_on() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATAPPROVALPARK0004";
+        agent.store.upsert_chat(chat, "Main", true, 0).unwrap();
+        let _host = agent.sync.open_room(chat).await.unwrap();
+
+        let waiter = {
+            let agent = agent.clone();
+            tokio::spawn(async move {
+                agent
+                    .request_approval(
+                        chat,
+                        ApprovalRequest {
+                            title: "Run a destructive command (file-delete)".into(),
+                            summary: "rm -rf /opt/x".into(),
+                            risk: Risk::Destructive,
+                            payload: json!({ "kind": "tool_call", "tool": "bash" }),
+                        },
+                    )
+                    .await
+            })
+        };
+        while !agent.approval_pending_for(chat).await {
+            tokio::task::yield_now().await;
+        }
+        let id = agent.store.pending_approvals().unwrap()[0].id.clone();
+        agent
+            .decide_approval(&id, ApprovalOutcome::Approved, "dev-mac")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), waiter)
+                .await
+                .expect("the waiter was never woken")
+                .expect("the waiter task"),
+            Some(ApprovalOutcome::Approved),
+            "the decision must reach the caller that is still waiting, not only the row"
+        );
+        // Answered inside the grace, so there is nothing to re-run later: the waiter ran the
+        // call itself, and the row's single-use grant is spent rather than left lying around
+        // for the next identical call to claim without a card. This caught a real hole — asked
+        // once, done twice — which is the whole reason the case is worth having.
+        assert!(
+            agent.store.unconsumed_grants().unwrap().is_empty(),
+            "the execution the user approved has happened; nothing may run a second time on it"
+        );
+        assert!(agent
+            .store
+            .approval(&id)
+            .unwrap()
+            .unwrap()
+            .grant_consumed_at
+            .is_some());
+        assert_eq!(
+            agent
+                .hook_approval("bash", &json!({ "command": "rm -rf /opt/x" }), chat, "main")
+                .await["state"],
+            "pending",
+            "the same call again is a new question, not a free pass"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
