@@ -16,20 +16,30 @@
 #      running are left for the next run; a red one is skipped) — except a hotfix: a revert, or a
 #      commit marked `hotfix:` / `[hotfix]`, is released as soon as it is on main, ahead of its CI
 #      (P0 #1208: waiting for CI cost the crash fix two releases);
-#   3. nothing to do when the paths the Mac app is built from did not change since the last
-#      stable tag (scripts/release/mac-change.sh — a Cargo.lock that moved only our own crates'
-#      version numbers is not a change; any real dependency change is), or when a stable tag
-#      already sits on the target;
-#   4. otherwise: version = next patch after the last stable tag (or Cargo.toml's version when
+#   3. which artifact the range since its last release changed, from
+#      scripts/release/release-channel.sh: the Mac app (channel=stable), the `arbos-agent`
+#      sandbox image alone (channel=agent), or neither (channel=none). Both answers and both
+#      reasons go to the log on every run, cutting or not — see "saying why" below;
+#   4a. stable: version = next patch after the last stable tag (or Cargo.toml's version when
 #      somebody bumped it higher by hand), `release: X.Y.Z — <what landed>` commit on top of the
 #      target (Cargo.toml + Cargo.lock only), tag `vX.Y.Z` on that commit. The tag is pushed first
 #      (always lands); main is fast-forwarded to the bump when it did not move meanwhile, else the
 #      bump commit lives under its tag only and later runs read the version from the tags.
 #      Pushes made with GITHUB_TOKEN start no workflows, so the caller builds this same version in
 #      its own run (the `macos`/`linux`/`publish` jobs read `sha`/`version` from here).
+#   4b. agent: tag `image-v0.1.N` on the target itself. No version file holds the image version
+#      and no bump commit is made — the tag is the whole record. `.github/workflows/image.yml`
+#      builds, pushes and smoke-tests that tag, and release.yml's `agent-image` job is what
+#      starts it, because a tag pushed with GITHUB_TOKEN starts no workflow of its own.
 #
-# Output lines: channel=stable|none, publish=true|false, promote=true, sha=<bump commit or head>,
-# version=<X.Y.Z or X.Y.Z.<count>>, build=<commit count>, notes=<one line>, tag=<vX.Y.Z or empty>.
+# ── saying why ─────────────────────────────────────────────────────────────────────────────────
+# `channel=none` used to be one line with one reason in it, and a healthy skip (a relay-only
+# merge) read exactly like the agentd hole (a fix nothing would ever release). Every run now logs
+# both predicates, both reasons and both baselines, whichever way it goes.
+#
+# Output lines: channel=stable|agent|none, publish=true|false, promote=true, sha=<bump commit,
+# target or head>, version=<X.Y.Z, 0.1.N or X.Y.Z.<count>>, build=<commit count>, notes=<one
+# line>, tag=<vX.Y.Z, image-v0.1.N or empty>.
 set -euo pipefail
 
 DRY_RUN=false
@@ -49,6 +59,9 @@ DEBOUNCE="${ARBOS_RELEASE_DEBOUNCE_S:-150}"
 # read mac-paths.sh (an operator's override reaches mac-change.sh on its own), and it read as
 # this script overriding the list when it was only echoing the list back at itself.
 MAC_PATHS="$("$here/mac-paths.sh")"
+# The same arrangement for the agent image: scripts/release/agent-paths.sh owns that list,
+# release-channel.sh asks it for itself, and this copy is only for the release notes.
+AGENT_PATHS="$("$here/agent-paths.sh")"
 
 say() { echo "::notice::$*" >&2; }
 
@@ -192,23 +205,83 @@ if [[ -z "$target" ]]; then
   emit_none "no commit on main with a green CI run among the last 25"
   exit 0
 fi
-# 3. the last stable tag (highest vX.Y.Z anywhere — a bump commit may live only under its tag,
-#    see below) and the commit it was released from: a release commit touches only
+# 3. the two baselines, and which artifact the range since them changed.
+#
+#    Mac: the last stable tag (highest vX.Y.Z anywhere — a bump commit may live only under its
+#    tag, see below) and the commit it was released from. A release commit touches only
 #    Cargo.toml/Cargo.lock, so its parent is what the Mac app was built from. Both come from
 #    scripts/release/stable-tag-base.sh, which the pre-merge release gate reads too.
+#
+#    Agent image: the highest `image-v0.1.N` tag, on the commit it was built from — the tag sits
+#    on that commit itself, because an image release makes no bump commit. The namespace is
+#    shared with scripts/deploy/arbos-deploy-worker, which tags the same way when it rolls boxes.
+#    Sharing it is the point: whichever side tags first, the other sees the range as released and
+#    does not cut it twice.
 tag_info="$("$here/stable-tag-base.sh")"
 last_tag="$(sed -n 's/^tag=//p' <<< "$tag_info")"
 tag_base="$(sed -n 's/^base=//p' <<< "$tag_info")"
-if [[ -n "$last_tag" ]]; then
-  if [[ "$tag_base" == "$target" ]] || git merge-base --is-ancestor "$target" "$tag_base"; then
-    emit_none "stable $last_tag already covers the newest green commit ${target:0:8}"
+image_tag="$(git tag -l 'image-v[0-9]*.[0-9]*.[0-9]*' | grep -E '^image-v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 || true)"
+image_base=""
+[[ -n "$image_tag" ]] && image_base="$(git rev-parse "$image_tag^{commit}")"
+
+decision="$("$here/release-channel.sh" "$tag_base" "$image_base" "$target")"
+channel="$(sed -n 's/^channel=//p' <<< "$decision")"
+mac_verdict="$(sed -n 's/^mac=//p' <<< "$decision")"
+mac_why="$(sed -n 's/^mac_why=//p' <<< "$decision")"
+agent_verdict="$(sed -n 's/^agent=//p' <<< "$decision")"
+agent_why="$(sed -n 's/^agent_why=//p' <<< "$decision")"
+
+# Whichever way it goes, the log says why. A silent `channel=none` is what let an agentd-only
+# range look like a healthy skip for as long as it did.
+say "release decision at ${target:0:8}: channel=$channel"
+say "  Mac         since ${last_tag:-no stable tag}: $mac_verdict — $mac_why"
+say "  agent image since ${image_tag:-no image tag}: $agent_verdict — $agent_why"
+
+if [[ "$channel" == none ]]; then
+  emit_none "nothing to release at ${target:0:8} — Mac: $mac_why; agent image: $agent_why$($pending_seen && echo '; newer commits still in CI')"
+  exit 0
+fi
+
+# What landed: the subjects of the commits that touched the releasing artifact's paths, trimmed.
+landed() {  # landed <since-tag> <paths>
+  local summary
+  # shellcheck disable=SC2086
+  summary="$(git log --format=%s --no-merges "${1:+$1..}$target" -- $2 \
+    | sed -E 's/^fix\(feedback\): //; s/^(fix|feat|chore|docs|refactor|test|build|ci)(\([^)]*\))?: //; s/ *\[feedback [^]]*\]//g' \
+    | grep -v -E '^(release:|Merge )' | awk '!seen[$0]++ && n < 8 { n++; print }' \
+    | awk '{ if (length($0) > 72) { s = substr($0, 1, 72); sub(/ [^ ]*$/, "", s); print s "…" } else print }' \
+    | paste -sd ';' - | sed 's/;/; /g' || true)"
+  echo "${summary:-changes since ${1:-the start}}"
+}
+
+# 3b. the agent image: tag `image-v0.1.N` on the target and stop. No bump commit, because no file
+#     in the tree holds the image version — the tag is the record, and image.yml reads it.
+if [[ "$channel" == agent ]]; then
+  image_version="${image_tag#image-v}"
+  image_version="${image_version%.*}.$(( ${image_tag##*.} + 1 ))"
+  new_image_tag="image-v$image_version"
+  if git rev-parse -q --verify "refs/tags/$new_image_tag" >/dev/null 2>&1; then
+    emit_none "$new_image_tag exists but is not the highest image tag; somebody is releasing by hand"
     exit 0
   fi
-  if mac_change="$("$here/mac-change.sh" "$tag_base" "$target")"; then
-    emit_none "no Mac change since $last_tag — $mac_change (newest green commit ${target:0:8}$($pending_seen && echo '; newer commits still in CI'))"
-    exit 0
+  subject="agent image: $image_version — $(landed "$image_tag" "$AGENT_PATHS")"
+  subject="${subject:0:480}"
+  git tag -a "$new_image_tag" -m "Arbos agent image $image_version" "$target"
+  if $DRY_RUN; then
+    say "dry run: would tag $new_image_tag at ${target:0:8}"
+  else
+    git push -q origin "refs/tags/$new_image_tag"
+    say "agent image release: $new_image_tag at ${target:0:8}"
   fi
-  say "Mac release needed: $mac_change"
+  echo "channel=agent"
+  echo "publish=true"
+  echo "promote=true"
+  echo "sha=$target"
+  echo "version=$image_version"
+  echo "build=$(git rev-list --count "$target")"
+  echo "notes=$subject"
+  echo "tag=$new_image_tag"
+  exit 0
 fi
 
 # 4. version
@@ -227,14 +300,7 @@ if git rev-parse -q --verify "refs/tags/v$version" >/dev/null 2>&1; then
   exit 0
 fi
 
-# What landed: the subjects of the Mac-touching commits since the last stable tag, trimmed.
-# shellcheck disable=SC2086
-summary="$(git log --format=%s --no-merges "${last_tag:+$last_tag..}$target" -- $MAC_PATHS \
-  | sed -E 's/^fix\(feedback\): //; s/^(fix|feat|chore|docs|refactor|test|build|ci)(\([^)]*\))?: //; s/ *\[feedback [^]]*\]//g' \
-  | grep -v -E '^(release:|Merge )' | awk '!seen[$0]++ && n < 8 { n++; print }' \
-  | awk '{ if (length($0) > 72) { s = substr($0, 1, 72); sub(/ [^ ]*$/, "", s); print s "…" } else print }' \
-  | paste -sd ';' - | sed 's/;/; /g' || true)"
-[[ -n "$summary" ]] || summary="changes since ${last_tag:-the start}"
+summary="$(landed "$last_tag" "$MAC_PATHS")"
 if $hotfix; then summary="hotfix (released ahead of CI): $summary"; fi
 subject="release: $version — $summary"
 subject="${subject:0:480}"
