@@ -92,9 +92,9 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
     /// and only the short-row variant goes dark.
     ///
     /// **The precondition above is now met, and this flag still says `true` on purpose.**
-    /// `nudge` ends its drag with a stationary finger, so the travel is `nudgeStep` — 260 pt,
-    /// which is 29 pt inside this row's 289 pt window — instead of the 140-to-471 pt a fling
-    /// chose. "No gesture length this rig can ask for has a travel it can bound" is no longer
+    /// `nudge` ends its drag with a stationary finger, so the travel is a measured 250 pt — 39 pt
+    /// inside this row's 289 pt window, and constant to 1 pt over the 18 drags of run
+    /// 42135608026 — instead of the 140-to-471 pt a fling chose. "No gesture length this rig can ask for has a travel it can bound" is no longer
     /// true of this rig. What is missing is evidence, not mechanism: restoring these two arms
     /// is a claim about where a 72 pt row comes to rest, and the only instrument for that is a
     /// gate run. Two arms at roughly 250 s each would also be added to a job whose execution
@@ -116,9 +116,10 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
     /// barely moved — see `nudgeStep` for the measurements.
     ///
     /// `nudge` now moves the list by `nudgeStep` and by nothing else, so the count this needs is
-    /// arithmetic rather than a fit. `convergingTarget` is about 5 200 pt of content back from
-    /// the newest hit (148 row ids at a measured 35 pt pitch), which is twenty 260 pt drags.
-    /// Forty is a factor of two on a step that no longer varies.
+    /// arithmetic rather than a fit. Run 42135608026 took **18 drags, 0 dropped**, against the
+    /// twenty predicted from `convergingTarget` being ~5 200 pt of content back; the row comes
+    /// into reach a little before it is centred, which is the difference. Forty is a factor of
+    /// 2.2 on a step that no longer varies.
     private static let aimSearchDrags = 40
     /// How many drags may leave the result list exactly where it was, over the whole aim search,
     /// before this calls the rig dead rather than the budget short.
@@ -154,6 +155,20 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
     ///
     /// **Lower bound: cost.** Twenty drags of 260 pt cover the ~5 200 pt back to
     /// `convergingTarget`, inside `aimSearchDrags` with a factor of two to spare.
+    ///
+    /// **Measured on run 42135608026: 249 to 250 pt over 18 drags, mean 250, 0 dropped.** So the
+    /// travel is this number less about 10 pt, which is the pan recognizer's slop — the movement
+    /// it consumes deciding that a drag has begun. That shortfall is a constant, not a spread:
+    /// the whole 18-sample range is 1 pt, against 0-to-346 pt for the gesture this replaced. It
+    /// makes the margin to the 289 pt window 39 pt rather than the 29 pt predicted here.
+    ///
+    /// A second thing bounded travel bought, which was not predicted. The old rig left
+    /// `convergingTarget` low enough that `aimPoint` had to clamp the aim to the band's lowest
+    /// legal point: every passing run on record aimed at y457, exactly `aimBandBottomMargin`
+    /// above the chat bar, on the razor's edge that `6bfb3a31f` fell off when a tap landed 34 pt
+    /// inside the bar's strip. On 42135608026 the aim was the preferred point, y270, with 210 pt
+    /// of clearance instead of 24. A step that stops where it is told also stops rows where they
+    /// can be aimed at properly.
     private static let nudgeStep: CGFloat = 260
     /// How far inside the reachable band each end of a drag stays, so the finger neither starts
     /// on the search chrome nor ends on the chat bar. The same 24 pt as `aimBandMargin`.
@@ -434,6 +449,9 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
     /// | 41943299478 | 41 | 301 pt | 7 pt | never reached |
     /// | 42088714186 | 41 | **0 pt** | 0 pt | never reached |
     ///
+    /// And this change, on the same layout: run 42135608026 measured **249 to 250 pt over 18
+    /// drags, mean 250, none dropped** — a 1 pt range where the old gesture spanned 0 to 346.
+    ///
     /// A 120 pt ask that moves the list 346 pt is being carried by deceleration, not by the
     /// finger: the fling is 2.9 times the gesture and it is where all the travel lives. The
     /// three failures are the same gesture with the fling gone, and 301 pt is one healthy
@@ -452,7 +470,8 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
     ///
     /// The transcript's `ScrollView` sets `.defaultScrollAnchor(.bottom)` and no
     /// `scrollTargetBehavior`, so there is no snapping to fight: while a pan tracks, the content
-    /// follows the finger one for one. With no fling after the lift, travel is `nudgeStep`.
+    /// follows the finger one for one. With no fling after the lift, travel is `nudgeStep` less
+    /// the pan recognizer's slop — measured 250 pt for a 260 pt ask, and constant to 1 pt.
     ///
     /// **Every drag is a measurement.** The travel is printed per drag, against the step asked
     /// for, because the claim this whole change rests on is that the two are now the same number
