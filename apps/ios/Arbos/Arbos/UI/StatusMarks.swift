@@ -152,8 +152,7 @@ struct UnreadDot: View {
     @Environment(\.theme) private var theme
 
     var body: some View {
-        // status-dot: exception unread is a count, not a status (Jacob 2026-11-05)
-        Circle().fill(theme.unread)
+        Circle().fill(theme.unread)  // status-dot: exception unread is a count, not a status (Jacob 2026-11-05)
             .frame(width: Theme.unreadDot, height: Theme.unreadDot)
             .accessibilityLabel("Unread")
     }
