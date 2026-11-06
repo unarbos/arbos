@@ -14732,7 +14732,7 @@ pub(crate) fn job_fallback_prompt(
     partial: &str,
 ) -> String {
     let mut p = format!(
-        "[Arbos] Job \"{}\" ({}) could not be run: its worker failed {} times without a result (last error: {error}). The user has heard nothing about this.\n\nThe user originally asked (message id {user_msg_id}): {}\n",
+        "[Arbos] Job \"{}\" ({}) could not be run: its worker failed {} times without a result (last error: {error}).\n\nThe user originally asked (message id {user_msg_id}): {}\n",
         job.title,
         job.id,
         u32::from(JOB_WORKER_RETRIES) + 1,
@@ -14752,7 +14752,7 @@ pub(crate) fn job_fallback_prompt(
         ));
     }
     p.push_str(&format!(
-        "\nDo this work yourself now, in this turn: route `act` and use your own tools directly (web_search and web_fetch for anything on the web, bash and files for the rest), then deliver the answer with send_message, reply_to = {user_msg_id}, in the shape the finished job would have had: for research or a comparison the conclusion in one or two sentences, a markdown table with one row per item, then sources and caveats and one concrete next-step offer; anything else one short message. Do not call start_job for this ask. Do not say that anything stopped, failed, was retried or ran in the background, and do not ask whether to try again. Only if the work truly cannot be done here, say in one plain sentence what you could not do and what you need from the user."
+        "\nDo this work yourself now, in this turn: route `act` and use your own tools directly (web_search and web_fetch for anything on the web, bash and files for the rest), then deliver the answer with send_message, reply_to = {user_msg_id}, in the shape the finished job would have had: for research or a comparison the conclusion in one or two sentences, a markdown table with one row per item, then sources and caveats and one concrete next-step offer; anything else one short message. Do not call start_job for this ask, and do not ask whether to try again. if earlier messages in this chat said work was running, say in one sentence that it didn't finish and what you did instead. Only if the work truly cannot be done here, say in one plain sentence what you could not do and what you need from the user."
     ));
     p
 }
@@ -15590,6 +15590,20 @@ mod tests {
         assert!(p.contains("reply_to = m-ask"));
         assert!(p.contains("Do not call start_job"));
         assert!(p.contains("do not ask whether to try again"));
+        // Round 21, job 01M6QTWC1JZGSNKHH54ZAW2GNV: the prompt asserted the user had heard
+        // nothing and then forbade saying anything stopped. Where the chat had already been told
+        // the work started, those two together instructed the model to leave that claim standing.
+        // The replacement is unconditional — whether the chat really carries a claim is a fact
+        // the box does not persist yet, and reading it is 0.1.201 work.
+        assert!(!p.contains("The user has heard nothing about this"), "{p}");
+        assert!(!p.contains("Do not say that anything stopped"), "{p}");
+        assert!(
+            p.contains(
+                "if earlier messages in this chat said work was running, say in one sentence \
+                 that it didn't finish and what you did instead"
+            ),
+            "{p}"
+        );
         assert!(!p.contains("What the last worker had written"));
         assert!(!p.contains("corrected this work while it ran"));
         let p2 = job_fallback_prompt(&job, "m-ask", "", "", &[], "child exited", "Soda Tapia — ");
