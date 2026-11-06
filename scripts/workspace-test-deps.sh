@@ -132,9 +132,15 @@ $SUDO apt-get install -y -qq "${GPUI_PKGS[@]}"
 # Accepting a clang++ whose sibling clang is missing would hand the build a CC that does not
 # exist, which is a worse failure than downloading: it surfaces as a broken cc-rs invocation
 # somewhere unrelated rather than as a missing compiler here.
+# CLANG_SEARCH_GLOB is overridable so the selftest can point the search at a tree of stubs. The
+# floor and the precedence are the parts worth testing, and testing them against /usr/lib would
+# mean installing real compilers in order to assert about them.
+CLANG_SEARCH_GLOB="${CLANG_SEARCH_GLOB:-/usr/lib/llvm-*/bin/clang++}"
+
 find_usable_clang() {
   local c m
-  for c in $(ls -d /usr/lib/llvm-*/bin/clang++ 2>/dev/null | sort -rV) "$(command -v clang++ 2>/dev/null)"; do
+  # shellcheck disable=SC2086 # the glob is a search pattern and must stay unquoted to expand
+  for c in $(ls -d $CLANG_SEARCH_GLOB 2>/dev/null | sort -rV) "$(command -v clang++ 2>/dev/null)"; do
     [ -n "$c" ] && [ -x "$c" ] && [ -x "${c%++}" ] || continue
     m="$(clang_major "$c" || true)"
     case "$m" in ''|*[!0-9]*) continue ;; esac
@@ -160,7 +166,11 @@ if found_cxx="$(find_usable_clang)"; then
 else
   prefix="LLVM-${LLVM_RELEASE}-Linux-X64"
   url="https://github.com/llvm/llvm-project/releases/download/llvmorg-${LLVM_RELEASE}/${prefix}.tar.xz"
-  say "downloading ${prefix} (~1 GB; most of the one-time cost)"
+  # 1.88 GiB (2,019,005,384 bytes, the release API's size for the asset; ci.yml's own note agrees)
+  # and 543 MiB once the extract list below is unpacked. This said "~1 GB", understating the
+  # download by about half — and it is the figure anyone deciding whether to call this script
+  # reasons from, so it is worth being the measured one.
+  say "downloading ${prefix} (1.88 GiB, 543 MiB unpacked; most of the one-time cost)"
 
   rc=0
   for attempt in 1 2 3; do
@@ -180,6 +190,15 @@ else
 
   echo "${LLVM_SHA256}  /tmp/llvm.tar.xz" | sha256sum -c -
 
+  # The driver, the resource directory and libclang, and nothing else — the hermetic libc++ comes
+  # from libwebrtc, so unpacking the full toolchain would cost disk for files no build here reads.
+  #
+  # DO NOT TRIM THIS FURTHER WITHOUT READING THE NEXT SENTENCE. What is already absent is a C++
+  # standard library: clang unpacked this way is inert on its own, and `libstdc++-14-dev` from the
+  # apt half above is what makes it usable. Measured on an A/B with the apt step skipped, the
+  # first failure is not the version guard but `'algorithm' file not found` — a missing header
+  # that names neither clang nor this list, which is why it is recorded here, where someone
+  # deciding what else to drop will be looking.
   say "unpacking to ${LLVM_DIR}"
   $SUDO mkdir -p "$LLVM_DIR"
   $SUDO tar -I 'xz -T0 -d' -xf /tmp/llvm.tar.xz --strip-components=1 \
