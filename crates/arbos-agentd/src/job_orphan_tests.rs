@@ -430,12 +430,14 @@ fn a_cancel_that_accounted_for_everything_says_nothing_extra() {
         killed: 1,
         survivors: vec![],
         evidence: Evidence::Enumerated,
+        unread: None,
     })];
     let reaped = Sweep {
         found: 2,
         killed: 2,
         survivors: vec![],
         evidence: Evidence::Enumerated,
+        unread: None,
     };
 
     let line = crate::agent::stop_line(&stopped, &[], &reaped);
@@ -458,12 +460,14 @@ fn a_cancel_that_could_not_kill_unnamed_work_says_so_and_names_the_pid() {
         killed: 1,
         survivors: vec![],
         evidence: Evidence::Enumerated,
+        unread: None,
     })];
     let survived = Sweep {
         found: 1,
         killed: 0,
         survivors: vec![23536],
         evidence: Evidence::Enumerated,
+        unread: None,
     };
 
     let line = crate::agent::stop_line(&stopped, &[], &survived);
@@ -500,6 +504,7 @@ fn a_cancel_that_ended_no_job_still_reports_work_it_could_not_account_for() {
         killed: 0,
         survivors: vec![23536],
         evidence: Evidence::Enumerated,
+        unread: None,
     };
     let line = crate::agent::stop_line(&[], &[], &survived);
     assert!(

@@ -4,7 +4,7 @@
 //! remain (turn deadline, context window, spend, tool timeouts) are announced
 //! in the chat — never a silent stop.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -1109,6 +1109,29 @@ impl StoppedJob {
 
 /// How many leftover pids one chat remembers for [`Agent::hook_kill_allowed`].
 const LEFTOVER_PIDS_MAX: usize = 32;
+
+/// Carry the cause of an unconfirmed sweep into the audit record, machine-readably.
+///
+/// The note already says it in words, and prose is not something an operator or a canary should
+/// have to parse to find out why a sweep came back unconfirmed. So: `unconfirmed_because` is a
+/// stable token, and `sessions_not_read` names what was skipped.
+///
+/// Absent entirely when the sweep looked at everything it was asked about, by the same
+/// convention `processes_checked` follows — no field rather than a field asserting that nothing
+/// was wrong, which is the shape of claim this whole guard exists to stop.
+///
+/// Annotates the answer rather than replacing any part of it, and runs after the answer has
+/// been logged, so no return path out of `hook_stop_job` can lose its emission through this.
+/// That invariant, and why it is one, is stated at its first emission site below.
+fn annotate_unread(answer: &mut Value, unread: Option<&crate::isolation::Unread>) {
+    let Some(unread) = unread else {
+        return;
+    };
+    answer["unconfirmed_because"] = unread.cause.as_str().into();
+    if !unread.sessions.is_empty() {
+        answer["sessions_not_read"] = json!(unread.sessions);
+    }
+}
 
 /// What `stop_job` tells the model it may now say, which is decided by what the cancel actually
 /// achieved rather than by the word in the job row.
@@ -4722,35 +4745,84 @@ impl Agent {
     pub(crate) async fn reap_unreachable_workers(&self) -> Sweep {
         let Some(marked) = crate::isolation::marked_procs_all() else {
             tracing::warn!("cancel: /proc could not be read, so unreachable work is unknown");
-            return Sweep::default();
+            return Sweep::default()
+                .part_unread(crate::isolation::UnreadCause::ProcUnreadable, vec![]);
         };
         let mut dead: HashSet<String> = HashSet::new();
+        let mut unread: BTreeSet<String> = BTreeSet::new();
         for (_pid, mark) in marked {
             let Some(session) = crate::isolation::session_of(&mark) else {
                 continue;
             };
-            if dead.contains(session) {
+            if dead.contains(session) || unread.contains(session) {
                 continue;
             }
-            let was_a_worker = matches!(self.store.subagent(session), Ok(Some(_)));
-            let still_open = self.adapters.values().any(|a| a.is_open(session));
-            if was_a_worker && !still_open {
-                dead.insert(session.to_owned());
+            if !matches!(self.store.subagent(session), Ok(Some(_))) {
+                continue;
+            }
+            match self.session_is_over(session) {
+                Some(true) => {
+                    dead.insert(session.to_owned());
+                }
+                // Live, or unreadable. Both are kept, and only the second is worth a word.
+                Some(false) => {}
+                None => {
+                    unread.insert(session.to_owned());
+                }
             }
         }
-        // The walk above read `/proc` and no process on the box belongs to a worker that is
-        // over. There was nothing to check, which is a different sentence from "I checked and
-        // it is dead" and is now recorded as one.
+        let unread: Vec<String> = unread.into_iter().collect();
+        if !unread.is_empty() {
+            tracing::warn!(
+                sessions = ?unread,
+                cause = crate::isolation::UnreadCause::AdapterLockContended.as_str(),
+                "a sweep could not read whether these sessions are still open, so they are kept \
+                 and nothing is claimed about their processes"
+            );
+        }
+        // Conditional on purpose, and this is the part that is easy to get wrong.
+        // `nothing_to_check` is [`Evidence::Nothing`], which `stop_job_note` turns into "there
+        // are no processes to account for" — a positive all-clear. A dead set that is empty
+        // only because a session could not be read has not earned that sentence: it is the
+        // evidence of success read off a field that records a failure to look, which is bug
+        // AE's shape and bug AP's shape, here a third time.
         if dead.is_empty() {
-            return Sweep::nothing_to_check();
+            return match unread.is_empty() {
+                true => Sweep::nothing_to_check(),
+                false => Sweep::default()
+                    .part_unread(crate::isolation::UnreadCause::AdapterLockContended, unread),
+            };
         }
         // Blocking: the reap signals, sleeps and re-reads `/proc`, which must not sit on a
         // runtime thread the rest of the box shares.
-        tokio::task::spawn_blocking(move || {
+        let sweep = tokio::task::spawn_blocking(move || {
             crate::isolation::reap_orphan_workers(|session| dead.contains(session))
         })
         .await
-        .unwrap_or_default()
+        .unwrap_or_default();
+        // However well the enumerated part went, part of the box went unlooked-at.
+        match unread.is_empty() {
+            true => sweep,
+            false => sweep.part_unread(crate::isolation::UnreadCause::AdapterLockContended, unread),
+        }
+    }
+
+    /// Is this session provably over? `Some(true)` over, `Some(false)` live, [`None`] unreadable.
+    ///
+    /// `Some(true)` needs **every** adapter to have answered, because one adapter's "not mine"
+    /// says nothing about a session another adapter could not be read for. An `any()` over the
+    /// adapters would let one adapter's `Some(false)` mask another's `None` and hand the caller
+    /// a licence to kill that no adapter ever gave it.
+    fn session_is_over(&self, session: &str) -> Option<bool> {
+        let mut all_answered = true;
+        for a in self.adapters.values() {
+            match a.is_open(session) {
+                Some(true) => return Some(false),
+                Some(false) => {}
+                None => all_answered = false,
+            }
+        }
+        all_answered.then_some(true)
     }
 
     /// Reap what no job row names, and remember any of it that would not die.
@@ -5581,13 +5653,15 @@ impl Agent {
                 note = %note,
                 "stop_job answered"
             );
-            return Ok(json!({
+            let mut answer = json!({
                 "stopped": [],
                 "asks_cancelled": pending.len(),
                 "unnamed_processes_still_alive": unreachable.survivors,
                 "all_cancelled": true,
                 "note": note,
-            }));
+            });
+            annotate_unread(&mut answer, unreachable.unread.as_ref());
+            return Ok(answer);
         }
         let note = stop_job_note(&stopped, &unreachable);
         // Verbatim, into agentd's own log, beside the sweep it was built from.
@@ -5663,6 +5737,7 @@ impl Agent {
         if let Some(checked) = unreachable.checked() {
             answer["unnamed_processes_checked"] = checked.into();
         }
+        annotate_unread(&mut answer, unreachable.unread.as_ref());
         Ok(answer)
     }
 
@@ -11982,7 +12057,10 @@ impl Agent {
                     Some(harness.as_str()),
                 )
                 .await;
-        } else if !adapter.is_open(&subagent_id) {
+        // `unwrap_or(false)`: a lock this could not take still means "resume it", which is what
+        // it meant before. Not a kill decision, so the three-state answer is not needed here —
+        // and `resume` is itself a no-op on a session that turns out to be open.
+        } else if !adapter.is_open(&subagent_id).unwrap_or(false) {
             match adapter.resume(&subagent_id).await {
                 Ok(()) => {
                     let _ = self

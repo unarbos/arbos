@@ -61,7 +61,8 @@ async fn a_workerless_open_job(agent: &crate::agent::Agent) -> String {
 ///
 /// Red against the unfixed code: the mark walk returns an empty vector for a `/proc` it cannot
 /// read, `dead.is_empty()` is then true, `reap_unreachable_workers` returns
-/// `Sweep::nothing_to_check()` with `checked: true`, and the note is the one that tells the
+/// `Sweep::nothing_to_check()` — which reported checked at the time, and is `Evidence::Nothing`
+/// now — and the note is the one that tells the
 /// model to say every process was checked and is dead. Nothing in the answer contradicts it,
 /// because the reap's own verdict never reached the sentence at all.
 ///
@@ -174,6 +175,7 @@ fn the_chat_line_promises_nothing_more_arrives_only_when_the_reap_could_look() {
             killed: 1,
             survivors: Vec::new(),
             evidence: Evidence::Enumerated,
+            unread: None,
         },
     }];
 

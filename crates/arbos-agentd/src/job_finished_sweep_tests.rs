@@ -420,6 +420,7 @@ fn a_reap_that_killed_everything_it_found_still_says_so() {
         // Enumerated: four processes read back by pid after the signal. The whole point of the
         // case is that this outcome used to be reported as silence.
         evidence: Evidence::Enumerated,
+        unread: None,
     };
     let line = crate::agent::stop_line(&[], &[], &swept);
     assert!(
@@ -449,6 +450,7 @@ fn a_reap_that_found_nothing_stays_silent() {
         survivors: vec![],
         // Nothing to check rather than a confirmed clean: no worker of this kind existed.
         evidence: Evidence::Nothing,
+        unread: None,
     };
     assert_eq!(crate::agent::stop_line(&[], &[], &nothing), "");
 }
@@ -467,6 +469,7 @@ fn the_merged_line_says_what_each_sweep_did_without_confusing_them() {
         killed: 3,
         survivors: vec![],
         evidence: Evidence::Enumerated,
+        unread: None,
     };
     let line = crate::agent::stop_line(&[a_cancelled_job(2)], &[], &swept);
 
@@ -497,6 +500,7 @@ fn a_reap_that_could_not_look_takes_the_promise_with_it() {
         killed: 0,
         survivors: vec![],
         evidence: Evidence::Unconfirmed,
+        unread: None,
     };
     let line = crate::agent::stop_line(&[a_cancelled_job(2)], &[], &blind);
     assert!(
@@ -520,6 +524,7 @@ fn a_cancelled_job(killed: usize) -> crate::agent::StoppedJob {
             killed,
             survivors: vec![],
             evidence: Evidence::Enumerated,
+            unread: None,
         },
     }
 }
@@ -536,6 +541,7 @@ fn a_stop_that_cancelled_only_asks_says_so() {
         survivors: vec![],
         // Nothing to check rather than a confirmed clean: no worker of this kind existed.
         evidence: Evidence::Nothing,
+        unread: None,
     };
     let line = crate::agent::stop_line(&[], &["a".to_owned(), "b".to_owned()], &nothing);
     assert!(

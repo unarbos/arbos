@@ -97,6 +97,8 @@ mod skills;
 mod status;
 mod steer_gate;
 mod store;
+#[cfg(test)]
+mod sweep_contention_tests;
 mod sync;
 mod tree;
 mod truncate;
