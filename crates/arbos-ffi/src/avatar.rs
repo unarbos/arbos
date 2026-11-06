@@ -70,7 +70,7 @@ pub fn disc_color_hex(index: u8) -> String {
     disc::fill(index).hex()
 }
 
-/// The sentinel stored for "no picture": the name's initial on a neutral grey disc.
+/// The sentinel stored for "no picture", which resolves at read time to the id's own colour.
 #[uniffi::export]
 pub fn disc_neutral_index() -> u8 {
     disc::NEUTRAL
