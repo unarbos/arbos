@@ -11081,12 +11081,12 @@ impl Agent {
         // And again now the slots are in hand, because acquiring them is a wait of unbounded
         // length and a stop can land anywhere inside it.
         //
-        // Bug AL, Jacob's Test5 round 18: the check above claimed to cover "a lock or a slot"
-        // and sat before the slot wait, so it covered only the lock. `status18g` was queued for
-        // a slot when the user cancelled it, the row was correctly set to `cancelled`, the slot
-        // then freed, and the line below overwrote the state with `running` and ran the job to
-        // completion — 03:32:40Z to 03:38:00Z, with no cancel anywhere in its life. A cancel was
-        // fully correct and was overtaken by a start.
+        // Bug AN: the check above claimed to cover "a lock or a slot" and sat before the slot
+        // wait, so it covered only the lock. A stop landing in the slot wait wrote `cancelled`
+        // to the row; when the slot freed, the line below overwrote it with `running` and the
+        // job ran to completion. The cancel was fully correct and was overtaken by a start —
+        // and because `set_job_state` clears `ended_at` on the way to `running`, the row kept
+        // no trace that the job had ever been stopped.
         if let Some(j) = &job {
             if self.job_was_cancelled(&j.id) {
                 self.stop_before_starting(&j.id, host, &msg_id).await;

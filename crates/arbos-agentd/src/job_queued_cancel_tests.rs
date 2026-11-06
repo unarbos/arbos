@@ -1,20 +1,21 @@
-//! Bug AL: a job cancelled while it waited for a slot started anyway and ran to completion.
+//! Bug AN: a job cancelled while it waited for a slot started anyway and ran to completion.
 //!
-//! Jacob, Test5 round 18 (2026-11-06, agentd 0.1.198), job `status18g`. He asked to cancel the
-//! six longest jobs. `g` was `queued` at the time — waiting for one of the four
-//! [`SUBAGENT_MAX_CONCURRENT`] slots — and `Job::is_open()` covers `queued`, so `stop_jobs`
-//! matched it and wrote `cancelled` to its row. It then ran 03:32:40Z to 03:38:00Z with no
-//! cancel anywhere in its life.
+//! A job sits `queued` while it waits for one of the four [`SUBAGENT_MAX_CONCURRENT`] slots, and
+//! `Job::is_open()` covers `queued`, so a stop matches it and writes `cancelled` to its row.
+//! When the slot frees, the job starts regardless.
 //!
-//! The cancel was not wrong. It was **overtaken by a start**, which is a worse shape than a
-//! cancel that misses: every surface told the truth at the time it spoke, and the row ended up
-//! with no trace that the job had ever been stopped.
+//! The cancel is not wrong. It is **overtaken by a start**, which is a worse shape than a cancel
+//! that misses: every surface tells the truth at the time it speaks, and the row ends up with no
+//! trace that the job was ever stopped.
 //!
 //! `run_subagent` checked for a stop in exactly one place, above the slot wait, under a comment
 //! that claimed to cover "a lock or a slot". The slot is acquired *after* that line, so the
 //! check covered the lock only. On the far side of a wait of unbounded length the start wrote
 //! `running` over `cancelled` — and `set_job_state` clears `ended_at` on the way to `running`,
 //! so the cancel was erased from the row rather than merely superseded.
+//!
+//! The evidence for all of this is the behavioural case below, which is red without the fix and
+//! reports the defect as `["done"]`: the job was cancelled and then ran to completion.
 
 use std::time::Duration;
 
@@ -64,7 +65,7 @@ async fn wait_for(what: &str, mut ready: impl FnMut() -> bool) {
 /// A job that was cancelled while it waited for a slot must not start when the slot frees.
 ///
 /// The slots are all held by the test, so the job cannot reach its start until the test lets it,
-/// and the cancel therefore lands squarely inside the slot wait — which is the window bug AL
+/// and the cancel therefore lands squarely inside the slot wait — which is the window bug AN
 /// lives in and the one the old check sat above.
 ///
 /// # The one part of this that is not deterministic, and what it would cost you
@@ -189,7 +190,7 @@ async fn a_job_cancelled_while_it_waited_for_a_slot_never_starts() {
         "the stop is recorded before the slot frees"
     );
 
-    // Now let it through. This is the moment bug AL happened on.
+    // Now let it through. The slot freeing is the moment bug AN turns on.
     drop(held);
     let _ = tokio::time::timeout(Duration::from_secs(10), runner).await;
 
@@ -212,7 +213,7 @@ async fn a_job_cancelled_while_it_waited_for_a_slot_never_starts() {
 /// The row-level backstop, stated on its own so it survives a rewrite of the case above: no path
 /// may move a cancelled job to `running`.
 ///
-/// This is what made bug AL invisible after the fact. The start overwrote the state *and*
+/// This is what makes bug AN invisible after the fact. The start overwrote the state *and*
 /// cleared `ended_at`, so the finished row read as an ordinary completed job and the cancel left
 /// no mark on it at all.
 #[test]
@@ -255,13 +256,14 @@ fn a_cancelled_job_can_still_be_requeued_by_a_restart() {
     assert_eq!(store.job(JOB).unwrap().unwrap().state, "queued");
 }
 
-/// A queued job is nominable as one of "the six longest", so the selection is not what lost
-/// `status18g`.
+/// A queued job is nominable as one of "the longest", so the selection is not where this defect
+/// lives — pinned here because the first theory of the bug was that it was.
 ///
 /// [`JobRow::elapsed_s`] falls back to `created_at` when there is no `started_at`, so a job that
 /// has only ever waited still reports a duration, and it grows. A long-queued job can therefore
-/// rank above a short-running one — which is the right answer, and it rules out the theory that
-/// the ranking silently dropped `g` before `stop_jobs` was ever asked about it.
+/// rank above a short-running one, which is the right answer: the wait is time the user has been
+/// waiting too. So a queued job really does reach `stop_jobs`, and the start path is the only
+/// place left for the stop to be lost.
 #[test]
 fn a_queued_job_reports_a_duration_and_can_rank_as_one_of_the_longest() {
     let store = job_store();

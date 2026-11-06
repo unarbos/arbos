@@ -703,7 +703,7 @@ impl Store {
     /// result arrives, and that line is the true account of what it finished with.
     /// Move a job to `state`.
     ///
-    /// A cancelled job cannot be moved to `running`, and that clause is the backstop for bug AL
+    /// A cancelled job cannot be moved to `running`, and that clause is the backstop for bug AN
     /// rather than decoration. `run_subagent` waits for a subagent slot of unbounded length
     /// before it starts a job, a stop can land anywhere inside that wait, and the start then
     /// wrote `running` straight over `cancelled` — which this statement was happy to do, and
