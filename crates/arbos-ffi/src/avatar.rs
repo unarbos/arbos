@@ -125,8 +125,6 @@ pub struct AgentIdentity {
     pub name: String,
     pub handle: String,
     pub disc_color: u8,
-    /// The card says "no picture": draw the name's initial on a neutral grey disc.
-    pub neutral: bool,
     pub color_index: u8,
     pub image_key: Option<String>,
     /// Stamp of the copy drawn; part of any picture cache key.
@@ -141,7 +139,6 @@ impl From<identity::AgentIdentity> for AgentIdentity {
             name: a.name,
             handle: a.handle,
             disc_color: a.disc_color,
-            neutral: a.neutral,
             color_index: a.color_index,
             image_key: a.image_key,
             avatar_version: a.avatar_version,

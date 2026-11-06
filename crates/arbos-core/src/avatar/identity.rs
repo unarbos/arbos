@@ -72,12 +72,9 @@ pub struct AgentIdentity {
     pub name: String,
     /// `@slug` (without the `@`).
     pub handle: String,
-    /// The disc colour in effect (owner's pick or the automatic one). Meaningless while
-    /// `neutral`.
+    /// The disc colour in effect: the owner's pick, or the automatic one when the card stores
+    /// none or the `disc::NEUTRAL` sentinel. Always drawable.
     pub disc_color: u8,
-    /// The card says "no picture" (`disc::NEUTRAL`, Jacob 2026-10-25): draw the name's initial
-    /// on a neutral grey disc instead of the colour.
-    pub neutral: bool,
     /// D79 colour index, for the surfaces that draw initials.
     pub color_index: u8,
     /// The picture that wins over the disc, when the agent has one.
@@ -154,7 +151,6 @@ pub fn resolve<'c>(
                 name: display_name(Some(&card.name), handle),
                 handle: card_handle,
                 disc_color: disc::color_for(&card.id, card.disc_color),
-                neutral: disc::is_neutral(card.disc_color),
                 color_index: super::index_for(&card.id, card.color_index),
                 image_key: card.image_key.clone().filter(|k| !k.is_empty()),
                 avatar_version: card.avatar_version,
@@ -178,7 +174,6 @@ pub fn resolve<'c>(
                     .or_else(|| name.map(agent_slug))
                     .unwrap_or_default(),
                 disc_color: disc::default_color(seed),
-                neutral: false,
                 color_index: super::color_index(seed),
                 image_key: None,
                 avatar_version: 0,
@@ -401,9 +396,8 @@ mod tests {
         );
         assert_eq!(r.handle, "rail-layout-bot");
         assert_eq!(r.image_key, None);
-        assert!(!r.neutral);
 
-        // 9. A neutral card (Create sheet, nothing picked) says so; its colour is not drawn.
+        // 9. A card storing the sentinel draws the id's own colour, not a grey disc.
         let neutral = [AgentCard {
             disc_color: Some(disc::NEUTRAL),
             ..card("01N", "Field notes")
@@ -416,7 +410,8 @@ mod tests {
             },
             &neutral,
         );
-        assert!(r.neutral);
+        assert_eq!(r.disc_color, disc::default_color("01N"));
+        assert!(r.disc_color < disc::COLOR_COUNT);
         assert_eq!(r.name, "Field notes");
     }
 
