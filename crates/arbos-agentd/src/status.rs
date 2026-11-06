@@ -726,8 +726,16 @@ impl Agent {
             tracing::info!(chat_id, "quick reply rate limit; silent queue");
             (SideKind::Task, String::new())
         };
-        // Guidance needs a user turn of this chat to steer; otherwise it queues like a task.
-        let kind = if kind == SideKind::Guide && !snap.steerable {
+        // Guidance needs somewhere to land: a user turn of this chat, or a job of this chat that
+        // can take the correction (`handle_steer` tries the job when no turn is running).
+        // `steerable` is set only while a turn holds the lock, so with a job as the running work
+        // every correction used to be demoted here and queued — and a queued correction becomes
+        // its own worker, which redoes the task and posts its own file (bug AG). With neither a
+        // turn nor a job it really is a new ask, and queues like a task.
+        let kind = if kind == SideKind::Guide
+            && !snap.steerable
+            && !self.correction_has_a_job_to_reach(chat_id)
+        {
             SideKind::Task
         } else {
             kind
@@ -786,7 +794,15 @@ impl Agent {
                 "model": model, "waited_ms": t_wait.elapsed().as_millis() as u64, "steerable": snap.steerable,
             })),
         );
-        self.mark_quick_noted(chat_id, turn_started);
+        // Only a status note is rationed. #1448 caps the *bubbles* a waiting user gets, and a
+        // guide writes none — it steers, and the working row says so. Spending the ration on a
+        // guide stopped every later message of the same wait being read at all: the next one
+        // returned `Queued` from `already_quick_noted` with no model call and no decision row,
+        // so a burst of corrections queued unclassified and each became its own worker (bug AG,
+        // `r18steer`: four guides classified, the three after them not).
+        if kind == SideKind::Status {
+            self.mark_quick_noted(chat_id, turn_started);
+        }
         if kind != SideKind::Status {
             // Queued or steered: the working row carries it; nothing in the transcript until
             // the real answer. The presence line names what was taken, briefly.
