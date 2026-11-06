@@ -13197,6 +13197,14 @@ impl Agent {
     /// AJ) is what that reads like from outside — eight heavy jobs, five workers dead, and the
     /// box reporting `running` a minute later because its pi was fine, which it was. A caller
     /// that wants to know whether the box's *work* is getting done has to ask separately.
+    ///
+    /// Forest on 0.1.200 showed the same split from the other direction, and this is the reading
+    /// `jobs_open` exists to make legible: a real five-death escalation logged `deaths=5
+    /// killed=0`, and the live workers beside it were spared — [`Self::reap_unreachable_workers`]
+    /// treats a session an adapter still reports open as not collectable — after which their jobs
+    /// finished and posted their results. The box called itself degraded over work that was
+    /// proceeding normally. Both lines are honest about pi; neither is evidence about the jobs,
+    /// in either direction.
     pub fn is_healthy(&self) -> bool {
         if self.pi_degraded.load(Ordering::SeqCst) {
             return false;
