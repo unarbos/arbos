@@ -32,6 +32,9 @@ mod job_background_claim_tests;
 mod job_backgrounded;
 #[cfg(test)]
 mod job_cancel_tests;
+mod job_delivery;
+#[cfg(test)]
+mod job_failure_report_tests;
 #[cfg(test)]
 mod job_leftover_tests;
 #[cfg(test)]
