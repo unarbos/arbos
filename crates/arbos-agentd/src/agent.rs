@@ -15013,6 +15013,21 @@ impl Agent {
         self.open_row(host, t, "result").await;
     }
 
+    /// Test seam: read the row-less asks this chat holds, without cancelling them.
+    ///
+    /// [`Agent::cancel_pending_asks`] is the only other way to see the held set and it cancels
+    /// what it reads, so a test that waited on it would destroy the state it was waiting for.
+    /// This is what lets the bug AL cases wait for the hold itself rather than sleep for a
+    /// period chosen to be long enough — see `rowless_cancel_entrypoint_tests`.
+    pub(crate) async fn test_held_asks(&self, chat_id: &str) -> Vec<String> {
+        self.pending_asks
+            .lock()
+            .await
+            .get(chat_id)
+            .map(|held| held.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
     /// Test seam: put a main pi child in the slot (or empty it), the way `respawn_pi` and the
     /// supervisor do. A box with no pi binary cannot start one for itself, so bug V's tests
     /// stand a scripted child in for it.
