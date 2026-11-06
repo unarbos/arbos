@@ -70,6 +70,55 @@ Run agentd suites from a checkout outside `/tmp`. That is a consequence of the r
 Record the worktree path beside any local test count reported as gate evidence, so a number can be
 re-read later against the class it was measured in.
 
+## Gate 4 on a Swift leg: a stable absence can be a counting artefact
+
+Gate 4 compares test **names** across a rebase and adjudicates anything missing as a dropped test.
+On a Swift leg a name can go missing for a reason that has nothing to do with the diff.
+
+xcodebuild interleaves its own status writes into the result stream and bisects result lines. In
+the clone phase each case emits exactly **one** line — its verdict, with no separate `started`
+line — so a bisected line removes the test from the log entirely. It is invisible to a verdict
+count **and** to a unique-name count, which is why two independent counts can agree with each
+other and both be short by the same one.
+
+**The victim is not arbitrary.** Measured across two logs from different pull requests, the cut
+line was the *same* test both times — `SearchSettingsTests.testEveryListedSettingsPa…`, at line
+12934 and line 12953, with different junk interleaved. It correlates with position in the run,
+where the end-of-testing status writes land.
+
+That is what makes it dangerous here rather than merely annoying:
+
+- An **arbitrary** miss differs between base and head, so it shows up as noise and invites a
+  second look.
+- A **repeated** miss is absent from base *and* head. It does not look like noise. It looks like a
+  stable dropped test — the exact signature the dropped-test rule exists to catch — and re-running
+  reproduces it, so scrutiny confirms rather than dispels it.
+
+The standing rule then asks the author to prove a behaviour is still asserted somewhere, for a
+test nobody removed. That is a false accusation that survives review.
+
+**So before adjudicating any dropped name on a Swift leg, check for a truncated line carrying it.**
+`swiftcount.sh counts` refuses to print a count while any line is unreadable, and
+`swiftcount.sh recover` names the test behind the fragment. Use them. This paragraph is here for
+the case the tooling does not cover: the adjudicator greping by hand under time pressure, who is
+who it will usually be.
+
+A one-name discrepancy on a Swift leg is more likely to be this than a genuine drop.
+
+### The worked arithmetic, from run 42277644010
+
+| | Figure |
+| --- | --- |
+| Unit verdicts, clean lines | 550 |
+| Unit verdict, truncated | 1 |
+| UI passes | 55 |
+| **Executed and passed** | **606** |
+| UI skips | 13 |
+| **Declared in the bundle** | **619** |
+
+619 = 606 + 13. Counting only clean lines gives 550 unit and so 605 passing and 618 declared —
+both one short, in the same term, with nothing in the log saying so.
+
 ## `image.yml`: the step that always fails is load-bearing
 
 `Register the Daytona snapshot` in `image.yml` has failed on **every** image run since 0.1.183 —
