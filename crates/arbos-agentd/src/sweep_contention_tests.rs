@@ -328,6 +328,68 @@ fn has_marked_session(session: &str) -> bool {
         .any(|(_, mark)| crate::isolation::session_of(mark) == Some(session))
 }
 
+/// The negative control, and it pins a cause of [`Evidence::Nothing`] that nothing else pins.
+///
+/// `Nothing`'s doc comment names two causes — "no worker was ever started, **or no candidate
+/// survived the filter**" — and only the first was covered. `a_cancel_whose_scan_ran_and_found_
+/// nothing_says_there_was_nothing_to_check` reaches the same branch through a job that never had
+/// a worker, so the second cause had no test of its own.
+///
+/// This is that cause literally: the mark walk reads the whole box and does enumerate marked
+/// processes of a real worker session, and the filter — is this session provably over? — selects
+/// none of them, because the session is open. `Nothing` is the right answer and not the lie the
+/// case above is about, and the distinction is the handle: a handle-based enumeration can be
+/// aimed at the wrong cgroup, so empty is unconfirmed, whereas the mark walk reads every process
+/// on the box and has no wrong place to look, so empty is a fact about the box.
+///
+/// **It is also the control for the case above.** That one asserts a skip forces `Unconfirmed`;
+/// this one asserts the branch still reaches `Nothing` when nothing was skipped. Without it the
+/// conditional early return could fire on every call — never claiming anything, never wrong, and
+/// useless — and both of this file's other assertions would still pass.
+#[tokio::test]
+async fn a_sweep_whose_filter_spares_everything_it_enumerated_has_nothing_to_account_for() {
+    let fx = Fixture::new();
+    let (agent, host) = a_box(&fx).await;
+    let live_job = a_job(&agent, &host).await;
+    let live = a_started_session(&agent, &live_job).await;
+    wait_for("the live worker's detached writers start", || {
+        fx.alive().len() >= 2
+    })
+    .await;
+    let running = fx.alive();
+
+    // No stop in flight, so every adapter answers about every session.
+    let sweep = agent.reap_unreachable_workers().await;
+
+    assert_eq!(
+        fx.alive(),
+        running,
+        "nothing of a live worker may be collected (pids {:?})",
+        fx.writer_pids()
+    );
+    assert!(
+        has_marked_session(&live),
+        "the walk must have had this worker's processes to enumerate, or the filter was handed \
+         an empty box and this measures the wrong cause"
+    );
+    assert_eq!(
+        sweep.evidence,
+        Evidence::Nothing,
+        "the box was read and no candidate survived the filter, which is exactly \
+         `Evidence::Nothing`: {sweep:?}"
+    );
+    assert_eq!(
+        sweep.unread, None,
+        "nothing was skipped, so nothing may be reported as unread: {sweep:?}"
+    );
+    assert_eq!(
+        sweep.checked(),
+        None,
+        "and there is no `processes_checked` to report over a question that does not arise"
+    );
+    assert!(sweep.clean(), "{sweep:?}");
+}
+
 /// The measurement. Two live sessions on one adapter; one of them is being stopped, so the
 /// adapter's children map is locked; the sweep runs inside that window.
 ///

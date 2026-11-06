@@ -1120,8 +1120,9 @@ const LEFTOVER_PIDS_MAX: usize = 32;
 /// convention `processes_checked` follows — no field rather than a field asserting that nothing
 /// was wrong, which is the shape of claim this whole guard exists to stop.
 ///
-/// Annotates the answer rather than replacing any part of it, so no return path out of
-/// `hook_stop_job` can lose its `stop_job answered` line through this.
+/// Annotates the answer rather than replacing any part of it, and runs after the answer has
+/// been logged, so no return path out of `hook_stop_job` can lose its emission through this.
+/// That invariant, and why it is one, is stated at its first emission site below.
 fn annotate_unread(answer: &mut Value, unread: Option<&crate::isolation::Unread>) {
     let Some(unread) = unread else {
         return;
