@@ -274,6 +274,15 @@ jobs:
         run: |
           set -euo pipefail
           major="${LLVM_RELEASE%%.*}"
+          # The floor is a literal, deliberately not derived from LLVM_RELEASE. Derived from the
+          # pin it would be self-satisfying — every version matches itself — and the first sign of
+          # a lowered pin would be an error deep in a libc++ header, which is what the comment
+          # above says this step exists to prevent.
+          webrtc_min_clang=21
+          if [ "$major" -lt "$webrtc_min_clang" ]; then
+            echo "::error title=clang floor::LLVM_RELEASE=${LLVM_RELEASE} gives clang ${major}, below webrtc-sys's floor of ${webrtc_min_clang}. libwebrtc's hermetic libc++ needs clang 21 or later."
+            exit 1
+          fi
           prefix="LLVM-${LLVM_RELEASE}-Linux-X64"
           url="https://github.com/llvm/llvm-project/releases/download/llvmorg-${LLVM_RELEASE}/${prefix}.tar.xz"
           rc=0
