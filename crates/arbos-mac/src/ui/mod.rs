@@ -56,6 +56,7 @@ pub mod profile_target;
 pub mod profiles;
 pub mod rail;
 pub mod reactions;
+pub mod reveal;
 pub mod routines;
 pub mod secret_card;
 pub mod secrets;

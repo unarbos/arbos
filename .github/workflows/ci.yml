@@ -87,6 +87,10 @@ jobs:
           shellcheck -S warning scripts/*.sh scripts/release/*.sh scripts/runner/*.sh scripts/feedback/*.sh scripts/merge/*.sh image/*.sh
           # One avatar resolver on both platforms (ARB-394): no surface draws an agent picture outside it.
           ./scripts/avatar-lint.sh
+          # One Glass-aware fill (#2801): no new opaque theme token is painted where the desktop
+          # shows through. Runs here rather than as a Rust test because the shape it guards is a
+          # source pattern, and Layout answers in seconds where the rust job takes tens of minutes.
+          ./scripts/glass-lint.sh
           # Which verdicts refuse a merge. No network, no credentials, ~0.1s.
           ./scripts/merge/selftest.sh
           # The deploy worker's pure helpers, including the agentd roll hold: it lifts by hand only, and a

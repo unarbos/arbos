@@ -605,14 +605,12 @@ fn preview(state: &AppState, space: &Project) -> String {
     let text = m.plain_text();
     let line = text.lines().next().unwrap_or_default();
     let who = if space.is_people() {
-        if state.is_mine(m) {
-            "You".to_string()
-        } else {
-            m.sender_handle
-                .as_deref()
-                .map(|h| format!("@{h}"))
-                .unwrap_or_default()
-        }
+        people_preview_who(
+            space.is_people_group(),
+            state.is_mine(m),
+            &m.sender,
+            m.sender_handle.as_deref(),
+        )
     } else if m.role == Role::User {
         "You".to_string()
     } else {
@@ -623,6 +621,28 @@ fn preview(state: &AppState, space: &Project) -> String {
     } else {
         format!("{who}: {}", plain(line))
     }
+}
+
+/// The label before a people chat's preview text: "You" for my own line, `@handle`
+/// for anyone else — but not for the other person of a 1:1 chat, whom the row's own
+/// header already names. Labelling them there printed the handle twice, "Affinity @Z"
+/// over "@Z: hahahaha" ([feedback doubled-sender-prefix-2026-10-30], seen again
+/// 2026-11-05). Only a 1:1 row carries `@handle` beside its name (`handle` above is
+/// gated on `!is_people_group`), so a group row — headed by the group — keeps its
+/// label, and so does an agent in a 1:1 chat, which is not the person the header names.
+pub(crate) fn people_preview_who(
+    group: bool,
+    mine: bool,
+    sender: &str,
+    sender_handle: Option<&str>,
+) -> String {
+    if mine {
+        return "You".into();
+    }
+    if !group && sender.starts_with("user:") {
+        return String::new();
+    }
+    sender_handle.map(|h| format!("@{h}")).unwrap_or_default()
 }
 
 /// "9:54 PM" today, "Yesterday", a weekday within the week, else "Oct 3".
@@ -3958,6 +3978,205 @@ mod channel_preview_tests {
         assert_eq!(channel_preview_who("", "", me), "", "no row yet");
         // The fixture names its senders outright (no member string).
         assert_eq!(channel_preview_who("", "Sami", me), "Sami");
+    }
+}
+
+#[cfg(test)]
+mod people_preview_tests {
+    //! A people row names the sender in its preview only where the row's own header
+    //! does not ([feedback doubled-sender-prefix-2026-10-30], reported again by Scout
+    //! 2026-11-05: a 1:1 row read "Affinity @Z" over "@Z: hahahaha", the same person
+    //! twice). A 1:1 row carries `@handle` beside the name, a group row does not — so
+    //! the prefix belongs to the group row alone.
+    use futures::future::BoxFuture;
+    use gpui::{AppContext as _, TestAppContext};
+    use tokio::sync::mpsc;
+
+    use crate::app::AppState;
+    use crate::model::{AccountView, Chat, Message, Person, Project, SpaceKind};
+    use crate::sync::{ClientCommand, SyncEvent, SyncSource};
+    use crate::ui::theme::{Surface, Theme};
+
+    use super::preview_for_tests;
+
+    struct Idle;
+
+    impl SyncSource for Idle {
+        fn name(&self) -> &'static str {
+            "idle"
+        }
+
+        fn run(
+            self: Box<Self>,
+            _events: mpsc::UnboundedSender<SyncEvent>,
+            _commands: mpsc::UnboundedReceiver<ClientCommand>,
+        ) -> BoxFuture<'static, anyhow::Result<()>> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    /// Scout's reporter: the display name and the handle differ, so the row header
+    /// draws both ("Affinity @Z") and a repeated handle is unmistakable.
+    fn affinity() -> Person {
+        serde_json::from_value(serde_json::json!({
+            "id": "gh_461", "handle": "Z", "name": "Affinity", "status": "active",
+        }))
+        .expect("person")
+    }
+
+    fn chat(room: &str, space: &str, at: u64) -> Chat {
+        serde_json::from_value(serde_json::json!({
+            "id": room, "project_id": space, "title": "Main", "is_pinned": true,
+            "is_system": false, "unread": false, "last_message_at": at,
+        }))
+        .expect("chat")
+    }
+
+    fn message(room: &str, sender: &str, handle: &str, text: &str, at: u64) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "id": format!("m-{room}"), "chatId": room, "role": "user", "sender": sender,
+            "senderHandle": handle, "senderName": "Affinity", "status": "done",
+            "createdAt": at, "completedAt": at,
+            "parts": [{ "id": format!("m-{room}-t"), "kind": "text", "text": text }],
+        }))
+        .expect("message")
+    }
+
+    /// Build one space per case and read the real preview builder for each.
+    fn previews(cx: &mut TestAppContext, cases: &[(&str, SpaceKind, &str, &str)]) -> Vec<String> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio");
+        let handle = rt.handle().clone();
+        cx.update(|cx| {
+            gpui_tokio::init_from_handle(cx, handle);
+            cx.set_global(Theme::dark(Surface::Matte));
+        });
+        let state = cx.new(|cx| AppState::new(Box::new(Idle), cx));
+        let now = crate::model::now_ms();
+        let ids: Vec<String> = cases.iter().map(|(id, ..)| (*id).to_string()).collect();
+        state.update(cx, |s, cx| {
+            s.account = Some(AccountView {
+                id: "gh_1".into(),
+                login: "unconst".into(),
+                name: "Jacob".into(),
+                avatar_url: String::new(),
+                device_name: "test".into(),
+                balance_usd: 0.0,
+                spent_today_usd: 0.0,
+                daily_cap_usd: None,
+            });
+            for (id, kind, sender, sender_handle) in cases {
+                s.projects.push(Project {
+                    id: (*id).into(),
+                    name: "Affinity".into(),
+                    kind: *kind,
+                    people: vec![affinity()],
+                    ..Project::default()
+                });
+                let room = format!("room-{id}");
+                s.chats
+                    .insert((*id).into(), vec![chat(&room, id, now - 30_000)]);
+                s.messages.insert(
+                    room.clone(),
+                    vec![message(
+                        &room,
+                        sender,
+                        sender_handle,
+                        "hahahaha",
+                        now - 30_000,
+                    )],
+                );
+            }
+            cx.notify();
+        });
+        state.read_with(cx, |s, _| {
+            ids.iter()
+                .map(|id| {
+                    let space = s
+                        .projects
+                        .iter()
+                        .find(|p| p.id == id.as_str())
+                        .cloned()
+                        .unwrap_or_else(|| panic!("space {id}"));
+                    preview_for_tests(s, &space)
+                })
+                .collect()
+        })
+    }
+
+    /// The regression itself: a 1:1 row must not print the handle its own header
+    /// already shows, while the group row — which has no handle in its header — must
+    /// keep naming whoever wrote.
+    #[gpui::test]
+    fn a_dm_row_drops_the_handle_its_header_shows_and_a_group_keeps_it(cx: &mut TestAppContext) {
+        let out = previews(
+            cx,
+            &[
+                ("dm", SpaceKind::Dm, "user:gh_461", "Z"),
+                ("group", SpaceKind::Group, "user:gh_461", "Z"),
+            ],
+        );
+        assert_eq!(
+            out[0], "hahahaha",
+            "the DM row header already reads \"Affinity @Z\"; the line must not say @Z again"
+        );
+        assert_eq!(
+            out[1], "@Z: hahahaha",
+            "a group row header names the group, so its line names the sender"
+        );
+    }
+
+    /// The two labels a 1:1 row still needs: my own line stays "You", and an agent
+    /// added to a DM is not the person the header names, so it keeps its own.
+    #[gpui::test]
+    fn a_dm_keeps_you_for_my_line_and_names_an_agent(cx: &mut TestAppContext) {
+        let out = previews(
+            cx,
+            &[
+                ("mine", SpaceKind::Dm, "user:gh_1", "unconst"),
+                ("agent", SpaceKind::Dm, "agent:01COMMS", "comms"),
+            ],
+        );
+        assert_eq!(out[0], "You: hahahaha", "my own line is still mine");
+        assert_eq!(
+            out[1], "@comms: hahahaha",
+            "an agent in a DM is not the person the header names"
+        );
+    }
+
+    /// The rule on its own, so a reader can see every case at once.
+    #[test]
+    fn only_the_other_human_of_a_one_to_one_loses_its_label() {
+        use super::people_preview_who;
+        assert_eq!(
+            people_preview_who(false, false, "user:gh_461", Some("Z")),
+            ""
+        );
+        assert_eq!(
+            people_preview_who(true, false, "user:gh_461", Some("Z")),
+            "@Z",
+            "a group row names the sender"
+        );
+        assert_eq!(
+            people_preview_who(false, true, "user:gh_1", Some("jacob")),
+            "You"
+        );
+        assert_eq!(
+            people_preview_who(true, true, "user:gh_1", Some("jacob")),
+            "You"
+        );
+        assert_eq!(
+            people_preview_who(false, false, "agent:01COMMS", Some("comms")),
+            "@comms",
+            "an agent in a 1:1 chat keeps its name"
+        );
+        assert_eq!(
+            people_preview_who(false, false, "system", None),
+            "",
+            "no handle, no label"
+        );
     }
 }
 

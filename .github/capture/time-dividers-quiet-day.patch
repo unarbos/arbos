@@ -1,0 +1,62 @@
+diff --git a/apps/ios/Arbos/Arbos/App/DebugHooks.swift b/apps/ios/Arbos/Arbos/App/DebugHooks.swift
+index 8042cd12d..3fda01f3e 100644
+--- a/apps/ios/Arbos/Arbos/App/DebugHooks.swift
++++ b/apps/ios/Arbos/Arbos/App/DebugHooks.swift
+@@ -105,6 +105,10 @@ enum DebugHooks {
+     /// `ARBOS_FIXTURE_LINKS=1`: four links from unconst in the fixture DM, for the Links tab's
+     /// tiles ([feedback link-icons-ios-tile-2026-10-27]).
+     static var fixtureLinks: Bool { value("ARBOS_FIXTURE_LINKS") == "1" }
++    /// `ARBOS_FIXTURE_QUIET_DAY=1`: the fixture DM as one quiet evening across a midnight
++    /// (time-divider rig, [feedback time-dividers-2026-11-05]). The Mac fixture's hook of the
++    /// same name seeds the same conversation.
++    static var fixtureQuietDay: Bool { value("ARBOS_FIXTURE_QUIET_DAY") == "1" }
+     /// Presence-row rig: `1` (the chat's other person) or comma-separated handles typing.
+     static var fixtureTyping: String? { value("ARBOS_FIXTURE_TYPING").flatMap { $0.isEmpty || $0 == "0" ? nil : $0 } }
+     /// Join a call seen via presence automatically (two-simulator relay tests).
+diff --git a/apps/ios/Arbos/Arbos/Store/Fixture.swift b/apps/ios/Arbos/Arbos/Store/Fixture.swift
+index 8af6962d3..3b5250f37 100644
+--- a/apps/ios/Arbos/Arbos/Store/Fixture.swift
++++ b/apps/ios/Arbos/Arbos/Store/Fixture.swift
+@@ -475,6 +475,42 @@ extension AppModel {
+                     subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 6 * 60_000, completedAt: nil, pending: false,
+                     parts: [.text(id: "d4t", text: "Sure — add it, and send the copy whenever you're ready.")], hiddenCount: 0, senderHandle: "jacob", senderName: "Jacob Steeves"),
+         ]
++        // `ARBOS_FIXTURE_QUIET_DAY=1` (rig, [feedback time-dividers-2026-11-05]): the DM as one
++        // quiet evening — fourteen messages six to twenty-two minutes apart, running from
++        // before a midnight to after it. Built from yesterday's own midnight, so the day change
++        // is real in the simulator's zone and the whole evening is in the past at any hour. The
++        // Mac fixture's `ARBOS_FIXTURE_QUIET_DAY` seeds the same conversation.
++        if DebugHooks.fixtureQuietDay {
++            let yesterday = Date(timeIntervalSinceNow: -86_400)
++            let midnight = Int64(Calendar.current.startOfDay(for: yesterday).timeIntervalSince1970) * 1000
++            let script: [(Int64, Bool, String)] = [
++                (-170, false, "Did the invite copy land?"),
++                (-152, true, "Just pushed it — the short version."),
++                (-130, false, "Reading now."),
++                (-108, false, "The second line is doing two jobs at once."),
++                (-90, true, "Agreed. I'll split it."),
++                (-72, false, "Better."),
++                (-52, true, "Shipping that, then."),
++                (-35, false, "One more thing before you do."),
++                (-18, false, "The footer still says beta."),
++                (-6, true, "Fixing it tonight."),
++                (9, false, "You're still up?"),
++                (21, true, "Last one, then bed."),
++                (34, false, "Same. Talk tomorrow."),
++                (50, true, "Night."),
++            ]
++            messages["fx-dm-unconst"] = script.enumerated().map { pair in
++                let (minutes, mine, text) = pair.element
++                let id = "q\(pair.offset)"
++                return Message(id: id, chatId: "fx-dm-unconst", role: .user,
++                               sender: mine ? "user:fx-me" : "user:gh_32490803", status: .done, turn: nil,
++                               decision: nil, subagentId: nil, subagentName: nil, inReplyTo: nil, usage: [:],
++                               model: nil, createdAt: midnight + minutes * 60_000, completedAt: nil, pending: false,
++                               parts: [.text(id: "\(id)t", text: text)], hiddenCount: 0,
++                               senderHandle: mine ? "jacob" : "unconst",
++                               senderName: mine ? "Jacob Steeves" : "Unconst")
++            }
++        }
+         // `ARBOS_FIXTURE_LINKS=1` (rig, [feedback link-icons-ios-tile-2026-10-27]): unconst's
+         // Links tab — a brand with a mono mark, one with a colour, X, and a site with no
+         // bundled mark (nypost.com, whose icon the fixture ships).

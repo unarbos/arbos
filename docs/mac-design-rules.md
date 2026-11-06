@@ -155,7 +155,7 @@ the chat area (not the window). Points from the window's edges.
 | Servers | a server's picture opens its **newest channel** (`#general` when none has spoken) and marks the server open, so expanding shows its channel list |
 | Expanded sidebar | **unchanged** — strip, filter, rows, footer exactly as above |
 | Composer / column | the pill's cap is Grok's **960** (`COMPOSER_WIDTH` 904 + 2 × 28; was 876), the transcript column shares it (`COLUMN_MAX_WIDTH`); both centred in the chat area right of the rail / sidebar, as before |
-| Collapse / open | a **morph**, not a clip, on the pane-slide curves (170 ms ease-out quad closing, 200 ms ease-out cubic opening): the three discs glide from the strip into the rail column (the toggle with them, into its slot under the lights), the rows' pictures shrink into their rail slots as the text and filter fade out by half-way, the selected card shrinks into its tile, my footer picture slides to the centre, the chat column re-centres. The travelling pictures keep the lists' `LIST_FADE_BAND` top and bottom fade the whole way, in a list frame that moves from the expanded list's to the rail's with them (`rail::morph_list_top`), so the rail's edge fade comes in with the fold and goes with the unfold — never added the frame the fold ends or dropped the frame an unfold begins ([feedback mac-sidebar-slide-jank-2026-10-29], Scout: "the second it is folded in it just overlays the blur"; `rail::tests::the_morph_fades_its_pictures_in_a_frame_that_moves_with_them`). `rail::render_morph` (the column) + `rail::render_overlay` (the travelling pieces, from the resting bounds the expanded sidebar records each frame — `Shell::morph`). Reduce Motion snaps |
+| Collapse / open | a **morph**, not a clip, on the pane-slide curves (170 ms ease-out quad closing, 200 ms ease-out cubic opening): the three discs glide from the strip into the rail column (the toggle with them, into its slot under the lights), the rows' pictures shrink into their rail slots as the text and filter fade out by half-way, the selected card shrinks into its tile, my footer picture slides to the centre, the chat column re-centres. The travelling pictures keep the lists' `LIST_FADE_BAND` top and bottom fade the whole way, in a list frame that moves from the expanded list's to the rail's with them (`rail::morph_list_top`), so the rail's edge fade comes in with the fold and goes with the unfold — never added the frame the fold ends or dropped the frame an unfold begins ([feedback mac-sidebar-slide-jank-2026-10-29], Scout: "the second it is folded in it just overlays the blur"; `rail::tests::the_morph_fades_its_pictures_in_a_frame_that_moves_with_them`). `rail::render_morph` (the column) + `rail::render_overlay` (the travelling pieces, from the resting bounds the expanded sidebar records each frame — `Shell::morph`). The selected chat **holds its appearance the whole way**: the travelling card wears the highlight token's selected step (`rail::morph_card_fill`), the one fill its expanded row rests in and its rail tile lands on — it was the opaque `surface_2`, which on the Glass sidebar read as a dark grey slab for the length of the animation, folding and unfolding alike ([feedback mac-sidebar-selected-blink-2026-11-05], Scout: "the selected chat blinks dark grey once"; `rail::tests::the_selected_chat_keeps_one_fill_across_the_collapse`). Reduce Motion snaps |
 | Narrow band | below `NARROW_WINDOW` the sidebar still hides and the header toggle floats it as an overlay (Q7 b); the rail is for the docked widths |
 | iPhone | no equivalent (no sidebar; the home list + the single bottom search bar) |
 
@@ -168,7 +168,7 @@ frames).
 Pinned by `rail::tests` (metrics vs the measurement table, the rail's layout
 on the mock's pixels, the toggle's rail slot under the lights, the lights'
 frame clear of every control in every state, header-toggle rule, badge
-priority, capacity, morph maths), `slide::tests::collapsing_slides_the_sidebar_down_to_the_rail_and_back`
+priority, capacity, morph maths, the selection's one fill across the morph), `slide::tests::collapsing_slides_the_sidebar_down_to_the_rail_and_back`
 (+ reduce-motion / width-drag), `theme::sidebar_state_tests` (collapsed state
 restore) and `sidebar::strip_tests::the_filter_is_restored_from_the_config_dir`.
 
@@ -369,7 +369,7 @@ app-wide, the bar is this chat only. Code: `crate::chat_search` (rules),
 | Inside, left → right | inset 12; magnifier 15 muted; pinned sender chip (24 tall, picture 18, "From Name" 12.5 medium, accent 18 %, ✕ or ⌫ unpins); the field at `TEXT_BODY` 15, placeholder "Search in chat"; an offered chip while a name matches (⇥ pins); right: "searching older…" while a page is in flight, the count 13 pt muted, ‹ › 24 pt hit targets (faint with nothing to step to), ✕ 16 |
 | Matching | keyword = folded substring over the chat's loaded rows (`arbos_core::search::fold`, the palette index's text); sender = the shared matcher of #1918 (`match_entity` on display name / @handle of everyone who posted: exact > prefix > word-start, name before handle); **chip AND keyword**; a pinned chip with no text = all of that sender's rows. A hit is a **message**, not a word occurrence |
 | Count | "n of m" over the loaded rows, 1 = the oldest loaded (Find's order); the cursor starts on the newest hit; "No matches"; nothing while nothing is typed |
-| Marks | every hit's words on the accent at 30 %; the revealed hit's words in Find's yellow `#ffd60a` with dark text; the revealed message's row washed and scrolled to through **the palette's reveal path** (`highlight_message` + `reveal_message` → `Transcript::reveal_hit`) — one reveal mechanism |
+| Marks | every hit's words on the accent at 30 %; the revealed hit's words in Find's yellow `#ffd60a` with dark text; the revealed message's row washed and scrolled to through **the palette's reveal path** (`highlight_message` + `reveal_message` → `Transcript::reveal_hit`) — one reveal mechanism. It comes to rest **`REVEAL_TOP_INSET`** = the header's `FADE_BAND` 66 + `TURN_GAP` 20 = **86** below the pane's top edge: a hit landing at the edge sat inside the fade and was the faintest row on screen, and the turn gap over the band is the air the transcript already opens between two speakers, so the message above shows through the fade and the hit reads as part of a conversation. The first message in a chat has nothing above it to give and still lands at the edge |
 | Keys | **⌘F toggles** (Jacob 2026-10-27, [feedback search-toggle-click-outside-mac-2026-10-27]): closed → opens and focuses the field; open → closes exactly like ✕ / Esc (marks go, the composer types again), also with the field focused — the chord is a root action, the text input never swallows it. Enter / › / ⌘G next (newer); ⇧Enter / ‹ / ⇧⌘G previous (older); both wrap; ⇥ pins the offered sender; Esc / ✕ close. Inside the field the "ChatSearch" context overrides the composer's Send / Newline / AcceptMention. **⌘⇧F / ⌘K toggle the palette** the same way |
 | ⌫ takes the chip | **the chip is a token and ⌫ removes it, the way the composer's strip gives up its last staged attachment** (§ Composer: staged attachments — the one rule, one mechanism): with an **empty field** the field has nothing to delete and lets the key through, and the bar unpins the sender **at once** — no select-first step, because nothing in this app asks for a second press. With text in the field ⌫ is the field's own, even with the caret at the start where it deletes nothing, so a keyword is never traded for the chip. There is never a second token to take: the bar holds **at most one** pinned sender (`Query::sender` is an `Option`), and the offered chip only exists while something is typed. Unpinning **re-runs the search** (`chat_search_unpin_sender` → `chat_search_recompute`): the chip's rows stop being hits, the count and the marks go with it — no filter outlives its chip. ⌦ is not this key: the chip sits to the **left** of the caret. Code: `Shell::chat_search_backspace`, the `Backspace` action on `chat-search-bar` |
 | Click outside | a mouse-down anywhere outside the bar closes it, and anywhere outside the palette's panel dismisses the palette — **without swallowing the click**: the message, sidebar row or button under it answers in the same click (`Shell::click_outside`, capture phase against the bar's / panel's last-painted bounds; the palette's backdrop is see-through for the mouse — `modal::modal_overlay_top_passthrough` — does not dim (§ Command palette, Material) and still swallows the wheel). A click inside the bar / panel keeps it. The Forward picker and the media viewer stay true modals (#1632) |
@@ -1175,7 +1175,9 @@ The two row builders live in the clients (`crates/arbos-mac/src/ui/transcript.rs
 `Transcript.continuesRun` / `carriesQuote`), not in `arbos_core`, so the window is
 one constant per client, pinned by a test on each side (`grouping_tests::
 the_window_is_two_minutes_and_the_gaps_are_groks`, `GroupedMessagesTests.
-testTheWindowIsTwoMinutesAndTheGapsAreTighter`). Change both or neither.
+testTheWindowIsTwoMinutesAndTheGapsAreTighter`). Change both or neither. The
+**date stamp** that breaks a run is the one part of this that does live in core
+(§ Time dividers), because a copy per client is what drifted.
 
 ### Spacing
 
@@ -1196,6 +1198,44 @@ cache's run starts) and `transcript_smoke_tests::a_run_shows_one_disc_and_opens_
 DM) and the updated `SenderNameRowTests` on the iPhone. Record: project store
 `internal/feedback-loop/grouped-messages-2026-10-28.md`, shots in
 `media/feedback/grouped-messages/`.
+
+## Time dividers: a new day, or an hour (Jacob 2026-11-05, [feedback time-dividers-2026-11-05])
+
+**A centred time line lands when the local day changes, or when an hour or more
+passed since the message above it. Nothing else draws one.** Jacob's screenshot
+had one between nearly every message group, in a chat nobody was typing in
+quickly, and a line through every pause is not information — it is the shape of
+the conversation broken up. The time itself did not go anywhere: it is on the
+Mac's hover rail and the iPhone's drag-left reveal (§ Message timestamps), where
+it is asked for rather than always on.
+
+| | Rule | Code |
+|---|---|---|
+| When | A different **local day**, or `DIVIDER_GAP_MS` **3 600 000 ms** or more between this message and the one above it — measured in either direction, since a row can arrive with an earlier clock than its neighbour. At exactly an hour a line lands; a millisecond under, none does | `arbos_core::transcript::shows_divider` |
+| From what | The **message above**, not the last line drawn. The Mac measured from its last stamp, so a chat ticking along every few minutes grew one every hour, mid-conversation, with no pause behind it | `last_at` in `build_rows_with_cache`, `lastAt` in `Transcript.rows` |
+| The first message of a chat | Draws one. Its day is new and a transcript has to say which day the reader is looking at | same |
+| A row with no clock (`createdAt` 0) | Draws none, and does not become the clock the next message is measured against | same |
+| The day | The **reader's** day. The clients pass their own UTC offset (Mac chrono `Local`, iPhone `TimeZone.current.secondsFromGMT(for:)`); the rule is pure and takes it as an argument | `utc_offset_seconds()`, `Transcript.showsDivider` |
+| Words | Unchanged: `sidebar::stamp_label` / `Transcript.dateLabel` — "Today 12:09 AM", "Yesterday 9:10 PM", the weekday inside a week, then the date | unchanged |
+
+**One rule, in core, for both clients.** This is the point of the change rather
+than a detail of it: the Mac and the iPhone each had their own answer to "is a
+divider warranted here", the two had already drifted — the Mac measured from its
+last stamp, the phone from the previous message, and *neither looked at the day*,
+so 23:58 → 00:04 drew nothing on either — and a third drift was the next quarter's
+bug. The clients keep their own row builders and call one function.
+
+Pinned by `arbos_core::transcript::tests` (day boundaries, the hour exactly and
+either side of it, a quiet chat, the reader's zone, the first message, a row with
+no clock), `transcript::time_divider_tests` on the Mac and
+`ArbosTests/TimeDividerTests` on the iPhone (the same cases through the row
+builders), plus `arbos_ffi::transcript::tests` for the binding. The shot rig is
+`ARBOS_FIXTURE_QUIET_DAY=1` (`sync/fixture.rs`): the DM with Sam as one quiet
+evening across a midnight. The iPhone gets the same conversation from
+`.github/capture/time-dividers-quiet-day.patch`, which `ios-capture.yml` applies
+to **both** legs through its `fixture_patch` input — rig-only fixture data, so it
+stays out of the app's own source and both builds read byte-identical messages.
+Shots in the project store's `media/time-dividers/`.
 
 ## Glass surface: readable content, translucent chrome (Jacob 2026-10-26, [feedback mac-glass-contrast-2026-10-26])
 

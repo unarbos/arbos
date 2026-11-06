@@ -37,6 +37,7 @@ use crate::ui::mention::{self, Mentions};
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
 use crate::ui::profile_target;
+use crate::ui::reveal::RevealInset;
 use crate::ui::secret_card::SecretOfferCard;
 use crate::ui::select::{BubbleAt, BubbleSelectable, LinkIcons, Selectable, Span, TextSelection};
 use crate::ui::sf_symbols;
@@ -147,8 +148,23 @@ pub fn own_bubble_fraction(people: bool) -> f32 {
 pub(crate) fn people_cap(slot_width: f32) -> f32 {
     slot_width * PEOPLE_BUBBLE_FRACTION
 }
-/// A new time stamp line whenever messages are this far apart.
-const STAMP_GAP_MS: u64 = 60 * 60 * 1000;
+/// When a centred time stamp lands: `arbos_core::transcript::shows_divider` —
+/// a new local day, or an hour or more since the message above it (Jacob,
+/// 2026-11-05, [feedback time-dividers-2026-11-05]). The rule is the iPhone's
+/// too; the Mac used to measure its hour from the last stamp it drew, so a chat
+/// with messages minutes apart grew one every hour mid-conversation.
+pub use arbos_core::transcript::shows_divider;
+#[cfg(test)]
+use arbos_core::transcript::DIVIDER_GAP_MS;
+
+/// The reader's offset from UTC in seconds, for the day half of the rule.
+/// Taken from the system zone each build, so a transcript left open across a
+/// DST step reads the new offset on its next build.
+fn utc_offset_seconds() -> i32 {
+    use chrono::{Local, Offset};
+    Local::now().offset().fix().local_minus_utc()
+}
+
 /// Grouped messages (Jacob, 2026-10-28, [feedback grouped-messages-mac-2026-10-28]):
 /// consecutive messages from one sender this close together form one **run** —
 /// the name and the disc show once, on the run's first message; the later
@@ -167,10 +183,10 @@ pub const RUN_WINDOW_MS: u64 = 2 * 60 * 1000;
 pub(crate) const ROW_GAP_HALF: f32 = 3.0;
 pub(crate) const TURN_GAP_EXTRA: f32 = 20.0 - 2.0 * ROW_GAP_HALF;
 /// The gap between two bubbles of one run, and the gap a new run opens — the
-/// numbers the rhythm tests pin.
+/// numbers the rhythm tests pin. `TURN_GAP` is also the air a revealed hit
+/// keeps under the header (`REVEAL_TOP_INSET`).
 #[cfg(test)]
 pub(crate) const RUN_GAP: f32 = 2.0 * ROW_GAP_HALF;
-#[cfg(test)]
 pub(crate) const TURN_GAP: f32 = TURN_GAP_EXTRA + 2.0 * ROW_GAP_HALF;
 
 /// The tail of the sender run the row builder is in: who spoke last and when
@@ -271,6 +287,16 @@ pub const SENDER_LANE: f32 = AVATAR_COLUMN_INSET + SENDER_DISC + SENDER_DISC_GAP
 const HOVER_FADE_MS: f32 = 150.0;
 /// The fade band under the floating header (one number for every chat kind).
 pub const HEADER_FADE_BAND: f32 = crate::ui::header::metrics::FADE_BAND;
+/// Where a reveal brings a message to rest: its row's top edge this far below
+/// the transcript's own top edge.
+///
+/// The chat pane's reading of the shared rule in [`crate::ui::reveal`] — the
+/// band the floating header fades the list out over, plus the gap the transcript
+/// already opens between two speakers. Both terms are read from where they live,
+/// so a header that changes size carries the inset with it. Any other list a
+/// reveal lands in states its own two terms through `reveal::top_inset` rather
+/// than reaching for this one.
+pub const REVEAL_TOP_INSET: f32 = crate::ui::reveal::top_inset(HEADER_FADE_BAND, TURN_GAP);
 /// How long the hover copy glyph stays a checkmark after a successful copy.
 const COPY_FEEDBACK_MS: u64 = 2_000;
 /// Ignore pointer noise until a click-drag travels this far before it is a
@@ -885,6 +911,8 @@ pub struct Transcript {
     pub(crate) rows_laid_out: u64,
     /// Reveal request (`AppState::reveal_nonce`) we already scrolled for.
     revealed: Option<u64>,
+    /// The row a reveal still owes its [`REVEAL_TOP_INSET`] to.
+    reveal_inset: crate::ui::reveal::RevealInset,
     spring: StickSpring,
     /// Set by the scroll callback; the next frame re-pins when the user
     /// stopped within `STICK_THRESHOLD_PX` of the end.
@@ -990,6 +1018,7 @@ impl Transcript {
             arrived_at: None,
             rows_laid_out: 0,
             revealed: None,
+            reveal_inset: RevealInset::default(),
             spring: StickSpring::default(),
             repin_check_pending: false,
             hover: HoverFade::default(),
@@ -1759,6 +1788,7 @@ impl Transcript {
         let state = self.state.read(cx);
         let Some((chat, msg)) = state.reveal_message.clone() else {
             self.revealed = None;
+            self.reveal_inset.clear();
             return;
         };
         let nonce = state.reveal_nonce;
@@ -1774,10 +1804,23 @@ impl Transcript {
             return;
         };
         self.pinned_to_bottom = false;
+        // The row to the top of the pane, then `REVEAL_TOP_INSET` back down it
+        // from inside the list's own prepaint (`RevealInset::row_request`).
+        //
+        // `offset_in_item` cannot carry the inset, however much it looks like
+        // the field for it. A negative one does anchor the row below the
+        // viewport's top edge — the list's own `scroll_by` says so — but it
+        // renders nothing above the row it anchors: `layout_items` only walks
+        // into earlier rows when the ones from the scroll top down fail to fill
+        // the viewport, and a negative offset makes them appear to fill more of
+        // it, not less. The reveal would land in a blank strip under the header
+        // instead of in the conversation, which is a worse artefact than the dim
+        // row it replaces.
         self.list.scroll_to(gpui::ListOffset {
             item_ix: ix,
             offset_in_item: px(0.0),
         });
+        self.reveal_inset.owed(ix);
         self.revealed = Some(nonce);
         cx.notify();
     }
@@ -3640,11 +3683,13 @@ impl Transcript {
             self.state.read(cx).highlight_message.as_deref() == Some(row.message_id.as_str());
         let turn_start = self.is_turn_start(ix);
         let measure = Self::measure_into(&self.measured, Some(row_frame_id.clone()));
+        let inset = self.reveal_inset.row_request(ix, REVEAL_TOP_INSET);
         div()
             .id(SharedString::from(format!("{row_frame_id}#frame")))
             .relative()
             .w_full()
             .child(measure)
+            .when_some(inset, |el, inset| el.child(inset))
             .child(
                 column_row(inner)
                     .when(turn_start, |el| el.pt(px(TURN_GAP_EXTRA)))
@@ -4169,7 +4214,9 @@ pub struct MessageRowCache {
 struct CachedMessageRows {
     version: u64,
     rows: Vec<Row>,
-    last_stamp_at: u64,
+    /// The clock the next message's stamp is measured against: this message's
+    /// own, once it drew a row.
+    last_at: u64,
     run_tail: Option<RunTail>,
     run_start: bool,
 }
@@ -4188,7 +4235,7 @@ impl MessageRowCache {
 #[allow(clippy::too_many_arguments)]
 fn message_render_version(
     message: &Message,
-    last_stamp_at: u64,
+    last_at: u64,
     continues_run: bool,
     is_last_reply: bool,
     show_details: bool,
@@ -4248,7 +4295,7 @@ fn message_render_version(
     format!("{:?}", message.turn).hash(&mut h);
     format!("{:?}", message.reply_ref).hash(&mut h);
     format!("{:?}", message.job).hash(&mut h);
-    last_stamp_at.hash(&mut h);
+    last_at.hash(&mut h);
     continues_run.hash(&mut h);
     is_last_reply.hash(&mut h);
     show_details.hash(&mut h);
@@ -4353,7 +4400,10 @@ pub fn build_rows_with_cache(
     let last_reply = messages
         .iter()
         .rposition(|m| m.role == Role::Assistant && !m.is_streaming());
-    let mut last_stamp_at: u64 = 0;
+    // The clock of the last message that drew a row: what the next message's
+    // stamp is measured against ([`shows_divider`]). 0 until the first one.
+    let mut last_at: u64 = 0;
+    let tz_offset = utc_offset_seconds();
     // The sender run the builder is in (who spoke last, when): a message that
     // continues it draws no name and no disc and sits in the tight in-run gap; a
     // date stamp, a system line or a hidden fold ends it ([feedback
@@ -4370,12 +4420,7 @@ pub fn build_rows_with_cache(
     let mut keep: HashSet<Id> = HashSet::new();
     for (mix, message) in messages.iter().enumerate() {
         keep.insert(message.id.clone());
-        retract_dangling_stamp(
-            &mut rows,
-            &mut pending_stamp,
-            &mut last_stamp_at,
-            &mut run_tail,
-        );
+        retract_dangling_stamp(&mut rows, &mut pending_stamp, &mut last_at, &mut run_tail);
         // Someone I blocked: fold the run into one hidden line, no bubble, no stamp.
         // Cross-message fold — do not serve from the per-message row cache.
         if message.role == Role::User && hidden_senders.contains(&message.sender) {
@@ -4422,7 +4467,7 @@ pub fn build_rows_with_cache(
         let run_start = !continues;
         let version = message_render_version(
             message,
-            last_stamp_at,
+            last_at,
             continues,
             is_last_reply,
             show_details,
@@ -4435,7 +4480,7 @@ pub fn build_rows_with_cache(
         if let Some(hit) = cache.entries.get(&message.id) {
             if hit.version == version {
                 rows.extend(hit.rows.iter().cloned());
-                last_stamp_at = hit.last_stamp_at;
+                last_at = hit.last_at;
                 run_tail = hit.run_tail.clone();
                 if hit.run_start {
                     cache.run_starts.insert(message.id.clone());
@@ -4447,10 +4492,8 @@ pub fn build_rows_with_cache(
         cache.built += 1;
         let start = rows.len();
         let streaming = message.is_streaming();
-        if message.created_at > 0 && message.created_at.saturating_sub(last_stamp_at) > STAMP_GAP_MS
-        {
-            pending_stamp = Some((rows.len(), last_stamp_at, run_tail.take()));
-            last_stamp_at = message.created_at;
+        if shows_divider(last_at, message.created_at, tz_offset) {
+            pending_stamp = Some((rows.len(), last_at, run_tail.take()));
             let label = crate::ui::sidebar::stamp_label(message.created_at);
             rows.push(Row {
                 version: hash_version(&label, false),
@@ -5324,6 +5367,9 @@ pub fn build_rows_with_cache(
         // a run, and is never a turn start.
         let drew = rows.len() > rows_before_message;
         if drew {
+            if message.created_at > 0 {
+                last_at = message.created_at;
+            }
             run_tail = Some(RunTail {
                 sender: message.sender.clone(),
                 at: message.created_at,
@@ -5335,34 +5381,24 @@ pub fn build_rows_with_cache(
         // Finalize a no-content message's stamp now so the cached slice is
         // complete (same outcome as retract on the next turn).
         if !drew {
-            retract_dangling_stamp(
-                &mut rows,
-                &mut pending_stamp,
-                &mut last_stamp_at,
-                &mut run_tail,
-            );
+            retract_dangling_stamp(&mut rows, &mut pending_stamp, &mut last_at, &mut run_tail);
         }
         cache.entries.insert(
             message.id.clone(),
             CachedMessageRows {
                 version,
                 rows: rows[start..].to_vec(),
-                last_stamp_at,
+                last_at,
                 run_tail: run_tail.clone(),
                 run_start: drew && run_start,
             },
         );
     }
-    retract_dangling_stamp(
-        &mut rows,
-        &mut pending_stamp,
-        &mut last_stamp_at,
-        &mut run_tail,
-    );
+    retract_dangling_stamp(&mut rows, &mut pending_stamp, &mut last_at, &mut run_tail);
     cache.entries.retain(|id, _| keep.contains(id));
     // Who is working is the presence row over the composer (`ui::presence`),
     // not a transcript row: one notice per agent, never a caption plus a line.
-    let _ = (running, queued, last_stamp_at, run_tail);
+    let _ = (running, queued, last_at, run_tail);
     // Trailing clearance: scrolls with the list so mid-thread bubbles can
     // reach the composer, while the pinned end still keeps 54 pt above it.
     if !rows.is_empty() {
@@ -5382,13 +5418,13 @@ pub fn build_rows_with_cache(
 fn retract_dangling_stamp(
     rows: &mut Vec<Row>,
     pending: &mut Option<(usize, u64, Option<RunTail>)>,
-    last_stamp_at: &mut u64,
+    last_at: &mut u64,
     run_tail: &mut Option<RunTail>,
 ) {
     if let Some((ix, at, tail)) = pending.take() {
         if rows.len() == ix + 1 && matches!(rows[ix].kind, RowKind::Stamp { .. }) {
             rows.pop();
-            *last_stamp_at = at;
+            *last_at = at;
             *run_tail = tail;
         }
     }
@@ -9124,6 +9160,92 @@ mod transcript_smoke_tests {
         );
     }
 
+    /// A reveal brings its message to rest clear of the floating header's fade
+    /// band. Every jump into a transcript shares one path — a home-search or
+    /// palette hit, Search-in-chat stepping, a channel-message notification, a
+    /// reply quote click, all through `Transcript::reveal_hit` — and that path
+    /// used to land the row at the pane's top edge, inside the band, so the
+    /// message the reader had just asked for was the faintest on screen.
+    ///
+    /// What this pins is the position against the band rather than a number of
+    /// its own: the row's top edge sits `REVEAL_TOP_INSET` (the band plus one
+    /// turn gap) below the pane's top edge, with the message before it drawn in
+    /// that space — not the blank strip a negative `offset_in_item` leaves.
+    #[gpui::test]
+    fn a_revealed_hit_rests_clear_of_the_headers_fade_band(cx: &mut TestAppContext) {
+        const ROWS: usize = 160;
+        let t = 1_700_000_000_000u64;
+        let messages: Vec<Message> = (0..ROWS)
+            .map(|i| {
+                let role = if i % 2 == 0 { "user" } else { "assistant" };
+                message(
+                    &format!("m{i}"),
+                    role,
+                    &format!("history line {i} — lorem ipsum dolor sit amet, consectetur"),
+                    t + i as u64 * 1_000,
+                )
+            })
+            .collect();
+        let (_rt, state, transcript) = mount_with(cx, messages);
+        let (_host, vcx) = cx.add_window_view(|_, _| Host {
+            transcript: transcript.clone(),
+        });
+        vcx.run_until_parked();
+
+        // How far down the pane the list drew a message's row, or `None` when
+        // that message is off screen.
+        let landing = |vcx: &gpui::VisualTestContext, message_id: &str| -> Option<f32> {
+            transcript.read_with(vcx, |t, _| {
+                let m = t.measured.borrow();
+                let row = t.rows.iter().find(|r| r.message_id == message_id)?;
+                let bounds = m.rows.get(&row.id)?;
+                Some(f32::from(bounds.top() - m.viewport.top()))
+            })
+        };
+        // What the palette, Search-in-chat and a quote click all do to the state.
+        let reveal = |vcx: &mut gpui::VisualTestContext, message_id: &str| {
+            transcript.update(vcx, |t, _| t.measured.borrow_mut().rows.clear());
+            state.update(vcx, |s, cx| {
+                s.reveal_message = Some(("c1".into(), message_id.into()));
+                s.reveal_nonce += 1;
+                cx.notify();
+            });
+            vcx.run_until_parked();
+        };
+
+        // A hit in the middle of the history, with chat above it and below it.
+        reveal(vcx, "m80");
+        let inset = landing(vcx, "m80").expect("the revealed row is on screen");
+        assert!(
+            (inset - REVEAL_TOP_INSET).abs() < 0.5,
+            "the revealed row rests {inset} pt down the pane, not {REVEAL_TOP_INSET}"
+        );
+        assert!(
+            inset > HEADER_FADE_BAND,
+            "…so it is clear of the {HEADER_FADE_BAND} pt fade band, where it used to land"
+        );
+        assert!(
+            landing(vcx, "m79").is_some_and(|above| above < inset),
+            "the message before the hit fills the space above it"
+        );
+
+        // The first message in a chat has next to nothing above it to scroll:
+        // the walk runs out of rows and clamps at the very top, which is where
+        // a reveal landed before the inset — no blank band, nothing worse.
+        reveal(vcx, "m0");
+        let top = transcript.read_with(&*vcx, |t, _| t.list.logical_scroll_top());
+        assert_eq!(
+            (top.item_ix, f32::from(top.offset_in_item)),
+            (0, 0.0),
+            "nothing above the first message to give it the inset"
+        );
+        let first = landing(vcx, "m0").expect("the first message is on screen");
+        assert!(
+            (0.0..REVEAL_TOP_INSET).contains(&first),
+            "it takes what little sits above it ({first} pt) and no more"
+        );
+    }
+
     /// Grouped messages ([feedback grouped-messages-mac-2026-10-28]), drawn by the real
     /// transcript in a people group: Bob's second line 30 s later has no disc and no name
     /// but keeps the lane (its bubble's left edge is the first bubble's), and sits in the
@@ -11371,7 +11493,7 @@ mod grouping_tests {
             person("m6", "bob", "after the quote", T + 4_000),
             // An hour later: the date stamp lands and breaks the run (the window has
             // passed anyway).
-            person("m7", "bob", "next hour", T + 2 * STAMP_GAP_MS),
+            person("m7", "bob", "next hour", T + 2 * DIVIDER_GAP_MS),
         ];
         let (rows, starts) = rows_of(&messages, true);
         assert_eq!(
@@ -11524,6 +11646,115 @@ mod grouping_tests {
             HashSet::from(["m1".to_string(), "m3".to_string()]),
             "run starts are rebuilt from the cached entries"
         );
+    }
+}
+
+#[cfg(test)]
+mod time_divider_tests {
+    //! The centred time stamp (Jacob, 2026-11-05, [feedback
+    //! time-dividers-2026-11-05]): one lands at a new local day or at an hour's
+    //! gap, and nowhere else. The hour is measured from the message above,
+    //! which is what the Mac got wrong: it measured from the last stamp it drew,
+    //! so a chat whose messages are minutes apart grew one every hour.
+    use std::collections::{HashMap, HashSet};
+
+    use super::*;
+
+    /// 2026-11-05 12:00:00 UTC. Midday, so the short gaps below cannot cross a
+    /// day where the tests run (UTC on CI and on the gate boxes).
+    const NOON: u64 = 1_793_880_000_000;
+    const MINUTE: u64 = 60_000;
+
+    fn person(id: &str, text: &str, at: u64) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "chatId": "chat_group",
+            "role": "user",
+            "sender": "user:gh_456",
+            "senderHandle": "sam",
+            "status": "done",
+            "createdAt": at,
+            "parts": [{ "id": format!("p-{id}"), "kind": "text", "text": text }],
+        }))
+        .expect("message")
+    }
+
+    fn stamps(messages: &[Message]) -> Vec<String> {
+        let (spoken, failed) = (HashSet::new(), HashMap::new());
+        let speech = SpeechRows {
+            enabled: false,
+            spoken: &spoken,
+            failed: &failed,
+            voice_mode: false,
+        };
+        let mut cache = MessageRowCache::default();
+        build_rows_with_cache(
+            messages,
+            false,
+            speech,
+            "gh_me",
+            &HashSet::new(),
+            &Mentions::empty(),
+            true,
+            true,
+            &mut cache,
+            &HashSet::new(),
+        )
+        .into_iter()
+        .filter_map(|row| match row.kind {
+            RowKind::Stamp { .. } => Some(row.message_id),
+            _ => None,
+        })
+        .collect()
+    }
+
+    /// The symptom in Jacob's screenshot: a chat ticking along a few minutes at
+    /// a time used to collect a stamp every hour, mid-conversation.
+    #[test]
+    fn a_chat_whose_messages_are_minutes_apart_opens_with_one_stamp_and_no_more() {
+        let messages: Vec<Message> = (0..40)
+            .map(|i| person(&format!("m{i}"), "steady", NOON + i * 6 * MINUTE))
+            .collect();
+        assert_eq!(
+            stamps(&messages),
+            ["m0".to_string()],
+            "four hours of talking, one stamp — the chat's first message"
+        );
+    }
+
+    #[test]
+    fn an_hour_of_silence_draws_one_and_the_rest_of_the_run_does_not() {
+        let messages = [
+            person("m1", "morning", NOON),
+            person("m2", "still here", NOON + 20 * MINUTE),
+            person("m3", "back", NOON + 20 * MINUTE + DIVIDER_GAP_MS),
+            person("m4", "and one more", NOON + 25 * MINUTE + DIVIDER_GAP_MS),
+        ];
+        assert_eq!(stamps(&messages), ["m1".to_string(), "m3".to_string()]);
+    }
+
+    /// 23:52 → 00:03 is four minutes short of the hour and still a new day:
+    /// neither client drew a stamp there before this.
+    #[test]
+    fn a_new_day_draws_one_on_a_gap_too_short_for_the_hour() {
+        let before_midnight = NOON + 11 * 60 * MINUTE + 52 * MINUTE;
+        let messages = [
+            person("m1", "last of the night", before_midnight),
+            person("m2", "one more thought", before_midnight + 11 * MINUTE),
+        ];
+        assert_eq!(stamps(&messages), ["m1".to_string(), "m2".to_string()]);
+    }
+
+    /// A row with no clock gets no stamp, and does not become the clock the next
+    /// message is measured against.
+    #[test]
+    fn a_row_with_no_clock_neither_draws_a_stamp_nor_moves_the_one_before_it() {
+        let messages = [
+            person("m1", "with a clock", NOON),
+            person("m2", "without one", 0),
+            person("m3", "with a clock again", NOON + 12 * MINUTE),
+        ];
+        assert_eq!(stamps(&messages), ["m1".to_string()]);
     }
 }
 
@@ -11808,7 +12039,7 @@ mod presence_rows_tests {
     #[test]
     fn a_wordless_row_an_hour_later_brings_no_dangling_stamp() {
         let now = now_ms();
-        let earlier = now - 2 * STAMP_GAP_MS;
+        let earlier = now - 2 * DIVIDER_GAP_MS;
         let settled = [
             agent_message(
                 "done",

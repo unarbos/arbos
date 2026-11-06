@@ -77,14 +77,26 @@ impl RpcChild {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::from(log))
-            // The child leads a process group of its own, so everything it starts can be
-            // signalled as a set without the signal reaching agentd (bug Z). Without this the
-            // child sits in agentd's own group and no group kill is possible at all.
-            .process_group(0)
             .kill_on_drop(true);
+        // A session and a process group of the child's own. Both are inherited on fork, so
+        // everything the child starts can be signalled as a set without the signal reaching
+        // agentd (bug Z) — and the session, unlike the group, is still the child's after a tool
+        // runner has put its command in a group of its own to time it out (bug Z, round 13).
+        // `setsid` is called here rather than through `process_group`, which would make the
+        // child a group leader first and so make `setsid` fail with EPERM.
+        unsafe {
+            cmd.pre_exec(|| {
+                // Fails only when the child already leads a group, which a forked child cannot.
+                nix::libc::setsid();
+                Ok(())
+            });
+        }
         for (k, v) in envs {
             cmd.env(k, v);
         }
+        // Inherited through fork and exec by everything the child starts, which is what lets a
+        // cancel find a process that has left every set the kernel keeps for it.
+        cmd.env(crate::isolation::WORKER_MARK_ENV, name);
         if let Some(ra) = run_as {
             // The workspace's own user: no sudo, no other workspace's files (D70 hardening).
             cmd.uid(ra.uid).gid(ra.gid);
@@ -104,9 +116,11 @@ impl RpcChild {
             _ => None,
         };
         let tree = crate::isolation::ProcessTree {
-            // `process_group(0)` makes the child a group leader, so its pgid is its pid.
+            // `setsid` makes the child the leader of both, so each id is its pid.
             pgid: pid,
+            sid: pid,
             cgroup,
+            mark: Some(name.to_owned()),
         };
         let stdin = child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?;
         let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;

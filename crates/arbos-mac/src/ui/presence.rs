@@ -439,6 +439,153 @@ fn row_inner(
 }
 
 #[cfg(test)]
+mod own_account_typing_tests {
+    //! [feedback own-typing-row-mac-2026-11-05] (Scout, Mac, Arbonites): typing on
+    //! his phone drew "@A is typing…" on his Mac — his own account, his own words.
+    //! The relay's own-frame check is per device (`RoomAction::Presence.mine`
+    //! compares the frame's `device` against this device's id), so a second device
+    //! signed in to the same account reads as a stranger and its frame is let
+    //! through. The account decides whose typing is mine, not the device.
+    use futures::future::BoxFuture;
+    use gpui::{Entity, TestAppContext};
+    use tokio::sync::mpsc;
+
+    use super::*;
+    use crate::model::{AccountView, Person, SpaceKind};
+    use crate::sync::{ClientCommand, SyncEvent, SyncSource};
+
+    const GROUP: &str = "01ARBONITES";
+    /// Scout's handle, with the capital the report shows.
+    const ME: &str = "A";
+
+    struct Idle;
+
+    impl SyncSource for Idle {
+        fn name(&self) -> &'static str {
+            "idle"
+        }
+
+        fn run(
+            self: Box<Self>,
+            _events: mpsc::UnboundedSender<SyncEvent>,
+            _commands: mpsc::UnboundedReceiver<ClientCommand>,
+        ) -> BoxFuture<'static, anyhow::Result<()>> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    fn member(handle: &str, name: &str) -> Person {
+        Person {
+            id: format!("gh_{handle}"),
+            handle: handle.into(),
+            name: Some(name.into()),
+            status: "member".into(),
+            ..Person::default()
+        }
+    }
+
+    /// The group as the relay hands it over: the OTHER members only — I am never
+    /// in my own chat's `people`, which is why my handle has no name to resolve to.
+    fn arbonites() -> Project {
+        Project {
+            id: GROUP.into(),
+            name: "Arbonites".into(),
+            kind: SpaceKind::Group,
+            people: vec![member("sam", "Sam Rivera")],
+            ..Project::default()
+        }
+    }
+
+    fn mount(cx: &mut TestAppContext) -> (tokio::runtime::Runtime, Entity<AppState>) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio");
+        let handle = rt.handle().clone();
+        cx.update(|cx| {
+            gpui_tokio::init_from_handle(cx, handle);
+            cx.set_global(Theme::dark(crate::ui::theme::Surface::Matte));
+        });
+        let state = cx.new(|cx| AppState::new(Box::new(Idle), cx));
+        state.update(cx, |s, _| {
+            s.account = Some(AccountView {
+                id: "gh_A".into(),
+                login: ME.into(),
+                name: "Scout".into(),
+                ..AccountView::default()
+            });
+            s.projects = vec![arbonites()];
+        });
+        (rt, state)
+    }
+
+    fn typing(state: &Entity<AppState>, cx: &mut TestAppContext, handle: &str) {
+        state.update(cx, |s, cx| {
+            s.apply(
+                SyncEvent::Typing {
+                    chat_id: GROUP.into(),
+                    handle: handle.into(),
+                    active: true,
+                },
+                cx,
+            );
+        });
+    }
+
+    /// The names the row would draw, or an empty list when there is no row at all.
+    fn row_names(state: &Entity<AppState>, cx: &mut TestAppContext) -> Vec<String> {
+        cx.update(|cx| {
+            let theme = Theme::dark(crate::ui::theme::Surface::Matte);
+            gather(state.read(cx), GROUP, &arbonites(), &theme)
+                .map(|p| p.participants.iter().map(|x| x.name.clone()).collect())
+                .unwrap_or_default()
+        })
+    }
+
+    /// The reported bug: the same account on another device is still me.
+    #[gpui::test]
+    fn my_own_account_typing_on_another_device_draws_no_row(cx: &mut TestAppContext) {
+        let (_rt, state) = mount(cx);
+        typing(&state, cx, ME);
+        assert!(
+            state.read_with(cx, |s, _| s.typing_in(GROUP).is_empty()),
+            "my own handle never becomes a typing mark"
+        );
+        assert_eq!(
+            row_names(&state, cx),
+            Vec::<String>::new(),
+            "no row for my own typing — not a named one, and not `@A` either"
+        );
+    }
+
+    /// Handles are case-insensitive, and the sending device need not spell mine the
+    /// way this one stored it. "a" from my phone is still me.
+    #[gpui::test]
+    fn my_own_handle_in_another_case_is_still_mine(cx: &mut TestAppContext) {
+        let (_rt, state) = mount(cx);
+        typing(&state, cx, "a");
+        assert_eq!(row_names(&state, cx), Vec::<String>::new());
+    }
+
+    /// The control: suppressing everything would also pass the test above.
+    #[gpui::test]
+    fn another_members_typing_still_draws_their_row(cx: &mut TestAppContext) {
+        let (_rt, state) = mount(cx);
+        typing(&state, cx, "sam");
+        assert_eq!(row_names(&state, cx), ["Sam Rivera"]);
+    }
+
+    /// Mine goes, theirs stays, in one chat at one moment.
+    #[gpui::test]
+    fn mine_is_dropped_from_a_row_that_keeps_the_others(cx: &mut TestAppContext) {
+        let (_rt, state) = mount(cx);
+        typing(&state, cx, "sam");
+        typing(&state, cx, ME);
+        assert_eq!(row_names(&state, cx), ["Sam Rivera"]);
+    }
+}
+
+#[cfg(test)]
 mod text_tests {
     use super::*;
 

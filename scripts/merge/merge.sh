@@ -6,16 +6,64 @@
 # and is unset as soon as the merge call returns.
 # Run from the repo checkout. MERGE_KIT (default /tmp/k) holds this session's files: merge-allow (the PR numbers
 # the coordinator cleared, `#` starts a comment), watch-solo (merge-window.sh) and op-last.err.
+#
+# EXIT CODES, and why there are four of them rather than three.
+#   2  REFUSED  — a policy answer about this pull request. The kit read the coordinator's list and the PR's
+#                 state, and the answer is no.
+#   3  NOT MERGED — a verdict answer. The window check said NO-GO, or main moved out from under the GO.
+#   4  credential refusal — 1Password was reached and did not serve the read.
+#   5  SETUP — the kit or its tools are not installed on this host. NOTHING WAS JUDGED. This code exists
+#                 because the other three were being used for it: a missing /tmp/k reported as "no merge list"
+#                 (indistinguishable from "the coordinator did not clear you"), and a missing `op` binary
+#                 reported as a PAT read failure after a clean GO. On 2026-11-05 a lane read a setup gap as a
+#                 refusal, fell back to `gh pr merge`, and landed a merge inside a closed release window.
+#                 A setup gap must never be reportable as a policy refusal or a credential refusal.
 set -u
 D=$(cd "$(dirname "$0")" && pwd); K=${MERGE_KIT:-/tmp/k}
 source "$D/opread.sh"
 source "$D/checks.sh"
-ALLOW=$(sed 's/#.*//' "$K/merge-allow" 2>/dev/null | tr -s ' \t\n' ' ' | sed 's/^ //; s/ $//')
-[ -n "$ALLOW" ] || { echo "REFUSED: no merge list at $K/merge-allow"; exit 2; }
+
+# --- setup preflight: everything that is MISSING rather than refused, named before anything is judged ------
+# All of it runs before the first API call, so a host with no tooling cannot reach a gate, a verdict or the
+# vault and so cannot dress a setup gap as one of their answers. Every finding is reported in one pass, so
+# one run names the whole gap instead of one layer of it per run.
+setup=0
+if [ ! -d "$K" ]; then
+  echo "SETUP: the merge kit directory $K does not exist, so there is no allow-list to read."
+  echo "  This is a MISSING DIRECTORY, not a policy answer: the coordinator's clearance for any pull request"
+  echo "  has neither been granted nor withheld, because nothing was read. Create the kit and ask the"
+  echo "  coordinator for the list; do not write your own clearance into it."
+  echo "    mkdir -p $K   (or point MERGE_KIT at the kit this session already has)"
+  setup=1
+elif [ ! -r "$K/merge-allow" ]; then
+  echo "SETUP: the merge kit directory $K exists but holds no readable allow-list at $K/merge-allow."
+  echo "  This is a MISSING FILE, not a policy answer: nothing has been read, so no pull request has been"
+  echo "  cleared or declined. Ask the coordinator which pull requests are cleared and write what they say."
+  setup=1
+fi
+op_preflight || setup=1
+[ $setup -eq 0 ] || { echo "  Nothing was judged and nothing was merged. Fix the above, then run this command again."; exit 5; }
+# --- end setup preflight -----------------------------------------------------------------------------------
+
+[ $# -ge 2 ] || { echo "REFUSED: usage: merge.sh <pr> <pinned-head-sha> [accept-red=<id>[,<id>]] [accept-pending=<id>[,<id>]] [over-serialize=<fid>@<head8>]"; exit 2; }
+ALLOW=$(sed 's/#.*//' "$K/merge-allow" | tr -s ' \t\n' ' ' | sed 's/^ //; s/ $//')
 PR=$1; SHA=$2; FLAKE=""; OVER=""; PEND=""
 for a in "${@:3}"; do case "$a" in accept-red=*) FLAKE=$a ;; over-serialize=*) OVER=${a#over-serialize=} ;; accept-pending=*) PEND=${a#accept-pending=} ;; *) echo "REFUSED: unknown argument $a"; exit 2;; esac; done
 R=unarbos/arbos
-case " $ALLOW " in *" $PR "*) ;; *) echo "REFUSED: #$PR is not in the coordinator's merge list ($ALLOW)"; exit 2;; esac
+# The allow-list is present and readable by here, so every answer below is a policy answer and says so. The
+# empty list and the list that names somebody else are different sentences because they call for different
+# actions, and neither is the missing-directory sentence above.
+case " $ALLOW " in
+  *" $PR "*) ;;
+  *) if [ -z "$ALLOW" ]; then
+       echo "REFUSED: $K/merge-allow is present and names no pull request at all, so the coordinator has cleared none."
+     else
+       echo "REFUSED: #$PR is not in the coordinator's merge list ($ALLOW)."
+     fi
+     echo "  This is a POLICY answer and not a setup gap: the allow-list was read from $K/merge-allow."
+     echo "  Ask the coordinator to clear #$PR. Do not add yourself to the list."
+     exit 2 ;;
+esac
 
 # main's head, read live from GitHub (never the local origin/main, which another fetch can move mid-run).
 main_head() { local o; o=$(git ls-remote origin refs/heads/main 2>&1) || { echo "git ls-remote failed: ${o:0:160}"; return; }; echo "$o" | awk '$2=="refs/heads/main"{print $1}'; }
@@ -88,8 +136,11 @@ skipped=$(gh pr view "$PR" -R $R --json statusCheckRollup --jq '.statusCheckRoll
 main0=$(main_head)
 [ ${#main0} -eq 40 ] || { echo "REFUSED: cannot read main's head before the GO check: ${main0:-empty answer}"; exit 2; }
 echo "    main before the GO check: ${main0:0:9}"
-out=$(bash "$D/merge-window.sh" go "$PR" 2>&1)
+out=$(bash "$D/merge-window.sh" go "$PR" 2>&1); mwrc=$?
 echo "$out" | grep -vE '^\s+(release:|dmg|feed \(|latest release|download/mac)'
+# Exit 5 from the window check is its own setup refusal (see merge-window.sh). Without this arm it arrives
+# here as a missing VERDICT line and is reported as "verdict is not GO" — a setup gap read as a verdict.
+[ $mwrc -ne 5 ] || { echo "SETUP: the window check could not run on this host, for the reason it gave above. Nothing was judged and nothing was merged."; exit 5; }
 v=$(echo "$out" | grep '^VERDICT' | tail -1)
 # over-serialize=<fid>@<head8>: a coordinator ruling for one merge. It lifts exactly one NO-GO reason, and only
 # when the sole releasable loop item is that item, at that head, still under a serialize-on-release flag.
@@ -122,9 +173,13 @@ main1=$(main_head)
 
 rl0=$(oprl)
 TOKEN=$(opread 'op://Arbos/gefompyaklwbv2iuyyb4z5rvbm/credential') && [ -n "$TOKEN" ] \
-  || { echo "NOT MERGED: PAT read failed at $(date -u +%FT%TZ) (cache off, so it reached 1Password; refused requests are not counted): $(head -c 300 "$K/op-last.err")"; exit 4; }
+  || { echo "NOT MERGED: PAT read failed at $(date -u +%FT%TZ). op is installed and the token is in the environment"
+       echo "  (both checked in the preflight above), and the cache is off, so this reached 1Password and is a real"
+       echo "  credential answer rather than a setup gap. Refused requests are not counted against the budget."
+       echo "  op said: $(head -c 300 "$(op_err_file)")"; exit 4; }
 rl1=$(oprl)
 echo "PAT read $(date -u +%FT%TZ): served by 1Password with the cache off. The client cannot see its cost in account requests; the account counter (shared by every lane) went from $rl0 to $rl1 across the read."
+echo "    That delta is an UPPER BOUND on this read, not its cost: it also holds any other lane's requests in the same window, and the two ratelimit probes that produced the two numbers may themselves be counted (see oprl in opread.sh)."
 body=$(printf '{"sha":"%s","merge_method":"merge"}' "$SHA")
 hdr=$(mktemp); chmod 600 "$hdr"
 # The PR merge API pins the PR head but not main, so this last read is the narrowest window this tool can give.

@@ -37,18 +37,33 @@
 //!
 //! 1. the **point size** the symbol is configured at is a whole number, so
 //!    AppKit lays Apple's artwork out on the pixel grid rather than between it;
-//! 2. the **box** the element occupies is a whole number of points, so the
-//!    slot's centring offset — half the difference of two whole numbers — is a
-//!    whole device pixel on a 2× display;
+//! 2. the **box** the element occupies is a whole number of points, so it
+//!    covers an even number of device pixels at 2× — the same parity as the
+//!    whole-point tile around it, which is what makes the glyph land exactly
+//!    on the tile's centre (`centring` pins this with measured bounds);
 //! 3. the **raster** is exactly that box times the backing scale, so GPUI
 //!    blits it 1:1 instead of rescaling it.
 //!
 //! Before that rule the box was the symbol's raw natural size and the raster
 //! `ceil(natural × scale)`, both off the grid for any configuration whose
 //! natural size is fractional — which is most of them, because [`glyph`] asked
-//! for `box × 0.85` points (an 18 pt box gave 15.3). A symbol then sat up to a
-//! device pixel off the centre of its slot, and neighbouring strokes picked up
+//! for `box × 0.85` points (an 18 pt box gave 15.3). A symbol then sat a
+//! device pixel off the centre of its tile, and neighbouring strokes picked up
 //! different coverage, so some read crisper than others.
+//!
+//! **The slot does not have to be whole, and that is not an oversight.** Three
+//! callers pass a fractional one (`11.5` in the people search field, `24 ×
+//! 0.58` in the palette, `72 × 0.45` on a profile hero). It looks like the
+//! same fault as a fractional box and it is not: GPUI rounds only the *final
+//! absolute* corners of a box, so a half device pixel inside the invisible
+//! slot is cancelled by the other half when the glyph's own corners are
+//! rounded against the tile. Measured through a real window, every tile the
+//! app draws centres its glyph exactly with the slots as they stand, while a
+//! fractional **box** is a device pixel out in every one of them. Rounding the
+//! slots would buy none of that back, and would cost: the search field's
+//! placeholder shifts half a point off the width measured from Grok Mac, and
+//! the hero's glyph drops from 28 pt to 27 because [`glyph`] takes its point
+//! size from the slot. So the slots are left as their callers wrote them.
 //!
 //! **Fallback.** On a macOS that lacks a name (`NSImage` answers nil), and on
 //! every other OS (the Linux dev build and the headless tests), the pack glyph
@@ -272,8 +287,7 @@ pub fn symbol(name: &str, size: f32, weight: Weight, slot: f32, color: Hsla) -> 
         .justify_center();
     #[cfg(target_os = "macos")]
     if let Some(natural) = mac::natural_size(name, size, weight) {
-        let (w, h) = snap_box(natural);
-        return frame.child(mac::element(name, size, weight, color).w(px(w)).h(px(h)));
+        return frame.child(mac::element(name, size, weight, color, snap_box(natural)));
     }
     #[cfg(not(target_os = "macos"))]
     let _ = (size, weight);
@@ -286,7 +300,7 @@ mod mac {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex, OnceLock};
 
-    use gpui::{img, Hsla, ImageSource, Img, RenderImage};
+    use gpui::{img, px, Hsla, ImageSource, Img, RenderImage, Styled};
     use objc2::AnyThread;
     use objc2_app_kit::{
         NSBitmapFormat, NSBitmapImageRep, NSCalibratedRGBColorSpace, NSColor,
@@ -351,15 +365,22 @@ mod mac {
         found
     }
 
-    /// The image element: the raster is produced at paint time, when the
-    /// window's scale factor is known, and cached.
-    pub fn element(name: &str, size: f32, weight: Weight, color: Hsla) -> Img {
-        // No `Styled` calls here (the trait is not in this module's scope and the
-        // frame in `symbol` already fixes the size); the caller sizes the element.
+    /// The image element in a `box_pt` box: the raster is produced at paint
+    /// time, when the window's scale factor is known, and cached.
+    ///
+    /// The box is applied here rather than left to the caller because the
+    /// raster is measured in **device** pixels and there is no way to say so:
+    /// `RenderImage::scale_factor` is crate-private to GPUI, which its own SVG
+    /// renderer sets and nothing outside it can. An `img` left to size itself
+    /// therefore takes its pixel dimensions as points, and every symbol would
+    /// come out twice too large on a 2× display.
+    pub fn element(name: &str, size: f32, weight: Weight, color: Hsla, box_pt: (f32, f32)) -> Img {
         let name: Arc<str> = name.into();
         img(ImageSource::Custom(Arc::new(move |window, _cx| {
             raster(&name, size, weight, window.scale_factor(), color).map(Ok)
         })))
+        .w(px(box_pt.0))
+        .h(px(box_pt.1))
     }
 
     fn raster(
@@ -593,19 +614,140 @@ mod tests {
         assert_ne!(ceiled.1, natural.1 * scale, "the height had slack");
     }
 
-    /// A whole-point box in a whole-point slot is centred by a whole device
-    /// pixel at 2×, so the symbol lands on the grid rather than across it.
-    /// `Leading::Glyph` draws a 20 pt slot; the menus a 13 and a 15.
+    /// A whole-point box covers an even number of device pixels at 2×, which
+    /// is the parity it shares with the whole-point tile around it — the
+    /// arithmetic behind `centring`'s measurements. A raw natural size does
+    /// not, which is why [`snap_box`] exists.
     #[test]
-    fn a_whole_point_box_centres_on_a_whole_device_pixel() {
-        for slot in [13.0_f32, 15.0, 18.0, 20.0] {
-            for natural in NATURALS {
-                let (w, h) = snap_box(natural);
-                let offset = |box_pt: f32| (slot - box_pt) / 2.0 * 2.0;
-                for o in [offset(w), offset(h)] {
-                    assert_eq!(o, o.trunc(), "slot {slot}, box {w}×{h}: offset {o} px");
-                }
+    fn a_whole_point_box_covers_an_even_number_of_device_pixels() {
+        for natural in NATURALS {
+            let (w, h) = snap_box(natural);
+            for side in [w, h] {
+                assert_eq!((side * 2.0) as u32 % 2, 0, "box {side} pt is odd at 2×");
             }
+        }
+        for natural in [17.595_f32, 27.54, 11.73] {
+            assert_ne!(
+                (natural * 2.0).round() as u32 % 2,
+                0,
+                "{natural} pt would have shared the tile's parity by luck"
+            );
+        }
+    }
+}
+
+/// Where a glyph lands inside its tile, **measured** through a real GPUI
+/// window at the 2× a Mac paints at rather than modelled: the window reports
+/// the bounds it computed, including its own rounding to whole device pixels.
+///
+/// The rule these pin is narrower than it looks. What has to be a whole number
+/// of points is the glyph's **box**; the slot between the box and the tile does
+/// not, because GPUI rounds only a box's final absolute corners, so a half
+/// device pixel inside the invisible slot cancels rather than accumulates.
+#[cfg(test)]
+mod centring {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    use gpui::{
+        canvas, div, point, prelude::*, px, size, AvailableSpace, Bounds, Context, Pixels, Render,
+        TestAppContext, VisualTestContext, Window,
+    };
+
+    use super::{whole_points, GLYPH_POINT_RATIO};
+
+    struct Pane;
+    impl Render for Pane {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+        }
+    }
+
+    /// Every tile the app centres a glyph in, as `(tile, slot)`. The three
+    /// fractional slots are deliberate: a measured reproduction of Grok Mac's
+    /// search field, and two picture-relative ratios.
+    const TILES: [(&str, f32, f32); 6] = [
+        ("profile hero", 72.0, 72.0 * 0.45),
+        ("kit glyph tile", 36.0, 20.0),
+        ("settings tile", 30.0, 15.0),
+        ("palette settings tile", 24.0, 12.0),
+        ("palette picture tile", 24.0, 24.0 * 0.58),
+        ("people search field", 32.0, 11.5),
+    ];
+
+    /// The device pixels left and right of a `box_pt` box, centred in `slot`,
+    /// centred in `tile` — the nesting every glyph tile draws.
+    fn gaps(vcx: &mut VisualTestContext, tile: f32, slot: f32, box_pt: f32) -> (i32, i32) {
+        let scale = vcx.update(|window, _| window.scale_factor());
+        let device = |p: Pixels| (p.to_f64() as f32 * scale).round() as i32;
+        let measure = |vcx: &mut VisualTestContext, inner: bool| -> Bounds<Pixels> {
+            let seen = Rc::new(Cell::new(Bounds::default()));
+            let out = seen.clone();
+            vcx.draw(
+                point(px(0.0), px(0.0)),
+                size(AvailableSpace::MinContent, AvailableSpace::MinContent),
+                move |_, _| {
+                    let leaf = canvas(move |b, _, _| out.set(b), |_, _, _, _| {});
+                    if inner {
+                        div()
+                            .size(px(tile))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                div()
+                                    .size(px(slot))
+                                    .flex_shrink_0()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(leaf.w(px(box_pt)).h(px(box_pt))),
+                            )
+                    } else {
+                        div().size(px(tile)).child(leaf.w(px(tile)).h(px(tile)))
+                    }
+                },
+            );
+            seen.get()
+        };
+        let outer = measure(vcx, false);
+        let inner = measure(vcx, true);
+        let left = device(inner.origin.x) - device(outer.origin.x);
+        let right = (device(outer.origin.x) + device(outer.size.width))
+            - (device(inner.origin.x) + device(inner.size.width));
+        (left, right)
+    }
+
+    /// Every tile the app draws, with the slots as they stand — fractional
+    /// ones included.
+    #[gpui::test]
+    fn a_whole_point_box_lands_dead_centre_of_its_tile(cx: &mut TestAppContext) {
+        let (_, vcx) = cx.add_window_view(|_, _| Pane);
+        for (name, tile, slot) in TILES {
+            let box_pt = whole_points(slot * GLYPH_POINT_RATIO);
+            let (left, right) = gaps(vcx, tile, slot, box_pt);
+            assert_eq!(
+                left, right,
+                "{name}: a {box_pt} pt glyph in a {tile} pt tile sits {left} px from one \
+                 edge and {right} px from the other"
+            );
+        }
+    }
+
+    /// The teeth: the raw natural sizes the code handed over before
+    /// [`super::snap_box`] are a device pixel out in every tile. Lose the
+    /// whole-point box and the glyph goes off centre again — the slot is not
+    /// what holds this up.
+    #[gpui::test]
+    fn a_fractional_box_is_a_device_pixel_out(cx: &mut TestAppContext) {
+        let (_, vcx) = cx.add_window_view(|_, _| Pane);
+        for (tile, natural) in [(72.0_f32, 27.54_f32), (36.0, 17.595), (24.0, 11.73)] {
+            let (left, right) = gaps(vcx, tile, tile, natural);
+            assert_eq!(
+                right - left,
+                1,
+                "a {natural} pt box in a {tile} pt tile: {left} px and {right} px"
+            );
         }
     }
 }

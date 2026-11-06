@@ -744,6 +744,270 @@ async fn a_job_cancelled_while_its_file_is_held_posts_nothing() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// A relay that holds a blob upload open until the test lets it finish.
+///
+/// It puts a delivery where round 12 had it — past the gate at the door, bytes in flight, row not
+/// yet written — without a seam in the delivery code to do it. `started` fires when the box's
+/// `PUT /blob/…` arrives, which is proof the gate has already answered; `permits` releases one
+/// upload each.
+struct HeldRelay {
+    url: String,
+    started: tokio::sync::mpsc::UnboundedReceiver<()>,
+    permits: Arc<tokio::sync::Semaphore>,
+}
+
+async fn a_relay_that_holds_the_upload() -> HeldRelay {
+    let (tx, started) = tokio::sync::mpsc::unbounded_channel();
+    // Zero permits, so the first upload parks; a permit is a release, and nothing can be lost the
+    // way a notification can.
+    let permits = Arc::new(tokio::sync::Semaphore::new(0));
+    let held = permits.clone();
+    let app = axum::Router::new().route(
+        "/blob/{slot}/{key}",
+        axum::routing::put(move || {
+            let tx = tx.clone();
+            let held = held.clone();
+            async move {
+                let _ = tx.send(());
+                let _ = held
+                    .acquire()
+                    .await
+                    .map(tokio::sync::SemaphorePermit::forget);
+                axum::http::StatusCode::CREATED
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    HeldRelay {
+        url: format!("http://127.0.0.1:{port}"),
+        started,
+        permits,
+    }
+}
+
+/// **The ordering the shipped fix did not cover: the delivery is already past the door when the
+/// correction lands.** Round 12 (`r12race`, 0.1.196 `508151f6a` — the AB fix's own first retest)
+/// on Test5: job ask 13:12:23, correction 13:12:24, and the uncorrected n² CSV in the chat at
+/// 13:12:29, the same second the steer reached the worker's session.
+///
+/// [`a_steer_routed_after_the_delivery_started_still_lands_first`] is the other ordering, and the
+/// only one #2793 tested: the correction is already being routed when the delivery starts, so the
+/// delivery is *inside* `SteerGate::hold` and the gate is looking at the state that decides. That
+/// is why an insufficient fix read as sufficient. This test is the complement. The chat is quiet
+/// when the delivery starts, so the gate answers `Clear` **on the merits**, and the correction
+/// arrives afterwards — while the bytes are in flight and the row is not yet written.
+///
+/// The hold here is the relay upload, which is the production window itself and not a contrivance:
+/// `deliver` asked the gate, then uploaded, then took the chat's room lock — the lock the routing
+/// lane needs too — and only then wrote the row the user sees.
+#[tokio::test]
+async fn a_correction_that_lands_after_the_gate_but_before_the_row_still_wins() {
+    let mut relay = a_relay_that_holds_the_upload().await;
+    let (agent, root) = crate::status::tests::test_agent_on_relay(&relay.url).await;
+    let host = agent.sync.open_room(CHAT10).await.unwrap();
+    hold_for(&agent, HOLD_MS);
+    a_job_in(&agent, &host, CHAT10, JOB10, WORKER10, ASK10, ROW10).await;
+
+    // 13:12:23 — the chat is quiet, so the gate has nothing to hold this delivery for. A gate
+    // that waited here would make this test pass as the other ordering.
+    assert_eq!(
+        agent.steer_gate.marks(CHAT10),
+        0,
+        "the chat must be quiet when the delivery starts, or this is not the ordering under test"
+    );
+    let uncorrected = a_file(&agent, "race12.csv", "n,square\n1,1\n");
+    let delivery = {
+        let agent = agent.clone();
+        tokio::spawn(async move { worker_delivers_as(&agent, WORKER10, &uncorrected).await })
+    };
+
+    // The upload has arrived at the relay, so the gate has answered and this delivery is past the
+    // door. Everything after this point is the window the first cut left open.
+    tokio::time::timeout(Duration::from_secs(5), relay.started.recv())
+        .await
+        .expect("the delivery never reached the upload")
+        .expect("the relay stopped listening");
+
+    // 13:12:24 — the correction arrives; 13:12:29 the main lane hands it to the worker, which
+    // cannot read it because it is inside this delivery call.
+    let routing = agent.steer_gate.routing(CHAT10, &ulid());
+    agent.steer_gate.steer_delivered(JOB10);
+
+    // The upload completes. This is the moment round 12 wrote the uncorrected CSV.
+    relay.permits.add_permits(1);
+    let out = tokio::time::timeout(Duration::from_millis(HOLD_MS * 20), delivery)
+        .await
+        .expect("the delivery never returned once the upload finished")
+        .unwrap();
+    drop(routing);
+
+    assert_eq!(
+        out["isError"],
+        json!(true),
+        "the uncorrected file was written after the correction had reached the worker: {out}"
+    );
+    let told = out["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(
+        told.contains("NOT posted") && told.contains("correction"),
+        "and the worker is told to take the correction first: {told}"
+    );
+    assert!(
+        cards(&host).is_empty(),
+        "the uncorrected CSV is in the chat: {:?}",
+        cards(&host)
+    );
+
+    // And the corrected file still posts, once — the refusal is a redirection, not a dead end.
+    agent.steer_gate.steers_drained(JOB10);
+    let corrected = a_file(&agent, "race12.csv", "n,cube\n1,1\n");
+    relay.permits.add_permits(1);
+    let posted = worker_delivers_as(&agent, WORKER10, &corrected).await;
+    assert!(
+        posted.get("isError").is_none(),
+        "the corrected file posts: {posted}"
+    );
+    assert_eq!(
+        cards(&host).len(),
+        1,
+        "exactly one CSV reaches the chat for one ask: {:?}",
+        cards(&host)
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// **`r12steer`: four rapid corrections must answer with exactly one file, carrying the last of
+/// them.** Round 12 applied **two** of four and put **three** CSVs in the chat for one ask
+/// (13:10:15, 13:10:19, 13:10:32) — the duplicate-card half of bug AB, graded as its own
+/// observation.
+///
+/// This is the suppression half proved on the burst. All four corrections land while the first
+/// delivery is in flight, so no stale card is ever written: the delivery is refused, the worker
+/// reads all four, and the one card the user ends up with is the four-correction file. It
+/// discriminates against a fix that stops only the *first* stale artifact — the one-refusal-per-
+/// correction rule would then let the second delivery through with corrections 2 to 4 unread.
+#[tokio::test]
+async fn four_rapid_corrections_answer_with_one_file_carrying_the_last() {
+    let mut relay = a_relay_that_holds_the_upload().await;
+    let (agent, root) = crate::status::tests::test_agent_on_relay(&relay.url).await;
+    let host = agent.sync.open_room(CHAT11).await.unwrap();
+    hold_for(&agent, HOLD_MS);
+    a_job_in(&agent, &host, CHAT11, JOB11, WORKER11, ASK11, ROW11).await;
+
+    // 13:10:15 — the worker posts the top-30 CSV with no length filter.
+    let uncorrected = a_file(&agent, "steer12.csv", "rank,name\n1,a\n");
+    let delivery = {
+        let agent = agent.clone();
+        tokio::spawn(async move { worker_delivers_as(&agent, WORKER11, &uncorrected).await })
+    };
+    tokio::time::timeout(Duration::from_secs(5), relay.started.recv())
+        .await
+        .expect("the delivery never reached the upload")
+        .expect("the relay stopped listening");
+
+    // Four corrections, as fast as the user could type them, all while that file is in flight.
+    let marks: Vec<_> = (0..4)
+        .map(|_| agent.steer_gate.routing(CHAT11, &ulid()))
+        .collect();
+    for _ in 0..4 {
+        agent.steer_gate.steer_delivered(JOB11);
+    }
+
+    relay.permits.add_permits(1);
+    let out = tokio::time::timeout(Duration::from_millis(HOLD_MS * 20), delivery)
+        .await
+        .expect("the delivery never returned")
+        .unwrap();
+    drop(marks);
+    assert_eq!(
+        out["isError"],
+        json!(true),
+        "the uncorrected CSV went into the chat with four corrections waiting: {out}"
+    );
+    assert!(
+        cards(&host).is_empty(),
+        "a stale card is in the chat: {:?}",
+        cards(&host)
+    );
+
+    // The worker reads all four and posts once. This is the file the user asked for.
+    agent.steer_gate.steers_drained(JOB11);
+    let corrected = a_file(
+        &agent,
+        "steer12.csv",
+        "rank,name,len,rate,note\n1,a,31,9.9,fourth\n",
+    );
+    relay.permits.add_permits(1);
+    let posted = worker_delivers_as(&agent, WORKER11, &corrected).await;
+    assert!(
+        posted.get("isError").is_none(),
+        "the corrected file posts: {posted}"
+    );
+
+    let cards = cards(&host);
+    assert_eq!(
+        cards.len(),
+        1,
+        "one ask, four corrections, and the chat holds more than one file: {cards:?}"
+    );
+    let body = {
+        let h = host.lock().await;
+        h.doc
+            .message(&cards[0].0)
+            .and_then(|m| m.rest.get("superseded").and_then(Value::as_bool))
+    };
+    assert_eq!(body, None, "the one card must not be a superseded one");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The other ordering of the same duplicate: the correction arrives **after** the card is already
+/// in the chat, and the job is still running. Suppression cannot help — the row exists — so the
+/// card the user is looking at is marked superseded and the corrected file takes its place.
+///
+/// Without this, `media::deliver` simply appends and the chat shows two answers to one ask with
+/// nothing to say which is live. `replace_just_posted_job` covers only a job that has already
+/// finished, so a running job fell between the two.
+#[tokio::test]
+async fn a_correction_after_a_running_jobs_file_supersedes_that_card() {
+    let (agent, root) = test_agent().await;
+    let host = agent.sync.open_room(CHAT12).await.unwrap();
+    hold_for(&agent, HOLD_MS);
+    a_job_in(&agent, &host, CHAT12, JOB12, WORKER12, ASK12, ROW12).await;
+
+    let first = a_file(&agent, "late12.csv", "rank,name\n1,a\n");
+    let posted = worker_delivers_as(&agent, WORKER12, &first).await;
+    assert!(posted.get("isError").is_none(), "{posted}");
+    let card = cards(&host);
+    assert_eq!(card.len(), 1, "{card:?}");
+
+    // The job is still running, so this is not `replace_just_posted_job`'s case. The correction
+    // reaches the worker's session — the one step this box cannot do for itself, since it has no
+    // pi binary and so no live worker child.
+    assert_eq!(agent.store.job(JOB12).unwrap().unwrap().state, "running");
+    let steered = agent
+        .test_correction_reached_worker(CHAT12, JOB12, "only entries longer than 30 characters")
+        .await
+        .expect("a running job takes the correction");
+    assert_eq!(
+        steered["superseded_message_id"],
+        json!(card[0].0),
+        "the card already in the chat was not superseded: {steered}"
+    );
+    let superseded = {
+        let h = host.lock().await;
+        h.doc
+            .message(&card[0].0)
+            .and_then(|m| m.rest.get("superseded").and_then(Value::as_bool))
+    };
+    assert_eq!(
+        superseded,
+        Some(true),
+        "the card the user is looking at is not marked replaced, so the chat shows two answers"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// Same shape as [`a_running_job`], for the tests that need their own chat.
 #[allow(clippy::too_many_arguments)]
 async fn a_job_in(
@@ -843,6 +1107,24 @@ const JOB7: &str = "01TESTJOBSTEERRACE00000007";
 const WORKER7: &str = "01TESTWORKERSTEERRACE00007";
 const ASK7: &str = "01TESTASKJOBSTEERRACE00007";
 const ROW7: &str = "01TESTROWJOBSTEERWORKER007";
+
+const CHAT10: &str = "01TESTCHATJOBSTEERRACE0010";
+const JOB10: &str = "01TESTJOBSTEERRACE00000010";
+const WORKER10: &str = "01TESTWORKERSTEERRACE00010";
+const ASK10: &str = "01TESTASKJOBSTEERRACE00010";
+const ROW10: &str = "01TESTROWJOBSTEERWORKER010";
+
+const CHAT11: &str = "01TESTCHATJOBSTEERRACE0011";
+const JOB11: &str = "01TESTJOBSTEERRACE00000011";
+const WORKER11: &str = "01TESTWORKERSTEERRACE00011";
+const ASK11: &str = "01TESTASKJOBSTEERRACE00011";
+const ROW11: &str = "01TESTROWJOBSTEERWORKER011";
+
+const CHAT12: &str = "01TESTCHATJOBSTEERRACE0012";
+const JOB12: &str = "01TESTJOBSTEERRACE00000012";
+const WORKER12: &str = "01TESTWORKERSTEERRACE00012";
+const ASK12: &str = "01TESTASKJOBSTEERRACE00012";
+const ROW12: &str = "01TESTROWJOBSTEERWORKER012";
 
 const CHAT6: &str = "01TESTCHATJOBSTEERRACE0006";
 const JOB6: &str = "01TESTJOBSTEERRACE00000006";

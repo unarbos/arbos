@@ -1113,9 +1113,10 @@ const LEFTOVER_PIDS_MAX: usize = 32;
 /// What `stop_job` tells the model it may now say, which is decided by what the cancel actually
 /// achieved rather than by the word in the job row.
 ///
-/// Three outcomes, and the middle one is bug Z: a row that reads `cancelled` over work that is
-/// still running. The model is told not to report a cancel, told which pid to name, and told
-/// that the `kill` the guard refused in r10cancel is allowed for exactly that pid.
+/// Four outcomes, and the middle two are the round-13 pair: a row that reads `cancelled` over
+/// work that is still running (bug Z), and a clean-sounding answer from a sweep that never read
+/// the kernel (bug AE). The model is told not to report a cancel, told which pid to name, and
+/// told that the `kill` the guard refused in r10cancel is allowed for exactly that pid.
 pub(crate) fn stop_job_note(stopped: &[StoppedJob]) -> String {
     if stopped.iter().any(|s| s.state != "cancelled") {
         return "At least one job above does NOT read `cancelled`. Do not tell the user it stopped: say which one is still open, call stop_job again for it, and only then report a cancel.".to_owned();
@@ -1125,7 +1126,10 @@ pub(crate) fn stop_job_note(stopped: &[StoppedJob]) -> String {
         .flat_map(|s| s.sweep.survivors.clone())
         .collect();
     if leftovers.is_empty() {
-        return "Every job above reads `cancelled` in its own row, and every process it had started is dead: its worker is closed, its tool call is dead and no result or file will arrive from it. Say it is cancelled in one line and end the turn.".to_owned();
+        if stopped.iter().any(|s| !s.sweep.checked) {
+            return "Every job above reads `cancelled`, but its processes could NOT be checked: agentd has no handle on them (it was restarted since the job started). Do not tell the user the work stopped. Say the job is cancelled and that you cannot confirm the processes it started are gone, and offer to look with `ps`.".to_owned();
+        }
+        return "Every job above reads `cancelled` in its own row, and every process it had started was checked and is dead: its worker is closed, its tool call is dead and no result or file will arrive from it. Say it is cancelled in one line and end the turn.".to_owned();
     }
     let pids = pid_list(&leftovers);
     format!(
@@ -1199,7 +1203,7 @@ pub(crate) fn stop_line(stopped: &[StoppedJob]) -> String {
     // Cancelled, but something it started is still running. Naming the pid is the point: it is
     // what the user needs to get rid of it, and bug Z is what happens when the line says
     // "cancelled" and stops there.
-    if let Some(leaky) = stopped.iter().find(|s| !s.sweep.clean()) {
+    if let Some(leaky) = stopped.iter().find(|s| !s.sweep.survivors.is_empty()) {
         return format!(
             "Stopped: {titles}. “{}” reads cancelled, but {} it started {} still running ({}). \
              I am not able to say its work has stopped.",
@@ -1221,6 +1225,15 @@ pub(crate) fn stop_line(stopped: &[StoppedJob]) -> String {
                 .map(u32::to_string)
                 .collect::<Vec<_>>()
                 .join(", ")
+        );
+    }
+    // Cancelled, nothing found running — but by a sweep that had no handle to look with. The
+    // promise below rests on a reading of the kernel, so a cancel that took none cannot make it.
+    if let Some(unchecked) = stopped.iter().find(|s| !s.sweep.checked) {
+        return format!(
+            "Stopped: {titles}. “{}” reads cancelled, but I could not check whether the \
+             processes it started are gone.",
+            unchecked.title.to_lowercase()
         );
     }
     let killed: usize = stopped.iter().map(|s| s.sweep.killed).sum();
@@ -1940,7 +1953,12 @@ pub struct Agent {
     /// the message is picked up, and this is what keeps it.
     pub(crate) pi_owed_sends: Mutex<Vec<(String, CommandView)>>,
     /// A drain is already running, so a later supervisor tick does not start a second one.
-    pi_draining: AtomicBool,
+    ///
+    /// It is also the only way to tell a drain that has *finished* from one that has merely
+    /// emptied [`Self::pi_owed_sends`], which it does before it decides anything. A reader that
+    /// wants the drain's outcome — a record written, a message answered — must wait for this to
+    /// fall, not for the list to empty.
+    pub(crate) pi_draining: AtomicBool,
     /// Sends that failed in a row, reset by the first one that works (bug Y, phase two). Test5
     /// failed every send for thirty minutes while reporting itself healthy, because nothing
     /// counted them and nothing drew a conclusion from them.
@@ -4221,7 +4239,9 @@ impl Agent {
             let _ = self
                 .store
                 .set_job_state(&j.id, "cancelled", Some("stopped by the user"));
-            let mut sweep = Sweep::default();
+            // A job that never had a worker started no processes, so "none are running" is a
+            // fact rather than the unchecked claim bug AE made.
+            let mut sweep = Sweep::nothing_to_check();
             if let Some(sid) = &j.subagent_id {
                 sweep = self.end_cancelled_worker(&j.id, sid).await;
             }
@@ -4270,19 +4290,29 @@ impl Agent {
         }
     }
 
-    /// The processes of a worker: its recorded process group and its cgroup leaf.
+    /// The processes of a worker: its recorded session and process group, its cgroup leaf, and
+    /// the mark its descendants carry.
+    ///
+    /// One recorded number is both the session id and the group id, because `RpcChild` spawns
+    /// through `setsid` and the child leads both. The mark and the cgroup path are derived from
+    /// the session id rather than remembered, so a cancel after an agentd restart — which has
+    /// lost the number — can still find what the dead agentd's worker left running.
     pub(crate) async fn worker_tree(&self, sid: &str) -> ProcessTree {
+        let leader = self.worker_pgids.lock().await.get(sid).copied();
         ProcessTree {
-            pgid: self.worker_pgids.lock().await.get(sid).copied(),
+            pgid: leader,
+            sid: leader,
             cgroup: self
                 .cfg
                 .run_as
                 .as_ref()
                 .and_then(|ra| crate::isolation::Isolation::leaf_path(ra, sid)),
+            mark: Some(sid.to_owned()),
         }
     }
 
-    /// Record the process group a freshly spawned worker leads.
+    /// Record the session and process group a freshly spawned worker leads, which are both its
+    /// pid.
     pub(crate) async fn note_worker_pgid(&self, sid: &str, pgid: u32) {
         self.worker_pgids.lock().await.insert(sid.to_owned(), pgid);
     }
@@ -4416,6 +4446,48 @@ impl Agent {
             .map(|j| j.id)
     }
 
+    /// What the box knows for certain about the work behind `ask_message_id`: it ran as a
+    /// background job, with this id, and it posted this many progress notes in the chat. `None`
+    /// when the ask has no job row.
+    ///
+    /// Bug AD, Test5 round 12 (see `job_backgrounded.rs`): the model that writes a job's answer
+    /// was told nothing about the job it is answering for, so the only thing in its context that
+    /// spoke to backgrounding was an acceptance criterion the worker had written off the brief's
+    /// "run each step in the foreground" instruction and scored unmet. It restated that to the
+    /// user as what had happened. The fact was two lookups away the whole time, which is the
+    /// defect: a writer inferring from text what the store holds as a row.
+    pub(crate) fn job_backgrounding_note(
+        &self,
+        chat_id: &str,
+        ask_message_id: &str,
+    ) -> Option<String> {
+        let job = self
+            .store
+            .jobs_for_chat(chat_id)
+            .unwrap_or_default()
+            .into_iter()
+            .find(|j| j.ask_message_id == ask_message_id)?;
+        let notes = self
+            .store
+            .t3_thread_in_order(chat_id, 500)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(r, src)| {
+                r.kind == "job_note"
+                    && src
+                        .as_ref()
+                        .and_then(|s| s.get("job_id"))
+                        .and_then(Value::as_str)
+                        == Some(job.id.as_str())
+            })
+            .count();
+        Some(format!(
+            "What the box records about this work, which overrides anything the notes below suggest: it ran as a background job beside the chat (job {}, {notes} progress note{} posted in this chat). Never tell the user it ran in the foreground, that it was not backgrounded, or that it was not a background job, and do not mention jobs, workers, backgrounding or the foreground at all. An instruction in the notes about running steps in the foreground or not detaching them is about how the worker ran its own steps inside that job; it says nothing about whether this work was backgrounded.",
+            job.id,
+            if notes == 1 { "" } else { "s" },
+        ))
+    }
+
     /// The title of a job of `chat_id` that is still `queued` or `running`, for the guard that
     /// refuses a reply reporting a cancel the job rows do not agree with.
     pub(crate) fn open_job_title(&self, chat_id: &str) -> Option<String> {
@@ -4522,6 +4594,24 @@ impl Agent {
             .steer(&sid, text)
             .await
             .map_err(|e| format!("steer failed: {e}"))?;
+        Ok(self
+            .correction_reached_worker(chat_id, &job, &sid, text)
+            .await)
+    }
+
+    /// Everything that follows a correction actually reaching its worker's session.
+    ///
+    /// Its own method because the line above it — the adapter's `steer` — needs a live pi child,
+    /// which a box with no pi binary cannot have (the same limit [`Self::test_note_job_steer`]
+    /// exists for). Split out, the bookkeeping that decides what the user sees is the code a test
+    /// runs rather than a copy of it.
+    async fn correction_reached_worker(
+        &self,
+        chat_id: &str,
+        job: &crate::store::JobRow,
+        sid: &str,
+        text: &str,
+    ) -> Value {
         // Counted before anything else can await: from here on a delivery of this job knows a
         // correction is in its worker's session and will not post the uncorrected file in front
         // of it (bug AB, `steer_gate.rs`).
@@ -4544,16 +4634,30 @@ impl Agent {
         );
         // On the worker's own thread too, so the rollout view shows the steer in place.
         let _ = self.store.t3_append(
-            &sid,
-            Some(&sid),
-            Some(&sid),
+            sid,
+            Some(sid),
+            Some(sid),
             "steer",
             Some("user"),
             text,
             Some(&json!({ "job_id": job.id })),
         );
-        tracing::info!(chat_id, job = %job.id, "job steered");
-        Ok(json!({ "job_id": job.id, "title": job.title, "state": "steered" }))
+        // One ask, one file. If this job has already put a card in the chat, the corrected file
+        // replaces it rather than appending to it (r12steer's three CSVs).
+        let superseded = self
+            .supersede_posted_file_of_running_job(chat_id, &job.id)
+            .await;
+        tracing::info!(chat_id, job = %job.id, superseded = ?superseded, "job steered");
+        let mut out = json!({ "job_id": job.id, "title": job.title, "state": "steered" });
+        if let Some(card_id) = superseded {
+            out["superseded_message_id"] = json!(card_id);
+            out["note"] = json!(
+                "The file this job already posted is marked superseded in the chat. The worker is \
+                 redoing the work with your correction and will post the corrected file in its \
+                 place — one file, not a second copy."
+            );
+        }
+        out
     }
 
     /// The job a `steer_job` is about: a running one as [`Self::resolve_job`] finds it, or — for
@@ -4583,6 +4687,46 @@ impl Agent {
             .into_iter()
             .find(|j| j.state == "done" && Self::ended_inside_replace_window(j))
             .ok_or(err)
+    }
+
+    /// A correction for a *running* job that has already put a file in the chat: mark that card
+    /// superseded, so the corrected file which follows replaces it rather than standing beside it.
+    ///
+    /// [`Self::replace_just_posted_job`] does this for a job that has already finished, and has to
+    /// reopen the job to get a corrected file at all. A running job needs no reopening — the
+    /// correction has just reached its worker — but it has the same duplicate to answer for.
+    /// Round 12's `r12steer` put **three** CSVs in the chat for one ask (13:10:15, 13:10:19,
+    /// 13:10:32): a correction arriving after a card is written leaves that card standing, and the
+    /// corrected file is appended beside it. The steer gate suppresses the stale delivery when the
+    /// correction beats the row (`steer_gate.rs`); this is the other side of that line, for the
+    /// corrections that arrive after it.
+    ///
+    /// Only inside [`crate::config::STEER_REPLACE_WINDOW_MS`] of the card, and only while the card
+    /// is still in the chat — a correction minutes after a file is a new ask, not a replacement.
+    async fn supersede_posted_file_of_running_job(
+        &self,
+        chat_id: &str,
+        job_id: &str,
+    ) -> Option<String> {
+        let (card_id, posted_at) = self.job_last_file(job_id).await?;
+        if arbos_core::ids::now_ms() - posted_at > crate::config::STEER_REPLACE_WINDOW_MS {
+            return None;
+        }
+        let host = self.sync.host(chat_id).await?;
+        {
+            let h = host.lock().await;
+            // The card has to still be there to be superseded; a row that went is a new delivery.
+            h.doc.message(&card_id)?;
+            h.doc
+                .set_message_fields(&card_id, &[("superseded", json!(true))]);
+        }
+        tracing::info!(
+            chat_id,
+            job = job_id,
+            card = %card_id,
+            "the file this job already posted is superseded by the user's correction"
+        );
+        Some(card_id)
     }
 
     /// Did this job finish recently enough for a correction to replace its file?
@@ -4715,7 +4859,9 @@ impl Agent {
                     "job_id": s.id,
                     "title": s.title,
                     "state": s.state,
-                    // What the cancel did to the job's processes, not what it meant to do.
+                    // What the cancel did to the job's processes, read back from the kernel
+                    // afterwards — not what it meant to do, and not what it assumes (bug AE).
+                    "processes_checked": s.sweep.checked,
                     "processes_killed": s.sweep.killed,
                     "processes_still_alive": s.sweep.survivors,
                 }))
@@ -11614,7 +11760,7 @@ impl Agent {
         let address = self.owner_address_note(chat_id, host, in_reply_to).await;
         let (talking_model, _) = self.live_models().await;
         let system = format!(
-            "{} You answer a message the user sent while you were busy with something else; the work for it is done (notes below). Write the answer the user should read, like a colleague in chat: what they asked for, what came out, what is open. First person; short when the answer is short; a plain GitHub-flavoured markdown table (header row, `| --- |` separator row, rows starting and ending with `|`, no code fence) with `[Name](https://…)` links when it compares several items, and then one line offering a concrete next step. Never mention a side task, helper, subagent, tool, command, model or that you were busy. If the notes hold no answer, say plainly what you could not do.{}",
+            "{} You answer a message the user sent while you were busy with something else; the work for it is done (notes below). Write the answer the user should read, like a colleague in chat: what they asked for, what came out, what is open. First person; short when the answer is short; a plain GitHub-flavoured markdown table (header row, `| --- |` separator row, rows starting and ending with `|`, no code fence) with `[Name](https://…)` links when it compares several items, and then one line offering a concrete next step. Never mention a side task, helper, subagent, tool, command, model or that you were busy. An acceptance criterion in the notes is the worker's own self-check against its instructions, not a finding about the user's request: an unmet one is never restated to the user as a description of what happened. If the notes hold no answer, say plainly what you could not do.{}",
             // The agent's live name (#1431), not the one the box booted with: a renamed agent
             // must introduce itself as its new self in this bubble too.
             match self.name().trim() {
@@ -11630,12 +11776,25 @@ impl Agent {
             Some(&format!("history_search {{\"query\": \"<a phrase from the notes>\", \"thread_id\": \"{chat_id}\"}}")),
         );
         let user = format!(
-            "The user's message: {}\n\nStatus of the work: {status}{}\n\nNotes from the work (for you only):\n<<<\n{}\n>>>",
+            "The user's message: {}\n\nStatus of the work: {status}{}{}\n\nNotes from the work (for you only):\n<<<\n{}\n>>>",
             if ask.trim().is_empty() { "(see the notes)" } else { ask.trim() },
             error.map(|e| format!("\nIt ended with an error: {e}")).unwrap_or_default(),
+            // Read from the job row rather than left to be worked out from the notes (bug AD).
+            self.job_backgrounding_note(chat_id, in_reply_to)
+                .map(|n| format!("\n\n{n}"))
+                .unwrap_or_default(),
             if raw_trim.trim().is_empty() { "(nothing was written)" } else { raw_trim.trim() }
         );
         let llm = self.llm.with_purpose("job-result");
+        // What is posted when the model writes nothing, or nothing that survives the strip below:
+        // the worker's own words for finished work, a plain line otherwise.
+        let fallback = || {
+            if status == "done" && !raw_trim.trim().is_empty() {
+                ProseFilter::clean_prose(raw_trim.trim())
+            } else {
+                "I couldn't finish that one. Ask me again in a moment.".to_owned()
+            }
+        };
         let text = match tokio::time::timeout(
             Duration::from_secs(30),
             llm.complete(&talking_model, &system, &user, 400),
@@ -11654,12 +11813,22 @@ impl Agent {
                     "job result call gave nothing; plain line"
                 );
                 let _ = other;
-                if status == "done" && !raw_trim.trim().is_empty() {
-                    ProseFilter::clean_prose(raw_trim.trim())
-                } else {
-                    "I couldn't finish that one. Ask me again in a moment.".to_owned()
-                }
+                fallback()
             }
+        };
+        // Bug AD. Every caller of this function is delivering work that ran beside the chat, so a
+        // sentence telling the user it was not a background job is false whatever wrote it. The
+        // prompt above says so; this is what makes it impossible rather than unlikely.
+        let text = match crate::job_backgrounded::strip_denials(&text) {
+            kept if kept.trim().is_empty() => {
+                tracing::warn!(
+                    chat_id,
+                    name,
+                    "the job result denied this job's own backgrounding and nothing else; the worker's own words are posted instead"
+                );
+                crate::job_backgrounded::strip_denials(&fallback())
+            }
+            kept => kept,
         };
         let text = crate::store::redact(&text);
         // The answer is written; where it lands in the chat is the chat's send order to decide
@@ -13741,6 +13910,22 @@ impl Agent {
     /// box with no pi binary cannot have.
     pub(crate) fn test_note_job_steer(&self, job_id: &str, text: &str) {
         let _ = self.store.append_job_steer(job_id, text);
+    }
+
+    /// Test seam: the half of `steer_job_in` that runs once a correction has reached the worker's
+    /// session. Everything but the adapter call, which needs the live pi child a box with no pi
+    /// binary cannot have — the same limit as [`Agent::test_note_job_steer`].
+    pub(crate) async fn test_correction_reached_worker(
+        self: &Arc<Self>,
+        chat_id: &str,
+        job_id: &str,
+        text: &str,
+    ) -> Result<Value, String> {
+        let job = self.resolve_steer_target(chat_id, job_id)?;
+        let sid = job.subagent_id.clone().ok_or("the job has no worker yet")?;
+        Ok(self
+            .correction_reached_worker(chat_id, &job, &sid, text)
+            .await)
     }
 
     /// Test seam: `steer_job` for a named chat rather than the running turn's, which is the only
