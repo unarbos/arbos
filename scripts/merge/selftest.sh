@@ -1195,14 +1195,44 @@ else
   if ! bash "$cl" pin "$cld/two.yml" >/dev/null 2>&1; then ok "two pins in one workflow refuse rather than pick one"
   else bad "a workflow pinning two releases resolved to one anyway: $got"; fi
 
-  # CI moving to a major this script does not verify must stop it, not be installed unchecked.
-  pin_yml 22.1.0 "$sha64"
-  got=$(bash "$cl" pin "$cld/ci.yml" 2>&1)
-  if ! bash "$cl" pin "$cld/ci.yml" >/dev/null 2>&1; then ok "a major this script does not check refuses"
-  else bad "a pin for a different major was accepted: $got"; fi
-  case "$got" in
-    *"major"*) ok "that refusal names the major, so the reader knows what to update" ;;
-    *) bad "the different-major refusal does not say which major: $got" ;;
+  # The floor, which is the claim gate 5 actually rests on. webrtc-sys' guard asks for "21 or
+  # later", so an existing 21.1.3 or a 22 must be accepted and an 18 must not — and a host that
+  # already clears the floor must not be made to download 2 GB, which is the case that cost a
+  # worker 25 minutes on 2026-11-06.
+  stub() { mkdir -p "$cld/llvm-$1/bin"
+           { printf '#!/bin/sh\n'
+             printf 'case "$1" in --version) echo "clang version %s.0.0"; exit 0;; esac\n' "$2"
+             printf 'echo "#define __clang_major__ %s"\n' "$2"; } > "$cld/llvm-$1/bin/clang++"
+           chmod +x "$cld/llvm-$1/bin/clang++"; }
+  # The system clang++ is left reachable on purpose: clang_find consults it last, so these cases
+  # exercise the real precedence instead of an emptied PATH. On a host whose default already
+  # clears the floor the 18-only case would be vacuous, so it is skipped there rather than lying.
+  sysmaj=$(clang++ -dM -E -x c++ /dev/null 2>/dev/null | awk '$2 == "__clang_major__" {print $3}')
+  stub 18 18
+  if [ -n "$sysmaj" ] && [ "$sysmaj" -ge 21 ] 2>/dev/null; then
+    ok "skipped the clang-18 case: this host's own clang++ is $sysmaj, which would decide it"
+  else
+    got=$(CLANG_SEARCH_GLOB="$cld/llvm-*/bin/clang++" bash "$cl" check 2>&1)
+    if [ -z "${got##*cannot build*}" ]; then ok "a host with only clang 18 is refused, which is the guard's own answer"
+    else bad "clang 18 alone was treated as usable: $got"; fi
+  fi
+
+  stub 21 21
+  got=$(CLANG_SEARCH_GLOB="$cld/llvm-*/bin/clang++" bash "$cl" check 2>&1)
+  if [ -z "${got##*llvm-21*}" ]; then ok "an existing clang at the floor is found rather than downloaded"
+  else bad "a usable clang 21 on the host was not found: $got"; fi
+
+  # Above the floor is usable too. An equality test here would reject a host that is MORE current
+  # than CI, and send it to fetch an older compiler it does not need.
+  stub 23 23
+  got=$(CLANG_SEARCH_GLOB="$cld/llvm-*/bin/clang++" bash "$cl" check 2>&1)
+  if [ -z "${got##*llvm-23*}" ]; then ok "the floor is a floor: a newer major is accepted, not rejected"
+  else bad "a clang above the floor was not accepted: $got"; fi
+
+  # And the claim it makes must stay the weaker, true one.
+  case $got in
+    *"not CI's build"*) ok "a compiler that is not CI's pin says so, so the compile is not misreported" ;;
+    *) bad "an off-pin compiler did not disclaim being CI's build: $got" ;;
   esac
   rm -rf "$cld"
 fi

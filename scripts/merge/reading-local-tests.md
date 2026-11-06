@@ -212,6 +212,24 @@ is interleaved with the test reporter's, so `** TEST SUCCEEDED **` appears in th
 suite's verdicts and the last unit verdict sits ~150 lines after it. Judge sequence by timestamps,
 never by position.
 
+## Gate 5 on a Mac-touching PR: look for the compiler before you fetch one
+
+`cargo test --workspace --no-run` fails on this repo under the clang most Linux images default to.
+The message is a version guard in `webrtc-sys`' own `build.rs`, not a compile error, and
+`arbos-mac` reaches `webrtc-sys` through `libwebrtc`, so there is no crate to scope around it.
+
+**Run `clang21.sh check` first.** On 2026-11-06 a worker met the wall, downloaded the 2 GB asset,
+and only afterwards found that `/usr/lib/llvm-21/bin/clang++` had been on the host for hours —
+present and working, merely not the default. The directory's birth time was four hours older than
+the session that "installed" it. `check` searches `/usr/lib/llvm-*` and the default compiler and
+names what it finds; `install` fetches only when nothing clears the floor.
+
+**Clearing the floor and matching CI are different claims, and only the weaker one is usually
+true.** The guard asks for "clang 21 or later", so any 21+ compiles the rebased head and gate 5 is
+satisfied — gate 5 asks whether the code compiles. It does **not** follow that the compile used
+CI's toolchain: that needs the pinned release, and `check` says so when the compiler it found is
+not the pin. Report the compile as having cleared the floor, not as having used CI's build.
+
 ## `image.yml`: the step that always fails is load-bearing
 
 `Register the Daytona snapshot` in `image.yml` has failed on **every** image run since 0.1.183 —
