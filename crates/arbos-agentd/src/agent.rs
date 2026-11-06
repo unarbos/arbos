@@ -1777,6 +1777,9 @@ pub struct ModelError {
     pub detail: String,
     /// `stop_reason: refusal` — the provider declined this context, not a transient failure.
     pub refusal: bool,
+    /// Which of the two things the refusal was about, once the fresh-context probe has asked
+    /// (`refusal_probe`). Untested until then, and on every failure that is not a refusal.
+    pub cause: crate::refusal_probe::RefusalCause,
 }
 
 impl ModelError {
@@ -1803,6 +1806,7 @@ impl ModelError {
         Some(Self {
             refusal: raw == Some("refusal") || Self::detail_is_refusal(&detail),
             detail,
+            cause: crate::refusal_probe::RefusalCause::Untested,
         })
     }
 
@@ -1840,7 +1844,15 @@ impl ModelError {
         // its own, so the line names what happened and the one thing that gets through
         // (Jacob, Test5 round 2, fix F — "ask me again in a moment" sent users back into the
         // same refusal and lost the turn).
+        //
+        // Unless the request was not what was declined. The probe asks the provider this message
+        // on its own (`refusal_probe`), and when it is accepted there the advice above is wrong
+        // twice over: there is nothing to split, and the user would be splitting a message that
+        // never offended anything (Jacob, Test5 2026-11-06, every benign task from 12:17 CR).
         if self.refusal {
+            if self.cause == crate::refusal_probe::RefusalCause::SessionHistory {
+                return crate::refusal_probe::SESSION_REFUSED_LINE.to_owned();
+            }
             return "I couldn't do all of that: the model provider declined part of the request. Asking for the part you most want on its own is the way through — split it up rather than sending the same message again.".to_owned();
         }
         if let Some(b) = crate::budget::Refusal::classify(&self.detail) {
@@ -8117,36 +8129,57 @@ impl Agent {
                 result = self.run_main_turn(chat_id, host, &prompt).await;
             }
         }
-        // The provider declined the request. That is a judgement about the message, so neither a
-        // backoff nor a fresh window changes it, and the turn is not lost work: most refused
-        // messages are one unsafe part next to several ordinary ones. One narrower attempt, on
-        // the fallback talking model because it is a different provider lane, asks for the parts
-        // it can do and for a sentence naming the part it is leaving out — the user reads an
-        // answer plus a named gap instead of "I couldn't answer that" (fix F). The session is
-        // deliberately left alone; see `empty_turn_retry_reason_for`.
+        // The provider declined the request — but which request? The one the user just sent, or
+        // the session it was sent into, which carries every earlier turn with it. Fix F (#2750)
+        // assumed the first and retried in the same session on the fallback model, asking for
+        // the parts it could do. On a session the provider has decided against, that retry is
+        // refused as well, and nothing else ever runs: Test5 on 0.1.198 refused identifying a
+        // photographed dish, writing a blog post and stating an output preference, each with
+        // zero tool calls, three-quarters of an hour after the two adversarial tasks that
+        // poisoned the chat. The chat could not be used again.
+        //
+        // So establish which it is before recovering, by asking the provider this message on
+        // its own with no history at all (`refusal_probe`). An adversarial ask is refused there
+        // too and reaches no recovery at all, which is what keeps this from laundering one.
         if result.is_ok() {
             if let Some(m) = self.refusal_to_retry().await {
-                tracing::warn!(chat_id, detail = %m.detail, "provider refusal; one retry on the fallback model for the parts it can do");
-                let on_fallback = self.switch_talking_model(true).await;
-                let retry_prompt = {
-                    let mut tl = self.turn.lock().await;
-                    match tl.as_mut() {
-                        Some(t) if !t.stopped => {
-                            t.refusal_retried = true;
-                            t.model_error = None;
-                            t.route = None;
-                            t.route_attempts = 0;
-                            t.metrics.route_missing = false;
-                            Some(refusal_retry_prompt(prompt_text))
-                        }
-                        _ => None,
-                    }
+                let bare = {
+                    let h = host.lock().await;
+                    h.doc
+                        .message(user_msg_id)
+                        .map(|m| m.text())
+                        .unwrap_or_default()
                 };
-                if let Some(prompt) = retry_prompt {
-                    result = self.run_main_turn(chat_id, host, &prompt).await;
-                }
-                if on_fallback {
-                    self.switch_talking_model(false).await;
+                let cause = self.probe_refusal_cause(&bare).await;
+                match crate::refusal_probe::recovery_for(cause) {
+                    // The message is what was declined. The refusal is the answer, and it
+                    // reaches the user unchanged: no retry, no trimmed context, no fallback
+                    // model. Marking the cause is all this arm does.
+                    crate::refusal_probe::RefusalRecovery::Stand => {
+                        tracing::warn!(chat_id, detail = %m.detail, "provider refusal; the message is refused on its own, so it stands");
+                        self.mark_refusal_cause(cause).await;
+                    }
+                    // The message passes on its own: the session is what the provider will not
+                    // read. Retry it on a window that holds none of this chat — a fresh session
+                    // and the bare message, not `prompt_text`, whose memory block and recap are
+                    // where the refused turns would come back in (`chat_recap`). A rotation that
+                    // fails leaves the verdict unacted on, so that falls to the arm below.
+                    crate::refusal_probe::RefusalRecovery::FreshContext => {
+                        result = match self
+                            .recover_on_fresh_context(chat_id, host, &bare, &m)
+                            .await
+                        {
+                            Some(r) => r,
+                            None => self.retry_for_safe_parts(chat_id, host, prompt_text).await,
+                        };
+                    }
+                    // No verdict: a 5xx or a timeout on the probe says nothing about content.
+                    // Fix F's narrower attempt is what a refusal with no verdict gets, and the
+                    // session is left alone — see `empty_turn_retry_reason_for`.
+                    crate::refusal_probe::RefusalRecovery::SafeParts => {
+                        tracing::warn!(chat_id, detail = %m.detail, "provider refusal with no probe verdict; one retry on the fallback model for the parts it can do");
+                        result = self.retry_for_safe_parts(chat_id, host, prompt_text).await;
+                    }
                 }
             }
         }
@@ -8355,7 +8388,7 @@ impl Agent {
                 );
             }
             if let Some(m) = &model_failed {
-                let detail = json!({ "refusal": m.refusal, "sessionRotated": turn.session_rotated, "retries": turn.model_retries });
+                let detail = json!({ "refusal": m.refusal, "refusalCause": format!("{:?}", m.cause), "sessionRotated": turn.session_rotated, "retries": turn.model_retries });
                 match turn
                     .ack_row_id
                     .as_deref()
@@ -8474,13 +8507,14 @@ impl Agent {
             self.refresh_job_activity(chat_id).await;
         }
         if let Some(m) = &model_failed {
-            tracing::warn!(chat_id, refusal = m.refusal, retries = turn.model_retries, session_rotated = turn.session_rotated, detail = %m.detail, "model call failed; error line shown in chat");
+            tracing::warn!(chat_id, refusal = m.refusal, cause = ?m.cause, retries = turn.model_retries, session_rotated = turn.session_rotated, detail = %m.detail, "model call failed; error line shown in chat");
             self.append_audit(
                 "model_call_failed",
                 json!({
                     "chat_id": chat_id,
                     "message_id": assistant_msg_id,
                     "refusal": m.refusal,
+                    "refusal_cause": format!("{:?}", m.cause),
                     "session_rotated": turn.session_rotated,
                     "detail": m.detail.chars().take(400).collect::<String>(),
                 }),
@@ -9474,10 +9508,12 @@ impl Agent {
                             Some(v) => Some(ModelError {
                                 detail: v.to_string(),
                                 refusal: false,
+                                cause: crate::refusal_probe::RefusalCause::Untested,
                             }),
                             None => Some(ModelError {
                                 detail: "provider error".into(),
                                 refusal: false,
+                                cause: crate::refusal_probe::RefusalCause::Untested,
                             }),
                         };
                         if let Some(m) = m {
@@ -11379,10 +11415,155 @@ impl Agent {
         empty_turn_retry_reason_for(tl.as_ref()?)
     }
 
-    /// The refusal this turn should retry once on the fallback model, if any (fix F).
+    /// The refusal this turn should act on, if any (fix F).
     async fn refusal_to_retry(&self) -> Option<ModelError> {
         let tl = self.turn.lock().await;
         refusal_retry_error(tl.as_ref()?)
+    }
+
+    /// Ask the provider this message on its own, with no history, and say which of the two
+    /// things the refusal was about (`refusal_probe`). One stateless completion through the
+    /// relay proxy: it opens no session, so it cannot be refused by one.
+    ///
+    /// It runs on the talking model, the same model that refused the turn. A probe on a
+    /// different model would answer a different question — whether some other provider lane
+    /// accepts the message — and the verdict this turn needs is about the one that said no.
+    async fn probe_refusal_cause(&self, bare_message: &str) -> crate::refusal_probe::RefusalCause {
+        let (talking_model, _) = self.live_models().await;
+        let llm = self.llm.with_purpose("refusal-probe");
+        let probe = crate::refusal_probe::probe_with(bare_message, |message| async move {
+            tokio::time::timeout(
+                crate::refusal_probe::PROBE_TIMEOUT,
+                llm.complete_full(
+                    &talking_model,
+                    crate::refusal_probe::PROBE_SYSTEM,
+                    &message,
+                    crate::refusal_probe::PROBE_MAX_TOKENS,
+                    None,
+                ),
+            )
+            .await?
+        })
+        .await;
+        let cause = crate::refusal_probe::cause_of(probe);
+        tracing::info!(?probe, ?cause, "fresh-context probe of a provider refusal");
+        cause
+    }
+
+    /// Record on the turn's error what the probe found, so the line the user reads is about the
+    /// cause rather than about the refusal.
+    async fn mark_refusal_cause(&self, cause: crate::refusal_probe::RefusalCause) {
+        if let Some(t) = self.turn.lock().await.as_mut() {
+            if let Some(e) = t.model_error.as_mut() {
+                e.cause = cause;
+            }
+        }
+    }
+
+    /// The recovery for a session the provider will not read: replace this chat's window and ask
+    /// the bare message on the fresh one. `None` when the rotation did not happen, which leaves
+    /// the refusal untouched for the caller to fall back on.
+    ///
+    /// The answer is never silent about where it came from. A recovery that just worked would
+    /// hide both facts the user needs — that this chat is poisoned, and that the window the
+    /// answer came from holds none of the conversation they have been having — so a recovered
+    /// answer carries [`crate::refusal_probe::SESSION_TRIMMED_NOTICE`], and a recovery that is
+    /// refused again leaves the refusal in place with its cause marked, which is what makes the
+    /// line stop blaming the message.
+    async fn recover_on_fresh_context(
+        self: &Arc<Self>,
+        chat_id: &str,
+        host: &SharedHost,
+        bare_message: &str,
+        m: &ModelError,
+    ) -> Option<Result<()>> {
+        tracing::warn!(chat_id, detail = %m.detail, "provider refusal; the message passes on its own, so this chat's context is what was declined");
+        if let Err(e) = self
+            .rotate_chat_session(chat_id, "refusal_session_poisoned")
+            .await
+        {
+            tracing::warn!(chat_id, error = %e, "fresh session after a poisoned-session refusal failed; the refusal falls to the narrower same-session retry");
+            return None;
+        }
+        // Counted only once the window was actually replaced, so the fleet number is recoveries
+        // run rather than verdicts reached.
+        self.append_audit(
+            "refusal_session_poisoned",
+            json!({
+                "chat_id": chat_id,
+                "detail": m.detail.chars().take(400).collect::<String>(),
+            }),
+        );
+        let _ = self
+            .post_timing("refusal_session_poisoned", 1, Some("fresh_context"))
+            .await;
+        {
+            let mut tl = self.turn.lock().await;
+            let t = tl.as_mut()?;
+            if t.stopped {
+                return None;
+            }
+            t.refusal_retried = true;
+            t.session_rotated = true;
+            t.model_error = None;
+            t.route = None;
+            t.route_attempts = 0;
+            t.metrics.route_missing = false;
+        }
+        let result = self
+            .run_main_turn(chat_id, host, &fresh_context_prompt(bare_message))
+            .await;
+        let recovered = {
+            let tl = self.turn.lock().await;
+            result.is_ok()
+                && tl
+                    .as_ref()
+                    .is_some_and(|t| t.model_error.is_none() && !t.stopped && answer_delivered(t))
+        };
+        if recovered {
+            let mut tl = self.turn.lock().await;
+            if let Some(t) = tl.as_mut() {
+                self.write_notice(host, t, crate::refusal_probe::SESSION_TRIMMED_NOTICE)
+                    .await;
+            }
+        } else {
+            self.mark_refusal_cause(crate::refusal_probe::RefusalCause::SessionHistory)
+                .await;
+        }
+        Some(result)
+    }
+
+    /// Fix F's one narrower attempt: the same session, the fallback talking model, and a prompt
+    /// that asks for the parts the provider can do plus a sentence naming the part it cannot.
+    async fn retry_for_safe_parts(
+        self: &Arc<Self>,
+        chat_id: &str,
+        host: &SharedHost,
+        prompt_text: &str,
+    ) -> Result<()> {
+        let on_fallback = self.switch_talking_model(true).await;
+        let retry_prompt = {
+            let mut tl = self.turn.lock().await;
+            match tl.as_mut() {
+                Some(t) if !t.stopped => {
+                    t.refusal_retried = true;
+                    t.model_error = None;
+                    t.route = None;
+                    t.route_attempts = 0;
+                    t.metrics.route_missing = false;
+                    Some(refusal_retry_prompt(prompt_text))
+                }
+                _ => None,
+            }
+        };
+        let mut result = Ok(());
+        if let Some(prompt) = retry_prompt {
+            result = self.run_main_turn(chat_id, host, &prompt).await;
+        }
+        if on_fallback {
+            self.switch_talking_model(false).await;
+        }
+        result
     }
 
     /// `/hook/turn-without-route`: the main run settled without calling `route`. When pi could
@@ -14558,11 +14739,12 @@ pub(crate) fn empty_turn_retry_reason_for(t: &TurnState) -> Option<&'static str>
     if !t.streamed_text.trim().is_empty() || !t.ack_text.trim().is_empty() {
         return None;
     }
-    // A refusal is the provider declining this request, not a bloated window: a fresh session
-    // is refused the same way and costs the user the conversation they are mid-way through
-    // (fix F). The refusal route retries once on the fallback model instead — see
-    // `refusal_retry_error` — and that holds even when the refused turn also missed its
-    // `route` call, so the rotation below is not reached through that door either.
+    // A refusal is not a bloated window, so it is not this rotation's to make: it is recovered
+    // on the refusal lane, which first establishes whether the message or the session was
+    // declined (`refusal_probe`) and only then replaces the window. Rotating here as well would
+    // cost a genuine refusal the conversation the user is mid-way through for nothing, and that
+    // holds even when the refused turn also missed its `route` call, so the rotation below is
+    // not reached through that door either.
     if t.model_error.as_ref().is_some_and(|m| m.refusal) {
         return None;
     }
@@ -14596,6 +14778,21 @@ pub(crate) fn refusal_retry_error(t: &TurnState) -> Option<ModelError> {
         return None;
     }
     Some(m)
+}
+
+/// The prompt of the fresh-context recovery: the user's own message, and nothing of this chat.
+///
+/// Not `prompt_text`. That prompt carries the memory block and, on a rotation, the chat recap
+/// (`with_chat_recap`), and both are routes by which the turns the provider declined come
+/// straight back into the window the recovery just cleared. The probe's verdict is about the
+/// bare message, so the bare message is what the recovery sends.
+///
+/// The model is told why its window is empty. Without that it answers a message that refers to
+/// work it can no longer see as though the work had never happened (#1722).
+pub(crate) fn fresh_context_prompt(bare_message: &str) -> String {
+    format!(
+        "[Arbos] The model provider declined this chat's recent context, so this chat's window has been replaced and holds none of it. The message below is the whole prompt; answer it on its own. Where it refers to earlier work in this chat, read that back with your history tools (`chat_messages`, `history_search`, `history_read`) instead of guessing at it.]\n\n{bare_message}"
+    )
 }
 
 /// The prompt of that one retry. The provider judged the message as a whole, so the retry must
@@ -15879,6 +16076,7 @@ mod tests {
         let refusal = |detail: &str| ModelError {
             detail: detail.to_owned(),
             refusal: true,
+            cause: crate::refusal_probe::RefusalCause::Untested,
         };
         let refused_turn = |m: ModelError| {
             let mut t = TurnState::claim("chat", "user-msg", false);
@@ -15892,6 +16090,7 @@ mod tests {
         let transient = refused_turn(ModelError {
             detail: "529 overloaded_error".to_owned(),
             refusal: false,
+            cause: crate::refusal_probe::RefusalCause::Untested,
         });
         assert!(refusal_retry_error(&transient).is_none());
 
