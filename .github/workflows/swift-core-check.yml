@@ -86,9 +86,16 @@ jobs:
     # here: it lives on `decide`, which this job needs, for the run-conclusion reason given there.
     if: needs.decide.outputs.applies == 'true'
     runs-on: macos-15
-    # 46-63 min measured on identical content, the spread being runner draw not diff. The old 60
-    # killed runs mid-bundle, which is no verdict rather than a red one; this change took 63.4.
-    timeout-minutes: 90
+    # The old 60 killed runs mid-bundle, which is no verdict rather than a red one, and 90 was set
+    # against a 46-63 min spread. That spread has moved. Re-measured 2026-11-03 20:51Z to
+    # 2026-11-05 20:16Z over 121 completed jobs: p50 65.3, p90 79.7, max 86.2. So 90 now leaves
+    # under 4 minutes above the worst observed run, and a run that trips it is killed outright —
+    # no verdict, not a red one, and `Keep the xcodebuild logs` never uploads the only record of
+    # what was running. The rerun costs another ~65 minutes and a second slot out of the five this
+    # repo gets, so the false red is dearer than the hang it would catch. 120 clears max by 39%
+    # and still bounds a genuine hang; 180 would hold a slot for three hours to learn the same
+    # thing. Measured near-miss: run 42089362322 (#2804) SUCCEEDED at 84.2 min.
+    timeout-minutes: 120
     env:
       APP_DIR: apps/ios/Arbos
     steps:
