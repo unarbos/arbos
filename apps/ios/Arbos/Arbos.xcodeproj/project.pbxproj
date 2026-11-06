@@ -182,6 +182,7 @@
 		A1F6000000000000000000C2 /* ChatSearchShortcut.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F6000000000000000000C1 /* ChatSearchShortcut.swift */; };
 		A1F6000000000000000000C4 /* ChatSearchShortcutTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F6000000000000000000C3 /* ChatSearchShortcutTests.swift */; };
 		A1F6000000000000000000C6 /* ChatSearchCloseTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F6000000000000000000C5 /* ChatSearchCloseTests.swift */; };
+		A1F6000000000000000000C8 /* ChatSearchFoldTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F6000000000000000000C7 /* ChatSearchFoldTests.swift */; };
 		A1AD0000000000000000B002 /* SheetHeader.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1AD0000000000000000B001 /* SheetHeader.swift */; };
 		A1AD0000000000000000B004 /* SheetHeaderLayoutTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1AD0000000000000000B003 /* SheetHeaderLayoutTests.swift */; };
 		A1AD0000000000000000B006 /* AddMembersActionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1AD0000000000000000B005 /* AddMembersActionTests.swift */; };
@@ -440,6 +441,7 @@
 		A1F6000000000000000000C1 /* ChatSearchShortcut.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatSearchShortcut.swift; sourceTree = "<group>"; };
 		A1F6000000000000000000C3 /* ChatSearchShortcutTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatSearchShortcutTests.swift; sourceTree = "<group>"; };
 		A1F6000000000000000000C5 /* ChatSearchCloseTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatSearchCloseTests.swift; sourceTree = "<group>"; };
+		A1F6000000000000000000C7 /* ChatSearchFoldTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatSearchFoldTests.swift; sourceTree = "<group>"; };
 		A1AD0000000000000000B001 /* SheetHeader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SheetHeader.swift; sourceTree = "<group>"; };
 		A1AD0000000000000000B003 /* SheetHeaderLayoutTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SheetHeaderLayoutTests.swift; sourceTree = "<group>"; };
 		A1AD0000000000000000B005 /* AddMembersActionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AddMembersActionTests.swift; sourceTree = "<group>"; };
@@ -713,6 +715,7 @@
 				A1680000000000000000A030 /* PaneCardGlassTests.swift */,
 				A1F6000000000000000000C3 /* ChatSearchShortcutTests.swift */,
 				A1F6000000000000000000C5 /* ChatSearchCloseTests.swift */,
+				A1F6000000000000000000C7 /* ChatSearchFoldTests.swift */,
 				A1AD0000000000000000B003 /* SheetHeaderLayoutTests.swift */,
 				A1AD0000000000000000B005 /* AddMembersActionTests.swift */,
 				A1670000000000000000A050 /* ControlTokenLintTests.swift */,
@@ -1109,6 +1112,7 @@
 				A1680000000000000000A031 /* PaneCardGlassTests.swift in Sources */,
 				A1F6000000000000000000C4 /* ChatSearchShortcutTests.swift in Sources */,
 				A1F6000000000000000000C6 /* ChatSearchCloseTests.swift in Sources */,
+				A1F6000000000000000000C8 /* ChatSearchFoldTests.swift in Sources */,
 				A1AD0000000000000000B004 /* SheetHeaderLayoutTests.swift in Sources */,
 				A1AD0000000000000000B006 /* AddMembersActionTests.swift in Sources */,
 				A1670000000000000000A051 /* ControlTokenLintTests.swift in Sources */,
