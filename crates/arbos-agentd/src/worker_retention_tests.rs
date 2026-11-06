@@ -29,6 +29,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use serde_json::json;
 use tokio::sync::{Mutex, MutexGuard};
 
 use arbos_core::ids::ulid;
@@ -244,6 +245,78 @@ async fn a_worker_an_open_job_names_is_kept() {
         "a worker an open job has had must be kept"
     );
     assert!(is_running(pid), "so its process is still there");
+}
+
+/// The one narrowing of gate 3: a worker waiting on its **own** approval card is released,
+/// because its job stays open for as long as the user takes to answer and nothing is running.
+///
+/// Both halves, because the permissive one alone would pass with the gate deleted. The parked
+/// worker goes; the other worker of the same job — the lineage `job_worker_ids` returns — stays.
+/// That distinction is the whole of the fix: the predicate asks about the worker the card names,
+/// not about the job, so one card cannot release every worker the job has ever had.
+///
+/// And the card survives the eviction answerable, which is what makes evicting safe: the work
+/// resumes from the card, not from the child.
+#[tokio::test]
+async fn a_worker_waiting_on_its_own_card_is_retired_and_its_lineage_is_not() {
+    let _one = exclusive().await;
+    let (agent, root) = test_agent().await;
+    let parked = ulid();
+    let parked_pid = a_retained_worker(&agent, &root, &parked).await;
+    let sibling = ulid();
+    let sibling_pid = a_retained_worker(&agent, &root, &sibling).await;
+    age_clock(&agent, &parked, past_the_bound()).await;
+    age_clock(&agent, &sibling, past_the_bound()).await;
+
+    // One open job, both workers in its lineage: the parked one is current, the sibling is an
+    // earlier attempt the row no longer names.
+    let job = ulid();
+    agent
+        .store
+        .insert_job(&job, CHAT, &ulid(), "A job", "ops", "work", &[])
+        .unwrap();
+    agent.store.set_job_subagent(&job, &sibling).unwrap();
+    agent.store.set_job_subagent(&job, &parked).unwrap();
+    agent.store.set_job_state(&job, "queued", None).unwrap();
+    for sid in [&parked, &sibling] {
+        agent
+            .store
+            .set_subagent_status(sid, "waiting_user")
+            .unwrap();
+    }
+
+    // The card, naming the parked worker and its job.
+    let card = ulid();
+    agent
+        .store
+        .insert_approval(
+            &card,
+            CHAT,
+            &ulid(),
+            "Run a destructive command (file-delete)",
+            "destructive",
+            &json!({ "kind": "tool_call", "tool": "bash", "session_id": parked, "job_id": job }),
+        )
+        .unwrap();
+
+    assert_eq!(
+        agent.retire_idle_workers().await,
+        1,
+        "the worker the card names is released, and only that one"
+    );
+    assert!(
+        !is_running(parked_pid),
+        "the parked worker's child is closed: it was holding a retained slot for a question \
+         nobody has answered"
+    );
+    assert!(
+        is_running(sibling_pid),
+        "the job's other worker is still claimed by the open job; one card releases one worker"
+    );
+    // Nothing about the eviction touched the question.
+    let row = agent.store.approval(&card).unwrap().unwrap();
+    assert_eq!(row.state, "pending");
+    assert!(agent.store.job(&job).unwrap().unwrap().is_open());
 }
 
 /// The population cap takes the longest-idle first, stops at the cap, and leaves the rest.

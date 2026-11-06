@@ -184,13 +184,15 @@ pub fn settle_quick(kind: SideKind, text: &str, truncated: bool) -> (SideKind, O
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct JobLine {
     pub title: String,
-    /// `queued` (waiting for a slot or a path lock) or `running`.
+    /// `queued` (waiting for a slot, a path lock, or the user's approval) or `running`.
     pub state: String,
     /// Empty until the worker's first labelled step.
     pub step: String,
     pub elapsed_s: i64,
     /// Seconds since `step` was recorded; `None` while there is no step yet.
     pub step_age_s: Option<i64>,
+    /// Waiting on an open approval card rather than on the box.
+    pub awaiting_approval: bool,
 }
 
 impl JobLine {
@@ -203,10 +205,12 @@ impl JobLine {
         format!(
             "{} — {} for {} s — {step}",
             self.title,
-            if self.state == "queued" {
-                "waiting to start"
-            } else {
-                "running"
+            match (self.awaiting_approval, self.state.as_str()) {
+                // A parked job is `queued`, and saying "waiting to start" of it would point the
+                // user at the box when what it is waiting for is them.
+                (true, _) => "waiting for your approval",
+                (false, "queued") => "waiting to start",
+                (false, _) => "running",
             },
             self.elapsed_s
         )
@@ -414,6 +418,11 @@ impl Agent {
                 step: clip(&crate::store::redact(&j.last_step), 160),
                 elapsed_s: j.elapsed_s(),
                 step_age_s: j.last_step_at.map(|t| (now - t).max(0) / 1000),
+                awaiting_approval: self
+                    .store
+                    .pending_approval_for_job(&j.id)
+                    .unwrap_or_default()
+                    .is_some(),
             })
             .collect()
     }
@@ -1074,6 +1083,7 @@ pub(crate) mod tests {
                     step: "Reading delsoulsurf.com".into(),
                     elapsed_s: 72,
                     step_age_s: Some(14),
+                    awaiting_approval: false,
                 },
                 JobLine {
                     title: "Comparing hosting prices".into(),
@@ -1285,6 +1295,21 @@ pub(crate) mod tests {
             .join("target")
             .join("approval-boxes")
             .join(ulid());
+        // The premise, checked rather than assumed. `CARGO_MANIFEST_DIR` is wherever the
+        // checkout happens to be, so a clone under `/tmp` — a scratch root — would put this
+        // box's whole workspace back inside scratch and make every boundary case here pass for
+        // the wrong reason, silently. Only the vacuous direction is quiet, which is why this
+        // fixture refuses to hand out a box it cannot vouch for.
+        assert!(
+            !arbos_core::approval::SCRATCH_ROOTS
+                .iter()
+                .any(|r| root.starts_with(r)),
+            "this fixture promises a workspace outside scratch and {} is inside one \
+             ({:?}): run the suite from a checkout that is not under a scratch root, or the \
+             boundary cases it serves would pass with the boundary removed",
+            root.display(),
+            arbos_core::approval::SCRATCH_ROOTS,
+        );
         test_agent_full_in(axum::Router::new(), "/nonexistent/pi", None, root).await
     }
 

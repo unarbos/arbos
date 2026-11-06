@@ -1950,7 +1950,12 @@ pub enum ApprovalState {
     Pending,
     Approved,
     Rejected,
+    /// Agent cards no longer expire, so this arrives only from the relay's outside-agent cards,
+    /// which do keep a window. Kept for the cards already in older documents.
     Expired,
+    /// The question stopped mattering before it was answered — its job was cancelled. The card
+    /// closes unanswered, like an expired one, but nothing timed out.
+    Cancelled,
 }
 
 impl ApprovalState {
@@ -1960,6 +1965,7 @@ impl ApprovalState {
             ApprovalState::Approved => "Approved",
             ApprovalState::Rejected => "Rejected",
             ApprovalState::Expired => "Expired",
+            ApprovalState::Cancelled => "Cancelled",
         }
     }
 }

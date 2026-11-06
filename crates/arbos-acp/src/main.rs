@@ -1092,8 +1092,15 @@ fn card_answer(state: &str, reason: Option<String>) -> CardAnswer {
         "rejected" => {
             CardAnswer::Refused(reason.unwrap_or_else(|| "the owner rejected it".to_owned()))
         }
+        // Agent cards no longer expire; the relay's outside-agent cards still do, and older
+        // documents still hold expired ones, so the arm stays.
         "expired" => {
             CardAnswer::Refused(reason.unwrap_or_else(|| "the card expired unanswered".to_owned()))
+        }
+        // Named rather than left to the fallback only so the caller hears it now instead of
+        // waiting out its own deadline for an answer that is never coming.
+        "cancelled" => {
+            CardAnswer::Refused(reason.unwrap_or_else(|| "the card was cancelled".to_owned()))
         }
         _ => CardAnswer::Waiting(reason),
     }

@@ -389,16 +389,9 @@ impl Supervisor {
                 }
             }));
         }
-        // Approval cards expire 24 h after they were posted (feature `approve`).
-        {
-            let agent2 = agent.clone();
-            tasks.push(tokio::spawn(async move {
-                loop {
-                    tokio::time::sleep(Duration::from_secs(60)).await;
-                    agent2.expire_approvals().await;
-                }
-            }));
-        }
+        // No approval sweep: a card is answerable until it is answered (feature `approve`). The
+        // minute sweep that used to close cards past their deadline is gone with the deadline —
+        // it was the thing that made an unanswered card stop the work behind it.
         // Command loop. Each command runs on its own task: `send`/`answer` serialize on the
         // agent's turn lock (FIFO), while `stop`/`steer` (Guide) and settings changes land at
         // once, mid-turn.

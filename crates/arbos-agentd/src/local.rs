@@ -53,7 +53,15 @@ pub fn gate(
         Some(ApprovalOutcome::Rejected { reason }) => {
             Err(format!("{} not approved: {reason}", op.name()))
         }
-        Some(ApprovalOutcome::Expired) => Err(format!("{}: approval expired", op.name())),
+        Some(ApprovalOutcome::Undecided) => Err(format!(
+            "{} did not run: it needs the user's approval and the card is still waiting for \
+             them. Do not retry it",
+            op.name()
+        )),
+        Some(ApprovalOutcome::Cancelled) => Err(format!(
+            "{} did not run: the work was cancelled, so its approval card was closed",
+            op.name()
+        )),
         None => Err(format!(
             "{} refused: the user's approval is required before anything runs on their computer",
             op.name()
@@ -438,7 +446,10 @@ mod tests {
             true
         )
         .is_err());
-        assert!(gate(&run(), Some(&ApprovalOutcome::Expired), true).is_err());
+        // An undecided card — the wait ended, the card is still open — refuses exactly as a
+        // refusal does. This is the case that used to arrive as "expired".
+        assert!(gate(&run(), Some(&ApprovalOutcome::Undecided), true).is_err());
+        assert!(gate(&run(), Some(&ApprovalOutcome::Cancelled), true).is_err());
         assert!(gate(&read(), None, false).is_err());
         assert!(gate(
             &read(),
