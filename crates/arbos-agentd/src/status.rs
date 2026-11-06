@@ -1110,6 +1110,17 @@ pub(crate) mod tests {
     /// logged it before every stalled message of `r11burst`.
     pub(crate) const EMPTY_STATUS_ASK: &str = "what is going on with the empty one?";
 
+    /// The user's message that makes the stub answer a job-result call the way Opus 5.5 does:
+    /// reasoning cannot be turned off, and a call that leaves no room for it spends the whole
+    /// budget on hidden tokens and comes back with empty content (bug AC). A call with room for
+    /// the thinking gets the answer. Counted in `REASONING_REFUSALS` / `REASONING_SERVED` like
+    /// the quick-lane case above.
+    pub(crate) const AC_THINKING_EATS_THE_BUDGET_ASK: &str =
+        "count the licence lines and give me the one CSV";
+
+    /// What the talking model writes for that ask once it has room to write it.
+    pub(crate) const AC_MODEL_ANSWER: &str = "I counted 1,204 licence lines across the archive and wrote the single CSV, `licences.csv`. Want me to sort it by count?";
+
     /// The unmet acceptance criterion round 12's worker wrote, as it sits in the notes a
     /// job-result call carries (`job_background_claim_tests.rs`, bug AD). A call whose notes hold
     /// it is answered below with the sentence the real talking model wrote from it.
@@ -1128,6 +1139,35 @@ pub(crate) mod tests {
             return axum::Json(json!({
                 "choices": [{ "message": { "role": "assistant", "content": AD_MODEL_ANSWER }, "finish_reason": "stop" }],
                 "usage": { "prompt_tokens": 900, "completion_tokens": 40 }
+            }))
+            .into_response();
+        }
+        // The same endpoint, answering a job-result call (bug AC). Two refusals, not one: the
+        // flag is rejected, and a budget with no room for the mandatory thinking buys only
+        // hidden tokens, so the content comes back empty at `finish_reason: "length"`.
+        if user.contains(AC_THINKING_EATS_THE_BUDGET_ASK) {
+            if body["reasoning"]["enabled"] == json!(false) {
+                *REASONING_REFUSALS.lock().unwrap() += 1;
+                return (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    axum::Json(json!({ "error": {
+                        "message": "Reasoning is mandatory for this endpoint and cannot be disabled.",
+                        "code": 400
+                    } })),
+                )
+                    .into_response();
+            }
+            if body["max_tokens"].as_u64().unwrap_or(0) < 1000 {
+                return axum::Json(json!({
+                    "choices": [{ "message": { "role": "assistant", "content": "" }, "finish_reason": "length" }],
+                    "usage": { "prompt_tokens": 1800, "completion_tokens": 400, "completion_tokens_details": { "reasoning_tokens": 400 } }
+                }))
+                .into_response();
+            }
+            *REASONING_SERVED.lock().unwrap() += 1;
+            return axum::Json(json!({
+                "choices": [{ "message": { "role": "assistant", "content": AC_MODEL_ANSWER }, "finish_reason": "stop" }],
+                "usage": { "prompt_tokens": 1800, "completion_tokens": 1100, "completion_tokens_details": { "reasoning_tokens": 1060 } }
             }))
             .into_response();
         }

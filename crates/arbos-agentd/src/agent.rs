@@ -12515,24 +12515,45 @@ impl Agent {
                 "I couldn't finish that one. Ask me again in a moment.".to_owned()
             }
         };
+        // The whole budget has to go to the sentence the user reads. On an endpoint where
+        // thinking cannot be turned off (Opus 5.5), hidden tokens are spent first and a 400-token
+        // cap leaves nothing visible: the call returns empty, the fallback below posts the
+        // worker's own notes, and those end in the fenced ```json the Return contract asks every
+        // worker for (bug AC). `complete_visible` asks for reasoning off and, on a refusal,
+        // retries with room for the thinking as well.
         let text = match tokio::time::timeout(
             Duration::from_secs(30),
-            llm.complete(&talking_model, &system, &user, 400),
+            llm.complete_visible(&talking_model, &system, &user, 400, 2400),
         )
         .await
         {
-            Ok(Ok((t, ms))) if !t.trim().is_empty() => {
-                tracing::info!(chat_id, name, ms, "job result written");
-                ProseFilter::clean_prose(t.trim())
+            Ok(Ok(c)) if !c.text.trim().is_empty() => {
+                tracing::info!(chat_id, name, ms = c.latency_ms, "job result written");
+                ProseFilter::clean_prose(c.text.trim())
             }
+            // Named, because the three ways to get here want three different repairs and the old
+            // line could not tell them apart.
             other => {
+                let why = match &other {
+                    Err(_) => "the call did not answer within 30s".to_owned(),
+                    Ok(Err(e)) => format!("the call failed: {e}"),
+                    Ok(Ok(c)) => format!(
+                        "the call answered with no visible text (finish_reason {:?}, completion_tokens {})",
+                        c.finish_reason.as_deref().unwrap_or("none"),
+                        c.usage
+                            .pointer("/completion_tokens")
+                            .and_then(Value::as_u64)
+                            .map(|n| n.to_string())
+                            .unwrap_or_else(|| "unknown".to_owned())
+                    ),
+                };
                 tracing::warn!(
                     chat_id,
                     name,
                     ?status,
+                    why,
                     "job result call gave nothing; plain line"
                 );
-                let _ = other;
                 fallback()
             }
         };
