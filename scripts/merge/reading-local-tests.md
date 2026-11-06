@@ -19,6 +19,25 @@ corroborating, both short by the same one, with no signal anywhere.
 Ask what the two methods share before you treat them as independent. If they read the same stream,
 parse the same shape, or trust the same absence, they are one measurement with two names.
 
+## Derive the value that must follow something else; assert the constraint that guards it
+
+"Derive, don't assert" is right about **values that have to track an external source**. A pinned
+version copied into a second file is correct today and silently wrong the day the first one moves,
+so read it from the source instead and refuse when you cannot.
+
+Applied to a **guard**, the same instinct destroys it. `workspace-test-deps.sh` keeps the floor
+`webrtc-sys` requires as its own constant, deliberately not derived from the release being
+installed, and the author's reason is the whole point: *a check against the version you asked for
+passes whatever you asked for*. Derive that floor from `LLVM_RELEASE` and `LLVM_RELEASE=18.0.0`
+sails through the guard that exists to catch exactly it.
+
+**So the two halves are different jobs.** The pin must agree with CI, so derive it. The floor must
+be able to disagree with the pin, so assert it independently. A guard derived from the thing it
+guards is not a guard — it is a restatement, and it passes for the same reason its subject does.
+
+That is the same fault as the rest of this document wearing different clothes: a check that cannot
+fail for the reason it names. Before deriving anything, ask which of the two it is.
+
 ## The rule: a test that depends on a path's class must assert that class
 
 `arbos-core/src/approval.rs` sorts every path into a **class** — `Scratch`, `Workspace`,
