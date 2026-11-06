@@ -102,9 +102,13 @@ jobs:
     needs: decide
     if: needs.decide.outputs.applies == 'true'
     runs-on: macos-15
-    # MEASUREMENT PENDING: filled in from this pull request's own runs before it is reviewed. The
-    # cap is set well above the cold figure because a timeout is no verdict rather than a red one,
-    # which is the state this whole file exists to stop producing.
+    # Measured on this workflow's own pull request, both runs cold: the job took 14 min 15 s and
+    # 13 min 34 s, of which `cargo check` was 12 min 59 s and 12 min 13 s. Inside the cold run,
+    # 11 min 53 s was the external dependency build and 66 s was the five workspace crates, so a
+    # run that restores the cache compiles for about a minute.
+    #
+    # The cap is set well above the cold figure because a timeout is no verdict rather than a red
+    # one, which is the state this whole file exists to stop producing.
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -117,25 +121,57 @@ jobs:
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           export PATH="$HOME/.cargo/bin:$PATH"
           rustup show active-toolchain || rustup toolchain install
-      # SAVED ONLY ON main, UNLIKE THE SWIFT GATE'S, AND THAT IS THE WHOLE POINT OF THE SETTING.
-      # This repository holds 11.05 GB of Actions cache against a 10 GB budget, over 102 entries,
-      # and GitHub evicts the least recently used to get back under it. The Swift gate saves a
-      # ~1.14 GB Darwin entry per BRANCH — four such entries were live on 2026-11-05 — and the
-      # entry that must not be evicted is the 2.29 GB Linux rust cache on main, whose near miss
-      # ci.yml measured at 2151 s against 354 s on the very next push.
+      # THE CACHE IS WORTH 11 OF THIS JOB'S 13 MINUTES, AND IN THIS REPOSITORY IT HAS TO BE EARNED.
       #
-      # A cache saved on main is readable from every branch, so one entry serves every pull
-      # request. Saving per branch would buy a warm build for the second push of one branch and
-      # pay for it by evicting the caches every other job in the repository reads.
+      # Actions cache here stands at 11.08 GB against a 10 GB budget, with 5.51 GB written in three
+      # hours on 2026-11-05, so GitHub is evicting least-recently-used continuously. Measured on
+      # this pull request: the entry saved at 21:00:54Z was gone before the next run of the same
+      # job on the same branch looked for it at 23:45:18Z — "No cache found", and the second run
+      # was cold too. An entry survives by being READ often, which is why main's 2.29 GB Linux
+      # rust cache lives for days and a branch's Darwin entry does not last an evening.
       #
-      # TEMPORARY FOR THIS PULL REQUEST: `save-if: true`, so that this branch's first run seeds an
-      # entry and its later runs can be measured warm. The last commit of this pull request puts
-      # it back to `github.ref == 'refs/heads/main'`.
+      # Two settings follow from that, and neither is cosmetic.
+      #
+      # `save-if` on main only. A cache saved on main is readable from every branch, so ONE entry
+      # serves every pull request and is read by all of them — the access pattern that survives
+      # eviction. The Swift gate instead saves a ~1.14 GB Darwin entry per BRANCH; four were live
+      # at once on 2026-11-05, each read by one branch, and that is a large part of what keeps
+      # this repository over its budget.
+      #
+      # The key is the dependency set, not the lockfile. This is ci.yml's own trick and its
+      # reasoning is written out there: rust-cache's default key moves whenever any workspace
+      # manifest does, and every release rewrites a dozen `version =` lines, so the default would
+      # mint a fresh ~1 GB Darwin entry per release commit and evict something real each time.
+      # `source`/`checksum` are the lines Cargo.lock gives EXTERNAL packages, which is exactly what
+      # `cache-workspace-crates: false` (the default, kept) stores. A key that is too loose costs
+      # rebuild time and never a verdict: cargo's own fingerprints decide what is reused, and
+      # `--locked` refuses outright when the resolved graph disagrees with Cargo.lock.
+      - name: Cache key for the dependency build
+        id: cache-key
+        run: |
+          set -euo pipefail
+          rustc -vV
+          # The key is only as good as this grep, so say so here rather than hashing an empty
+          # string for ever.
+          lines=$(grep -cE '^(source|checksum) = ' Cargo.lock)
+          if [ "$lines" -lt 100 ]; then
+            echo "::error title=Cache key::Cargo.lock yielded $lines source/checksum lines, too few to be the dependency set. The cache key no longer tracks what it caches."
+            exit 1
+          fi
+          echo "$lines external dependency lines in Cargo.lock"
+          deps=$(grep -E '^(source|checksum) = ' Cargo.lock | shasum -a 256 | cut -c1-16)
+          # `rust-toolchain.toml` says `channel = "stable"`, so the file alone pins no compiler;
+          # `rustc -vV` carries the release and its commit hash. RUSTFLAGS is unset here today and
+          # is folded in anyway, so an entry saved under one set of flags never answers for another.
+          rust=$( { rustc -vV; cat rust-toolchain.toml; echo "RUSTFLAGS=${RUSTFLAGS:-}"; } | shasum -a 256 | cut -c1-16)
+          echo "deps=$deps" >> "$GITHUB_OUTPUT"
+          echo "rust=$rust" >> "$GITHUB_OUTPUT"
       - uses: Swatinem/rust-cache@v2
         with:
-          key: mac-check
+          add-rust-environment-hash-key: false
+          key: mac-check-${{ steps.cache-key.outputs.rust }}-${{ steps.cache-key.outputs.deps }}
           cache-on-failure: true
-          save-if: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # --all-targets, because the gap includes test code: #2089 (54bc19da) passed every check and
       # then broke every Mac release from 06:58 to 08:1x on 2026-10-28 in `cargo test -p arbos-mac
       # enter_tests`, which is Mac-only test code no Linux job compiles.

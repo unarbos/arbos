@@ -343,7 +343,7 @@ mod mac {
         let ns_name = NSString::from_str(name);
         let base = NSImage::imageWithSystemSymbolName_accessibilityDescription(&ns_name, None)?;
         let config = NSImageSymbolConfiguration::configurationWithPointSize_weight_scale(
-            size,
+            size as f64,
             font_weight(weight),
             NSImageSymbolScale::Medium,
         );
