@@ -484,7 +484,11 @@ fn rss_of(pid: u32) -> u64 {
 /// expects exactly two evictions — and a bound that swept the lot or did nothing fails.
 ///
 /// A plain directory stands in for the cgroup: `workspace_mem_max` reads `memory.max` as a text
-/// file, which is the same thing `test_agent_in_cgroup`'s other users rely on.
+/// file, so a directory a test writes serves as well as the kernel's.
+///
+/// This is the only case that relies on the declaration being **read**. It used to say the
+/// other users relied on the same thing; they did not — the crash-loop leftover cases declared
+/// a cgroup that nothing on their path ever opened, and they no longer declare one.
 #[tokio::test]
 async fn the_memory_bound_takes_only_what_the_share_needs() {
     // The three children below are under the population cap, so a pass that evicts here can only
