@@ -1854,7 +1854,7 @@ pub struct Agent {
     pub shutting_down: AtomicBool,
     turn_lock: Mutex<()>,
     /// FIFO gate on concurrent subagent runs in this workspace (`SUBAGENT_MAX_CONCURRENT`).
-    subagent_slots: Arc<Semaphore>,
+    pub(crate) subagent_slots: Arc<Semaphore>,
     /// Box-wide gate shared by every workspace (`workspace::BOX_MAX_SUBAGENTS`).
     box_slots: Arc<Semaphore>,
     http: reqwest::Client,
@@ -10882,6 +10882,28 @@ impl Agent {
         lines.join("\n")
     }
 
+    /// Has a stop landed on this job while it waited to start?
+    ///
+    /// Read from the store rather than from anything held in memory, because the stop is written
+    /// by whichever turn ran [`Agent::stop_jobs`] and not by this task.
+    fn job_was_cancelled(&self, job_id: &str) -> bool {
+        self.store
+            .job(job_id)
+            .ok()
+            .flatten()
+            .is_some_and(|row| row.state == "cancelled")
+    }
+
+    /// End a job that was cancelled before it ever started: drop its locks and close its row as
+    /// stopped. The state is left alone — it already reads `cancelled`, written by the stop.
+    async fn stop_before_starting(&self, job_id: &str, host: &SharedHost, msg_id: &str) {
+        self.release_job_locks(job_id).await;
+        tracing::info!(job = %job_id, "job was cancelled before it started");
+        let h = host.lock().await;
+        h.doc.add_status_part(msg_id, "stopped", "Stopped");
+        h.doc.finish_message(msg_id, MessageStatus::Cancelled);
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn run_subagent(
         self: &Arc<Self>,
@@ -11038,18 +11060,9 @@ impl Agent {
             if !keys.is_empty() {
                 tracing::info!(job = %j.id, ?keys, "job holds its resource locks");
             }
-            // A stop that landed while this job waited for a lock or a slot ends it here.
-            if self
-                .store
-                .job(&j.id)
-                .ok()
-                .flatten()
-                .is_some_and(|row| row.state == "cancelled")
-            {
-                self.release_job_locks(&j.id).await;
-                let h = host.lock().await;
-                h.doc.add_status_part(&msg_id, "stopped", "Stopped");
-                h.doc.finish_message(&msg_id, MessageStatus::Cancelled);
+            // A stop that landed while this job waited for a lock ends it here.
+            if self.job_was_cancelled(&j.id) {
+                self.stop_before_starting(&j.id, host, &msg_id).await;
                 return Ok(());
             }
         }
@@ -11065,6 +11078,21 @@ impl Agent {
             .acquire_owned()
             .await
             .map_err(|_| anyhow!("box subagent slots closed"))?;
+        // And again now the slots are in hand, because acquiring them is a wait of unbounded
+        // length and a stop can land anywhere inside it.
+        //
+        // Bug AL, Jacob's Test5 round 18: the check above claimed to cover "a lock or a slot"
+        // and sat before the slot wait, so it covered only the lock. `status18g` was queued for
+        // a slot when the user cancelled it, the row was correctly set to `cancelled`, the slot
+        // then freed, and the line below overwrote the state with `running` and ran the job to
+        // completion — 03:32:40Z to 03:38:00Z, with no cancel anywhere in its life. A cancel was
+        // fully correct and was overtaken by a start.
+        if let Some(j) = &job {
+            if self.job_was_cancelled(&j.id) {
+                self.stop_before_starting(&j.id, host, &msg_id).await;
+                return Ok(());
+            }
+        }
         let queued_ms = queued_at.elapsed().as_millis() as i64;
         if queued_ms > 500 {
             let _ = self

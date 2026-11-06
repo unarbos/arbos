@@ -41,6 +41,8 @@ mod job_note_tests;
 #[cfg(test)]
 mod job_notice_tests;
 #[cfg(test)]
+mod job_queued_cancel_tests;
+#[cfg(test)]
 mod job_reparent_tests;
 #[cfg(test)]
 mod job_steer_inherit_tests;
