@@ -90,20 +90,78 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
     /// `convergingTarget` is 231 pt tall and its window is 448 pt, wider than any travel yet
     /// measured, so that arm and the control stay: the behaviour at distance is still covered
     /// and only the short-row variant goes dark.
+    ///
+    /// **The precondition above is now met, and this flag still says `true` on purpose.**
+    /// `nudge` ends its drag with a stationary finger, so the travel is `nudgeStep` — 260 pt,
+    /// which is 29 pt inside this row's 289 pt window — instead of the 140-to-471 pt a fling
+    /// chose. "No gesture length this rig can ask for has a travel it can bound" is no longer
+    /// true of this rig. What is missing is evidence, not mechanism: restoring these two arms
+    /// is a claim about where a 72 pt row comes to rest, and the only instrument for that is a
+    /// gate run. Two arms at roughly 250 s each would also be added to a job whose execution
+    /// distribution already has 1.4 minutes of headroom under its limit
+    /// (`internal/swift-gate-timeout-is-on-the-job-clock-not-the-queue.md`). So the lift stays
+    /// with #2539, behind this change and behind #2821's raise, and it should be made on a run
+    /// that reads the per-drag travel this rig now prints.
     private static let shortRowArmsQuarantined = true
     private static let shortRowQuarantine =
         "the rig cannot bound its drag travel, measured 140 to 471 pt per drag, against this "
         + "72 pt row's 289 pt aim window, so the arm reds about one run in four; the app's "
         + "reveal of this row is shipped and measured correct, and #2539 is the rig fix that "
         + "removes this skip"
-    /// How many drags the list may be nudged while looking for a named target before the case
-    /// gives up. Twenty-nine hits separate `convergingTarget` from the newest, a drag moves
-    /// one to three of them, and the measured counts were eleven and fourteen at the old 200 pt
-    /// step, so forty had most of a factor of three in hand. `nudge`'s step is now 120 pt,
-    /// which should put the counts near eighteen to twenty-three and still leaves a factor
-    /// close to two. The gate run after this change is what settles that; if a case ever gives
-    /// up here, the drag count in the failure message is the number to read.
+    /// How many drags **that moved the list** the aim search may spend on a named target.
+    ///
+    /// This counts effective drags, not attempts, and that distinction is the whole of #2539.
+    /// A drag the simulator drops costs a retry and not a unit of this budget, because the three
+    /// gate failures that motivated the change all gave up with the budget spent and the list
+    /// barely moved — see `nudgeStep` for the measurements.
+    ///
+    /// `nudge` now moves the list by `nudgeStep` and by nothing else, so the count this needs is
+    /// arithmetic rather than a fit. `convergingTarget` is about 5 200 pt of content back from
+    /// the newest hit (148 row ids at a measured 35 pt pitch), which is twenty 260 pt drags.
+    /// Forty is a factor of two on a step that no longer varies.
     private static let aimSearchDrags = 40
+    /// How many drags may leave the result list exactly where it was, over the whole aim search,
+    /// before this calls the rig dead rather than the budget short.
+    ///
+    /// Run 42088714186 spent all forty drags without moving the list one point and reported it
+    /// as "never came into reach in 40 drags", which reads as a budget that wants raising. This
+    /// is the counter that tells those two apart, and it also bounds the loop: at worst the aim
+    /// search now makes `aimSearchDrags + nudgeDropsAllowed` attempts.
+    ///
+    /// **This is the one number in this change with no measurement under it**, because the rig
+    /// could not count a dropped drag until now. What is known is that the two runs that reached
+    /// the target did it in fifteen drags against a budget of forty, so they were making ground
+    /// on very nearly every drag and cannot have been dropping many. Eight is that read plus
+    /// slack — 40 % of the twenty effective drags the search needs — and it trips in about thirty
+    /// seconds on a rig as dead as 42088714186's instead of the 269 s it spent. If it ever
+    /// trips on a run that should have passed, the dropped count in the failure message is the
+    /// number to read, and it is the number to raise.
+    private static let nudgeDropsAllowed = 8
+    /// How far one drag moves the result list. With `nudge`'s terminal hold this is the travel
+    /// and not a request, so it is the one number the two failure directions are both bounded by.
+    ///
+    /// **Upper bound: the narrowest aim window.** `aimPoint` can aim at a row of height `h`
+    /// only while its top edge is inside a window of `217 + h` points — read off its own
+    /// arithmetic against a band of `y167…481`, and it is where commit `29863ba8d`'s 289 pt for
+    /// the 72 pt `stuckTarget` and 448 pt for the 231 pt `convergingTarget` come from. A step
+    /// wider than that window can carry a row clean over it between two drags, which is the
+    /// red-about-one-run-in-four that quarantined the two short-row arms. 260 pt sits 29 pt
+    /// under the 289 pt window of the shortest row this suite names.
+    ///
+    /// **Upper bound: the band.** Both ends of the gesture stay inside the reachable band, so
+    /// the step is also capped at `band.height - 2 * nudgeInset` — 266 pt on the gate's
+    /// `y167…481`. `nudge` takes the smaller of the two.
+    ///
+    /// **Lower bound: cost.** Twenty drags of 260 pt cover the ~5 200 pt back to
+    /// `convergingTarget`, inside `aimSearchDrags` with a factor of two to spare.
+    private static let nudgeStep: CGFloat = 260
+    /// How far inside the reachable band each end of a drag stays, so the finger neither starts
+    /// on the search chrome nor ends on the chat bar. The same 24 pt as `aimBandMargin`.
+    private static let nudgeInset: CGFloat = 24
+    /// How long the finger stands still at the end of a drag before it lifts. `.slow` with a
+    /// hold is what `ChatSwipeTrackingUITests` and `BackSwipeUITests` already use to take the
+    /// velocity out of a release; both hold 0.6 s, and this wants the same thing.
+    private static let nudgeHold: TimeInterval = 0.5
     /// Clear space the aim point must have above it, below the search chrome, before this
     /// will tap there.
     ///
@@ -354,23 +412,112 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
         return nil
     }
 
-    /// One drag back through the results, toward older hits — the reader scrolling the list.
-    /// The press is slow and short so it drags rather than flicks: a flick's deceleration
-    /// would leave the list somewhere this cannot name. With a keyword typed a scroll keeps
-    /// the bar open (`ChatSearchClose.scrollCloses`), so this moves where the list stands and
-    /// changes nothing else about the state under test.
+    /// One drag back through the results, toward older hits — the reader scrolling the list —
+    /// and where the list stands afterwards, so the caller can tell a drag that worked from one
+    /// the simulator threw away. With a keyword typed a scroll keeps the bar open
+    /// (`ChatSearchClose.scrollCloses`), so this moves where the list stands and changes nothing
+    /// else about the state under test.
     ///
-    /// The step has to be smaller than the reachable band, or a row can cross the band between
-    /// two drags and never be aimable in it. On gate run 41353988578 the 200 pt drag moved
-    /// `long-304` from y140…234 to y461…556 — 322 pt — stepping clean over a band that ends at
-    /// the keyboard, which is how the aim came to sit under it. 120 pt moves the list about
-    /// 190 pt, against a band of roughly 350, and costs a handful more drags inside the cap.
-    private func nudge(_ app: XCUIApplication, band: CGRect) {
+    /// **The gesture ends with a stationary finger, which is #2539's "bound the travel" half.**
+    /// Lifting the short-row quarantine is the other half and is not done here — see
+    /// `shortRowArmsQuarantined`. The old
+    /// `press(forDuration:thenDragTo:)` names no velocity and holds nothing at the end, so the
+    /// list travelled by the fling that XCUITest happened to synthesize at the lift rather than
+    /// by the distance asked for, and a fling is neither specified nor bounded. Measured per
+    /// drag against a result list whose pre-drag frames are byte-identical in all five runs:
+    ///
+    /// | run | drags | content travel | per drag | verdict |
+    /// | --- | ---: | ---: | ---: | --- |
+    /// | 42095537743 (main) | 15 | ~5 200 pt | ~346 pt | reached |
+    /// | 42101506438 | 15 | ~5 200 pt | ~346 pt | reached |
+    /// | 42104203283 | 41 | 1 908 pt | 47 pt | never reached |
+    /// | 41943299478 | 41 | 301 pt | 7 pt | never reached |
+    /// | 42088714186 | 41 | **0 pt** | 0 pt | never reached |
+    ///
+    /// A 120 pt ask that moves the list 346 pt is being carried by deceleration, not by the
+    /// finger: the fling is 2.9 times the gesture and it is where all the travel lives. The
+    /// three failures are the same gesture with the fling gone, and 301 pt is one healthy
+    /// drag's worth arriving out of forty-one attempts, so the per-drag outcome is closer to
+    /// landed-or-dropped than to a continuum. Nothing else differed — same tree on 42104203283,
+    /// whose branch touches one workflow file, same `Clone 1 of iPhone 17` on all five, and the
+    /// control arm that taps without dragging passed in all five.
+    ///
+    /// `withVelocity:thenHoldForDuration:` is the repo's own answer to this and it is already
+    /// written down twice: `ChatSwipeTrackingUITests.comesBack` ("stops the finger before it
+    /// lifts, so the release carries no velocity at all") and
+    /// `internal/ios-profile-push-media-rig/gesture-velocity-traps.md` ("every rule that reads
+    /// the velocity at lift sees zero — and iOS then decides on distance alone"). That document
+    /// treats the zeroed velocity as the trap. Here it is the whole point: distance alone is the
+    /// one quantity this rig can ask for and check.
+    ///
+    /// The transcript's `ScrollView` sets `.defaultScrollAnchor(.bottom)` and no
+    /// `scrollTargetBehavior`, so there is no snapping to fight: while a pan tracks, the content
+    /// follows the finger one for one. With no fling after the lift, travel is `nudgeStep`.
+    ///
+    /// **Every drag is a measurement.** The travel is printed per drag, against the step asked
+    /// for, because the claim this whole change rests on is that the two are now the same number
+    /// — and a gate run is the only instrument that can say so. One run of this case is about
+    /// twenty samples of it, which is a stronger reading than the run's own pass or fail at a
+    /// failure rate near a third.
+    private func nudge(_ app: XCUIApplication, band: CGRect) -> (moved: Bool, travel: CGFloat?) {
+        let step = min(Self.nudgeStep, band.height - 2 * Self.nudgeInset)
+        // A band with no room to drag in is a dead rig, not a short drag. Say so and report no
+        // movement, rather than dragging backwards on a negative step and moving the list the
+        // wrong way.
+        guard step >= Self.nudgeInset else {
+            print("[rig] no room to drag: band y\(Int(band.minY))…\(Int(band.maxY)) leaves a "
+                  + "\(Int(step))pt step")
+            // No gesture was made, so there is no travel to add to the measurements.
+            return (false, nil)
+        }
+        // The anchor is read before the gesture and re-read by identifier after it, so the travel
+        // is this drag's own and not an inference from which rows happen to be realized. The
+        // oldest realized hit is the safe choice: the list carries it downward, toward the middle
+        // of the realized window, so a drag cannot take it out of the tree.
+        let anchor = oldestHit(app)
         let origin = app.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0))
-        origin.withOffset(CGVector(dx: band.midX, dy: band.minY + 30))
+        // The press stays at the 0.1 s this suite has always used. `messageRowGestures` composes a
+        // `LongPressGesture(minimumDuration: 0.35)` on every message row, and the initial press is
+        // the one phase of this gesture that is stationary and so could satisfy it — a drag
+        // cancels a long press once it moves, but only if it moves first. 0.1 s keeps 0.25 s of
+        // margin on a runner that stretches what it is asked for; the velocity and the terminal
+        // hold below are what this change is actually about, and neither touches that margin.
+        origin.withOffset(CGVector(dx: band.midX, dy: band.minY + Self.nudgeInset))
             .press(forDuration: 0.1,
-                   thenDragTo: origin.withOffset(CGVector(dx: band.midX, dy: band.minY + 150)))
-        usleep(900_000)
+                   thenDragTo: origin.withOffset(CGVector(dx: band.midX,
+                                                          dy: band.minY + Self.nudgeInset + step)),
+                   withVelocity: .slow,
+                   thenHoldForDuration: Self.nudgeHold)
+        // The terminal hold has already held the list still for `nudgeHold` with the finger
+        // down, and a lift at zero velocity starts no deceleration, so what is left to wait for
+        // is the `LazyVStack` realizing the rows that came in — not a fling coming to rest. The
+        // old 900 ms was sized for the fling.
+        usleep(400_000)
+        guard let anchor else {
+            // No hit was realized to measure against. That is not a dropped drag and must not be
+            // counted as one; the assertions in `landing` are what should speak to an empty list.
+            print("[rig] drag asked \(Int(step))pt against no realized hit")
+            return (true, nil)
+        }
+        let again = app.descendants(matching: .any)[anchor.id].firstMatch
+        guard again.exists else {
+            print("[rig] drag asked \(Int(step))pt; \(anchor.id) has left the tree, so the list "
+                  + "moved by more than the realized window")
+            return (true, nil)
+        }
+        let travel = again.frame.minY - anchor.y
+        print("[rig] drag asked \(Int(step))pt, \(anchor.id) moved \(Int(travel))pt")
+        return (abs(travel) >= 1, travel)
+    }
+
+    /// The oldest realized hit and its top edge, in one element query. Tree order is oldest
+    /// first, which `describe`'s output on every gate run confirms.
+    private func oldestHit(_ app: XCUIApplication) -> (id: String, y: CGFloat)? {
+        let first = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier BEGINSWITH %@", "bubble:"))
+            .firstMatch
+        guard first.exists else { return nil }
+        return (id: first.identifier, y: first.frame.minY)
     }
 
     /// A still hit whose bottom padding is reachable, and the point to tap in it.
@@ -441,11 +588,11 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
         -> (app: XCUIApplication, screen: CGRect, id: String, point: CGPoint)? {
         let app = openSearch(preFix: preFix)
         let screen = app.windows.firstMatch.frame
-        for _ in 0..<scrollUp { nudge(app, band: reachable(app, screen: screen)) }
+        for _ in 0..<scrollUp { _ = nudge(app, band: reachable(app, screen: screen)) }
         guard let wanted else {
             for _ in 0..<4 {
                 if let hit = aimable(app, screen: screen) { return (app, screen, hit.id, hit.point) }
-                nudge(app, band: reachable(app, screen: screen))
+                _ = nudge(app, band: reachable(app, screen: screen))
             }
             XCTFail("no reachable hit after \(scrollUp) drags up the result list "
                     + "(results: \(describe(bubbles(app))))")
@@ -455,41 +602,103 @@ final class ChatSearchRevealLandingUITests: XCTestCase {
         // by nudging and can be nudged past. Check after every drag rather than after a fixed
         // fourteen: `inReach` is one element query, and running the full `aimable` walk forty
         // times would cost more than the case does.
-        for drag in 0...Self.aimSearchDrags {
-            if inReach(app, screen: screen, wanted: wanted),
+        //
+        // The budget is spent on drags that MOVED the list. A drag the simulator dropped leaves
+        // its anchor where it was and is retried, because charging it to the budget is what turned
+        // a dead rig into the message "never came into reach in 40 drags" on runs 42088714186
+        // (zero points of travel in forty-one drags), 41943299478 (301 pt) and 42104203283
+        // (1 908 pt), against the ~5 200 pt the two passing runs covered in fifteen.
+        var moved = 0
+        var dropped = 0
+        var travels: [CGFloat] = []
+        while moved <= Self.aimSearchDrags {
+            // One band per pass, shared by all three of the reads below. They each used to call
+            // `reachable` for themselves, which is two to four element queries apiece on a list
+            // this long, and that is what paid for the anchor reads in `nudge`.
+            let band = reachable(app, screen: screen)
+            if inReach(app, band: band, wanted: wanted),
                let hit = aimable(app, screen: screen, wanted: wanted) {
-                print("[rig] \(wanted) came into reach after \(scrollUp + drag) drags")
+                print("[rig] \(wanted) came into reach after \(scrollUp + moved) drags that moved "
+                      + "the list, \(dropped) dropped; travel \(describe(travels: travels))")
                 return (app, screen, hit.id, hit.point)
             }
             // Past it: no drag goes back the other way, so say so now instead of spending the
             // rest of the budget looking for a row that has left.
-            if wentPast(app, screen: screen, wanted: wanted) {
-                XCTFail("the result list went past \(wanted) after \(scrollUp + drag) drags — "
+            if wentPast(app, band: band, wanted: wanted) {
+                XCTFail("the result list went past \(wanted) after \(scrollUp + moved) drags — "
                         + "it is below the reachable band, and nudging only moves older hits "
                         + "in from the top (results: \(describe(bubbles(app))))")
                 return nil
             }
-            nudge(app, band: reachable(app, screen: screen))
+            let drag = nudge(app, band: band)
+            if let travel = drag.travel { travels.append(travel) }
+            guard drag.moved else {
+                dropped += 1
+                guard dropped < Self.nudgeDropsAllowed else {
+                    XCTFail("the rig cannot move the result list: \(dropped) drags left it where "
+                            + "it was, after \(moved) that did move it, so this run says nothing "
+                            + "about \(wanted) or about the reveal — the budget is not what ran "
+                            + "out. Travel \(describe(travels: travels)) "
+                            + "(results: \(describe(bubbles(app))))")
+                    return nil
+                }
+                continue
+            }
+            moved += 1
         }
-        XCTFail("\(wanted) never came into reach in \(scrollUp + Self.aimSearchDrags) drags up "
-                + "the result list (results: \(describe(bubbles(app))))")
+        let resting = bubbles(app)
+        XCTFail("\(wanted) never came into reach in \(scrollUp + moved) drags that moved the "
+                + "result list, \(dropped) dropped — \(shortfall(resting, wanted: wanted)). "
+                + "Travel \(describe(travels: travels)) (results: \(describe(resting)))")
         return nil
+    }
+
+    /// What the drags measured, as a line a gate log can be read for: how many, the range, and
+    /// the mean. A bounded travel puts the range and the mean on the nominal step.
+    private func describe(travels: [CGFloat]) -> String {
+        guard let least = travels.min(), let most = travels.max() else { return "not measured" }
+        let mean = travels.reduce(0, +) / CGFloat(travels.count)
+        return "\(travels.count) drags measured \(Int(least))…\(Int(most))pt, mean "
+            + "\(Int(mean))pt, against a nominal \(Int(Self.nudgeStep))pt"
+    }
+
+    /// Which way the aim search ran out, read off the realized rows rather than left to the
+    /// reader. The fixture numbers its rows oldest-first, so a realized window entirely above
+    /// or entirely below the target's number says which side the list stopped on.
+    ///
+    /// A give-up message that does not say this is what sent three lanes looking for a budget
+    /// that wanted raising while the list was not moving at all.
+    private func shortfall(_ rows: [(id: String, frame: CGRect)], wanted: String) -> String {
+        func index(_ id: String) -> Int? {
+            Int(id.split(separator: "-").last.map(String.init) ?? "")
+        }
+        guard let target = index(wanted) else { return "the target's row number is unreadable" }
+        let seen = rows.compactMap { index($0.id) }
+        guard !seen.isEmpty else { return "no hit is realized at all" }
+        if let least = seen.min(), least > target {
+            return "every realized hit is newer than \(wanted), so the list stopped short of it "
+                + "by at least \(least - target) row ids and the drags were not carrying it"
+        }
+        if let most = seen.max(), most < target {
+            return "every realized hit is older than \(wanted), so the list overran it by at "
+                + "least \(target - most) row ids without `wentPast` ever seeing it realized"
+        }
+        return "\(wanted)'s neighbourhood is realized but no point in it was ever reachable"
     }
 
     /// Is the named row's aim point in the reachable band? One element query, so it can be
     /// asked after every drag; `aimable` does the rest of the checks once this says yes.
-    private func inReach(_ app: XCUIApplication, screen: CGRect, wanted: String) -> Bool {
+    private func inReach(_ app: XCUIApplication, band: CGRect, wanted: String) -> Bool {
         let e = row(app, wanted)
         guard e.exists else { return false }
-        let band = reachable(app, screen: screen)
         return aimPoint(in: e.frame, band: band) != nil
     }
 
     /// Has the named row gone out below the band, where no further drag can bring it back?
-    private func wentPast(_ app: XCUIApplication, screen: CGRect, wanted: String) -> Bool {
+    private func wentPast(_ app: XCUIApplication, band: CGRect, wanted: String) -> Bool {
         let e = row(app, wanted)
         guard e.exists else { return false }
-        return e.frame.minY > reachable(app, screen: screen).maxY
+        return e.frame.minY > band.maxY
     }
 
     /// Tap the aimed point and say where the transcript came to rest. Identical for every
