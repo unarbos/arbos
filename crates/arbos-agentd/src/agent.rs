@@ -1930,6 +1930,72 @@ impl TurnState {
     }
 }
 
+/// How big the live main pi child was, read from `/proc/<pid>/status` while it was still running.
+///
+/// It has to be taken in advance, and that is the whole reason this type exists. A process loses
+/// its `mm` the moment it dies, so a zombie's `/proc/<pid>/status` holds `State: Z` and nothing
+/// else — no `VmRSS`, no `VmHWM`. By the time [`Agent::report_pi_child_exit`] runs there is
+/// nothing left to measure, so the size of the child that just died can only be a reading taken
+/// earlier.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PiRssSample {
+    /// The child this reading belongs to. A sample is only ever reported against its own pid, so
+    /// a dead predecessor's size is never attributed to the child that replaced it.
+    pub pid: u32,
+    /// `VmRSS`: resident set at the moment of the reading.
+    pub rss_kb: u64,
+    /// `VmHWM`: the largest resident set this child ever held.
+    pub peak_kb: u64,
+    pub at_ms: u64,
+}
+
+/// What the workspace cgroup can still say about its memory once a child has died.
+///
+/// Everything here survives the kill, which is the test each field had to pass: the kernel frees
+/// the victim's pages before anything in agentd is told, so a number that describes the dead
+/// child's own share is already gone (see [`PiRssSample`]).
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct WorkspaceMemory {
+    /// `memory.events` `oom_kill`, new since the last child exit. More than one means the kernel
+    /// took other tasks of this workspace in the same window, not only the pi child.
+    pub oom_kills: u64,
+    /// `memory.events` `max`, new since the last child exit: how many times an allocation hit
+    /// `memory.max` and was forced into reclaim.
+    ///
+    /// This is the one that says the cgroup ran out, and it is incident-scoped — a delta, like
+    /// `oom_kills` — so it stays readable on a workspace that has been up for hours.
+    pub at_max: u64,
+    /// `memory.max`: the ceiling. Without it every other byte count here is unreadable.
+    pub max: Option<u64>,
+    /// `memory.current` **after** the kill, which is a different question from how full the
+    /// cgroup was when the child died — the victim's pages are already back.
+    ///
+    /// It is worth having for what it says about the next start: still close to `max` here means
+    /// whatever filled the cgroup is somebody else and is still resident, so the respawn is about
+    /// to walk into the same wall. That is the crash-loop signature.
+    pub after: Option<u64>,
+    /// `memory.peak`: the high-water mark of `memory.current`. Survives the kill, but it is
+    /// **all-time for this cgroup** and is never reset here, so on a long-lived workspace it
+    /// saturates and stops telling one incident from an earlier one. Read `at_max` for that.
+    pub peak: Option<u64>,
+    /// `pids.current`: how many processes the workspace cgroup holds, read at the exit.
+    ///
+    /// Deliberately weak, and worth having because it is weak in a direction nothing else here
+    /// is. Round 20 cannot distinguish one task ballooning from several modest tasks summing
+    /// over the cap, and the two want opposite answers on `memory.high`. A per-process snapshot
+    /// taken here would look like the instrument for that and would not be one: the kernel
+    /// selects its victim by `oom_score`, which tracks RSS, so in the ballooning shape the
+    /// balloon is precisely what the snapshot is guaranteed to be missing, and both shapes read
+    /// as "several modest tasks". An instrument that can only return one of two answers reads
+    /// as having excluded the other.
+    ///
+    /// A count has no such bias, because it does not depend on which process died — only on how
+    /// many are left, and a death changes that by one whoever it was. It cannot confirm either
+    /// shape. Persistently high here is evidence for the several-tasks shape and nothing more,
+    /// and it is recorded as that rather than as a small snapshot.
+    pub pids: Option<u64>,
+}
+
 pub struct Agent {
     pub cfg: Arc<Config>,
     pub store: Store,
@@ -2058,6 +2124,13 @@ pub struct Agent {
     /// `memory.events`' `oom_kill` count as of the last child exit, so the next one reports the
     /// delta rather than a number nobody can read.
     pub(crate) pi_oom_kills: std::sync::atomic::AtomicU64,
+    /// `memory.events`' `max` count as of the last child exit, held for the same reason as
+    /// [`Self::pi_oom_kills`]: the raw total counts every ceiling hit since the box booted.
+    pub(crate) pi_mem_at_max: std::sync::atomic::AtomicU64,
+    /// The last size read from the live main pi child, kept because a dead one cannot be
+    /// measured (see [`PiRssSample`]). `None` until the first reading, and cleared for nothing:
+    /// the pid inside it is what keeps a stale sample from being read as the current child's.
+    pub(crate) pi_rss: std::sync::Mutex<Option<PiRssSample>>,
     /// The last time the supervise loop went round. A supervisor that has stopped is a silence
     /// no other field reports, so `/inspect` carries this one.
     pub(crate) pi_supervisor_tick_ms: std::sync::atomic::AtomicU64,
@@ -2286,6 +2359,8 @@ impl Agent {
             pi_degraded: AtomicBool::new(false),
             pi_last_ready_ms: std::sync::atomic::AtomicU64::new(0),
             pi_oom_kills: std::sync::atomic::AtomicU64::new(0),
+            pi_mem_at_max: std::sync::atomic::AtomicU64::new(0),
+            pi_rss: std::sync::Mutex::new(None),
             pi_supervisor_tick_ms: std::sync::atomic::AtomicU64::new(0),
             pi_owed_sends: Mutex::new(Vec::new()),
             pi_draining: AtomicBool::new(false),
@@ -2672,6 +2747,7 @@ impl Agent {
         if boot_failed.is_none() {
             tracing::info!(ms = t0.elapsed().as_millis() as i64, "pi main agent ready");
             self.watch_pi_child(&child);
+            self.sample_pi_rss(child.pid());
             *self.pi.lock().await = Some(child.clone());
             *self.pi_model.lock().await = Some(talking_model.clone());
             *self.current_chat.lock().await = Some(initial_chat.to_owned());
@@ -2705,13 +2781,15 @@ impl Agent {
                 }
                 me.pi_supervisor_tick_ms
                     .store(now_ms() as u64, Ordering::SeqCst);
-                let alive = me
-                    .pi
-                    .lock()
-                    .await
-                    .as_ref()
-                    .map(|c| c.is_alive())
-                    .unwrap_or(false);
+                let (alive, pid) = match me.pi.lock().await.as_ref() {
+                    Some(c) => (c.is_alive(), c.pid()),
+                    None => (false, None),
+                };
+                // While it is up, in case this is the last tick before it is not: a dead child
+                // cannot be measured, so its size has to have been taken in advance.
+                if alive {
+                    me.sample_pi_rss(pid);
+                }
                 if me.shutting_down.load(Ordering::SeqCst) {
                     return;
                 }
@@ -2928,24 +3006,100 @@ impl Agent {
         lines[lines.len().saturating_sub(Self::PI_LOG_TAIL_LINES)..].join("\n")
     }
 
-    /// How many of the workspace cgroup's OOM kills are new since the last child exit.
+    /// What the workspace cgroup says about its memory, read once a child is gone.
     ///
-    /// `None` when the box runs without isolation (a dev machine) or the file cannot be read —
-    /// never 0, because "no OOM kill happened" and "nobody could look" are the two answers this
-    /// whole event exists to tell apart.
-    fn workspace_oom_kill_delta(&self) -> Option<u64> {
+    /// `None` when the box runs without isolation (a dev machine) or `memory.events` cannot be
+    /// read — never a zeroed struct, because "nothing happened" and "nobody could look" are the
+    /// two answers this whole event exists to tell apart. The byte fields inside are each
+    /// `Option` for the same reason, one file at a time: `memory.peak` needs Linux 5.19.
+    ///
+    /// Both counters are turned into deltas here, so each exit reports what happened since the
+    /// last one rather than a total that only grows.
+    fn workspace_memory(&self) -> Option<WorkspaceMemory> {
         let cgroup = self.cfg.run_as.as_ref()?.cgroup.as_ref()?;
-        let text = std::fs::read_to_string(cgroup.join("memory.events")).ok()?;
-        let total: u64 = text
-            .lines()
-            .find_map(|l| l.strip_prefix("oom_kill "))
-            .and_then(|n| n.trim().parse().ok())?;
-        let before = self.pi_oom_kills.swap(total, Ordering::SeqCst);
-        Some(total.saturating_sub(before))
+        let events = std::fs::read_to_string(cgroup.join("memory.events")).ok()?;
+        let counter = |key: &str| -> u64 {
+            events
+                .lines()
+                .find_map(|l| l.strip_prefix(key))
+                .and_then(|n| n.trim().parse().ok())
+                .unwrap_or(0)
+        };
+        // Every one of these is a single number on its own line, and `None` covers both a file
+        // this kernel does not expose and the literal `max` an unlimited ceiling reads as.
+        let num = |name: &str| -> Option<u64> {
+            std::fs::read_to_string(cgroup.join(name))
+                .ok()
+                .and_then(|t| crate::resources::parse_cgroup_u64(&t))
+        };
+        let oom_total = counter("oom_kill ");
+        let max_total = counter("max ");
+        Some(WorkspaceMemory {
+            oom_kills: oom_total
+                .saturating_sub(self.pi_oom_kills.swap(oom_total, Ordering::SeqCst)),
+            at_max: max_total.saturating_sub(self.pi_mem_at_max.swap(max_total, Ordering::SeqCst)),
+            max: num("memory.max"),
+            after: num("memory.current"),
+            peak: num("memory.peak"),
+            pids: num("pids.current"),
+        })
     }
 
-    /// Say why a main pi child is gone: its exit code or signal, how long it had been ready, the
-    /// workspace's new OOM kills, and the tail of its log.
+    /// Read the live main pi child's size and keep it, so the next exit report has one.
+    ///
+    /// Called where a child is known to be running: once it has answered its boot `get_state`,
+    /// and on every supervisor tick it survives. Both, because the tick alone is not enough —
+    /// round 20's second and fourth children lived 76 ms and 68 ms, well inside one 2 s poll, so
+    /// a child can die having never been sampled. The reading taken at ready is also the useful
+    /// one on its own terms: it is the child's size with its session loaded and no work done.
+    ///
+    /// Silent on failure. This is a diagnostic, and a box that cannot read `/proc` should carry
+    /// on without one rather than log a line per tick about it.
+    pub(crate) fn sample_pi_rss(&self, pid: Option<u32>) {
+        let Some(pid) = pid else { return };
+        let Ok(status) = std::fs::read_to_string(format!("/proc/{pid}/status")) else {
+            return;
+        };
+        let field = |key: &str| -> Option<u64> {
+            status
+                .lines()
+                .find_map(|l| l.strip_prefix(key))?
+                .split_whitespace()
+                .next()?
+                .parse()
+                .ok()
+        };
+        // Absent on a zombie, which is the case this whole path exists to get ahead of: a
+        // process that has died keeps its `/proc` entry until it is reaped but loses its `mm`,
+        // so there is nothing to record and the last good sample must stand.
+        let (Some(rss_kb), Some(peak_kb)) = (field("VmRSS:"), field("VmHWM:")) else {
+            return;
+        };
+        if let Ok(mut slot) = self.pi_rss.lock() {
+            *slot = Some(PiRssSample {
+                pid,
+                rss_kb,
+                peak_kb,
+                at_ms: now_ms() as u64,
+            });
+        }
+    }
+
+    /// The last size read from `pid` while it was alive, and how old that reading is.
+    ///
+    /// `None` when the sample belongs to a different child, which is the honest answer for one
+    /// that died before any tick reached it: a predecessor's size would be read as this child's.
+    pub(crate) fn pi_rss_for(&self, pid: Option<u32>) -> Option<(PiRssSample, u64)> {
+        let sample = (*self.pi_rss.lock().ok()?)?;
+        if Some(sample.pid) != pid {
+            return None;
+        }
+        let age = (now_ms() as u64).saturating_sub(sample.at_ms);
+        Some((sample, age))
+    }
+
+    /// Say why a main pi child is gone: its exit code or signal, how long it had been ready, what
+    /// the workspace cgroup's memory did, how big the child was, and the tail of its log.
     ///
     /// This is bug Y's central repair. Test5 lost about four thousand children without one of
     /// these, because nothing ever waited on a child — `RpcChild` learns of a death from stdout
@@ -2956,13 +3110,39 @@ impl Agent {
     /// `phase` says where the child was when it went — `ready` once it had answered its boot
     /// `get_state`, `boot` before that. The incident needed both: the respawn path dropped a
     /// child that failed to come up without ever looking at its status.
+    ///
+    /// **The memory fields and the moment each one describes.** Bug AJ (Test5 round 20) had five
+    /// of these records in 42 s, every one `signal 9` with `oom_kill` set, and they were still
+    /// not enough to say *how* the cgroup filled — the count was the only number here. The rest
+    /// are added for that, and each had to survive the kill to be worth logging:
+    ///
+    /// * `rss_kb` / `rss_peak_kb` are the child's own size, and they are a reading from
+    ///   [`Agent::sample_pi_rss`] taken while it was alive, not from here. A dead process has no
+    ///   `mm`: its `/proc/<pid>/status` is `State: Z` with no `VmRSS` and no `VmHWM` at all. So
+    ///   `rss_age_ms` rides with them — a size from 1.9 s ago can predate the growth that killed
+    ///   it, and the fields are absent entirely for a child that died before any sample reached
+    ///   it rather than carrying a predecessor's number.
+    /// * `mem_at_max` is the delta the diagnosis actually turns on: how many times an allocation
+    ///   hit `memory.max` since the last exit.
+    /// * `mem_after` is `memory.current` read *now*, which is after the kernel freed the victim.
+    ///   It does not say how full the cgroup was at the death; it says whether the respawn has
+    ///   room. Still near `mem_max` here is the crash loop.
+    /// * `mem_peak` is `memory.peak`, all-time for this cgroup and never reset, so it bounds the
+    ///   answer once and then saturates.
+    /// * `pids` is `pids.current`, and it is here as the one unbiased hint at *how many* tasks
+    ///   filled the cgroup. See [`WorkspaceMemory::pids`] for why the obvious stronger reading —
+    ///   a per-process snapshot taken here — cannot answer that question at this moment.
     async fn report_pi_child_exit(self: &Arc<Self>, child: &Arc<RpcChild>, phase: &str) {
         let alive = child.is_alive();
         let exit = match alive {
             true => ChildExit::default(),
             false => child.exit_report().await,
         };
-        let oom_kill = self.workspace_oom_kill_delta();
+        // Before the cgroup read, so a child that is somehow still alive is measured rather than
+        // guessed at; for the dead one this is a no-op and the sample from its last tick stands.
+        self.sample_pi_rss(child.pid());
+        let rss = self.pi_rss_for(child.pid());
+        let mem = self.workspace_memory();
         let tail = self.pi_log_tail();
         let ready_ms = match phase {
             "ready" => self.pi_last_ready_ms.load(Ordering::SeqCst),
@@ -2973,8 +3153,17 @@ impl Agent {
             phase,
             exit = %exit,
             still_alive = alive,
-            oom_kill = oom_kill.unwrap_or_default(),
-            oom_readable = oom_kill.is_some(),
+            oom_kill = mem.map(|m| m.oom_kills).unwrap_or_default(),
+            oom_readable = mem.is_some(),
+            mem_at_max = mem.map(|m| m.at_max).unwrap_or_default(),
+            mem_max = mem.and_then(|m| m.max).unwrap_or_default(),
+            mem_after = mem.and_then(|m| m.after).unwrap_or_default(),
+            mem_peak = mem.and_then(|m| m.peak).unwrap_or_default(),
+            pids = mem.and_then(|m| m.pids).unwrap_or_default(),
+            rss_kb = rss.map(|(s, _)| s.rss_kb).unwrap_or_default(),
+            rss_peak_kb = rss.map(|(s, _)| s.peak_kb).unwrap_or_default(),
+            rss_age_ms = rss.map(|(_, age)| age).unwrap_or_default(),
+            rss_sampled = rss.is_some(),
             ready_ms,
             tail = %tail,
             "pi_child_exit"
@@ -2987,7 +3176,15 @@ impl Agent {
                 "code": exit.code,
                 "signal": exit.signal,
                 "still_alive": alive,
-                "oom_kill": oom_kill,
+                "oom_kill": mem.map(|m| m.oom_kills),
+                "mem_at_max": mem.map(|m| m.at_max),
+                "mem_max": mem.and_then(|m| m.max),
+                "mem_after": mem.and_then(|m| m.after),
+                "mem_peak": mem.and_then(|m| m.peak),
+                "pids": mem.and_then(|m| m.pids),
+                "rss_kb": rss.map(|(s, _)| s.rss_kb),
+                "rss_peak_kb": rss.map(|(s, _)| s.peak_kb),
+                "rss_age_ms": rss.map(|(_, age)| age),
                 "ready_ms": ready_ms,
                 "deaths": self.pi_deaths.load(Ordering::SeqCst),
                 "tail": tail,
@@ -3267,6 +3464,7 @@ impl Agent {
             return Err(anyhow!("{why}"));
         }
         self.watch_pi_child(&child);
+        self.sample_pi_rss(child.pid());
         *self.pi.lock().await = Some(child);
         *self.pi_model.lock().await = Some(talking_model);
         *self.current_chat.lock().await = Some(chat_id.to_owned());
