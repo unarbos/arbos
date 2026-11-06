@@ -1120,9 +1120,12 @@ const LEFTOVER_PIDS_MAX: usize = 32;
 /// convention `processes_checked` follows — no field rather than a field asserting that nothing
 /// was wrong, which is the shape of claim this whole guard exists to stop.
 ///
-/// Annotates the answer rather than replacing any part of it, and runs after the answer has
-/// been logged, so no return path out of `hook_stop_job` can lose its emission through this.
-/// That invariant, and why it is one, is stated at its first emission site below.
+/// Annotates the answer rather than replacing any part of it, and **runs before the answer is
+/// logged**, so the `stop_job answered` line can carry the same two fields off the same binding.
+/// It used to run after, which is how #2867 shipped with its evidence in a JSON body that no
+/// sink on a real box captures: not the chat row, not the offloaded tool-output blob, not the
+/// relay audit trail, not `.arbos/audit.jsonl`. A field only a unit test reads is not a record.
+/// This cannot cost an emission, because nothing between the annotation and the line can return.
 fn annotate_unread(answer: &mut Value, unread: Option<&crate::isolation::Unread>) {
     let Some(unread) = unread else {
         return;
@@ -5620,6 +5623,18 @@ impl Agent {
                         work belonged to the job the user named: it belongs to no live row, \
                         which is why it needed sweeping, and nothing here establishes whose it \
                         was.";
+            let mut answer = json!({
+                "stopped": [],
+                "unnamed_processes_killed": unreachable.killed,
+                "unnamed_processes_still_alive": unreachable.survivors,
+                "note": note,
+            });
+            // This path used to be the one `Ok` return that annotated nothing, so the cause of
+            // an unconfirmed reap reached no sink at all from here. The reap it reports is the
+            // same reap the other two paths report, and a sweep whose evidence it prints as
+            // `unconfirmed` owes the reader the reason — so it carries the fields too.
+            let unread = unreachable.unread.as_ref();
+            annotate_unread(&mut answer, unread);
             // This path answers the user, so it leaves a line, on the same rule the row-less
             // return below follows: a successful answer that records nothing is a hole in the
             // guard's record even when the answer itself is honest. The evidence is the reap's
@@ -5633,15 +5648,12 @@ impl Agent {
                 found = unreachable.found,
                 killed = unreachable.killed,
                 survivors = ?unreachable.survivors,
+                unconfirmed_because = ?unread.map(|u| u.cause.as_str()),
+                sessions_not_read = ?unread.map(|u| u.sessions.as_slice()).unwrap_or(&[]),
                 note = %note,
                 "stop_job answered"
             );
-            return Ok(json!({
-                "stopped": [],
-                "unnamed_processes_killed": unreachable.killed,
-                "unnamed_processes_still_alive": unreachable.survivors,
-                "note": note,
-            }));
+            return Ok(answer);
         }
         if stopped.is_empty() {
             // Bug AL: no sweep is claimed for a cancelled ask, and the omission is deliberate.
@@ -5659,6 +5671,15 @@ impl Agent {
                         of theirs was swept because none existed yet. Tell the user the request \
                         was stopped; do not report that nothing was found.";
             let evidence = Evidence::Nothing;
+            let mut answer = json!({
+                "stopped": [],
+                "asks_cancelled": pending.len(),
+                "unnamed_processes_still_alive": unreachable.survivors,
+                "all_cancelled": true,
+                "note": note,
+            });
+            let unread = unreachable.unread.as_ref();
+            annotate_unread(&mut answer, unread);
             tracing::info!(
                 jobs = 0,
                 asks = pending.len(),
@@ -5667,43 +5688,17 @@ impl Agent {
                 found = 0,
                 killed = 0,
                 survivors = ?unreachable.survivors,
+                unconfirmed_because = ?unread.map(|u| u.cause.as_str()),
+                sessions_not_read = ?unread.map(|u| u.sessions.as_slice()).unwrap_or(&[]),
                 note = %note,
                 "stop_job answered"
             );
-            let mut answer = json!({
-                "stopped": [],
-                "asks_cancelled": pending.len(),
-                "unnamed_processes_still_alive": unreachable.survivors,
-                "all_cancelled": true,
-                "note": note,
-            });
-            annotate_unread(&mut answer, unreachable.unread.as_ref());
             return Ok(answer);
         }
         let note = stop_job_note(&stopped, &unreachable);
-        // Verbatim, into agentd's own log, beside the sweep it was built from.
-        //
-        // The sentence the user ends up reading is the model's, and the cancel canary can only
-        // see whether a stop line is *present* in that prose — which cannot tell a claim that
-        // every process is dead from an admission that none could be checked. Those are opposite
-        // outcomes and they decide whether a cancel failure was dishonest or merely incomplete.
-        // This is where the difference is actually decided, so this is where it is recorded; the
-        // log survives prose a harness cannot parse.
         let evidence = stopped
             .iter()
             .fold(Evidence::Nothing, |e, s| e.and(s.sweep.evidence));
-        tracing::info!(
-            jobs = stopped.len(),
-            // Both, because they are different questions: `evidence` is which of the three
-            // answers this cancel earned, and `checked` is whether the box may claim a kill.
-            %evidence,
-            checked = evidence.proven(),
-            found = stopped.iter().map(|s| s.sweep.found).sum::<usize>(),
-            killed = stopped.iter().map(|s| s.sweep.killed).sum::<usize>(),
-            survivors = ?stopped.iter().flat_map(|s| s.sweep.survivors.clone()).collect::<Vec<_>>(),
-            note = %note,
-            "stop_job answered"
-        );
         let mut answer = json!({
             "stopped": stopped
                 .iter()
@@ -5754,7 +5749,41 @@ impl Agent {
         if let Some(checked) = unreachable.checked() {
             answer["unnamed_processes_checked"] = checked.into();
         }
-        annotate_unread(&mut answer, unreachable.unread.as_ref());
+        let unread = unreachable.unread.as_ref();
+        annotate_unread(&mut answer, unread);
+        // Verbatim, into agentd's own log, beside the sweep it was built from.
+        //
+        // The sentence the user ends up reading is the model's, and the cancel canary can only
+        // see whether a stop line is *present* in that prose — which cannot tell a claim that
+        // every process is dead from an admission that none could be checked. Those are opposite
+        // outcomes and they decide whether a cancel failure was dishonest or merely incomplete.
+        // This is where the difference is actually decided, so this is where it is recorded; the
+        // log survives prose a harness cannot parse.
+        //
+        // **It emits after the answer is annotated, and that order is the fix for #2867's miss.**
+        // It used to run before, so `unconfirmed_because` and `sessions_not_read` existed only in
+        // a JSON body nothing on a real box captures, and the one sink an operator does read
+        // could not carry them. Both now come off the same `unread` binding, so the line and the
+        // answer cannot disagree about why a sweep came back unconfirmed. Nothing between the
+        // annotation and here can return, so the one-line-per-`Ok` invariant is unchanged.
+        tracing::info!(
+            jobs = stopped.len(),
+            // Both, because they are different questions: `evidence` is which of the three
+            // answers this cancel earned, and `checked` is whether the box may claim a kill.
+            %evidence,
+            checked = evidence.proven(),
+            found = stopped.iter().map(|s| s.sweep.found).sum::<usize>(),
+            killed = stopped.iter().map(|s| s.sweep.killed).sum::<usize>(),
+            survivors = ?stopped.iter().flat_map(|s| s.sweep.survivors.clone()).collect::<Vec<_>>(),
+            // `None` and `[]` rather than an omitted field, by the convention the `survivors`
+            // field beside them already follows: on a log line the absence of a value has to be
+            // printed to be read, and a canary that cannot tell "no unread part" from "the field
+            // was dropped again" is the hole this fix closes.
+            unconfirmed_because = ?unread.map(|u| u.cause.as_str()),
+            sessions_not_read = ?unread.map(|u| u.sessions.as_slice()).unwrap_or(&[]),
+            note = %note,
+            "stop_job answered"
+        );
         Ok(answer)
     }
 
