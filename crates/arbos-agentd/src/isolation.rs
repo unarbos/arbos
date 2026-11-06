@@ -132,6 +132,14 @@ pub enum UnreadCause {
     ProcUnreadable,
     /// An adapter's children map was held by a concurrent `stop`, so whether these sessions are
     /// still open could not be read. They are kept, never collected.
+    ///
+    /// **Reachable from an ordinary cancel, and measured as such** — read
+    /// `sweep_contention_tests::a_cancel_through_the_job_path_opens_the_window_and_a_timer_tick_reads_it`
+    /// before concluding otherwise. The hold is `RpcChild::shutdown` waiting up to five seconds
+    /// for a child to exit on the close of its stdin, which sends no signal; the cancel's
+    /// `cgroup.kill` runs strictly after it and so cannot shorten it. A cancel of a worker that
+    /// is slow to exit, overlapping the five-minute `reap_unreachable_workers` tick, is the whole
+    /// of it.
     AdapterLockContended,
 }
 

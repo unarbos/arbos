@@ -100,6 +100,17 @@ pub trait HarnessAdapter: Send + Sync {
     /// session is over, and a contended lock used to produce exactly that `false` — so a live
     /// worker's whole tree was collectable for as long as a sibling session took to stop. Every
     /// caller that decides whether to signal a process must treat `None` as alive.
+    ///
+    /// **Where the contention comes from, because it has been got wrong once.** `stop` below
+    /// takes that mutex and holds it across `RpcChild::shutdown`, since the `if let` scrutinee's
+    /// temporary lives to the end of the block. `shutdown` closes the child's stdin and then
+    /// waits up to five seconds for it to exit on EOF, **sending no signal at all**. So the
+    /// window is as wide as a slow child's exit, and the `cgroup.kill` a cancel issues runs
+    /// strictly afterwards and cannot shorten it. A cancel overlapping the five-minute
+    /// `Agent::reap_unreachable_workers` tick is enough, and
+    /// `sweep_contention_tests::a_cancel_through_the_job_path_opens_the_window_and_a_timer_tick_reads_it`
+    /// is that, measured. Do not read this as defensive-only and delete it: the `false` it
+    /// replaced is bug AQ.
     fn is_open(&self, session_id: &str) -> Option<bool>;
     /// The process group this session's child leads, so a cancel can reap everything the child
     /// spawned after the child itself is gone (bug Z). `None` for an adapter whose children are
@@ -613,6 +624,10 @@ impl HarnessAdapter for PrimeAdapter {
         tail_jsonl(&path, cursor)
     }
 
+    /// The guard is held across `shutdown` — the `if let` scrutinee's temporary lives to the end
+    /// of the block — so this is the hold `HarnessAdapter::is_open` answers `None` for. Not an
+    /// accident to tidy away: a `remove` that dropped the guard first would let a concurrent
+    /// sweep read a session that is still shutting down as already gone.
     async fn stop(&self, session_id: &str) -> Result<()> {
         if let Some(c) = self.sessions.children.lock().await.remove(session_id) {
             c.shutdown().await;
@@ -917,6 +932,10 @@ impl HarnessAdapter for PiAdapter {
         Ok((entries, leaf))
     }
 
+    /// The guard is held across `shutdown` — the `if let` scrutinee's temporary lives to the end
+    /// of the block — so this is the hold `HarnessAdapter::is_open` answers `None` for. Not an
+    /// accident to tidy away: a `remove` that dropped the guard first would let a concurrent
+    /// sweep read a session that is still shutting down as already gone.
     async fn stop(&self, session_id: &str) -> Result<()> {
         if let Some(c) = self.sessions.children.lock().await.remove(session_id) {
             c.shutdown().await;
