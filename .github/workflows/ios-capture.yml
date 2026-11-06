@@ -446,8 +446,9 @@ jobs:
             echo "::error title=Rig helper missing::$helper was not checked out, so the capture variables cannot be written"
             exit 1
           fi
+          # NEGATIVE CONTROL, never to be merged: ARBOS_SHOT_DIR is deliberately withheld so
+          # that the capture step's "Capture rig skipped" guard is observed to fire.
           python3 "$helper" "$run" \
-            "ARBOS_SHOT_DIR=$SHOT_DIR" \
             "ARBOS_SHOT_TAG=${{ matrix.leg }}" \
             "ARBOS_SHOT_SCRIPT=$SHOT_SCRIPT" \
             "ARBOS_SHOT_LAUNCH_ENV=$SHOT_LAUNCH_ENV"
