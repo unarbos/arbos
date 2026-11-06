@@ -612,7 +612,7 @@ mod tests {
     const WORKER: &str = "01TESTWORKERROUTINECALL001";
 
     /// An agent holding one job in `CHAT`, run by `WORKER` — the r7note shape.
-    async fn agent_with_a_job() -> (Arc<Agent>, std::path::PathBuf) {
+    async fn agent_with_a_job() -> (Arc<Agent>, crate::status::tests::TestRoot) {
         let (agent, root) = crate::status::tests::test_agent().await;
         agent
             .store

@@ -1210,7 +1210,40 @@ pub(crate) mod tests {
         axum::http::StatusCode::NO_CONTENT
     }
 
-    pub(crate) async fn test_agent() -> (Arc<Agent>, std::path::PathBuf) {
+    /// A test box's work root, removed when the test that holds it drops it.
+    ///
+    /// This used to be a plain `PathBuf`, and clearing it was left to each test remembering to
+    /// call `remove_dir_all` on its last line. Most do. It is not enough: a test that panics
+    /// never reaches that line, and a test that binds the root as `_root` because it has no use
+    /// for it never had one to reach. Each root is around 129 MB, so a repeat-run measurement
+    /// of a flaky test — 1,200 runs while pinning the bug-AJ pair — left 3,704 directories
+    /// behind and filled a 254 GB disk, which then failed the runs it was measuring.
+    ///
+    /// Dropping is the one step a panic cannot skip, so the root clears itself now. It derefs
+    /// to [`std::path::Path`], so the tests that do their own clean-up keep working and simply
+    /// repeat a removal that has already happened, which `remove_dir_all` ignores.
+    pub(crate) struct TestRoot(std::path::PathBuf);
+
+    impl std::ops::Deref for TestRoot {
+        type Target = std::path::Path;
+        fn deref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl AsRef<std::path::Path> for TestRoot {
+        fn as_ref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TestRoot {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    pub(crate) async fn test_agent() -> (Arc<Agent>, TestRoot) {
         test_agent_with(axum::Router::new()).await
     }
 
@@ -1276,25 +1309,25 @@ pub(crate) mod tests {
     /// Every other test box points `pi_bin` at nothing, which leaves the agent with no main
     /// session and no supervisor at all — bug Y's tests need the production loop itself, so
     /// they give it a scripted child to supervise.
-    pub(crate) async fn test_agent_with_pi(pi_bin: &str) -> (Arc<Agent>, std::path::PathBuf) {
+    pub(crate) async fn test_agent_with_pi(pi_bin: &str) -> (Arc<Agent>, TestRoot) {
         test_agent_full(axum::Router::new(), pi_bin).await
     }
 
     /// Same, with extra mock-relay routes merged in (`/box/secrets/…` for the hand-off tests).
-    pub(crate) async fn test_agent_with(extra: axum::Router) -> (Arc<Agent>, std::path::PathBuf) {
+    pub(crate) async fn test_agent_with(extra: axum::Router) -> (Arc<Agent>, TestRoot) {
         test_agent_full(extra, "/nonexistent/pi").await
     }
 
     /// Same, pointed at a relay the caller serves itself. The model-stub tests count the TCP
     /// connections the box opens, which `axum::serve` cannot report.
-    pub(crate) async fn test_agent_on_relay(relay_url: &str) -> (Arc<Agent>, std::path::PathBuf) {
+    pub(crate) async fn test_agent_on_relay(relay_url: &str) -> (Arc<Agent>, TestRoot) {
         test_agent_on(relay_url.to_owned(), "/nonexistent/pi").await
     }
 
     async fn test_agent_full(
         extra: axum::Router,
         pi_bin: &str,
-    ) -> (Arc<Agent>, std::path::PathBuf) {
+    ) -> (Arc<Agent>, TestRoot) {
         let app = axum::Router::new()
             .merge(extra)
             .route(
@@ -1318,7 +1351,7 @@ pub(crate) mod tests {
         test_agent_on(format!("http://127.0.0.1:{port}"), pi_bin).await
     }
 
-    async fn test_agent_on(relay_url: String, pi_bin: &str) -> (Arc<Agent>, std::path::PathBuf) {
+    async fn test_agent_on(relay_url: String, pi_bin: &str) -> (Arc<Agent>, TestRoot) {
         let root = std::env::temp_dir().join(format!("arbos-quick-{}", ulid()));
         std::fs::create_dir_all(&root).unwrap();
         let bx = crate::config::BoxConfig {
@@ -1349,7 +1382,7 @@ pub(crate) mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(64);
         let sync = crate::sync::SyncHub::new(cfg.clone(), store.clone(), tx);
         let agent = Agent::new(cfg, store, sync, Arc::new(tokio::sync::Semaphore::new(4)));
-        (agent, root)
+        (agent, TestRoot(root))
     }
 
     /// Shorten the act-ack promotion threshold for one agent only. The knob file lives in this

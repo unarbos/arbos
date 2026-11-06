@@ -1703,7 +1703,7 @@ mod job_approval_tests {
     const WORKER: &str = "01TESTJOBWORKER00000000000";
 
     /// An agent with one running job in a pinned chat, as `start_job` leaves it.
-    async fn agent_running_a_job() -> (Arc<Agent>, SharedHost, std::path::PathBuf) {
+    async fn agent_running_a_job() -> (Arc<Agent>, SharedHost, crate::status::tests::TestRoot) {
         let (agent, root) = test_agent().await;
         agent.store.upsert_chat(CHAT, "Main", true, 0).unwrap();
         let host = agent.sync.open_room(CHAT).await.unwrap();
@@ -1732,7 +1732,7 @@ mod job_approval_tests {
     /// chat, because that is the chat the owner reads (`approval_chat`). Both rooms are open,
     /// so a notice in either one is a thing the test could see.
     async fn agent_running_a_job_in_a_side_chat(
-    ) -> (Arc<Agent>, SharedHost, SharedHost, std::path::PathBuf) {
+    ) -> (Arc<Agent>, SharedHost, SharedHost, crate::status::tests::TestRoot) {
         let (agent, root) = test_agent().await;
         agent.store.upsert_chat(CHAT, "Main", true, 0).unwrap();
         agent

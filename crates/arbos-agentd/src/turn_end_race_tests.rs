@@ -224,7 +224,7 @@ async fn a_message_sent_as_the_pi_child_dies_is_answered_and_the_finished_row_st
     // did between the ack row at 00:09:35.298 and the warning 165 ms later.
     let dying = scripted_pi(&root, "act", FIRST_REPLY, true).await;
     agent.test_set_pi(Some(dying), chat).await;
-    let _supervisor = stand_in_supervisor(&agent, root.clone(), chat, SECOND_REPLY);
+    let _supervisor = stand_in_supervisor(&agent, root.to_path_buf(), chat, SECOND_REPLY);
 
     let (first_msg, first_cmd) = send_cmd(&host, "make a CSV of n squared up to 5000").await;
     let _ = agent.handle_command(chat, first_cmd).await;
@@ -478,7 +478,7 @@ async fn three_messages_at_a_turn_end_are_all_answered_with_no_failed_rows() {
 
     let dying = scripted_pi(&root, "act3", FIRST_REPLY, true).await;
     agent.test_set_pi(Some(dying), chat).await;
-    let _supervisor = stand_in_supervisor(&agent, root.clone(), chat, SECOND_REPLY);
+    let _supervisor = stand_in_supervisor(&agent, root.to_path_buf(), chat, SECOND_REPLY);
 
     // An ask in the shape the replay used. It runs inline rather than as a job: the burst path
     // needs a user turn to be running, and this chat has none, so nothing here takes a second

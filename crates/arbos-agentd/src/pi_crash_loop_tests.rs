@@ -1072,7 +1072,7 @@ fn the_shipped_backoff_is_two_seconds_doubling_to_a_minute() {
 async fn a_send_owed_into_an_outage<F, Fut>(
     chat: &str,
     take_the_room: F,
-) -> (Arc<Agent>, Stub, std::path::PathBuf, String)
+) -> (Arc<Agent>, Stub, crate::status::tests::TestRoot, String)
 where
     F: FnOnce(Arc<Agent>) -> Fut,
     Fut: std::future::Future<Output = ()>,
