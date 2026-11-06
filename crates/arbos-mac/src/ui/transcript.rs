@@ -70,8 +70,8 @@ pub enum Delivery {
     Delivered,
 }
 
-/// Whole-bubble opacity of a pending bubble (white text on `#5c5c5c` /
-/// `#111111`: 3.4 : 1 dark, 3.6 : 1 light — transient, until the relay's ACK).
+/// Whole-bubble opacity of a pending bubble (white text on `#3c3c3c` /
+/// `#111111`: 4.1 : 1 dark, 3.6 : 1 light — transient, until the relay's ACK).
 pub const BUBBLE_ALPHA_PENDING: f32 = 0.5;
 
 impl Delivery {

@@ -2,7 +2,7 @@
 //!
 //! The palette is the iPhone app's (`apps/ios/.../UI/Theme.swift`), itself
 //! measured from Grok Bot: background #141414, assistant bubble #202020, user
-//! bubble #5C5C5C, field #181818 with a #242424 rim, system text #95959B.
+//! bubble #3C3C3C, field #181818 with a #242424 rim, system text #95959B.
 //! The Mac is that UI scaled up: a chat-list sidebar, one conversation pane.
 //! Dark + Matte is the default for anyone who never picked (D90); Glass is a
 //! macOS-only toggle (D10, §3.11).
@@ -615,7 +615,12 @@ pub struct Theme {
     /// Grok's blue: unread dots, links, the caret.
     pub accent: Hsla,
     pub accent_soft: Hsla,
-    /// User bubble (right).
+    /// User bubble (right). Dark is `#3C3C3C`, sampled off the approved mock
+    /// (`design/grok-parity-2026-11-05/grok-reference.png` in the project
+    /// store): the mock's own bubbles run `#3D3D3D` at the top to `#3B3B3B` at
+    /// the bottom, and `#3C3C3C` is that ramp's midpoint. It replaces the
+    /// `#5C5C5C` that made a routine prompt a slab — see
+    /// `docs/mac-design-rules.md` § Two bubble tones.
     pub bubble: Hsla,
     /// Assistant bubble (left).
     pub bubble_assistant: Hsla,
@@ -687,7 +692,7 @@ impl Theme {
             text_faint: hex(0x6a6a6e),
             accent: hex(0x1084fe),
             accent_soft: hex_a(0x1084fe, 0.18),
-            bubble: hex(0x5c5c5c),
+            bubble: hex(0x3c3c3c),
             bubble_assistant: hex(0x232323),
             field: hex(0x181818),
             field_border: hex(0x242424),
@@ -1212,13 +1217,22 @@ impl Theme {
     }
 
     /// The selected segment of an On/Off or Dark/Light choice
-    /// ([`glass::segment`]): `bubble` on Matte; on Glass white 16 % (dark) /
-    /// black 72 % (light) — its text stays `bubble_text` (white) in both.
-    /// 16 %, not more: over a white desktop the dark card already sits near
-    /// `#4d4d4d`, and the white label must keep 4.5:1 on the segment there.
+    /// ([`glass::segment`]): its own mid-grey on Matte; on Glass white 16 %
+    /// (dark) / black 72 % (light) — its text stays `bubble_text` (white) in
+    /// both. 16 %, not more: over a white desktop the dark card already sits
+    /// near `#4d4d4d`, and the white label must keep 4.5:1 on the segment
+    /// there.
+    ///
+    /// Matte reads a constant rather than `bubble`, which it borrowed until
+    /// the bubble tone moved to `#3C3C3C`. The segmented pill grey is one of
+    /// the calls Jacob still has open, so it holds the `#5C5C5C` / `#111111`
+    /// it has always drawn instead of following a change it was not part of.
     pub fn segment_on_fill(&self) -> Hsla {
         if !self.is_frost() {
-            return self.bubble;
+            return match self.appearance {
+                Appearance::Dark => hex(0x5c5c5c),
+                Appearance::Light => hex(0x111111),
+            };
         }
         if self.is_light() {
             hex_a(0x000000, 0.72)
@@ -1747,7 +1761,11 @@ mod glass_contrast_tests {
             assert_eq!(theme.control_fill(), theme.surface_2);
             assert_eq!(theme.filter_on_fill(), theme.bubble_assistant);
             assert_eq!(theme.field_fill(), theme.field);
-            assert_eq!(theme.segment_on_fill(), theme.bubble);
+            let segment = match appearance {
+                Appearance::Dark => hex(0x5c5c5c),
+                Appearance::Light => hex(0x111111),
+            };
+            assert_eq!(theme.segment_on_fill(), segment);
             assert_eq!(theme.label_muted(), theme.text_muted);
             assert_eq!(theme.label_faint(), theme.text_faint);
             let tile = match appearance {
@@ -1757,6 +1775,24 @@ mod glass_contrast_tests {
             assert_eq!(theme.tile_fill(), tile);
             assert_eq!(theme.tile_fill().a, 1.0);
         }
+    }
+
+    /// `docs/mac-design-rules.md` § Two bubble tones. The two fills are the
+    /// midpoints of the approved mock's ramps, and the segmented pill is a
+    /// constant of its own so an open call does not move with them.
+    #[test]
+    fn the_transcript_draws_two_bubble_tones_and_the_segment_keeps_its_own() {
+        let dark = Theme::with(Appearance::Dark, Surface::Matte);
+        assert_eq!(dark.bubble, hex(0x3c3c3c), "user bubble");
+        assert_eq!(dark.bubble_assistant, hex(0x232323), "agent bubble");
+        // Lighter for the user, darker for the agent, and the agent's fill
+        // stays above the page so a bubble still reads as a bubble.
+        assert!(dark.bubble.l > dark.bubble_assistant.l);
+        assert!(dark.bubble_assistant.l > dark.bg.l);
+        // The slab tone is gone from the transcript, and the segmented pill
+        // — Jacob's open call — is the only thing still drawing it.
+        assert_ne!(dark.bubble, hex(0x5c5c5c));
+        assert_eq!(dark.segment_on_fill(), hex(0x5c5c5c));
     }
 }
 
