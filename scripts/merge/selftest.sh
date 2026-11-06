@@ -730,16 +730,33 @@ echo
 echo "merge.sh tells a setup gap from a policy refusal:"
 
 # The sandbox PATH carries bash and the text tools merge.sh needs to read an allow-list, and NOTHING that can
-# reach the network: no gh, no git, no curl. That absence is load-bearing twice over. It keeps these cases
-# hermetic, and it is how "the op check happens up front" is pinned without a stopwatch — if the check moved
-# back to where it used to be, below the GO, these runs would die on a missing gh instead of printing a setup
-# refusal, and every case here would go red.
+# reach the network. That absence is load-bearing twice over. It keeps these cases hermetic, and it is how
+# "the op check happens up front" is pinned without a stopwatch — if the check moved back to where it used to
+# be, below the GO, these runs would die before printing a setup refusal and every case here would go red.
+#
+# gh and git are STUBS rather than absent, which is a change from when this block was written. They used to be
+# simply missing, and case (e) below used their absence as its proof that a correctly set up host gets PAST the
+# preflight: the run died further down on a missing gh. Then tools.sh started checking gh and git by version,
+# so their absence became a setup gap in its own right and (e) could no longer tell "passed the preflight"
+# from "refused by it". The stubs answer --version and refuse everything else, so the host now looks set up,
+# the run still dies at the first real gh call, and no case can reach the network.
 sandbox=$(mktemp -d) || exit 1
 trap 'rm -rf "$repo" "$sandbox"' EXIT
 mkdir -p "$sandbox/bin" "$sandbox/fake" "$sandbox/kit" "$sandbox/kit-noallow"
 for t in bash dirname sed tr grep cat cut head awk sort date mktemp; do
   p=$(command -v "$t") && ln -sf "$p" "$sandbox/bin/$t" || bad "no $t on PATH, so the sandbox cannot be built"
 done
+# The gh and git stubs. They report the versions tools.sh treats as its floors, so a clean sandbox produces no
+# version NOTE, and they exit non-zero for every other argument so the first genuine call still fails. They sit
+# in bin/ rather than fake/ so that NOOP_PATH isolates exactly one missing tool — op — and case (d) stays a
+# statement about op and not about three tools at once.
+printf '%s\n' '#!/bin/bash' \
+  '[ "${1:-}" = --version ] && { echo "gh version 2.103.0 (2026-10-21)"; exit 0; }' \
+  'echo "FAKE-GH refuses: $*" >&2; exit 1' > "$sandbox/bin/gh"
+printf '%s\n' '#!/bin/bash' \
+  '[ "${1:-}" = --version ] && { echo "git version 2.43.0"; exit 0; }' \
+  'echo "FAKE-GIT refuses: $*" >&2; exit 1' > "$sandbox/bin/git"
+chmod +x "$sandbox/bin/gh" "$sandbox/bin/git"
 # `op` is simulated and never the real binary, so these cases hold on a runner that has never installed it —
 # and so no case here can spend a request out of the account's shared 1,000/day budget.
 # It writes a stdout sentinel and two stderr lines; block 12c reads all three.
@@ -821,6 +838,95 @@ done
 mrun "$WITHOP_PATH" "$sandbox/kit" 9999
 if [ "$MRC" -ne 5 ] && ! says "SETUP:"; then ok "a kit with op, a token and a clearance passes the preflight"
 else bad "a correctly set up host still reads as a setup gap (rc=$MRC), so the preflight refuses everything: $MOUT"; fi
+
+echo
+echo "tools.sh checks the kit's own tools by version, and tells three causes apart:"
+# On 2026-11-06 four merges ran with op resolving to /tmp/opbin/op at 2.30.0, from a directory an earlier shell
+# had put on PATH by hand. The next shell did not inherit it, so `command -v op` found nothing and the kit said
+# MISSING TOOL. That was true of the host it could see and useless as a diagnosis: the binary had not been
+# deleted and the host had not been reimaged, PATH had changed under a running session. A presence check cannot
+# separate those three, and they call for three different actions — reinstall, investigate, or fix PATH. These
+# cases pin the separation, and each one is driven against a crafted baseline rather than a real outage.
+tkit=$sandbox/tools-kit; mkdir -p "$tkit"
+trun() {  # <path> <merge-kit> — runs `tools.sh check` with nothing from this shell; sets TRC and TOUT
+  TOUT=$(env -i PATH="$1" HOME=/tmp MERGE_KIT="$2" bash "$D/tools.sh" check 2>&1); TRC=$?
+}
+tsays() { printf '%s\n' "$TOUT" | grep -qF "$1"; }
+now_boot=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)
+
+# (f) gh missing is a setup gap of its own. merge.sh cannot read a check rollup without it, so this must not
+#     be discovered halfway down a run that has already started judging things.
+mkdir -p "$sandbox/nogh"; for t in bash sed tr grep cat cut head awk sort date mktemp dirname; do
+  p=$(command -v "$t") && ln -sf "$p" "$sandbox/nogh/$t"
+done
+ln -sf "$sandbox/bin/git" "$sandbox/nogh/git"; ln -sf "$sandbox/fake/op" "$sandbox/nogh/op"
+mrun "$sandbox/nogh" "$sandbox/kit" 9999
+if [ "$MRC" -eq 5 ] && says "gh is not on PATH"; then ok "a missing gh exits 5 (setup) and names gh"
+else bad "a missing gh exits $MRC and does not name gh, so it is not reported as the setup gap it is: $MOUT"; fi
+for sentence in "VERDICT" "NO-GO" "PAT read failed"; do
+  if says "$sentence"; then bad "a missing gh printed '$sentence' — something was judged before the tools were checked for"
+  else ok "a missing gh reaches no '$sentence'"; fi
+done
+
+# (g) A clean check records what it saw. That record is the only thing the NEXT failure can compare against,
+#     which is the whole reason the three causes below can be told apart at all.
+rm -f "$tkit/tools-baseline"
+trun "$WITHOP_PATH" "$tkit"
+if [ "$TRC" -eq 0 ]; then ok "a host with all three tools passes the check"
+else bad "a host with all three tools fails the check (rc=$TRC): $TOUT"; fi
+if grep -q '^op_path=' "$tkit/tools-baseline" 2>/dev/null && grep -q '^boot_id=' "$tkit/tools-baseline" 2>/dev/null
+then ok "a clean check writes the resolved path and the boot id to the baseline"
+else bad "a clean check left no usable baseline, so the next failure has nothing to compare against"; fi
+
+# (h) A FAILING check must not overwrite a good baseline. If it did, the first failure would destroy the
+#     reading that explains it, and every cause below would collapse into "no baseline on this host".
+good=$(cat "$tkit/tools-baseline")
+trun "$sandbox/nogh" "$tkit"
+if [ "$(cat "$tkit/tools-baseline")" = "$good" ]; then ok "a failing check leaves the last good baseline intact"
+else bad "a failing check overwrote the baseline, destroying the evidence that explains the failure"; fi
+
+# (i) PATH DRIFT: the recorded binary is still on disk and executable, and PATH no longer reaches it. This is
+#     the one that actually happened, and the one a presence check reports as a deletion.
+printf 'recorded=2026-11-06T00:00:00Z\nop_path=%s\nop_version=2.30.0\nboot_id=%s\n' "$sandbox/fake/op" "$now_boot" > "$tkit/tools-baseline"
+trun "$NOOP_PATH" "$tkit"
+if tsays "PATH DRIFT"; then ok "a binary still on disk but off PATH is diagnosed as PATH drift"
+else bad "a binary still on disk but off PATH is not diagnosed as PATH drift: $TOUT"; fi
+if tsays "DELETED" || tsays "REIMAGE"; then bad "PATH drift was also reported as a deletion or a reimage, so the three are not separated: $TOUT"
+else ok "PATH drift is not also reported as a deletion or a reimage"; fi
+
+# (j) DELETED: same running host, recorded path gone from it. Worth knowing WHAT removed it before reinstalling.
+printf 'recorded=2026-11-06T00:00:00Z\nop_path=%s\nop_version=2.30.0\nboot_id=%s\n' "$sandbox/absent/op" "$now_boot" > "$tkit/tools-baseline"
+trun "$NOOP_PATH" "$tkit"
+if tsays "DELETED"; then ok "a vanished binary on an unrestarted host is diagnosed as a deletion"
+else bad "a vanished binary on an unrestarted host is not diagnosed as a deletion: $TOUT"; fi
+
+# (k) REIMAGE OR REBOOT: the boot id moved, so this is not the host that recorded the baseline and nobody
+#     deleted anything. A fresh install is the whole answer, and no investigation is owed.
+printf 'recorded=2026-11-06T00:00:00Z\nop_path=%s\nop_version=2.30.0\nboot_id=%s\n' "$sandbox/absent/op" 00000000-0000-0000-0000-000000000000 > "$tkit/tools-baseline"
+trun "$NOOP_PATH" "$tkit"
+if tsays "REIMAGE OR REBOOT"; then ok "a changed boot id is diagnosed as a reimage or reboot"
+else bad "a changed boot id is not diagnosed as a reimage or reboot: $TOUT"; fi
+if tsays "DELETED"; then bad "a reimage was also reported as a deletion, which sends the reader looking for a culprit that does not exist: $TOUT"
+else ok "a reimage is not also reported as a deletion"; fi
+
+# (l) Version drift is a NOTE and NOT a refusal. A floor here is a version the kit has been run with, not a
+#     measured minimum, so below one is UNKNOWN rather than proven broken. Refusing on it would stop a merge
+#     over something nobody has shown to be a problem; saying nothing would lose it when a merge behaves oddly.
+mkdir -p "$sandbox/olddrift"; for t in bash sed tr grep cat cut head awk sort date mktemp dirname; do
+  p=$(command -v "$t") && ln -sf "$p" "$sandbox/olddrift/$t"
+done
+ln -sf "$sandbox/fake/op" "$sandbox/olddrift/op"; ln -sf "$sandbox/bin/git" "$sandbox/olddrift/git"
+printf '%s\n' '#!/bin/bash' '[ "${1:-}" = --version ] && { echo "gh version 2.9.0 (2024-01-01)"; exit 0; }' \
+  'exit 1' > "$sandbox/olddrift/gh"; chmod +x "$sandbox/olddrift/gh"
+rm -f "$tkit/tools-baseline"
+trun "$sandbox/olddrift" "$tkit"
+if [ "$TRC" -eq 0 ]; then ok "a tool below its floor still passes the check — a floor is exercised, not measured"
+else bad "a tool below its floor refuses the run (rc=$TRC), stopping a merge over something unproven: $TOUT"; fi
+if tsays "below the"; then ok "the drift is named rather than passed over in silence"
+else bad "a tool below its floor produced no note at all, so the drift is invisible when a merge misbehaves: $TOUT"; fi
+# sort -V and not a string compare: 2.9.0 is BELOW 2.103.0, and `[[ 2.9.0 < 2.103.0 ]]` says the opposite.
+if tsays "2.9.0"; then ok "2.9.0 reads as below 2.103.0, so the comparison is numeric and not lexical"
+else bad "2.9.0 was not reported below 2.103.0 — the version compare is lexical, which inverts every two-digit minor: $TOUT"; fi
 
 echo
 echo "opread writes op's stderr to the CONFIGURED kit, and runs op either way:"
