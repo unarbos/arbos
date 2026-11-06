@@ -243,11 +243,18 @@ diff.
 The message is a version guard in `webrtc-sys`' own `build.rs`, not a compile error, and
 `arbos-mac` reaches `webrtc-sys` through `libwebrtc`, so there is no crate to scope around it.
 
-**Run `clang21.sh check` first.** On 2026-11-06 a worker met the wall, downloaded the 2 GB asset,
-and only afterwards found that `/usr/lib/llvm-21/bin/clang++` had been on the host for hours —
-present and working, merely not the default. The directory's birth time was four hours older than
-the session that "installed" it. `check` searches `/usr/lib/llvm-*` and the default compiler and
-names what it finds; `install` fetches only when nothing clears the floor.
+**Run `scripts/workspace-test-deps.sh` — the repository already has an installer, and you should
+not write a second one.** It landed in #2878 and installs the GPUI apt packages and the pinned
+clang together, skipping the download when a usable compiler is already unpacked. A lane worker
+missed it on 2026-11-06, wrote a second installer, and spent 25 minutes downloading a 2 GB asset
+onto a host that already had `/usr/lib/llvm-21/bin/clang++` — present and working, merely not the
+default. Two installers of one toolchain is the same trap as two copies of one pin.
+
+**And look before you fetch, which is also how that was diagnosed.** The tell was not the file
+list: the directory held exactly the extract list, which looks identical whether this session
+created it or an earlier one did. `stat` settled it — the directory's birth time was four hours
+older than the session that "installed" it, and `lib/clang` kept its original mtime while all 379
+files below it moved. The obvious check was not a check, and a second route was needed.
 
 **Clearing the floor and matching CI are different claims, and only the weaker one is usually
 true.** The guard asks for "clang 21 or later", so any 21+ compiles the rebased head and gate 5 is
