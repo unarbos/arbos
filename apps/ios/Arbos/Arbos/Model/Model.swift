@@ -236,10 +236,9 @@ enum WorkspaceState: String, Codable, Equatable {
     }
 }
 
-/// The Create sheet's pending picture, applied once the entity exists (Jacob, 2026-10-25: the
-/// sheet offers Upload and Generate only; with neither the entity is stored neutral —
-/// `avatar_disc_color` = `DiscArt.neutral`, the name's initial on a grey disc — never an
-/// automatic colour).
+/// The Create sheet's pending picture, applied once the entity exists (the sheet offers Upload
+/// and Generate only; with neither the entity is stored with no `avatar_disc_color` at all, and
+/// the colour follows from the id the relay assigns — Jacob, 2026-11-06).
 enum DraftPicture: Equatable {
     /// The photo as chosen, already the encoded master (PNG or JPEG, ≤ 1024 px —
     /// `PictureMaster`); uploaded into the new entity's slot.

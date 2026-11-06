@@ -138,10 +138,10 @@ struct ServerAvatar: View {
 
     @ViewBuilder
     private var fallback: some View {
-        if server.isNeutralAvatar {
-            NeutralAvatar(name: server.name, size: size)
-        } else if let color = server.avatarDiscColor {
-            DiscAvatar(color: UInt8(clamping: color), size: size)
+        if server.avatarDiscColor != nil {
+            // Resolved through the core, so an older client's sentinel lands on the id's
+            // colour rather than a grey disc (Jacob, 2026-11-06).
+            DiscAvatar(color: DiscArt.pick(seed: server.id, color: server.avatarDiscColor), size: size)
         } else {
             InitialsAvatar(name: server.name, handle: nil, id: server.id, override: server.avatarColorIndex, size: size)
         }

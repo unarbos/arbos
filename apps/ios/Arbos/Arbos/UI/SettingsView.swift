@@ -903,7 +903,8 @@ struct MachineAgentRow: View {
             if let project {
                 AgentAvatar(project: project, theme: theme, size: PaneKit.avatar)
             } else {
-                NeutralAvatar(name: workspace.name, size: PaneKit.avatar)
+                // No project record yet, but the workspace knows the id the colour comes from.
+                DiscAvatar(color: DiscArt.pick(seed: workspace.projectId), size: PaneKit.avatar)
             }
             VStack(alignment: .leading, spacing: 2) {
                 Text(workspace.name).font(theme.font(Theme.body, weight: .medium)).foregroundStyle(theme.text).lineLimit(1)

@@ -102,6 +102,12 @@ pub fn agent(seed: &str, disc_override: Option<u8>, size: f32) -> Div {
     disc_element(disc_color(seed, disc_override), size)
 }
 
+/// The disc for an id whose `Project` record is not loaded yet — a workspace row the registry
+/// has not caught up with. The id is all the colour needs.
+pub fn disc_for_id(id: &str, size: f32) -> Div {
+    disc_element(disc_color(id, None), size)
+}
+
 /// The agent pane's hero: the same disc at hero size.
 pub fn project_hero(p: &Project, size: f32, theme: &Theme) -> Div {
     if p.is_people() {

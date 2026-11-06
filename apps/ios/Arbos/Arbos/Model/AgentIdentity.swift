@@ -87,10 +87,9 @@ extension AppModel {
     /// `AgentIdentity` → the `Project` the views draw. A known agent keeps its full record
     /// (model, state, owner…) with the identity's name, colour and picture written over it.
     func agentProject(_ a: AgentIdentity, chatId: Id?) -> Project {
-        // The resolver's `discColor` is the colour in effect (the automatic one for a neutral
-        // card, so an older client still draws something); the stored neutral value (Jacob,
-        // 2026-10-25) is read off the card itself, so the initial-on-grey survives the round trip.
-        let neutral = a.known && agentCards(chatId: chatId).first { $0.id == a.id }?.discColor == UInt8(clamping: DiscArt.neutral)
+        // The resolver's `discColor` is the colour in effect, with a stored sentinel already
+        // resolved to the id's own. No default is grey (Jacob, 2026-11-06), so the card's raw
+        // value no longer needs reading back out.
         var p = knownProject(a.id, chatId: chatId) ?? Project(
             id: a.id,
             name: a.name,
@@ -107,9 +106,7 @@ extension AppModel {
             avatarColor: nil
         )
         p.name = a.name
-        // A neutral card (Create sheet, nothing picked — Jacob 2026-10-25) keeps its stored
-        // value, so `AgentAvatar` draws the initial on grey, never the automatic colour.
-        p.avatarDiscColor = neutral ? DiscArt.neutral : Int(a.discColor)
+        p.avatarDiscColor = Int(a.discColor)
         p.avatarColorIndexEffective = Int(a.colorIndex)
         p.imageKey = a.imageKey
         p.avatarVersion = Int(a.avatarVersion)

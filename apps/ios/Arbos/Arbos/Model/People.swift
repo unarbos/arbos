@@ -241,10 +241,9 @@ struct PeopleChat: Identifiable, Equatable {
     /// Blob key under `people:{id}` for an optional group picture.
     var imageKey: String? = nil
     /// D92 amendment: the group's disc colour from the Create screen (the uploaded picture wins).
-    /// nil for a group without one — including the neutral value (Jacob, 2026-10-25), which
-    /// `isNeutralAvatar` names and draws as the title's initial on grey.
+    /// nil for a group without one. A stored value resolves through the core, so an older
+    /// client's sentinel lands on the id's colour rather than a grey disc.
     var avatarDiscColor: Int? = nil
-    var isNeutralAvatar: Bool { DiscArt.isNeutral(avatarDiscColor) }
     /// Optional about text for a people group (≤200 chars).
     var description: String = ""
     var pending: Bool

@@ -537,10 +537,10 @@ enum ConnectTransport: String, CaseIterable, Identifiable {
 /// the sixteen-shape grid and the ten pastel swatches are gone. Under the name field sit the
 /// agent avatar picker's own two options — `Upload | Generate` (`AvatarTabPill` +
 /// `AvatarSourceBody` on an `AvatarSourceState`) — and the preview above the field shows the
-/// chosen photo, the generated picture, or, when neither was picked, the fallback every new
-/// agent / group / server gets: the name's first letter on a neutral grey disc (`NeutralAvatar`).
-/// The entity is stored with the neutral value (`DiscArt.neutral`), never an automatic colour;
-/// existing agents keep theirs.**
+/// chosen photo, the generated picture, or, when neither was picked, the sheet's own placeholder:
+/// the name's first letter on a grey disc (`NeutralAvatar`). That grey is sheet chrome, not a
+/// default avatar — the entity has no id yet, so no colour can be derived. The entity is stored
+/// with no colour at all, and the disc follows from the id the relay assigns.**
 struct CreateEntityView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
@@ -563,9 +563,10 @@ struct CreateEntityView: View {
 
     /// The two options every Create sheet offers, in order — the draft picker's tabs.
     static let options: [AvatarPickerTab] = [.upload, .generate]
-    /// The disc colour a new entity is stored with: the neutral one, whatever else was picked,
-    /// so no colour is ever auto-assigned (a later Reset lands on the initial, not on a disc).
-    static var storedDisc: UInt8 { UInt8(clamping: DiscArt.neutral) }
+    /// The disc colour a new entity is stored with: **none**. The relay has not assigned the id
+    /// the colour derives from, and no default is grey any more, so there is nothing to store
+    /// that would mean "draw me grey" (Jacob, 2026-11-06).
+    static var storedDisc: UInt8? { nil }
     /// Rig: `ARBOS_CREATE_PICTURE=generate[:<prompt>]` opens the sheet on Generate.
     private static var initialOption: AvatarPickerTab {
         (DebugHooks.createPicture ?? "").hasPrefix("generate") ? .generate : .upload
@@ -1008,7 +1009,8 @@ struct ConnectRevealView: View {
 /// What the Create group screen hands to the member picker (step 2).
 struct GroupDraft: Equatable {
     var title: String
-    var discColor: UInt8
+    /// `nil` = no colour was stored, so the group's id picks one.
+    var discColor: UInt8?
     /// The Create screen's uploaded / generated picture, applied once the group exists.
     var picture: DraftPicture? = nil
 }
@@ -1320,7 +1322,9 @@ struct NewGroupView: View {
         localError = nil
         let agentIds = pickedAgents.map(\.id)
         Task {
-            if await model.createGroup(handles: picked.map(\.handle), agentIds: agentIds, title: draft?.title, discColor: draft?.discColor, picture: draft?.picture) {
+            // `draft?.discColor` is a double optional now that the draft stores no colour;
+            // `?? nil` flattens it to the one `UInt8?` the call takes.
+            if await model.createGroup(handles: picked.map(\.handle), agentIds: agentIds, title: draft?.title, discColor: draft?.discColor ?? nil, picture: draft?.picture) {
                 onDone()
             }
             creating = false

@@ -2082,15 +2082,10 @@ struct ChatSession: View {
                                     .font(.system(size: Theme.body, weight: .semibold))
                                     .foregroundStyle(theme.text)
                                     .lineLimit(1)
-                            } else if people.isGroup, people.isNeutralAvatar {
-                                NeutralAvatar(name: people.title, size: Controls.avatar)
-                                Text(people.title)
-                                    .font(.system(size: Theme.body, weight: .semibold))
-                                    .foregroundStyle(theme.text)
-                                    .lineLimit(1)
-                            } else if people.isGroup, let color = people.avatarDiscColor {
-                                // D92 amendment: the colour picked on the Create screen.
-                                DiscAvatar(color: UInt8(clamping: color), size: Controls.avatar)
+                            } else if people.isGroup, people.avatarDiscColor != nil {
+                                // D92 amendment: the colour picked on the Create screen, or the
+                                // id's own once the core resolves a stored sentinel.
+                                DiscAvatar(color: DiscArt.pick(seed: people.id, color: people.avatarDiscColor), size: Controls.avatar)
                                 Text(people.title)
                                     .font(.system(size: Theme.body, weight: .semibold))
                                     .foregroundStyle(theme.text)
