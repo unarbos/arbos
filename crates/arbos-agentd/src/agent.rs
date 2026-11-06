@@ -3002,13 +3002,19 @@ impl Agent {
         }
         self.pi_backoff_ms.store(0, Ordering::SeqCst);
         if self.pi_degraded.swap(false, Ordering::SeqCst) {
+            let jobs_open = self.open_job_count();
             tracing::warn!(
                 ready_s = self.pi_ready_for_ms() / 1000,
+                jobs_open,
                 "the main agent is answering again; the degraded report is withdrawn"
             );
             self.append_audit(
                 "agent_degraded",
-                json!({ "state": "recovered", "ready_ms": self.pi_ready_for_ms() }),
+                json!({
+                    "state": "recovered",
+                    "ready_ms": self.pi_ready_for_ms(),
+                    "jobs_open": jobs_open,
+                }),
             );
             self.report_agent_state("running").await;
         }
@@ -3323,6 +3329,7 @@ impl Agent {
                 // let the box go on claiming everything is accounted for.
                 "leftover_survivors": leftovers.survivors,
                 "fresh_session": fresh,
+                "jobs_open": self.open_job_count(),
             }),
         );
         self.pi_degraded.store(true, Ordering::SeqCst);
@@ -3388,6 +3395,16 @@ impl Agent {
             );
         }
         sweep
+    }
+
+    /// Jobs still `queued` or `running`, for the two `agent_degraded` lines.
+    ///
+    /// The mark those lines report is about pi alone (see [`Self::is_healthy`]), so "degraded"
+    /// and "recovered" are both silent about the work. Carrying the count makes a withdrawal
+    /// that happened over six unfinished jobs readable in the audit log, which in round 16 it
+    /// was not. It is a number beside the claim, not a change to the claim.
+    fn open_job_count(&self) -> usize {
+        self.store.open_jobs().map(|j| j.len()).unwrap_or_default()
     }
 
     /// Tell the relay and the apps what state this agent's model process is in.
@@ -13172,6 +13189,22 @@ impl Agent {
     /// says at that instant. And no ready child for [`Self::PI_UNHEALTHY_AFTER_MS`] on an awake
     /// box is unhealthy in its own right, which is what makes it eligible for the restart path
     /// that was never offered one.
+    ///
+    /// **It answers for the main pi child and for nothing else.** No branch below reads a job
+    /// row, a worker or `jobs_running`, and neither does the `pi_degraded` mark either branch
+    /// rests on: it is raised by pi losing five children and lowered by a pi child holding
+    /// ready, in both cases without consulting the jobs running beside it. Test5 round 16 (bug
+    /// AJ) is what that reads like from outside — eight heavy jobs, five workers dead, and the
+    /// box reporting `running` a minute later because its pi was fine, which it was. A caller
+    /// that wants to know whether the box's *work* is getting done has to ask separately.
+    ///
+    /// Forest on 0.1.200 showed the same split from the other direction, and this is the reading
+    /// `jobs_open` exists to make legible: a real five-death escalation logged `deaths=5
+    /// killed=0`, and the live workers beside it were spared — [`Self::reap_unreachable_workers`]
+    /// treats a session an adapter still reports open as not collectable — after which their jobs
+    /// finished and posted their results. The box called itself degraded over work that was
+    /// proceeding normally. Both lines are honest about pi; neither is evidence about the jobs,
+    /// in either direction.
     pub fn is_healthy(&self) -> bool {
         if self.pi_degraded.load(Ordering::SeqCst) {
             return false;
