@@ -171,6 +171,24 @@ pub fn steer_hold_ms_with(files: &[std::path::PathBuf]) -> u64 {
 /// nine seconds after the card and was simply lost.
 pub const STEER_REPLACE_WINDOW_MS: i64 = 30_000;
 
+/// How long after a job ends the corrections it was given still bind the work the user asks for
+/// next in that chat (`Agent::steers_to_inherit`, bug AG). What the bound protects against is a
+/// correction outliving its subject: unbounded, "only the top 50" would govern an unrelated job
+/// started in the same chat an hour later, which is a worse failure than the one it fixes.
+///
+/// Two minutes, and deliberately **not** [`STEER_REPLACE_WINDOW_MS`], which answers a different
+/// question on a different timescale — that one is "may the user still replace a steer they just
+/// sent", a matter of typing speed, where this is "does a change the user was promised still
+/// govern what they asked for next", a matter of intent. Borrowing the number would also couple
+/// them silently, so that retuning the replace window moved inheritance without anyone meaning
+/// to.
+///
+/// Erring long is the cheap direction. A correction on the wrong side of this window is still
+/// carried into the brief as labelled context by `Agent::recent_turns_for_brief`; it simply
+/// stops being a requirement. So a window that is too short loses a promise silently, and one
+/// that is too long over-applies a visible line the worker can weigh.
+pub const STEER_INHERIT_WINDOW_MS: i64 = 120_000;
+
 /// Override file for the research-job worker model: `.arbos/research-worker-model` holding a model
 /// id, or `off` to run research jobs on the subagent model like every other kind.
 pub const RESEARCH_WORKER_MODEL_FILE: &str = "research-worker-model";

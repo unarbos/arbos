@@ -722,6 +722,20 @@ impl Store {
         })
     }
 
+    /// Test seam: move a finished job's `ended_at` back by `ms_ago`, so a test can place a job
+    /// outside a window without sleeping through one.
+    #[cfg(test)]
+    pub fn test_backdate_job_end(&self, id: &str, ms_ago: i64) -> Result<()> {
+        let at = now_ms().saturating_sub(ms_ago);
+        self.with(|c| {
+            c.execute(
+                "UPDATE jobs SET ended_at = ?2 WHERE id = ?1",
+                params![id, at],
+            )
+            .map(|_| ())
+        })
+    }
+
     pub fn set_job_step(&self, id: &str, step: &str) -> Result<()> {
         self.with(|c| {
             c.execute(

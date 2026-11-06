@@ -41,6 +41,8 @@ mod job_notice_tests;
 #[cfg(test)]
 mod job_reparent_tests;
 #[cfg(test)]
+mod job_steer_inherit_tests;
+#[cfg(test)]
 mod job_steer_race_tests;
 mod jobs_view;
 mod llm;

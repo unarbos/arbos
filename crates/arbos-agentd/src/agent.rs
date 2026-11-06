@@ -1392,6 +1392,16 @@ pub(crate) const OWN_ROWS_MAX: usize = 512;
 /// without end.
 const JOB_FILES_MAX: usize = 256;
 
+/// Turns of the chat a job brief carries ([`Agent::recent_turns_for_brief`]).
+const BRIEF_TURNS: usize = 12;
+
+/// T3 rows read to find [`BRIEF_TURNS`] of them.
+///
+/// Ten times the budget, because the rows a brief wants are a minority of a busy chat's thread:
+/// one job writes a `job_start`, a `job_steer` for every correction and a `job_result`, and bug
+/// AG is what happened when that bookkeeping crowded the user out of a window sized for turns.
+const BRIEF_TURN_SCAN: i64 = 120;
+
 /// One file a job put in the chat: what the duplicate guard matches on, and what a correction
 /// arriving after the answer supersedes (bug AB).
 struct JobFile {
@@ -4734,6 +4744,58 @@ impl Agent {
         job.ended_at.is_some_and(|at| {
             arbos_core::ids::now_ms() - at <= crate::config::STEER_REPLACE_WINDOW_MS
         })
+    }
+
+    /// Did this job finish recently enough that the corrections it was given still bind the
+    /// work the user asks for next? A longer window, and a different question — see
+    /// [`crate::config::STEER_INHERIT_WINDOW_MS`].
+    fn ended_inside_inherit_window(job: &crate::store::JobRow) -> bool {
+        job.ended_at.is_some_and(|at| {
+            arbos_core::ids::now_ms() - at <= crate::config::STEER_INHERIT_WINDOW_MS
+        })
+    }
+
+    /// The corrections the user has already had accepted on the work this chat is doing now,
+    /// for a job that is about to take that work over. Oldest first, across jobs as well as
+    /// within one, because they are numbered for the worker and a later correction of the same
+    /// thing has to come after the one it overrules.
+    ///
+    /// Bug AG's second half (Jacob, Test5 round 13, agentd 0.1.196 `508151f6a`). An accepted
+    /// correction binds the *work*, not the job row that happened to be running when it was
+    /// spoken — but every reader of [`crate::store::JobRow::steers`] keys on one job id, and
+    /// [`job_steers_note`], the one carrier that states corrections as overriding the brief, is
+    /// only ever called with a job's own. No job could inherit another's by any path. So a
+    /// follow-up job began again from the original ask, and round 13 ended with it posting a
+    /// confident "final" that silently reverted three changes the user had been told were taken.
+    ///
+    /// `except` is the new job's own id. It has no corrections of its own yet, but its row may
+    /// already exist by the time this is asked, and a job must never inherit from itself.
+    ///
+    /// **Why this is bounded.** Only the jobs this chat is still on count: open, or ended inside
+    /// [`crate::config::STEER_INHERIT_WINDOW_MS`]. The bound is not decoration — these lines
+    /// arrive as *requirements*, so an unbounded rule would let "only the top 50" govern an
+    /// unrelated job started in the same chat an hour later, a worse failure than the one being
+    /// fixed and a harder one to see.
+    ///
+    /// Its own constant rather than [`crate::config::STEER_REPLACE_WINDOW_MS`], whose thirty
+    /// seconds answer a typing-speed question; see that constant for why the two must not be
+    /// coupled. And deliberately the longer of the two, because the failures are not
+    /// symmetrical: outside the window a correction is still carried by
+    /// [`Self::recent_turns_for_brief`] as labelled context and merely stops binding, so a
+    /// window that is too short loses a promise silently while one that is too long
+    /// over-applies a line the worker can see and weigh.
+    pub(crate) fn steers_to_inherit(&self, chat_id: &str, except: &str) -> Vec<String> {
+        let mut jobs: Vec<crate::store::JobRow> = self
+            .store
+            .jobs_for_chat(chat_id)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|j| j.id != except)
+            .filter(|j| j.is_open() || Self::ended_inside_inherit_window(j))
+            .collect();
+        // `jobs_for_chat` answers newest first; the worker reads these as one numbered list.
+        jobs.reverse();
+        jobs.into_iter().flat_map(|j| j.steers).collect()
     }
 
     /// A correction for a job that finished and put a file in the chat moments ago: mark that
@@ -9013,6 +9075,24 @@ impl Agent {
             ));
         }
         let job_id = ulid();
+        // Bug AG: the corrections the user has already had accepted go into this job's **own
+        // brief**, not into the worker's prompt alone. Every carrier downstream reads the row —
+        // a fresh worker after a crash, the inline fallback, a later replace — so folding them
+        // in here is what makes them survive everything that can happen to this job next,
+        // rather than only the first worker it gets.
+        let brief = match self.steers_to_inherit(chat_id, &job_id) {
+            inherited if inherited.is_empty() => brief.to_owned(),
+            inherited => {
+                tracing::info!(
+                    chat_id,
+                    job = %job_id,
+                    carried = inherited.len(),
+                    "this job inherits corrections the user already had accepted in this chat"
+                );
+                format!("{brief}{}", inherited_steers_note(&inherited))
+            }
+        };
+        let brief = brief.as_str();
         self.store
             .insert_job(&job_id, chat_id, user_msg_id, &title, kind, brief, &touches)
             .map_err(|e| e.to_string())?;
@@ -10574,8 +10654,16 @@ impl Agent {
         } else if let Some(n) = self.owner_address_note(chat_id, host, &user_msg_id).await {
             prelude = n;
         }
+        // This ask answers beside the chat with no job row of its own, so [`Agent::start_job`]'s
+        // inheritance never runs for it — and it is the path a correction burst takes most
+        // often, since every message that arrives mid-turn comes through here (bug AG).
+        //
+        // A correction inside the window appears twice here, once in `recent` and once below,
+        // and that is deliberate: the first says when it was spoken, the second says that it
+        // binds. Only the second survives a worker that reads the brief as its instructions.
+        let inherited = inherited_steers_note(&self.steers_to_inherit(chat_id, ""));
         let brief = format!(
-            "{prelude}The user sent this message to you while you were busy with another request in the same chat; answer it now, in parallel, as yourself.\n\nMessage: {user_text}\n\nRecent turns in this chat:\n{recent}\n\nDo what the message asks (use your tools when needed) and finish with the answer the user should read: plain prose, no process narration, no mention of other requests. If it only needs a reply, reply."
+            "{prelude}The user sent this message to you while you were busy with another request in the same chat; answer it now, in parallel, as yourself.\n\nMessage: {user_text}\n\nRecent turns in this chat:\n{recent}\n{inherited}\nDo what the message asks (use your tools when needed) and finish with the answer the user should read: plain prose, no process narration, no mention of other requests. If it only needs a reply, reply."
         );
         let _ = self.store.t3_append(
             chat_id,
@@ -10727,27 +10815,54 @@ impl Agent {
     }
 
     /// The last turns of a chat, one short line each, for a job brief written without the model.
-    fn recent_turns_for_brief(&self, chat_id: &str) -> String {
-        self.store
-            .t3_thread(chat_id, None, None, 12)
+    /// Bug AG (Jacob, Test5 round 13, agentd 0.1.196 `508151f6a`). Five changes arrived one
+    /// second apart, and a second job then posted a confident "final" that silently reverted
+    /// three of them. This is the only context a code-started job gets about the chat it is
+    /// answering in, and it dropped the user's corrections twice over — independently, so that
+    /// mending either one alone still loses them.
+    ///
+    /// **An accepted correction is a turn.** [`Self::correction_reached_worker`] records one as
+    /// kind `job_steer`, which is the only machine-readable proof that the user was told their
+    /// change was taken. The kind filter kept `user` and `assistant` alone, so that proof never
+    /// reached the job that took the work over.
+    ///
+    /// **The budget counts turns, not rows.** [`crate::store::Store::t3_thread`]'s own `LIMIT`
+    /// is `ORDER BY id DESC` over every kind, and the kind filter ran after it, here, in Rust —
+    /// so a job's own bookkeeping (`job_start`, `job_steer`, `job_result`, `job_fallback`)
+    /// evicted the user's turns from the window that exists to hold them. Round 13's burst
+    /// cleared twelve rows on its own. Scanning wider and counting after the filter is what
+    /// makes [`BRIEF_TURNS`] a promise about the user's turns rather than about table rows.
+    pub(crate) fn recent_turns_for_brief(&self, chat_id: &str) -> String {
+        let mut lines: Vec<String> = self
+            .store
+            .t3_thread(chat_id, None, None, BRIEF_TURN_SCAN)
             .unwrap_or_default()
             .into_iter()
-            .filter(|r| r.kind == "user" || r.kind == "assistant")
-            .map(|r| {
-                format!(
-                    "- {}: {}",
-                    r.role.unwrap_or_default(),
-                    r.text
-                        .split_whitespace()
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                        .chars()
-                        .take(240)
-                        .collect::<String>()
-                )
+            .filter_map(|r| {
+                let text = r
+                    .text
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .chars()
+                    .take(240)
+                    .collect::<String>();
+                match r.kind.as_str() {
+                    "user" | "assistant" => {
+                        Some(format!("- {}: {text}", r.role.unwrap_or_default()))
+                    }
+                    // Labelled for what it is rather than as another plain user line: a worker
+                    // has to be able to tell a change the user was promised from a remark they
+                    // made in passing.
+                    "job_steer" | "job_steer_replace" => {
+                        Some(format!("- user (correction, already accepted): {text}"))
+                    }
+                    _ => None,
+                }
             })
-            .collect::<Vec<_>>()
-            .join("\n")
+            .collect();
+        lines.drain(..lines.len().saturating_sub(BRIEF_TURNS));
+        lines.join("\n")
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -13610,6 +13725,25 @@ fn sentence_promises_a_time(sentence: &str) -> bool {
 /// n³ — and said nothing about having dropped the correction. The correction is the
 /// instruction; the brief above it is what the instruction was before.
 pub(crate) fn job_steers_note(steers: &[String]) -> String {
+    numbered_steers_note(
+        "The user corrected this work while it ran, in this order. These override the brief above wherever they disagree with it, and the answer you deliver must follow them:",
+        steers,
+    )
+}
+
+/// The same corrections, for a job that is taking over work an *earlier* job was corrected on
+/// (bug AG). Separate wording because the worker's situation differs in the one way that
+/// decides how it should read them: it was not there when they were spoken, and it has no
+/// partial answer of its own that already reflects them.
+pub(crate) fn inherited_steers_note(steers: &[String]) -> String {
+    numbered_steers_note(
+        "Before this, the user corrected the same work while an earlier run of it was going, and every one of these was accepted and acknowledged to them. None has been withdrawn, so they still hold here: they override the brief above wherever they disagree with it, and the answer you deliver must satisfy all of them as well as the brief. Do not treat them as background or as history — the user believes they are settled.",
+        steers,
+    )
+}
+
+/// Corrections numbered under `header`, oldest first, or nothing at all when there are none.
+fn numbered_steers_note(header: &str, steers: &[String]) -> String {
     let steers: Vec<&str> = steers
         .iter()
         .map(|s| s.trim())
@@ -13618,9 +13752,7 @@ pub(crate) fn job_steers_note(steers: &[String]) -> String {
     if steers.is_empty() {
         return String::new();
     }
-    let mut p = String::from(
-        "\nThe user corrected this work while it ran, in this order. These override the brief above wherever they disagree with it, and the answer you deliver must follow them:\n",
-    );
+    let mut p = format!("\n{header}\n");
     for (n, s) in steers.iter().enumerate() {
         p.push_str(&format!("{}. {s}\n", n + 1));
     }
