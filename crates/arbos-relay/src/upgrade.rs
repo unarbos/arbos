@@ -20,8 +20,8 @@
 //!   unpack  — stop the new agentd, confirm room on the box itself (bytes and inodes — the measure
 //!             step already applied the same arithmetic to the snapshot's disk size), upload / verify / extract part by
 //!             part, count the tree against the plan, reset the per-workspace owner markers;
-//!   start   — the swap: the row now names the new box, which is bounced so the entrypoint starts
-//!             agentd on the carried `/work` and must say hello.
+//!   start   — the swap: the carried `/work` is flushed, the row now names the new box, which is
+//!             bounced so the entrypoint starts agentd on the carried `/work` and must say hello.
 //! Progress is in `GET /machine` (`upgrade.phase`, e.g. `pack 3/16`). Any failure after pack rolls
 //! back (see [`rollback`]): the row is back on the source first, then the new box is deleted when it
 //! holds nothing of `/work`, else kept stopped in `box_history` for the sweeper.
@@ -482,6 +482,34 @@ async fn unpack(
     Ok(())
 }
 
+/// Longest the flush before the bounce may take. The unpack extracts one part at a time over
+/// minutes, so only the last part's writes can still be dirty; a `sync` that needs longer than
+/// this is not going to make the bounce safer by being waited for.
+const SYNC_BEFORE_BOUNCE_S: u64 = 120;
+
+/// Flush the carried `/work` to disk before the bounce force-kills the container. The relay's own
+/// records say write-back is *not* what wedges the kill — in the four of nine recorded kill
+/// failures where Docker gave a reason it was a zombie PID 1 that cannot be signalled, and the
+/// failures span 129 MiB to 8 967 MiB of `/work` with no gradient — so this is not a fix for that.
+/// It is here so the next occurrence is diagnostic: a kill that still fails after a completed
+/// flush excludes write-back by construction. A failed or slow flush is not worth failing an
+/// upgrade over, so it is logged and the bounce goes ahead.
+async fn flush_before_bounce(dt: &crate::daytona::Daytona, user_id: &str, new_id: &str) {
+    let t0 = Instant::now();
+    match dt.toolbox_exec(new_id, "sync", SYNC_BEFORE_BOUNCE_S).await {
+        Ok(out) => tracing::info!(
+            user = %user_id, sandbox = %new_id, ms = t0.elapsed().as_millis() as u64,
+            exit = out.get("exitCode").and_then(serde_json::Value::as_i64).unwrap_or(-1),
+            "carried /work flushed before the bounce"
+        ),
+        Err(e) => tracing::warn!(
+            user = %user_id, sandbox = %new_id, ms = t0.elapsed().as_millis() as u64,
+            error = %format!("{e:#}"),
+            "the flush before the bounce did not complete; bouncing anyway"
+        ),
+    }
+}
+
 /// The swap: the carried new box becomes the user's row, then it is bounced so the entrypoint
 /// starts agentd on the carried `/work`, and must say hello.
 async fn swap_and_start(
@@ -492,6 +520,7 @@ async fn swap_and_start(
     new_id: &str,
 ) -> Result<()> {
     set_phase(state, user_id, "start").await;
+    flush_before_bounce(dt, user_id, new_id).await;
     dt.stop(new_id, true).await?;
     dt.wait_for(new_id, Duration::from_secs(120), |s| {
         s.state == SandboxState::Stopped

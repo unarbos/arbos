@@ -19,6 +19,7 @@ pub mod search;
 pub mod settings_search;
 pub mod sites;
 pub mod skill;
+pub mod transcript;
 pub mod wav;
 pub mod widget;
 pub mod wire;

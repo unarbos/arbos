@@ -1175,7 +1175,9 @@ The two row builders live in the clients (`crates/arbos-mac/src/ui/transcript.rs
 `Transcript.continuesRun` / `carriesQuote`), not in `arbos_core`, so the window is
 one constant per client, pinned by a test on each side (`grouping_tests::
 the_window_is_two_minutes_and_the_gaps_are_groks`, `GroupedMessagesTests.
-testTheWindowIsTwoMinutesAndTheGapsAreTighter`). Change both or neither.
+testTheWindowIsTwoMinutesAndTheGapsAreTighter`). Change both or neither. The
+**date stamp** that breaks a run is the one part of this that does live in core
+(§ Time dividers), because a copy per client is what drifted.
 
 ### Spacing
 
@@ -1196,6 +1198,44 @@ cache's run starts) and `transcript_smoke_tests::a_run_shows_one_disc_and_opens_
 DM) and the updated `SenderNameRowTests` on the iPhone. Record: project store
 `internal/feedback-loop/grouped-messages-2026-10-28.md`, shots in
 `media/feedback/grouped-messages/`.
+
+## Time dividers: a new day, or an hour (Jacob 2026-11-05, [feedback time-dividers-2026-11-05])
+
+**A centred time line lands when the local day changes, or when an hour or more
+passed since the message above it. Nothing else draws one.** Jacob's screenshot
+had one between nearly every message group, in a chat nobody was typing in
+quickly, and a line through every pause is not information — it is the shape of
+the conversation broken up. The time itself did not go anywhere: it is on the
+Mac's hover rail and the iPhone's drag-left reveal (§ Message timestamps), where
+it is asked for rather than always on.
+
+| | Rule | Code |
+|---|---|---|
+| When | A different **local day**, or `DIVIDER_GAP_MS` **3 600 000 ms** or more between this message and the one above it — measured in either direction, since a row can arrive with an earlier clock than its neighbour. At exactly an hour a line lands; a millisecond under, none does | `arbos_core::transcript::shows_divider` |
+| From what | The **message above**, not the last line drawn. The Mac measured from its last stamp, so a chat ticking along every few minutes grew one every hour, mid-conversation, with no pause behind it | `last_at` in `build_rows_with_cache`, `lastAt` in `Transcript.rows` |
+| The first message of a chat | Draws one. Its day is new and a transcript has to say which day the reader is looking at | same |
+| A row with no clock (`createdAt` 0) | Draws none, and does not become the clock the next message is measured against | same |
+| The day | The **reader's** day. The clients pass their own UTC offset (Mac chrono `Local`, iPhone `TimeZone.current.secondsFromGMT(for:)`); the rule is pure and takes it as an argument | `utc_offset_seconds()`, `Transcript.showsDivider` |
+| Words | Unchanged: `sidebar::stamp_label` / `Transcript.dateLabel` — "Today 12:09 AM", "Yesterday 9:10 PM", the weekday inside a week, then the date | unchanged |
+
+**One rule, in core, for both clients.** This is the point of the change rather
+than a detail of it: the Mac and the iPhone each had their own answer to "is a
+divider warranted here", the two had already drifted — the Mac measured from its
+last stamp, the phone from the previous message, and *neither looked at the day*,
+so 23:58 → 00:04 drew nothing on either — and a third drift was the next quarter's
+bug. The clients keep their own row builders and call one function.
+
+Pinned by `arbos_core::transcript::tests` (day boundaries, the hour exactly and
+either side of it, a quiet chat, the reader's zone, the first message, a row with
+no clock), `transcript::time_divider_tests` on the Mac and
+`ArbosTests/TimeDividerTests` on the iPhone (the same cases through the row
+builders), plus `arbos_ffi::transcript::tests` for the binding. The shot rig is
+`ARBOS_FIXTURE_QUIET_DAY=1` (`sync/fixture.rs`): the DM with Sam as one quiet
+evening across a midnight. The iPhone gets the same conversation from
+`.github/capture/time-dividers-quiet-day.patch`, which `ios-capture.yml` applies
+to **both** legs through its `fixture_patch` input — rig-only fixture data, so it
+stays out of the app's own source and both builds read byte-identical messages.
+Shots in the project store's `media/time-dividers/`.
 
 ## Glass surface: readable content, translucent chrome (Jacob 2026-10-26, [feedback mac-glass-contrast-2026-10-26])
 
