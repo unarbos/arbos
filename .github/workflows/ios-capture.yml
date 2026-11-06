@@ -422,11 +422,13 @@ jobs:
             echo "::error title=No capture script::dispatch gave an empty \`script\`, so this run would shoot nothing"
             exit 1
           fi
-          run=$(ls build/dd/Build/Products/*.xctestrun 2>/dev/null | head -1)
-          if [ -z "$run" ]; then
+          shopt -s nullglob
+          found=(build/dd/Build/Products/*.xctestrun)
+          if [ "${#found[@]}" -eq 0 ]; then
             echo "::error title=No xctestrun::build-for-testing wrote no .xctestrun under build/dd/Build/Products"
             exit 1
           fi
+          run="${found[0]}"
           python3 "$GITHUB_WORKSPACE/scripts/ci/xctestrun-env.py" "$run" \
             "ARBOS_SHOT_DIR=$SHOT_DIR" \
             "ARBOS_SHOT_TAG=${{ matrix.leg }}" \
