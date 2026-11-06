@@ -14,9 +14,13 @@ name: Release
 #           published in this same run (marked latest, own appcast.xml):
 #             https://github.com/<repo>/releases/latest/download/appcast.xml
 #           A hand-pushed tag v<version> (Cargo.toml already bumped) still works.
-#           Hotfix: a revert, or a commit marked `hotfix:` / `[hotfix]`, pushed
-#           to main is released by the push trigger at once, ahead of its CI
-#           (target ≤ 15 min tag→published; v0.6.93 took 30).
+#           Fast path: a commit whose own subject STARTS with `[release-now] `
+#           skips the debounce, and nothing below it is released while its CI is
+#           unfinished — so the release that burns the next patch number cannot
+#           leave the urgent fix out. It still waits for its own CI. P0 #1208:
+#           this used to release such a commit ahead of CI, armed by any case
+#           variant, any body line, or any commit a merge brought in. See
+#           release_marker() in scripts/release/auto-stable.sh.
 #           Set the repository variable ARBOS_AUTO_STABLE=0 to go back to edge
 #           builds per push.
 #   edge    workflow_dispatch channel=edge (or ARBOS_AUTO_STABLE=0 per push).
@@ -63,10 +67,11 @@ on:
     types: [completed]
     branches: [main]
   push:
+    # Tags only. This trigger used to fire for pushes to `main` as well, which is how a commit
+    # whose CI had not finished reached a release (P0 #1208): the push arrived before the CI run
+    # did. Nothing is released from a push to a branch any more, so a release can only come from
+    # the `workflow_run` path below, which starts after CI concluded success.
     tags: ["v*"]
-    # Hotfix fast path: a revert or `hotfix`-marked commit pushed to main is released at once,
-    # ahead of its CI (auto-stable.sh with ARBOS_HOTFIX_ONLY=1; any other push ends in the plan job).
-    branches: [main]
   schedule:
     # Backstop for continuous delivery: a green commit whose Release run was lost
     # (cancelled while pending, main moved during the bump) ships within 15 min.
@@ -100,9 +105,10 @@ permissions:
   packages: write
 
 concurrency:
-  # Tag pushes and hotfix pushes get their own group: a hotfix must never wait behind, or be cancelled
-  # by, the pending run of the regular path (GitHub keeps one pending run per group).
-  group: release-${{ github.event_name == 'push' && (startsWith(github.ref, 'refs/tags/') && github.ref || format('hotfix-{0}', github.sha)) || 'main' }}
+  # A tag push gets its own group: a hand-pushed tag must never wait behind, or be cancelled by,
+  # the pending run of the regular path (GitHub keeps one pending run per group). A push can only
+  # be a tag now, so the ref is the group.
+  group: release-${{ github.event_name == 'push' && github.ref || 'main' }}
   cancel-in-progress: false
 
 env:
@@ -139,7 +145,6 @@ jobs:
           EVENT: ${{ github.event_name }}
           REF_NAME: ${{ github.ref_name }}
           REF_TYPE: ${{ github.ref_type }}
-          PUSHED_SHA: ${{ github.sha }}
           IN_CHANNEL: ${{ inputs.channel }}
           IN_PUBLISH: ${{ inputs.publish }}
           IN_PROMOTE: ${{ inputs.promote }}
@@ -155,14 +160,12 @@ jobs:
           case "$EVENT" in
             push)
               if [[ "$REF_TYPE" == branch ]]; then
-                # A push to main: only a hotfix (revert / `hotfix` mark) is released here, at once and
-                # without debounce; everything else waits for its green CI (the workflow_run path).
-                if [[ "$AUTO_STABLE" == 0 ]]; then
-                  channel=none; version="$base.$build"; publish=false
-                else
-                  auto=true; channel=auto; version="$base.$build"; publish=true
-                  export ARBOS_HOTFIX_ONLY=1 ARBOS_PUSHED_SHA="$PUSHED_SHA" ARBOS_RELEASE_DEBOUNCE_S=0
-                fi
+                # Unreachable: the push trigger listens for tags only. It is kept, and it plans
+                # nothing, because the shape it used to hold was a release of a commit whose CI had
+                # not finished. If somebody widens the trigger again, this says no rather than
+                # guessing.
+                echo "::notice::a push to the branch $REF_NAME plans no release; a release waits for CI (workflow_run)"
+                channel=none; version="$base.$build"; publish=false
               else
                 channel=stable
                 version="${REF_NAME#v}"
