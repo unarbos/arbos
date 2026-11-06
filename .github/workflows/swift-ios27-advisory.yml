@@ -6,20 +6,26 @@ name: Swift iOS 27 (advisory)
 # so the iOS 27 coverage this file describes is NOT being obtained today, and has not been for the
 # whole time this notice has been missing from it.
 #
-# It is off, and the recorded reason is that nobody knows why its runs kept being cancelled and it
-# has never had a trial longer than one day. All 53 of its lifetime runs ran on 2026-10-31: the
-# lane was added, ran for a single day and was switched off the same day. Understanding those
-# cancellations is the open question gating any re-enable — a low-priority item to drain, not a
-# decision waiting on anyone.
+# It has never had a trial longer than one day: all 53 of its lifetime runs ran on 2026-10-31, so
+# the lane was added, ran for a single day and was switched off the same day.
 #
 # Do not quote "8 of 53 succeeded" as a reliability figure. 39 of the 53 were cancelled rather
-# than judged, and 15 of those were cancelled in two bursts on the evening the lane went off — 8
-# within ten seconds of each other and 7 more within ninety, across fifteen branches — so the
-# sweep that came with the disabling sits inside the denominator. The raw ratio measures how often
-# something cancelled this workflow, not whether it works. Of the runs that reached a verdict, 8
-# of 14 succeeded: 8 success against 6 failure. That is not a clean record either.
+# than judged, and most of those cancellations are this file's own doing: the concurrency block
+# below sets `cancel-in-progress: true` per ref, so every fresh push to a branch supersedes that
+# branch's running advisory. 23 of the 39 are exactly that — a newer run on the same ref was
+# created 1 to 61 seconds before the old one died. By design, and benign. So the raw ratio mostly
+# measures how often branches pushed, not whether this lane works.
 #
-# Who switched it off is recorded nowhere: this repo is a User account, so it has no audit log.
+# Of the runs that reached a verdict, 8 of 14 succeeded: 8 success against 6 failure. That is not
+# a clean record either.
+#
+# The remaining 16 cancellations are unaccounted for, and 15 are two bursts on the evening the
+# lane went off: 8 within ten seconds of each other from 23:38:58Z, then 7 within ninety seconds
+# from 23:47:37Z, across fifteen branches, each killing a run that had been going between 31
+# minutes and 2h55m. Nothing joined those refs to supersede them. Why they died is not understood,
+# and that is the open question gating any re-enable — a low-priority item to drain, not a
+# decision waiting on anyone. Who switched the lane off is recorded nowhere: this repo is a User
+# account, so it has no audit log.
 #
 # `Swift core check` (.github/workflows/swift-core-check.yml) is the only live Swift gate on push
 # and pull request, and it runs on GitHub's hosted `macos-15`. Neither Swift check runs on the
