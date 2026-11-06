@@ -248,7 +248,7 @@ async fn the_writers_are_gone(fx: &Fixture, stopped: &[crate::agent::StoppedJob]
         "the writers' log kept growing after the cancel"
     );
     assert!(
-        stopped[0].sweep.checked,
+        stopped[0].sweep.evidence.proven(),
         "the cancel must have read the kernel: {:?}",
         stopped[0].sweep
     );
@@ -284,6 +284,61 @@ async fn a_cancel_kills_the_writers_its_only_worker_left_behind() {
 
     let stopped = agent.stop_jobs(CHAT, Some(&job)).await;
     the_writers_are_gone(&fx, &stopped).await;
+}
+
+/// The same cancel as above, through the hook the agent actually calls, asserting on what the
+/// model is handed rather than on the `Sweep`.
+///
+/// **This is the true negative for bug AP's guard, and it is the case the strict rule broke.**
+/// "Nothing is checked unless the scan enumerated something" is right about Forest and wrong
+/// about this: `adapter.stop` closes the worker before the sweep runs, so a cancel that did its
+/// job perfectly can enumerate zero afterwards, and reporting "I could not confirm" over a
+/// cancel that found and killed real work is how a guard stops being read. The probe in
+/// [`crate::agent::Agent::end_cancelled_worker`] is what keeps this case honest: the handles
+/// matched this worker while it was alive, so the empty tree afterwards is a read.
+///
+/// Green before the guard as well as after — deliberately. It is here to pin the behaviour the
+/// guard must not change, and a case that only went green with the change could not do that.
+#[tokio::test]
+async fn a_real_cancel_that_killed_what_it_found_says_so_through_the_hook() {
+    let fx = Fixture::new(false);
+    let (agent, host) = a_box(&fx).await;
+    let job = a_job(&agent, &host).await;
+
+    wait_for("the worker's detached writers start", || {
+        fx.alive().len() >= 2
+    })
+    .await;
+    let before = fx.log_len();
+    wait_for("the writers are writing", || fx.log_len() > before).await;
+
+    let _turn = agent.test_hold_turn(CHAT).await;
+    let answer = agent
+        .hook_stop_job(&job)
+        .await
+        .expect("the job is stoppable");
+
+    // The physical half first, so nothing below rests on the answer agreeing with itself.
+    assert_eq!(
+        fx.alive(),
+        Vec::<u32>::new(),
+        "a writer outlived the cancel (pids {:?}): {answer}",
+        fx.writer_pids()
+    );
+    let at_cancel = fx.log_len();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(fx.log_len(), at_cancel, "the writers' log kept growing");
+
+    assert_eq!(
+        answer["stopped"][0]["processes_checked"],
+        serde_json::json!(true),
+        "this cancel enumerated real processes and killed them, so it may say so: {answer}"
+    );
+    let note = answer["note"].as_str().unwrap_or_default();
+    assert!(
+        note.contains("checked and is dead"),
+        "and the model is told the strongest true thing, not a hedge: {answer}"
+    );
 }
 
 /// Both naming schemes, on a job with two workers: each one is spelled from **its own** harness

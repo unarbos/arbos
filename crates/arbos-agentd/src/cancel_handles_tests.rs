@@ -188,7 +188,7 @@ async fn a_sweep_with_no_handle_says_it_could_not_check_rather_than_that_all_is_
     );
     let sweep = tree.kill();
     assert!(
-        !sweep.checked,
+        !sweep.evidence.proven(),
         "a sweep that resolved no handle did not check anything: {sweep:?}"
     );
     assert!(
@@ -221,7 +221,7 @@ async fn a_harness_that_marks_nothing_is_given_no_mark_to_match() {
         "a mark that cannot match is not a handle, and must not be counted as one"
     );
     assert!(
-        !tree.kill().checked,
+        !tree.kill().evidence.proven(),
         "so a cancel of one of these reports that it could not check, not that all is well"
     );
 }

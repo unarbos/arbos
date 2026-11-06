@@ -65,7 +65,8 @@ use std::time::{Duration, Instant};
 use arbos_core::ids::ulid;
 
 use crate::isolation::{
-    marked_procs_all, orphan_marked_procs, reap_orphan_workers, session_of, Sweep, WORKER_MARK_ENV,
+    marked_procs_all, orphan_marked_procs, reap_orphan_workers, session_of, Evidence, Sweep,
+    WORKER_MARK_ENV,
 };
 
 /// The mark the main pi child and everything it runs carry (`agent.rs` spawns it under this
@@ -159,6 +160,7 @@ impl Drop for Reaped {
 
 fn pids_for(mark: &str) -> Vec<u32> {
     marked_procs_all()
+        .expect("/proc is readable in this test")
         .into_iter()
         .filter(|(_, m)| m == mark)
         .map(|(pid, _)| pid)
@@ -218,7 +220,8 @@ fn only_a_dead_workers_leftovers_are_collectable() {
     // which is the point: that tree survives because no evidence was offered for killing it,
     // not because it was named in an exception.
     let dead_session = session_of(dead_mark).expect("a worker mark names a session");
-    let orphans = orphan_marked_procs(|session| session == dead_session);
+    let orphans = orphan_marked_procs(|session| session == dead_session)
+        .expect("/proc is readable in this test");
     let collected: Vec<u32> = orphans.iter().map(|(pid, _)| *pid).collect();
 
     for pid in &dead_pids {
@@ -289,6 +292,7 @@ fn a_mark_that_names_no_session_survives_an_oracle_that_says_everything_is_dead(
         .collect();
 
     let collected: Vec<u32> = orphan_marked_procs(|_| true)
+        .expect("/proc is readable in this test")
         .into_iter()
         .map(|(pid, _)| pid)
         .collect();
@@ -318,7 +322,7 @@ fn a_tree_becomes_collectable_when_its_session_ends_and_not_before() {
     let pids = worker.pids().to_vec();
     let session = session_of(mark).expect("a worker mark names a session");
 
-    let held = orphan_marked_procs(|_| false);
+    let held = orphan_marked_procs(|_| false).expect("/proc is readable in this test");
     for pid in &pids {
         assert!(
             !held.iter().any(|(p, _)| p == pid),
@@ -327,7 +331,7 @@ fn a_tree_becomes_collectable_when_its_session_ends_and_not_before() {
     }
 
     // The worker ends. Nothing about the processes changed — only what the box still holds.
-    let released = orphan_marked_procs(|s| s == session);
+    let released = orphan_marked_procs(|s| s == session).expect("/proc is readable in this test");
     for pid in &pids {
         assert!(
             released.iter().any(|(p, _)| p == pid),
@@ -370,7 +374,7 @@ fn the_reap_collects_the_dead_workers_loop_and_leaves_the_job_beside_it_running(
     let sweep = reap_orphan_workers(|session| session == dead_session);
 
     assert!(
-        sweep.checked,
+        sweep.evidence.proven(),
         "a reap that did not read the kernel knows nothing (bug AE)"
     );
     assert!(
@@ -425,13 +429,13 @@ fn a_cancel_that_accounted_for_everything_says_nothing_extra() {
         found: 1,
         killed: 1,
         survivors: vec![],
-        checked: true,
+        evidence: Evidence::Enumerated,
     })];
     let reaped = Sweep {
         found: 2,
         killed: 2,
         survivors: vec![],
-        checked: true,
+        evidence: Evidence::Enumerated,
     };
 
     let line = crate::agent::stop_line(&stopped, &reaped);
@@ -453,13 +457,13 @@ fn a_cancel_that_could_not_kill_unnamed_work_says_so_and_names_the_pid() {
         found: 1,
         killed: 1,
         survivors: vec![],
-        checked: true,
+        evidence: Evidence::Enumerated,
     })];
     let survived = Sweep {
         found: 1,
         killed: 0,
         survivors: vec![23536],
-        checked: true,
+        evidence: Evidence::Enumerated,
     };
 
     let line = crate::agent::stop_line(&stopped, &survived);
@@ -495,7 +499,7 @@ fn a_cancel_that_ended_no_job_still_reports_work_it_could_not_account_for() {
         found: 1,
         killed: 0,
         survivors: vec![23536],
-        checked: true,
+        evidence: Evidence::Enumerated,
     };
     let line = crate::agent::stop_line(&[], &survived);
     assert!(
