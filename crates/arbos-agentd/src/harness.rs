@@ -93,12 +93,6 @@ pub trait HarnessAdapter: Send + Sync {
     /// Orderly shutdown of every open child (close stdin, wait, kill) before the box stops.
     async fn shutdown_all(&self);
     fn is_open(&self, session_id: &str) -> bool;
-    /// Pids of this adapter's live children, so a sweep of the workspace cgroup's leftovers can
-    /// tell a running job worker from something a dead one left behind (bug Y). An adapter whose
-    /// children the box does not hold a handle for reports none and is swept like any other.
-    async fn live_child_pids(&self) -> Vec<u32> {
-        Vec::new()
-    }
     /// The process group this session's child leads, so a cancel can reap everything the child
     /// spawned after the child itself is gone (bug Z). `None` for an adapter whose children are
     /// not group leaders; the cancel then falls back to the cgroup alone.
@@ -266,17 +260,6 @@ impl RpcSessions {
 
     async fn pgid(&self, session_id: &str) -> Option<u32> {
         self.children.lock().await.get(session_id)?.tree().pgid
-    }
-
-    /// Pids of the children still running, for the workspace-leftover sweep.
-    async fn live_pids(&self) -> Vec<u32> {
-        self.children
-            .lock()
-            .await
-            .values()
-            .filter(|c| c.is_alive())
-            .filter_map(|c| c.pid())
-            .collect()
     }
 
     async fn attach(
@@ -648,10 +631,6 @@ impl HarnessAdapter for PrimeAdapter {
             .unwrap_or(false)
     }
 
-    async fn live_child_pids(&self) -> Vec<u32> {
-        self.sessions.live_pids().await
-    }
-
     async fn child_pgid(&self, session_id: &str) -> Option<u32> {
         self.sessions.pgid(session_id).await
     }
@@ -954,10 +933,6 @@ impl HarnessAdapter for PiAdapter {
             .try_lock()
             .map(|c| c.get(session_id).map(|ch| ch.is_alive()).unwrap_or(false))
             .unwrap_or(false)
-    }
-
-    async fn live_child_pids(&self) -> Vec<u32> {
-        self.sessions.live_pids().await
     }
 
     async fn child_pgid(&self, session_id: &str) -> Option<u32> {
