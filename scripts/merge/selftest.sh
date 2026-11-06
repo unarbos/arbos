@@ -1156,6 +1156,57 @@ SCCUT
   else bad "an ambiguous fragment was resolved anyway, which invents a gate-4 verdict: $got"; fi
 fi
 
+# 18. clang21.sh. Gate 5 asks whether the code compiles with the compiler the project SHIPS, so the
+#     danger is not a failed install — that is loud — but a successful one against the wrong
+#     release. The pin is therefore read out of ci.yml at run time, and these cases assert that it
+#     refuses every way the parse can go wrong rather than falling back to a remembered version.
+echo "clang21 — the pin comes from CI, or there is no pin:"
+cl="$D/clang21.sh"
+if [ ! -f "$cl" ]; then
+  bad "no clang21.sh beside the kit — case 18 is testing nothing"
+else
+  cld=$(mktemp -d)
+  pin_yml() { printf '          LLVM_RELEASE: %s\n          LLVM_SHA256: %s\n' "$1" "$2" > "$cld/ci.yml"; }
+  sha64=b3b7f2801d15d50736acea3c73982994d025b01c2f035b91ae3b49d1b575732b
+
+  pin_yml 21.1.8 "$sha64"
+  got=$(bash "$cl" pin "$cld/ci.yml" 2>&1)
+  if [ "$got" = "21.1.8 $sha64" ]; then ok "a well-formed workflow yields its release and digest"
+  else bad "a well-formed workflow parsed as '$got'"; fi
+
+  # The real workflow, so this case cannot pass on fixtures while the parser has drifted off the
+  # file it actually has to read. Skipped rather than failed when the tree has no ci.yml.
+  real="$D/../../.github/workflows/ci.yml"
+  if [ -r "$real" ]; then
+    got=$(bash "$cl" pin "$real" 2>&1); rc=$?
+    if [ "$rc" -eq 0 ] && [ "$(printf '%s' "$got" | wc -w)" = 2 ]; then
+      ok "the repo's own ci.yml parses to one release and one digest ($got)"
+    else bad "the repo's own ci.yml does not parse: $got"; fi
+  fi
+
+  printf '          LLVM_RELEASE: 21.1.8\n' > "$cld/half.yml"
+  if ! bash "$cl" pin "$cld/half.yml" >/dev/null 2>&1; then ok "a workflow missing the digest refuses"
+  else bad "a workflow with no LLVM_SHA256 still produced a pin"; fi
+
+  # Two pins is not a tie to break: picking either would install a compiler by coin toss.
+  { printf '          LLVM_RELEASE: 21.1.8\n          LLVM_SHA256: %s\n' "$sha64"
+    printf '          LLVM_RELEASE: 21.1.7\n          LLVM_SHA256: %s\n' "${sha64/b3b7/c4c8}"; } > "$cld/two.yml"
+  got=$(bash "$cl" pin "$cld/two.yml" 2>&1)
+  if ! bash "$cl" pin "$cld/two.yml" >/dev/null 2>&1; then ok "two pins in one workflow refuse rather than pick one"
+  else bad "a workflow pinning two releases resolved to one anyway: $got"; fi
+
+  # CI moving to a major this script does not verify must stop it, not be installed unchecked.
+  pin_yml 22.1.0 "$sha64"
+  got=$(bash "$cl" pin "$cld/ci.yml" 2>&1)
+  if ! bash "$cl" pin "$cld/ci.yml" >/dev/null 2>&1; then ok "a major this script does not check refuses"
+  else bad "a pin for a different major was accepted: $got"; fi
+  case "$got" in
+    *"major"*) ok "that refusal names the major, so the reader knows what to update" ;;
+    *) bad "the different-major refusal does not say which major: $got" ;;
+  esac
+  rm -rf "$cld"
+fi
+
 echo
 if [ "$fail" -eq 0 ]; then echo "selftest: PASS"; else echo "selftest: FAIL"; fi
 exit "$fail"
