@@ -17,12 +17,14 @@ so in its summary.
 
 Jacob, on the amber glow after a chat tab's name: "replace all neon glimmer
 icons like this in the app with braille spinners always, on a matter of
-principle never use colored dots." App-wide, both platforms:
+principle never use colored dots." The rule governs **status and progress
+indicators**; a count is not a status (Jacob 2026-11-05). App-wide, both
+platforms:
 
 | A dot used to mean | Now |
 |---|---|
 | **activity** — an agent working, a tab streaming, a machine waking, a link reconnecting / syncing, a memo recording, the voice agent thinking | the **braille spinner** (`ui::working` / `WorkingSpinner`, § Working indicator), `text_muted`, one shared ticker |
-| **unread** | the **count pill** (`marks::unread_pill` / `UnreadBadge`: accent capsule, white digits, "99+") beside the bold title; a lit flag with no count reads "1". **The Grok reference draws a dot here instead and we deliberately do not** — see § Row contents, "The unread mark is not settled" |
+| **unread** | **not covered by this rule** (Jacob 2026-11-05: "Unread dot is fine. No coloured dots refers to status or progress indicators"). A people or agent row shows the **unread dot** (`marks::unread_dot` / `UnreadDot`); a server or channel row keeps the count pill (`marks::unread_pill` / `UnreadBadge`). See § Row contents |
 | **a fault** — relay down, machine error | the red **`exclamation` glyph** (`marks::fault_glyph`), the error note's mark |
 | **a resting state** — awake, asleep, offline, read | **nothing**; the words say it ("Awake · 5 h", "Offline") |
 | **a person typing** | nothing in the status cell; the preview reads "typing…" and the status row over the composer names them. The spinner is never a human's sign |
@@ -110,7 +112,7 @@ same header, pins servers too and migrates its device-local pins into the synced
 | Item | Rule | Code |
 |---|---|---|
 | Pin / Unpin | the **first item** of every row menu (agent, person, group, server), above today's items, which do not move; SF `pin` / `pin.slash`, the iPhone's names. A new pin lands at the **top**; Unpin returns the row to its place by activity. At the cap the click answers with the shared error element ("You can pin up to 5 chats.") | `sidebar::row_menu` (`row-menu-pin`), `AppState::set_pinned` |
-| Pinned section | "Pinned" `TEXT_SMALL` 13 medium `text_muted` at the rows' text inset (list 8 + row 12 = **20**) in a **26** pt band (`PINNED_HEADER_H`) under the filter row; the pinned rows **in the user's order only** — never re-sorted by unread or activity, unread stays the count pill / bold name; then a 1 pt `border` hairline inset 12 in a 9 pt band (`PINNED_DIVIDER_H` = `glass::MENU_DIVIDER_HEIGHT`); then the rest in today's order, no second header | `sidebar::list_sections`, `pinned_header`, `pinned_divider` |
+| Pinned section | "Pinned" `TEXT_SMALL` 13 medium `text_muted` at the rows' text inset (list 8 + row 12 = **20**) in a **26** pt band (`PINNED_HEADER_H`) under the filter row; the pinned rows **in the user's order only** — never re-sorted by unread or activity, unread stays the unread dot / bold name; then a 1 pt `border` hairline inset 12 in a 9 pt band (`PINNED_DIVIDER_H` = `glass::MENU_DIVIDER_HEIGHT`); then the rest in today's order, no second header | `sidebar::list_sections`, `pinned_header`, `pinned_divider` |
 | Pinned row | a normal row plus **`pin.fill` 11 pt semibold** in `text_muted` before the time (`row-pin-<id>`). No colour, no dot | `pin_mark` |
 | Zero pins | **nothing is drawn** — no header, hairline or marks; the list is exactly as before | pinned by `pin_tests::zero_pins_draws_no_section` |
 | Filter | All · Agents · People · Servers: the section shows only the pins the segment admits; header and hairline hide when none passes | `list_sections` over the filtered rows; `pin_tests::the_filter_shows_only_the_pins_it_admits` |
@@ -148,7 +150,7 @@ the chat area (not the window). Points from the window's edges.
 | Toggle | **inside the rail**, the first disc under the lights' slot: x **24**, top **52** (`TOGGLE_TOP` = `LIGHTS_SLOT` 44 + `STRIP_GAP` 8), the same 36 pt `control_disc` and column as + and Search, in a window and in full screen alike (Jacob 2026-10-27, [feedback sidebar-toggle-in-rail-2026-10-27]: "The tab button should also be in the side bar here" — supersedes the 2026-10-26 rule that a plain window kept the toggle in the chat header at x 96 and that full screen put it on the lights' line at top 12, where a window state read as full screen left it half hidden under the buttons; `rail::toggle_spot` is gone). The chat header draws a toggle only for the narrow band's hidden sidebar (`header_toggle_shown`) |
 | + and Search | stacked under the toggle, `STRIP_GAP` 8 apart: + top **96**, Search top **140** (36 pt `control_disc`s, the strip's own handlers) — the strip's search · + · collapse read top-down from the toggle |
 | Pictures | every chat the current filter admits — agents, people, groups, servers (rounded squares, `SERVER_PICTURE_CORNER`) — in the list's order, **36** pt on a **58** pitch, first tile top **192** (16 under Search; picture top 201, centre 219; was 152/161/179 before the toggle joined the column); the same `ListEntry::picture` builders as the rows (one avatar resolver, #1912). Selected = **54** tile, radius **12**, the highlight token's selected step; hover = its hover step + a name tip 8 right of the rail (`pane_card`, `border_strong`, 13 pt) |
-| Badges | one spot at the picture's bottom-right corner (never a coloured dot, 2026-10-27): **working** = the braille spinner in the 13 pt ring of the rail's colour, else **unread** = the count pill (`marks::unread_pill`, a 2 pt rim in the rail's colour); the selected chat shows no unread pill; nothing for a person typing |
+| Badges | one spot at the picture's bottom-right corner (never a coloured dot, 2026-10-27): **working** = the braille spinner in the 13 pt ring of the rail's colour, else **unread** = the count pill (`marks::unread_pill`, a 2 pt rim in the rail's colour) — a *picture badge*, not a row, so § Row contents' dot does not reach it and the count survives here; the selected chat shows no unread pill; nothing for a person typing |
 | My picture | alone at the bottom: 36 at x 24, **12** above the bottom (centre 30 = `CONTROL_LINE` mirrored; Grok 31), with the machine dot; opens Settings like the footer row |
 | Scrolling | the pictures scroll (`LIST_FADE_BAND` edge fade) when more fit than the window holds (`capacity`: 14 in a 1079 pt window, 8 in a 760 one) |
 | Filter | the rail follows All · Agents · People · Servers; the segment persists in `<config>/sidebar_filter` and the collapsed state in `<config>/sidebar_collapsed` (`SidebarCollapsed`), so the app reopens as it was left |
@@ -294,7 +296,7 @@ composer) is unchanged; this rule is for the small status glyph on rows.
 | Frames | the classic ten, in order: `FRAMES` = ⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏; `FRAME_MS` **90** (80–100 ms band, ≈ 11 fps) |
 | Cell | a fixed box **8 × 12** pt (`CELL_W` = the unread dot's 8, `CELL_H` 12), the glyph centred in it in the monospace face (`theme.font_mono`, `GLYPH_SIZE` = `TEXT_TINY` 11.5, line height 12). The ten frames differ only in which dots are set, so the cell never changes size: the row never re-flows while it turns |
 | Colour | `theme.text_muted` — the time label's colour above it. Not `online` green, not `warn` amber, not the accent |
-| Where | **sidebar chat rows**: the status cell at the right end of the preview line, under the time (`sidebar::RowStatus`: Working ▸ Unread ▸ Typing ▸ Quiet — a person typing shows **nothing** in the cell, so it hides neither the spinner nor the pill (the spinner is the agent's sign, never a human's — coordinator veto 2026-10-27; the green pulse went with the no-coloured-dots principle the same day, the preview reads "typing…"), the spinner while the chat's agent streams, else the unread **count pill**, else nothing). Where a count pill shows it wins the slot — information over animation. **Header tab segment**: the spinner after the tab name while that tab streams (was a 6 pt amber dot). **Settings › Machine › Per-agent usage**: the spinner before "Working · …" on a running workspace. The collapsed rail's picture badges and the avatar presence dot are *not* this rule (avatar badge code, another owner) |
+| Where | **sidebar chat rows**: the status cell at the right end of the preview line (the row has carried no time since § Row contents) (`sidebar::RowStatus`: Working ▸ Unread ▸ Typing ▸ Quiet — a person typing shows **nothing** in the cell, so it hides neither the spinner nor the mark (the spinner is the agent's sign, never a human's — coordinator veto 2026-10-27; the green pulse went with the no-coloured-dots principle the same day, the preview reads "typing…"), the spinner while the chat's agent streams, else the unread **dot** (§ Row contents), else nothing). The dot is the cell's own width, so unlike the count pill it never re-flows the row — which is what the fixed cell is for. **Header tab segment**: the spinner after the tab name while that tab streams (was a 6 pt amber dot). **Settings › Machine › Per-agent usage**: the spinner before "Working · …" on a running workspace. The collapsed rail's picture badges and the avatar presence dot are *not* this rule (avatar badge code, another owner) |
 | Clock | one `WorkingClock` global: frame = elapsed ÷ 90 ms mod 10, read by every spinner at render → all spinners turn in step; no row owns a timer |
 | Ticker | one task for the whole app. Drawing a spinner marks the clock `wanted`; the ticker sleeps 90 ms, and if nothing was drawn since the last tick it parks (no frames requested at all) — it starts again on the next spinner drawn. It also parks while the window is in the background (`Shell`'s activation observer → `WorkingClock::set_window_active`) and resumes with the window. A tick landing on a frame the window draws anyway (a scroll) is coalesced by GPUI — the ticker never adds frames to a scroll. The sidebar row's old `PulseClock::request` for a working row (30 fps whole-window redraws that nothing read since the tree animation retired) is gone: a working row costs the 11 fps ticker and nothing else |
 | Reduce Motion | `cx.reduce_motion()` → the still glyph **⠿** in the same cell, and no frame requested (the ticker parks) |
@@ -662,34 +664,53 @@ breakpoint is now deleted, and its time ladder applies to **server and
 channel rows only**, which keep their times. A chat row's name has the whole
 line at every width.
 
-### The unread mark is not settled
+### The unread mark is a dot (Jacob 2026-11-05)
 
-The reference draws an 8 pt accent dot where we draw the count pill
-(measured: 16 px at 2 px/pt, `#6199F8`, against our `#1084FE`). **We keep the
-pill**, pending Jacob. The reference is not the authority here because two of
-his own instructions point the other way: "no coloured dots, use braille
-spinners" when the Grok-parity work opened, and "unread = the count pill,
-never a dot" on 2026-10-27.
+**A people or agent row shows a small unread dot. No count pill.**
 
-**If you are reading this because the reference and the code disagree: the
-rule won on purpose. Do not "fix" it.** The choice is isolated to
-`sidebar::unread_mark`, so settling it is one edit there and one here.
+> "Replace the count pill with a small dot." — the approved item text,
+> 2026-11-05
+>
+> "Unread dot is fine. No coloured dots refers to status or progress
+> indicators." — Jacob's clarification
 
-The case for the dot, recorded so it is not lost:
+**This supersedes the 2026-10-27 "unread = the count pill, never a dot"
+ruling.** If you arrive here from that older note, it is out of date; do not
+restore the pill from it.
 
-- `working::CELL_W` is 8 pt and is commented "the cell is the old dot's
-  width". The status cell is still sized for a dot.
-- The cell is fixed so the row never re-flows while the spinner turns. The
-  pill is 16 pt wide before its digits and grows with each one, so it already
-  breaks that invariant. **The dot restores something the pill took away**,
-  which is a better reason than matching a picture.
-- A second reference agrees: `Theme.swift` records Grok's iPhone home row as
-  "48 pt avatar box, 80 pt row pitch, **10 pt unread dot**", measured off
-  `internal/refs/grokbot-ios`.
+**The no-coloured-dots rule is unchanged and still binding.** It covers
+**status and progress indicators** — waking, faulted, working — and those are
+carried by the braille spinner (`ui::working` / `WorkingSpinner`) and the
+fault glyph (`marks::fault_glyph` / `FaultGlyph`) **only**. An unread dot is a
+count, not a status, which is why it is allowed.
 
-The no-coloured-dots rule is about **status** — waking, faulted, working —
-which the braille spinner and the fault glyph carry. Whether "unread" is a
-status in that sense is exactly the question.
+Both lints keep their teeth. `theme.unread` and `theme.accent` stay on the
+status-fill lists, so a new coloured disc anywhere is still caught: the Mac's
+dot lives in `marks.rs`, the one file the scan skips because sanctioned marks
+live there, and the iPhone's carries an explicit
+`// status-dot: exception` naming the ruling. There should be exactly one
+unread dot per client.
+
+| | Size | Fill |
+|---|---|---|
+| Mac | **8 pt** — the reference measures 16 px at 2 px/pt | `theme.accent` |
+| iPhone | **10 pt** — `Theme.unreadDot`, from `internal/refs/grokbot-ios` | `theme.unread` |
+
+**The colour is ours, not the reference's.** The Mac reference's dot measures
+`#6199F8`; our accent is `#1084FE`. A brand accent is ours to keep and the
+reference's exact blue is not part of this item, so the dot takes our accent
+and the measured value is recorded here so the choice stays visible and
+reversible. The iPhone's `theme.unread` (`#006CEB` dark) is already a
+Grok-measured token named for this dot.
+
+It also fits a slot the pill never did. The status cell is fixed so the row
+never re-flows while the spinner turns, and `working::CELL_W` is 8 pt and
+commented "the cell is the old dot's width". The pill is 16 pt wide before
+its digits and grows with each one, so it had been breaking that invariant.
+
+**What a user loses** is the exact unread count at a glance. The total still
+reaches the app icon badge, and opening a chat still shows the "NEW" divider
+at the boundary.
 
 ## Row pitch (Jacob 2026-11-06, same reference)
 

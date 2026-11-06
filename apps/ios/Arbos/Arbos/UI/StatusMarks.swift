@@ -1,8 +1,13 @@
 // Status marks that are not coloured dots (Jacob, 2026-10-27, [feedback
 // neon-dots-ios-2026-10-27]: "replace all neon glimmer icons like this in the
 // app with braille spinners always, on a matter of principle never use colored
-// dots"). Activity → the braille spinner (`WorkingSpinner`); unread → the count
-// pill (`UnreadBadge`); a fault → the red "!" glyph; a resting state (awake,
+// dots"). That rule covers **status and progress** — Jacob narrowed it on
+// 2026-11-05: "Unread dot is fine. No coloured dots refers to status or
+// progress indicators."
+//
+// Activity → the braille spinner (`WorkingSpinner`); unread → the dot on a home
+// row (`UnreadDot`) and the count pill on a server or channel row
+// (`UnreadBadge`); a fault → the red "!" glyph; a resting state (awake,
 // asleep, read) → nothing. On a picture the mark sits in a ring cut out of the
 // picture (`CornerMark`, `View.statusMark`). `StatusDotLintTests` refuses a new small
 // `Circle().fill(<status colour>)` anywhere in the app. Mirrors the Mac's
@@ -122,10 +127,34 @@ extension View {
 }
 
 /// The unread mark for a row: the count pill, "1" when only the flag is lit.
+/// Server and channel rows still use this. **A home row uses `UnreadDot`.**
 struct UnreadMark: View {
     let count: Int
 
     var body: some View {
         UnreadBadge(count: max(1, count))
+    }
+}
+
+/// The unread mark on a home row: a `Theme.unreadDot` disc in the accent,
+/// the size Grok draws (`internal/refs/grokbot-ios`, 10 pt).
+///
+/// **Do not replace this with the count pill from the 2026-10-27 note.**
+/// Jacob superseded it on 2026-11-05: "Unread dot is fine. No coloured dots
+/// refers to status or progress indicators." Unread is a count, not a
+/// status; status and progress are still the braille spinner and the fault
+/// glyph, and nothing here changes that.
+///
+/// It also fits the slot the pill never did: the cell is
+/// `WorkingSpinnerFrames.cell` = `Theme.unreadDot` so the row holds still
+/// when the mark changes, and the pill is twice that before its digits.
+struct UnreadDot: View {
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        // status-dot: exception unread is a count, not a status (Jacob 2026-11-05)
+        Circle().fill(theme.unread)
+            .frame(width: Theme.unreadDot, height: Theme.unreadDot)
+            .accessibilityLabel("Unread")
     }
 }

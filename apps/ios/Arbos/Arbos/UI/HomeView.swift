@@ -1383,8 +1383,9 @@ struct AgentRow: View {
                     case .working:
                         WorkingSpinner()
                     case .unread:
-                        // The count pill, never a dot (Jacob, 2026-10-27).
-                        UnreadMark(count: unreadCount)
+                        // The dot, not the count pill (Jacob, 2026-11-05;
+                        // `UnreadDot` carries the reasoning).
+                        UnreadDot()
                     case .quiet:
                         EmptyView()
                     }
@@ -1489,15 +1490,14 @@ struct PeopleRow: View {
                         .foregroundStyle(theme.muted)
                         .lineLimit(1)
                     Spacer(minLength: 0)
-                    // Information over animation (coordinator, 2026-10-27): an unread
-                    // count pill wins the slot; the spinner replaces only the plain dot.
-                    if count > 0 {
-                        UnreadBadge(count: count)
-                    } else if streaming {
+                    // The work wins the slot while it runs, then the unread dot
+                    // (Jacob 2026-11-05; `UnreadDot` carries the reasoning). The
+                    // count no longer rides the row, so it no longer outranks the
+                    // spinner the way the pill did.
+                    if streaming {
                         WorkingSpinner()
-                    } else if unread {
-                        // The count pill ("1"), never a dot (Jacob, 2026-10-27).
-                        UnreadMark(count: 1)
+                    } else if unread || count > 0 {
+                        UnreadDot()
                     }
                 }
             }

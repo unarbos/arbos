@@ -11,6 +11,13 @@ import XCTest
 /// colour is data or a surface (a pager's page dots, a chart swatch) carries
 /// `// status-dot: exception <why>` on its `.fill(` line. Twin of the Mac's
 /// `marks::lint_tests`.
+///
+/// **The rule is status and progress only**, narrowed by Jacob on 2026-11-05:
+/// "Unread dot is fine. No coloured dots refers to status or progress
+/// indicators." `UnreadDot` therefore carries the exception marker rather than
+/// the lint being loosened — `theme.unread` stays on the list, so every new
+/// unread dot has to be a deliberate act, and there should only ever be the
+/// one.
 final class StatusDotLintTests: XCTestCase {
     static let statusFill = try! NSRegularExpression(
         pattern: #"\.fill\((theme\.(unread|online|warn|danger|accent)\b|machineDotColor\(|dot\))"#)

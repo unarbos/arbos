@@ -46,6 +46,29 @@ pub fn unread_pill(count: usize, theme: &Theme) -> Div {
         .child(unread_label(count))
 }
 
+/// The unread dot a chat row shows: 8 pt, measured on the approved Grok
+/// reference (16 px at 2 px/pt). It is the same width as the status cell it
+/// sits in ([`working::CELL_W`], commented "the cell is the old dot's
+/// width"), so the row holds still when the mark changes — `marks_tests`
+/// pins that agreement rather than deriving one from the other.
+///
+/// Allowed by Jacob's 2026-11-05 ruling: "Unread dot is fine. No coloured
+/// dots refers to status or progress indicators." See
+/// `docs/mac-design-rules.md` § The unread mark.
+pub const UNREAD_DOT: f32 = 8.0;
+
+/// The dot in the status cell's box, so the slot is the spinner's exact size.
+pub fn unread_dot(theme: &Theme) -> Div {
+    div()
+        .w(px(working::CELL_W))
+        .h(px(working::CELL_H))
+        .flex()
+        .items_center()
+        .justify_center()
+        .debug_selector(|| "unread-dot".into())
+        .child(div().size(px(UNREAD_DOT)).rounded_full().bg(theme.accent))
+}
+
 /// What a machine state shows instead of its old coloured dot: the spinner
 /// while it wakes, the red `!` glyph on a fault, nothing at rest.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -302,6 +325,13 @@ mod tests {
 /// filled with a status colour (`online`, `warn`, `danger`, `accent`, a machine
 /// dot colour, or a pulsing alpha of one). Legend swatches and other
 /// non-status discs carry `// status-dot: exception <why>` on the `.bg(` line.
+///
+/// **Status and progress only** — Jacob 2026-11-05: "Unread dot is fine. No
+/// coloured dots refers to status or progress indicators." The unread dot is
+/// a count, and it is allowed. It is drawn by [`unread_dot`] in this file,
+/// which the scan skips because this is where sanctioned marks live; drawing
+/// one anywhere else is still caught, which is the point — there should be
+/// exactly one unread dot in the crate and it should be this one.
 #[cfg(test)]
 mod lint_tests {
     use std::path::Path;
@@ -407,5 +437,32 @@ mod lint_tests {
         assert!(super::lint_tests::status_fill(sample[3]));
         assert!(!super::lint_tests::small_size("    .size(px(30.0))"));
         assert!(!super::lint_tests::status_fill("    .bg(theme.surface_2)"));
+    }
+}
+
+#[cfg(test)]
+mod unread_dot_tests {
+    use super::{UNREAD_DOT, UNREAD_PILL_H};
+    use crate::ui::working::CELL_W;
+
+    /// 8 pt is two numbers that agree, not one borrowed from the other: the
+    /// approved Grok reference measures the dot at 16 px on a 2 px/pt frame,
+    /// and the status cell has been 8 pt wide since it replaced the old dot.
+    /// Pinning the agreement means a change to either side has to face it.
+    #[test]
+    fn the_dot_is_the_status_cells_width() {
+        assert_eq!(UNREAD_DOT, 8.0, "the reference's 16 px at 2 px/pt");
+        assert_eq!(
+            UNREAD_DOT, CELL_W,
+            "the dot must fit the cell that holds the spinner, or the row \
+             re-flows when the mark changes"
+        );
+    }
+
+    /// Why the pill could not stay: it is twice the cell before its digits,
+    /// so the slot the cell exists to hold still was never still.
+    #[test]
+    fn the_pill_never_fitted_the_cell() {
+        assert!(UNREAD_PILL_H > CELL_W);
     }
 }

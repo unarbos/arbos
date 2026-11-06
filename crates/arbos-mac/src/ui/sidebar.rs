@@ -2313,7 +2313,8 @@ fn render_row(
         selected,
         streaming,
         unread,
-        unread_count,
+        // A chat row shows the unread dot, not a count (`unread_mark`).
+        unread_count: _,
         typing,
         preview,
         // The chat row no longer prints a time (`docs/mac-design-rules.md`
@@ -2492,7 +2493,6 @@ fn render_row(
                         // chat. Never a coloured status dot.
                         .children(row_status_cell(
                             RowStatus::of(streaming, typing, unread),
-                            unread_count,
                             &id,
                             theme,
                             cx,
@@ -2503,11 +2503,15 @@ fn render_row(
 
 /// What the status cell under a row's time shows (Jacob, 2026-10-27,
 /// [feedback working-braille-spinner-mac-2026-10-27] + [feedback
-/// neon-dots-mac-2026-10-27]). One cell, one mark, never a coloured dot: a
-/// person typing shows nothing in the cell (the spinner is the *agent's*
-/// working sign, never a human's; the preview reads "typing…"); the spinner
-/// while the chat's agent works; the unread **count pill** otherwise; a quiet
-/// read chat shows nothing.
+/// neon-dots-mac-2026-10-27]). One cell, one mark: a person typing shows
+/// nothing in the cell (the spinner is the *agent's* working sign, never a
+/// human's; the preview reads "typing…"); the spinner while the chat's agent
+/// works; the unread **dot** otherwise (see [`unread_mark`]); a quiet read
+/// chat shows nothing.
+///
+/// No coloured **status or progress** dot — that rule is unchanged, and the
+/// spinner and the fault glyph are what carry those. An unread dot is a
+/// count, and Jacob allowed it on 2026-11-05.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RowStatus {
     /// A person is typing: no mark in the cell (the preview carries it).
@@ -2535,13 +2539,7 @@ impl RowStatus {
     }
 }
 
-fn row_status_cell(
-    status: RowStatus,
-    unread_count: usize,
-    id: &Id,
-    theme: &Theme,
-    cx: &mut App,
-) -> Option<AnyElement> {
+fn row_status_cell(status: RowStatus, id: &Id, theme: &Theme, cx: &mut App) -> Option<AnyElement> {
     match status {
         RowStatus::Typing | RowStatus::Quiet => None,
         RowStatus::Working => Some(
@@ -2550,33 +2548,33 @@ fn row_status_cell(
                 .into_any_element(),
         ),
         RowStatus::Unread => Some(
-            unread_mark(unread_count, theme)
+            unread_mark(theme)
                 .debug_selector(|| format!("row-status-unread-{id}"))
                 .into_any_element(),
         ),
     }
 }
 
-/// **The one place a chat row's unread mark is chosen** — the single site the
-/// open question below resolves into, so the answer is an edit here and
-/// nowhere else.
+/// **The one place a chat row's unread mark is chosen.**
 ///
-/// Today it is the count pill, and that is a decision rather than an
-/// oversight. The approved Grok reference draws an 8 pt accent dot instead
-/// (measured: 16 px at 2 px/pt, `#6199F8` against our `#1084FE`), and the
-/// Grok-parity brief asks for one. Two of Jacob's own instructions say
-/// otherwise — "no coloured dots, use braille spinners" when this workstream
-/// opened, and "unread = the count pill, never a dot" on 2026-10-27 — so the
-/// reference is held pending his ruling rather than overriding him.
+/// It is the 8 pt dot (`marks::unread_dot`), **not** the count pill.
 ///
-/// The case for the dot, recorded so it is not lost: `working::CELL_W` is 8
-/// and is commented "the cell is the old dot's width", so the status cell is
-/// still sized for a dot; and the pill is 16 pt wide before its digits and
-/// grows with each one, which defeats the fixed cell whose purpose is to stop
-/// the row re-flowing while the spinner turns. See
+/// **Do not restore the pill from the 2026-10-27 "never a dot" note.** That
+/// note is superseded by Jacob's 2026-11-05 ruling: "Unread dot is fine. No
+/// coloured dots refers to status or progress indicators." Unread is a count,
+/// not a status. The no-coloured-dots rule still governs status and progress
+/// — waking, faulted, working — and those are carried by the braille spinner
+/// (`ui::working`) and the fault glyph (`marks::fault_glyph`) only.
+///
+/// The dot also restores something the pill had taken away: the status cell
+/// is fixed so the row never re-flows while the spinner turns, and the pill
+/// is 16 pt wide before its digits and grows with each one. See
 /// `docs/mac-design-rules.md` § The unread mark.
-fn unread_mark(count: usize, theme: &Theme) -> Div {
-    crate::ui::marks::unread_pill(count, theme)
+///
+/// What a user loses is the exact count at a glance; that section says where
+/// it still lives.
+fn unread_mark(theme: &Theme) -> Div {
+    crate::ui::marks::unread_dot(theme)
 }
 
 /// The right-click menu of a sidebar row, anchored at the click. An agent
