@@ -263,6 +263,17 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ matrix.sha }}
+      # The workspace holds the *commit being shot*, which is usually older than this
+      # workflow and does not contain the rig's own helpers. `github.workflow_sha` is the
+      # commit this workflow file came from, so the rig always runs its own code no matter
+      # how old the subject is — which is the whole point of shooting historical commits.
+      - name: Fetch the rig's own helpers
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .capture-rig
+          sparse-checkout: scripts/ci
+          sparse-checkout-cone-mode: false
       # Copied from ios.yml, not shared: at most two heavy jobs run on the EC2 Mac at a time
       # (#1839). Only relevant when someone points `runner` at it; the hosted pool has no slots.
       - name: Heavy-job slot
@@ -429,7 +440,13 @@ jobs:
             exit 1
           fi
           run="${found[0]}"
-          python3 "$GITHUB_WORKSPACE/scripts/ci/xctestrun-env.py" "$run" \
+          # From `.capture-rig`, not the workspace: see "Fetch the rig's own helpers".
+          helper="$GITHUB_WORKSPACE/.capture-rig/scripts/ci/xctestrun-env.py"
+          if [ ! -f "$helper" ]; then
+            echo "::error title=Rig helper missing::$helper was not checked out, so the capture variables cannot be written"
+            exit 1
+          fi
+          python3 "$helper" "$run" \
             "ARBOS_SHOT_DIR=$SHOT_DIR" \
             "ARBOS_SHOT_TAG=${{ matrix.leg }}" \
             "ARBOS_SHOT_SCRIPT=$SHOT_SCRIPT" \
