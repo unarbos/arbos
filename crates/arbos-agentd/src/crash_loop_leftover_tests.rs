@@ -52,7 +52,7 @@ use std::time::{Duration, Instant};
 
 use arbos_core::ids::ulid;
 
-use crate::isolation::{marked_procs_all, WORKER_MARK_ENV};
+use crate::isolation::{marked_procs_all, Evidence, WORKER_MARK_ENV};
 use crate::status::tests::test_agent_in_cgroup;
 
 const CHAT: &str = "01TESTCHATCRASHLOOPLEFT001";
@@ -138,8 +138,15 @@ impl Drop for Tree {
     }
 }
 
+/// The pids carrying `mark`, or a panic saying `/proc` could not be read.
+///
+/// `marked_procs_all` answers `None` for a `/proc` it could not walk, which is **not** an empty
+/// process list — that conflation is the whole of bug AP, and a fixture that made it here would
+/// measure an empty box and call the result a pass. The panic is the point: these cases have no
+/// meaning without the walk, so they must fail loudly rather than quietly measure nothing.
 fn pids_for(mark: &str) -> Vec<u32> {
     marked_procs_all()
+        .expect("/proc must be readable, or these cases measure an empty box and prove nothing")
         .into_iter()
         .filter(|(_, m)| m == mark)
         .map(|(pid, _)| pid)
@@ -246,9 +253,11 @@ async fn the_escalation_collects_only_what_the_box_can_prove_is_abandoned() {
 
     let sweep = agent.kill_workspace_leftovers().await;
 
-    assert!(
-        sweep.checked,
-        "a sweep that did not read the kernel knows nothing (bug AE)"
+    assert_eq!(
+        sweep.evidence,
+        Evidence::Enumerated,
+        "this sweep enumerated a tree and read each pid back, which is the only outcome a kill \
+         may be claimed from (bugs AE and AP); nothing weaker earns the assertions below"
     );
     // The survivors come first: a sweep that collected the wrong thing has already done the
     // damage, and this is the assertion that says which process it was.
@@ -302,6 +311,15 @@ async fn a_workspace_of_live_work_loses_nothing_to_the_escalation() {
             "every process here is live work: killing {pid} is the bug"
         );
     }
+    // `found == 0` on its own is the assertion that decayed: it stays true whether the walk ran
+    // and condemned nothing or never ran at all, and those are the two answers bug AP exists to
+    // keep apart. The evidence value is what still says the interesting half.
+    assert_eq!(
+        sweep.evidence,
+        Evidence::Nothing,
+        "the walk read /proc and no process on this box was a candidate — which is neither \
+         `Unconfirmed` (it could not look) nor `Enumerated` (it killed something)"
+    );
     assert_eq!(
         sweep.found, 0,
         "no evidence was offered about anything, so nothing is a candidate"
