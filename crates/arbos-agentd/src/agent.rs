@@ -1110,6 +1110,28 @@ impl StoppedJob {
 /// How many leftover pids one chat remembers for [`Agent::hook_kill_allowed`].
 const LEFTOVER_PIDS_MAX: usize = 32;
 
+/// Carry the cause of an unconfirmed sweep into the audit record, machine-readably.
+///
+/// The note already says it in words, and prose is not something an operator or a canary should
+/// have to parse to find out why a sweep came back unconfirmed. So: `unconfirmed_because` is a
+/// stable token, and `sessions_not_read` names what was skipped.
+///
+/// Absent entirely when the sweep looked at everything it was asked about, by the same
+/// convention `processes_checked` follows — no field rather than a field asserting that nothing
+/// was wrong, which is the shape of claim this whole guard exists to stop.
+///
+/// Annotates the answer rather than replacing any part of it, so no return path out of
+/// `hook_stop_job` can lose its `stop_job answered` line through this.
+fn annotate_unread(answer: &mut Value, unread: Option<&crate::isolation::Unread>) {
+    let Some(unread) = unread else {
+        return;
+    };
+    answer["unconfirmed_because"] = unread.cause.as_str().into();
+    if !unread.sessions.is_empty() {
+        answer["sessions_not_read"] = json!(unread.sessions);
+    }
+}
+
 /// What `stop_job` tells the model it may now say, which is decided by what the cancel actually
 /// achieved rather than by the word in the job row.
 ///
@@ -4722,7 +4744,8 @@ impl Agent {
     pub(crate) async fn reap_unreachable_workers(&self) -> Sweep {
         let Some(marked) = crate::isolation::marked_procs_all() else {
             tracing::warn!("cancel: /proc could not be read, so unreachable work is unknown");
-            return Sweep::default();
+            return Sweep::default()
+                .part_unread(crate::isolation::UnreadCause::ProcUnreadable, vec![]);
         };
         let mut dead: HashSet<String> = HashSet::new();
         let mut unread: BTreeSet<String> = BTreeSet::new();
@@ -4747,9 +4770,11 @@ impl Agent {
                 }
             }
         }
+        let unread: Vec<String> = unread.into_iter().collect();
         if !unread.is_empty() {
             tracing::warn!(
                 sessions = ?unread,
+                cause = crate::isolation::UnreadCause::AdapterLockContended.as_str(),
                 "a sweep could not read whether these sessions are still open, so they are kept \
                  and nothing is claimed about their processes"
             );
@@ -4763,7 +4788,8 @@ impl Agent {
         if dead.is_empty() {
             return match unread.is_empty() {
                 true => Sweep::nothing_to_check(),
-                false => Sweep::default(),
+                false => Sweep::default()
+                    .part_unread(crate::isolation::UnreadCause::AdapterLockContended, unread),
             };
         }
         // Blocking: the reap signals, sleeps and re-reads `/proc`, which must not sit on a
@@ -4776,7 +4802,7 @@ impl Agent {
         // However well the enumerated part went, part of the box went unlooked-at.
         match unread.is_empty() {
             true => sweep,
-            false => sweep.part_unread(),
+            false => sweep.part_unread(crate::isolation::UnreadCause::AdapterLockContended, unread),
         }
     }
 
@@ -5626,13 +5652,15 @@ impl Agent {
                 note = %note,
                 "stop_job answered"
             );
-            return Ok(json!({
+            let mut answer = json!({
                 "stopped": [],
                 "asks_cancelled": pending.len(),
                 "unnamed_processes_still_alive": unreachable.survivors,
                 "all_cancelled": true,
                 "note": note,
-            }));
+            });
+            annotate_unread(&mut answer, unreachable.unread.as_ref());
+            return Ok(answer);
         }
         let note = stop_job_note(&stopped, &unreachable);
         // Verbatim, into agentd's own log, beside the sweep it was built from.
@@ -5708,6 +5736,7 @@ impl Agent {
         if let Some(checked) = unreachable.checked() {
             answer["unnamed_processes_checked"] = checked.into();
         }
+        annotate_unread(&mut answer, unreachable.unread.as_ref());
         Ok(answer)
     }
 

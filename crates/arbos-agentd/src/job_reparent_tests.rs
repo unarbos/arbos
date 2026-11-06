@@ -710,6 +710,7 @@ async fn a_cancel_that_left_a_process_running_names_it_and_unlocks_the_guard() {
             killed: 3,
             survivors: vec![2576],
             evidence: Evidence::Enumerated,
+            unread: None,
         },
     }];
 

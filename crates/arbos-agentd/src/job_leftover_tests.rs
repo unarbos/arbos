@@ -309,6 +309,7 @@ fn a_cancel_that_cannot_kill_everything_says_so_instead_of_claiming_a_cancel() {
             killed: 1,
             survivors: vec![561],
             evidence: Evidence::Enumerated,
+            unread: None,
         },
     }];
 
@@ -341,6 +342,7 @@ fn a_cancel_that_cannot_kill_everything_says_so_instead_of_claiming_a_cancel() {
             killed: 2,
             survivors: Vec::new(),
             evidence: Evidence::Enumerated,
+            unread: None,
         },
         ..leaky[0].clone()
     }];

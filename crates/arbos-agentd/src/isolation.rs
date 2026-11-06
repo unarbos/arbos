@@ -99,6 +99,50 @@ pub struct Sweep {
     pub survivors: Vec<u32>,
     /// What this sweep's answer rests on.
     pub evidence: Evidence,
+    /// What this sweep could not look at, and why — [`None`] when it looked at everything it
+    /// was asked about.
+    pub unread: Option<Unread>,
+}
+
+/// The part of a sweep that was not looked at: a stable cause token and the sessions it names.
+///
+/// **This is where the cause of an [`Evidence::Unconfirmed`] lives, and the reason it is here
+/// rather than in that enum.** A fourth evidence variant for "an adapter's lock was busy" would
+/// be absorbing in [`Evidence::and`] exactly as `Unconfirmed` is, and would answer
+/// [`Evidence::proven`], [`Sweep::checked`] and [`Sweep::clean`] exactly as `Unconfirmed` does —
+/// indistinguishable under every operation the enum has, which makes it a label and not a state.
+/// A label belongs in a field a reader can print, not in a lattice a decision is taken from.
+///
+/// So the enum keeps the consequence and this keeps the cause, which is the split `Unconfirmed`
+/// was already written for: its own doc comment names three causes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unread {
+    pub cause: UnreadCause,
+    /// The sessions that were skipped, where the cause names any. Empty for a cause that
+    /// stopped the walk before it could say which sessions it was about.
+    pub sessions: Vec<String>,
+}
+
+/// Why a sweep could not look. One token per cause, so an operator or a canary asking why a
+/// sweep came back unconfirmed gets the answer without parsing prose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnreadCause {
+    /// `/proc` could not be walked at all, so nothing on the box was enumerated and no session
+    /// can be named.
+    ProcUnreadable,
+    /// An adapter's children map was held by a concurrent `stop`, so whether these sessions are
+    /// still open could not be read. They are kept, never collected.
+    AdapterLockContended,
+}
+
+impl UnreadCause {
+    /// The stable token the audit record carries. Match on this rather than on a log line.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ProcUnreadable => "proc_unreadable",
+            Self::AdapterLockContended => "adapter_lock_contended",
+        }
+    }
 }
 
 /// What a sweep's answer rests on, which is a different question from what it found.
@@ -221,8 +265,9 @@ impl Sweep {
     ///
     /// Expressed through [`Evidence::and`] rather than by assigning the variant, so the algebra
     /// stays the only place that decides what two pieces of evidence make together.
-    pub fn part_unread(mut self) -> Self {
+    pub fn part_unread(mut self, cause: UnreadCause, sessions: Vec<String>) -> Self {
         self.evidence = self.evidence.and(Evidence::Unconfirmed);
+        self.unread = Some(Unread { cause, sessions });
         self
     }
 
@@ -244,6 +289,9 @@ impl Sweep {
         self.survivors.extend(other.survivors);
         self.survivors.sort_unstable();
         self.survivors.dedup();
+        // The first unread part is kept, not the last: either is a reason the whole answer is
+        // unconfirmed, and dropping it here would put the evidence and its cause out of step.
+        self.unread = self.unread.take().or(other.unread);
         self
     }
 }
@@ -400,6 +448,7 @@ impl ProcessTree {
             } else {
                 Evidence::Enumerated
             },
+            unread: None,
         }
     }
 }
@@ -720,6 +769,7 @@ pub fn reap_orphan_workers(is_dead_session: impl Fn(&str) -> bool) -> Sweep {
         survivors: alive,
         // Reached only with a non-empty `found`, which is the enumeration this stands on.
         evidence: Evidence::Enumerated,
+        unread: None,
     }
 }
 

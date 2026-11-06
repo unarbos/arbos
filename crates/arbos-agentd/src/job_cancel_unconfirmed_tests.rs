@@ -174,6 +174,7 @@ fn the_chat_line_promises_nothing_more_arrives_only_when_the_reap_could_look() {
             killed: 1,
             survivors: Vec::new(),
             evidence: Evidence::Enumerated,
+            unread: None,
         },
     }];
 

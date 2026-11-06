@@ -52,7 +52,7 @@ use arbos_core::route::Harness;
 
 use crate::agent::Agent;
 use crate::harness::StartRequest;
-use crate::isolation::Evidence;
+use crate::isolation::{Evidence, UnreadCause};
 use crate::status::tests::test_agent_with_pi;
 
 const CHAT: &str = "01TESTCHATSWEEPCONTEND0001";
@@ -403,6 +403,21 @@ async fn a_sweep_that_cannot_read_an_adapter_keeps_the_session_and_says_it_could
     assert!(
         !sweep.clean(),
         "and must not be read as a clean sweep: {sweep:?}"
+    );
+
+    // The cause and the ids, machine-readably, because "unconfirmed" on its own does not tell an
+    // operator or a canary which of the three causes it was looking at.
+    let unread = sweep.unread.as_ref().expect("the skip is reported");
+    assert_eq!(unread.cause, UnreadCause::AdapterLockContended);
+    assert_eq!(
+        unread.cause.as_str(),
+        "adapter_lock_contended",
+        "the token is what the audit record carries; changing it breaks every reader"
+    );
+    assert_eq!(
+        unread.sessions,
+        vec![live.clone()],
+        "the skipped session must be named, not merely counted"
     );
 
     let _ = stopping.await;
