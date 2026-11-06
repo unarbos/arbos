@@ -1,10 +1,23 @@
 name: Swift iOS 27 (advisory)
 
+# DISABLED SINCE 2026-10-31, AND NOT CURRENTLY RUNNING. GitHub holds this workflow in
+# `disabled_manually` state, so neither trigger below fires; its last run of any kind was
+# 2026-10-31T23:08Z. Nothing refuses on its absence — it is not a gate in scripts/merge/checks.sh —
+# so the iOS 27 coverage this file describes is NOT being obtained today, and has not been for the
+# whole time this notice has been missing from it. Re-enabling it needs Jacob's yes: the hosted
+# pools are billable, and who switched it off, and why, is recorded nowhere.
+#
+# `Swift core check` (.github/workflows/swift-core-check.yml) is the only live Swift gate on push
+# and pull request, and it runs on GitHub's hosted `macos-15`. Neither Swift check runs on the
+# self-hosted EC2 Mac: `arbos-mac` serves ios.yml's TestFlight lane and release.yml's Mac job.
+#
+# What this lane covers when it is switched on, which is still accurate and still worth reading:
+#
 # The Swift core check's build and `fastlane test`, on GitHub's hosted `xcode-27` image (a public
 # preview): the toolchain and simulator testers' builds meet, which the macos-15 gate has neither of
 # (Xcode 26.3, iOS 26.2). Advisory only. It is its own workflow file so nothing in it can feed the
 # Swift core check's jobs or its verdict: a red, cancelled or queued run here says nothing about
-# that check. The EC2 Mac stays the real gate.
+# that check.
 
 on:
   push:
