@@ -2358,6 +2358,10 @@ fn render_row(
         .h(px(ROW_HEIGHT))
         .my(px(ROW_INSET_Y))
         .rounded(px(ROW_RADIUS))
+        .debug_selector({
+            let id = id.clone();
+            move || format!("row-{id}")
+        })
         .map(|el| {
             if lifted {
                 highlight::lifted(el, theme)
@@ -4319,11 +4323,10 @@ mod status_cell_tests {
     use gpui::{AppContext as _, Bounds, Entity, Pixels, TestAppContext, VisualTestContext};
     use tokio::sync::mpsc;
 
-    use super::RowStatus;
+    use super::{RowStatus, ROW_HEIGHT};
     use crate::app::AppState;
     use crate::model::{Chat, Message, Person, Project, SpaceKind};
     use crate::sync::{ClientCommand, SyncEvent, SyncSource};
-    use crate::ui::marks::UNREAD_PILL_H;
     use crate::ui::motion::PulseClock;
     use crate::ui::shell::Shell;
     use crate::ui::theme::{Surface, Theme};
@@ -4486,30 +4489,23 @@ mod status_cell_tests {
         f32::from(b.origin.y) + f32::from(b.size.height) / 2.0
     }
 
-    /// The spinner sits exactly where the dot sat: its right edge is the time
-    /// label's right edge (the unread dot's too), it is centred on the preview
-    /// line, and it is the fixed cell. The unread row keeps its accent dot,
-    /// the quiet row shows nothing, the typing DM keeps its green pulse.
+    /// The spinner and the unread dot are the same cell in the same place:
+    /// at the right end of the preview line, sharing a right edge, centred on
+    /// that line. The row carries no time to sit under any more
+    /// (`docs/mac-design-rules.md` § Row contents), so the cell's own
+    /// geometry is what holds the slot still — which is the reason the dot
+    /// replaced the count pill, and this test is where that is checked.
     #[gpui::test]
-    fn the_spinner_sits_under_the_time_where_the_dot_was(cx: &mut TestAppContext) {
+    fn the_spinner_and_the_dot_are_one_cell_at_the_lines_end(cx: &mut TestAppContext) {
         let (_rt, _state, _shell, vcx) = mount(cx);
         let spinner = vcx
             .debug_bounds("row-status-working-working")
             .expect("the working agent's row draws the spinner");
-        let time = vcx
-            .debug_bounds("row-time-working")
-            .expect("its time label");
         let line = vcx
             .debug_bounds("row-preview-line-working")
             .expect("its preview line");
         assert_eq!(f32::from(spinner.size.width), CELL_W, "cell width");
         assert_eq!(f32::from(spinner.size.height), CELL_H, "cell height");
-        assert!(
-            close(right(spinner), right(time)),
-            "spinner right {} = time right {}",
-            right(spinner),
-            right(time)
-        );
         assert!(
             close(centre_y(spinner), centre_y(line)),
             "spinner centre {} = preview line centre {}",
@@ -4517,30 +4513,39 @@ mod status_cell_tests {
             centre_y(line)
         );
         assert!(
-            f32::from(spinner.origin.y)
-                > f32::from(time.origin.y) + f32::from(time.size.height) - 1.0,
-            "under the time, not beside it"
+            close(right(spinner), right(line)),
+            "spinner right {} = preview line right {}",
+            right(spinner),
+            right(line)
         );
 
-        let pill = vcx
+        assert!(
+            vcx.debug_bounds("row-time-working").is_none(),
+            "no row prints a time any more"
+        );
+        assert!(
+            vcx.debug_bounds("row-handle-dm").is_none(),
+            "no row prints an @handle any more"
+        );
+
+        let dot = vcx
             .debug_bounds("row-status-unread-unread")
-            .expect("the unread agent's row shows the count pill (never a dot)");
-        assert_eq!(f32::from(pill.size.height), UNREAD_PILL_H);
-        assert!(
-            f32::from(pill.size.width) >= UNREAD_PILL_H,
-            "at least as wide as tall"
+            .expect("the unread agent's row shows the dot");
+        assert_eq!(
+            f32::from(dot.size.width),
+            CELL_W,
+            "the dot takes the cell, so the row holds still when the mark changes"
+        );
+        assert_eq!(f32::from(dot.size.height), CELL_H);
+        assert_eq!(
+            dot.size, spinner.size,
+            "spinner and dot are the same box: that is the whole point of the cell"
         );
         assert!(
-            close(
-                right(pill),
-                right(vcx.debug_bounds("row-time-unread").expect("time"))
-            ),
-            "the pill ends under its time too"
+            close(right(dot), right(spinner)),
+            "dot and spinner share the right edge"
         );
-        assert!(
-            close(right(pill), right(spinner)),
-            "pill and spinner share the right edge under the time"
-        );
+
         assert!(
             vcx.debug_bounds("row-status-working-unread").is_none(),
             "an unread row that is not working shows no spinner"
@@ -4633,17 +4638,21 @@ mod status_cell_tests {
         );
     }
 
-    /// Where a row's `@handle` sits against its own preview line — the one
-    /// measure that is the same for every DM row whatever its name is drawn with.
-    fn handle_offset(vcx: &mut VisualTestContext, id: &'static str) -> (f32, f32) {
-        let handle = vcx
+    /// Where a row's preview line sits inside the row, and how tall the row
+    /// is — the two measures that are the same for every DM row whatever its
+    /// name is drawn with. This used to probe the `@handle`, which the row no
+    /// longer carries (`docs/mac-design-rules.md` § Row contents); the
+    /// regression it guards is about the *name*, so the probe moved rather
+    /// than the test going away.
+    fn row_metrics(vcx: &mut VisualTestContext, id: &'static str) -> (f32, f32) {
+        let row = vcx
             .debug_bounds(match id {
-                "dm" => "row-handle-dm",
-                "dm-emoji" => "row-handle-dm-emoji",
-                "dm-mixed" => "row-handle-dm-mixed",
+                "dm" => "row-dm",
+                "dm-emoji" => "row-dm-emoji",
+                "dm-mixed" => "row-dm-mixed",
                 _ => unreachable!(),
             })
-            .unwrap_or_else(|| panic!("{id}: the DM row shows its @handle"));
+            .unwrap_or_else(|| panic!("{id}: the DM row"));
         let line = vcx
             .debug_bounds(match id {
                 "dm" => "row-preview-line-dm",
@@ -4653,16 +4662,17 @@ mod status_cell_tests {
             })
             .unwrap_or_else(|| panic!("{id}: its preview line"));
         (
-            f32::from(line.origin.y) - f32::from(handle.origin.y),
-            f32::from(handle.size.height),
+            f32::from(line.origin.y) - f32::from(row.origin.y),
+            f32::from(row.size.height),
         )
     }
 
     /// [feedback emoji-name-handle-offset-mac-2026-10-28]: a DM whose person is
-    /// named with one emoji (and one with a mixed name) draws its `@handle` at
-    /// the same height as a text name's — and the rows stay the same height.
+    /// named with one emoji (and one with a mixed name) lays out exactly as a
+    /// text name's does — same preview line, same row height. A taller glyph
+    /// in the name must not push the row around.
     #[gpui::test]
-    fn an_emoji_name_keeps_the_dm_rows_handle_where_text_names_have_it(cx: &mut TestAppContext) {
+    fn an_emoji_name_lays_the_dm_row_out_as_a_text_name_does(cx: &mut TestAppContext) {
         let (_rt, state, shell, vcx) = mount(cx);
         let now = crate::model::now_ms();
         state.update(vcx, |s, cx| {
@@ -4692,23 +4702,21 @@ mod status_cell_tests {
             shell.update(vcx, |_, cx| cx.notify());
             vcx.run_until_parked();
         }
-        let text = handle_offset(vcx, "dm");
-        let emoji = handle_offset(vcx, "dm-emoji");
-        let mixed = handle_offset(vcx, "dm-mixed");
+        let text = row_metrics(vcx, "dm");
+        let emoji = row_metrics(vcx, "dm-emoji");
+        let mixed = row_metrics(vcx, "dm-mixed");
         assert_eq!(
             emoji, text,
-            "emoji name: handle offset / height as for text"
+            "emoji name: preview line offset / row height as for text"
         );
         assert_eq!(
             mixed, text,
-            "mixed name: handle offset / height as for text"
+            "mixed name: preview line offset / row height as for text"
         );
-        let row_h = |vcx: &mut VisualTestContext, sel: &'static str| {
-            f32::from(vcx.debug_bounds(sel).expect(sel).size.height)
-        };
-        let text_h = row_h(vcx, "row-preview-line-dm");
-        assert_eq!(row_h(vcx, "row-preview-line-dm-emoji"), text_h);
-        assert_eq!(row_h(vcx, "row-preview-line-dm-mixed"), text_h);
+        assert_eq!(
+            text.1, ROW_HEIGHT,
+            "and every one of them is the reference's row"
+        );
     }
 }
 
@@ -4858,7 +4866,7 @@ mod pin_tests {
             );
         }
         assert!(
-            vcx.debug_bounds("row-time-arbos").is_some(),
+            vcx.debug_bounds("row-preview-line-arbos").is_some(),
             "the list is drawn"
         );
     }
@@ -4886,8 +4894,14 @@ mod pin_tests {
         let affine = vcx
             .debug_bounds("row-pin-affine")
             .expect("Affine's pin mark");
-        let arbos = vcx.debug_bounds("row-time-arbos").expect("Arbos, unpinned");
-        let lium = vcx.debug_bounds("row-time-lium").expect("Lium, unpinned");
+        // The row's preview line stands for the row; it used to be the time,
+        // which no row prints now (`docs/mac-design-rules.md` § Row contents).
+        let arbos = vcx
+            .debug_bounds("row-preview-line-arbos")
+            .expect("Arbos, unpinned");
+        let lium = vcx
+            .debug_bounds("row-preview-line-lium")
+            .expect("Lium, unpinned");
         assert!(top(header) < top(dm), "header above the first pin");
         assert!(
             top(dm) < top(srv) && top(srv) < top(affine),
