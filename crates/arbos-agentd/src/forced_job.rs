@@ -50,17 +50,9 @@ fn word_key(w: &str) -> String {
 /// Elided before matching rather than written into [`FORCES`] as more phrases, because they
 /// combine: a phrase list would need every count against every cue. Elision is also why
 /// "start a new job" and "as a separate job" are read as the orders they plainly are.
+///
+/// The counts proper are not here. They are derived by [`is_ordinal`], for the reason below.
 const COUNTING_WORDS: &[&str] = &[
-    "second",
-    "third",
-    "fourth",
-    "fifth",
-    "sixth",
-    "2nd",
-    "3rd",
-    "4th",
-    "5th",
-    "6th",
     "another",
     "separate",
     "additional",
@@ -71,9 +63,82 @@ const COUNTING_WORDS: &[&str] = &[
     "concurrent",
 ];
 
-/// Is this word key one [`COUNTING_WORDS`] elides?
+/// Ordinals whose stem changes shape before the ending, so no rule generates them. Seven words,
+/// and that is all of them in English — a closed set, unlike the ordinals themselves.
+const IRREGULAR_ORDINALS: &[&str] = &[
+    "first", "second", "third", "fifth", "eighth", "ninth", "twelfth",
+];
+
+/// Cardinals that take a plain `th`: "four" → "fourth", "nineteen" → "nineteenth", "hundred" →
+/// "hundredth". The stems rather than the ordinals, because the ordinals are what is derived.
+const PLAIN_TH_CARDINALS: &[&str] = &[
+    "four",
+    "six",
+    "seven",
+    "ten",
+    "eleven",
+    "thirteen",
+    "fourteen",
+    "fifteen",
+    "sixteen",
+    "seventeen",
+    "eighteen",
+    "nineteen",
+    "hundred",
+    "thousand",
+    "million",
+];
+
+/// Tens, which form their ordinal by `y` → `ieth` ("twenty" → "twentieth") and their compounds
+/// by prefixing a unit ordinal ("twenty-first").
+const TENS: &[&str] = &[
+    "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety",
+];
+
+/// Is this word key an ordinal — "second", "seventh", "twelfth", "twenty-third", "40th"?
+///
+/// Derived rather than listed, which is the whole point of this function. Bug AA was fixed in
+/// `r10status` by writing "second" through "sixth" into [`COUNTING_WORDS`], and that list is
+/// why it came back: Jacob's `r17status` asked for eight jobs, and the **seventh** and
+/// **eighth** — "As a seventh, separate background job …" — matched nothing and ran as
+/// quick-lane subagents with no job row, exactly as the second and third had a round earlier.
+/// Every phrase in [`FORCES`] is a run of adjacent words, so one unlisted word in the middle of
+/// one breaks the whole match.
+///
+/// A list of ordinals has no end to reach, so extending it to "eighth" would only have moved
+/// the cliff to the ninth job. The rule has no cliff: English builds every ordinal above twelve
+/// out of a stem and an ending, so the stems are listed and the ordinals are generated.
+fn is_ordinal(key: &str) -> bool {
+    if IRREGULAR_ORDINALS.contains(&key) {
+        return true;
+    }
+    // "40th", "21st", "2nd". The suffix is not checked for agreement with the digits: a person
+    // who writes "21th" means the twenty-first, and reading them is the job here.
+    if ["st", "nd", "rd", "th"].iter().any(|end| {
+        key.strip_suffix(end)
+            .is_some_and(|digits| !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()))
+    }) {
+        return true;
+    }
+    // "twentieth". Bare "twenty" is the cardinal and is left alone.
+    if key
+        .strip_suffix("ieth")
+        .is_some_and(|stem| TENS.iter().any(|t| t.strip_suffix('y') == Some(stem)))
+    {
+        return true;
+    }
+    // "twenty-third", which [`word_key`] has already joined into "twentythird". One level of
+    // recursion only: no tens word begins with another, so the remainder carries no tens.
+    if let Some(unit) = TENS.iter().find_map(|t| key.strip_prefix(t)) {
+        return is_ordinal(unit);
+    }
+    key.strip_suffix("th")
+        .is_some_and(|stem| PLAIN_TH_CARDINALS.contains(&stem))
+}
+
+/// Is this word key one that counts an order rather than changing it, and is therefore elided?
 fn counts_only(key: &str) -> bool {
-    COUNTING_WORDS.contains(&key)
+    COUNTING_WORDS.contains(&key) || is_ordinal(key)
 }
 
 /// The word keys of a message, with the empty ones and the counting words dropped.
@@ -306,6 +371,78 @@ mod tests {
             "Compare them as an additional background task",
         ] {
             assert!(forces_a_job(ask), "{ask}");
+        }
+    }
+
+    /// Bug AA's return, in Jacob's `r17status` words. He asked for eight background jobs in one
+    /// burst; the seventh and eighth matched nothing, because the list of counts stopped at
+    /// "sixth". Round 10 fixed the second and third by writing them down, which is precisely
+    /// why the seventh and eighth broke.
+    #[test]
+    fn the_round_seventeen_asks_past_the_end_of_the_old_list_force_a_job() {
+        for ask in [
+            "As a seventh, separate background job, count the files under /etc",
+            "As an eighth, separate background job, report the kernel version",
+        ] {
+            assert!(forces_a_job(ask), "{ask}");
+        }
+    }
+
+    /// The point of deriving rather than listing: an ordinal nobody would have written down
+    /// still reads as the order it is. If these needed a list entry each, the rule is not a
+    /// rule and the next burst finds the new cliff wherever the list now ends.
+    #[test]
+    fn an_ordinal_no_list_would_have_reached_is_still_only_a_count() {
+        for ask in [
+            "As a twelfth background job, diff the two trees",
+            "As a twentieth background job, check the disk",
+            "As a twenty-third background job, tail that log",
+            "As a fortieth background job, list the mounts",
+            "as a 40th background job, count the lines",
+            "As a hundredth background job, say hello",
+        ] {
+            assert!(forces_a_job(ask), "{ask}");
+        }
+    }
+
+    /// Derivation earns its keep by generating, so it must not generate what it should not. A
+    /// word is a count because it is an ordinal, not because it ends in the same two letters.
+    #[test]
+    fn a_word_that_merely_ends_in_th_is_not_a_count() {
+        for word in [
+            "worth",
+            "month",
+            "both",
+            "north",
+            "health",
+            "growth",
+            "depth",
+            "path",
+            "faith",
+            "truth",
+            "length",
+            "bandwidth",
+            "twenty",
+            "nine",
+        ] {
+            assert!(
+                !counts_only(word),
+                "{word} is not a count and must not be elided"
+            );
+        }
+    }
+
+    /// The elision must not swallow a word the match needs. "Fourth" leaving a sentence is only
+    /// safe while the sentence that remains says the same thing.
+    #[test]
+    fn eliding_a_count_does_not_invent_an_order_that_was_not_given() {
+        for ask in [
+            "the fourth test is failing, have a look",
+            "what is the seventh line of that file",
+            "read the twelfth paragraph and tell me what it says",
+            "the first background job finished, what did it say",
+        ] {
+            assert!(!forces_a_job(ask), "{ask}");
         }
     }
 
