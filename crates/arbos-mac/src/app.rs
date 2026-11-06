@@ -2081,6 +2081,14 @@ impl AppState {
                 handle,
                 active,
             } => {
+                // My own account, on any device, is never a typing row ([feedback
+                // own-typing-row-mac-2026-11-05]). The relay frame is dropped a
+                // layer down only when it came from THIS device
+                // (`RoomAction::Presence.mine` compares device ids), so my phone's
+                // keystrokes arrive here looking like a stranger's.
+                if self.is_me_handle(&handle) {
+                    return;
+                }
                 let entry = self.typing.entry(chat_id).or_default();
                 entry.retain(|(h, _)| *h != handle);
                 if active {
@@ -9730,6 +9738,14 @@ impl AppState {
                     String::new()
                 }
             })
+    }
+
+    /// Is `handle` the signed-in account — whichever device it reached us from?
+    /// Case-insensitive: a login is one identity however it is spelled, and the
+    /// sending device need not spell it the way this one stored it.
+    pub fn is_me_handle(&self, handle: &str) -> bool {
+        let me = self.me_handle();
+        !me.is_empty() && me.eq_ignore_ascii_case(handle)
     }
 
     /// The signed-in user's display name, else their handle.
