@@ -5279,16 +5279,33 @@ impl Agent {
                     "no running job matched; list_jobs shows what is open in this chat".into()
                 }));
             }
+            let note = "The job you named had already finished, so there was no job to cancel — \
+                        but work left running by a worker that no live job row names was found \
+                        and swept. Report what was killed and what survived. Do not say this \
+                        work belonged to the job the user named: it belongs to no live row, \
+                        which is why it needed sweeping, and nothing here establishes whose it \
+                        was.";
+            // This path answers the user, so it leaves a line, on the same rule the row-less
+            // return below follows: a successful answer that records nothing is a hole in the
+            // guard's record even when the answer itself is honest. The evidence is the reap's
+            // own — an `Unconfirmed` sweep that nonetheless listed survivors must not be
+            // written down as a confirmed one.
+            tracing::info!(
+                jobs = 0,
+                asks = 0,
+                evidence = %unreachable.evidence,
+                checked = unreachable.evidence.proven(),
+                found = unreachable.found,
+                killed = unreachable.killed,
+                survivors = ?unreachable.survivors,
+                note = %note,
+                "stop_job answered"
+            );
             return Ok(json!({
                 "stopped": [],
                 "unnamed_processes_killed": unreachable.killed,
                 "unnamed_processes_still_alive": unreachable.survivors,
-                "note": "The job you named had already finished, so there was no job to cancel — \
-                         but work left running by a worker that no live job row names was found \
-                         and swept. Report what was killed and what survived. Do not say this \
-                         work belonged to the job the user named: it belongs to no live row, \
-                         which is why it needed sweeping, and nothing here establishes whose it \
-                         was.",
+                "note": note,
             }));
         }
         if stopped.is_empty() {

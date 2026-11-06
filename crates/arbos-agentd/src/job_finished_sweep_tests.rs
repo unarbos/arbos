@@ -251,6 +251,83 @@ async fn a_cancel_naming_a_finished_job_sweeps_the_work_it_left() {
     );
 }
 
+/// Collects the message of every event emitted while it is installed.
+#[derive(Clone, Default)]
+struct Messages(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+impl Messages {
+    fn count(&self, needle: &str) -> usize {
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|m| m.contains(needle))
+            .count()
+    }
+}
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Messages {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        struct Message(Option<String>);
+        impl tracing::field::Visit for Message {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "message" {
+                    self.0 = Some(format!("{value:?}"));
+                }
+            }
+        }
+        let mut found = Message(None);
+        event.record(&mut found);
+        if let Some(message) = found.0 {
+            self.0.lock().unwrap().push(message);
+        }
+    }
+}
+
+/// The finished-job sweep answers the user, so it must leave exactly one `stop_job answered`
+/// line behind — the record the honesty guard rests on and the canary scrapes.
+///
+/// This is the return path this change *added*, and it is the one most easily left silent: it
+/// is reached only when no job row and no ask matched, so nothing further down the function
+/// runs. Red before the emission site was added, with zero lines for an answer the user was
+/// nonetheless given. Two lines would be the other failure — one path recording twice is what
+/// a bad merge leaves.
+#[tokio::test]
+async fn the_finished_job_sweep_leaves_exactly_one_record() {
+    let _one = exclusive().await;
+    let (agent, _root, chat, job, writer) = a_finished_job_with_work_still_running().await;
+    assert!(
+        is_running(writer.pid) && writer.is_still_appending(),
+        "the premise again: there is live work for the sweep to find"
+    );
+
+    let messages = Messages::default();
+    let answer = {
+        let _log =
+            tracing::subscriber::set_default(tracing_subscriber::layer::SubscriberExt::with(
+                tracing_subscriber::registry(),
+                messages.clone(),
+            ));
+        let _turn = agent.test_hold_turn_for(&chat, &ulid()).await;
+        agent.hook_stop_job(&job).await
+    };
+
+    assert!(
+        answer.is_ok(),
+        "the premise of the record is that there was an answer to record: {answer:?}"
+    );
+    assert_eq!(
+        messages.count("stop_job answered"),
+        1,
+        "an answer the user is given must leave one line, no more and no fewer: {:?}",
+        messages.0.lock().unwrap()
+    );
+}
+
 /// `stop_job("latest")` must resolve a finished job, not refuse because nothing is running.
 ///
 /// Without this the moved sweep is unreachable by the phrasing users actually type: `latest`
