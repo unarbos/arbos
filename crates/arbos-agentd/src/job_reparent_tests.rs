@@ -50,7 +50,7 @@ use arbos_core::doc::UserMessageOpts;
 use serde_json::json;
 
 use crate::agent::{Agent, StoppedJob};
-use crate::isolation::{ProcessTree, Sweep, WORKER_MARK_ENV};
+use crate::isolation::{Evidence, ProcessTree, Sweep, WORKER_MARK_ENV};
 use crate::status::tests::test_agent;
 
 const CHAT: &str = "01TESTCHATJOBREPARENT00001";
@@ -679,7 +679,7 @@ async fn the_read_back_finds_a_process_that_left_every_kernel_set() {
     let sweep = tree.kill();
     assert_eq!(sweep.survivors, Vec::<u32>::new(), "{sweep:?}");
     assert!(!alive(escapee.pid), "pid {} survived", escapee.pid);
-    assert!(sweep.checked);
+    assert!(sweep.evidence.proven());
 
     escapee.reap();
     let _ = std::fs::remove_dir_all(&root);
@@ -709,7 +709,7 @@ async fn a_cancel_that_left_a_process_running_names_it_and_unlocks_the_guard() {
             found: 4,
             killed: 3,
             survivors: vec![2576],
-            checked: true,
+            evidence: Evidence::Enumerated,
         },
     }];
 

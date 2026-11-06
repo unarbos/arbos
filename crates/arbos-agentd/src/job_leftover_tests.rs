@@ -39,7 +39,7 @@ use arbos_core::doc::UserMessageOpts;
 use serde_json::json;
 
 use crate::agent::{Agent, StoppedJob};
-use crate::isolation::{ProcessTree, Sweep};
+use crate::isolation::{Evidence, ProcessTree, Sweep};
 use crate::status::tests::test_agent;
 
 const CHAT: &str = "01TESTCHATJOBLEFTOVER00001";
@@ -308,7 +308,7 @@ fn a_cancel_that_cannot_kill_everything_says_so_instead_of_claiming_a_cancel() {
             found: 2,
             killed: 1,
             survivors: vec![561],
-            checked: true,
+            evidence: Evidence::Enumerated,
         },
     }];
 
@@ -340,7 +340,7 @@ fn a_cancel_that_cannot_kill_everything_says_so_instead_of_claiming_a_cancel() {
             found: 2,
             killed: 2,
             survivors: Vec::new(),
-            checked: true,
+            evidence: Evidence::Enumerated,
         },
         ..leaky[0].clone()
     }];

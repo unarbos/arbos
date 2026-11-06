@@ -97,40 +97,137 @@ pub struct Sweep {
     /// Pids still alive after the read-back, each one a process the caller must name rather
     /// than quietly leave to the user.
     pub survivors: Vec<u32>,
-    /// Did this sweep read the kernel at all?
+    /// What this sweep's answer rests on.
+    pub evidence: Evidence,
+}
+
+/// What a sweep's answer rests on, which is a different question from what it found.
+///
+/// An empty survivor list is reached three ways and the box used to print one sentence for all
+/// three. Bug AE was the first half of that: `stop_job` reported "every process it had started
+/// is dead" from a sweep that had found nothing to look at, the agent repeated it, and the
+/// guard then refused `kill 1700 1701 1702` because no pid had been reported unkillable. The
+/// `checked: bool` that replaced it kept the second half, because a sweep that enumerated zero
+/// processes still set it — and zero is what a sweep looking in the wrong place sees.
+///
+/// **Bug AP, and the rule is Jacob's: nothing is `Enumerated` unless the scan actually
+/// enumerated something.** The burden is on the scan to have seen a process, not on the caller
+/// to argue that an empty answer was probably right.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Evidence {
+    /// The scan cannot stand behind an answer: it had no handle to look with, it could not read
+    /// `/proc`, or it looked and enumerated no process at all.
     ///
-    /// `false` is the default, because a cancel that looked at nothing knows nothing. Test5
-    /// round 13, bug AE: `stop_job` reported "every process it had started is dead" from a
-    /// sweep that had found nothing to look at, the agent repeated it, and the guard then
-    /// refused `kill 1700 1701 1702` because no pid had been reported unkillable.
-    pub checked: bool,
+    /// The default, because a scan that has not earned a claim must not be able to make one by
+    /// being constructed carelessly. The last of the three is the case that reads like success
+    /// and is not: an enumeration that returns nothing says the handles matched nothing, which
+    /// is equally true of a tree that has died and of a tree the handles never named. Forest,
+    /// agentd 0.1.199: two writers kept growing for 45 s under a cgroup the cancel never asked
+    /// about, and the sweep that asked about the wrong one reported a clean kill.
+    #[default]
+    Unconfirmed,
+    /// The scan enumerated at least one process and read each of them back by pid after the
+    /// signal. The only outcome from which "it was checked and it is dead" may be said.
+    Enumerated,
+    /// There was nothing of this kind to look at — no worker was ever started, or no candidate
+    /// survived the filter — so no process of it can exist.
+    ///
+    /// Not a claim about processes. It is the answer to a question that does not arise, and it
+    /// is kept apart from [`Self::Enumerated`] so that nothing turns it into one: a count of
+    /// zero processes checked is the shape bug AE's sentence was printed from.
+    Nothing,
+}
+
+impl Evidence {
+    /// May "every process was checked and is dead" be said from this? Only where something was
+    /// read.
+    pub fn proven(self) -> bool {
+        matches!(self, Self::Enumerated)
+    }
+
+    /// Two pieces of evidence about one cancel, read as one.
+    ///
+    /// [`Self::Unconfirmed`] wins over everything and [`Self::Nothing`] yields to everything.
+    /// One tree the cancel could not read with is enough to make "every process is dead" a
+    /// claim the box cannot support, however well the others went — and a worker that never
+    /// existed neither helps nor harms the answer about one that did.
+    pub fn and(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Unconfirmed, _) | (_, Self::Unconfirmed) => Self::Unconfirmed,
+            (Self::Enumerated, _) | (_, Self::Enumerated) => Self::Enumerated,
+            (Self::Nothing, Self::Nothing) => Self::Nothing,
+        }
+    }
+}
+
+impl std::fmt::Display for Evidence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Unconfirmed => "unconfirmed",
+            Self::Enumerated => "enumerated",
+            Self::Nothing => "nothing_to_check",
+        })
+    }
 }
 
 impl Sweep {
-    /// A job with no worker: there were never any processes, and saying so is not a guess.
+    /// There was nothing to check: no worker, or no candidate. Saying so is not a guess, and it
+    /// is not a claim that anything was killed.
     pub fn nothing_to_check() -> Self {
         Self {
-            checked: true,
+            evidence: Evidence::Nothing,
             ..Self::default()
         }
     }
 
-    /// The job's work really stopped — which needs the kernel to have been read, not only an
-    /// empty survivor list from a sweep that never looked.
+    /// What this sweep may report as `processes_checked`, and [`None`] where the honest answer
+    /// is no field at all.
+    ///
+    /// A job whose worker never existed has nothing to report as checked, and a vacuously
+    /// `true` there is bug AE's sentence with the numbers filled in. Reporting no field rather
+    /// than a convenient one is the convention the row-less cancel path already follows.
+    pub fn checked(&self) -> Option<bool> {
+        match self.evidence {
+            Evidence::Nothing => None,
+            e => Some(e.proven()),
+        }
+    }
+
+    /// Report a sweep that enumerated nothing as a read of the kernel anyway, on the strength
+    /// of an enumeration its caller made that it did not.
+    ///
+    /// The one admissible way out of [`Evidence::Unconfirmed`], and the reason it exists is
+    /// that the strict rule alone cannot tell the two empty answers apart *from inside a single
+    /// sweep*. A cancel can: it can enumerate the worker's tree while the worker is still
+    /// alive, when a handle that names the right worker must match at least the worker's own
+    /// process. A tree that matched something then and matches nothing now has been read across
+    /// the kill. A tree that matched nothing either time is Forest, and stays unconfirmed.
+    ///
+    /// Only reachable with nothing found, because a sweep that found something has already
+    /// earned [`Evidence::Enumerated`] on its own terms, and only from `Unconfirmed`, so this
+    /// can never turn "there was nothing to check" into a claim that something was killed.
+    pub fn backed_by_enumeration(mut self) -> Self {
+        if self.evidence == Evidence::Unconfirmed && self.found == 0 {
+            self.evidence = Evidence::Enumerated;
+        }
+        self
+    }
+
+    /// The job's work really stopped — which needs the kernel to have been read, or there to
+    /// have been nothing to read about. Not an empty survivor list from a sweep that looked
+    /// with handles that named nothing.
     pub fn clean(&self) -> bool {
-        self.checked && self.survivors.is_empty()
+        self.evidence != Evidence::Unconfirmed && self.survivors.is_empty()
     }
 
     /// Two sweeps of one cancel, read as one answer.
     ///
-    /// A job can have left processes under more than one worker (bug AO), and the user is owed a
-    /// single statement about the job. `checked` is the conjunction and not the disjunction: one
-    /// tree the cancel could not read with is enough to make "every process is dead" a claim the
-    /// box cannot support, however well the others went.
+    /// A job can have left processes under more than one worker (bug AO), and the user is owed
+    /// a single statement about the job.
     pub fn and(mut self, other: Self) -> Self {
         self.found += other.found;
         self.killed += other.killed;
-        self.checked &= other.checked;
+        self.evidence = self.evidence.and(other.evidence);
         self.survivors.extend(other.survivors);
         self.survivors.sort_unstable();
         self.survivors.dedup();
@@ -280,7 +377,16 @@ impl ProcessTree {
             found: found.len(),
             killed: found.iter().filter(|p| !survivors.contains(p)).count(),
             survivors,
-            checked: true,
+            // Bug AP. The handles existed, so the guard above let this run — but a tree that
+            // enumerated nothing proves only that these handles matched nothing, and the
+            // handles matching nothing is what a cancel aimed at the wrong worker looks like
+            // from in here. It is indistinguishable from the good case and the good case is
+            // the cheaper one to get wrong, so it is not claimed.
+            evidence: if found.is_empty() {
+                Evidence::Unconfirmed
+            } else {
+                Evidence::Enumerated
+            },
         }
     }
 }
@@ -388,17 +494,60 @@ fn read_stat(pid: u32) -> Option<ProcStat> {
     parse_stat(&std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?)
 }
 
+/// Where the `/proc` walks read.
+///
+/// A function rather than a constant so the tests can point the walks at a directory that holds
+/// no process and exercise the branch where the scan cannot read the kernel — which is not
+/// reproducible on a box whose `/proc` works, and is exactly the branch bug AP's second half is
+/// about. In a release build this compiles to the constant.
+#[cfg(not(test))]
+fn proc_root() -> PathBuf {
+    PathBuf::from("/proc")
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Thread-local and not a global: the test that blinds the walks runs beside tests that
+    /// need the real `/proc`, and must not be able to blind theirs.
+    static PROC_ROOT: std::cell::RefCell<PathBuf> = std::cell::RefCell::new(PathBuf::from("/proc"));
+}
+
+#[cfg(test)]
+fn proc_root() -> PathBuf {
+    PROC_ROOT.with(|p| p.borrow().clone())
+}
+
+/// Point the `/proc` walks of **this thread** at `root` for the rest of the test.
+#[cfg(test)]
+pub fn blind_proc_walks_to(root: &Path) {
+    PROC_ROOT.with(|p| *p.borrow_mut() = root.to_path_buf());
+}
+
+/// Every pid directory in `/proc`, or [`None`] where the walk could not read the kernel.
+///
+/// **Bug AP's second conflation.** Every walk below returned an empty vector for two unrelated
+/// facts: that nothing on the box matched, and that the walk could not look. The caller then
+/// read the empty vector as "there is nothing", which is a claim it had not earned.
+///
+/// A missing or unreadable `/proc` is one way to get here. So is a `/proc` that holds no
+/// process at all, which is not a box this code can be running on: agentd is itself a process
+/// and must appear in its own listing. Either way the walk has failed rather than found an
+/// empty box, and the difference is [`Evidence::Unconfirmed`] instead of a clean answer.
+fn proc_pids() -> Option<Vec<(u32, PathBuf)>> {
+    let mut out = Vec::new();
+    for e in std::fs::read_dir(proc_root()).ok()?.flatten() {
+        if let Ok(pid) = e.file_name().to_string_lossy().parse::<u32>() {
+            out.push((pid, e.path()));
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
 /// Every process on the box with the stat fields a sweep reads, in one pass of `/proc`.
 fn all_stats() -> Vec<(u32, ProcStat)> {
-    let Ok(entries) = std::fs::read_dir("/proc") else {
-        return Vec::new();
-    };
     let mut out = Vec::new();
-    for e in entries.flatten() {
-        let Ok(pid) = e.file_name().to_string_lossy().parse::<u32>() else {
-            continue;
-        };
-        let Ok(stat) = std::fs::read_to_string(e.path().join("stat")) else {
+    for (pid, dir) in proc_pids().unwrap_or_default() {
+        let Ok(stat) = std::fs::read_to_string(dir.join("stat")) else {
             continue;
         };
         if let Some(st) = parse_stat(&stat) {
@@ -415,16 +564,10 @@ fn all_stats() -> Vec<(u32, ProcStat)> {
 /// cannot be read is skipped: the mark is how a cancel finds what escaped it, and a read that
 /// fails is one more reason to report rather than to promise.
 fn marked_procs(mark: &str) -> Vec<u32> {
-    let Ok(entries) = std::fs::read_dir("/proc") else {
-        return Vec::new();
-    };
     let needle = format!("{WORKER_MARK_ENV}={mark}");
     let mut out = Vec::new();
-    for e in entries.flatten() {
-        let Ok(pid) = e.file_name().to_string_lossy().parse::<u32>() else {
-            continue;
-        };
-        let Ok(environ) = std::fs::read(e.path().join("environ")) else {
+    for (pid, dir) in proc_pids().unwrap_or_default() {
+        let Ok(environ) = std::fs::read(dir.join("environ")) else {
             continue;
         };
         if environ
@@ -446,17 +589,15 @@ fn marked_procs(mark: &str) -> Vec<u32> {
 /// from, and nothing read marks it had not been given.
 ///
 /// Same `/proc` read and the same skip-what-cannot-be-read rule as [`marked_procs`].
-pub fn marked_procs_all() -> Vec<(u32, String)> {
-    let Ok(entries) = std::fs::read_dir("/proc") else {
-        return Vec::new();
-    };
+///
+/// [`None`] where the walk could not read `/proc` at all, which [`marked_procs`] can afford to
+/// flatten into "no members" and this cannot: a caller of this decides from an empty result
+/// that there is no unreachable work on the box, and that is only true if it looked (bug AP).
+pub fn marked_procs_all() -> Option<Vec<(u32, String)>> {
     let prefix = format!("{WORKER_MARK_ENV}=");
     let mut out = Vec::new();
-    for e in entries.flatten() {
-        let Ok(pid) = e.file_name().to_string_lossy().parse::<u32>() else {
-            continue;
-        };
-        let Ok(environ) = std::fs::read(e.path().join("environ")) else {
+    for (pid, dir) in proc_pids()? {
+        let Ok(environ) = std::fs::read(dir.join("environ")) else {
             continue;
         };
         let found = environ.split(|b| *b == 0).find_map(|entry| {
@@ -467,7 +608,7 @@ pub fn marked_procs_all() -> Vec<(u32, String)> {
             out.push((pid, mark));
         }
     }
-    out
+    Some(out)
 }
 
 /// The session id a mark names, for a mark that names one at all.
@@ -499,16 +640,20 @@ pub fn session_of(mark: &str) -> Option<&str> {
 /// it garbage would SIGKILL the box's own agent mid-turn. `pi-main` is not special here. It is
 /// simply one of the marks that never proves itself dead, which is also true of every name a
 /// future caller invents.
-pub fn orphan_marked_procs(is_dead_session: impl Fn(&str) -> bool) -> Vec<(u32, String)> {
+///
+/// [`None`] where the `/proc` walk could not read the kernel, which is carried out rather than
+/// flattened into an empty list: "no orphan was found" and "nothing was looked at" are the two
+/// statements bug AP exists to keep apart, and this is where they would otherwise merge.
+pub fn orphan_marked_procs(is_dead_session: impl Fn(&str) -> bool) -> Option<Vec<(u32, String)>> {
     let me = std::process::id();
-    let mut out: Vec<(u32, String)> = marked_procs_all()
+    let mut out: Vec<(u32, String)> = marked_procs_all()?
         .into_iter()
         .filter(|(pid, mark)| {
             *pid > 1 && *pid != me && session_of(mark).is_some_and(&is_dead_session)
         })
         .collect();
     out.sort_unstable();
-    out
+    Some(out)
 }
 
 /// Kill every process left by a worker whose session is over, and read the kernel back to say
@@ -521,20 +666,27 @@ pub fn orphan_marked_procs(is_dead_session: impl Fn(&str) -> bool) -> Vec<(u32, 
 ///
 /// Re-enumerated between rounds, so a process the set forks while it is dying is caught on the
 /// next pass instead of slipping between the read and the signal.
+///
+/// Three outcomes, not two (bug AP). The walk could not read `/proc`, so nothing may be said:
+/// [`Evidence::Unconfirmed`]. The walk read `/proc` and no process was an orphan, so there was
+/// nothing to check: [`Evidence::Nothing`]. Or orphans were enumerated and read back:
+/// [`Evidence::Enumerated`]. The first two used to be the same empty vector.
 pub fn reap_orphan_workers(is_dead_session: impl Fn(&str) -> bool) -> Sweep {
-    let found = orphan_pids(&is_dead_session);
+    let Some(found) = orphan_pids(&is_dead_session) else {
+        return Sweep::default();
+    };
+    if found.is_empty() {
+        return Sweep::nothing_to_check();
+    }
     let witnesses: Vec<Witness> = found.iter().copied().filter_map(Witness::of).collect();
     for pid in &found {
         signal(*pid);
     }
     let mut alive = Vec::new();
     for attempt in 0..REAP_TRIES {
-        if found.is_empty() {
-            break;
-        }
         std::thread::sleep(REAP_WAIT);
         alive = still_alive(&witnesses);
-        for pid in orphan_pids(&is_dead_session) {
+        for pid in orphan_pids(&is_dead_session).unwrap_or_default() {
             if !alive.contains(&pid) {
                 alive.push(pid);
             }
@@ -553,15 +705,18 @@ pub fn reap_orphan_workers(is_dead_session: impl Fn(&str) -> bool) -> Sweep {
         found: found.len(),
         killed: found.iter().filter(|p| !alive.contains(p)).count(),
         survivors: alive,
-        checked: true,
+        // Reached only with a non-empty `found`, which is the enumeration this stands on.
+        evidence: Evidence::Enumerated,
     }
 }
 
-fn orphan_pids(is_dead_session: &impl Fn(&str) -> bool) -> Vec<u32> {
-    orphan_marked_procs(is_dead_session)
-        .into_iter()
-        .map(|(pid, _)| pid)
-        .collect()
+fn orphan_pids(is_dead_session: &impl Fn(&str) -> bool) -> Option<Vec<u32>> {
+    Some(
+        orphan_marked_procs(is_dead_session)?
+            .into_iter()
+            .map(|(pid, _)| pid)
+            .collect(),
+    )
 }
 
 #[derive(Debug, Clone)]

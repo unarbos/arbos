@@ -26,7 +26,7 @@ use crate::config::Config;
 use crate::harness::{
     AgentEvent, ClaudeCodeAdapter, HarnessAdapter, PiAdapter, PrimeAdapter, StartRequest,
 };
-use crate::isolation::{ProcessTree, Sweep};
+use crate::isolation::{Evidence, ProcessTree, Sweep};
 use crate::llm::{extract_return_contract, Llm};
 use crate::memory::Memory;
 use crate::rpc_child::{ChildExit, RpcChild};
@@ -1132,10 +1132,35 @@ pub(crate) fn stop_job_note(stopped: &[StoppedJob], unreachable: &Sweep) -> Stri
         .collect();
     leftovers.extend(unreachable.survivors.iter().copied());
     if leftovers.is_empty() {
-        if stopped.iter().any(|s| !s.sweep.checked) {
-            return "Every job above reads `cancelled`, but its processes could NOT be checked: agentd has no handle on them (it was restarted since the job started). Do not tell the user the work stopped. Say the job is cancelled and that you cannot confirm the processes it started are gone, and offer to look with `ps`.".to_owned();
+        // Three sentences for three outcomes (bug AP), and the first two used to share one.
+        let jobs = stopped
+            .iter()
+            .fold(Evidence::Nothing, |e, s| e.and(s.sweep.evidence));
+        let (claim, guidance) = match jobs {
+            Evidence::Unconfirmed => (
+                "Every job above reads `cancelled`, but its processes could NOT be checked: either agentd has no handle on them (it was restarted since the job started) or the sweep enumerated no process at all, which is also what a cancel looking in the wrong place sees.",
+                "Do not tell the user the work stopped. Say the job is cancelled and that you cannot confirm the processes it started are gone, and offer to look with `ps`.",
+            ),
+            Evidence::Nothing => (
+                "Every job above reads `cancelled` in its own row, and none of them had a worker running, so there are no processes to account for.",
+                "Say it is cancelled in one line and end the turn. Do not say processes were killed: none were.",
+            ),
+            Evidence::Enumerated => (
+                "Every job above reads `cancelled` in its own row, and every process it had started was checked and is dead: its worker is closed, its tool call is dead and no result or file will arrive from it.",
+                "Say it is cancelled in one line and end the turn.",
+            ),
+        };
+        // The box-wide reap's own verdict, in its own sentence and carrying the same disclaimer
+        // the survivor sentences already carry.
+        //
+        // It is mark-keyed and finds work that belongs to no live row, so nothing in that path
+        // establishes whose it was. Folded into the job-shaped sentence above it would read as
+        // a statement about the jobs the user just named — a misattribution that reads
+        // perfectly well and is wrong, and the opposite error to the one this guard removes.
+        if unreachable.evidence == Evidence::Unconfirmed {
+            return format!("{claim} Separately, and about no job in particular: a worker that died can leave processes running that no job row names, and this cancel could not look for them. Do not tell the user the chat is clear. Say what is true of the jobs above, say you could not check for work that belongs to no job, and offer to look with `ps`.");
         }
-        return "Every job above reads `cancelled` in its own row, and every process it had started was checked and is dead: its worker is closed, its tool call is dead and no result or file will arrive from it. Say it is cancelled in one line and end the turn.".to_owned();
+        return format!("{claim} {guidance}");
     }
     let pids = pid_list(&leftovers);
     format!(
@@ -1257,7 +1282,10 @@ pub(crate) fn stop_line(stopped: &[StoppedJob], unreachable: &Sweep) -> String {
     }
     // Cancelled, nothing found running — but by a sweep that had no handle to look with. The
     // promise below rests on a reading of the kernel, so a cancel that took none cannot make it.
-    if let Some(unchecked) = stopped.iter().find(|s| !s.sweep.checked) {
+    if let Some(unchecked) = stopped
+        .iter()
+        .find(|s| s.sweep.evidence == Evidence::Unconfirmed)
+    {
         return format!(
             "Stopped: {titles}. “{}” reads cancelled, but I could not check whether the \
              processes it started are gone.{orphans}",
@@ -1272,7 +1300,15 @@ pub(crate) fn stop_line(stopped: &[StoppedJob], unreachable: &Sweep) -> String {
     };
     // The promise is dropped where work no job row names is still running. It would be true of
     // the jobs and false of the chat, which is the kind of true sentence bug Z was made of.
-    let (whose, nothing_more) = match (stopped.len(), unreachable.survivors.is_empty()) {
+    //
+    // And dropped equally where the reap could not look (bug AP). An empty survivor list is
+    // what a box with nothing left on it produces and also what a `/proc` that cannot be walked
+    // produces, so resting "nothing more arrives" on emptiness alone makes this sentence the
+    // last place the unchecked claim survives — the one the user actually reads, rather than
+    // the note the model is handed.
+    let accounted_for =
+        unreachable.survivors.is_empty() && unreachable.evidence != Evidence::Unconfirmed;
+    let (whose, nothing_more) = match (stopped.len(), accounted_for) {
         (1, true) => ("Its", ", so nothing more arrives from it"),
         (_, true) => ("Their", ", so nothing more arrives from them"),
         (1, false) => ("Its", ""),
@@ -4338,9 +4374,19 @@ impl Agent {
     /// session is live, the box's own agent because `pi-main` is no session at all. Deriving
     /// the keep set this way is the point: an exclusion list is one catastrophe per name a
     /// future caller forgets, and the main pi child would have been the first of them.
+    ///
+    /// Three outcomes, because the empty answer had two causes and said the same thing for both
+    /// (**bug AP**). A `/proc` walk that could not read returns no mark, exactly as a box with
+    /// no unreachable work does, and this used to answer `checked: true` either way — a
+    /// confident "everything is accounted for" over a tree it had never enumerated, reached on
+    /// every chat-wide stop.
     pub(crate) async fn reap_unreachable_workers(&self) -> Sweep {
+        let Some(marked) = crate::isolation::marked_procs_all() else {
+            tracing::warn!("cancel: /proc could not be read, so unreachable work is unknown");
+            return Sweep::default();
+        };
         let mut dead: HashSet<String> = HashSet::new();
-        for (_pid, mark) in crate::isolation::marked_procs_all() {
+        for (_pid, mark) in marked {
             let Some(session) = crate::isolation::session_of(&mark) else {
                 continue;
             };
@@ -4353,6 +4399,9 @@ impl Agent {
                 dead.insert(session.to_owned());
             }
         }
+        // The walk above read `/proc` and no process on the box belongs to a worker that is
+        // over. There was nothing to check, which is a different sentence from "I checked and
+        // it is dead" and is now recorded as one.
         if dead.is_empty() {
             return Sweep::nothing_to_check();
         }
@@ -4507,6 +4556,22 @@ impl Agent {
         if let Err(e) = adapter.cancel(sid).await {
             tracing::debug!(job = %job_id, error = %e, "cancel: the abort did not land");
         }
+        // Before the stop, and this is the only thing it is for: proof that these handles reach
+        // this worker at all.
+        //
+        // **Bug AP.** The sweep below cannot tell a tree that has died from a tree its handles
+        // never named — both enumerate nothing. Forest asked the kernel about the wrong worker
+        // and got the same empty answer a clean cancel gets, and the box reported a clean kill
+        // over two writers that were still growing. Read once here, while the worker is still
+        // alive and a correct handle must therefore match at least the worker's own process,
+        // the empty answer afterwards is a read of the kernel rather than a blind spot. A tree
+        // that matches nothing at this point is the Forest shape and claims nothing.
+        let resolved = {
+            let t = self.worker_tree(sid).await;
+            tokio::task::spawn_blocking(move || !t.members().is_empty())
+                .await
+                .unwrap_or_default()
+        };
         if let Err(e) = adapter.stop(sid).await {
             tracing::warn!(job = %job_id, error = %e, "cancel: the worker's child did not close");
         }
@@ -4521,6 +4586,18 @@ impl Agent {
             tokio::task::spawn_blocking(move || t.kill())
                 .await
                 .unwrap_or_default()
+        };
+        let sweep = if resolved {
+            sweep.backed_by_enumeration()
+        } else {
+            if sweep.found == 0 {
+                tracing::warn!(
+                    job = %job_id, subagent = %sid, tree = ?tree,
+                    "cancel: these handles matched no process before the stop or after it, so \
+                     nothing is claimed about this worker's processes"
+                );
+            }
+            sweep
         };
         if sweep.clean() {
             self.worker_pgids.lock().await.remove(sid);
@@ -5073,35 +5150,66 @@ impl Agent {
         // outcomes and they decide whether a cancel failure was dishonest or merely incomplete.
         // This is where the difference is actually decided, so this is where it is recorded; the
         // log survives prose a harness cannot parse.
+        let evidence = stopped
+            .iter()
+            .fold(Evidence::Nothing, |e, s| e.and(s.sweep.evidence));
         tracing::info!(
             jobs = stopped.len(),
-            checked = stopped.iter().all(|s| s.sweep.checked),
+            // Both, because they are different questions: `evidence` is which of the three
+            // answers this cancel earned, and `checked` is whether the box may claim a kill.
+            %evidence,
+            checked = evidence.proven(),
             found = stopped.iter().map(|s| s.sweep.found).sum::<usize>(),
             killed = stopped.iter().map(|s| s.sweep.killed).sum::<usize>(),
             survivors = ?stopped.iter().flat_map(|s| s.sweep.survivors.clone()).collect::<Vec<_>>(),
             note = %note,
             "stop_job answered"
         );
-        Ok(json!({
+        let mut answer = json!({
             "stopped": stopped
                 .iter()
-                .map(|s| json!({
-                    "job_id": s.id,
-                    "title": s.title,
-                    "state": s.state,
+                .map(|s| {
+                    let mut row = json!({
+                        "job_id": s.id,
+                        "title": s.title,
+                        "state": s.state,
+                        "processes_killed": s.sweep.killed,
+                        "processes_still_alive": s.sweep.survivors,
+                    });
                     // What the cancel did to the job's processes, read back from the kernel
                     // afterwards — not what it meant to do, and not what it assumes (bug AE).
-                    "processes_checked": s.sweep.checked,
-                    "processes_killed": s.sweep.killed,
-                    "processes_still_alive": s.sweep.survivors,
-                }))
+                    //
+                    // Absent, deliberately, for a job that had no worker: there is nothing to
+                    // report as checked, and a `true` here would be bug AE's claim with the
+                    // numbers filled in. No field rather than a vacuously true one, which is
+                    // the convention the row-less cancel path already follows — do not tidy
+                    // this into a clean-looking `true`.
+                    if let Some(checked) = s.sweep.checked() {
+                        row["processes_checked"] = checked.into();
+                    }
+                    row
+                })
                 .collect::<Vec<_>>(),
             "all_cancelled": stopped.iter().all(StoppedJob::cancelled),
             // Work this cancel found running that belongs to no job row at all (bug AK). Kept
             // apart from the per-job numbers above because no job is answerable for it.
             "unnamed_processes_still_alive": unreachable.survivors,
+            // The same `note` binding the log line above was given, so the two cannot drift.
+            // This one is authoritative: a structured field survives log formatting,
+            // truncation and quoting, and the cancel canary should match on it rather than
+            // scrape the line. The log line is kept because it is the only copy on a box whose
+            // hook response nobody captured.
             "note": note,
-        }))
+        });
+        // Whether the box-wide reap could stand behind its own empty answer (bug AP), kept
+        // apart from the per-job claim for the same reason its survivors are: no job is
+        // answerable for it. Absent where there was simply nothing of the kind to find, by the
+        // same convention as `processes_checked` above — a `true` here over a `/proc` that
+        // could not be walked is precisely the claim this guard exists to stop.
+        if let Some(checked) = unreachable.checked() {
+            answer["unnamed_processes_checked"] = checked.into();
+        }
+        Ok(answer)
     }
 
     /// May the main agent run this `kill`? `Ok(())` to allow it, `Err(reason)` to refuse.

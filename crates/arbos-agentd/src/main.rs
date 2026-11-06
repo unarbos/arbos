@@ -37,6 +37,8 @@ mod job_cancel_real_worker_tests;
 #[cfg(test)]
 mod job_cancel_tests;
 #[cfg(test)]
+mod job_cancel_unconfirmed_tests;
+#[cfg(test)]
 mod job_leftover_tests;
 #[cfg(test)]
 mod job_note_tests;
