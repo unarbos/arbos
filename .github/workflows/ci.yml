@@ -269,7 +269,7 @@ jobs:
           # github.com/llvm/llvm-project/releases/tag/llvmorg-21.1.8, the last 21.x. The digest is
           # the release API's own `assets[].digest` for this file, not one computed from a
           # download, so it is an independent statement of what the asset should be.
-          LLVM_RELEASE: 21.1.8
+          LLVM_RELEASE: 18.0.0
           LLVM_SHA256: b3b7f2801d15d50736acea3c73982994d025b01c2f035b91ae3b49d1b575732b
         run: |
           set -euo pipefail
