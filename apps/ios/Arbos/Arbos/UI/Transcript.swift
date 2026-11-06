@@ -78,8 +78,12 @@ struct Quote: Equatable, Hashable {
 
     /// First words of a message: the whole message on one line (newlines and markdown
     /// flattened), cut on a word boundary; an attachment-only message names its file.
+    ///
+    /// A routine's prompt names its routine instead. Quoting one verbatim put
+    /// `"Tell the user (reply_to 01M6N21WFJQ92GJX6QF1Z…` at the top of the reply that
+    /// answered it — the plumbing, twice over.
     static func text(of message: Message) -> String {
-        line(of: message, maxChars: maxChars)
+        message.routinePromptLabel ?? line(of: message, maxChars: maxChars)
     }
 
     /// A whole message on one line, for quote headers and the composer's reply preview:
@@ -173,6 +177,11 @@ enum RowKind: Equatable {
     /// hidden because you blocked @sam · Unblock") — the blocker alone sees this
     /// ([feedback blocked-state-ios-2026-10-26], Jacob 2026-10-26).
     case hidden(count: Int, sender: String, handle: String, name: String?)
+    /// A routine's prompt, collapsed to one quiet line on the user's side — never a
+    /// bubble (`docs/mac-design-rules.md` § The routine prompt is one quiet line). The
+    /// prompt's own words are not drawn at all: they are an instruction to the agent,
+    /// not a message to read.
+    case routinePrompt(label: String)
     /// Grok Bot question card: bold question, × top-right, lettered answer rows.
     /// `questionId` is nil for a legacy `waiting_user` status line (no `question` part).
     /// `lane`: in a people chat the card sits after the sender's avatar lane, like the bubble it
@@ -485,6 +494,15 @@ enum Transcript {
                                                            quoted: Self.carriesQuote(message, people: people))
             let named = multiParty && runStart
             switch message.role {
+            // A routine's prompt is a user-role message, so every bubble rule applied to
+            // it and a fifteen-line `Tell the user (reply_to 01M…)` drew as a slab. It
+            // collapses to one quiet line and its words are dropped: they address the
+            // agent, not the reader.
+            case .user where message.routinePromptLabel != nil:
+                chunk.append(Row(id: "\(message.id)#routine", messageId: message.id,
+                                 role: .user,
+                                 kind: .routinePrompt(label: message.routinePromptLabel ?? "Routine"),
+                                 createdAt: message.createdAt))
             case .user:
                 var hasImage = false
                 var hasAttachment = false
@@ -866,7 +884,9 @@ enum Transcript {
         case .image(item: _, fromUser: _, caption: _, lane: _, source: _, forwardedFrom: _, sender: let sender, named: _, quote: _),
              .file(item: _, subtitle: _, caption: _, forwardedFrom: _, sender: let sender, named: _, quote: _):
             return sender != nil
-        case .user, .assistant, .system, .hidden, .question, .voiceMemo, .forwardHint, .error: return false
+        case .user, .assistant, .system, .hidden, .routinePrompt, .question, .voiceMemo,
+             .forwardHint, .error:
+            return false
         }
     }
 
@@ -1560,7 +1580,7 @@ struct RowView: View, Equatable {
     /// Bubbles get a swipe time; centred system / card / error rows do not.
     private var showsSwipeTime: Bool {
         switch row.kind {
-        case .system, .question, .error, .forwardHint, .secretGhost, .hidden:
+        case .system, .question, .error, .forwardHint, .secretGhost, .hidden, .routinePrompt:
             return false
         case .user, .other, .member, .assistant, .file, .voiceMemo, .image:
             return true
@@ -1810,6 +1830,19 @@ struct RowView: View, Equatable {
             .foregroundStyle(theme.muted)
             .frame(maxWidth: .infinity)
             .multilineTextAlignment(.center)
+        case .routinePrompt(let label):
+            // One muted line on the user's side, on the page itself: no fill, no radius,
+            // no padding of its own. A bubble here would say a person wrote this, and
+            // nobody did.
+            HStack(spacing: 0) {
+                Spacer(minLength: 0)
+                Text(label)
+                    .font(theme.font(Theme.body))
+                    .foregroundStyle(theme.muted)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .accessibilityIdentifier("routine-prompt-line")
+            }
         case .hidden(let count, _, let handle, let name):
             // The blocker's folded line ([feedback blocked-state-ios-2026-10-26]); Unblock
             // opens the person's sheet (its Unblock asks first).
@@ -2089,7 +2122,9 @@ struct RowView: View, Equatable {
         case .secretGhost(_, let mine, _, _, _): return mine ? 0 : lane
         case .image(_, _, _, let inLane, _, _, let sender, _, _): return inLane || sender != nil ? lane : 0
         case .file(_, _, _, _, let sender, _, _): return sender != nil ? lane : 0
-        case .user, .assistant, .system, .hidden, .voiceMemo, .forwardHint, .error: return 0
+        case .user, .assistant, .system, .hidden, .routinePrompt, .voiceMemo, .forwardHint,
+             .error:
+            return 0
         }
     }
 

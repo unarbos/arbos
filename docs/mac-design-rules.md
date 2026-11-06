@@ -634,6 +634,50 @@ Code: `transcript.rs` `hover_time()` (returns nothing at opacity 0), pinned by
 `layout_tests::the_time_is_hidden_at_rest_and_beside_the_bubble_on_hover`;
 iPhone `Transcript.swift` `RowView` + `SenderNameRowTests`.
 
+## The routine prompt is one quiet line (Jacob 2026-11-06, approved mock `design/grok-parity-2026-11-05/grok-reference.png`)
+
+**A routine's prompt is not a message. It draws as one muted line that names the
+routine, and its own words are not drawn at all.**
+
+A routine's prompt reaches the chat as a **user-role** message whose sender is
+`routine:<id>`. That is the whole reason it was ever visible: nothing about the
+row said "machine", so every user-bubble rule applied to it and a fifteen-line
+`Tell the user (reply_to 01M6N21WFJQ92GJX6QF1ZQ8K3W) …` drew as a slab. The same
+text was then repeated at the top of the reply that answered it, because the
+quote header took the first 64 characters of whatever it quoted.
+
+Measured on the before frame `design/grok-parity-2026-11-05/arbos-current.png`
+(2282 × 1878 px at 2 px/pt = 1141 × 939 pt, dark, Matte). Three slabs, all the
+same width:
+
+| | Before | Now |
+|---|---|---|
+| Fill | `#5C5C5C`, 336 pt wide | none — the line sits on the page |
+| Height | 148.5 pt, 122 pt, 122 pt (392.5 pt stacked, **41.8 % of the 939 pt frame**) | 28 pt each: `CHAT_LINE_HEIGHT` 22 + 2 × `ROW_GAP_HALF` 3 |
+| Text | the prompt, wrapped to 5–7 lines | `Routine · <name>`, one line, truncated |
+| Quote header on the reply | the first 64 characters of the prompt | `Routine · <name>` |
+
+Each slab goes from 122 pt to 28 pt, so a prompt takes **77 % less height** and
+no fill at all.
+
+**The ink is `text_muted`, not the mock's grey.** The mock's muted ink in the
+chat column is `#A8A8A8` (168), sampled as the modal colour of five separate
+text bands; `text_muted` is `#95959B` (149, 149, 155), 19 steps darker and 6
+toward blue. `text_muted` is a shared token with consumers across the sidebar,
+the system lines and the right pane, so it holds — same reasoning as the agent
+bubble in § Two bubble tones. Moving it belongs to the typography item, which
+re-measures the whole ink ramp.
+
+**A nameless routine says its id.** `routineName` is written by the relay beside
+the sender and is absent on rows older than the field, so the line falls back to
+`Routine · rt_7KQ2`. A line that says nothing true is worse than an ugly one.
+
+Code: `transcript.rs` `routine_prompt_label()`, `RowKind::RoutinePrompt` and
+`quote_text()`, pinned by `transcript::routine_prompt_tests`; iPhone
+`Model.swift` `Message.routinePromptLabel` and `Transcript.swift`
+`RowKind.routinePrompt`. The iPhone model gained `routineName`, which it had
+never decoded.
+
 ## Agent bubble width (Jacob 2026-10-24, [feedback bubble-width-2026-10-24])
 
 **An agent bubble is at most 560 pt wide, and never closer than 84 pt to the
