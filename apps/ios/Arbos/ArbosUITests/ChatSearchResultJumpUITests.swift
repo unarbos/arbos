@@ -45,6 +45,19 @@ final class ChatSearchResultJumpUITests: XCTestCase {
     /// line of text and clear of the deepest overlap seen. The guard in `settledResult` is what
     /// keeps this honest if a later pass deepens the overlap again.
     private static let bubbleBottomAim: CGFloat = 9
+    /// How far `nudgeResultsDown` moves the result list. With that gesture's terminal hold this
+    /// is the travel rather than a request, less about 10 pt of pan-recognizer slop — the
+    /// movement it consumes deciding a drag has begun, measured as a constant on run 42135608026.
+    ///
+    /// 200 pt is the distance this suite has always asked for, kept deliberately: the one thing
+    /// changing here is whether the ask is honoured, and a second altered variable would make a
+    /// future gate run on this file say less than it could. Both ends of the gesture stay inside
+    /// the reachable band, which runs to the keyboard here.
+    private static let nudgeStep: CGFloat = 200
+    /// How long the finger stands still before it lifts, which is what takes the velocity out of
+    /// the release. The same 0.5 s as `ChatSearchRevealLandingUITests.nudgeHold`;
+    /// `ChatSwipeTrackingUITests` and `BackSwipeUITests` hold 0.6 for the same purpose.
+    private static let nudgeHold: TimeInterval = 0.5
 
     override func setUpWithError() throws {
         continueAfterFailure = false
@@ -238,12 +251,67 @@ final class ChatSearchResultJumpUITests: XCTestCase {
     /// comes into reach. With a keyword typed a scroll keeps the bar open
     /// (`ChatSearchClose.scrollCloses`), so this changes which results are reachable and
     /// nothing else about the state under test.
+    ///
+    /// **The gesture ends with a stationary finger, and the ask is the travel.** The old
+    /// two-argument `press(forDuration:thenDragTo:)` named no velocity and held nothing at the
+    /// end, so what the list did was set by the fling XCUITest happened to synthesize at the
+    /// lift — a quantity nothing here specifies. `ChatSearchRevealLandingUITests` measured that
+    /// gesture on this same fixture across five gate runs: for a 120 pt ask the list moved 346,
+    /// 346, 47, 7 and **0** pt, and with the terminal hold it moved 249 to 250 pt for a 260 pt
+    /// ask over 18 consecutive drags — a 1 pt range where the old span was 0 to 346. The repo
+    /// already records why: `ChatSwipeTrackingUITests.comesBack` and
+    /// `internal/ios-profile-push-media-rig/gesture-velocity-traps.md` both note that a terminal
+    /// hold zeroes the velocity at lift and iOS then decides on distance alone. There it is a
+    /// trap; here, as there, it is the point.
+    ///
+    /// **What this does and does not claim for this suite.** It does not fix the landing failures
+    /// — those happen after the tap is delivered, and a drag cannot reach them. What it removes
+    /// is the drag's say in *which row gets tapped*. `settledResult` picks whichever candidate
+    /// qualifies on the layout the drags happen to leave, and the case doc below records the
+    /// consequence: the row that comes up after a scroll "is `long-408`", while the two cases
+    /// that need no scroll pick `long-412`, and the landing is known to fail on one row and not
+    /// another. That is the #2535 lottery — one fault firing "about half the time" turning out
+    /// to be two different rows — and an unbounded fling is what rolls it. A bounded step makes
+    /// the pick repeatable, so a landing failure here can be attributed to a row instead of
+    /// reading as an intermittency.
+    ///
+    /// The press stays at 0.1 s: `messageRowGestures` composes a
+    /// `LongPressGesture(minimumDuration: 0.35)` on every message row, and the initial press is
+    /// this gesture's one stationary phase, so the margin to it is not spare.
     private func nudgeResultsDown(_ app: XCUIApplication, band: CGRect) {
+        // The anchor is read before the gesture and re-read by identifier after it, so what gets
+        // printed is this drag's own travel. Without it a gate run says only whether the case
+        // passed, and the whole lesson of the reveal suite's fix is that the per-drag measurement
+        // is the evidence and the verdict is only corroboration.
+        let before = oldestHit(app)
         let origin = app.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0))
         origin.withOffset(CGVector(dx: band.midX, dy: band.minY + 30))
             .press(forDuration: 0.1,
-                   thenDragTo: origin.withOffset(CGVector(dx: band.midX, dy: band.minY + 230)))
+                   thenDragTo: origin.withOffset(CGVector(dx: band.midX,
+                                                          dy: band.minY + 30 + Self.nudgeStep)),
+                   withVelocity: .slow,
+                   thenHoldForDuration: Self.nudgeHold)
         sleep(2)
+        guard let before else { return print("[rig] nudge asked \(Int(Self.nudgeStep))pt against "
+                                             + "no realized hit") }
+        let again = app.descendants(matching: .any)[before.id].firstMatch
+        guard again.exists else {
+            return print("[rig] nudge asked \(Int(Self.nudgeStep))pt; \(before.id) has left the "
+                         + "tree, so the list moved by more than the realized window")
+        }
+        print("[rig] nudge asked \(Int(Self.nudgeStep))pt, \(before.id) moved "
+              + "\(Int(again.frame.minY - before.y))pt")
+    }
+
+    /// The oldest realized hit and its top edge, in one element query — the anchor one drag is
+    /// measured against. Tree order is oldest first, and the list carries that row downward,
+    /// toward the middle of the realized window, so a drag cannot take it out of the tree.
+    private func oldestHit(_ app: XCUIApplication) -> (id: String, y: CGFloat)? {
+        let first = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier BEGINSWITH %@", "bubble:"))
+            .firstMatch
+        guard first.exists else { return nil }
+        return (id: first.identifier, y: first.frame.minY)
     }
 
     /// Type the keyword, then pick the result row to tap: holding still, with `child` realized
