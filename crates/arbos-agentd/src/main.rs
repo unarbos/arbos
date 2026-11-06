@@ -39,6 +39,8 @@ mod job_cancel_tests;
 #[cfg(test)]
 mod job_cancel_unconfirmed_tests;
 #[cfg(test)]
+mod job_finished_sweep_tests;
+#[cfg(test)]
 mod job_leftover_tests;
 #[cfg(test)]
 mod job_note_tests;

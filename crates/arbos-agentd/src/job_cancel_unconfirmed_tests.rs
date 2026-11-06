@@ -179,14 +179,14 @@ fn the_chat_line_promises_nothing_more_arrives_only_when_the_reap_could_look() {
 
     let looked = Sweep::nothing_to_check();
     assert!(
-        crate::agent::stop_line(&cancelled, &looked).contains("nothing more arrives"),
+        crate::agent::stop_line(&cancelled, &[], &looked).contains("nothing more arrives"),
         "a reap that read the kernel and found nothing has accounted for the box, and the \
          promise is the user's to have: {}",
-        crate::agent::stop_line(&cancelled, &looked)
+        crate::agent::stop_line(&cancelled, &[], &looked)
     );
 
     let blind = Sweep::default();
-    let line = crate::agent::stop_line(&cancelled, &blind);
+    let line = crate::agent::stop_line(&cancelled, &[], &blind);
     assert!(
         !line.contains("nothing more arrives"),
         "but a reap that could not look has not earned it, however empty its survivor list \
