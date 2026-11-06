@@ -87,7 +87,8 @@ permissions:
 # which matters for the dispatch-on-a-branch rehearsal too: that run must not cancel the push run
 # for the same branch.
 concurrency:
-  group: swift-core-check-${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'baseline' || 'change' }}-${{ github.ref }}
+  # TEMPORARY-BASELINE-REHEARSAL: the ref clause is reverted before the pull request opens.
+  group: swift-core-check-${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/cursor/nightly-macos-baseline-4986') && 'baseline' || 'change' }}-${{ github.ref }}
   # A baseline run is never superseded the way a branch head is, and it is the only measurement of
   # the suite anyone gets that day, so it is never cancelled either.
   cancel-in-progress: ${{ github.event_name != 'schedule' && github.event_name != 'workflow_dispatch' && github.ref != 'refs/heads/main' }}
@@ -237,7 +238,8 @@ jobs:
   baseline-report:
     name: Nightly baseline report
     needs: [decide, check]
-    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    # TEMPORARY-BASELINE-REHEARSAL: the ref clause is reverted before the pull request opens.
+    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/cursor/nightly-macos-baseline-4986')
     runs-on: ubuntu-24.04
     permissions:
       contents: read

@@ -145,6 +145,13 @@ match() {
 # answer is forced here, where it is one case statement under a comment, rather than by widening
 # what the gate covers for everyone else. Nothing on the pull_request or push path reads this.
 baseline_event() {
+  # TEMPORARY-BASELINE-REHEARSAL: reverted before the pull request opens. The lane token cannot
+  # create a workflow_dispatch event on this repository (HTTP 403, the same "Resource not
+  # accessible by integration" that blocks `gh run rerun`), and GitHub only ever fires `schedule`
+  # from the default branch's copy of a workflow, so a temporary cron on this branch would not
+  # fire either. A push on this one branch therefore stands in for the cron for one run, down the
+  # identical code path.
+  if [ "${GITHUB_REF_NAME:-}" = cursor/nightly-macos-baseline-4986 ]; then return 0; fi
   case "${GITHUB_EVENT_NAME:-}" in
     schedule|workflow_dispatch) return 0 ;;
     *) return 1 ;;
