@@ -102,12 +102,13 @@ jobs:
     needs: decide
     if: needs.decide.outputs.applies == 'true'
     runs-on: macos-15
-    # Measured on this workflow's own pull request over three runs, every one of them cold: the
-    # job took 14 min 15 s, 13 min 34 s and 14 min 8 s, of which `cargo check` was 12 min 59 s,
-    # 12 min 13 s and 13 min 53 s. Inside the first, 11 min 53 s was the external dependency build
-    # and 66 s was the five workspace crates, so a run that restores the cache compiles for about
-    # a minute. The queue in front of the job was 84.5, 162.7 and 4.5 minutes — the pool, not the
-    # work, is what decides when this answers.
+    # Measured on this workflow's own pull request, every run of it cold: the job takes 11 to 14
+    # minutes and `cargo check` 10 to 14 of those, the spread being runner draw rather than diff.
+    # Inside one of them, 11 min 53 s was the external dependency build and 66 s was the five
+    # workspace crates, so a run that restores the cache compiles for about a minute.
+    #
+    # The queue in front of the job ranged from 4.5 minutes to 162.7 on the same evening. The
+    # pool, not the work, is what decides when this answers.
     #
     # The cap is set well above the cold figure because a timeout is no verdict rather than a red
     # one, which is the state this whole file exists to stop producing.
