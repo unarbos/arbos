@@ -24,10 +24,16 @@
 //!   pointer up to the snap width ([`EdgeDrag::track`]) and past it settles
 //!   at the restored width on the same slide, and a hand let go short of it
 //!   settles back into the rail (`ui::slide`).
-//! * **Rows**: the name wins over the time. From [`HANDLE_MIN`] down a DM's
-//!   `@handle` goes; from [`TIME_FULL_MIN`] down the time drops to
-//!   [`TIME_SMALL_SIZE`] pt; from [`TIME_SMALL_MIN`] down the time is hidden
-//!   — all before the name's column goes under [`NAME_MIN`].
+//! * **Rows**: the name wins over the time. From [`TIME_FULL_MIN`] down the
+//!   time drops to [`TIME_SMALL_SIZE`] pt; from [`TIME_SMALL_MIN`] down the
+//!   time is hidden — both before the name's column goes under [`NAME_MIN`].
+//!
+//!   This now applies to **server and channel rows only**. A chat row carries
+//!   neither a time nor an `@handle` since the Grok-parity pass
+//!   (`docs/mac-design-rules.md` § Row contents), so the handle breakpoint is
+//!   gone and the chat row's name has the whole line at every width. That is
+//!   most of what this ladder was built for, and what is left of it is worth
+//!   keeping only while some row still carries a time.
 //! * **Filter**: the All · Agents · People · Servers capsules scroll
 //!   horizontally with an edge fade when they do not fit (Grok Bot's iPhone
 //!   home pattern for its filter row), centred when they do; the selected
@@ -62,10 +68,6 @@ pub const TIME_FULL_WIDTH: f32 = 56.0;
 pub const TIME_SMALL_WIDTH: f32 = 44.0;
 /// The time's font size once the column is tight.
 pub const TIME_SMALL_SIZE: f32 = 10.0;
-/// A DM row's `@handle` beside the name (text + its 6 pt gap): the first
-/// thing to go, at [`HANDLE_MIN`] (= the default 296 pt column, near enough).
-pub const HANDLE_WIDTH: f32 = 50.0;
-pub const HANDLE_MIN: f32 = ROW_CHROME + NAME_MIN + TIME_FULL_WIDTH + HANDLE_WIDTH;
 /// Column widths at which the time still fits beside a [`NAME_MIN`] name:
 /// full at ≥ **238**, small at ≥ **226**, hidden below (the snap width is 220).
 pub const TIME_FULL_MIN: f32 = ROW_CHROME + NAME_MIN + TIME_FULL_WIDTH;
@@ -80,11 +82,6 @@ pub enum RowTime {
     Small,
     /// No time: the name has the whole line.
     Hidden,
-}
-
-/// Whether a DM row shows its `@handle` beside the name at `width`.
-pub fn handle_shown(width: f32) -> bool {
-    width >= HANDLE_MIN
 }
 
 pub fn row_time(width: f32) -> RowTime {
@@ -258,13 +255,6 @@ mod tests {
         assert_eq!(ROW_CHROME, 86.0);
         assert_eq!(TIME_FULL_MIN, 238.0);
         assert_eq!(TIME_SMALL_MIN, 226.0);
-        assert_eq!(HANDLE_MIN, 288.0);
-        assert!(
-            handle_shown(SIDEBAR_WIDTH),
-            "the default column shows @handles"
-        );
-        assert!(!handle_shown(260.0));
-        assert!(text_column(HANDLE_MIN) - TIME_FULL_WIDTH - HANDLE_WIDTH >= NAME_MIN);
         // At the snap width the name has the whole line and it is readable.
         assert!(text_column(SNAP_WIDTH) >= NAME_MIN);
         assert_eq!(row_time(SNAP_WIDTH), RowTime::Hidden);
@@ -289,8 +279,6 @@ mod tests {
             assert_eq!(row_time(w), RowTime::Full, "{w}");
             assert!(text_column(w) - TIME_FULL_WIDTH >= NAME_MIN, "{w}");
         }
-        assert!(handle_shown(320.0));
-        assert!(!handle_shown(260.0), "the @handle is the first to go");
         for w in [237.0, 232.0, 226.0] {
             assert_eq!(row_time(w), RowTime::Small, "{w}");
             assert!(text_column(w) - TIME_SMALL_WIDTH >= NAME_MIN, "{w}");

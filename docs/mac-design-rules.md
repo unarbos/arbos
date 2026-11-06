@@ -22,7 +22,7 @@ principle never use colored dots." App-wide, both platforms:
 | A dot used to mean | Now |
 |---|---|
 | **activity** — an agent working, a tab streaming, a machine waking, a link reconnecting / syncing, a memo recording, the voice agent thinking | the **braille spinner** (`ui::working` / `WorkingSpinner`, § Working indicator), `text_muted`, one shared ticker |
-| **unread** | the **count pill** (`marks::unread_pill` / `UnreadBadge`: accent capsule, white digits, "99+") beside the bold title; a lit flag with no count reads "1" |
+| **unread** | the **count pill** (`marks::unread_pill` / `UnreadBadge`: accent capsule, white digits, "99+") beside the bold title; a lit flag with no count reads "1". **The Grok reference draws a dot here instead and we deliberately do not** — see § Row contents, "The unread mark is not settled" |
 | **a fault** — relay down, machine error | the red **`exclamation` glyph** (`marks::fault_glyph`), the error note's mark |
 | **a resting state** — awake, asleep, offline, read | **nothing**; the words say it ("Awake · 5 h", "Offline") |
 | **a person typing** | nothing in the status cell; the preview reads "typing…" and the status row over the composer names them. The spinner is never a human's sign |
@@ -633,6 +633,88 @@ element and may stay in the footer.
 Code: `transcript.rs` `hover_time()` (returns nothing at opacity 0), pinned by
 `layout_tests::the_time_is_hidden_at_rest_and_beside_the_bubble_on_hover`;
 iPhone `Transcript.swift` `RowView` + `SenderNameRowTests`.
+
+## Row contents (Jacob 2026-11-06, approved reference `design/grok-parity-2026-11-05/grok-reference.png`)
+
+**A chat row carries a name and a preview. Nothing else.** The `@handle` and
+the last-activity time are gone.
+
+### What a user loses, and where it still lives
+
+This rule removes information, so it owes an account of it.
+
+| Gone from the row | Where it still lives |
+|---|---|
+| `@handle` on a 1:1 people row | The chat header names the person and their handle; the profile pane shows it in full; the composer completes and prints `@handle`; mentions render it inside messages. It was shown twice in some layouts, which is what [feedback doubled-sender-prefix-2026-10-30] was about. |
+| Last-activity time | The transcript timestamps every message, so the exact time is one tap away. **Relative recency is not lost at all**: the list is still ordered by it, so a row's position carries what the time carried. |
+
+The honest cost is the **absolute** time of the last message at a glance —
+telling "an hour ago" from "yesterday" without opening the chat. The list's
+order cannot show that. If it is missed, the place to put it back is the
+preview line, not the name line, and this paragraph is the reason to decide
+rather than drift.
+
+### What this empties out
+
+`ui::sidebar_fit` exists because the time and the handle crowded the name as
+the column narrowed ([feedback sidebar-narrow-wrap-2026-10-27]). Its handle
+breakpoint is now deleted, and its time ladder applies to **server and
+channel rows only**, which keep their times. A chat row's name has the whole
+line at every width.
+
+### The unread mark is not settled
+
+The reference draws an 8 pt accent dot where we draw the count pill
+(measured: 16 px at 2 px/pt, `#6199F8`, against our `#1084FE`). **We keep the
+pill**, pending Jacob. The reference is not the authority here because two of
+his own instructions point the other way: "no coloured dots, use braille
+spinners" when the Grok-parity work opened, and "unread = the count pill,
+never a dot" on 2026-10-27.
+
+**If you are reading this because the reference and the code disagree: the
+rule won on purpose. Do not "fix" it.** The choice is isolated to
+`sidebar::unread_mark`, so settling it is one edit there and one here.
+
+The case for the dot, recorded so it is not lost:
+
+- `working::CELL_W` is 8 pt and is commented "the cell is the old dot's
+  width". The status cell is still sized for a dot.
+- The cell is fixed so the row never re-flows while the spinner turns. The
+  pill is 16 pt wide before its digits and grows with each one, so it already
+  breaks that invariant. **The dot restores something the pill took away**,
+  which is a better reason than matching a picture.
+- A second reference agrees: `Theme.swift` records Grok's iPhone home row as
+  "48 pt avatar box, 80 pt row pitch, **10 pt unread dot**", measured off
+  `internal/refs/grokbot-ios`.
+
+The no-coloured-dots rule is about **status** — waking, faulted, working —
+which the braille spinner and the fault glyph carry. Whether "unread" is a
+status in that sense is exactly the question.
+
+## Row pitch (Jacob 2026-11-06, same reference)
+
+**58 pt, and the selected pill is 54 pt inside it.**
+
+Measured two independent ways that agree: the spacing of the name text bands
+and the spacing of the avatar centres, both **116 px** at 2 px/pt. We shipped
+**69.5 pt**, so the reference is the **denser** of the two designs — fourteen
+rows in the height that held twelve.
+
+`sidebar::ROW_PITCH` is the single value. `ROW_HEIGHT` is derived from it and
+`ROW_INSET_Y`, and the row is laid out by **height** rather than by padding,
+so the pitch is exact by construction: there is no content measurement in
+between that could be wrong. `row_pitch_tests` renders the real boxes and
+reads their bounds back, so the number is recovered from a laid-out row and
+not from the formula that produced it.
+
+`ROW_INSET_Y` is 2 pt, measured as the difference between the 54 pt pill and
+its 58 pt slot. Ours filled its slot edge to edge, so two selected rows
+touched.
+
+**The iPhone keeps its own pitch.** Grok's iPhone home row is a different
+design from Grok's Mac sidebar — `Theme.swift` records it from
+`internal/refs/grokbot-ios` as an 80 pt pitch **with a time on the row**. So
+this rule is Mac-only, and `Theme.rowVPad` stays at 16.
 
 ## Sidebar rows (Jacob 2026-11-06, approved mock `design/grok-parity-2026-11-05/grok-reference.png`)
 
