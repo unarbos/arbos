@@ -121,7 +121,7 @@ impl Shell {
                     .map(|ws| {
                         let el = match state.project(&ws.project_id) {
                             Some(p) => crate::ui::avatars::project_in(state, p, 28.0, &theme),
-                            None => crate::ui::avatars::neutral_element(&ws.name, 28.0, &theme),
+                            None => crate::ui::avatars::agent(&ws.project_id, None, 28.0),
                         }
                         .into_any_element();
                         (ws.project_id.clone(), el)
@@ -538,7 +538,7 @@ impl Shell {
                                 .position(|(id, _)| *id == ws.project_id)
                                 .map(|ix| machine_pictures.remove(ix).1)
                                 .unwrap_or_else(|| {
-                                    crate::ui::avatars::neutral_element(&ws.name, 28.0, &theme)
+                                    crate::ui::avatars::agent(&ws.project_id, None, 28.0)
                                         .into_any_element()
                                 });
                             card.child(machine::agent_row(picture, ws, &theme, cx))

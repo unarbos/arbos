@@ -252,8 +252,7 @@ pub fn gather(state: &AppState, chat_id: &str, space: &Project, theme: &Theme) -
                 participants.push(Participant {
                     name: agent.name.clone(),
                     activity: Activity::Working,
-                    picture: avatars::agent_picture(&agent, image, AVATAR, theme)
-                        .into_any_element(),
+                    picture: avatars::agent_picture(&agent, image, AVATAR).into_any_element(),
                     page,
                 });
             }
@@ -264,7 +263,7 @@ pub fn gather(state: &AppState, chat_id: &str, space: &Project, theme: &Theme) -
             participants.push(Participant {
                 name: agent.name.clone(),
                 activity: Activity::Working,
-                picture: avatars::agent_picture(&agent, image, AVATAR, theme).into_any_element(),
+                picture: avatars::agent_picture(&agent, image, AVATAR).into_any_element(),
                 page: Some(ProfilePage::Agent {
                     project_id: space.id.clone(),
                 }),

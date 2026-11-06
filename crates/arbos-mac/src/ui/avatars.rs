@@ -56,12 +56,11 @@ pub fn disc_element(color: u8, size: f32) -> Div {
         .bg(disc_fill(color))
 }
 
-// ----- Neutral default (Jacob, 2026-10-25) -------------------------------------------
-
-/// The value the Create sheets store when nothing was uploaded or generated: "no picture".
-pub fn neutral_pick() -> u8 {
-    disc::NEUTRAL
-}
+// ----- Create-sheet chrome ------------------------------------------------------------
+//
+// No *default avatar* is grey any more (Jacob, 2026-11-06). The grey disc survives only as
+// Create-sheet chrome: that sheet previews an entity that has no id yet, so there is no seed
+// to derive a colour from. The relay assigns the id, and the colour follows from it.
 
 /// Neutral disc fill and letter ink for the appearance.
 pub fn neutral_colors(theme: &Theme) -> (Hsla, Hsla) {
@@ -98,32 +97,21 @@ pub fn neutral_element(name: &str, size: f32, theme: &Theme) -> Div {
         .child(letter)
 }
 
-/// An agent's avatar: its solid disc (D92) — or the neutral initial when the agent was
-/// created with no picture (Jacob, 2026-10-25). `color_index` is the D79 index, kept for
-/// the people surfaces that still draw initials.
-pub fn agent(seed: &str, name: &str, disc_override: Option<u8>, size: f32, theme: &Theme) -> Div {
-    if disc::is_neutral(disc_override) {
-        return neutral_element(name, size, theme);
-    }
+/// An agent's avatar: its solid disc (D92).
+pub fn agent(seed: &str, disc_override: Option<u8>, size: f32) -> Div {
     disc_element(disc_color(seed, disc_override), size)
 }
 
 /// The agent pane's hero: the same disc at hero size.
 pub fn project_hero(p: &Project, size: f32, theme: &Theme) -> Div {
-    if disc::is_neutral(p.avatar_disc_color) {
-        return neutral_element(&p.name, size, theme);
-    }
     if p.is_people() {
         return element(&p.id, &p.name, p.avatar_color_index, size, theme);
     }
     disc_element(disc_color(&p.id, p.avatar_disc_color), size)
 }
 
-/// The bubble-bar accent of an agent: its disc colour (D92); a mid grey for a neutral agent.
+/// The bubble-bar accent of an agent: its disc colour (D92).
 pub fn agent_accent(seed: &str, disc_override: Option<u8>, theme: &Theme) -> Hsla {
-    if disc::is_neutral(disc_override) {
-        return accent_color(disc::neutral_accent(), theme);
-    }
     accent_color(disc::accent(disc_color(seed, disc_override)), theme)
 }
 
@@ -277,15 +265,14 @@ pub fn project_with(
 /// its D79 initials — never an id-derived colour.
 pub fn project(p: &Project, size: f32, theme: &Theme) -> Div {
     if p.is_people() {
-        if disc::is_neutral(p.avatar_disc_color) {
-            return neutral_element(&p.name, size, theme);
-        }
-        if let Some(color) = p.avatar_disc_color {
-            return disc_element(color, size);
+        // A pick (including an older client's `255`) resolves through `color_for`, so a
+        // group that was stored "no picture" draws its id's colour rather than a grey disc.
+        if p.avatar_disc_color.is_some() {
+            return disc_element(disc_color(&p.id, p.avatar_disc_color), size);
         }
         return element(&p.id, &p.name, p.avatar_color_index, size, theme);
     }
-    agent(&p.id, &p.name, p.avatar_disc_color, size, theme)
+    agent(&p.id, p.avatar_disc_color, size)
 }
 
 // ----- One identity for every surface (#1592) --------------------------------------
@@ -400,16 +387,10 @@ pub fn member_identity(
 }
 
 /// A roster member's picture through the resolver (identity → newest copy → decoded image).
-pub fn member_picture(
-    state: &AppState,
-    chat: Option<&Project>,
-    a: &AgentMember,
-    size: f32,
-    theme: &Theme,
-) -> Div {
+pub fn member_picture(state: &AppState, chat: Option<&Project>, a: &AgentMember, size: f32) -> Div {
     let id = member_identity(chat, &state.projects, a);
     let image = id.image_key.as_deref().and_then(|u| state.avatar(u));
-    agent_picture(&id, image, size, theme)
+    agent_picture(&id, image, size)
 }
 
 /// The picture for an identity: the uploaded / generated image when the loader has it,
@@ -418,7 +399,6 @@ pub fn agent_picture(
     a: &AgentIdentity,
     image: Option<std::sync::Arc<gpui::RenderImage>>,
     size: f32,
-    theme: &Theme,
 ) -> Div {
     if let Some(image) = image {
         return div()
@@ -433,16 +413,13 @@ pub fn agent_picture(
                     .object_fit(gpui::ObjectFit::Cover),
             );
     }
-    if a.neutral {
-        return neutral_element(&a.name, size, theme);
-    }
-    agent(&a.id, &a.name, Some(a.disc_color), size, theme)
+    agent(&a.id, Some(a.disc_color), size)
 }
 
 /// Who started a call / sits in it (users and agents).
 pub fn sender(s: &Sender, size: f32, theme: &Theme) -> Div {
     if s.kind == "agent" {
-        agent(&s.id, &s.display_name(), s.avatar_disc_color, size, theme)
+        agent(&s.id, s.avatar_disc_color, size)
     } else {
         element(&s.id, &s.display_name(), s.avatar_color_index, size, theme)
     }
@@ -571,12 +548,10 @@ fn draw_initials(out: &mut image::RgbaImage, text: &str) {
 mod tests {
     use super::*;
 
-    /// Jacob, 2026-10-25: the stored neutral value is told apart from the automatic colour,
-    /// and a neutral identity never draws a coloured disc.
+    /// Jacob, 2026-11-06: no grey default survives. An agent stored with the old `255`
+    /// sentinel resolves to its id's palette colour like any other.
     #[test]
-    fn neutral_pick_is_the_core_value_and_identity_carries_it() {
-        assert!(disc::is_neutral(Some(neutral_pick())));
-        assert!(!disc::is_neutral(None));
+    fn an_agent_stored_neutral_now_resolves_to_its_ids_colour() {
         let card = AgentCard {
             id: "01N".into(),
             name: "Field notes".into(),
@@ -594,8 +569,8 @@ mod tests {
             },
             &[card],
         );
-        assert!(who.neutral);
-        assert_eq!(disc::initial(&who.name), "F");
+        assert_eq!(who.disc_color, disc::default_color("01N"));
+        assert!(who.disc_color < disc::COLOR_COUNT);
     }
 
     /// Every agent without a picture gets one of the ten colours, stable for its id.

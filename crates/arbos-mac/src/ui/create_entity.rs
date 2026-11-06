@@ -10,9 +10,10 @@
 //! agent avatar picker's own two options — `Upload | Generate` (`avatar_picker::tab_pill`,
 //! `upload_body`, `generate_body` on a draft [`avatar_picker::Picker`]) — and the preview
 //! above the field shows the chosen file, the generated picture, or, when neither was picked,
-//! the fallback every new agent / group / server gets: the name's first letter on a neutral
-//! grey disc (`avatars::neutral_element`). The entity is stored with the neutral value
-//! (`disc::NEUTRAL`), never an automatic colour; existing agents keep theirs.**
+//! the sheet's own placeholder: the name's first letter on a grey disc
+//! (`avatars::neutral_element`). That grey is sheet chrome, not a default avatar — the entity
+//! has no id yet, so no colour can be derived. The entity is stored with no colour at all
+//! (`stored_disc()` → `None`), and the disc follows from the id the relay assigns.**
 //!
 //! Header, preview and field keep Grok's sizes, measured on the 2x reference
 //! (`media/agent-avatars/create-sheet/ref-grok-create-new-bot.png`) and written here in
@@ -220,10 +221,11 @@ pub fn options() -> Vec<Tab> {
     Tab::for_target(&avatar_picker::Target::Draft)
 }
 
-/// The disc colour a new entity is stored with: the neutral one, whatever else was picked, so
-/// no colour is ever auto-assigned (a later Reset lands on the initial, not on a disc).
-pub fn stored_disc() -> u8 {
-    avatars::neutral_pick()
+/// The disc colour a new entity is stored with: **none**, so the colour is derived from the id
+/// the relay assigns. A new entity has no id yet, so no colour can be chosen here, and storing a
+/// sentinel would be storing "draw me grey" — which no default does any more.
+pub fn stored_disc() -> Option<u8> {
+    None
 }
 
 /// The preview above the field: the pending file or generated picture, else the neutral
@@ -550,13 +552,13 @@ mod tests {
     }
 
     #[test]
-    fn a_new_entity_is_stored_neutral_never_with_an_automatic_colour() {
-        let stored = stored_disc();
-        assert!(avatars::disc::is_neutral(Some(stored)));
-        assert_eq!(stored, avatars::disc::NEUTRAL);
-        // The automatic colour an id would get is not what the sheet sends.
+    fn a_new_entity_stores_no_colour_so_its_id_picks_one() {
+        // `None`, not the old `255` sentinel: the relay has not assigned an id yet, and every
+        // default draws a palette colour now, so there is nothing to store that means "grey".
+        assert_eq!(stored_disc(), None);
+        // Whatever id the relay assigns resolves to a real palette colour.
         for seed in ["new-agent-0", "new-group-3", "new-server-1"] {
-            assert_ne!(avatars::disc::default_color(seed), stored);
+            assert!(avatars::disc::color_for(seed, stored_disc()) < avatars::disc::COLOR_COUNT);
         }
     }
 

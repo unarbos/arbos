@@ -1044,7 +1044,7 @@ fn chat_picture(
                     .p(px(2.0))
                     .rounded_full()
                     .bg(theme.bg)
-                    .child(avatars::agent_picture(&a, image, size / 2.0, theme)),
+                    .child(avatars::agent_picture(&a, image, size / 2.0)),
             );
         }
         return pic;
@@ -1706,11 +1706,11 @@ pub fn server_picture(server: &ServerInfo, state: &AppState, size: f32, theme: &
                     .object_fit(gpui::ObjectFit::Cover),
             );
     }
-    if avatars::disc::is_neutral(server.avatar_disc_color) {
-        return avatars::neutral_element(&server.name, size, theme);
-    }
-    if let Some(color) = server.avatar_disc_color {
-        return avatars::disc_element(color, size);
+    if server.avatar_disc_color.is_some() {
+        return avatars::disc_element(
+            avatars::disc_color(&server.id, server.avatar_disc_color),
+            size,
+        );
     }
     avatars::element(
         &server.id,

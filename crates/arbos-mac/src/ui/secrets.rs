@@ -1260,7 +1260,6 @@ impl SecretsPanel {
                     ),
                     None,
                     30.0,
-                    theme,
                 ),
             };
             let (sid_a, pid_a, on) = (sid.clone(), a.project_id.clone(), a.enabled);
@@ -2262,7 +2261,6 @@ impl SecretsPanel {
                     ),
                     None,
                     30.0,
-                    theme,
                 ),
             };
             let (vid, pid, on) = (v.id.clone(), a.project_id.clone(), a.enabled);

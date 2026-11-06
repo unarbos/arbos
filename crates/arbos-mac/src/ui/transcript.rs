@@ -2343,13 +2343,7 @@ impl Transcript {
         let had_id = seed.starts_with("agent:") || seed.starts_with("project:");
         // D92 amendment: the agent's uploaded / generated picture, once the loader has it.
         let image = a.image_key.as_deref().and_then(|url| state.avatar(url));
-        // A neutral agent (no picture, Jacob 2026-10-25) carries the stored value on, so every
-        // disc drawn from this identity goes through `avatars::agent`'s neutral branch.
-        let disc_color = Some(if a.neutral {
-            avatars::neutral_pick()
-        } else {
-            a.disc_color
-        });
+        let disc_color = Some(a.disc_color);
         AgentIdentity {
             name: a.name,
             seed: a.id.clone(),
@@ -2514,7 +2508,6 @@ impl Transcript {
 
     /// The 24 pt disc for an agent's message in a people chat.
     fn agent_disc(&self, seed: &str, cx: &Context<Self>) -> Div {
-        let theme = Theme::of(cx).clone();
         let a = self.agent_identity_full(seed, "Agent", cx);
         if let Some(image) = a.image {
             return div()
@@ -2532,10 +2525,8 @@ impl Transcript {
         avatars::agent(
             // avatar-lint: allow (the resolver's identity, decoded above)
             &a.seed,
-            &a.name,
             a.disc_color,
             SENDER_DISC,
-            &theme,
         )
     }
 
