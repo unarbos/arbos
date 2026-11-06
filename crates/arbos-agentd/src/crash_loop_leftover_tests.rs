@@ -8,13 +8,21 @@
 //!
 //! ## The two halves that did not match
 //!
-//! The sweep read the workspace cgroup **recursively**, which is deliberate and documented:
-//! since bug Z every harness child sits in a leaf of its own, so a read of the workspace's own
-//! `cgroup.procs` would find nothing. Its keep list came from `live_child_pids`, which returned
-//! the adapters' **session children and no descendant of theirs**. A live job worker's `bash`,
-//! `python` and `curl` were therefore in the kill list, absent from the keep list, and SIGKILLed
-//! on that absence — killed because nobody had put them on a list, not because anything said
-//! they were abandoned.
+//! This is the defect, not the present design, and neither half of it survives.
+//!
+//! The old sweep read the workspace cgroup **recursively**: since bug Z every harness child sits
+//! in a leaf of its own, so a read of the workspace's own `cgroup.procs` would find nothing. Its
+//! keep list came from `live_child_pids`, a `HarnessAdapter` method returning the adapters'
+//! **session children and no descendant of theirs**. A live job worker's `bash`, `python` and
+//! `curl` were therefore in the kill list, absent from the keep list, and SIGKILLed on that
+//! absence — killed because nobody had put them on a list, not because anything said they were
+//! abandoned.
+//!
+//! **Neither name resolves in the tree today.** `live_child_pids` went with the keep list it
+//! fed; the trait now carries `child_pgid`, which tells a cancel which process group to reap
+//! (bug Z) and is not a keep list. And the sweep no longer subtracts the living from everything
+//! in the cgroup at all: `reap_unreachable_workers` selects from marked processes in `/proc` and
+//! collects only on positive evidence, which is the rule the cases below pin.
 //!
 //! Test5 round 16 logged "workspace leftovers killed… killed: 36" in the window 18:36:30–18:37:21
 //! while eight compute jobs were mid-calculation, and five of those jobs died of
@@ -29,16 +37,18 @@
 //! and that the session is over. Everything else is kept… The alternative, exempting known-safe
 //! names, is one catastrophe per name anybody forgets."
 //!
-//! So each case below puts a process in the workspace cgroup that the sweep's old keep list did
-//! not name, and asserts the sweep leaves it alone unless the box can say *why* it is garbage.
+//! So each case below stands up a process the old keep list would not have named, and asserts
+//! the sweep leaves it alone unless the box can say *why* it is garbage.
 //!
 //! ## What is not measured here
 //!
 //! Cgroups are not available in this environment, so none of this reproduces round 16's kill or
-//! proves the fix against a real cgroup. `isolation::cgroup_procs` reads `cgroup.procs` as a
-//! plain text file and recurses the directory below it, which is what lets a temp directory
-//! stand in for the kernel's: the sweep's *selection* is measurable here, the kernel's
-//! bookkeeping is not. Nothing in this file is evidence about bug AJ's root cause.
+//! proves the fix against a real cgroup. The temp directory handed to `test_agent_in_cgroup`
+//! declares what the workspace holds — `isolation::cgroup_procs` reads `cgroup.procs` as a plain
+//! text file and recurses the directory below it, so a plain directory can stand in for the
+//! kernel's. **The present sweep does not read it.** Selection now comes from the marks in
+//! `/proc`, and that is the half these cases measure; the cgroup fixture is left standing rather
+//! than relied on. Nothing in this file is evidence about bug AJ's root cause.
 //!
 //! Real processes with real marks, read back out of `/proc`, for the same reason
 //! `job_orphan_tests` uses them: nothing else tells a kill that worked from one that was only
@@ -62,8 +72,10 @@ const CHAT: &str = "01TESTCHATCRASHLOOPLEFT001";
 /// so the marked set is exactly two and stays that way — a tree that respawns children makes
 /// every exact-count assertion race its next fork.
 ///
-/// The backgrounded child is the process that matters. It is a session of its own, so it was
-/// never in `live_child_pids` and it is what a worker's tool call looks like to the sweep.
+/// The backgrounded child is the process that matters. It is a session of its own, so the old
+/// keep list — session children only — never held it, and it is what a worker's tool call looks
+/// like to the sweep. The sweep reaches it here through the mark it inherited, not through the
+/// cgroup.
 fn marked_tree(mark: &str) -> Tree {
     let before = pids_for(mark);
     let mut cmd = Command::new("bash");
