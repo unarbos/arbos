@@ -82,6 +82,26 @@ and a 250 GB volume (five leftover 13 GB test-simulator clones took it from 60 t
   equal stamps the caller's order holds (chat roster, my records, other rosters). While a picture
   loads, the disc is the neutral initial — never an older picture, never the leaf.
 
+## One Glass-aware fill (#2801, 2026-11-05)
+
+- On Glass the desktop shows through the window, so an **opaque theme token painted as a fill is a
+  foreign material**, not a slightly wrong grey. Most of those tokens already have a Glass-aware
+  accessor beside them in `ui/theme.rs`, returning the Matte token unchanged and a wash of the text
+  colour on Glass: `surface_2` → `control_fill()`, `field` → `field_fill()`, `surface_1` → `card()`
+  / `popup()`, `pane_card` → `pane_card_fill()`, `sidebar` → `chrome()`, `bubble_assistant` →
+  `filter_on_fill()`, `bubble` → `segment_on_fill()`.
+- `scripts/glass-lint.sh` scans `crates/arbos-mac/src` in CI's Layout job and fails the build. It
+  keys on the **token**, not on the control flow around it: #2801's defect was a bare
+  `.bg(theme.surface_2)` inside an `if selected` leg, which `highlight.rs`'s drift guard — it only
+  reads `.hover(…)`, `.active(…)`, `group_hover(…)` and `.when(selected, …)` — could not see.
+- A line that must paint an opaque token carries `// glass-lint: allow (<why>)`, on the line or in
+  the comment block above it. The reason is free text and may not be empty: a photo viewer's own
+  matte, a call's stage, a modal document panel.
+- `scripts/glass-lint-baseline.txt` carries the sites that predate the guard. It is a **debt list,
+  not an approval** — nothing in it has been judged for Glass. It may only shrink: convert a site
+  to its accessor (or decide it is deliberate and move it to a marker), then
+  `./scripts/glass-lint.sh --write-baseline` and commit the smaller file with the change.
+
 ## No Simulator.app on the gate Mac (2026-10-28 21:40 UTC)
 
 Xcode 27 on the shared EC2 Mac ships **no Simulator.app** (nothing under `Contents/Developer/Applications`,
