@@ -212,6 +212,31 @@ is interleaved with the test reporter's, so `** TEST SUCCEEDED **` appears in th
 suite's verdicts and the last unit verdict sits ~150 lines after it. Judge sequence by timestamps,
 never by position.
 
+## What no gate reads: a new value in a shared document
+
+All five gates read **one repository at one commit**. A change can therefore be green on every one
+of them and still break a different component, because no gate ever looks at two readers of the
+same data at once.
+
+The live case is #2890, held before merge on 2026-11-06. It is the first producer of a new
+approval state, `cancelled`, written into the document the Mac client reads. The client's enum has
+no catch-all, and the failure is not a missing card: `read_message` ends in `from_value(json).ok()?`,
+so an unparseable state discards **the whole message row, assistant text included** — permanently,
+since the state is terminal. The same PR deletes the expiry sweep that wrote the one automatic
+close the client does understand, which turns this from a rare close into the only unanswered one,
+and the trigger is a user stopping a job with a card open.
+
+**Every gate passes it.** Gate 4 sees no dropped test. Gate 5 compiles — the producer's repository
+is internally consistent. The new state's own test asserts exactly the right thing. Nothing is
+wrong *within* the commit under test.
+
+**So ask it of the diff, because CI cannot answer it.** When a PR writes a new value into a shared
+document, the question is whether **every** reader already tolerates an unknown value. A reader
+that models a wire string as a closed enum does not, and deserialising into one is the tell. The
+follow-up that matters is what the reader does on failure: dropping one field is a degraded card,
+while dropping the enclosing record is data loss, and the two look identical in the producer's
+diff.
+
 ## Gate 5 on a Mac-touching PR: look for the compiler before you fetch one
 
 `cargo test --workspace --no-run` fails on this repo under the clang most Linux images default to.
