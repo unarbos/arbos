@@ -7,11 +7,13 @@ name: Swift iOS 27 (advisory)
 # whole time this notice has been missing from it.
 #
 # It is staying off because it almost never finished: 8 of its 53 lifetime runs succeeded, and 39
-# were cancelled. On 2026-10-31, immediately before it was switched off, 8 of its runs were
-# cancelled within ten seconds of each other and 7 more within ninety, across fifteen branches.
-# Why most of its runs were cancelled is not yet understood, and that is the open question gating
-# any re-enable — a low-priority item to drain, not a decision waiting on anyone. Who switched it
-# off is recorded nowhere: this repo is a User account, so it has no audit log.
+# were cancelled. Read that with its dates — all 53 ran on 2026-10-31, so this lane was added, ran
+# for a single day and was switched off the same day. It has never had a longer trial than that.
+# 8 of those runs were cancelled within ten seconds of each other and 7 more within ninety, across
+# fifteen branches, immediately before it went quiet. Why so many were cancelled is not yet
+# understood, and that is the open question gating any re-enable — a low-priority item to drain,
+# not a decision waiting on anyone. Who switched it off is recorded nowhere: this repo is a User
+# account, so it has no audit log.
 #
 # `Swift core check` (.github/workflows/swift-core-check.yml) is the only live Swift gate on push
 # and pull request, and it runs on GitHub's hosted `macos-15`. Neither Swift check runs on the
