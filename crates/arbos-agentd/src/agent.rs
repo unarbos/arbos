@@ -4299,15 +4299,32 @@ impl Agent {
     /// lost the number — can still find what the dead agentd's worker left running.
     pub(crate) async fn worker_tree(&self, sid: &str) -> ProcessTree {
         let leader = self.worker_pgids.lock().await.get(sid).copied();
+        // The name the worker was spawned under, not the session id. Both the mark and the
+        // cgroup leaf are keyed on that name, and rebuilding them from the id alone is bug AI:
+        // the mark looked for `ARBOS_WORKER=<sid>` where the environment held `prime:<sid>`,
+        // and the leaf for `w-<sid>` where `attach_leaf` had made `w-prime-<sid>`. Both missed
+        // on every cancel, leaving only the recorded pgid and session — which are exactly the
+        // two handles a `setsid` descendant escapes.
+        //
+        // From the store, so a cancel after an agentd restart still has it; `worker_pgids`
+        // above is in memory and does not survive one.
+        let name = self
+            .store
+            .subagent(sid)
+            .ok()
+            .flatten()
+            .filter(|row| crate::harness::marks_its_children(&row.harness))
+            .map(|row| crate::harness::worker_name(&row.harness, sid));
         ProcessTree {
             pgid: leader,
             sid: leader,
-            cgroup: self
-                .cfg
-                .run_as
-                .as_ref()
-                .and_then(|ra| crate::isolation::Isolation::leaf_path(ra, sid)),
-            mark: Some(sid.to_owned()),
+            cgroup: name.as_deref().and_then(|n| {
+                self.cfg
+                    .run_as
+                    .as_ref()
+                    .and_then(|ra| crate::isolation::Isolation::leaf_path(ra, n))
+            }),
+            mark: name,
         }
     }
 

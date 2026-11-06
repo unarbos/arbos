@@ -57,10 +57,16 @@ const CHAT: &str = "01TESTCHATJOBREPARENT00001";
 const JOB: &str = "01TESTJOBREPARENTTICK13001";
 const ASK: &str = "01TESTASKJOBREPARENT000001";
 
-/// A worker id per test, because the mark is read out of the box's process table and that is
-/// one namespace for the whole suite. Two tests sharing a mark would each find the other's
-/// processes and report them as survivors of its own job — a flake, and one that would look
-/// exactly like the bug.
+/// A worker **session id** per test, because the mark is read out of the box's process table
+/// and that is one namespace for the whole suite. Two tests sharing one would each find the
+/// other's processes and report them as survivors of its own job — a flake, and one that would
+/// look exactly like the bug.
+///
+/// The mark a worker actually carries is [`planted_mark`], not this. Until bug AI these
+/// fixtures planted the bare session id, which is what the cancel looked for and **not** what
+/// `RpcChild::spawn` writes — so the cases below passed against an environment production
+/// never creates, and the two `setsid` shapes, the only ones that depend on the mark, went
+/// green over a handle that had never matched a real process.
 const WORKER_R13: &str = "01TESTWORKERREPARENTKILL01";
 const WORKER_R14: &str = "01TESTWORKERSETSIDCHILD001";
 const WORKER_R15: &str = "01TESTWORKERSETSIDNOHUP001";
@@ -296,6 +302,12 @@ fn level_log(dir: &Path, depth: usize) -> PathBuf {
 
 /// A worker root as `RpcChild::spawn` leaves one: its own session, and the mark its descendants
 /// inherit.
+/// The mark `RpcChild::spawn` would have given a worker of this session, so these fixtures
+/// plant the environment the box really creates rather than the one the cancel used to expect.
+fn planted_mark(sid: &str) -> String {
+    crate::harness::worker_name("pi", sid)
+}
+
 fn spawn_worker_root(script: &str, mark: &str) -> std::process::Child {
     let mut cmd = Command::new("bash");
     cmd.arg("-c")
@@ -438,7 +450,7 @@ async fn a_job_row(agent: &std::sync::Arc<Agent>) {
 #[tokio::test]
 async fn cancelling_a_job_kills_the_backgrounded_tree_it_orphaned() {
     let (agent, root) = test_agent().await;
-    let worker = Worker::start(&root, WORKER_R13);
+    let worker = Worker::start(&root, &planted_mark(WORKER_R13));
     worker.assert_is_round_13_shape();
     a_running_job(&agent, worker.leader, WORKER_R13).await;
 
@@ -499,7 +511,7 @@ async fn cancelling_a_job_kills_the_backgrounded_tree_it_orphaned() {
 async fn cancelling_a_job_kills_a_descendant_that_started_its_own_session() {
     let (agent, root) = test_agent().await;
     // Round 14's tree: four levels, and the deepest starts a session of its own.
-    let worker = DeepWorker::start(&root, WORKER_R14, &["", "", "setsid"]);
+    let worker = DeepWorker::start(&root, &planted_mark(WORKER_R14), &["", "", "setsid"]);
     worker.assert_a_descendant_leads_its_own_session();
     a_running_job(&agent, worker.leader, WORKER_R14).await;
 
@@ -549,7 +561,11 @@ async fn cancelling_a_job_kills_a_descendant_that_started_its_own_session() {
 #[tokio::test]
 async fn cancelling_a_job_kills_a_tree_that_stacks_setsid_on_nohup() {
     let (agent, root) = test_agent().await;
-    let worker = DeepWorker::start(&root, WORKER_R15, &["nohup", "setsid", "nohup", "setsid"]);
+    let worker = DeepWorker::start(
+        &root,
+        &planted_mark(WORKER_R15),
+        &["nohup", "setsid", "nohup", "setsid"],
+    );
     worker.assert_a_descendant_leads_its_own_session();
     a_running_job(&agent, worker.leader, WORKER_R15).await;
 

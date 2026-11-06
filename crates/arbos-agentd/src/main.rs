@@ -4,6 +4,8 @@ mod agent_messages;
 mod approval;
 mod attachments;
 mod budget;
+#[cfg(test)]
+mod cancel_handles_tests;
 mod channels;
 mod chart;
 mod config;

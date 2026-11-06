@@ -107,6 +107,31 @@ pub trait HarnessAdapter: Send + Sync {
     }
 }
 
+/// The name [`RpcChild::spawn`] starts a worker under.
+///
+/// It is not decoration. The name becomes the `ARBOS_WORKER` value every descendant inherits
+/// and the cgroup leaf the worker is attached to, so a cancel that wants either handle has to
+/// spell it the same way — and a cancel only has the session id to rebuild it from.
+///
+/// Bug AI, found in `r17status`: `Agent::worker_tree` built the mark as the bare session id
+/// while the environment held `prime:<session id>`, and looked the leaf up as `w-<session id>`
+/// while `attach_leaf` had created `w-prime-<session id>`. Both missed, silently, on every
+/// cancel the box has ever run. One definition now, used by the spawn and by the cancel, so a
+/// second spelling cannot be introduced by editing only one of them.
+pub fn worker_name(harness: &str, session_id: &str) -> String {
+    format!("{harness}:{session_id}")
+}
+
+/// Does this harness spawn its workers through [`RpcChild`], and so mark them?
+///
+/// Claude Code builds its own [`Command`], so its children carry no mark and own no cgroup
+/// leaf. A cancel must know that rather than construct a name for them: a mark that cannot
+/// match is not a handle, and treating it as one is how a sweep reports a clean kill having
+/// looked at nothing.
+pub fn marks_its_children(harness: &str) -> bool {
+    matches!(harness, "pi" | "prime")
+}
+
 /// Translate one pi/Prime RPC event into zero or more `AgentEvent`s.
 pub fn translate_rpc_event(e: &Event) -> Vec<AgentEvent> {
     match e {
@@ -444,7 +469,7 @@ impl PrimeAdapter {
             .join(format!("prime-{session_id}.log"));
         std::fs::create_dir_all(log.parent().unwrap())?;
         RpcChild::spawn(
-            &format!("prime:{session_id}"),
+            &worker_name(Harness::Prime.as_str(), session_id),
             &self.cfg.prime_bin,
             &args,
             &self.envs(session_id).await,
@@ -748,7 +773,7 @@ impl PiAdapter {
             .join(format!("pi-sub-{session_id}.log"));
         std::fs::create_dir_all(log.parent().unwrap())?;
         RpcChild::spawn(
-            &format!("pi:{session_id}"),
+            &worker_name(Harness::Pi.as_str(), session_id),
             &self.cfg.pi_bin,
             &args,
             &Self::envs(&self.cfg, session_id, "subagent"),
