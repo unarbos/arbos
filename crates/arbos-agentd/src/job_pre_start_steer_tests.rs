@@ -135,6 +135,70 @@ async fn a_correction_that_arrived_before_the_job_existed_reaches_its_first_work
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// r16race, at the timings the round actually recorded — a five-second lead, the tightest of the
+/// four rounds that reproduced this.
+///
+/// | 18:33:19 | `R1` arrives |
+/// | 18:33:24 | `job_start`, **five seconds** later |
+/// | 18:33:50 | `race16.csv` posts, built to the uncorrected n² spec |
+/// | 18:34:27 | the corrected `race16_r1.csv` posts, 37 seconds after the wrong one |
+///
+/// The worker said it plainly at 18:33:57: *"I wrote race16.csv … and posted it once; **no
+/// correction arrived**"*. It was right, and that is the bug — the correction was five seconds
+/// older than the job and nothing carried it in.
+///
+/// **Why a second case rather than widening the one above.** The capture bounds what it inherits
+/// by `issued_at >= asked_at` and has no upper bound, so no gap size can pass at thirty seconds
+/// and fail at five — the only axis that can break is *ordering*, not duration. This case
+/// therefore does not test a new code path. It pins a **measured** timing, so that a later change
+/// introducing a window has to fail against a real trace rather than an invented margin.
+///
+/// Asserts all three of `R1`'s constraints reach the worker. A single-constraint assertion would
+/// pass on a brief that carried the correction but truncated it, which is the failure that leaves
+/// a user's last instruction silently half-applied.
+#[tokio::test]
+async fn the_five_second_lead_of_r16race_still_reaches_the_first_worker() {
+    // The round's own clock, as `r16race.json` recorded it: the ask at 18:33:11, `R1` at
+    // 18:33:19, `job_start` at 18:33:24.
+    const ASKED_AT_MS: i64 = 0;
+    const CORRECTION_AT_MS: i64 = 8_000;
+    const JOB_START_AT_MS: i64 = 13_000;
+    const LEAD_MS: i64 = JOB_START_AT_MS - CORRECTION_AT_MS;
+    assert_eq!(LEAD_MS, 5_000, "r16race's measured lead is five seconds");
+
+    let (agent, root) = test_agent().await;
+    let host = agent.sync.open_room(CHAT).await.unwrap();
+    let t0 = now_ms();
+    an_ask(&host, t0 + ASKED_AT_MS).await;
+    let _busy = agent.test_hold_turn_for(CHAT, ASK).await;
+    let r1 = "R1: correction for the race16 job BEFORE you post it: use n^3 instead of n^2, \
+              only n divisible by 6, and add a column n_mod_11.";
+    a_user_message(&host, "steer", r1, t0 + CORRECTION_AT_MS).await;
+
+    let job = the_model_starts_a_job(&agent).await;
+
+    assert_eq!(
+        steers_of(&agent, &job),
+        vec![r1.to_owned()],
+        "a correction five seconds older than the job is still inherited onto its row"
+    );
+    let brief = agent
+        .test_first_worker_brief(&job)
+        .expect("the first worker was started");
+    for constraint in ["n^3", "divisible by 6", "n_mod_11"] {
+        assert!(
+            brief.contains(constraint),
+            "the first worker must start with all of R1, including {constraint:?} — r16's worker \
+             reported \"no correction arrived\": {brief}"
+        );
+    }
+    assert!(
+        brief.starts_with(BRIEF),
+        "the model's brief is still carried byte-identical ahead of the correction: {brief}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// The fold is a no-op when there is nothing to fold: a job nobody corrected hands its worker the
 /// brief the model wrote and not a word more. The guard on fix 1 being a quiet change to every
 /// job rather than only to corrected ones.
