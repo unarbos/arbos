@@ -4851,7 +4851,7 @@ fn decide_approval(
     let (kind, core_state) = match state {
         ApprovalState::Approved => ("approve", CoreApprovalState::Approved),
         ApprovalState::Rejected => ("reject", CoreApprovalState::Rejected),
-        ApprovalState::Pending | ApprovalState::Expired => return,
+        ApprovalState::Pending | ApprovalState::Expired | ApprovalState::Unknown => return,
     };
     let reason = reason.filter(|r| !r.trim().is_empty());
     let found = with_doc(shared, &chat_id, |doc| {
@@ -4905,7 +4905,7 @@ fn decide_approval(
                 .map(|r| format!(" ({r})"))
                 .unwrap_or_default()
         )],
-        ApprovalState::Pending | ApprovalState::Expired => return,
+        ApprovalState::Pending | ApprovalState::Expired | ApprovalState::Unknown => return,
     };
     let project_id = project_of(shared, &chat_id);
     let shared = shared.clone();
@@ -5181,7 +5181,10 @@ fn write_parts(core: &CoreDoc, msg_id: &str, parts: &[Part], hidden: bool) -> Ve
     parts
         .iter()
         .filter_map(|part| {
-            let mut v = serde_json::to_value(part).unwrap_or(json!({}));
+            // A part that refuses to serialise is skipped, not written as `{}`:
+            // `add_part_from_json` takes an empty object and appends a part carrying only a
+            // generated id and no `kind`, which is worse than writing nothing.
+            let mut v = serde_json::to_value(part).ok()?;
             if let (true, Some(obj)) = (hidden, v.as_object_mut()) {
                 obj.insert("hidden".into(), Value::Bool(true));
             }
