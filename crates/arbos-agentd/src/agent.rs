@@ -3268,10 +3268,10 @@ impl Agent {
     ///
     /// Three things, in this order. The workspace's leftovers go first, because a dead job's
     /// worker holding the shared `memory.max` near its limit would kill every fresh child the
-    /// same way. Then the chat moves to a new session file, since a session pi
-    /// cannot load is a loop no backoff escapes — the old file is kept, and the chat's earlier
-    /// turns stay available through the tree, exactly as a window rotation leaves them. Then
-    /// the box reports that it cannot answer, which is the part Test5 never did at all.
+    /// same way. Then the chat moves to a new session file, since a session pi cannot load is a
+    /// loop no backoff escapes — the old file is kept, and the chat's earlier turns stay
+    /// available through the tree, exactly as a window rotation leaves them. Then the box
+    /// reports that it cannot answer, which is the part Test5 never did at all.
     async fn escalate_pi_crash_loop(self: &Arc<Self>, chat_id: &str, deaths: u32) {
         if self.pi_degraded.load(Ordering::SeqCst) {
             // Said once per outage; the retries below carry on either way.
