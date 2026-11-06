@@ -701,6 +701,18 @@ impl Store {
     /// cancelled job reading "Reading >" (bug X) or a failed one reading "Searching the project"
     /// fourteen minutes on (round 8). `done` keeps its worker's last line: it finished, its
     /// result arrives, and that line is the true account of what it finished with.
+    /// Move a job to `state`.
+    ///
+    /// A cancelled job cannot be moved to `running`, and that clause is the backstop for bug AN
+    /// rather than decoration. `run_subagent` waits for a subagent slot of unbounded length
+    /// before it starts a job, a stop can land anywhere inside that wait, and the start then
+    /// wrote `running` straight over `cancelled` — which this statement was happy to do, and
+    /// which also cleared `ended_at`, leaving no trace in the row that the job had ever been
+    /// cancelled. `run_subagent` re-checks after the wait so the work does not start; this makes
+    /// the row unable to lie about it even if some future path forgets to ask.
+    ///
+    /// `cancelled` to `queued` is deliberately still allowed: that is the box-restart reclaim,
+    /// which is a new decision about the job rather than a start racing a stop.
     pub fn set_job_state(&self, id: &str, state: &str, error: Option<&str>) -> Result<()> {
         let now = now_ms();
         self.with(|c| {
@@ -715,7 +727,7 @@ impl Store {
                                      ELSE last_step END,
                     last_step_at = CASE WHEN ?2 IN ('cancelled','failed') AND ended_at IS NULL THEN ?4
                                         ELSE last_step_at END
-                 WHERE id = ?1",
+                 WHERE id = ?1 AND NOT (?2 = 'running' AND state = 'cancelled')",
                 params![id, state, error, now, CANCELLED_STEP, FAILED_STEP],
             )
             .map(|_| ())
