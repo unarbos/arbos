@@ -92,7 +92,15 @@ pub trait HarnessAdapter: Send + Sync {
     async fn stop(&self, session_id: &str) -> Result<()>;
     /// Orderly shutdown of every open child (close stdin, wait, kill) before the box stops.
     async fn shutdown_all(&self);
-    fn is_open(&self, session_id: &str) -> bool;
+    /// Does this adapter still hold a live child for this session?
+    ///
+    /// [`None`] is "I could not look", never a guess: the map of children is behind one mutex
+    /// per adapter, and a read that cannot take it knows nothing about any session. The three
+    /// answers are kept apart because a kill decision reads a `false` as evidence that a
+    /// session is over, and a contended lock used to produce exactly that `false` — so a live
+    /// worker's whole tree was collectable for as long as a sibling session took to stop. Every
+    /// caller that decides whether to signal a process must treat `None` as alive.
+    fn is_open(&self, session_id: &str) -> Option<bool>;
     /// The process group this session's child leads, so a cancel can reap everything the child
     /// spawned after the child itself is gone (bug Z). `None` for an adapter whose children are
     /// not group leaders; the cancel then falls back to the cgroup alone.
@@ -520,7 +528,10 @@ impl HarnessAdapter for PrimeAdapter {
     }
 
     async fn resume(&self, session_id: &str) -> Result<()> {
-        if self.is_open(session_id) {
+        // `unwrap_or(false)`, so a lock this could not take still means "resume it" — exactly
+        // what it meant before. Deliberately unchanged: this is not a kill decision, and the
+        // other reading (assume open, skip the resume) would leave a session unresumed.
+        if self.is_open(session_id).unwrap_or(false) {
             return Ok(());
         }
         let uuid = self
@@ -623,12 +634,9 @@ impl HarnessAdapter for PrimeAdapter {
         }
     }
 
-    fn is_open(&self, session_id: &str) -> bool {
-        self.sessions
-            .children
-            .try_lock()
-            .map(|c| c.get(session_id).map(|ch| ch.is_alive()).unwrap_or(false))
-            .unwrap_or(false)
+    fn is_open(&self, session_id: &str) -> Option<bool> {
+        let children = self.sessions.children.try_lock().ok()?;
+        Some(children.get(session_id).is_some_and(|ch| ch.is_alive()))
     }
 
     async fn child_pgid(&self, session_id: &str) -> Option<u32> {
@@ -815,7 +823,10 @@ impl HarnessAdapter for PiAdapter {
     }
 
     async fn resume(&self, session_id: &str) -> Result<()> {
-        if self.is_open(session_id) {
+        // `unwrap_or(false)`, so a lock this could not take still means "resume it" — exactly
+        // what it meant before. Deliberately unchanged: this is not a kill decision, and the
+        // other reading (assume open, skip the resume) would leave a session unresumed.
+        if self.is_open(session_id).unwrap_or(false) {
             return Ok(());
         }
         let extra = vec!["--session".into(), session_id.to_owned()];
@@ -927,12 +938,9 @@ impl HarnessAdapter for PiAdapter {
         }
     }
 
-    fn is_open(&self, session_id: &str) -> bool {
-        self.sessions
-            .children
-            .try_lock()
-            .map(|c| c.get(session_id).map(|ch| ch.is_alive()).unwrap_or(false))
-            .unwrap_or(false)
+    fn is_open(&self, session_id: &str) -> Option<bool> {
+        let children = self.sessions.children.try_lock().ok()?;
+        Some(children.get(session_id).is_some_and(|ch| ch.is_alive()))
     }
 
     async fn child_pgid(&self, session_id: &str) -> Option<u32> {
@@ -1218,7 +1226,10 @@ impl HarnessAdapter for ClaudeCodeAdapter {
     }
 
     async fn resume(&self, session_id: &str) -> Result<()> {
-        if self.is_open(session_id) {
+        // `unwrap_or(false)`, so a lock this could not take still means "resume it" — exactly
+        // what it meant before. Deliberately unchanged: this is not a kill decision, and the
+        // other reading (assume open, skip the resume) would leave a session unresumed.
+        if self.is_open(session_id).unwrap_or(false) {
             return Ok(());
         }
         self.spawn(session_id, true, "", &self.cfg.work_dir).await
@@ -1278,11 +1289,9 @@ impl HarnessAdapter for ClaudeCodeAdapter {
         }
     }
 
-    fn is_open(&self, session_id: &str) -> bool {
-        self.children
-            .try_lock()
-            .map(|c| c.contains_key(session_id))
-            .unwrap_or(false)
+    fn is_open(&self, session_id: &str) -> Option<bool> {
+        let children = self.children.try_lock().ok()?;
+        Some(children.contains_key(session_id))
     }
 }
 

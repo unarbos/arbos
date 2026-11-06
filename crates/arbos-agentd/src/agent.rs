@@ -4,7 +4,7 @@
 //! remain (turn deadline, context window, spend, tool timeouts) are announced
 //! in the chat — never a silent stop.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -4725,32 +4725,77 @@ impl Agent {
             return Sweep::default();
         };
         let mut dead: HashSet<String> = HashSet::new();
+        let mut unread: BTreeSet<String> = BTreeSet::new();
         for (_pid, mark) in marked {
             let Some(session) = crate::isolation::session_of(&mark) else {
                 continue;
             };
-            if dead.contains(session) {
+            if dead.contains(session) || unread.contains(session) {
                 continue;
             }
-            let was_a_worker = matches!(self.store.subagent(session), Ok(Some(_)));
-            let still_open = self.adapters.values().any(|a| a.is_open(session));
-            if was_a_worker && !still_open {
-                dead.insert(session.to_owned());
+            if !matches!(self.store.subagent(session), Ok(Some(_))) {
+                continue;
+            }
+            match self.session_is_over(session) {
+                Some(true) => {
+                    dead.insert(session.to_owned());
+                }
+                // Live, or unreadable. Both are kept, and only the second is worth a word.
+                Some(false) => {}
+                None => {
+                    unread.insert(session.to_owned());
+                }
             }
         }
-        // The walk above read `/proc` and no process on the box belongs to a worker that is
-        // over. There was nothing to check, which is a different sentence from "I checked and
-        // it is dead" and is now recorded as one.
+        if !unread.is_empty() {
+            tracing::warn!(
+                sessions = ?unread,
+                "a sweep could not read whether these sessions are still open, so they are kept \
+                 and nothing is claimed about their processes"
+            );
+        }
+        // Conditional on purpose, and this is the part that is easy to get wrong.
+        // `nothing_to_check` is [`Evidence::Nothing`], which `stop_job_note` turns into "there
+        // are no processes to account for" — a positive all-clear. A dead set that is empty
+        // only because a session could not be read has not earned that sentence: it is the
+        // evidence of success read off a field that records a failure to look, which is bug
+        // AE's shape and bug AP's shape, here a third time.
         if dead.is_empty() {
-            return Sweep::nothing_to_check();
+            return match unread.is_empty() {
+                true => Sweep::nothing_to_check(),
+                false => Sweep::default(),
+            };
         }
         // Blocking: the reap signals, sleeps and re-reads `/proc`, which must not sit on a
         // runtime thread the rest of the box shares.
-        tokio::task::spawn_blocking(move || {
+        let sweep = tokio::task::spawn_blocking(move || {
             crate::isolation::reap_orphan_workers(|session| dead.contains(session))
         })
         .await
-        .unwrap_or_default()
+        .unwrap_or_default();
+        // However well the enumerated part went, part of the box went unlooked-at.
+        match unread.is_empty() {
+            true => sweep,
+            false => sweep.part_unread(),
+        }
+    }
+
+    /// Is this session provably over? `Some(true)` over, `Some(false)` live, [`None`] unreadable.
+    ///
+    /// `Some(true)` needs **every** adapter to have answered, because one adapter's "not mine"
+    /// says nothing about a session another adapter could not be read for. An `any()` over the
+    /// adapters would let one adapter's `Some(false)` mask another's `None` and hand the caller
+    /// a licence to kill that no adapter ever gave it.
+    fn session_is_over(&self, session: &str) -> Option<bool> {
+        let mut all_answered = true;
+        for a in self.adapters.values() {
+            match a.is_open(session) {
+                Some(true) => return Some(false),
+                Some(false) => {}
+                None => all_answered = false,
+            }
+        }
+        all_answered.then_some(true)
     }
 
     /// Reap what no job row names, and remember any of it that would not die.
@@ -11982,7 +12027,10 @@ impl Agent {
                     Some(harness.as_str()),
                 )
                 .await;
-        } else if !adapter.is_open(&subagent_id) {
+        // `unwrap_or(false)`: a lock this could not take still means "resume it", which is what
+        // it meant before. Not a kill decision, so the three-state answer is not needed here —
+        // and `resume` is itself a no-op on a session that turns out to be open.
+        } else if !adapter.is_open(&subagent_id).unwrap_or(false) {
             match adapter.resume(&subagent_id).await {
                 Ok(()) => {
                     let _ = self

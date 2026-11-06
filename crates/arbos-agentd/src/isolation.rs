@@ -213,6 +213,19 @@ impl Sweep {
         self
     }
 
+    /// Fold in the fact that something this sweep was asked about could not be looked at.
+    ///
+    /// For a sweep over a set of things, where one of them was skipped because the box could
+    /// not read whether it was still in use. Whatever the part it did enumerate found, the
+    /// answer no longer covers everything it was asked about, so it cannot be stated as one.
+    ///
+    /// Expressed through [`Evidence::and`] rather than by assigning the variant, so the algebra
+    /// stays the only place that decides what two pieces of evidence make together.
+    pub fn part_unread(mut self) -> Self {
+        self.evidence = self.evidence.and(Evidence::Unconfirmed);
+        self
+    }
+
     /// The job's work really stopped — which needs the kernel to have been read, or there to
     /// have been nothing to read about. Not an empty survivor list from a sweep that looked
     /// with handles that named nothing.
