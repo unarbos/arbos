@@ -54,9 +54,11 @@ const BUDGET: Duration = Duration::from_secs(5);
 /// A live worker process tree, as a job leaves one: a shell leading its own process group,
 /// which starts a loop that appends to `log` once every [`TICK`].
 ///
-/// `process_group(0)` mirrors `RpcChild::spawn`. It is the production shape and it is also what
-/// keeps this test honest: without it the loop would share the test runner's group and a group
-/// kill would take the test harness with it.
+/// `process_group(0)` and nothing else, so these tests pin the group fallback on its own: it is
+/// what a box without a cgroup has, and round 13 showed it is not enough by itself
+/// (`job_reparent_tests`). Production spawns through `setsid`, which leads a group as well.
+/// A group of its own is also what keeps this test honest: without it the loop would share the
+/// test runner's group and a group kill would take the test harness with it.
 struct Worker {
     pgid: u32,
     log: std::path::PathBuf,
@@ -117,7 +119,7 @@ impl Worker {
     fn tree(&self) -> ProcessTree {
         ProcessTree {
             pgid: Some(self.pgid),
-            cgroup: None,
+            ..ProcessTree::default()
         }
     }
 }
@@ -306,6 +308,7 @@ fn a_cancel_that_cannot_kill_everything_says_so_instead_of_claiming_a_cancel() {
             found: 2,
             killed: 1,
             survivors: vec![561],
+            checked: true,
         },
     }];
 
@@ -337,13 +340,14 @@ fn a_cancel_that_cannot_kill_everything_says_so_instead_of_claiming_a_cancel() {
             found: 2,
             killed: 2,
             survivors: Vec::new(),
+            checked: true,
         },
         ..leaky[0].clone()
     }];
     let line = crate::agent::stop_line(&clean);
     assert!(line.contains("nothing more arrives"), "{line}");
     assert!(
-        crate::agent::stop_job_note(&clean).contains("every process it had started is dead"),
+        crate::agent::stop_job_note(&clean).contains("was checked and is dead"),
         "{}",
         crate::agent::stop_job_note(&clean)
     );
