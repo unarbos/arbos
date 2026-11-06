@@ -1295,6 +1295,21 @@ pub(crate) mod tests {
             .join("target")
             .join("approval-boxes")
             .join(ulid());
+        // The premise, checked rather than assumed. `CARGO_MANIFEST_DIR` is wherever the
+        // checkout happens to be, so a clone under `/tmp` — a scratch root — would put this
+        // box's whole workspace back inside scratch and make every boundary case here pass for
+        // the wrong reason, silently. Only the vacuous direction is quiet, which is why this
+        // fixture refuses to hand out a box it cannot vouch for.
+        assert!(
+            !arbos_core::approval::SCRATCH_ROOTS
+                .iter()
+                .any(|r| root.starts_with(r)),
+            "this fixture promises a workspace outside scratch and {} is inside one \
+             ({:?}): run the suite from a checkout that is not under a scratch root, or the \
+             boundary cases it serves would pass with the boundary removed",
+            root.display(),
+            arbos_core::approval::SCRATCH_ROOTS,
+        );
         test_agent_full_in(axum::Router::new(), "/nonexistent/pi", None, root).await
     }
 
