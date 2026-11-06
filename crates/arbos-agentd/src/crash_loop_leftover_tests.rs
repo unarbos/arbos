@@ -250,6 +250,15 @@ async fn the_escalation_collects_only_what_the_box_can_prove_is_abandoned() {
         sweep.checked,
         "a sweep that did not read the kernel knows nothing (bug AE)"
     );
+    // The survivors come first: a sweep that collected the wrong thing has already done the
+    // damage, and this is the assertion that says which process it was.
+    for pid in &spared {
+        assert!(
+            is_running(*pid),
+            "the escalation killed {pid}, for which it had no evidence of abandonment at all; \
+             round 16 killed 36 processes this way while eight jobs were mid-calculation"
+        );
+    }
     assert_eq!(
         sweep.found,
         doomed.len(),
@@ -260,17 +269,9 @@ async fn the_escalation_collects_only_what_the_box_can_prove_is_abandoned() {
         "nothing should have survived this sweep: {:?}",
         sweep.survivors
     );
-
     wait_until("the abandoned worker's tree is gone", || {
         doomed.iter().all(|p| !is_running(*p))
     });
-    for pid in &spared {
-        assert!(
-            is_running(*pid),
-            "the escalation killed {pid}, for which it had no evidence of abandonment at all; \
-             round 16 killed 36 processes this way while eight jobs were mid-calculation"
-        );
-    }
 
     let _ = std::fs::remove_dir_all(&cgroup);
 }
@@ -295,17 +296,17 @@ async fn a_workspace_of_live_work_loses_nothing_to_the_escalation() {
 
     let sweep = agent.kill_workspace_leftovers().await;
 
-    assert_eq!(
-        sweep.found, 0,
-        "no evidence was offered about anything, so nothing is a candidate"
-    );
-    assert_eq!(sweep.killed, 0, "and nothing is killed");
     for pid in &alive {
         assert!(
             is_running(*pid),
             "every process here is live work: killing {pid} is the bug"
         );
     }
+    assert_eq!(
+        sweep.found, 0,
+        "no evidence was offered about anything, so nothing is a candidate"
+    );
+    assert_eq!(sweep.killed, 0, "and nothing is killed");
 
     let _ = std::fs::remove_dir_all(&cgroup);
 }
