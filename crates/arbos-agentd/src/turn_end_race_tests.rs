@@ -517,3 +517,105 @@ async fn three_messages_at_a_turn_end_are_all_answered_with_no_failed_rows() {
     assert!(errors.is_empty(), "0 turn_failed rows: {errors:?}");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// Bug AO: an answer that arrives while the re-run is waiting for a child must stop the re-run.
+///
+/// `handle_command` asks `message_answered` as part of deciding to re-run, and
+/// `rerun_send_after_respawn` then waits up to `PI_RESPAWN_WAIT` — 45 seconds — for a child to
+/// come back. The chat is live for all of it. A job started for this same ask posts its result
+/// against the ask, and the owed drain delivers into it, so an answer can land after the caller
+/// looked and before the send goes again. One reading, taken before a wait that long, is a
+/// question asked about a chat that no longer exists.
+///
+/// Why this cannot be seen from the diff, and why it was not seen in Test5 round 20 either: the
+/// hole is latent. Round 20 put two of its three lost messages round this path more than once
+/// and produced no second row, because its children came back fast enough that nothing landed
+/// inside the window. A slower box, or a job that finishes a second later, is all it takes.
+///
+/// The test drives the window directly. `wait_for_ready_pi` cannot return until a live child is
+/// in the slot, so withholding one holds the re-run exactly where the race is, and the answer is
+/// written into the chat before the child is handed over.
+#[tokio::test]
+async fn an_answer_arriving_during_the_respawn_wait_stops_the_re_run() {
+    let (agent, root) = test_agent().await;
+    let chat = "01TESTCHATRERUNANSWERED001";
+    let host = agent.sync.open_room(chat).await.unwrap();
+
+    // A child that is already gone: the send fails on the write, with nothing streamed, which is
+    // the `lost_child && !spoke` shape that sends a message round the re-run.
+    let dead = scripted_pi(&root, "answered-rerun", "unused", true).await;
+    dead.shutdown().await;
+    agent.test_set_pi(Some(dead), chat).await;
+
+    let (msg_id, cmd) = send_cmd(&host, "What is 361 / 19?").await;
+    let runner = {
+        let agent = agent.clone();
+        tokio::spawn(async move { agent.handle_command(chat, cmd).await })
+    };
+
+    // The lost-child path retires the row the failed attempt opened, so a hidden row under the
+    // ask is the box saying it has decided this message was never answered — the decision the
+    // caller's own `message_answered` has just been part of. Waiting for it puts the chat's new
+    // answer after that reading and before the re-run's, which is the window being tested.
+    let retired = {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let seen = {
+                let h = host.lock().await;
+                h.doc.messages().into_iter().any(|m| {
+                    m.role == "assistant"
+                        && m.rest.get("inReplyTo").and_then(Value::as_str) == Some(msg_id.as_str())
+                        && m.rest.get("hidden").and_then(Value::as_bool) == Some(true)
+                })
+            };
+            if seen || Instant::now() >= deadline {
+                break seen;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    };
+    assert!(
+        retired,
+        "the first attempt loses its child and its row is retired"
+    );
+    tokio::time::sleep(RACE_WINDOW).await;
+    {
+        let h = host.lock().await;
+        let row = ulid();
+        h.doc.start_assistant_message(&row, &msg_id, "dev-mac");
+        if let Some(p) = h.doc.add_text_part(&row, "text") {
+            h.doc.append_text(&row, &p, "361 / 19 = 19, exactly.");
+        }
+        h.doc
+            .finish_message(&row, arbos_core::doc::MessageStatus::Done);
+    }
+
+    // Only now does a child come back, which is what releases the wait.
+    let fresh = scripted_pi(&root, "answered-rerun-fresh", SECOND_REPLY, false).await;
+    agent.test_set_pi(Some(fresh), chat).await;
+    let _ = tokio::time::timeout(ANSWER_BY, runner).await;
+
+    // The premise, and the reason this test cannot quietly become a trivial pass: the message
+    // did reach the re-run, past the caller's own reading, and was stopped by the one added here.
+    let skipped = std::fs::read_to_string(agent.cfg.audit_path())
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| l.contains("rerun_skipped_message_answered"))
+        .count();
+    assert_eq!(
+        skipped, 1,
+        "premise: the re-run was entered and then stopped by the chat's own rows"
+    );
+
+    let answers = visible_answers(&host, &msg_id).await;
+    assert_eq!(
+        answers.len(),
+        1,
+        "the ask keeps the one answer it already had, not a second from the re-run: {answers:?}"
+    );
+    assert!(
+        !answers[0].1.contains(SECOND_REPLY),
+        "and the row the user keeps is the answer that arrived, not the re-run's: {answers:?}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}

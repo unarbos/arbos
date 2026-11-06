@@ -4167,6 +4167,22 @@ impl Agent {
     ///
     /// Once. A box that cannot keep a pi child up for one prompt has a worse problem than this
     /// message, and the user is better served by the plain line than by a silent retry loop.
+    ///
+    /// **Why the chat is read again here, having been read to get here (bug AO).** The caller
+    /// asks [`Self::message_answered`] as part of deciding to re-run at all, and then this
+    /// function waits up to [`Self::PI_RESPAWN_WAIT`] — 45 seconds — for a child. The chat is
+    /// live for the whole of that wait. A job started for this same ask posts its result against
+    /// the ask, and the owed drain delivers into it, so the answer the caller looked for and did
+    /// not find can arrive after it looked and before the send goes again. Asking once, before a
+    /// wait that long, is a question asked about a chat that no longer exists.
+    ///
+    /// Nothing held in memory can stand in for the read. The turn's own judgement is
+    /// [`answer_delivered`], which reads the `TurnState` of the attempt that just failed — its
+    /// `streamed_text`, `ack_text`, `attachments_posted`, `progress_texts` — and every attempt
+    /// gets a fresh one, so attempt N+1 structurally cannot see that attempt N spoke. One
+    /// message can reach here more than once: a loss sends it round this function, a second loss
+    /// parks it in [`Self::pi_owed_sends`], and the drain runs it again when a child comes back.
+    /// The chat's own rows are the only record that spans those attempts.
     async fn rerun_send_after_respawn(
         self: &Arc<Self>,
         chat_id: &str,
@@ -4181,6 +4197,20 @@ impl Agent {
                 "the send lost the pi child and no ready one came back; the user is told the agent is restarting"
             );
             return self.owe_send_while_restarting(chat_id, host, cmd).await;
+        }
+        // The caller's reading of this is now up to `PI_RESPAWN_WAIT` old. Re-read it here,
+        // which is the last moment before a second answer would exist.
+        if self.message_answered(host, cmd).await {
+            tracing::warn!(
+                chat_id,
+                error = first_error,
+                "the send lost the pi child but its message has an answer already; not re-running it"
+            );
+            self.append_audit(
+                "rerun_skipped_message_answered",
+                json!({ "chat_id": chat_id, "command_id": cmd.id, "error": first_error }),
+            );
+            return Ok(());
         }
         tracing::warn!(
             chat_id,
