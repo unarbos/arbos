@@ -36,7 +36,7 @@ use arbos_core::route::Harness;
 
 use crate::agent::Agent;
 use crate::rpc_child::RpcChild;
-use crate::status::tests::test_agent;
+use crate::status::tests::{test_agent, test_agent_in_cgroup};
 
 /// `retire_idle_workers` reads every adapter's map and the store, both of which are this agent's
 /// own — but the cases also read `/proc` by pid, and one of them holds an adapter lock. Serialised
@@ -446,6 +446,97 @@ async fn retiring_leaves_what_a_resume_reads() {
         Some(false),
         "and `is_open` must read false, which is the one condition `run_subagent` resumes on"
     );
+}
+
+// ---- the memory bound ---------------------------------------------------------------------------
+
+/// `VmRSS` of `pid` in bytes, read here rather than borrowed from `agent::rss_bytes`.
+///
+/// Deliberately a second implementation. The memory case calibrates its ceiling from these
+/// numbers, so sharing the product's reader would make a broken reader calibrate its own test and
+/// pass. Two readers of the same file disagree if either is wrong.
+fn rss_of(pid: u32) -> u64 {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status"))
+        .unwrap_or_else(|e| panic!("pid {pid} must be alive to be measured: {e}"));
+    let line = status
+        .lines()
+        .find(|l| l.starts_with("VmRSS:"))
+        .unwrap_or_else(|| panic!("pid {pid} has no VmRSS line"));
+    let kb: u64 = line.split_whitespace().nth(1).unwrap().parse().unwrap();
+    assert!(
+        kb > 0,
+        "pid {pid} reads as zero-sized, which measures nothing"
+    );
+    kb * 1024
+}
+
+/// The memory bound takes the **fewest** children that fit the set under the share, not all of
+/// them.
+///
+/// This is the case for the question the threshold raised: when the memory path fires, does it
+/// collapse the retention that resume reuse depends on? It must not, so the figure asserted here
+/// is the survivor count, and the survivor is named.
+///
+/// The ceiling is **calibrated from the children's own measured RSS** rather than guessed. Three
+/// young workers stand under the population cap of six, so the cap cannot act and only memory
+/// can; `memory.max` is then written as the sum of their three readings, which makes the 50 %
+/// share half of what they hold. Half of three roughly equal things is one, so the arithmetic
+/// expects exactly two evictions — and a bound that swept the lot or did nothing fails.
+///
+/// A plain directory stands in for the cgroup: `workspace_mem_max` reads `memory.max` as a text
+/// file, which is the same thing `test_agent_in_cgroup`'s other users rely on.
+#[tokio::test]
+async fn the_memory_bound_takes_only_what_the_share_needs() {
+    let _one = exclusive().await;
+    let cgroup = std::env::temp_dir().join(format!("arbos-worker-mem-{}", ulid()));
+    std::fs::create_dir_all(&cgroup).unwrap();
+    std::fs::write(cgroup.join("cgroup.procs"), "").unwrap();
+    let (agent, root) = test_agent_in_cgroup(&cgroup).await;
+
+    // Three, which is under the population cap — so a pass that evicts here can only be the
+    // memory bound, and the two bounds cannot be confused for one another.
+    assert!(3 < Agent::WORKER_RETAINED_MAX);
+    let mut held = Vec::new();
+    for age in [300_000u64, 200_000, 100_000] {
+        let sid = ulid();
+        let pid = a_retained_worker(&agent, &root, &sid).await;
+        age_clock(&agent, &sid, age).await;
+        held.push((sid, pid));
+    }
+
+    // Nothing to do until a ceiling exists: the absent-ceiling case, measured rather than assumed.
+    assert_eq!(
+        agent.retire_idle_workers().await,
+        0,
+        "with no readable ceiling and the set under the cap, the pass must do nothing"
+    );
+
+    let total: u64 = held.iter().map(|(_, pid)| rss_of(*pid)).sum();
+    std::fs::write(cgroup.join("memory.max"), total.to_string()).unwrap();
+
+    assert_eq!(
+        agent.retire_idle_workers().await,
+        2,
+        "half of what three roughly equal children hold fits one of them, so two go — \
+         not three, which would collapse the retention resume reuse depends on"
+    );
+
+    let (youngest, youngest_pid) = held.last().unwrap();
+    for (sid, pid) in &held[..2] {
+        wait_until_gone(*pid).await;
+        assert!(!is_running(*pid), "{sid} is one of the two longest idle");
+    }
+    assert!(
+        is_running(*youngest_pid),
+        "and the most recently used child is the one kept"
+    );
+    assert_eq!(
+        agent.adapter(Harness::Pi).is_open(youngest),
+        Some(true),
+        "{youngest} must still be resident and reusable without a resume"
+    );
+
+    let _ = std::fs::remove_dir_all(&cgroup);
 }
 
 // ---- the resume round trip ----------------------------------------------------------------------
