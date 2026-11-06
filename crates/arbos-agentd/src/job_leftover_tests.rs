@@ -237,7 +237,7 @@ async fn cancelling_a_job_kills_the_detached_loop_its_worker_started() {
         "the cancel killed nothing and still called itself a cancel: {:?}",
         stopped[0].sweep
     );
-    let line = crate::agent::stop_line(&stopped);
+    let line = crate::agent::stop_line(&stopped, &nothing_unreachable());
     assert!(
         line.contains("cancelled") && line.contains("killed"),
         "the chat's stop line must say what was killed, not only that the row reads \
@@ -312,7 +312,7 @@ fn a_cancel_that_cannot_kill_everything_says_so_instead_of_claiming_a_cancel() {
         },
     }];
 
-    let line = crate::agent::stop_line(&leaky);
+    let line = crate::agent::stop_line(&leaky, &nothing_unreachable());
     assert!(
         line.contains("561") && line.contains("still running"),
         "the chat must be told which process outlived the cancel: {line}"
@@ -324,7 +324,7 @@ fn a_cancel_that_cannot_kill_everything_says_so_instead_of_claiming_a_cancel() {
 
     // And the model is told not to call it a cancel, and that the kill r10cancel refused is
     // the way out for this pid.
-    let note = crate::agent::stop_job_note(&leaky);
+    let note = crate::agent::stop_job_note(&leaky, &nothing_unreachable());
     assert!(
         note.contains("did NOT die") && note.contains("561"),
         "stop_job must name the pid it could not kill: {note}"
@@ -344,12 +344,13 @@ fn a_cancel_that_cannot_kill_everything_says_so_instead_of_claiming_a_cancel() {
         },
         ..leaky[0].clone()
     }];
-    let line = crate::agent::stop_line(&clean);
+    let line = crate::agent::stop_line(&clean, &nothing_unreachable());
     assert!(line.contains("nothing more arrives"), "{line}");
     assert!(
-        crate::agent::stop_job_note(&clean).contains("was checked and is dead"),
+        crate::agent::stop_job_note(&clean, &nothing_unreachable())
+            .contains("was checked and is dead"),
         "{}",
-        crate::agent::stop_job_note(&clean)
+        crate::agent::stop_job_note(&clean, &nothing_unreachable())
     );
 }
 
@@ -476,4 +477,11 @@ async fn stop_job_reports_what_it_killed() {
     assert_eq!(result["all_cancelled"], json!(true));
 
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// These cases are about a job's own processes, so the reap that runs beside a cancel found
+/// nothing. Not `Sweep::default()`: that reads as a sweep which never looked, which is a
+/// different claim and the one bug AE was about.
+fn nothing_unreachable() -> Sweep {
+    Sweep::nothing_to_check()
 }

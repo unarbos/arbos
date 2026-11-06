@@ -488,9 +488,7 @@ pub fn orphan_marked_procs(is_dead_session: impl Fn(&str) -> bool) -> Vec<(u32, 
     let mut out: Vec<(u32, String)> = marked_procs_all()
         .into_iter()
         .filter(|(pid, mark)| {
-            *pid > 1
-                && *pid != me
-                && session_of(mark).is_some_and(|session| is_dead_session(session))
+            *pid > 1 && *pid != me && session_of(mark).is_some_and(&is_dead_session)
         })
         .collect();
     out.sort_unstable();

@@ -27,6 +27,35 @@
 //!   mid-turn — a far worse bug than the one being fixed.
 //!
 //! Real processes, with real marks, read back out of `/proc`.
+//!
+//! ## Four ways these cases lied while they were being written
+//!
+//! Recorded because every one of them passed or failed convincingly, and because a file whose
+//! subject is "tell live work from dead" is the worst possible place to accept a measurement
+//! on trust. Anyone extending it will meet the same four.
+//!
+//! - **A panicking case skips its cleanup.** The first failures left real marked `sleep`
+//!   processes on the machine, and the next run read them as part of its own measurement — so
+//!   the second run's failure was caused by the first. Cleanup belongs in `Drop`, not at the
+//!   end of the body.
+//! - **`/proc` is the whole machine, not this test.** Cases that assert on an exact set must
+//!   own their namespace, which is why marks are minted per run: a tree leaked by an earlier
+//!   aborted run would otherwise be indistinguishable from this run's.
+//! - **A tree that forks cannot be counted.** The obvious `while true; do sleep 0.2; done`
+//!   fixture races every exact-set assertion against its next fork. These trees `exec` a plain
+//!   sleep and fork nothing, so the marked set is exactly two and stays that way.
+//! - **Two cases needing the same literal mark will eat each other.** `pi-main` is deliberately
+//!   the real string, so the two cases that need it cannot both run at once: in parallel each
+//!   captured the other's processes as its own and tore them down. That failure reads in the
+//!   output exactly like *the reaper killing the box's own agent* — the most dangerous false
+//!   signal this file can produce, because it is the thing we are watching for and it would
+//!   have been believed. Hence [`ONE_AT_A_TIME`].
+//!
+//! One of the four was a real bug rather than a fixture bug, and it is worth separating:
+//! judging liveness by whether `/proc/<pid>` exists counts a SIGKILLed child as alive, because
+//! it stays as a zombie until it is waited on. `isolation.rs` already treats `Z` and `X` as
+//! dead, and [`is_running`] here matches it rather than inventing a second rule — two liveness
+//! rules in one codebase is how the next one of these gets written.
 
 use std::os::unix::process::CommandExt;
 use std::process::Command;
@@ -36,7 +65,7 @@ use std::time::{Duration, Instant};
 use arbos_core::ids::ulid;
 
 use crate::isolation::{
-    marked_procs_all, orphan_marked_procs, reap_orphan_workers, session_of, WORKER_MARK_ENV,
+    marked_procs_all, orphan_marked_procs, reap_orphan_workers, session_of, Sweep, WORKER_MARK_ENV,
 };
 
 /// The mark the main pi child and everything it runs carry (`agent.rs` spawns it under this
@@ -385,4 +414,105 @@ fn is_running(pid: u32) -> bool {
         after_comm.1.split_whitespace().next(),
         Some("Z") | Some("X")
     )
+}
+
+// ---- what the cancel says about work no job row names -----------------------------------
+
+/// A cancel that reaps cleanly has nothing extra to say, and must not invent a worry.
+#[test]
+fn a_cancel_that_accounted_for_everything_says_nothing_extra() {
+    let stopped = vec![cancelled_job(Sweep {
+        found: 1,
+        killed: 1,
+        survivors: vec![],
+        checked: true,
+    })];
+    let reaped = Sweep {
+        found: 2,
+        killed: 2,
+        survivors: vec![],
+        checked: true,
+    };
+
+    let line = crate::agent::stop_line(&stopped, &reaped);
+    assert!(
+        line.contains("cancelled") && !line.contains("belongs to no job"),
+        "work that was reaped is accounted for and needs no sentence: {line}"
+    );
+    assert!(
+        crate::agent::stop_job_note(&stopped, &reaped).contains("end the turn"),
+        "and the model is still free to report the cancel"
+    );
+}
+
+/// Bug AE's guarantee, for a process that had no row to be named in. `stop_job` may not claim
+/// the work stopped when the reap could not kill what it found, even though no job owns it.
+#[test]
+fn a_cancel_that_could_not_kill_unnamed_work_says_so_and_names_the_pid() {
+    let stopped = vec![cancelled_job(Sweep {
+        found: 1,
+        killed: 1,
+        survivors: vec![],
+        checked: true,
+    })];
+    let survived = Sweep {
+        found: 1,
+        killed: 0,
+        survivors: vec![23536],
+        checked: true,
+    };
+
+    let line = crate::agent::stop_line(&stopped, &survived);
+    assert!(
+        line.contains("23536"),
+        "the user needs the pid; it is the only way they can get rid of it: {line}"
+    );
+    assert!(
+        !line.contains("nothing more arrives from it"),
+        "a cancel that left work running must not promise nothing more arrives: {line}"
+    );
+
+    let note = crate::agent::stop_job_note(&stopped, &survived);
+    assert!(
+        note.contains("23536") && note.contains("kill -9 23536"),
+        "the model must name the pid and be pointed at the one kill now allowed: {note}"
+    );
+    assert!(
+        note.contains("no job row names it"),
+        "and be told why stopping the job again will not reach it: {note}"
+    );
+    assert!(
+        !note.contains("end the turn"),
+        "it must not be told the cancel is complete: {note}"
+    );
+}
+
+/// `r17status` itself: the ask that left the loop had no job row, so a cancel ends no job at
+/// all. The old line returned early on an empty list and the chat heard nothing.
+#[test]
+fn a_cancel_that_ended_no_job_still_reports_work_it_could_not_account_for() {
+    let survived = Sweep {
+        found: 1,
+        killed: 0,
+        survivors: vec![23536],
+        checked: true,
+    };
+    let line = crate::agent::stop_line(&[], &survived);
+    assert!(
+        line.contains("23536") && line.contains("belongs to no job"),
+        "with no job to hang it off, this is the only thing the user is told: {line}"
+    );
+    assert!(
+        !line.starts_with(' '),
+        "and it reads as a sentence rather than a fragment: {line:?}"
+    );
+}
+
+fn cancelled_job(sweep: Sweep) -> crate::agent::StoppedJob {
+    crate::agent::StoppedJob {
+        id: "j-1".to_owned(),
+        title: "Checking the box".to_owned(),
+        state: "cancelled".to_owned(),
+        sweep,
+    }
 }

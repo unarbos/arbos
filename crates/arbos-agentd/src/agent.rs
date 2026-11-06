@@ -1117,14 +1117,20 @@ const LEFTOVER_PIDS_MAX: usize = 32;
 /// work that is still running (bug Z), and a clean-sounding answer from a sweep that never read
 /// the kernel (bug AE). The model is told not to report a cancel, told which pid to name, and
 /// told that the `kill` the guard refused in r10cancel is allowed for exactly that pid.
-pub(crate) fn stop_job_note(stopped: &[StoppedJob]) -> String {
+pub(crate) fn stop_job_note(stopped: &[StoppedJob], unreachable: &Sweep) -> String {
     if stopped.iter().any(|s| s.state != "cancelled") {
         return "At least one job above does NOT read `cancelled`. Do not tell the user it stopped: say which one is still open, call stop_job again for it, and only then report a cancel.".to_owned();
     }
-    let leftovers: Vec<u32> = stopped
+    // Work a dead worker left that no job row names (bug AK) counts here exactly like a job's
+    // own leftover. It is the harder case to say out loud, because there is no job to attach it
+    // to — and saying nothing is how `r17status` ended with a loop running and a chat that
+    // believed everything had stopped.
+    let unnamed = !unreachable.survivors.is_empty();
+    let mut leftovers: Vec<u32> = stopped
         .iter()
         .flat_map(|s| s.sweep.survivors.clone())
         .collect();
+    leftovers.extend(unreachable.survivors.iter().copied());
     if leftovers.is_empty() {
         if stopped.iter().any(|s| !s.sweep.checked) {
             return "Every job above reads `cancelled`, but its processes could NOT be checked: agentd has no handle on them (it was restarted since the job started). Do not tell the user the work stopped. Say the job is cancelled and that you cannot confirm the processes it started are gone, and offer to look with `ps`.".to_owned();
@@ -1133,8 +1139,13 @@ pub(crate) fn stop_job_note(stopped: &[StoppedJob]) -> String {
     }
     let pids = pid_list(&leftovers);
     format!(
-        "Every job above reads `cancelled`, but {} it started did NOT die: pid(s) {pids}. Do not tell the user the work stopped. Say the job is cancelled and that pid(s) {pids} are still running, then run `kill -9 {pids}` — a kill aimed at a pid stop_job reported it could not kill is allowed in this chat — and check with `ps -p {pids}`.",
+        "Every job above reads `cancelled`, but {} did NOT die: pid(s) {pids}.{} Do not tell the user the work stopped. Say the job is cancelled and that pid(s) {pids} are still running, then run `kill -9 {pids}` — a kill aimed at a pid stop_job reported it could not kill is allowed in this chat — and check with `ps -p {pids}`.",
         if leftovers.len() == 1 { "a process" } else { "processes" },
+        if unnamed {
+            " Some of it belongs to no job: a worker died and left it running, so no job row names it and stopping a job again will not reach it."
+        } else {
+            ""
+        },
     )
 }
 
@@ -1187,7 +1198,24 @@ fn pids_in_command(command: &str) -> Vec<u32> {
 /// The line the chat gets when the user's stop ended one or more jobs. It names the state the
 /// store holds now, because that — and not the fact that a stop was issued — is what makes
 /// "cancelled" a true thing to say (bug S).
-pub(crate) fn stop_line(stopped: &[StoppedJob]) -> String {
+pub(crate) fn stop_line(stopped: &[StoppedJob], unreachable: &Sweep) -> String {
+    // Bug AK: a cancel can leave work running that belongs to no job at all, and in `r17status`
+    // there was no job row to hang the sentence off. The user still has to be told, and told
+    // the pid, because that is the only way they can get rid of it.
+    let orphans = match unreachable.survivors.as_slice() {
+        [] => String::new(),
+        pids => format!(
+            " Work left by a worker that died is still running and belongs to no job ({}). \
+             I cannot stop that by cancelling a job.",
+            pids.iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    };
+    if stopped.is_empty() {
+        return orphans.trim_start().to_owned();
+    }
     let titles = stopped
         .iter()
         .map(|s| s.title.to_lowercase())
@@ -1195,7 +1223,7 @@ pub(crate) fn stop_line(stopped: &[StoppedJob]) -> String {
         .join(", ");
     if let Some(open) = stopped.iter().find(|s| s.state != "cancelled") {
         return format!(
-            "Stopped: {titles}. “{}” still reads {}, so I cannot tell you it is cancelled.",
+            "Stopped: {titles}. “{}” still reads {}, so I cannot tell you it is cancelled.{orphans}",
             open.title.to_lowercase(),
             open.state
         );
@@ -1206,7 +1234,7 @@ pub(crate) fn stop_line(stopped: &[StoppedJob]) -> String {
     if let Some(leaky) = stopped.iter().find(|s| !s.sweep.survivors.is_empty()) {
         return format!(
             "Stopped: {titles}. “{}” reads cancelled, but {} it started {} still running ({}). \
-             I am not able to say its work has stopped.",
+             I am not able to say its work has stopped.{orphans}",
             leaky.title.to_lowercase(),
             if leaky.sweep.survivors.len() == 1 {
                 "a process"
@@ -1232,7 +1260,7 @@ pub(crate) fn stop_line(stopped: &[StoppedJob]) -> String {
     if let Some(unchecked) = stopped.iter().find(|s| !s.sweep.checked) {
         return format!(
             "Stopped: {titles}. “{}” reads cancelled, but I could not check whether the \
-             processes it started are gone.",
+             processes it started are gone.{orphans}",
             unchecked.title.to_lowercase()
         );
     }
@@ -1242,15 +1270,15 @@ pub(crate) fn stop_line(stopped: &[StoppedJob]) -> String {
         1 => " The one process it had left running was killed too.".to_owned(),
         n => format!(" The {n} processes it had left running were killed too."),
     };
-    if stopped.len() == 1 {
-        format!(
-            "Stopped: {titles}. Its state is cancelled now, so nothing more arrives from it.{also}"
-        )
-    } else {
-        format!(
-            "Stopped: {titles}. Their state is cancelled now, so nothing more arrives from them.{also}"
-        )
-    }
+    // The promise is dropped where work no job row names is still running. It would be true of
+    // the jobs and false of the chat, which is the kind of true sentence bug Z was made of.
+    let (whose, nothing_more) = match (stopped.len(), unreachable.survivors.is_empty()) {
+        (1, true) => ("Its", ", so nothing more arrives from it"),
+        (_, true) => ("Their", ", so nothing more arrives from them"),
+        (1, false) => ("Its", ""),
+        (_, false) => ("Their", ""),
+    };
+    format!("Stopped: {titles}. {whose} state is cancelled now{nothing_more}.{also}{orphans}")
 }
 
 /// What [`Agent::settle_cancelled_job`] needs to close a worker down whose job the user
@@ -4191,14 +4219,18 @@ impl Agent {
         if let Some(job_id) = cmd.payload.get("jobId").and_then(Value::as_str) {
             let stopped = self.stop_jobs(chat_id, Some(job_id)).await;
             tracing::info!(chat_id, job_id, stopped = stopped.len(), "stop: one job");
+            let unreachable = self.reap_and_note_unreachable(chat_id).await;
             // The chip stopped a job and said nothing, so whether it worked was unknowable from
             // the chat. One line, and it names the state the job row holds now (bug S).
-            self.write_stop_line(chat_id, &anchor, &stopped).await;
+            self.write_stop_line(chat_id, &anchor, &stopped, &unreachable)
+                .await;
             return Ok(());
         }
         let turn = self.handle_stop(chat_id).await;
         let stopped = self.stop_jobs(chat_id, None).await;
-        self.write_stop_line(chat_id, &anchor, &stopped).await;
+        let unreachable = self.reap_and_note_unreachable(chat_id).await;
+        self.write_stop_line(chat_id, &anchor, &stopped, &unreachable)
+            .await;
         turn
     }
 
@@ -4209,11 +4241,19 @@ impl Agent {
     /// joins no queue, so the cancel lands however long the chat's burst is, and this line is the
     /// user's only proof that it did. Held behind a queue it could be two minutes late, which is
     /// the silence the valve in `send_order.rs` exists to avoid.
-    async fn write_stop_line(&self, chat_id: &str, anchor: &str, stopped: &[StoppedJob]) {
-        if stopped.is_empty() {
+    async fn write_stop_line(
+        &self,
+        chat_id: &str,
+        anchor: &str,
+        stopped: &[StoppedJob],
+        unreachable: &Sweep,
+    ) {
+        // A stop that ended no job still has something to report when it found work no job row
+        // names — which in `r17status` was the only thing there was to report (bug AK).
+        if stopped.is_empty() && unreachable.survivors.is_empty() {
             return;
         }
-        let line = stop_line(stopped);
+        let line = stop_line(stopped, unreachable);
         let Ok(host) = self.room(chat_id).await else {
             return;
         };
@@ -4278,23 +4318,6 @@ impl Agent {
                 sweep,
             });
         }
-        // Bug AK. A cancel that only walks job rows cannot see work whose row never existed,
-        // and in `r17status` that was the whole of it. The survivors go to the same place a
-        // job's do, so a `kill` the user aims at one is allowed rather than refused — bug AE's
-        // guarantee must not weaken just because the process had no row to be named in.
-        let unreachable = self.reap_unreachable_workers().await;
-        if !unreachable.survivors.is_empty() {
-            self.note_cancel_leftovers(chat_id, &unreachable.survivors)
-                .await;
-        }
-        if unreachable.found > 0 {
-            tracing::warn!(
-                found = unreachable.found,
-                killed = unreachable.killed,
-                survivors = ?unreachable.survivors,
-                "work left by a dead worker that no job row named"
-            );
-        }
         if !stopped.is_empty() {
             self.refresh_job_activity(chat_id).await;
         }
@@ -4339,6 +4362,28 @@ impl Agent {
         })
         .await
         .unwrap_or_default()
+    }
+
+    /// Reap what no job row names, and remember any of it that would not die.
+    ///
+    /// Sits beside `stop_jobs` rather than inside it, so the sweep reaches the sentence the
+    /// user reads. The survivors go to the same place a job's do, which is what lets a `kill`
+    /// aimed at one through instead of refusing it: bug AE's guarantee must not weaken just
+    /// because the process had no row to be named in.
+    async fn reap_and_note_unreachable(&self, chat_id: &str) -> Sweep {
+        let sweep = self.reap_unreachable_workers().await;
+        if !sweep.survivors.is_empty() {
+            self.note_cancel_leftovers(chat_id, &sweep.survivors).await;
+        }
+        if sweep.found > 0 {
+            tracing::warn!(
+                found = sweep.found,
+                killed = sweep.killed,
+                survivors = ?sweep.survivors,
+                "work left by a dead worker that no job row named"
+            );
+        }
+        sweep
     }
 
     /// Remember pids a cancel could not kill, so the agent's `kill` on one of them is allowed
@@ -4988,6 +5033,7 @@ impl Agent {
         if stopped.is_empty() {
             return Err("no running job matched; list_jobs shows what is open in this chat".into());
         }
+        let unreachable = self.reap_and_note_unreachable(&chat_id).await;
         Ok(json!({
             "stopped": stopped
                 .iter()
@@ -5003,7 +5049,10 @@ impl Agent {
                 }))
                 .collect::<Vec<_>>(),
             "all_cancelled": stopped.iter().all(StoppedJob::cancelled),
-            "note": stop_job_note(&stopped),
+            // Work this cancel found running that belongs to no job row at all (bug AK). Kept
+            // apart from the per-job numbers above because no job is answerable for it.
+            "unnamed_processes_still_alive": unreachable.survivors,
+            "note": stop_job_note(&stopped, &unreachable),
         }))
     }
 

@@ -713,7 +713,7 @@ async fn a_cancel_that_left_a_process_running_names_it_and_unlocks_the_guard() {
         },
     }];
 
-    let line = crate::agent::stop_line(&leaky);
+    let line = crate::agent::stop_line(&leaky, &nothing_unreachable());
     assert!(
         line.contains("2576") && line.contains("still running"),
         "the chat must be told which process outlived the cancel: {line}"
@@ -723,7 +723,7 @@ async fn a_cancel_that_left_a_process_running_names_it_and_unlocks_the_guard() {
         "a cancel that left work running must not promise nothing more arrives: {line}"
     );
 
-    let note = crate::agent::stop_job_note(&leaky);
+    let note = crate::agent::stop_job_note(&leaky, &nothing_unreachable());
     assert!(
         note.contains("did NOT die") && note.contains("2576"),
         "stop_job must name the pid it could not kill: {note}"
@@ -814,4 +814,11 @@ impl Drop for Escapee {
     fn drop(&mut self) {
         self.reap();
     }
+}
+
+/// These cases are about a job's own processes, so the reap that runs beside a cancel found
+/// nothing. Not `Sweep::default()`: that reads as a sweep which never looked, which is a
+/// different claim and the one bug AE was about.
+fn nothing_unreachable() -> Sweep {
+    Sweep::nothing_to_check()
 }
