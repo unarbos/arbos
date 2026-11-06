@@ -1277,23 +1277,41 @@ pub(crate) mod tests {
     /// session and no supervisor at all — bug Y's tests need the production loop itself, so
     /// they give it a scripted child to supervise.
     pub(crate) async fn test_agent_with_pi(pi_bin: &str) -> (Arc<Agent>, std::path::PathBuf) {
-        test_agent_full(axum::Router::new(), pi_bin).await
+        test_agent_full(axum::Router::new(), pi_bin, NO_PRIME).await
+    }
+
+    /// Same, and with a `prime_bin` that works as well.
+    ///
+    /// A box whose pi is dying still has a working `prime-agent`: they are separate processes,
+    /// and the one that answers a mid-turn ask is prime, not pi. A test box left on [`NO_PRIME`]
+    /// does not model that — it models a box with no prime installed, where any ask that runs
+    /// beside a turn fails to spawn. For a test whose pi is *meant* to crash, that difference
+    /// decides the result, so such a test gives prime a scripted child of its own.
+    pub(crate) async fn test_agent_with_pi_and_prime(
+        pi_bin: &str,
+        prime_bin: &str,
+    ) -> (Arc<Agent>, std::path::PathBuf) {
+        test_agent_full(axum::Router::new(), pi_bin, prime_bin).await
     }
 
     /// Same, with extra mock-relay routes merged in (`/box/secrets/…` for the hand-off tests).
     pub(crate) async fn test_agent_with(extra: axum::Router) -> (Arc<Agent>, std::path::PathBuf) {
-        test_agent_full(extra, "/nonexistent/pi").await
+        test_agent_full(extra, "/nonexistent/pi", NO_PRIME).await
     }
 
     /// Same, pointed at a relay the caller serves itself. The model-stub tests count the TCP
     /// connections the box opens, which `axum::serve` cannot report.
     pub(crate) async fn test_agent_on_relay(relay_url: &str) -> (Arc<Agent>, std::path::PathBuf) {
-        test_agent_on(relay_url.to_owned(), "/nonexistent/pi").await
+        test_agent_on(relay_url.to_owned(), "/nonexistent/pi", NO_PRIME).await
     }
+
+    /// The `prime_bin` a test box gets when the test does not care: spawning it fails.
+    pub(crate) const NO_PRIME: &str = "/nonexistent/prime-agent";
 
     async fn test_agent_full(
         extra: axum::Router,
         pi_bin: &str,
+        prime_bin: &str,
     ) -> (Arc<Agent>, std::path::PathBuf) {
         let app = axum::Router::new()
             .merge(extra)
@@ -1315,10 +1333,14 @@ pub(crate) mod tests {
         tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
-        test_agent_on(format!("http://127.0.0.1:{port}"), pi_bin).await
+        test_agent_on(format!("http://127.0.0.1:{port}"), pi_bin, prime_bin).await
     }
 
-    async fn test_agent_on(relay_url: String, pi_bin: &str) -> (Arc<Agent>, std::path::PathBuf) {
+    async fn test_agent_on(
+        relay_url: String,
+        pi_bin: &str,
+        prime_bin: &str,
+    ) -> (Arc<Agent>, std::path::PathBuf) {
         let root = std::env::temp_dir().join(format!("arbos-quick-{}", ulid()));
         std::fs::create_dir_all(&root).unwrap();
         let bx = crate::config::BoxConfig {
@@ -1331,7 +1353,7 @@ pub(crate) mod tests {
             port: 0,
             local_box: true,
             pi_bin: pi_bin.into(),
-            prime_bin: "/nonexistent/prime-agent".into(),
+            prime_bin: prime_bin.into(),
             claude_bin: "/nonexistent/claude".into(),
             pi_ext_override: None,
             device_id: "box:test".into(),
