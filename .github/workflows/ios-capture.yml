@@ -10,6 +10,13 @@ name: iPhone capture
 # `ARBOS_SHOT_DIR` is absent, so the `swift-core-check.yml` gate pays one skipped test case for it
 # and nothing else. Read its doc comment for the step vocabulary.
 #
+# Those variables reach the runner through the built `.xctestrun`, written by
+# `scripts/ci/xctestrun-env.py` between `build-for-testing` and the capture. They do NOT travel as
+# `TEST_RUNNER_<KEY>` build settings: that is the documented route, it silently does not work on
+# this image, and relying on it meant this workflow skipped its own rig on every run it ever made
+# while reporting `** TEST EXECUTE SUCCEEDED **`. If a leg ever skips again the capture step says
+# so in those words rather than leaving an empty directory to be misread.
+#
 #   gh workflow run ios-capture.yml \
 #     -f head_ref=cursor/my-fix -f base_ref=main \
 #     -f launch_env='ARBOS_FIXTURE=1;ARBOS_NO_STORE=1;ARBOS_OPEN_PEOPLE=fx-group-launch' \
@@ -396,6 +403,36 @@ jobs:
             | grep -E "error:|\*\* (TEST )?BUILD" || true
           # `build-for-testing` ends in `** TEST BUILD SUCCEEDED **`, not `** BUILD SUCCEEDED **`.
           grep -qE "\*\* (TEST )?BUILD SUCCEEDED \*\*" build/xcodebuild-capture-build.log
+      # A `TEST_RUNNER_<KEY>` build setting is documented to reach the UI test runner as `<KEY>`.
+      # On this image it does not, and that is why no run of this workflow had ever produced a
+      # screenshot: `CaptureRigUITests` found no `ARBOS_SHOT_DIR`, skipped itself, and xcodebuild
+      # still said `** TEST EXECUTE SUCCEEDED **`. The variables go into the built `.xctestrun`
+      # instead — the file the run actually reads — and the capture step below names that file so
+      # nothing regenerates it underneath us.
+      - name: Put the capture variables in the xctestrun
+        id: xctestrun
+        env:
+          SHOT_SCRIPT: ${{ inputs.script }}
+          SHOT_LAUNCH_ENV: ${{ inputs.launch_env }}
+        run: |
+          set -euo pipefail
+          cd "$APP_DIR"
+          # A capture with no script shoots nothing, so it is a dispatch mistake, not a run.
+          if [ -z "${SHOT_SCRIPT//[[:space:]]/}" ]; then
+            echo "::error title=No capture script::dispatch gave an empty \`script\`, so this run would shoot nothing"
+            exit 1
+          fi
+          run=$(ls build/dd/Build/Products/*.xctestrun 2>/dev/null | head -1)
+          if [ -z "$run" ]; then
+            echo "::error title=No xctestrun::build-for-testing wrote no .xctestrun under build/dd/Build/Products"
+            exit 1
+          fi
+          python3 "$GITHUB_WORKSPACE/scripts/ci/xctestrun-env.py" "$run" \
+            "ARBOS_SHOT_DIR=$SHOT_DIR" \
+            "ARBOS_SHOT_TAG=${{ matrix.leg }}" \
+            "ARBOS_SHOT_SCRIPT=$SHOT_SCRIPT" \
+            "ARBOS_SHOT_LAUNCH_ENV=$SHOT_LAUNCH_ENV"
+          echo "path=$PWD/$run" >> "$GITHUB_OUTPUT"
       #
       # xcodebuild has sat idle for minutes after a suite finished, still holding the machine. The
       # watchdog below stops it ~20 s after the log carries the verdict, which is the same trick
@@ -425,14 +462,10 @@ jobs:
           mkdir -p "$SHOT_DIR"
           cd "$APP_DIR"
           log=build/xcodebuild-capture-test.log
-          xcodebuild test-without-building -project Arbos.xcodeproj -scheme Arbos -configuration Debug \
+          xcodebuild test-without-building -xctestrun "${{ steps.xctestrun.outputs.path }}" \
             -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.udid }}" \
-            -derivedDataPath build/dd -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO \
-            -only-testing:ArbosUITests/CaptureRigUITests \
-            TEST_RUNNER_ARBOS_SHOT_DIR="$SHOT_DIR" \
-            TEST_RUNNER_ARBOS_SHOT_TAG="${{ matrix.leg }}" \
-            TEST_RUNNER_ARBOS_SHOT_SCRIPT="$SHOT_SCRIPT" \
-            TEST_RUNNER_ARBOS_SHOT_LAUNCH_ENV="$SHOT_LAUNCH_ENV" > "$log" 2>&1 &
+            -parallel-testing-enabled NO \
+            -only-testing:ArbosUITests/CaptureRigUITests > "$log" 2>&1 &
           pid=$!
           start=$(date +%s); verdict=0
           while kill -0 "$pid" 2>/dev/null; do
@@ -450,11 +483,20 @@ jobs:
           wait "$pid" 2>/dev/null
           grep -E "ARBOS_CAPTURE|error: |Test Case .* (passed|failed)|was skipped|\*\* TEST" "$log" | tail -40 || true
           ls -la "$SHOT_DIR" || true
+          # A skipped rig is the failure this job was blind to for its whole history: the rig
+          # skips itself when its environment is missing, xcodebuild reports TEST EXECUTE
+          # SUCCEEDED, and the only other symptom is an empty directory — which points at the
+          # directory instead of at the environment. Name the real cause here, first.
+          if grep -q "Test skipped" "$log"; then
+            echo "::error title=Capture rig skipped::the rig skipped instead of shooting, so its environment never reached the test runner. This is not an empty-directory problem. The skip line was:"
+            grep -m1 "Test skipped" "$log" || true
+            exit 1
+          fi
           # A leg with no PNG is a failed leg, whatever xcodebuild said.
           shopt -s nullglob
           shots=("$SHOT_DIR"/*.png)
           if [ "${#shots[@]}" -eq 0 ]; then
-            echo "::error title=No screenshots::${{ matrix.leg }} wrote no PNG; see the capture log artifact"
+            echo "::error title=No screenshots::${{ matrix.leg }} ran the rig but wrote no PNG; see the capture log artifact"
             exit 1
           fi
           echo "${{ matrix.leg }}: ${#shots[@]} screenshot(s)"
