@@ -17,7 +17,8 @@
 //!             newest per user stay unarchived, older retained ones are Daytona-archived at once);
 //!   create  — a fresh box from the target snapshot, staged: new tokens, the `boxes` row still
 //!             names the source;
-//!   unpack  — stop the new agentd, confirm room on the box itself (bytes and inodes — the measure
+//!   unpack  — quiesce the new box the way the source is quiesced (agentd, `pi` and `prime-agent`,
+//!             so the bounce does not stop a container holding fresh orphans), confirm room on the box itself (bytes and inodes — the measure
 //!             step already applied the same arithmetic to the snapshot's disk size), upload / verify / extract part by
 //!             part, count the tree against the plan, reset the per-workspace owner markers;
 //!   start   — the swap: the carried `/work` is flushed, the row now names the new box, which is
@@ -434,6 +435,14 @@ async fn pack(
 /// Put the carried `/work` onto the staged new box. The user's row still names the source.
 /// `holds_data` turns true before the first byte of `/work` is uploaded: from then on the new box
 /// may hold user data and rollback keeps it instead of deleting it.
+///
+/// The new box is quiesced exactly as the source is. It used to lose `arbos-agentd` alone, so
+/// `pi --mode rpc` and `prime-agent` — which the new box does run, because it says hello and
+/// `apply_listing` opens the user's workspaces on it before the unpack starts — were left alive
+/// and reparented onto the container's PID 1, which is Daytona's daemon and not agentd. The bounce
+/// then force-killed a container holding two fresh orphans, and in nine recorded failures Docker
+/// answered that the container's PID was a zombie it could not kill. The source, quiesced in full,
+/// has never been seen to wedge.
 async fn unpack(
     state: &AppState,
     dt: &crate::daytona::Daytona,
@@ -444,12 +453,7 @@ async fn unpack(
     holds_data: &mut bool,
 ) -> Result<()> {
     let tb = dt.toolbox(new_id).await;
-    let _ = tb
-        .exec(
-            "sudo -n pkill -TERM -x arbos-agentd 2>/dev/null; sleep 2; sudo -n pkill -KILL -x arbos-agentd 2>/dev/null; true",
-            60,
-        )
-        .await;
+    let _ = carry::quiesce(&tb).await;
     let (avail_mib, avail_inodes) = carry::destination_room(&tb).await?;
     carry::destination_fits(
         avail_mib,
@@ -487,19 +491,31 @@ async fn unpack(
 /// this is not going to make the bounce safer by being waited for.
 const SYNC_BEFORE_BOUNCE_S: u64 = 120;
 
-/// Flush the carried `/work` to disk before the bounce force-kills the container. The relay's own
-/// records say write-back is *not* what wedges the kill — in the four of nine recorded kill
-/// failures where Docker gave a reason it was a zombie PID 1 that cannot be signalled, and the
-/// failures span 129 MiB to 8 967 MiB of `/work` with no gradient — so this is not a fix for that.
-/// It is here so the next occurrence is diagnostic: a kill that still fails after a completed
-/// flush excludes write-back by construction. A failed or slow flush is not worth failing an
-/// upgrade over, so it is logged and the bounce goes ahead.
+/// Flush the carried `/work` to disk and count the box's process states, in the one round trip
+/// before the bounce.
+///
+/// The flush is not a fix: the relay's own records say write-back is *not* what wedges the kill —
+/// in the four of nine recorded kill failures where Docker gave a reason it was a zombie PID 1
+/// that cannot be signalled, and the failures span 129 MiB to 8 967 MiB of `/work` with no
+/// gradient. It is here so the next occurrence is diagnostic: a kill that still fails after a
+/// completed flush excludes write-back by construction.
+///
+/// `procs` is what says whether the full quiesce of the new box worked. A bounce that wedges at
+/// 0.46 % cannot be shown to be fixed by an absence of failures, so the state counts are recorded
+/// at the moment of the stop instead: if quiescing the new box the way the source is quiesced is
+/// the right mechanism, the `Z` and orphan counts here go quiet, and that is readable on every
+/// upgrade rather than only on the ones that fail.
+///
+/// A failed or slow probe is not worth failing an upgrade over, so it is logged and the bounce
+/// goes ahead.
 async fn flush_before_bounce(dt: &crate::daytona::Daytona, user_id: &str, new_id: &str) {
     let t0 = Instant::now();
-    match dt.toolbox_exec(new_id, "sync", SYNC_BEFORE_BOUNCE_S).await {
+    let probe = "sync; ps -eo stat= | sort | uniq -c | tr '\\n' ' '";
+    match dt.toolbox_exec(new_id, probe, SYNC_BEFORE_BOUNCE_S).await {
         Ok(out) => tracing::info!(
             user = %user_id, sandbox = %new_id, ms = t0.elapsed().as_millis() as u64,
             exit = out.get("exitCode").and_then(serde_json::Value::as_i64).unwrap_or(-1),
+            procs = out.get("result").and_then(serde_json::Value::as_str).unwrap_or("").trim(),
             "carried /work flushed before the bounce"
         ),
         Err(e) => tracing::warn!(
