@@ -34,6 +34,7 @@ use tokio::sync::{Mutex, MutexGuard};
 
 use arbos_core::ids::ulid;
 
+use crate::isolation::{Evidence, Sweep};
 use crate::rpc_child::RpcChild;
 use crate::status::tests::test_agent;
 
@@ -321,6 +322,148 @@ async fn latest_still_prefers_a_running_job() {
         agent.resolve_stop_target(chat, "latest").map(|j| j.id),
         Ok(running),
         "a running job is what `latest` means while one is running"
+    );
+}
+
+/// Bug AP: a reap that killed everything it found must still produce a stop line.
+///
+/// The gate on `write_stop_line` read `survivors` alone, so `found: 4, killed: 4,
+/// survivors: []` with no job row stopped wrote nothing. The line was suppressed *because* the
+/// sweep had succeeded, which is the inverse of what a cancel line is for — and it leaves the
+/// canary with no `STOP_LINE_VERBATIM` to scrape in exactly the case it exists to confirm.
+///
+/// Red without the fix with `line = ""`, which is the defect stated plainly: the sweep worked
+/// and the chat was told nothing.
+#[test]
+fn a_reap_that_killed_everything_it_found_still_says_so() {
+    let swept = Sweep {
+        found: 4,
+        killed: 4,
+        survivors: vec![],
+        // Enumerated: four processes read back by pid after the signal. The whole point of the
+        // case is that this outcome used to be reported as silence.
+        evidence: Evidence::Enumerated,
+    };
+    let line = crate::agent::stop_line(&[], &[], &swept);
+    assert!(
+        !line.is_empty(),
+        "a sweep that killed four processes must not report as silence"
+    );
+    assert!(
+        line.contains('4'),
+        "and it must say how many it killed: {line:?}"
+    );
+    // The ownership refusal holds here too: box-wide and mark-keyed, so there is no job to
+    // name and the line must not invent one.
+    assert!(
+        line.contains("no job row"),
+        "and must not imply the work belonged to a job it cannot establish: {line:?}"
+    );
+}
+
+/// A reap that enumerated nothing still says nothing. Pinned because the cheapest way to pass
+/// the case above is to always write a line, which would put an empty cancel sentence in the
+/// chat after every stop.
+#[test]
+fn a_reap_that_found_nothing_stays_silent() {
+    let nothing = Sweep {
+        found: 0,
+        killed: 0,
+        survivors: vec![],
+        // Nothing to check rather than a confirmed clean: no worker of this kind existed.
+        evidence: Evidence::Nothing,
+    };
+    assert_eq!(crate::agent::stop_line(&[], &[], &nothing), "");
+}
+
+/// The whole merged sentence, read as a user would read it.
+///
+/// Four clauses now meet in one line that three separate changes contributed to: the job's own
+/// cancel, the job's own kills, the box-wide reap's kills (bug AP) and the honesty guard's
+/// `nothing more arrives` promise. The guard's own lane hit a case where two individually
+/// correct clauses merged into a sentence that attributed box-wide swept work to a named job,
+/// so this pins the combination rather than the parts.
+#[test]
+fn the_merged_line_says_what_each_sweep_did_without_confusing_them() {
+    let swept = Sweep {
+        found: 3,
+        killed: 3,
+        survivors: vec![],
+        evidence: Evidence::Enumerated,
+    };
+    let line = crate::agent::stop_line(&[a_cancelled_job(2)], &[], &swept);
+
+    assert!(
+        line.contains("The 2 processes it had left running were killed too"),
+        "the job's own kills are still attributed to the job: {line:?}"
+    );
+    assert!(
+        line.contains("3 processes left running by a worker that had already died"),
+        "the reap's kills are stated: {line:?}"
+    );
+    assert!(
+        line.contains("They belonged to no job row"),
+        "and are disclaimed, so the three are not read as the job's: {line:?}"
+    );
+    assert!(
+        line.contains("nothing more arrives from it"),
+        "and the guard's promise still stands where everything was accounted for: {line:?}"
+    );
+}
+
+/// The same line where the reap could not look: the guard drops its promise, and this change's
+/// clause must not quietly put a confident one back.
+#[test]
+fn a_reap_that_could_not_look_takes_the_promise_with_it() {
+    let blind = Sweep {
+        found: 0,
+        killed: 0,
+        survivors: vec![],
+        evidence: Evidence::Unconfirmed,
+    };
+    let line = crate::agent::stop_line(&[a_cancelled_job(2)], &[], &blind);
+    assert!(
+        !line.contains("nothing more arrives"),
+        "an unconfirmed reap must leave the promise off: {line:?}"
+    );
+    assert!(
+        !line.contains("were found and killed"),
+        "and this change must claim no sweep it did not make: {line:?}"
+    );
+}
+
+/// A cancelled job that killed `killed` processes of its own and left none behind.
+fn a_cancelled_job(killed: usize) -> crate::agent::StoppedJob {
+    crate::agent::StoppedJob {
+        id: ulid(),
+        title: "A job".to_owned(),
+        state: "cancelled".to_owned(),
+        sweep: Sweep {
+            found: killed,
+            killed,
+            survivors: vec![],
+            evidence: Evidence::Enumerated,
+        },
+    }
+}
+
+/// A stop that cancelled only row-less asks says so, completing #2857's reporting.
+///
+/// #2857 made the cancel reach those asks; the stop line still spoke only of jobs, so the
+/// cancel worked and the chat heard nothing about it.
+#[test]
+fn a_stop_that_cancelled_only_asks_says_so() {
+    let nothing = Sweep {
+        found: 0,
+        killed: 0,
+        survivors: vec![],
+        // Nothing to check rather than a confirmed clean: no worker of this kind existed.
+        evidence: Evidence::Nothing,
+    };
+    let line = crate::agent::stop_line(&[], &["a".to_owned(), "b".to_owned()], &nothing);
+    assert!(
+        line.contains('2') && line.contains("had not started"),
+        "two asks were cancelled before they began, and the line must say so: {line:?}"
     );
 }
 

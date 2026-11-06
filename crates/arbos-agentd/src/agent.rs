@@ -1223,7 +1223,7 @@ fn pids_in_command(command: &str) -> Vec<u32> {
 /// The line the chat gets when the user's stop ended one or more jobs. It names the state the
 /// store holds now, because that — and not the fact that a stop was issued — is what makes
 /// "cancelled" a true thing to say (bug S).
-pub(crate) fn stop_line(stopped: &[StoppedJob], unreachable: &Sweep) -> String {
+pub(crate) fn stop_line(stopped: &[StoppedJob], pending: &[String], unreachable: &Sweep) -> String {
     // Bug AK: a cancel can leave work running that belongs to no job at all, and in `r17status`
     // there was no job row to hang the sentence off. The user still has to be told, and told
     // the pid, because that is the only way they can get rid of it.
@@ -1238,9 +1238,37 @@ pub(crate) fn stop_line(stopped: &[StoppedJob], unreachable: &Sweep) -> String {
                 .join(", ")
         ),
     };
+    // What the reap *succeeded* at. Until bug AP this appeared in no sentence any user read:
+    // every clause here keyed off survivors, which is the record of failure, so a sweep that
+    // killed four processes and left none reported exactly as much as a sweep that did nothing.
+    //
+    // It says "belonged to no job row" rather than naming the job the user stopped. The reaper
+    // enumerates by mark and is box-wide, so nothing on this path establishes whose work it
+    // was, and a confident attribution here would be a fabrication.
+    let swept = match (unreachable.found, unreachable.killed) {
+        (0, _) => String::new(),
+        (_, 0) => " Work left running by a worker that had already died was found, and had gone \
+                   by the time it was signalled. It belonged to no job row."
+            .to_owned(),
+        (_, 1) => " One process left running by a worker that had already died was found and \
+                   killed. It belonged to no job row."
+            .to_owned(),
+        (_, n) => format!(
+            " {n} processes left running by a worker that had already died were found and \
+             killed. They belonged to no job row."
+        ),
+    };
+    // Asks that owned no job row (bug AL). #2857 made the cancel reach them; without this the
+    // stop line still spoke only of jobs, so the cancel worked and said nothing about it.
+    let asks = match pending.len() {
+        0 => String::new(),
+        1 => " One request that had not started yet was cancelled before it began.".to_owned(),
+        n => format!(" {n} requests that had not started yet were cancelled before they began."),
+    };
     if stopped.is_empty() {
-        return orphans.trim_start().to_owned();
+        return format!("{orphans}{swept}{asks}").trim_start().to_owned();
     }
+    let orphans = format!("{orphans}{swept}{asks}");
     let titles = stopped
         .iter()
         .map(|s| s.title.to_lowercase())
@@ -4264,7 +4292,8 @@ impl Agent {
             let unreachable = self.reap_and_note_unreachable(chat_id).await;
             // The chip stopped a job and said nothing, so whether it worked was unknowable from
             // the chat. One line, and it names the state the job row holds now (bug S).
-            self.write_stop_line(chat_id, &anchor, &stopped, &unreachable)
+            // No pending asks: the chip names one job, and a row-less ask is not one.
+            self.write_stop_line(chat_id, &anchor, &stopped, &[], &unreachable)
                 .await;
             return Ok(());
         }
@@ -4279,7 +4308,7 @@ impl Agent {
         // In order of when the work exists: rows that are running, asks that have not started,
         // then whatever a dead worker left behind that no row can name (bug AI, #2847).
         let unreachable = self.reap_and_note_unreachable(chat_id).await;
-        self.write_stop_line(chat_id, &anchor, &stopped, &unreachable)
+        self.write_stop_line(chat_id, &anchor, &stopped, &pending, &unreachable)
             .await;
         turn
     }
@@ -4296,14 +4325,24 @@ impl Agent {
         chat_id: &str,
         anchor: &str,
         stopped: &[StoppedJob],
+        pending: &[String],
         unreachable: &Sweep,
     ) {
         // A stop that ended no job still has something to report when it found work no job row
         // names — which in `r17status` was the only thing there was to report (bug AK).
-        if stopped.is_empty() && unreachable.survivors.is_empty() {
+        //
+        // Bug AP: this gate read `survivors` alone, so a reap with `found: 4, killed: 4,
+        // survivors: []` and no job row stopped wrote no line at all. The sweep worked and the
+        // chat was told nothing — the line was suppressed *because* the kill had succeeded.
+        // It is gated on what the reap enumerated, which is the question actually being asked.
+        if stopped.is_empty()
+            && pending.is_empty()
+            && unreachable.survivors.is_empty()
+            && unreachable.found == 0
+        {
             return;
         }
-        let line = stop_line(stopped, unreachable);
+        let line = stop_line(stopped, pending, unreachable);
         let Ok(host) = self.room(chat_id).await else {
             return;
         };
@@ -5340,6 +5379,11 @@ impl Agent {
             "all_cancelled": stopped.iter().all(StoppedJob::cancelled),
             // Work this cancel found running that belongs to no job row at all (bug AK). Kept
             // apart from the per-job numbers above because no job is answerable for it.
+            //
+            // Both numbers, not just the survivors: reporting only what the reap failed to kill
+            // described a successful sweep and a sweep that did nothing identically, and made
+            // this branch disagree with the finished-job branch above about the same reap.
+            "unnamed_processes_killed": unreachable.killed,
             "unnamed_processes_still_alive": unreachable.survivors,
             // The same `note` binding the log line above was given, so the two cannot drift.
             // This one is authoritative: a structured field survives log formatting,

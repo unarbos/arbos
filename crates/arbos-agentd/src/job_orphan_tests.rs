@@ -438,7 +438,7 @@ fn a_cancel_that_accounted_for_everything_says_nothing_extra() {
         evidence: Evidence::Enumerated,
     };
 
-    let line = crate::agent::stop_line(&stopped, &reaped);
+    let line = crate::agent::stop_line(&stopped, &[], &reaped);
     assert!(
         line.contains("cancelled") && !line.contains("belongs to no job"),
         "work that was reaped is accounted for and needs no sentence: {line}"
@@ -466,7 +466,7 @@ fn a_cancel_that_could_not_kill_unnamed_work_says_so_and_names_the_pid() {
         evidence: Evidence::Enumerated,
     };
 
-    let line = crate::agent::stop_line(&stopped, &survived);
+    let line = crate::agent::stop_line(&stopped, &[], &survived);
     assert!(
         line.contains("23536"),
         "the user needs the pid; it is the only way they can get rid of it: {line}"
@@ -501,7 +501,7 @@ fn a_cancel_that_ended_no_job_still_reports_work_it_could_not_account_for() {
         survivors: vec![23536],
         evidence: Evidence::Enumerated,
     };
-    let line = crate::agent::stop_line(&[], &survived);
+    let line = crate::agent::stop_line(&[], &[], &survived);
     assert!(
         line.contains("23536") && line.contains("belongs to no job"),
         "with no job to hang it off, this is the only thing the user is told: {line}"

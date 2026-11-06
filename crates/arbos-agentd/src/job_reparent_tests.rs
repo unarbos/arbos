@@ -713,7 +713,7 @@ async fn a_cancel_that_left_a_process_running_names_it_and_unlocks_the_guard() {
         },
     }];
 
-    let line = crate::agent::stop_line(&leaky, &nothing_unreachable());
+    let line = crate::agent::stop_line(&leaky, &[], &nothing_unreachable());
     assert!(
         line.contains("2576") && line.contains("still running"),
         "the chat must be told which process outlived the cancel: {line}"

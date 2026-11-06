@@ -237,7 +237,7 @@ async fn cancelling_a_job_kills_the_detached_loop_its_worker_started() {
         "the cancel killed nothing and still called itself a cancel: {:?}",
         stopped[0].sweep
     );
-    let line = crate::agent::stop_line(&stopped, &nothing_unreachable());
+    let line = crate::agent::stop_line(&stopped, &[], &nothing_unreachable());
     assert!(
         line.contains("cancelled") && line.contains("killed"),
         "the chat's stop line must say what was killed, not only that the row reads \
@@ -312,7 +312,7 @@ fn a_cancel_that_cannot_kill_everything_says_so_instead_of_claiming_a_cancel() {
         },
     }];
 
-    let line = crate::agent::stop_line(&leaky, &nothing_unreachable());
+    let line = crate::agent::stop_line(&leaky, &[], &nothing_unreachable());
     assert!(
         line.contains("561") && line.contains("still running"),
         "the chat must be told which process outlived the cancel: {line}"
@@ -344,7 +344,7 @@ fn a_cancel_that_cannot_kill_everything_says_so_instead_of_claiming_a_cancel() {
         },
         ..leaky[0].clone()
     }];
-    let line = crate::agent::stop_line(&clean, &nothing_unreachable());
+    let line = crate::agent::stop_line(&clean, &[], &nothing_unreachable());
     assert!(line.contains("nothing more arrives"), "{line}");
     assert!(
         crate::agent::stop_job_note(&clean, &nothing_unreachable())
