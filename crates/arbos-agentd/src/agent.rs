@@ -1380,6 +1380,12 @@ pub(crate) struct ResultDelivery<'a> {
 /// never asked "should I try again?" on a first failure).
 pub(crate) const JOB_WORKER_RETRIES: u8 = 1;
 
+/// How many jobs `list_jobs` hands the model.
+///
+/// It bounds the *finished* tail only. Live jobs are always listed in full, however many there
+/// are: see [`Agent::hook_list_jobs`].
+pub(crate) const JOB_LIST_CAP: usize = 12;
+
 /// A job worker ended without a usable result on an attempt that still has a retry; the
 /// worker task (`spawn_subagent_task`) starts the next attempt with a fresh worker.
 #[derive(Debug)]
@@ -9781,12 +9787,30 @@ impl Agent {
                 None => return Err("no turn is running".into()),
             }
         };
-        let jobs: Vec<Value> = self
+        // Every live job, then the newest finished ones with whatever budget is left. A finished
+        // job must never push a live one off this list.
+        //
+        // `jobs_for_chat` is `created_at DESC` and this used to be a plain `.take(12)`, so the
+        // twelve *newest* rows won — and the longest-running jobs are the oldest. Past twelve
+        // jobs in a chat, "cancel the six longest" was answered from a list that had dropped
+        // exactly the rows it was asking about, and a job the user could still steer or stop was
+        // unnameable because some finished job was newer than it.
+        //
+        // When the live jobs alone reach the cap, `saturating_sub` gives the deliberate answer:
+        // the finished tail gets nothing and every live job is still listed. The list is allowed
+        // to exceed the cap rather than drop a live job, because a live job is something the
+        // user can act on and a finished one is history — truncating live work is the defect
+        // this comment is about, and a cap is not worth reintroducing it for.
+        let (live, finished): (Vec<_>, Vec<_>) = self
             .store
             .jobs_for_chat(&chat_id)
             .unwrap_or_default()
             .into_iter()
-            .take(12)
+            .partition(|j| j.is_open());
+        let finished_budget = JOB_LIST_CAP.saturating_sub(live.len());
+        let jobs: Vec<Value> = live
+            .into_iter()
+            .chain(finished.into_iter().take(finished_budget))
             .map(|j| {
                 json!({
                     "job_id": j.id,
