@@ -4967,8 +4967,12 @@ impl Agent {
     ///
     /// Without that fallback `steer_job("latest")` cannot name the job the user is correcting at
     /// all: the file is in the chat, the user is talking about it, and the only job that matches
-    /// their words finished two seconds ago. `stop_job` keeps the stricter rule — there is
-    /// nothing to stop about a job that has ended.
+    /// their words finished two seconds ago.
+    ///
+    /// `stop_job` used to keep the stricter rule on the stated grounds that "there is nothing to
+    /// stop about a job that has ended". That was the assumption bug AO lived inside, written
+    /// down: a worker can detach work that outlives it, and the row going `done` reports the
+    /// worker's exit, not the work's. See [`Self::resolve_stop_target`].
     fn resolve_steer_target(
         &self,
         chat_id: &str,
@@ -5197,24 +5201,57 @@ impl Agent {
                 .ok_or("no turn is running")?
         };
         let all = job_id.trim().eq_ignore_ascii_case("all");
-        let (stopped, pending) = if all {
+        // Bug AO: the resolution failure is held rather than returned. A job that finished can
+        // still have work running, so whether this call failed is not knowable until the sweep
+        // below has looked.
+        let (stopped, pending, unresolved) = if all {
             let stopped = self.stop_jobs(&chat_id, None).await;
             let pending = self.cancel_pending_asks(&chat_id).await;
             if !pending.is_empty() {
                 tracing::info!(asks = ?pending, "asks cancelled before they started");
             }
-            (stopped, pending)
+            (stopped, pending, None)
         } else {
-            let job = self.resolve_job(&chat_id, job_id)?;
-            (self.stop_jobs(&chat_id, Some(&job.id)).await, Vec::new())
+            match self.resolve_stop_target(&chat_id, job_id) {
+                Ok(job) => (
+                    self.stop_jobs(&chat_id, Some(&job.id)).await,
+                    Vec::new(),
+                    None,
+                ),
+                Err(e) => (Vec::new(), Vec::new(), Some(e)),
+            }
         };
+        // The sweep runs before the verdict, not after it. This is the whole of bug AO: the
+        // early return used to sit here, so a cancel naming a job that had already finished
+        // answered "no running job matched" without ever reading `/proc` — and the processes
+        // its worker had detached went on writing.
+        let unreachable = self.reap_and_note_unreachable(&chat_id).await;
         // Bug AL: "nothing matched" is false once a row-less ask has been cancelled. Reporting
         // the failure here is what made round 18's cancel unprovable — the stop had reached
         // nothing, said so truthfully, and the ask it could not see started anyway.
         if stopped.is_empty() && pending.is_empty() {
-            return Err("no running job matched; list_jobs shows what is open in this chat".into());
+            // Judged on what the reap itself enumerated — `found` and `survivors` — and never
+            // on `Sweep::checked` or `Sweep::clean()`. A sweep that looked at nothing must not
+            // be able to turn this call into a success, and a `checked` flag this function did
+            // not set is not evidence it can rest a verdict on.
+            let reached = unreachable.found > 0 || !unreachable.survivors.is_empty();
+            if !reached {
+                return Err(unresolved.unwrap_or_else(|| {
+                    "no running job matched; list_jobs shows what is open in this chat".into()
+                }));
+            }
+            return Ok(json!({
+                "stopped": [],
+                "unnamed_processes_killed": unreachable.killed,
+                "unnamed_processes_still_alive": unreachable.survivors,
+                "note": "The job you named had already finished, so there was no job to cancel — \
+                         but work left running by a worker that no live job row names was found \
+                         and swept. Report what was killed and what survived. Do not say this \
+                         work belonged to the job the user named: it belongs to no live row, \
+                         which is why it needed sweeping, and nothing here establishes whose it \
+                         was.",
+            }));
         }
-        let unreachable = self.reap_and_note_unreachable(&chat_id).await;
         if stopped.is_empty() {
             // Bug AL: no sweep is claimed for a cancelled ask, and the omission is deliberate.
             // An ask stopped before it started has no process tree, so there is nothing that
@@ -5366,6 +5403,48 @@ impl Agent {
 
     /// A job of this chat by id, or the newest running one for `latest` / an empty id
     /// (binding rule, design §2.4).
+    /// The job a `stop_job` is about: a running one as [`Self::resolve_job`] finds it, or — for
+    /// `latest` / an empty id with nothing running — the newest job of this chat that has ended.
+    ///
+    /// A finished job is a legitimate stop target because finishing is a fact about the worker,
+    /// not about its work: a `setsid` descendant outlives the worker that spawned it, and the
+    /// row goes `done` with the writer still appending. `stop_jobs` will correctly decline to
+    /// cancel such a row — there is no open job there — and the sweep in
+    /// [`Self::hook_stop_job`] is what the resolution exists to let run.
+    ///
+    /// # Why there is no time window on this
+    ///
+    /// The obvious bound is "finished recently", as [`Self::resolve_steer_target`] uses. It is
+    /// the wrong instrument here, and it fails in the dangerous direction: a detached writer
+    /// still running an hour after its job ended is *more* worth killing than one that started
+    /// a minute ago, and any window walks past exactly the case that most needs the sweep.
+    ///
+    /// Nothing is risked by leaving it unbounded, because resolving is not acting. Naming a job
+    /// that ended last week only lets the sweep look; if it enumerates nothing, `hook_stop_job`
+    /// still answers that no job matched. The user-visible behaviour changes only where there
+    /// is live work to find.
+    pub(crate) fn resolve_stop_target(
+        &self,
+        chat_id: &str,
+        job_id: &str,
+    ) -> Result<crate::store::JobRow, String> {
+        let err = match self.resolve_job(chat_id, job_id) {
+            Ok(job) => return Ok(job),
+            Err(e) => e,
+        };
+        let id = job_id.trim();
+        if !id.is_empty() && !id.eq_ignore_ascii_case("latest") {
+            return Err(err);
+        }
+        // `jobs_for_chat` is newest first, so the first ended row is the one the user means.
+        self.store
+            .jobs_for_chat(chat_id)
+            .unwrap_or_default()
+            .into_iter()
+            .find(|j| j.ended_at.is_some())
+            .ok_or(err)
+    }
+
     fn resolve_job(&self, chat_id: &str, job_id: &str) -> Result<crate::store::JobRow, String> {
         let id = job_id.trim();
         if !id.is_empty() && !id.eq_ignore_ascii_case("latest") {
