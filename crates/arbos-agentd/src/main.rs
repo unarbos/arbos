@@ -11,6 +11,8 @@ mod chart;
 mod config;
 mod connectors;
 #[cfg(test)]
+mod crash_loop_leftover_tests;
+#[cfg(test)]
 mod cross_workspace_auth_tests;
 mod disk;
 mod eval;

@@ -1333,23 +1333,40 @@ pub(crate) mod tests {
     /// session and no supervisor at all — bug Y's tests need the production loop itself, so
     /// they give it a scripted child to supervise.
     pub(crate) async fn test_agent_with_pi(pi_bin: &str) -> (Arc<Agent>, std::path::PathBuf) {
-        test_agent_full(axum::Router::new(), pi_bin).await
+        test_agent_full(axum::Router::new(), pi_bin, None).await
     }
 
     /// Same, with extra mock-relay routes merged in (`/box/secrets/…` for the hand-off tests).
     pub(crate) async fn test_agent_with(extra: axum::Router) -> (Arc<Agent>, std::path::PathBuf) {
-        test_agent_full(extra, "/nonexistent/pi").await
+        test_agent_full(extra, "/nonexistent/pi", None).await
+    }
+
+    /// Same, with this workspace's children declared to live in the cgroup at `cgroup`.
+    ///
+    /// A plain directory stands in for a kernel cgroup: [`crate::isolation::cgroup_procs`] reads
+    /// `cgroup.procs` as a text file and recurses the directory below it, so a test can state
+    /// exactly which pids the workspace holds on a machine that has no cgroups to give.
+    pub(crate) async fn test_agent_in_cgroup(
+        cgroup: &std::path::Path,
+    ) -> (Arc<Agent>, std::path::PathBuf) {
+        test_agent_full(
+            axum::Router::new(),
+            "/nonexistent/pi",
+            Some(cgroup.to_path_buf()),
+        )
+        .await
     }
 
     /// Same, pointed at a relay the caller serves itself. The model-stub tests count the TCP
     /// connections the box opens, which `axum::serve` cannot report.
     pub(crate) async fn test_agent_on_relay(relay_url: &str) -> (Arc<Agent>, std::path::PathBuf) {
-        test_agent_on(relay_url.to_owned(), "/nonexistent/pi").await
+        test_agent_on(relay_url.to_owned(), "/nonexistent/pi", None).await
     }
 
     async fn test_agent_full(
         extra: axum::Router,
         pi_bin: &str,
+        cgroup: Option<std::path::PathBuf>,
     ) -> (Arc<Agent>, std::path::PathBuf) {
         let app = axum::Router::new()
             .merge(extra)
@@ -1371,10 +1388,14 @@ pub(crate) mod tests {
         tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
-        test_agent_on(format!("http://127.0.0.1:{port}"), pi_bin).await
+        test_agent_on(format!("http://127.0.0.1:{port}"), pi_bin, cgroup).await
     }
 
-    async fn test_agent_on(relay_url: String, pi_bin: &str) -> (Arc<Agent>, std::path::PathBuf) {
+    async fn test_agent_on(
+        relay_url: String,
+        pi_bin: &str,
+        cgroup: Option<std::path::PathBuf>,
+    ) -> (Arc<Agent>, std::path::PathBuf) {
         let root = std::env::temp_dir().join(format!("arbos-quick-{}", ulid()));
         std::fs::create_dir_all(&root).unwrap();
         let bx = crate::config::BoxConfig {
@@ -1395,10 +1416,20 @@ pub(crate) mod tests {
             default_subagent_model: "mock-sub".into(),
             legacy_project_id: None,
         };
-        let cfg = Arc::new(bx.workspace(
+        let mut workspace = bx.workspace(
             &json!({ "id": "01TESTPROJECTQUICKREPLY000", "name": "Doug" }),
             0,
-        ));
+        );
+        if let Some(cgroup) = cgroup {
+            workspace.run_as = Some(crate::isolation::RunAs {
+                user: "u-test".into(),
+                uid: nix::unistd::getuid().as_raw(),
+                gid: nix::unistd::getgid().as_raw(),
+                home: root.clone(),
+                cgroup: Some(cgroup),
+            });
+        }
+        let cfg = Arc::new(workspace);
         std::fs::create_dir_all(cfg.state_dir.join("agentd")).unwrap();
         let store =
             crate::store::Store::open(&cfg.state_dir.join("agentd").join("agentd.db")).unwrap();

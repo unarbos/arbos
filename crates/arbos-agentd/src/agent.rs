@@ -3266,18 +3266,18 @@ impl Agent {
 
     /// Five children lost in a row: stop retrying the same way and say so.
     ///
-    /// Three things, in this order. The workspace's leftovers go first, because a tool process
-    /// or a dead job's worker holding the shared `memory.max` near its limit would kill every
-    /// fresh child the same way. Then the chat moves to a new session file, since a session pi
-    /// cannot load is a loop no backoff escapes — the old file is kept, and the chat's earlier
-    /// turns stay available through the tree, exactly as a window rotation leaves them. Then
-    /// the box reports that it cannot answer, which is the part Test5 never did at all.
+    /// Three things, in this order. The workspace's leftovers go first, because a dead job's
+    /// worker holding the shared `memory.max` near its limit would kill every fresh child the
+    /// same way. Then the chat moves to a new session file, since a session pi cannot load is a
+    /// loop no backoff escapes — the old file is kept, and the chat's earlier turns stay
+    /// available through the tree, exactly as a window rotation leaves them. Then the box
+    /// reports that it cannot answer, which is the part Test5 never did at all.
     async fn escalate_pi_crash_loop(self: &Arc<Self>, chat_id: &str, deaths: u32) {
         if self.pi_degraded.load(Ordering::SeqCst) {
             // Said once per outage; the retries below carry on either way.
             return;
         }
-        let killed = self.kill_workspace_leftovers().await;
+        let leftovers = self.kill_workspace_leftovers().await;
         let fresh = match chat_id.is_empty() {
             true => None,
             false => self.fresh_session_after_crash_loop(chat_id),
@@ -3285,7 +3285,7 @@ impl Agent {
         tracing::warn!(
             chat_id,
             deaths,
-            killed,
+            killed = leftovers.killed,
             fresh = fresh.as_deref().unwrap_or(""),
             "the main agent has lost five children in a row; the box reports itself degraded"
         );
@@ -3295,7 +3295,10 @@ impl Agent {
                 "state": "degraded",
                 "chat_id": chat_id,
                 "deaths": deaths,
-                "killed_leftovers": killed,
+                "killed_leftovers": leftovers.killed,
+                // Bug AE: a sweep that could not kill what it found must name it rather than
+                // let the box go on claiming everything is accounted for.
+                "leftover_survivors": leftovers.survivors,
                 "fresh_session": fresh,
             }),
         );
@@ -3325,45 +3328,43 @@ impl Agent {
         Some(path.display().to_string())
     }
 
-    /// Kill what is left in the workspace cgroup that the box does not own.
+    /// Kill what a dead worker left in this workspace, before the next pi start.
     ///
     /// The cgroup's `memory.max` is one limit shared by every child of the workspace, and the
     /// kernel's OOM killer takes the largest task in it — so a runaway left behind by a dead
-    /// job can keep killing each fresh pi child instead of dying itself. agentd's own pid and
-    /// every live child it holds a handle for are spared; nothing outside this workspace's
-    /// cgroup is ever read or signalled.
-    async fn kill_workspace_leftovers(&self) -> usize {
-        let Some(cgroup) = self.cfg.run_as.as_ref().and_then(|r| r.cgroup.clone()) else {
-            return 0;
-        };
-        // Recursive: since bug Z every harness child sits in a leaf of its own under this
-        // cgroup, so a read of this directory's own `cgroup.procs` alone would find nothing.
-        let found = crate::isolation::cgroup_procs(&cgroup);
-        let mut keep: Vec<u32> = vec![std::process::id()];
-        if let Some(c) = self.pi.lock().await.as_ref() {
-            keep.extend(c.pid());
-        }
-        for a in self.adapters.values() {
-            keep.extend(a.live_child_pids().await);
-        }
-        let mut killed = 0;
-        for pid in found {
-            if keep.contains(&pid) {
-                continue;
-            }
-            let _ = nix::sys::signal::kill(
-                nix::unistd::Pid::from_raw(pid as i32),
-                nix::sys::signal::Signal::SIGKILL,
-            );
-            killed += 1;
-        }
-        if killed > 0 {
+    /// job can keep killing each fresh pi child instead of dying itself.
+    ///
+    /// This is [`Agent::reap_unreachable_workers`] and nothing more, because the polarity is
+    /// the safety property ([`crate::isolation::orphan_marked_procs`]): nothing is collected
+    /// without positive evidence on both halves — that the mark names a worker's session, and
+    /// that the session is over.
+    ///
+    /// The sweep that stood here killed on the absence of evidence instead. It read the
+    /// workspace cgroup **recursively** — deliberately, since bug Z puts every harness child in
+    /// a leaf of its own — and spared only the pids the adapters held handles for, which is
+    /// session children and none of their descendants. So every `bash`, `python` and `curl` a
+    /// **live** job worker was running was absent from that keep list and was SIGKILLed on that
+    /// absence. Test5 round 16 killed 36 processes at the moment eight compute jobs were
+    /// mid-calculation, and five of those jobs died of `Broken pipe (os error 32)` — which is
+    /// what a worker sees when the child it is writing to is killed underneath it.
+    ///
+    /// What this gives up, said plainly rather than left to be discovered: a process that
+    /// exec'd with its environment cleared (`env -i`) carries no mark, and the cgroup was the
+    /// only thing that still held it. No evidence names it abandoned, so it is kept and the
+    /// next child may still be OOM-killed by it. That is the trade the polarity makes, and it
+    /// is the cheaper side of it: a kept leftover costs one more OOM kill, a killed tool call
+    /// costs the job.
+    pub(crate) async fn kill_workspace_leftovers(&self) -> Sweep {
+        let sweep = self.reap_unreachable_workers().await;
+        if sweep.found > 0 {
             tracing::warn!(
-                killed,
+                found = sweep.found,
+                killed = sweep.killed,
+                survivors = ?sweep.survivors,
                 "workspace leftovers killed before the next pi start"
             );
         }
-        killed
+        sweep
     }
 
     /// Tell the relay and the apps what state this agent's model process is in.
