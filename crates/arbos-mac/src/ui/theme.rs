@@ -1912,9 +1912,10 @@ mod chat_typography_tests {
              {REFERENCE_X_HEIGHT_PX:.2} px — {:.2}% out",
             error * 100.0
         );
+        let (now, before) = (CHAT_BODY, OUR_OLD_BODY);
         assert!(
-            CHAT_BODY > OUR_OLD_BODY,
-            "the brief and the reference both say larger"
+            now > before,
+            "the brief and the reference both say larger: {now} against {before}"
         );
     }
 
