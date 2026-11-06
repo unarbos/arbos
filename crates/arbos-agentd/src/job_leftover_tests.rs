@@ -243,8 +243,6 @@ async fn cancelling_a_job_kills_the_detached_loop_its_worker_started() {
         "the chat's stop line must say what was killed, not only that the row reads \
          cancelled: {line}"
     );
-
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// The same cancel against a worker's **plain** child — no `nohup`, no `setsid`, no `&`.
@@ -281,8 +279,6 @@ async fn a_plain_child_of_a_worker_does_not_survive_the_cancel_either() {
         at_cancel,
         "the plain child kept writing"
     );
-
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// A cancel that could not kill everything must not claim it did.
@@ -409,7 +405,6 @@ async fn a_kill_is_allowed_only_for_a_pid_a_cancel_of_this_chat_could_not_reap()
     }
 
     drop(host);
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// `Result::unwrap_err`, but it keeps the message rather than needing `Debug` on `()`.
@@ -430,7 +425,7 @@ impl UnwrapErrMessage for Result<(), String> {
 /// chat is not a free pass in another.
 #[tokio::test]
 async fn a_leftover_of_another_chat_does_not_unlock_a_kill_here() {
-    let (agent, root) = test_agent().await;
+    let (agent, _root) = test_agent().await;
     let host = agent.sync.open_room(CHAT).await.unwrap();
     let _turn = agent.test_hold_turn(CHAT).await;
     agent
@@ -446,7 +441,6 @@ async fn a_leftover_of_another_chat_does_not_unlock_a_kill_here() {
     assert!(refused.contains("not a cancel"), "{refused}");
 
     drop(host);
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// The job's chat is told, and `stop_job`'s result tells the model, in numbers rather than in
@@ -474,6 +468,4 @@ async fn stop_job_reports_what_it_killed() {
         "and which survived: {result}"
     );
     assert_eq!(result["all_cancelled"], json!(true));
-
-    let _ = std::fs::remove_dir_all(&root);
 }

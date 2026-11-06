@@ -1564,7 +1564,7 @@ mod shell_grant_tests {
     /// options for its class.
     #[tokio::test]
     async fn standing_grant_skips_the_card_until_revoked() {
-        let (agent, root) = test_agent().await;
+        let (agent, _root) = test_agent().await;
         let chat = "01TESTCHATSHELLGRANT000000";
         agent.store.upsert_chat(chat, "Main", true, 0).unwrap();
         let _host = agent.sync.open_room(chat).await.unwrap();
@@ -1631,14 +1631,13 @@ mod shell_grant_tests {
             .unwrap()
             .unwrap();
         assert!(row.payload["grant_options"].as_array().unwrap().is_empty());
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Option B/C on the card (`approve` with `grant`): the grant takes effect locally at once,
     /// even before the relay confirms it, and the next matching command runs without a card.
     #[tokio::test]
     async fn approve_with_grant_records_a_standing_grant() {
-        let (agent, root) = test_agent().await;
+        let (agent, _root) = test_agent().await;
         let chat = "01TESTCHATSHELLGRANT000001";
         agent.store.upsert_chat(chat, "Main", true, 0).unwrap();
         let _host = agent.sync.open_room(chat).await.unwrap();
@@ -1685,7 +1684,6 @@ mod shell_grant_tests {
             .await
             .unwrap();
         assert_eq!(agent.approvals.shell_grants.lock().await.len(), 1);
-        let _ = std::fs::remove_dir_all(&root);
     }
 }
 
@@ -1731,8 +1729,12 @@ mod job_approval_tests {
     /// Round 4's geometry: the job runs in a side chat, and its card goes to the pinned main
     /// chat, because that is the chat the owner reads (`approval_chat`). Both rooms are open,
     /// so a notice in either one is a thing the test could see.
-    async fn agent_running_a_job_in_a_side_chat(
-    ) -> (Arc<Agent>, SharedHost, SharedHost, crate::status::tests::TestRoot) {
+    async fn agent_running_a_job_in_a_side_chat() -> (
+        Arc<Agent>,
+        SharedHost,
+        SharedHost,
+        crate::status::tests::TestRoot,
+    ) {
         let (agent, root) = test_agent().await;
         agent.store.upsert_chat(CHAT, "Main", true, 0).unwrap();
         agent
@@ -1797,7 +1799,7 @@ mod job_approval_tests {
     /// read, and a "needs your approval" line in the job's own exchange.
     #[tokio::test]
     async fn a_job_waiting_for_a_card_says_so_in_its_own_view() {
-        let (agent, _host, root) = agent_running_a_job().await;
+        let (agent, _host, _root) = agent_running_a_job().await;
         let v = agent
             .hook_approval(
                 "bash",
@@ -1830,7 +1832,6 @@ mod job_approval_tests {
             "the line says which chat holds the card: {}",
             lines[0]
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The deletion rule flagged files the job itself had just made. T8's own outputs —
@@ -1841,7 +1842,7 @@ mod job_approval_tests {
     /// the same delete from a session that is no job of ours.
     #[tokio::test]
     async fn a_job_deleting_a_file_it_created_itself_raises_no_card() {
-        let (agent, _host, root) = agent_running_a_job().await;
+        let (agent, _host, _root) = agent_running_a_job().await;
         agent
             .note_job_write(
                 JOB,
@@ -1915,7 +1916,6 @@ mod job_approval_tests {
                 .await["state"],
             "pending"
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The livelock: every expired card was retried, so T8 waited four times fourteen minutes.
@@ -1923,7 +1923,7 @@ mod job_approval_tests {
     /// own view says so, no second card is raised, and no fresh worker is given.
     #[tokio::test]
     async fn one_expired_card_fails_the_job_instead_of_raising_another() {
-        let (agent, _host, root) = agent_running_a_job().await;
+        let (agent, _host, _root) = agent_running_a_job().await;
         let cmd = json!({ "command": "rm -rf /work/p/exports" });
         let v = agent.hook_approval("bash", &cmd, WORKER, "subagent").await;
         let id = v["approvalId"].as_str().expect("a card").to_owned();
@@ -1949,7 +1949,6 @@ mod job_approval_tests {
             crate::agent::worker_failure(Some(APPROVAL_EXPIRED_ERROR), "", 3, "done").map(|f| f.1),
             Some(false)
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The sentence itself, which the owner may tune: it names the work and where to answer.
@@ -1993,7 +1992,7 @@ mod job_approval_tests {
     /// the extension polls throughout it.
     #[tokio::test]
     async fn a_job_in_a_side_chat_says_in_that_chat_that_a_card_is_waiting() {
-        let (agent, main, side, root) = agent_running_a_job_in_a_side_chat().await;
+        let (agent, main, side, _root) = agent_running_a_job_in_a_side_chat().await;
         let v = agent
             .hook_approval(
                 "bash",
@@ -2055,7 +2054,6 @@ mod job_approval_tests {
             "one row per card, not one per poll: {:?}",
             waiting_rows(&side)
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 }
 
@@ -2075,7 +2073,7 @@ mod park_tests {
     /// card goes back to advertising the full TTL, and that is again the truth.
     #[tokio::test]
     async fn a_main_session_wait_is_short_and_the_card_keeps_the_full_deadline() {
-        let (agent, root) = test_agent().await;
+        let (agent, _root) = test_agent().await;
         let chat = "01TESTCHATAPPROVALPARK0000";
         agent.store.upsert_chat(chat, "Main", true, 0).unwrap();
         let _host = agent.sync.open_room(chat).await.unwrap();
@@ -2104,7 +2102,6 @@ mod park_tests {
             (life - approval_ttl_ms()).abs() < 5_000,
             "a parked card is bounded by nothing but its TTL: {life} ms"
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The owner's third test: approving before `expires_at` runs the command and the result
@@ -2113,7 +2110,7 @@ mod park_tests {
     /// identical call and starts a turn to run it. No second card is raised.
     #[tokio::test]
     async fn a_parked_card_approved_later_runs_the_call_without_a_second_card() {
-        let (agent, root) = test_agent().await;
+        let (agent, _root) = test_agent().await;
         let chat = "01TESTCHATAPPROVALPARK0001";
         agent.store.upsert_chat(chat, "Main", true, 0).unwrap();
         let _host = agent.sync.open_room(chat).await.unwrap();
@@ -2174,7 +2171,6 @@ mod park_tests {
             "allowed",
             "the re-run must not raise a second card"
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// #2770 sweeps every row a turn opened that shows nothing, and a parked wait outlives its
@@ -2189,7 +2185,7 @@ mod park_tests {
     /// hands the row's own id to the real predicate rather than reasoning about it.
     #[tokio::test]
     async fn a_parked_cards_row_survives_the_wordless_sweep() {
-        let (agent, root) = test_agent().await;
+        let (agent, _root) = test_agent().await;
         let chat = "01TESTCHATAPPROVALPARK0002";
         agent.store.upsert_chat(chat, "Main", true, 0).unwrap();
         let host = agent.sync.open_room(chat).await.unwrap();
@@ -2235,7 +2231,6 @@ mod park_tests {
             "a hidden row takes the card away from the user who has to answer it"
         );
         drop(h);
-        let _ = std::fs::remove_dir_all(&root);
     }
 }
 
@@ -2256,7 +2251,7 @@ mod card_location_tests {
     /// it can say to the user; the id is beside it so it is exact. No prompt text changes.
     #[tokio::test]
     async fn the_session_that_asked_is_told_which_chat_the_card_is_in() {
-        let (agent, root) = test_agent().await;
+        let (agent, _root) = test_agent().await;
         agent.store.upsert_chat(MAIN, "Main", true, 0).unwrap();
         agent
             .store
@@ -2285,14 +2280,13 @@ mod card_location_tests {
 
         assert_eq!(v["chat"], "Main", "a name the model can say out loud: {v}");
         assert_eq!(v["chatId"], MAIN, "and the id, so it is exact: {v}");
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A chat with no title would otherwise put a raw ULID where a place name belongs, and the
     /// model reads whatever it is given out to the user.
     #[tokio::test]
     async fn an_untitled_chat_is_named_rather_than_spelled_out() {
-        let (agent, root) = test_agent().await;
+        let (agent, _root) = test_agent().await;
         let chat = "01TESTCHATCARDWHERE0BLANK0";
         agent.store.upsert_chat(chat, "", true, 0).unwrap();
         let _host = agent.sync.open_room(chat).await.unwrap();
@@ -2305,7 +2299,6 @@ mod card_location_tests {
             !v["chat"].as_str().unwrap().contains(chat),
             "a ULID is not a place a person can be sent to: {v}"
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 }
 
@@ -2324,7 +2317,7 @@ mod deadline_tests {
     /// waiter the number instead of letting it keep a second copy of the default.
     #[tokio::test]
     async fn a_gated_card_advertises_the_deadline_its_waiter_enforces() {
-        let (agent, root) = test_agent().await;
+        let (agent, _root) = test_agent().await;
         let chat = "01TESTCHATAPPROVALTTL00000";
         agent.store.upsert_chat(chat, "Main", true, 0).unwrap();
         let _host = agent.sync.open_room(chat).await.unwrap();
@@ -2365,7 +2358,6 @@ mod deadline_tests {
             Some(harness_wait_cap_ms()),
             "the waiter reads agentd's cap, so the two cannot drift apart again: {v}"
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The owner's first test: leave a card undecided and its real expiry matches `expires_at`
@@ -2374,7 +2366,7 @@ mod deadline_tests {
     /// own deadline and the sweep stays the restart backstop.
     #[tokio::test]
     async fn an_undecided_card_expires_at_the_time_it_advertises() {
-        let (agent, root) = test_agent().await;
+        let (agent, _root) = test_agent().await;
         let chat = "01TESTCHATAPPROVALTTL00001";
         agent.store.upsert_chat(chat, "Main", true, 0).unwrap();
         let _host = agent.sync.open_room(chat).await.unwrap();
@@ -2400,6 +2392,5 @@ mod deadline_tests {
             late.abs() < 5_000,
             "expired {late} ms away from the advertised deadline"
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 }

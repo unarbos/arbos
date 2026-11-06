@@ -711,7 +711,6 @@ mod tests {
         assert!(!p.exists());
         assert!(!release_ballast(&root));
         std::env::remove_var("ARBOS_DISK_BALLAST_MB");
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -774,6 +773,5 @@ mod tests {
             .join("agentd.db")
             .exists());
         assert!(cleanup_line(&rep).contains("Removed"));
-        let _ = std::fs::remove_dir_all(&root);
     }
 }

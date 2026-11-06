@@ -129,7 +129,7 @@ fn cancel_cmd(cancel_msg_id: &str) -> CommandView {
 /// 3. the reply that reports the cancel cites that state.
 #[tokio::test]
 async fn cancelling_a_job_from_the_chat_stops_it_and_silences_it() {
-    let (agent, root) = test_agent().await;
+    let (agent, _root) = test_agent().await;
     let host = agent.sync.open_room(CHAT).await.unwrap();
     a_running_job(&agent, &host).await;
 
@@ -248,8 +248,6 @@ async fn cancelling_a_job_from_the_chat_stops_it_and_silences_it() {
         after_cancel,
         "the cancelled job left a new row in the chat"
     );
-
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// The other half of bug S: the sentence. The main agent said the job was cancelled because it
@@ -257,7 +255,7 @@ async fn cancelling_a_job_from_the_chat_stops_it_and_silences_it() {
 /// refused while a job of the chat is still open, and it goes out once the state agrees.
 #[tokio::test]
 async fn a_reported_cancel_has_to_match_the_job_state() {
-    let (agent, root) = test_agent().await;
+    let (agent, _root) = test_agent().await;
     let host = agent.sync.open_room(CHAT).await.unwrap();
     a_running_job(&agent, &host).await;
     let _busy = agent.test_hold_turn(CHAT).await;
@@ -298,8 +296,6 @@ async fn a_reported_cancel_has_to_match_the_job_state() {
         .hook_send_message(claim, None, None)
         .await
         .expect("with the state cancelled the claim is grounded");
-
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// A cancel retires the job's live rows even when the chat's room has gone cold — the window
@@ -310,7 +306,7 @@ async fn a_reported_cancel_has_to_match_the_job_state() {
 /// comes back from disk still streaming, and a client draws a working indicator for a dead job.
 #[tokio::test]
 async fn a_cancel_retires_the_jobs_rows_on_a_chat_whose_room_went_cold() {
-    let (agent, root) = test_agent().await;
+    let (agent, _root) = test_agent().await;
     let opened = agent.sync.open_room(CHAT).await.unwrap();
     a_running_job(&agent, &opened).await;
 
@@ -360,8 +356,6 @@ async fn a_cancel_retires_the_jobs_rows_on_a_chat_whose_room_went_cold() {
         (Some(true), MessageStatus::Done.as_str().to_owned()),
         "the reopened room brought the cancelled job's row back drawing and streaming"
     );
-
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// Bug O puts a per-chat FIFO in front of every reply, and a job's answer waits in it for up to
@@ -374,7 +368,7 @@ async fn a_cancel_retires_the_jobs_rows_on_a_chat_whose_room_went_cold() {
 /// cancel that stalled the chat's order would be a worse failure than the late result it fixed.
 #[tokio::test]
 async fn a_cancel_inside_the_send_order_wait_posts_nothing_and_strands_no_ticket() {
-    let (agent, root) = test_agent().await;
+    let (agent, _root) = test_agent().await;
     let host = agent.sync.open_room(CHAT).await.unwrap();
     a_running_job(&agent, &host).await;
 
@@ -484,8 +478,6 @@ async fn a_cancel_inside_the_send_order_wait_posts_nothing_and_strands_no_ticket
         "the cancelled job stranded its place and stalled the chat's order"
     );
     assert!(t1.elapsed() < Duration::from_secs(1), "{:?}", t1.elapsed());
-
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// A job the model started answers through its relay result turn, which is a writer of its own,
@@ -505,7 +497,7 @@ async fn a_cancel_inside_the_send_order_wait_posts_nothing_and_strands_no_ticket
 /// what is asserted is the row — the thing the user would have seen either way.
 #[tokio::test]
 async fn a_cancelled_job_delivers_nothing_through_its_relay_turn() {
-    let (agent, root) = test_agent().await;
+    let (agent, _root) = test_agent().await;
     let host = agent.sync.open_room(CHAT).await.unwrap();
     a_running_job(&agent, &host).await;
     let spec = crate::agent::JobSpec {
@@ -603,8 +595,6 @@ async fn a_cancelled_job_delivers_nothing_through_its_relay_turn() {
         0,
         "the relay turn stranded the ask's place in the chat's send order"
     );
-
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// The other side of the same wait. A job already cancelled when its result turn starts must not
@@ -612,7 +602,7 @@ async fn a_cancelled_job_delivers_nothing_through_its_relay_turn() {
 /// message behind it for up to `SEND_ORDER_WAIT` to reach a `return`.
 #[tokio::test]
 async fn a_relay_turn_for_an_already_cancelled_job_does_not_wait_for_its_turn() {
-    let (agent, root) = test_agent().await;
+    let (agent, _root) = test_agent().await;
     let host = agent.sync.open_room(CHAT).await.unwrap();
     a_running_job(&agent, &host).await;
     agent.store.set_job_state(JOB, "cancelled", None).unwrap();
@@ -663,8 +653,6 @@ async fn a_relay_turn_for_an_already_cancelled_job_does_not_wait_for_its_turn() 
         "the cancelled job's result turn queued behind the older message: {:?}",
         t0.elapsed()
     );
-
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// Bug T opens a second door from a job into its chat: `send_message` with no `to`, which posts
@@ -675,7 +663,7 @@ async fn a_relay_turn_for_an_already_cancelled_job_does_not_wait_for_its_turn() 
 /// between it and the chat is the question it asks itself.
 #[tokio::test]
 async fn a_cancelled_job_cannot_post_a_progress_note_either() {
-    let (agent, root) = test_agent().await;
+    let (agent, _root) = test_agent().await;
     let host = agent.sync.open_room(CHAT).await.unwrap();
     a_running_job(&agent, &host).await;
 
@@ -714,8 +702,6 @@ async fn a_cancelled_job_cannot_post_a_progress_note_either() {
         agent.sync.host(CHAT).await.is_none(),
         "a cancelled job's note reopened the room it was refused from"
     );
-
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// The answer bubbles a job wrote in reply to `msg_id`. `decision: "job"` is what

@@ -1386,7 +1386,6 @@ mod tests {
             .unwrap()
             .file_type()
             .is_symlink());
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// #1851 regression bound: a fresh project's own bytes from the seed copy stay tiny — the
@@ -1467,7 +1466,6 @@ mod tests {
             &seed.join("deny.ts"),
             &dst.join("deny.ts")
         ));
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The text Arbos seeded into the project folder moved to pi's agent directory, so the old
@@ -1509,8 +1507,6 @@ mod tests {
         std::fs::write(&path, "# my project\n").unwrap();
         super::retire_seeded_agents_md_against(&work, &known);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "# my project\n");
-
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The list must keep holding the last text that reached a project folder, or every project

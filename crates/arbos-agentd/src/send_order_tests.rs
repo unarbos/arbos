@@ -78,7 +78,7 @@ async fn join_lanes(lanes: Vec<tokio::task::JoinHandle<()>>) {
 /// 30 sends, answered 1 through 30 in order, with no gap over ten seconds.
 #[tokio::test]
 async fn a_burst_of_thirty_is_answered_in_send_order() {
-    let (agent, root) = test_agent().await;
+    let (agent, _root) = test_agent().await;
     let chat = "01TESTCHATSENDORDER0000030";
     let host = agent.sync.open_room(chat).await.unwrap();
     // Minted and appended in send order, as a client's burst is. At least a millisecond apart,
@@ -142,7 +142,6 @@ async fn a_burst_of_thirty_is_answered_in_send_order() {
         0,
         "every place is released once its message is answered"
     );
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// The round-6 shape, which the thirty-message case does not reach: a job holds the chat for the
@@ -165,7 +164,7 @@ async fn a_burst_of_thirty_is_answered_in_send_order() {
 /// `3, 10, 5, 12, 7, 2, 14, 9, 4, 11, 6, 1, 13, 8` — round 6's shape, tail ahead of middle.
 #[tokio::test]
 async fn a_burst_that_queues_behind_a_job_is_answered_in_send_order() {
-    let (agent, root) = test_agent().await;
+    let (agent, _root) = test_agent().await;
     let chat = "01TESTCHATSENDORDER0000014";
     let host = agent.sync.open_room(chat).await.unwrap();
     // The job that was running throughout: its ask arrived before the burst, so it holds both
@@ -230,7 +229,6 @@ async fn a_burst_that_queues_behind_a_job_is_answered_in_send_order() {
         "a burst released all at once must still be answered in send order"
     );
     assert_eq!(agent.send_order.waiting(chat), 0);
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// Order is not held at any price (Jacob's ruling, 2026-11-05): a finished answer behind a turn
@@ -247,7 +245,7 @@ async fn a_burst_that_queues_behind_a_job_is_answered_in_send_order() {
 /// The clock is paused, so the wait costs no real time and the measurement is the virtual one.
 #[tokio::test(start_paused = true)]
 async fn a_finished_answer_behind_a_long_turn_posts_after_the_valve() {
-    let (agent, root) = test_agent().await;
+    let (agent, _root) = test_agent().await;
     let chat = "01TESTCHATSENDORDER0000032";
     let _host = agent.sync.open_room(chat).await.unwrap();
     // The long turn takes the floor and never answers while this test runs.
@@ -287,7 +285,6 @@ async fn a_finished_answer_behind_a_long_turn_posts_after_the_valve() {
         1,
         "the long turn has still not answered, so this really did post out of turn"
     );
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// The reply rows written under `user_msg_id`, with the host lock taken and released.
@@ -347,7 +344,7 @@ async fn sweep_every_row(host: &SharedHost) -> usize {
 /// Split that one guard in two and this test goes red.
 #[tokio::test]
 async fn the_turn_finish_sweep_cannot_hide_a_held_answer() {
-    let (agent, root) = test_agent().await;
+    let (agent, _root) = test_agent().await;
     let chat = "01TESTCHATSENDORDER0000033";
     let host = agent.sync.open_room(chat).await.unwrap();
     let older = ulid();
@@ -433,7 +430,6 @@ async fn the_turn_finish_sweep_cannot_hide_a_held_answer() {
         Some(true),
         "the sweep hid the held answer after {swept} row(s) retired"
     );
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// A user message appended to the chat, and the `send` command a client issues for it.
@@ -505,7 +501,7 @@ async fn an_inline_approval_wait(
 /// the pair deadlocks.
 #[tokio::test(start_paused = true)]
 async fn the_valve_releases_an_answer_held_by_an_inline_approval_wait() {
-    let (agent, root) = test_agent().await;
+    let (agent, _root) = test_agent().await;
     let chat = "01TESTCHATSENDORDER0000034";
     let host = agent.sync.open_room(chat).await.unwrap();
     let older = ulid();
@@ -604,7 +600,6 @@ async fn the_valve_releases_an_answer_held_by_an_inline_approval_wait() {
     drop(behind);
     drop(holding);
     assert_eq!(agent.send_order.waiting(chat), 0);
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// Interaction 2, first half: "how is it going?" during an approval wait.
@@ -622,7 +617,7 @@ async fn the_valve_releases_an_answer_held_by_an_inline_approval_wait() {
 /// is not worth exempting.
 #[tokio::test]
 async fn a_status_question_is_answered_while_the_turn_waits_for_approval() {
-    let (agent, root) = test_agent().await;
+    let (agent, _root) = test_agent().await;
     let chat = "01TESTCHATSENDORDER0000035";
     let host = agent.sync.open_room(chat).await.unwrap();
     let older = ulid();
@@ -687,7 +682,6 @@ async fn a_status_question_is_answered_while_the_turn_waits_for_approval() {
         agent.approval_pending_for(chat).await && replies_to(&host, &older).await.is_empty(),
         "the held turn answered meanwhile, so the quick row was not exempted from anything"
     );
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// Interaction 2, second half: a deterministic queue must not starve anyone.
@@ -702,7 +696,7 @@ async fn a_status_question_is_answered_while_the_turn_waits_for_approval() {
 /// from the moment its own answer is written, not from the moment the head stalled.
 #[tokio::test(start_paused = true)]
 async fn no_lane_behind_an_approval_wait_waits_longer_than_the_valve() {
-    let (agent, root) = test_agent().await;
+    let (agent, _root) = test_agent().await;
     let chat = "01TESTCHATSENDORDER0000036";
     let host = agent.sync.open_room(chat).await.unwrap();
     let head = ulid();
@@ -775,7 +769,6 @@ async fn no_lane_behind_an_approval_wait_waits_longer_than_the_valve() {
         1,
         "only the head is still owed an answer"
     );
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// Interaction 3 with #2761: can its queued-behind row be written after the answer it describes?
@@ -798,7 +791,7 @@ async fn no_lane_behind_an_approval_wait_waits_longer_than_the_valve() {
 /// answer, which is the row that has to come second.
 #[tokio::test]
 async fn the_queued_behind_row_cannot_follow_the_answer_it_describes() {
-    let (agent, root) = test_agent().await;
+    let (agent, _root) = test_agent().await;
     let chat = "01TESTCHATSENDORDER0000037";
     let host = agent.sync.open_room(chat).await.unwrap();
     let (ask, _cmd) = send_cmd(&host, "fix the failing parser tests in alpha/").await;
@@ -926,7 +919,6 @@ async fn the_queued_behind_row_cannot_follow_the_answer_it_describes() {
 
     agent.release_job_locks(&holder.id).await;
     drop(holding);
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// The answer still lands when the chat's room is dropped while that answer waits its turn.
@@ -945,7 +937,7 @@ async fn the_queued_behind_row_cannot_follow_the_answer_it_describes() {
 /// cost of the case — two lines, and no cap or timer to drive.
 #[tokio::test]
 async fn an_answer_lands_in_a_room_that_was_dropped_while_it_waited() {
-    let (agent, root) = test_agent().await;
+    let (agent, _root) = test_agent().await;
     let chat = "01TESTCHATSENDORDER0000038";
     let dropped = agent.sync.open_room(chat).await.unwrap();
     let older = ulid();
@@ -1079,7 +1071,6 @@ async fn an_answer_lands_in_a_room_that_was_dropped_while_it_waited() {
             .any(|m| m.id == lost),
         "the stale doc and the live room are the same document, so nothing was ever at risk"
     );
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// The other half of the same rule, and the reason the re-acquire is not a plain `open_room`:
@@ -1091,7 +1082,7 @@ async fn an_answer_lands_in_a_room_that_was_dropped_while_it_waited() {
 /// to a chat we have left goes nowhere, exactly as it does today, and the room stays shut.
 #[tokio::test]
 async fn an_answer_does_not_reopen_a_chat_the_agent_was_removed_from() {
-    let (agent, root) = test_agent().await;
+    let (agent, _root) = test_agent().await;
     let chat = "01TESTCHATSENDORDER0000039";
     let left = agent.sync.open_room(chat).await.unwrap();
     let (ask, _cmd) = send_cmd(&left, "reply with only 2").await;
@@ -1144,14 +1135,13 @@ async fn an_answer_does_not_reopen_a_chat_the_agent_was_removed_from() {
         rows[0].has_visible_content(),
         "the write into the closed handle did not land, so this proves nothing"
     );
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// A voice send keeps its old way in: it must be able to preempt the turn of a caller who has
 /// hung up, so it never queues behind the chat's typed messages.
 #[tokio::test]
 async fn a_voice_send_does_not_queue_behind_typed_messages() {
-    let (agent, root) = test_agent().await;
+    let (agent, _root) = test_agent().await;
     let chat = "01TESTCHATSENDORDER0000031";
     let _host = agent.sync.open_room(chat).await.unwrap();
     let typed = ulid();
@@ -1167,7 +1157,6 @@ async fn a_voice_send_does_not_queue_behind_typed_messages() {
         got.is_ok(),
         "a voice send waited for an older typed message's answer"
     );
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// Remove, re-add, then a cold drop: the one sequence where a flag on the handle and a record on
@@ -1186,7 +1175,7 @@ async fn a_voice_send_does_not_queue_behind_typed_messages() {
 /// read and it fails here while every other case still passes.
 #[tokio::test]
 async fn a_reply_through_a_stale_handle_survives_a_rejoin_and_a_cold_drop() {
-    let (agent, root) = test_agent().await;
+    let (agent, _root) = test_agent().await;
     let chat = "01TESTCHATSENDORDER0000040";
     let stale = agent.sync.open_room(chat).await.unwrap();
     let (ask, _cmd) = send_cmd(&stale, "reply with only 2").await;
@@ -1261,5 +1250,4 @@ async fn a_reply_through_a_stale_handle_survives_a_rejoin_and_a_cold_drop() {
         "a reply to a chat the agent is a member of was declined and counted as dropped"
     );
     drop(fresh);
-    let _ = std::fs::remove_dir_all(&root);
 }

@@ -309,7 +309,6 @@ async fn a_message_sent_as_the_pi_child_dies_is_answered_and_the_finished_row_st
         0,
         "both messages released their place in the chat's send order"
     );
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// The act turn's words. Plain statement prose: the boilerplate filter drops tool narration, so
@@ -424,7 +423,6 @@ async fn a_job_whose_worker_dies_with_the_main_pi_child_waits_for_it_and_keeps_t
         brief.contains("override the brief above"),
         "and it is told which of the two wins: {brief}"
     );
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// The correction Jacob sent, in the shape r7correct used.
@@ -515,5 +513,4 @@ async fn three_messages_at_a_turn_end_are_all_answered_with_no_failed_rows() {
     }
     let errors = error_parts(&host).await;
     assert!(errors.is_empty(), "0 turn_failed rows: {errors:?}");
-    let _ = std::fs::remove_dir_all(&root);
 }

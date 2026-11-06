@@ -646,7 +646,7 @@ mod tests {
     /// beside.
     #[tokio::test]
     async fn a_routine_belongs_to_the_chat_its_caller_is_in() {
-        let (agent, root) = agent_with_a_job().await;
+        let (agent, _root) = agent_with_a_job().await;
 
         let caller = caller_for(&agent, SessionRole::Subagent, WORKER).await;
         assert_eq!(caller.chat_id.as_deref(), Some(CHAT));
@@ -689,7 +689,6 @@ mod tests {
             create_body(&named, &caller).unwrap()["chatId"],
             json!("01TESTCHATASKEDFORBYNAME01")
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The other half of W: the three routines were `once` triggers one second away, which is not
@@ -703,7 +702,7 @@ mod tests {
     /// name for the open path would rebuild the trap it is closing.
     #[tokio::test]
     async fn a_job_cannot_use_a_one_shot_routine_as_a_progress_note() {
-        let (agent, root) = agent_with_a_job().await;
+        let (agent, _root) = agent_with_a_job().await;
         let caller = caller_for(&agent, SessionRole::Subagent, WORKER).await;
 
         let note = |secs: i64| {
@@ -737,6 +736,5 @@ mod tests {
         // And the main agent is untouched: "remind me in ten seconds" is its own chat's business.
         let main = caller_for(&agent, SessionRole::Main, "").await;
         assert!(create_body(&note(1), &main).is_ok());
-        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -141,7 +141,7 @@ fn a_job_notice_carries_the_result_and_marks_what_it_cut() {
 /// there is no instant at which a message can be in the doc and its reply row not yet be.
 #[tokio::test]
 async fn a_job_notice_never_opens_its_row_before_a_new_message_is_answered() {
-    let (agent, root) = test_agent().await;
+    let (agent, _root) = test_agent().await;
     let chat = "01TESTCHATJOBNOTICE0000001";
     let host = agent.sync.open_room(chat).await.unwrap();
     // No pi: the turn fails at its first model call, which is past the row under test.
@@ -230,8 +230,6 @@ async fn a_job_notice_never_opens_its_row_before_a_new_message_is_answered() {
             && at("01TESTJOBNOTICEACK00000002") < at(&notice),
         "the notice comes after the reply to the newest message, never between the two: {rows:?}"
     );
-
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// The notice carries whatever the worker wrote, and `partial` is a finished return contract,

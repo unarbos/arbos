@@ -2147,7 +2147,7 @@ mod attribution_tests {
 
     #[tokio::test]
     async fn guest_row_without_author_fields_is_not_the_owner() {
-        let (agent, root) = test_agent().await;
+        let (agent, _root) = test_agent().await;
         let chat = "01TESTCHATATTRIBUTION00001";
         agent.people.test_insert(chat, group_info(&agent, false));
         let host = agent.sync.open_room(chat).await.unwrap();
@@ -2245,7 +2245,6 @@ mod attribution_tests {
         assert!(fields
             .iter()
             .any(|(k, v)| *k == "askedBy" && v == "user:gh_peer"));
-        let _ = std::fs::remove_dir_all(&root);
     }
 }
 
@@ -2350,7 +2349,7 @@ mod gate_record_tests {
     #[tokio::test]
     async fn gate_decision_is_recorded_with_the_judges_reason_and_judged_once() {
         let calls = StdArc::new(AtomicUsize::new(0));
-        let (agent, root) = test_agent_with(mock_decisions(calls.clone())).await;
+        let (agent, _root) = test_agent_with(mock_decisions(calls.clone())).await;
         let chat = "01TESTCHATGATERECORD000001";
         seed_group(&agent, chat);
         let host = agent.sync.open_room(chat).await.unwrap();
@@ -2430,14 +2429,13 @@ mod gate_record_tests {
             .is_empty());
         let after = agent.store.t3_after(reply.at, Some(chat), 50).unwrap();
         assert!(after.iter().all(|(r, _)| r.at > reply.at));
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// No judge (the mock relay has no `/proxy/decisions`): an unmentioned message is silence;
     /// every @mention by a person wakes the agent, vocative or not ("thanks @doug").
     #[tokio::test]
     async fn judge_failure_fails_closed_unless_mentioned() {
-        let (agent, root) = test_agent().await;
+        let (agent, _root) = test_agent().await;
         let chat = "01TESTCHATGATEFAILS0000001";
         seed_group(&agent, chat);
         let host = agent.sync.open_room(chat).await.unwrap();
@@ -2474,7 +2472,6 @@ mod gate_record_tests {
             reasons[&asked].contains("by a person → reply"),
             "{reasons:?}"
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// After a `reply` verdict the turn prelude tells the model the gate already decided and
@@ -2482,7 +2479,7 @@ mod gate_record_tests {
     #[tokio::test]
     async fn prelude_follows_the_judges_verdict() {
         let calls = StdArc::new(AtomicUsize::new(0));
-        let (agent, root) = test_agent_with(mock_decisions(calls)).await;
+        let (agent, _root) = test_agent_with(mock_decisions(calls)).await;
         let chat = "01TESTCHATGATEPRELUDE00001";
         seed_group(&agent, chat);
         let host = agent.sync.open_room(chat).await.unwrap();
@@ -2513,7 +2510,6 @@ mod gate_record_tests {
             prelude.contains("If this message is for someone else"),
             "{prelude}"
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The owner's `every_message` setting is not a heuristic: no judge call, every human
@@ -2521,7 +2517,7 @@ mod gate_record_tests {
     #[tokio::test]
     async fn every_message_policy_skips_the_judge() {
         let calls = StdArc::new(AtomicUsize::new(0));
-        let (agent, root) = test_agent_with(mock_decisions(calls.clone())).await;
+        let (agent, _root) = test_agent_with(mock_decisions(calls.clone())).await;
         let chat = "01TESTCHATGATEEVERY0000001";
         seed_group(&agent, chat);
         agent
@@ -2536,7 +2532,6 @@ mod gate_record_tests {
         let plain = append(&host, "morning all", vec![]).await;
         assert!(agent.people_wants(chat, &host, &plain).await);
         assert_eq!(calls.load(Ordering::SeqCst), 0);
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// #2207 (long-task h4, image 0.1.177): the judge chose lane-b alone for "@lane-b can you
@@ -2547,7 +2542,7 @@ mod gate_record_tests {
     #[tokio::test]
     async fn an_agents_bubble_never_wakes_another_agent() {
         let calls = StdArc::new(AtomicUsize::new(0));
-        let (agent, root) = test_agent_with(mock_decisions(calls.clone())).await;
+        let (agent, _root) = test_agent_with(mock_decisions(calls.clone())).await;
         let chat = "01TESTCHATAGENTROW00000001";
         seed_group(&agent, chat);
         let host = agent.sync.open_room(chat).await.unwrap();
@@ -2612,7 +2607,6 @@ mod gate_record_tests {
             .commands()
             .iter()
             .all(|c| c.payload.get("agentMention").is_none()));
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A judge that is never sure: the first @mentioned agent at 0.48 (under every threshold),
@@ -2671,7 +2665,7 @@ mod gate_record_tests {
     #[tokio::test]
     async fn a_persons_mentions_wake_every_mentioned_agent() {
         let calls = StdArc::new(AtomicUsize::new(0));
-        let (agent, root) = test_agent_with(unsure_decisions(calls.clone())).await;
+        let (agent, _root) = test_agent_with(unsure_decisions(calls.clone())).await;
         let chat = "01TESTCHATMULTIMENTION0001";
         let me_id = agent.cfg.project_id.clone();
         let me = format!("agent:{me_id}");
@@ -2815,7 +2809,6 @@ mod gate_record_tests {
             before,
             "no judge call for an agent's row"
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Jacob, Arbonites 2026-10-26: "@hezbola can you communicate directly with @doug-agent?"

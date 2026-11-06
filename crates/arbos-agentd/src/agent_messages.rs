@@ -880,7 +880,7 @@ mod tests {
     /// file there is no limit, and the same text posts (bug Q, Test5 round 5).
     #[tokio::test]
     async fn a_configured_limit_is_named_in_the_refusal_and_is_absent_by_default() {
-        let (agent, root) = crate::status::tests::test_agent().await;
+        let (agent, _root) = crate::status::tests::test_agent().await;
         let chat = "01TESTCHATTEXTLIMIT0000001";
         let host = agent.sync.open_room(chat).await.unwrap();
         let _busy = agent.test_hold_turn(chat).await;
@@ -920,7 +920,6 @@ mod tests {
 
         std::fs::write(agent.cfg.state_dir.join("chat-text-max"), "off").unwrap();
         assert_eq!(agent.cfg.chat_text_max(), None, "`off` is no limit");
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// #2395 closes the rooms agentd never releases today, which turns every "no open room" arm
@@ -933,7 +932,7 @@ mod tests {
     /// Leaving the chat is the other close, and a reopen there is #1440's 403 every 16 s.
     #[tokio::test]
     async fn a_closed_room_is_reopened_instead_of_swallowing_the_message() {
-        let (agent, root) = crate::status::tests::test_agent().await;
+        let (agent, _root) = crate::status::tests::test_agent().await;
         let chat = "01TESTCHATREOPENPOST000001";
         let host = agent.sync.open_room(chat).await.unwrap();
         let _busy = agent.test_hold_turn(chat).await;
@@ -963,7 +962,6 @@ mod tests {
                 .collect()
         };
         assert_eq!(posted, vec!["One message, as asked.".to_owned()]);
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Bug T, Test5 round 6 (r6cardjob, agentd 0.1.193): the user asked a job to post a note
@@ -976,7 +974,7 @@ mod tests {
     /// the main turn that started the job ended long before the worker spoke.
     #[tokio::test]
     async fn a_job_posts_three_progress_notes_as_three_rows_before_its_result() {
-        let (agent, root) = crate::status::tests::test_agent().await;
+        let (agent, _root) = crate::status::tests::test_agent().await;
         let chat = "01TESTCHATJOBPROGRESS00001";
         let ask = "01TESTASKJOBPROGRESS000001";
         let job_id = "01TESTJOBPROGRESS00000001";
@@ -1066,7 +1064,6 @@ mod tests {
             .await
             .expect_err("a session with no job has no chat of its own");
         assert!(orphan.to_string().contains("runs no job"), "{orphan}");
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Arbonites, 2026-10-28 (01M627S7…): a hand-off row in a group came out as bare
@@ -1078,7 +1075,7 @@ mod tests {
         use crate::people::PeopleChatInfo;
         use crate::status::tests::test_agent;
 
-        let (agent, root) = test_agent().await;
+        let (agent, _root) = test_agent().await;
         let chat = "01TESTCHATHANDOFFROW000001";
         agent.people.test_insert(
             chat,
@@ -1119,7 +1116,6 @@ mod tests {
             !agent.people_already_replied(&host, "u1").await,
             "a hand-off row is not the answer to the ask"
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Arbonites 2026-10-28 21:48: Jacob wrote "@bob talk to @bubble" in the group; Bubble's
@@ -1130,7 +1126,7 @@ mod tests {
     #[tokio::test]
     async fn agent_message_from_a_shared_group_carries_its_recent_lines() {
         use crate::people::PeopleChatInfo;
-        let (agent, root) = crate::status::tests::test_agent().await;
+        let (agent, _root) = crate::status::tests::test_agent().await;
         let group = "01TESTCHATA2AORIGIN0000001";
         let me = format!("agent:{}", agent.cfg.project_id);
         agent.people.test_insert(
@@ -1218,7 +1214,6 @@ mod tests {
             );
             assert!(!note.contains("@bob talk to @bubble"), "{note}");
         }
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The guard, on the writer that holds no handle: `hooks.rs` calls `hook_send_message`
@@ -1226,7 +1221,7 @@ mod tests {
     /// this writer to consult but the hub's own record. Reopening here is #1440's 403 every 16 s.
     #[tokio::test]
     async fn a_handle_less_hook_send_does_not_reopen_a_room_the_agent_left() {
-        let (agent, root) = crate::status::tests::test_agent().await;
+        let (agent, _root) = crate::status::tests::test_agent().await;
         let chat = "01TESTCHATHOOKLEFT000001";
         let host = agent.sync.open_room(chat).await.unwrap();
         let _busy = agent.test_hold_turn(chat).await;
@@ -1248,7 +1243,6 @@ mod tests {
             !agent.sync.is_open(chat).await,
             "and it left no room open to redial the relay with"
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The other half, and the reason the guard cannot simply be "never reopen": the same writer
@@ -1256,7 +1250,7 @@ mod tests {
     /// swallows the message it was supposed to keep.
     #[tokio::test]
     async fn a_handle_less_hook_send_reopens_a_room_that_went_cold() {
-        let (agent, root) = crate::status::tests::test_agent().await;
+        let (agent, _root) = crate::status::tests::test_agent().await;
         let chat = "01TESTCHATHOOKCOLD000001";
         let host = agent.sync.open_room(chat).await.unwrap();
         let _busy = agent.test_hold_turn(chat).await;
@@ -1275,7 +1269,6 @@ mod tests {
             agent.sync.is_open(chat).await,
             "the message went somewhere nothing will push it"
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The background-job hook is a writer too, and it refused with "no room for this chat" —
@@ -1287,7 +1280,7 @@ mod tests {
     async fn a_background_job_starts_in_a_room_the_idle_close_took() {
         use arbos_core::doc::UserMessageOpts;
 
-        let (agent, root) = crate::status::tests::test_agent().await;
+        let (agent, _root) = crate::status::tests::test_agent().await;
         let chat = "01TESTCHATJOBCOLD0000001";
         let host = agent.sync.open_room(chat).await.unwrap();
         let _busy = agent.test_hold_turn_for(chat, "m-job").await;
@@ -1327,6 +1320,5 @@ mod tests {
             agent.sync.is_open(chat).await,
             "the job has a room to write its rows into"
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 }

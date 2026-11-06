@@ -1217,7 +1217,7 @@ mod tests {
     /// frame, and a history fetch afterwards is healthy.
     #[tokio::test]
     async fn a_fifty_one_thousand_character_table_posts_as_one_row_in_this_chat() {
-        let (agent, root) = crate::status::tests::test_agent().await;
+        let (agent, _root) = crate::status::tests::test_agent().await;
         let chat = "01TESTCHATBIGTABLE00000001";
         let host = agent.sync.open_room(chat).await.unwrap();
         let _busy = agent.test_hold_turn(chat).await;
@@ -1297,7 +1297,6 @@ mod tests {
             body["handle"].as_str().is_some_and(|h| !h.is_empty()),
             "a message past one page must come back with a handle to peek: {body}"
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The description is where the model learns whether a limit exists, so it states the truth
@@ -1359,7 +1358,7 @@ mod tests {
     /// are in the job's chat, and a call with neither field is told which one to use.
     #[tokio::test]
     async fn a_jobs_script_posts_through_the_mcp_tool_with_either_field_name() {
-        let (agent, root) = crate::status::tests::test_agent().await;
+        let (agent, _root) = crate::status::tests::test_agent().await;
         let chat = "01TESTCHATMCPJOBNOTE000001";
         let ask = "01TESTASKMCPJOBNOTE0000001";
         let worker = "01TESTWORKERMCPJOBNOTE0001";
@@ -1438,7 +1437,6 @@ mod tests {
             said.contains("put the words in `text`"),
             "the refusal must name the field: {said}"
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The session header is the only thing that tells this server which worker is calling: one
@@ -1485,7 +1483,6 @@ mod tests {
             Some("01TESTWORKERENVSESSION0001".to_owned()),
             "the header resolves from this env var, so every pi child must carry it"
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     fn auth(value: &str) -> HeaderMap {

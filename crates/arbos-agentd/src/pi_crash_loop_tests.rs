@@ -1142,7 +1142,7 @@ async fn the_owed_send_drain_ran(agent: &Arc<Agent>) {
 #[tokio::test(flavor = "multi_thread")]
 async fn an_owed_send_is_answered_after_the_idle_close_took_its_room() {
     let chat = "01TESTCHATOWEDCOLD000001";
-    let (agent, _s, root, msg) = a_send_owed_into_an_outage(chat, |a| async move {
+    let (agent, _s, _root, msg) = a_send_owed_into_an_outage(chat, |a| async move {
         a.sync.test_close_cold(chat).await;
         assert!(a.sync.host(chat).await.is_none(), "premise: no handle");
         assert!(
@@ -1179,7 +1179,6 @@ async fn an_owed_send_is_answered_after_the_idle_close_took_its_room() {
         agent.sync.is_open(chat).await,
         "and the answer went to a room the relay can push from"
     );
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// The same guarantee where the reopen cannot help, which is what makes this test discriminating:
@@ -1188,7 +1187,7 @@ async fn an_owed_send_is_answered_after_the_idle_close_took_its_room() {
 #[tokio::test(flavor = "multi_thread")]
 async fn an_owed_send_that_can_never_be_delivered_still_leaves_a_record() {
     let chat = "01TESTCHATOWEDLEFT000001";
-    let (agent, _s, root, _msg) = a_send_owed_into_an_outage(chat, |a| async move {
+    let (agent, _s, _root, _msg) = a_send_owed_into_an_outage(chat, |a| async move {
         a.sync.close_room(chat).await;
         assert!(
             !a.sync.may_open(chat).await,
@@ -1221,7 +1220,6 @@ async fn an_owed_send_that_can_never_be_delivered_still_leaves_a_record() {
         !agent.sync.is_open(chat).await,
         "and the chat the agent left stays left"
     );
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// The one place an owed send is dropped by design: the queue is bounded, and a chat someone
@@ -1234,7 +1232,7 @@ async fn an_owed_send_that_can_never_be_delivered_still_leaves_a_record() {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_oldest_owed_send_is_recorded_when_the_queue_overflows() {
     let s = stub(0, true);
-    let (agent, root) = test_agent_with_pi(&s.bin).await;
+    let (agent, _root) = test_agent_with_pi(&s.bin).await;
     fast_backoff(&agent);
     let chat = "01TESTCHATOWEDCAP0000001";
     agent
@@ -1270,5 +1268,4 @@ async fn the_oldest_owed_send_is_recorded_when_the_queue_overflows() {
         Some(chat),
         "and names the chat whose oldest promise went: {evicted:?}"
     );
-    let _ = std::fs::remove_dir_all(&root);
 }
