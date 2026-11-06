@@ -2270,7 +2270,7 @@ pub(crate) async fn apply_event(state: &AppState, me: &AgentPrincipal, e: &Value
             let a = approval_id.clone();
             crate::notices::write_doc_as(state, Some(&pid), &card_chat.id, &device, move |doc| {
                 doc.start_assistant_message(&m, "", &d);
-                doc.add_approval_part(&m, &a, &req, expires_at)
+                doc.add_approval_part(&m, &a, &req, Some(expires_at))
                     .ok_or_else(|| anyhow::anyhow!("the card could not be written"))?;
                 doc.finish_message(&m, MessageStatus::Done);
                 Ok(())
@@ -4381,7 +4381,7 @@ mod approval_card_tests {
                         risk: Risk::Computer,
                         payload: json!({}),
                     },
-                    stale,
+                    Some(stale),
                 )
                 .expect("the card is written");
                 Ok(())
@@ -4418,7 +4418,7 @@ mod approval_card_tests {
                         risk: Risk::Computer,
                         payload: json!({}),
                     },
-                    ahead,
+                    Some(ahead),
                 )
                 .expect("the card is written");
                 Ok(())

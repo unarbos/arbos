@@ -602,10 +602,7 @@ async fn the_valve_releases_an_answer_held_by_an_inline_approval_wait() {
     );
     // And the card it let go of is still there to be answered, which is the whole point of
     // letting go rather than closing it.
-    assert_eq!(
-        agent.store.approval(&id).unwrap().unwrap().state,
-        "pending"
-    );
+    assert_eq!(agent.store.approval(&id).unwrap().unwrap().state, "pending");
     agent
         .decide_approval(&id, ApprovalOutcome::Approved, "dev-mac")
         .await
