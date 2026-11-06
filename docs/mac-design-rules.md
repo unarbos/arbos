@@ -652,22 +652,31 @@ fill, not one pixel.
 |---|---|---|---|
 | Page under the transcript | `#121212` (18) | `#141414` (20) | `#141414` (20), unchanged — the page is not this rule |
 | **User bubble** | `#3D3D3D` (61) at the top to `#3B3B3B` (59) at the bottom, midpoint **`#3C3C3C` (60)** | `#5C5C5C` (92) | **`#3C3C3C` (60)** |
-| **Agent bubble** | `#222222` (34) at the top to `#1B1B1B` (27) at the bottom, midpoint `#1E1E1E` (30.5) | Mac `#232323` (35), iPhone `#202020` (32) | unchanged — see below |
+| **Agent bubble** | flat per bubble, but 27 to 34 between bubbles in one frame; modal `#1F1F1F` (31) | Mac `#232323` (35), iPhone `#202020` (32) | unchanged — see below |
 | Bubble ink | `#F5F5F5` (245) | `#FFFFFF` (255) | unchanged — the ink is the typography item |
 
-**The mock's fills are vertical gradients, and ours are flat.** Every agent
-bubble in the mock runs `#222222` to `#1B1B1B` across its own height, whatever
-that height is — a 69 px bubble and a 363 px bubble both span the full ramp. The
-user bubbles run `#3D3D3D` to `#3B3B3B` the same way. We take the midpoint of
-each ramp as a flat fill, because this rule is about tones. Whether the bubbles
-gain real gradients is a separate call and is not settled here.
+**Only the user bubble is a gradient, and it is a shallow one.** Measured as the
+modal grey of each scanline across a bubble's own height, so that text pixels do
+not count: the mock's 70 px user bubble runs `#3D3D3D` (61) to `#3B3B3B` (59),
+monotonically, sextiles 61 · 61 · 60 · 60 · 59 · 59. `#3C3C3C` (60) is its
+midpoint, which is what we take.
 
-**Why the agent bubble did not move with the user bubble.** It is 4.5 steps off
-the mock on the Mac and 1.5 on the iPhone, against the user bubble's 32. On the
+**The mock's agent bubbles are flat.** Each one holds a single grey down its
+whole height — a 304 px bubble reads 31 at every twelfth scanline, a 200 px
+bubble 31, a 68 px bubble 27. What varies is the grey *between* bubbles: 27, 28,
+29, 30, 31 and 34 on different bubbles in the same frame. That is a different
+phenomenon from a ramp, most likely translucency over differing page content,
+and it is why a naive sample that straddles two bubbles reads as a `#222222` to
+`#1B1B1B` gradient when no such gradient exists.
+
+**Why the agent bubble did not move with the user bubble.** It is 4 steps off
+the mock's modal 31 on the Mac and 1 on the iPhone, against the user bubble's
+32 — and the mock's own agent bubbles span 7 steps between themselves, so there
+is no single number to move it to. On the
 Mac `bubble_assistant` is also the fill of the sidebar card, the composer's
 reply-preview strip, the chat header's link pill, the chart card and the
 onboarding morph — surfaces that the sidebar, header and right-pane rules each
-re-measure in their own right. Moving a shared token by 4.5 steps to settle one
+re-measure in their own right. Moving a shared token by 4 steps to settle one
 of its six consumers would change the other five as a side effect.
 
 **The segmented pill does not follow the bubble.** `segment_on_fill()` read
