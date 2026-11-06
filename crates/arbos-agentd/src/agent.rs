@@ -5003,6 +5003,20 @@ impl Agent {
                 .await
                 .unwrap_or_default()
         };
+        // **This is where a cancel blocks, and the order below matters to more than this
+        // function.** `PiAdapter::stop` takes the adapter's children map and holds it across
+        // `RpcChild::shutdown`, which closes the child's stdin and then waits up to five seconds
+        // for it to exit on EOF — sending no signal of its own. The `cancel` above was an in-band
+        // RPC `Abort`, not a signal either. So for as long as this takes, a concurrent
+        // `reap_unreachable_workers` reads that adapter as unreadable and reports
+        // `UnreadCause::AdapterLockContended` rather than collecting the live sessions it holds.
+        //
+        // The kill through the cgroup happens *below*, after this returns. It is therefore not
+        // what keeps this wait short, and a reading that says the window cannot open because
+        // `cgroup.kill` delivers SIGKILL has the order backwards — it was believed once, on
+        // 0.1.200, from a lever that trapped SIGTERM in a job's bash subprocess, which is not a
+        // process this wait is on. Measured in
+        // `sweep_contention_tests::a_cancel_through_the_job_path_opens_the_window_and_a_timer_tick_reads_it`.
         if let Err(e) = adapter.stop(sid).await {
             tracing::warn!(job = %job_id, error = %e, "cancel: the worker's child did not close");
         }

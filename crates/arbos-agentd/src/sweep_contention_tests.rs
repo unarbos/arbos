@@ -40,6 +40,24 @@
 //! would lose most runs.
 //!
 //! Real processes, read back by pid out of `/proc`. Linux-only, skipped elsewhere.
+//!
+//! ## And the window is reachable from a workload, which was doubted
+//!
+//! The 0.1.200 cancel canary could not open it from a workload in three attempts and concluded
+//! it was structurally unreachable, on the ground that the cancel kills through the cgroup and
+//! `cgroup.kill` delivers SIGKILL, so `RpcChild::shutdown` could never block. **That has the
+//! order backwards**, and the correction is worth stating here because this file is where the
+//! next reader will come looking before deleting the guard.
+//!
+//! `Agent::end_cancelled_worker` issues an in-band RPC `Abort` (no signal), then `adapter.stop`
+//! (the blocking wait, no signal), and only then `tree.kill()` — the one place `cgroup.kill` is
+//! written. The SIGKILL lands after the window, so it cannot be what keeps it shut. The canary's
+//! lever put `trap '' TERM` on a job's bash **subprocess**, which `shutdown` never waits on; it
+//! waits on the worker's pi child, which exits promptly on EOF. That run tested something else.
+//!
+//! The third case below is that reachability, measured: the cancel a user issues, and the
+//! five-minute `reap_unreachable_workers` tick that already runs, with no second cancel and
+//! nothing planted.
 
 #![cfg(target_os = "linux")]
 
@@ -60,6 +78,11 @@ const ASK_ONE: &str = "01TESTASKSWEEPCONTENDONE01";
 /// The sibling session's id, and the string its stub child looks for in its own mark to know
 /// that it is the one that must not die when its stdin closes.
 const SIBLING: &str = "01TESTSIBLINGMIDSTOP00001";
+/// The chat the job-path case runs in, kept apart so the two cases cannot see each other's jobs.
+const CHAT_VIA_JOB: &str = "01TESTCHATSWEEPCONTEND0002";
+const ASK_VIA_JOB: &str = "01TESTASKSWEEPCONTENDTWO01";
+/// In a job's brief, this marks its worker as the one whose `stop()` must hold the children map.
+const HANG_BRIEF: &str = "hold-the-children-map-on-close";
 
 /// The live worker's detached work: a `setsid` writer and a nested child of it, each recording
 /// its own pid so the test watches them directly rather than through any handle the sweep uses.
@@ -75,13 +98,18 @@ while true; do echo setsid >> "@LOG@"; sleep 0.2; done
 /// `bash` tool call leaves behind. `ARBOS_SESSION_ROLE` is what tells a worker from the box's
 /// own main pi child, which this same binary also serves.
 ///
-/// And the one session whose id says so refuses to die when its stdin closes: after the read
+/// And the one session that is told to refuses to die when its stdin closes: after the read
 /// loop ends it sleeps well past `RpcChild::shutdown`'s 5-second `timeout`, so a `stop()` on it
 /// holds that adapter's children map for the whole of it. **That hold is the condition under
 /// test.** Without it the window is a few microseconds wide and the test would lose the race
-/// nearly every run; with it the window is the test's to choose. It is keyed on the session id,
-/// read back out of the `ARBOS_WORKER` mark, so that only this session hangs and every other
-/// child on the box — the main pi child above all — shuts down as it normally would.
+/// nearly every run; with it the window is the test's to choose.
+///
+/// It is told in one of two ways, so that only the chosen session hangs and every other child on
+/// the box — the main pi child above all — shuts down as it normally would. Either its session id
+/// carries the marker, read back out of the `ARBOS_WORKER` mark, for a session the test starts
+/// with an id of its own; or its **brief** carries the marker, for a worker whose session id a
+/// job generates and the test cannot know in advance. A new worker's first prompt is the brief
+/// verbatim (`agent.rs:12100`), so the marker arrives in the prompt line.
 const STUB_PI: &str = r#"#!/usr/bin/env python3
 import json, os, subprocess, sys, time
 
@@ -105,6 +133,8 @@ for line in sys.stdin:
     if kind != "prompt" or not worker:
         reply(kind, cid)
         continue
+    if "@HANG_BRIEF@" in line:
+        hang = True
     if not os.path.exists(once):
         open(once, "w").close()
         subprocess.Popen(
@@ -151,7 +181,8 @@ impl Fixture {
                     "@ONCE@",
                     &root.join("writers-spawned").display().to_string(),
                 )
-                .replace("@HANG@", SIBLING),
+                .replace("@HANG@", SIBLING)
+                .replace("@HANG_BRIEF@", HANG_BRIEF),
         )
         .unwrap();
         for f in [&writers, &pi_bin] {
@@ -220,18 +251,22 @@ async fn wait_for(what: &str, mut ready: impl FnMut() -> bool) {
 }
 
 /// A box with a live main pi child and an open room, started the way one is on a box.
-async fn a_box(fx: &Fixture) -> (std::sync::Arc<Agent>, crate::sync::SharedHost) {
+async fn a_box_for(
+    fx: &Fixture,
+    chat: &str,
+    ask: &str,
+) -> (std::sync::Arc<Agent>, crate::sync::SharedHost) {
     let (agent, _root) = test_agent_with_pi(&fx.pi_bin.display().to_string()).await;
     agent
-        .start_pi(CHAT)
+        .start_pi(chat)
         .await
         .expect("the main pi child starts");
-    let host = agent.sync.open_room(CHAT).await.unwrap();
+    let host = agent.sync.open_room(chat).await.unwrap();
     {
         let h = host.lock().await;
         h.doc
             .append_user_message(
-                ASK_ONE,
+                ask,
                 "start some work",
                 "dev-mac",
                 &UserMessageOpts::default(),
@@ -241,24 +276,46 @@ async fn a_box(fx: &Fixture) -> (std::sync::Arc<Agent>, crate::sync::SharedHost)
     (agent, host)
 }
 
+async fn a_box(fx: &Fixture) -> (std::sync::Arc<Agent>, crate::sync::SharedHost) {
+    a_box_for(fx, CHAT, ASK_ONE).await
+}
+
 /// A job with a real worker session of its own, through `start_job` so that nothing about the
 /// session id is planted by the test.
-async fn a_job(agent: &std::sync::Arc<Agent>, host: &crate::sync::SharedHost) -> String {
+/// `touches` is what keeps two jobs of one chat running at once rather than queueing. An `ops`
+/// job that names nothing takes the shared `routines` key (`job_lock_keys`), so a second one
+/// waits on the first — and with this stub the first job's run never ends, so it would wait for
+/// the whole test. A key of its own is the same lever the 0.1.200 canary needed for its own
+/// concurrent pair.
+async fn a_job_in(
+    agent: &std::sync::Arc<Agent>,
+    host: &crate::sync::SharedHost,
+    chat: &str,
+    ask: &str,
+    title: &str,
+    brief: &str,
+    touches: Vec<String>,
+) -> String {
     let started = agent
         .start_job(
-            CHAT,
-            host,
-            ASK_ONE,
-            "Writing ticks",
-            "Start some work and leave it running.",
-            "ops",
-            vec![],
-            false,
-            &mut None,
+            chat, host, ask, title, brief, "ops", touches, false, &mut None,
         )
         .await
         .expect("the job starts");
     started["job_id"].as_str().expect("a job id").to_owned()
+}
+
+async fn a_job(agent: &std::sync::Arc<Agent>, host: &crate::sync::SharedHost) -> String {
+    a_job_in(
+        agent,
+        host,
+        CHAT,
+        ASK_ONE,
+        "Writing ticks",
+        "Start some work and leave it running.",
+        vec![],
+    )
+    .await
 }
 
 /// Every worker session a job has had, via the helper #2859 added — a job accumulates a session
@@ -483,4 +540,172 @@ async fn a_sweep_that_cannot_read_an_adapter_keeps_the_session_and_says_it_could
     );
 
     let _ = stopping.await;
+}
+
+/// The job row's state as the store has it, which is what `stop_jobs` writes before it touches
+/// any process.
+fn job_state(agent: &std::sync::Arc<Agent>, job: &str) -> String {
+    agent
+        .store
+        .job(job)
+        .ok()
+        .flatten()
+        .map(|row| row.state)
+        .unwrap_or_default()
+}
+
+/// The same window, opened by the cancel a user issues and read by the timer tick that exists.
+///
+/// # Why this case exists on top of the one above
+///
+/// The case above opens the window by calling `adapter.stop` directly on a session with no job.
+/// That proves the guard works; it does not prove any workload can reach it. The 0.1.200 cancel
+/// canary tried to reach it from a workload, failed three times, and concluded the window was
+/// structurally unreachable — **on a reading of the cancel path that is inverted**, stated here so
+/// that nobody repeats it:
+///
+/// > the cancel kills through the cgroup and `cgroup.kill` delivers SIGKILL, so
+/// > `RpcChild::shutdown` cannot block
+///
+/// [`Agent::end_cancelled_worker`] does three things, in this order:
+///
+/// 1. `adapter.cancel(sid)` — an in-band RPC `Abort` down the child's stdin. Not a signal.
+/// 2. `adapter.stop(sid)` — takes the adapter's children map and holds it across
+///    `c.shutdown().await`, because the `if let` scrutinee's temporary lives to the end of the
+///    block. [`crate::rpc_child::RpcChild::shutdown`] closes stdin and then waits **up to five
+///    seconds for the child to exit on EOF**, sending no signal of its own.
+/// 3. `tree.kill()` — the only place `cgroup.kill` is written.
+///
+/// So the cgroup SIGKILL lands strictly **after** the window, and cannot be what stops `shutdown`
+/// blocking. The canary's lever put `trap '' TERM` on the job's bash **subprocess**, which
+/// `shutdown` never waits on — it waits on the worker's pi child — so that run did not test this
+/// guard at all, and its 1.041 s reading is just pi exiting promptly on EOF.
+///
+/// # The concurrent caller is the one that already runs
+///
+/// No second cancel is needed and none is issued here. `Agent::spawn_keepalive` runs
+/// `reap_unreachable_workers` on a five-minute `tokio::time::interval` for the daemon's whole
+/// life, and the tick's body is this one call. So a single cancel of a worker that is slow to
+/// exit on EOF, overlapping a tick, is the whole shape — and `adapter.stop` is also called with
+/// no cgroup kill anywhere near it when a resumed session fails on its first prompt and when an
+/// approval card expires.
+///
+/// # What makes it fail if the guard is removed
+///
+/// With `is_open` back to answering a contended lock with `Some(false)`, `session_is_over` reads
+/// every adapter as having answered, returns `Some(true)` for the **subject** — a job running
+/// correctly that nobody asked to stop — and `reap_orphan_workers` SIGKILLs everything carrying
+/// its mark. Both halves below then fail: the subject's detached writers are gone, and the sweep
+/// reports no unread part. That is bug AQ, and it is why this guard is not dead code to delete.
+#[tokio::test]
+async fn a_cancel_through_the_job_path_opens_the_window_and_a_timer_tick_reads_it() {
+    let fx = Fixture::new();
+    let (agent, host) = a_box_for(&fx, CHAT_VIA_JOB, ASK_VIA_JOB).await;
+
+    // The subject: a job running correctly, with detached work of its own, never cancelled.
+    // Started first so that it — and not the doomed job's worker — is the one the stub's
+    // run-once branch gives the writers to.
+    let subject_job = a_job_in(
+        &agent,
+        &host,
+        CHAT_VIA_JOB,
+        ASK_VIA_JOB,
+        "Writing ticks",
+        "Start some work and leave it running.",
+        vec![format!("{}/subject", fx.root.display())],
+    )
+    .await;
+    let subject = a_started_session(&agent, &subject_job).await;
+    wait_for("the subject's detached writers start", || {
+        fx.alive().len() >= 2
+    })
+    .await;
+    let before = fx.log_len();
+    wait_for("the writers are writing", || fx.log_len() > before).await;
+    let doomed_if_broken = fx.alive();
+    assert!(
+        doomed_if_broken.len() >= 2,
+        "the subject must have detached work for a broken sweep to take"
+    );
+
+    // The job the user cancels. Its brief marks its worker as the one that does not answer the
+    // close of its stdin, so the `shutdown` inside the cancel runs to its five-second timeout.
+    let doomed_job = a_job_in(
+        &agent,
+        &host,
+        CHAT_VIA_JOB,
+        ASK_VIA_JOB,
+        "Holding the map",
+        &format!("Start some work and leave it running. {HANG_BRIEF}"),
+        vec![format!("{}/doomed", fx.root.display())],
+    )
+    .await;
+    let doomed = a_started_session(&agent, &doomed_job).await;
+    assert_ne!(
+        subject, doomed,
+        "the two sessions must differ or this measures nothing"
+    );
+
+    // The cancel, through the path a user's `stop_job` takes. Nothing here calls `adapter.stop`.
+    let cancelling = {
+        let agent = agent.clone();
+        let job = doomed_job.clone();
+        tokio::spawn(async move { agent.stop_jobs(CHAT_VIA_JOB, Some(&job)).await })
+    };
+
+    // Synchronised on the job row rather than on `is_open`, so the wait does not depend on the
+    // guard under test: `stop_jobs` writes `cancelled` before it reaches any process. What is
+    // left after that is the `Abort` round trip and one `/proc` read of the worker's tree, both
+    // of which are milliseconds against `shutdown`'s five-second hold.
+    wait_for("the cancel reaches the doomed job's row", || {
+        job_state(&agent, &doomed_job) == "cancelled"
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(
+        !cancelling.is_finished(),
+        "the cancel had already returned, so the tick below ran outside the window and this \
+         measured nothing"
+    );
+
+    // The five-minute keepalive tick, which is this call and nothing else.
+    let sweep = agent.reap_unreachable_workers().await;
+
+    // The physical half first, so nothing below rests on the sweep agreeing with itself.
+    assert_eq!(
+        fx.alive(),
+        doomed_if_broken,
+        "the tick collected a live job's detached work because a cancel held the adapter's \
+         children map: it read a locked map as proof the session was over (pids {:?}, \
+         sweep {sweep:?})",
+        fx.writer_pids()
+    );
+    let at_sweep = fx.log_len();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(
+        fx.log_len() > at_sweep,
+        "the subject's writers stopped writing after the tick, so something reached them"
+    );
+
+    // And the honesty half: the skip has to be reported, with its cause and the session it was
+    // about. `Nothing` is the dangerous answer here, not `Enumerated` — it is the one that reads
+    // as "there are no processes to account for".
+    assert_eq!(
+        sweep.evidence,
+        Evidence::Unconfirmed,
+        "a tick that skipped a session it could not read must say so: {sweep:?}"
+    );
+    assert!(
+        !sweep.clean(),
+        "and must not be read as a clean sweep: {sweep:?}"
+    );
+    let unread = sweep.unread.as_ref().expect("the skip is reported");
+    assert_eq!(unread.cause, UnreadCause::AdapterLockContended);
+    assert!(
+        unread.sessions.contains(&subject),
+        "the live job's own session is the one that would have been collected, so it is the one \
+         that must be named: {unread:?}"
+    );
+
+    let _ = cancelling.await;
 }
