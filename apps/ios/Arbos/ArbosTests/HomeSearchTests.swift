@@ -436,6 +436,48 @@ final class HiddenChatOpenTests: XCTestCase {
     }
 }
 
+/// Affinity (Arbonites, 2026-11-05): the "Hidden chats N ›" footer left the home list
+/// ([feedback affinity-hidden-chats-2026-11-05]). The recording shows the trigger is the
+/// *segment* emptying, not the hidden collection: archiving the only server emptied the
+/// Servers segment and the footer went with the row while two chats were still hidden.
+/// The footer's only gate is the hidden count — never what the body above it is.
+/// Mirrors crates/arbos-mac/src/ui/sidebar.rs, where the empty-segment copy (`:1431`) and
+/// the footer (`:1517`) are sibling appends, so the Mac keeps both.
+final class HomeListLayoutTests: XCTestCase {
+    func testTheFooterSurvivesTheSegmentEmptying() {
+        // Affinity's sequence: one server listed, one chat hidden elsewhere …
+        let listed = HomeListLayout.of(hasAnyChat: true, visibleRows: 1, hiddenCount: 1)
+        XCTAssertEqual(listed.body, .rows)
+        XCTAssertTrue(listed.showsHiddenFooter)
+
+        // … then Archive takes the last row: the segment is empty and the hidden count is 2.
+        let emptied = HomeListLayout.of(hasAnyChat: true, visibleRows: 0, hiddenCount: 2)
+        XCTAssertEqual(emptied.body, .filterEmpty, "the segment shows its own empty copy")
+        XCTAssertTrue(emptied.showsHiddenFooter, "the footer holds its place through an empty segment")
+    }
+
+    func testTheHiddenCountIsTheFooterSOnlyGate() {
+        for rows in [0, 1, 7] {
+            XCTAssertFalse(
+                HomeListLayout.of(hasAnyChat: true, visibleRows: rows, hiddenCount: 0).showsHiddenFooter,
+                "rows=\(rows): nothing hidden, no footer"
+            )
+            XCTAssertTrue(
+                HomeListLayout.of(hasAnyChat: true, visibleRows: rows, hiddenCount: 3).showsHiddenFooter,
+                "rows=\(rows): the row count never decides the footer"
+            )
+        }
+    }
+
+    func testAnAccountWithNothingOnItGetsTheFirstRunCardAndNoFooter() {
+        // The hidden rows are filtered out of the same three arrays, so an account with no
+        // agents, people or servers cannot have a hidden one either.
+        let fresh = HomeListLayout.of(hasAnyChat: false, visibleRows: 0, hiddenCount: 0)
+        XCTAssertEqual(fresh.body, .noChats)
+        XCTAssertFalse(fresh.showsHiddenFooter)
+    }
+}
+
 /// Affinity (Arbonites, 2026-10-29): starting a chat from search made a permanent chat and
 /// notified both people before anything was sent ([feedback
 /// draft-chat-from-search-ios-2026-10-29]). It is a local draft now: no `POST /chats/dm`
