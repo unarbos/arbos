@@ -96,6 +96,24 @@ pub(crate) fn approval_wait_line(title: &str, summary: &str, chat: &str) -> Stri
     format!("Waiting for your approval to {what}. The card is in {chat}.")
 }
 
+/// The state written into the chat doc for a card that has just been decided, which is the row's
+/// own state.
+///
+/// It exists because the doc is the one approval surface read by a client that cannot tolerate a
+/// state it has never heard of: the Mac app's `ApprovalState` is a plain serde enum, and an
+/// unparseable value there costs the whole message — `read_message` ends `from_value(json).ok()?`
+/// over the message and `read_all` filter-maps it, so the assistant's text goes with the card.
+/// `cancelled` is new, so every build shipped before it loses that row until the app updates.
+///
+/// The honest value is the one that ships, and the fix for the client is a tolerant decode that
+/// survives the *next* new state as well, not a producer that avoids emitting one. This function
+/// is only the hedge: if a bridge is ever preferred over waiting for that client, substituting a
+/// state older builds parse is this one line rather than a hunt through call sites. SQLite, the
+/// hook replies and ACP would keep the real state either way — they read the row, not the doc.
+fn doc_state(row_state: ApprovalState) -> ApprovalState {
+    row_state
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WaitMode {
     Inline,
@@ -672,8 +690,12 @@ impl Agent {
         // stay "pending" for ever even though the decision landed.
         if let Ok(host) = self.room(&chat_id).await {
             let h = host.lock().await;
-            h.doc
-                .set_approval_state(approval_id, state, Some(decided_by), reason.as_deref());
+            h.doc.set_approval_state(
+                approval_id,
+                doc_state(state),
+                Some(decided_by),
+                reason.as_deref(),
+            );
             let still_pending = h
                 .doc
                 .message(&msg_id)
@@ -3249,12 +3271,16 @@ mod deadline_tests {
     ///
     /// `cancelled` and not `rejected`, because the user refused nothing — and not `expired`,
     /// which is the state this change stopped producing.
+    ///
+    /// The card in the chat is asserted as well as the row, because they are written through
+    /// different paths: `doc_state` sits between them so that substituting a state older clients
+    /// parse is one line. Both halves must be read for that line to have anything holding it.
     #[tokio::test]
     async fn cancelling_the_work_closes_its_card_as_cancelled() {
         let (agent, root) = test_agent().await;
         let chat = "01TESTCHATAPPROVALTTL00002";
         agent.store.upsert_chat(chat, "Main", true, 0).unwrap();
-        let _host = agent.sync.open_room(chat).await.unwrap();
+        let host = agent.sync.open_room(chat).await.unwrap();
 
         let req = ApprovalRequest {
             title: "Run a destructive command (file.delete)".into(),
@@ -3273,6 +3299,12 @@ mod deadline_tests {
         assert_eq!(row.state, "cancelled", "not expired, and not rejected");
         assert_eq!(row.decided_by.as_deref(), Some("arbos:cancelled"));
         assert!(agent.store.pending_approvals().unwrap().is_empty());
+        let card = host.lock().await.doc.approval(&id).expect("the card");
+        assert_eq!(
+            card["state"].as_str(),
+            Some("cancelled"),
+            "the card in the chat carries the row's own state; `doc_state` is where that changes"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }
