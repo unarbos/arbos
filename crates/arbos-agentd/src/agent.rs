@@ -4290,10 +4290,11 @@ impl Agent {
                 .store
                 .set_job_state(&j.id, "cancelled", Some("stopped by the user"));
             // A job that never had a worker started no processes, so "none are running" is a
-            // fact rather than the unchecked claim bug AE made.
+            // fact rather than the unchecked claim bug AE made. Every worker it did have is
+            // swept, not only the one it was on last (bug AO).
             let mut sweep = Sweep::nothing_to_check();
-            if let Some(sid) = &j.subagent_id {
-                sweep = self.end_cancelled_worker(&j.id, sid).await;
+            for sid in self.job_worker_ids(&j) {
+                sweep = sweep.and(self.end_cancelled_worker(&j.id, &sid).await);
             }
             self.release_job_locks(&j.id).await;
             self.retire_live_job_rows(chat_id, &j.id).await;
@@ -4400,6 +4401,35 @@ impl Agent {
         if over > 0 {
             list.drain(..over);
         }
+    }
+
+    /// Every worker this job has been given, newest first — which is what a cancel has to reach,
+    /// not the one the job is on now.
+    ///
+    /// **Bug AO**, and the half of the cancel #2849 did not reach. That fix made the mark and the
+    /// cgroup leaf be spelled the way the spawn spells them, `pi:<id>` / `w-pi-<id>` and the
+    /// `prime` pair. Both spellings are right. The *id* in them was not: a job keeps one row
+    /// across a worker that crashed (`JOB_WORKER_RETRIES`) and across a box restart
+    /// ([`Self::reclaim_interrupted_jobs`]), each fresh worker is a new session with a new ULID,
+    /// and [`crate::store::Store::set_job_subagent`] overwrites the column the cancel read. So
+    /// the cancel asked the kernel about the live replacement and never about the worker whose
+    /// processes were the ones left over.
+    ///
+    /// It is the worst case to lose, because the trigger and the damage are the same event: a
+    /// worker that died is precisely the worker whose children were reparented to PID 1 and ran
+    /// on. And it is silent — the sweep finds nothing, reports `checked: true` with no survivors,
+    /// and `stop_job` states that every process was checked and is dead.
+    ///
+    /// The job row's own `subagent_id` is folded in for a job whose workers were recorded by an
+    /// agentd that predates `job_workers`, so an upgrade mid-job loses nothing.
+    pub(crate) fn job_worker_ids(&self, job: &crate::store::JobRow) -> Vec<String> {
+        let mut ids = self.store.job_workers(&job.id).unwrap_or_default();
+        if let Some(current) = &job.subagent_id {
+            if !ids.iter().any(|id| id == current) {
+                ids.insert(0, current.clone());
+            }
+        }
+        ids
     }
 
     /// The processes of a worker: its recorded session and process group, its cgroup leaf, and
@@ -5034,6 +5064,24 @@ impl Agent {
             return Err("no running job matched; list_jobs shows what is open in this chat".into());
         }
         let unreachable = self.reap_and_note_unreachable(&chat_id).await;
+        let note = stop_job_note(&stopped, &unreachable);
+        // Verbatim, into agentd's own log, beside the sweep it was built from.
+        //
+        // The sentence the user ends up reading is the model's, and the cancel canary can only
+        // see whether a stop line is *present* in that prose — which cannot tell a claim that
+        // every process is dead from an admission that none could be checked. Those are opposite
+        // outcomes and they decide whether a cancel failure was dishonest or merely incomplete.
+        // This is where the difference is actually decided, so this is where it is recorded; the
+        // log survives prose a harness cannot parse.
+        tracing::info!(
+            jobs = stopped.len(),
+            checked = stopped.iter().all(|s| s.sweep.checked),
+            found = stopped.iter().map(|s| s.sweep.found).sum::<usize>(),
+            killed = stopped.iter().map(|s| s.sweep.killed).sum::<usize>(),
+            survivors = ?stopped.iter().flat_map(|s| s.sweep.survivors.clone()).collect::<Vec<_>>(),
+            note = %note,
+            "stop_job answered"
+        );
         Ok(json!({
             "stopped": stopped
                 .iter()
@@ -5052,7 +5100,7 @@ impl Agent {
             // Work this cancel found running that belongs to no job row at all (bug AK). Kept
             // apart from the per-job numbers above because no job is answerable for it.
             "unnamed_processes_still_alive": unreachable.survivors,
-            "note": stop_job_note(&stopped, &unreachable),
+            "note": note,
         }))
     }
 

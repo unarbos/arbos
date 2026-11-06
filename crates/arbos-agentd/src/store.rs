@@ -109,6 +109,16 @@ CREATE TABLE IF NOT EXISTS jobs (
   created_at INTEGER NOT NULL, started_at INTEGER, ended_at INTEGER, error TEXT,
   delivered_key TEXT, restarts INTEGER NOT NULL DEFAULT 0, steers TEXT NOT NULL DEFAULT '[]'
 );
+
+-- Every worker a job has ever been given, not only the one it is on now (bug AO). `jobs.subagent_id`
+-- is overwritten by each fresh worker, and the processes the replaced worker left behind are
+-- reachable only under *its* id — so a cancel that reads the column alone asks the kernel about the
+-- wrong session. This is the job's whole history of workers, which is what a cancel sweeps.
+CREATE TABLE IF NOT EXISTS job_workers (
+  job_id TEXT NOT NULL, subagent_id TEXT NOT NULL, at INTEGER NOT NULL,
+  PRIMARY KEY (job_id, subagent_id)
+);
+CREATE INDEX IF NOT EXISTS job_workers_job ON job_workers(job_id, at);
 "#;
 
 /// The step of a job the user stopped, in the same plain words as every other step the working
@@ -674,13 +684,39 @@ impl Store {
         })
     }
 
+    /// Give a job its worker: the one it is on now, and one more entry in the history a cancel
+    /// sweeps.
+    ///
+    /// Both, because they answer different questions. Every lane that asks "which session is this
+    /// job talking to" wants the column, and it must keep being overwritten. A cancel asks
+    /// "whose processes belong to this job", and a job that was given a fresh worker — after a
+    /// crash, or after a box restart — has two answers to that (bug AO).
     pub fn set_job_subagent(&self, id: &str, subagent_id: &str) -> Result<()> {
         self.with(|c| {
             c.execute(
                 "UPDATE jobs SET subagent_id = ?2 WHERE id = ?1",
                 params![id, subagent_id],
+            )?;
+            c.execute(
+                "INSERT OR IGNORE INTO job_workers(job_id, subagent_id, at) VALUES (?1,?2,?3)",
+                params![id, subagent_id, now_ms()],
             )
             .map(|_| ())
+        })
+    }
+
+    /// Every worker this job has been given, newest first.
+    ///
+    /// Newest first because the worker the job is on now is the one that must be closed before
+    /// anything is swept: a worker that is still live can answer a kill by starting something
+    /// else, and the replaced ones cannot.
+    pub fn job_workers(&self, job_id: &str) -> Result<Vec<String>> {
+        self.with(|c| {
+            let mut st = c.prepare(
+                "SELECT subagent_id FROM job_workers WHERE job_id = ?1 ORDER BY at DESC, rowid DESC",
+            )?;
+            let rows = st.query_map(params![job_id], |r| r.get(0))?;
+            rows.collect()
         })
     }
 
