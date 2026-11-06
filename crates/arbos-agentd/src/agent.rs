@@ -13803,16 +13803,23 @@ pub(crate) fn answers_message(m: &MessageView, user_msg: &str) -> bool {
         && m.rest.get(RESTARTING_ROW_FIELD).and_then(Value::as_bool) != Some(true)
 }
 
-/// This turn already put its answer in front of the user: prose, an acknowledgement, a progress
-/// note or a posted file.
+/// This turn already put its answer in front of the user: prose, a **posted** acknowledgement, a
+/// progress note or a posted file.
 ///
 /// Bug V's second half. The act turn of r7correct run 2 had acked at 00:09:35.298 and started
 /// its job; 165 ms later the main pi child went away and the turn loop reported it, and that
 /// error rewrote the finished row to `error`. What happens to the model process afterwards says
 /// nothing about words the chat already holds, so a turn that got this far keeps its `done`.
+///
+/// **The acknowledgement is counted as posted, not as produced**, and the difference is the
+/// whole of `ack_is_not_an_answer_tests`. [`Agent::write_ack`] fills `ack_text` from the route
+/// call's streaming arguments, before anything is shown and whether or not anything ever is: on
+/// an `act` route [`ack_bubble`] returns `None`, the sentence goes to the working row's activity,
+/// and the end of the turn clears it. So `ack_text` says the model produced an acknowledgement
+/// and `ack_posted` says the chat still holds one. The clause above is about what the chat holds.
 pub(crate) fn answer_delivered(t: &TurnState) -> bool {
     !t.streamed_text.trim().is_empty()
-        || !t.ack_text.trim().is_empty()
+        || t.ack_posted
         || !t.attachments_posted.is_empty()
         || t.progress_texts.iter().any(|p| !p.trim().is_empty())
 }
