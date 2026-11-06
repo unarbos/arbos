@@ -200,6 +200,19 @@ impl ProcessTree {
     /// it is being reaped is caught on the next pass rather than slipping between the
     /// enumeration and the signal.
     pub fn kill(&self) -> Sweep {
+        // No handle, no claim. A tree that resolved nothing cannot tell "I read the kernel and
+        // found nothing alive" from "I had nothing to read with", and those are the two
+        // statements bug AE exists to keep apart — so it makes neither. `Sweep::default` is
+        // `checked: false`, which `clean` refuses and the chat reports as "I could not check".
+        //
+        // This is the mechanism's own guard rather than the caller's. Before bug AI the mark
+        // was unconditionally `Some`, so this was never reachable and a sweep that resolved no
+        // usable handle at all still returned `checked: true` with an empty survivor list —
+        // which `clean` reads as success, and `r17status` printed as "every process it had
+        // started is dead" over a loop that was still writing.
+        if self.is_empty() {
+            return Sweep::default();
+        }
         let found = self.members();
         let witnesses: Vec<Witness> = found.iter().copied().filter_map(Witness::of).collect();
         if !found.is_empty() {
