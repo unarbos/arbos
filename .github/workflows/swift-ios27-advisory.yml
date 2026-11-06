@@ -4,12 +4,19 @@ name: Swift iOS 27 (advisory)
 # `disabled_manually` state, so neither trigger below fires; its last run of any kind was
 # 2026-10-31T23:08Z. Nothing refuses on its absence — it is not a gate in scripts/merge/checks.sh —
 # so the iOS 27 coverage this file describes is NOT being obtained today, and has not been for the
-# whole time this notice has been missing from it. Re-enabling it needs Jacob's yes: the hosted
-# pools are billable, and who switched it off, and why, is recorded nowhere.
+# whole time this notice has been missing from it.
+#
+# It is staying off because it almost never finished: 8 of its 53 lifetime runs succeeded, and 39
+# were cancelled. On 2026-10-31, immediately before it was switched off, 8 of its runs were
+# cancelled within ten seconds of each other and 7 more within ninety, across fifteen branches.
+# Why most of its runs were cancelled is not yet understood, and that is the open question gating
+# any re-enable — a low-priority item to drain, not a decision waiting on anyone. Who switched it
+# off is recorded nowhere: this repo is a User account, so it has no audit log.
 #
 # `Swift core check` (.github/workflows/swift-core-check.yml) is the only live Swift gate on push
 # and pull request, and it runs on GitHub's hosted `macos-15`. Neither Swift check runs on the
-# self-hosted EC2 Mac: `arbos-mac` serves ios.yml's TestFlight lane and release.yml's Mac job.
+# self-hosted EC2 Mac: `arbos-mac` is the default runner for ios.yml's TestFlight lane and for
+# ios-capture.yml, and release.yml's Mac job uses it when `vars.ARBOS_MAC_RUNNER` selects it.
 #
 # What this lane covers when it is switched on, which is still accurate and still worth reading:
 #
