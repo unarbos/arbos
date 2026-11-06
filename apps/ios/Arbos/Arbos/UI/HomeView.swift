@@ -1338,8 +1338,8 @@ struct AgentRow: View {
 
     var body: some View {
         // Grok home row (measured): 48 pt avatar box, text 15 pt after it, name 17
-        // semibold over a 15 pt grey preview, time right, 10 pt unread dot at the far
-        // right of the preview line, 80 pt row pitch.
+        // medium — semibold only when unread — over a 15 pt grey preview, time right,
+        // 10 pt unread dot at the far right of the preview line, 80 pt row pitch.
         HStack(spacing: 15) {
             // The status slot at the right end of the preview line, under the time
             // (Jacob, 2026-10-27): the braille spinner while the agent works (one
@@ -1347,8 +1347,11 @@ struct AgentRow: View {
             AgentAvatar(project: project, theme: theme, size: Theme.rowAvatar)
             VStack(alignment: .leading, spacing: 4) {
                 HStack(alignment: .firstTextBaseline) {
+                    // Medium, as the Mac's row is; semibold is reserved for a row
+                    // with something unread, so weight means "look here" rather
+                    // than being the resting state of every row at once.
                     Text(project.name)
-                        .font(theme.font(Theme.body, weight: .semibold))
+                        .font(theme.font(Theme.body, weight: unread ? .semibold : .medium))
                         .foregroundStyle(theme.text)
                         .lineLimit(1)
                     Spacer()

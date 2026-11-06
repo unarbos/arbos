@@ -634,6 +634,88 @@ Code: `transcript.rs` `hover_time()` (returns nothing at opacity 0), pinned by
 `layout_tests::the_time_is_hidden_at_rest_and_beside_the_bubble_on_hover`;
 iPhone `Transcript.swift` `RowView` + `SenderNameRowTests`.
 
+## Sidebar rows (Jacob 2026-11-06, approved mock `design/grok-parity-2026-11-05/grok-reference.png`)
+
+**The sidebar sits under the page, not over it, and the selected row's tint
+comes from that ground rather than from a tint value of its own.**
+
+### How these numbers were taken
+
+Modal grey of each scanline across one element's own height, restricted to
+near-neutral pixels in that fill's range. The modal value ignores text pixels,
+and confining the window to one element stops a sample straddling two. Corner
+radii are fitted, not eyeballed: for a rounded rectangle of radius *r*, the
+horizontal inset at depth *d* below the top edge is
+*r* − √(*r*² − (*r*−*d*)²), and *r* is the least-squares fit over the corner's
+scanlines.
+
+**The fit recovers a value we already know.** Our selected pill is
+`PANEL_RADIUS - 4` = 10 pt = 20 px, and the fit returns **20.5 px**. That is
+what makes the mock's **23.9 px = 12 pt** worth acting on.
+
+### Measured
+
+| | Mock | Before | Now |
+|---|---|---|---|
+| Sidebar background | `#0E0E0E` (14) | `#1A1A1A` (26) | **`#0E0E0E` (14)** |
+| Selected row tint | `#202020` (32) | `#2F2F2F` (47) | follows the ground — see below |
+| Selected pill radius | 23.9 px ≈ **12 pt** | 20.5 px fitted = 10 pt | **12 pt** (`sidebar::ROW_RADIUS`) |
+| Preview ink | `#ACACAC` (172) | `#95959B` (149) | unchanged — see below |
+| Name weight | medium | Mac medium, iPhone semibold | **medium on both**, semibold kept for unread |
+| Row pitch | 58 pt | 69.5 pt | 69.5 pt (`sidebar::ROW_PAD_Y`, one value) |
+
+### The difference was the ground, not the wash
+
+The selected row is not a colour. It is a 9 % wash of `text` from
+`highlight::fills`, so it composites off whatever it sits on:
+
+- On our old `#1A1A1A`: 26 × 0.91 + 245 × 0.09 = **46.7**, and 47 is what the
+  frame measures.
+- The mock's `#202020` (32) over `#0E0E0E` (14) implies a wash of
+  (32 − 14) / (245 − 14) = **7.8 %**, which is our 9 % within noise.
+- Our unchanged 9 % over `#0E0E0E` composites to **34.8**, against the mock's
+  32.
+
+So one background token moves the tint three steps from the mock, and no second
+token is introduced.
+
+### Why the shared-token reasoning from § Two bubble tones does not apply here
+
+A reviewer who has read that section will expect a shared fill to be pinned.
+There is nothing to pin. The selected row has never drawn from
+`bubble_assistant`: it uses `highlight::fills`, shared with palette rows and
+menu rows, which is the correct home for a row highlight. `bubble_assistant`'s
+only consumer in `sidebar.rs` is the waitlist card, which this rule does not
+touch.
+
+**The radius is the thing that gets its own constant.** `PANEL_RADIUS - 4` is
+also taken by palette and menu rows, so softening the sidebar would have
+reshaped every list in the app. `sidebar::ROW_RADIUS` is the sidebar's own 12.
+
+### "Softer grey preview" is ambiguous and is left alone
+
+The mock's preview ink is `#ACACAC` (172); ours is `#95959B` (149). The mock's
+is the **brighter** grey, but it sits on a **darker** ground, so it is lower
+contrast. "Softer" can mean either, and the two give opposite moves. The
+measurement is recorded here; the ink is unchanged until the reading is
+settled, and the typography item re-measures the whole ink ramp anyway.
+
+### Row pitch is one value
+
+`sidebar::ROW_PAD_Y` is the only number that sets how tall a row is, and
+`Theme.rowVPad` is its iPhone counterpart. The mock is the **denser** of the
+two designs — 58 pt against our 69.5 pt, about fourteen rows where we fit
+twelve — so a brief asking for taller rows diverges from the mock rather than
+converging on it. Whichever way it settles, it is one line, and a future
+measurer should read this paragraph before "correcting" the gap.
+
+### The iPhone has no sidebar
+
+Most of this rule is Mac-only: the iPhone's home list is the page, with no
+panel behind it and no persistent selection, so there is no ground to darken
+and no pill to round. Its share of the rule is the name weight and
+`Theme.rowVPad`.
+
 ## Agent bubble width (Jacob 2026-10-24, [feedback bubble-width-2026-10-24])
 
 **An agent bubble is at most 560 pt wide, and never closer than 84 pt to the
