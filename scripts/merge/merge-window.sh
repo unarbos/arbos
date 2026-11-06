@@ -414,6 +414,67 @@ nomac_covers() {
   git rev-list --first-parent "$3..$2" 2>/dev/null | grep -qx "$1"
 }
 
+# mergeability <pr>: GitHub's mergeable/isDraft pair for one PR, as "<mergeable> <isDraft>", with
+# UNKNOWN resolved rather than reported.
+#
+# UNKNOWN IS NOT AN ANSWER. GitHub computes mergeable lazily: a read of a cold field returns UNKNOWN
+# and only SCHEDULES the computation, so the next read collects it. Treating UNKNOWN as a verdict is
+# the same category error this file's header warns about for unreadable checks — it reports "not
+# computed yet" as "not mergeable", and the refusal names the pull request, so a lost race reads like
+# a fault in the branch.
+#
+# THE CACHE IS RELIABLY COLD AT THE ONLY MOMENT THAT MATTERS, which is why this re-read is required
+# and not a defensive flourish. The field is invalidated when the commit's check state changes, and
+# checks going green is precisely the event that makes a lane eligible to merge. Measured on #2828:
+# 21:32Z with rust running, MERGEABLE/UNSTABLE; 21:38Z the moment rust went green, UNKNOWN/UNKNOWN;
+# three seconds later, MERGEABLE/CLEAN. A well-behaved lane that arrives the instant CI turns green
+# reads the one value that turning green just invalidated. Every merge to main invalidates it for
+# every open PR too, so warming it early buys nothing: the thing that warms it later invalidates it.
+# Do not "simplify" the conditional below into an unconditional single read.
+#
+# This formalises something the file already did by luck: the display read above and the judging read
+# here are two requests a second apart, so the first often warmed the second. Two lanes on
+# byte-identical kits landed on opposite sides of that race; the gate line was unchanged since
+# 0bcf67901 (2026-10-31).
+#
+# THE STATE DISCRIMINATOR COMES FIRST, BEFORE THE BOUND. A merged pull request also reports UNKNOWN,
+# permanently, and indistinguishably from a cold cache — but the two want opposite responses. Re-
+# reading a merged PR burns the whole retry budget to re-learn that it is merged, at the moment the
+# right answer is "this already landed". So state is read once, up front, and only an OPEN pull
+# request enters the loop.
+#
+# A merged or closed PR yields a non-retryable NO-GO reason rather than an early exit: go() must
+# reach its VERDICT line. merge.sh treats a missing VERDICT as "verdict is not GO" (see its comment
+# at the merge-window.sh call), so returning early from here would turn a clear answer into a vague
+# one. A lane that wants to stop on an already-merged PR reads the sha named below.
+mergeability() {
+  local pr=$1 ms st
+  ms=$(gh pr view "$pr" -R $R --json mergeable,isDraft --jq '"\(.mergeable) \(.isDraft)"') \
+    || { echo "UNREADABLE (gh exited non-zero reading mergeable)"; return; }
+  case "$ms" in
+    UNKNOWN*) ;;
+    *) echo "$ms"; return ;;
+  esac
+  st=$(gh pr view "$pr" -R $R --json state,mergedAt,mergeCommit \
+        --jq '"\(.state) \(.mergedAt // "-") \(.mergeCommit.oid // "-")"') \
+    || { echo "UNREADABLE (gh exited non-zero reading state)"; return; }
+  case "$st" in
+    MERGED*)  echo "ALREADY MERGED at $(echo "$st" | awk '{print $3}') on $(echo "$st" | awk '{print $2}') — nothing to merge, and no re-read will change that"; return ;;
+    CLOSED*)  echo "CLOSED without merging — reopen it before asking for a window"; return ;;
+  esac
+  # OPEN: a cold field. Bounded, and short — the measured case resolved in three seconds.
+  for _ in 1 2 3 4; do
+    sleep 3
+    ms=$(gh pr view "$pr" -R $R --json mergeable,isDraft --jq '"\(.mergeable) \(.isDraft)"') \
+      || { echo "UNREADABLE (gh exited non-zero re-reading mergeable)"; return; }
+    case "$ms" in
+      UNKNOWN*) continue ;;
+      *) echo "$ms"; return ;;
+    esac
+  done
+  echo "$ms (still uncomputed after 4 re-reads over 12s; not inferred either way)"
+}
+
 go() {
   echo "== merge-window GO check $(ts)"
   git fetch -q origin main --tags 2>/dev/null
@@ -531,8 +592,8 @@ go() {
       --jq '"    \(.title)\n    \(.headRefName)@\(.headRefOid[0:9]) base=\(.baseRefName) draft=\(.isDraft) mergeable=\(.mergeable)"'
     gh pr checks "$1" -R $R 2>&1 | awk -F'\t' '{print "    "$1": "$2}' | sort | uniq -c | sed 's/^/  /' | head -30
     # mergeable is about conflicts and draft state, which are facts about the branch. It is not a
-    # statement about checks: see the header.
-    local ms; ms=$(gh pr view "$1" -R $R --json mergeable,isDraft --jq '"\(.mergeable) \(.isDraft)"')
+    # statement about checks: see the header. UNKNOWN is not a fact about either — see mergeability().
+    local ms; ms=$(mergeability "$1")
     case "$ms" in "MERGEABLE false") ;; *) nogo+=("PR #$1 is not mergeable or is a draft ($ms)") ;; esac
     local phead pfiles
     phead=$(gh pr view "$1" -R $R --json headRefOid --jq .headRefOid)

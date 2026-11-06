@@ -901,6 +901,22 @@ echo "merge.sh re-reads main rather than trusting mergeable:"
 # The kit's defence is three live reads of main's head around the GO, compared against each other. The reads
 # themselves need the network; what can be asserted here is that they are made, that each one refuses, and
 # that nothing in this file has started inferring staleness from the rollup's mergeable fields instead.
+#
+# THE COMMENT-STRIPPING IS LOAD-BEARING. DO NOT GREP THE RAW FILE, AND DO NOT TIGHTEN nocomment.
+# merge.sh says in prose why a running lane cannot be inferred from mergeStateStatus, so the string
+# appears there legitimately — in a comment, stating the very rule this case enforces. nocomment
+# strips only lines whose first non-space character is '#', so that occurrence is invisible here
+# solely because it is a FULL-LINE comment. Two consequences, both of which cost nothing to avoid:
+#
+#   - Grepping the raw file fails on that sentence, and the failure names whichever pull request
+#     happens to land next. Its author then reads a diff that has nothing to do with the failure.
+#   - Rewriting that sentence as a TRAILING comment on a line of code trips this case for the same
+#     reason, and the author who merely moved a comment sees nothing wrong in their own change.
+#
+# Prose that agrees with a rule must not trip the check enforcing it. A slightly loose assertion
+# beats one whose failure accuses the wrong change — and nothing is lost, because the mutation worth
+# defending against is a real READ, and a read is code. Verified: a real `--json mergeable` read
+# appended to merge.sh still fails this case.
 mcode=$(nocomment <"$D/merge.sh")
 if printf '%s\n' "$mcode" | grep -qE 'mergeable|mergeStateStatus'; then
   bad "merge.sh reads mergeable/mergeStateStatus. main has no branch protection, so that field reports on text and not on tests, and a MERGEABLE pull request 20 commits behind reads identically to a current one."
@@ -934,6 +950,95 @@ else
       *) bad "the stale-main refusal does not carry '$want': $mr_out" ;;
     esac
   done
+fi
+
+echo
+echo "mergeability — UNKNOWN is resolved, and a merged PR is not retried:"
+# 12e. UNKNOWN is "not computed yet", not "not mergeable". The case that matters is the one a careful
+# lane hits: the field is invalidated when the commit's check state changes, so it is reliably cold at
+# the exact moment checks go green and the lane becomes eligible. A single read therefore refuses the
+# lanes that arrive on time. These cases assert the BEHAVIOUR of each branch, not its wording, and in
+# particular that the merged branch costs ONE state read and no re-reads — an unconditional re-read
+# would spend the whole bound re-learning that a merged PR is merged.
+mg_src=$(sed -n '/^mergeability() {/,/^}/p' "$D/merge-window.sh")
+if [ -z "$mg_src" ]; then
+  bad "no mergeability() in merge-window.sh — it was renamed or removed, and case 12e is testing nothing"
+else
+  eval "$mg_src"
+  R=owner/repo
+  sleep() { :; }   # the shipped bound is 4 waits of 3s; the test asserts the logic, not the clock
+  # The stub's state lives in FILES, not variables, and that is not a style choice. Every
+  # `x=$(gh ...)` in the function under test is a command substitution, which FORKS: a counter or a
+  # reply queue held in a shell variable is updated in the child and lost when it exits. The stub
+  # then answers its first reply forever and reports zero calls.
+  #
+  # THE DANGER IS THE DIRECTION THAT PASSES. This file hit the benign direction first — four cases
+  # failed while the shipped function was correct, which is loud and gets fixed in minutes. The
+  # malign direction is silent and permanent: "no re-read happened" is asserted with a call count,
+  # and a counter stuck at zero SATISFIES that assertion no matter what the function did. A stub
+  # that always replies MERGEABLE likewise passes a case about a cold field warming up without the
+  # function ever re-reading anything. A harness that makes a broken function look correct is
+  # strictly worse than no harness, because it is read as evidence. Assert nothing through state
+  # that a fork can discard.
+  mgq=$(mktemp); mgc=$(mktemp)
+  # Replies are popped in order; the LAST reply is sticky, which is how a field that never computes
+  # is modelled without writing out one line per re-read.
+  mg_run() { printf '%s\n' "$1" | tr '|' '\n' >"$mgq"; : >"$mgc"; }
+  gh() {
+    echo x >>"$mgc"
+    local a; a=$(head -1 "$mgq")
+    [ "$(wc -l <"$mgq")" -le 1 ] || { sed -i 1d "$mgq"; }
+    printf '%s\n' "$a"
+  }
+  mg_calls() { wc -l <"$mgc" | tr -d ' '; }
+
+  mg_run 'MERGEABLE false'
+  out=$(mergeability 7); c=$(mg_calls)
+  { [ "$out" = "MERGEABLE false" ] && [ "$c" -eq 1 ]; } \
+    && ok "a field that is already computed is returned on one read, with no re-read" \
+    || bad "an already-computed field took $c read(s) and returned '$out'"
+
+  mg_run 'UNKNOWN false|UNKNOWN false|MERGEABLE false'
+  out=$(mergeability 7)
+  [ "$out" = "MERGEABLE false" ] \
+    && ok "a cold field that warms up is reported as MERGEABLE, not refused" \
+    || bad "a cold field that warms up was reported as '$out' — this is the refusal that hits a lane arriving the instant CI goes green"
+
+  mg_run 'UNKNOWN false|MERGED 2026-11-05T21:56:55Z b6d19c2cda2f543e555e65a492c703cbb8eec32d'
+  out=$(mergeability 7); c=$(mg_calls)
+  case "$out" in
+    *"ALREADY MERGED"*b6d19c2cda2f543e555e65a492c703cbb8eec32d*)
+      [ "$c" -eq 2 ] \
+        && ok "a merged PR is named with its merge sha after one state read, with no re-read" \
+        || bad "a merged PR cost $c reads — the state discriminator is not ahead of the bound, so the retry budget is spent re-learning that it is merged" ;;
+    *) bad "a merged PR reported '$out' — it must name the landing, since no re-read can ever change UNKNOWN on a merged PR" ;;
+  esac
+
+  mg_run 'UNKNOWN false|CLOSED - -'
+  out=$(mergeability 7)
+  case "$out" in
+    *CLOSED*) ok "a closed, unmerged PR is reported as closed rather than re-read" ;;
+    *) bad "a closed PR reported '$out'" ;;
+  esac
+
+  mg_run 'UNKNOWN false|OPEN - -|UNKNOWN false'
+  out=$(mergeability 7); c=$(mg_calls)
+  case "$out" in
+    *UNKNOWN*)
+      [ "$c" -le 7 ] \
+        && ok "a field that never computes is bounded and still refuses, inferring nothing" \
+        || bad "the re-read is unbounded: $c reads" ;;
+    *) bad "a field that never computes reported '$out', which infers an answer that was never given" ;;
+  esac
+
+  gh() { return 1; }
+  out=$(mergeability 7)
+  case "$out" in
+    UNREADABLE*) ok "a failed read is UNREADABLE and cannot pass the gate" ;;
+    *) bad "a failed read reported '$out' — gh writes an error body to stdout, so a read that is not checked for a non-zero exit can be mistaken for an answer" ;;
+  esac
+  unset -f gh sleep mg_run mg_calls
+  rm -f "$mgq" "$mgc"
 fi
 
 echo
