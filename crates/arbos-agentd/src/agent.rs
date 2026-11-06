@@ -1083,6 +1083,30 @@ pub struct JobSpec {
     pub attempt: u8,
 }
 
+/// The spec a job's worker is restarted on when an approval card it parked on is answered.
+///
+/// The `attempt` is read from the row's durable `restarts` rather than reset, because answering
+/// a card is evidence that a person approved an action — not evidence that whatever was crashing
+/// has stopped crashing. A reset would hand the job a fresh `JOB_WORKER_RETRIES` budget every
+/// time a card was answered, so a worker could crash through the budget, raise a card, be
+/// answered, and begin the budget again: bug AJ's crash loop bounded by the user's patience
+/// rather than by the box.
+///
+/// `restarts` is the right source and not merely the available one. It counts every fresh worker
+/// the job has already been given — crash retry, failed start, box restart — and it is the only
+/// count that survives the agentd restart a card is now allowed to outlive, since `attempt`
+/// lives on an in-memory [`JobSpec`] that a restart does not keep.
+pub(crate) fn resumed_job_spec(job: &crate::store::JobRow) -> JobSpec {
+    JobSpec {
+        id: job.id.clone(),
+        title: job.title.clone(),
+        kind: job.kind.clone(),
+        brief: job.brief.clone(),
+        touches: job.touches.clone(),
+        attempt: job.restarts.clamp(0, u8::MAX as i64) as u8,
+    }
+}
+
 /// One job [`Agent::stop_jobs`] ended, with the state read back out of the store afterwards.
 ///
 /// Every sentence that tells the user a job is cancelled is built from `state`. Jacob's Test5
