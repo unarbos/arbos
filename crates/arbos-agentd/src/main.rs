@@ -43,6 +43,8 @@ mod job_finished_sweep_tests;
 #[cfg(test)]
 mod job_leftover_tests;
 #[cfg(test)]
+mod job_list_cap_tests;
+#[cfg(test)]
 mod job_note_tests;
 #[cfg(test)]
 mod job_notice_tests;
