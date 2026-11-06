@@ -1106,19 +1106,19 @@ extension AppModel {
                        parts: [.question(id: "\(id)-w", question: q), .status(id: "\(id)-q", code: .askUser, message: text)], hiddenCount: 0)
     }
 
-    /// #1544: an `approval` part as agentd writes it for `cd /tmp && rm -rf …` outside scratch —
-    /// `grant_options` make the card offer A once / B in its workspace / C anywhere / D deny.
+    /// #1544: an `approval` part as agentd writes it for an `rm -rf` outside the agent's own
+    /// workspace — `grant_options` make the card offer A once / C anywhere / D deny.
     private func shellCard(_ id: Id, _ chat: Id, at: Int64) -> Message {
+        let command = "cd /opt/vendor && rm -rf node_modules && git clone --depth 1 https://github.com/unarbos/arbos arbos-src"
         let pm: [String: Any] = [
             "id": "\(id)-ap", "kind": "approval", "approvalId": "\(id)-approval", "state": "pending",
             "title": "Run a destructive command (file-delete)", "risk": "destructive",
-            "summary": "cd /work/app && rm -rf node_modules && git clone --depth 1 https://github.com/unarbos/arbos arbos-src",
+            "summary": command,
             "payload": [
-                "kind": "tool_call", "tool": "bash", "class": "file-delete", "path_class": "workspace",
-                "why": "deletes files outside /work/tmp",
-                "input": ["command": "cd /work/app && rm -rf node_modules && git clone --depth 1 https://github.com/unarbos/arbos arbos-src"],
+                "kind": "tool_call", "tool": "bash", "class": "file-delete", "path_class": "anywhere",
+                "why": "deletes files outside the agent's own workspace",
+                "input": ["command": command],
                 "grant_options": [
-                    ["path_class": "workspace", "label": "its workspace", "detail": "the agent's own /work folder, including scratch"],
                     ["path_class": "anywhere", "label": "anywhere", "detail": "any folder of its box"],
                 ],
             ],

@@ -299,13 +299,15 @@ pub struct RiskMatch {
 pub enum PathClass {
     /// `/tmp` and `/work/tmp`: the box scratch area.
     Scratch,
-    /// The agent's own workspace (`/work`).
+    /// The agent's own workspace: the project folder it is given and everything under it
+    /// (`/work/<project>`). Another project's folder is not this — it is `Anywhere`.
     Workspace,
     /// Anything else on the box.
     Anywhere,
 }
 
-/// The agent's workspace in the box.
+/// The root every workspace sits under (`/work/<project>`), and the default a caller that names
+/// no project gets.
 pub const WORKSPACE_ROOT: &str = "/work";
 /// Scratch roots: deletes under these never raise a card.
 pub const SCRATCH_ROOTS: &[&str] = &["/tmp", "/work/tmp"];
@@ -387,7 +389,7 @@ impl ShellGrant {
 /// `os.remove` / `shutil.rmtree`. One class, so one standing grant covers the whole family
 /// (#1712: `find "$D" -type f -delete` emptied a folder with no card possible).
 pub const FILE_DELETE: &str = "file-delete";
-const FILE_DELETE_WHY: &str = "deletes files outside /work/tmp";
+const FILE_DELETE_WHY: &str = "deletes files outside the agent's own workspace";
 
 /// Rule classes a standing grant may cover: shell rules whose risk is in filesystem paths.
 pub const GRANTABLE_CLASSES: &[&str] = &[FILE_DELETE];
@@ -431,15 +433,20 @@ fn under(path: &str, root: &str) -> bool {
     path == root || path.starts_with(&format!("{root}/"))
 }
 
-/// Class of one absolute path. A glob keeps the class of its fixed prefix.
-pub fn classify_path(path: &str) -> PathClass {
+/// Class of one absolute path, against the workspace the caller owns. A glob keeps the class of
+/// its fixed prefix.
+///
+/// `workspace_root` is the asking agent's own project folder (`/work/<project>`). Only paths
+/// under it are `Workspace`; `/work` itself, a sibling project's folder and the box's own
+/// `/work/.arbos` are all `Anywhere`, because none of them belongs to this agent.
+pub fn classify_path(path: &str, workspace_root: &str) -> PathClass {
     if !path.starts_with('/') {
         return PathClass::Anywhere;
     }
     if SCRATCH_ROOTS.iter().any(|r| under(path, r)) {
         return PathClass::Scratch;
     }
-    if under(path, WORKSPACE_ROOT) {
+    if under(path, workspace_root) {
         return PathClass::Workspace;
     }
     PathClass::Anywhere
@@ -649,10 +656,15 @@ pub type FileHasContent<'a> = &'a dyn Fn(&str) -> bool;
 ///   a file it wrote in this same run destroys nothing the user had, so that target raises no
 ///   card. Exact paths only: no parent, prefix or glob ever matches, so a job that made
 ///   `/work/out/report.md` still gets a card for `rm -rf /work/out`.
+///
+/// `workspace_root` is not a fact about one path but the frame the others are read in: the
+/// asking agent's own project folder, which is both where a relative target resolves and the
+/// boundary of what it may delete uncarded.
 #[derive(Clone, Copy)]
 pub struct PathFacts<'a> {
     pub has_content: FileHasContent<'a>,
     pub created_here: FileHasContent<'a>,
+    pub workspace_root: &'a str,
 }
 
 fn path_exists(_: &str) -> bool {
@@ -669,6 +681,7 @@ impl PathFacts<'static> {
         PathFacts {
             has_content: &path_exists,
             created_here: &created_by_nobody,
+            workspace_root: WORKSPACE_ROOT,
         }
     }
 }
@@ -680,6 +693,19 @@ impl<'a> PathFacts<'a> {
         PathFacts {
             has_content,
             created_here: &created_by_nobody,
+            workspace_root: WORKSPACE_ROOT,
+        }
+    }
+
+    /// Read these paths as the agent whose workspace is `workspace_root` (`/work/<project>`).
+    ///
+    /// A caller that does not set this is treated as owning the whole of `/work`, which is the
+    /// pure matcher's position: it has no project to key on. Every gate that decides a real
+    /// card does know the project, and says so here.
+    pub fn in_workspace(self, workspace_root: &'a str) -> Self {
+        PathFacts {
+            workspace_root,
+            ..self
         }
     }
 }
@@ -714,7 +740,11 @@ fn parent_dir(path: &str) -> &str {
 /// the caller created itself (`PathFacts::created_here`) contributes no class; the widest of
 /// what is left still decides, so one pre-existing target keeps the card.
 pub fn delete_targets_with(command: &str, facts: PathFacts<'_>) -> Option<PathClass> {
-    let mut cwd = WORKSPACE_ROOT.to_owned();
+    // The shell the agent is given runs in its own project folder, so that is where a relative
+    // target resolves. Reading it against `/work` instead put `rm d*.html.bak` a directory
+    // above the files it names.
+    let mut cwd = facts.workspace_root.to_owned();
+    let classify = |p: &str| classify_path(p, facts.workspace_root);
     let mut widest: Option<PathClass> = None;
     let mut pipeline_paths: Vec<String> = Vec::new();
     // Truncation idioms, decided at the end: (resolved path, raw word).
@@ -759,7 +789,7 @@ pub fn delete_targets_with(command: &str, facts: PathFacts<'_>) -> Option<PathCl
                 if (facts.created_here)(&path) {
                     continue;
                 }
-                note(widest, classify_path(&path));
+                note(widest, classify(&path));
             }
         };
         match head {
@@ -804,7 +834,7 @@ pub fn delete_targets_with(command: &str, facts: PathFacts<'_>) -> Option<PathCl
                 }
                 if targets.is_empty() {
                     // `rm` fed by a pipe / xargs / glob we cannot see.
-                    note(&mut widest, classify_path(&cwd));
+                    note(&mut widest, classify(&cwd));
                 } else {
                     classify_all(&mut widest, &targets);
                 }
@@ -823,10 +853,10 @@ pub fn delete_targets_with(command: &str, facts: PathFacts<'_>) -> Option<PathCl
                     .any(|w| matches!(*w, "rm" | "shred" | "unlink" | "truncate"));
                 if deletes {
                     if pipeline_paths.is_empty() {
-                        note(&mut widest, classify_path(&cwd));
+                        note(&mut widest, classify(&cwd));
                     } else {
                         for p in &pipeline_paths {
-                            note(&mut widest, classify_path(p));
+                            note(&mut widest, classify(p));
                         }
                     }
                 }
@@ -881,10 +911,10 @@ pub fn delete_targets_with(command: &str, facts: PathFacts<'_>) -> Option<PathCl
                         Vec::new()
                     };
                     if paths.is_empty() {
-                        note(&mut widest, classify_path(&repo_dir));
+                        note(&mut widest, classify(&repo_dir));
                     } else {
                         for p in &paths {
-                            note(&mut widest, classify_path(&resolve_path(&repo_dir, p)));
+                            note(&mut widest, classify(&resolve_path(&repo_dir, p)));
                         }
                     }
                 }
@@ -893,7 +923,7 @@ pub fn delete_targets_with(command: &str, facts: PathFacts<'_>) -> Option<PathCl
                 if rest.iter().any(|w| w.starts_with("--delete")) {
                     if let Some(dest) = plain_args(&rest).last() {
                         if !dest.contains(':') {
-                            note(&mut widest, classify_path(&resolve_path(&cwd, dest)));
+                            note(&mut widest, classify(&resolve_path(&cwd, dest)));
                         } else {
                             note(&mut widest, PathClass::Anywhere);
                         }
@@ -953,7 +983,7 @@ pub fn delete_targets_with(command: &str, facts: PathFacts<'_>) -> Option<PathCl
         if !(facts.has_content)(&path) {
             continue;
         }
-        note(&mut widest, classify_path(&path));
+        note(&mut widest, classify(&path));
     }
     widest
 }
@@ -973,17 +1003,24 @@ pub fn rm_targets(command: &str) -> Option<(PathClass, bool)> {
 }
 
 /// Flag a shell command when it matches a destructive pattern. Anything that deletes files
-/// (`delete_targets`) is a card unless every target sits in scratch (`/tmp`, `/work/tmp`); the
-/// card carries the path class so a standing grant can cover it (#1544, #1712). The regex
-/// rules (force-push, DROP TABLE, cloud deletes, …) follow.
+/// (`delete_targets`) is a card when a target sits outside the agent's own workspace; the card
+/// carries the path class so a standing grant can cover it (#1544, #1712). The regex rules
+/// (force-push, DROP TABLE, cloud deletes, …) follow.
 pub fn classify_shell(command: &str) -> Option<RiskMatch> {
     classify_shell_with(command, PathFacts::assumed())
 }
 
 /// `classify_shell` with the box's view of the paths it names (#1719, `PathFacts`).
+///
+/// An agent deleting files in its own `/work/<project>` folder raises no card. That folder is
+/// the agent's to work in: a scratch-only rule made the common case — clearing its own build
+/// output, its own `.bak` files — ask the user about work they had already asked for, and a
+/// card nobody answers is a stall rather than a safeguard. The rule stays strict for every path
+/// the agent does not own: another project's folder, the box's own `/work/.arbos`, and the
+/// system paths outside `/work` altogether.
 pub fn classify_shell_with(command: &str, facts: PathFacts<'_>) -> Option<RiskMatch> {
     if let Some(class) = delete_targets_with(command, facts) {
-        if class != PathClass::Scratch {
+        if class == PathClass::Anywhere {
             return Some(RiskMatch {
                 class: FILE_DELETE,
                 risk: Risk::Destructive,
@@ -1188,8 +1225,8 @@ mod tests {
         );
 
         for cmd in [
-            "rm -rf /work/project/src",
-            "cd /work && rm -r build",
+            "rm -rf /srv/project/src",
+            "cd /srv && rm -r build",
             "git push --force origin main",
             "git push -f",
             "git push origin +main",
@@ -1267,8 +1304,12 @@ mod tests {
     }
 
     /// #1544 / #1712: every way a shell command deletes files is classified by where the
-    /// targets are — scratch (no card), the workspace, or anywhere — with a leading `cd`
+    /// targets are — scratch, the agent's own workspace, or anywhere — with a leading `cd`
     /// moving the working directory. One table, one expected class per command.
+    ///
+    /// The table's agent owns the whole of `/work`, which is what the pure matcher assumes when
+    /// no project is named; `own_workspace_deletes_pass_and_other_projects_still_card` is the
+    /// same question asked by an agent that owns one folder in it.
     #[test]
     fn deletion_family_is_classified_by_target_path() {
         use PathClass::*;
@@ -1276,11 +1317,11 @@ mod tests {
             // rm — scratch is free, the rest cards (non-recursive too: #1712's files were plain).
             (
                 "cd /tmp && rm -rf arbos-src && git clone --depth 1 https://x/y arbos-src",
-                None,
+                Some(Scratch),
             ),
-            ("cd /work/tmp; rm -r build", None),
-            ("pushd /tmp && rm -rf ./cache", None),
-            ("rm -rf /work/tmp/build /tmp/x", None),
+            ("cd /work/tmp; rm -r build", Some(Scratch)),
+            ("pushd /tmp && rm -rf ./cache", Some(Scratch)),
+            ("rm -rf /work/tmp/build /tmp/x", Some(Scratch)),
             ("rm -- -weird-file", Some(Workspace)),
             ("rm -f out/*.png", Some(Workspace)),
             ("rm -rf build", Some(Workspace)),
@@ -1301,7 +1342,7 @@ mod tests {
                 Some(Workspace),
             ),
             ("find . -name '*.pyc' -delete", Some(Workspace)),
-            ("find /tmp/build -type f -delete", None),
+            ("find /tmp/build -type f -delete", Some(Scratch)),
             (
                 "find /work/p -name '*.log' -exec rm {} \\;",
                 Some(Workspace),
@@ -1314,15 +1355,15 @@ mod tests {
                 "find /work/p -name '*.log' -print0 | xargs -0 rm -f",
                 Some(Workspace),
             ),
-            ("find /tmp/p -name '*.log' | xargs rm", None),
+            ("find /tmp/p -name '*.log' | xargs rm", Some(Scratch)),
             ("ls *.bak | xargs rm -f", Some(Workspace)),
             ("find /work/p -name '*.log'", None),
             // shred / unlink / truncate / bare truncation idioms.
             ("shred -u /work/p/secret.key", Some(Workspace)),
-            ("shred -n 3 -z /tmp/dump.bin", None),
+            ("shred -n 3 -z /tmp/dump.bin", Some(Scratch)),
             ("unlink /work/p/link", Some(Workspace)),
             ("truncate -s 0 /work/p/app.log", Some(Workspace)),
-            ("truncate -s 0 /tmp/app.log", None),
+            ("truncate -s 0 /tmp/app.log", Some(Scratch)),
             ("> /work/p/app.log", Some(Workspace)),
             (": > /work/p/app.log", Some(Workspace)),
             ("true > /etc/motd", Some(Anywhere)),
@@ -1352,7 +1393,7 @@ mod tests {
             ("git reset --hard HEAD~1", Some(Workspace)),
             ("git reset --soft HEAD~1", None),
             ("git stash drop", Some(Workspace)),
-            ("cd /tmp/scratch-repo && git reset --hard", None),
+            ("cd /tmp/scratch-repo && git reset --hard", Some(Scratch)),
             // rsync --delete: the destination.
             ("rsync -a --delete src/ /work/p/site/", Some(Workspace)),
             ("rsync -a --delete-after src/ /srv/www/", Some(Anywhere)),
@@ -1377,8 +1418,14 @@ mod tests {
             ("echo 'remove the old files' > /work/tmp/plan.txt", None),
         ];
         for (cmd, expected) in table {
+            assert_eq!(delete_targets(cmd), *expected, "{cmd}");
+            // The card predicate over that class: only a target the agent does not own.
             let hit = classify_shell(cmd).filter(|h| h.class == FILE_DELETE);
-            assert_eq!(hit.as_ref().and_then(|h| h.path_class), *expected, "{cmd}");
+            assert_eq!(
+                hit.as_ref().and_then(|h| h.path_class),
+                expected.filter(|c| *c == Anywhere),
+                "{cmd}"
+            );
             if let Some(h) = hit {
                 assert_eq!(h.risk, Risk::Destructive);
             }
@@ -1391,7 +1438,7 @@ mod tests {
             None
         );
         // With the box's view (#1719): a truncation of a file that does not exist, or is
-        // empty, creates it — no card; the same idiom on a file with content is a delete.
+        // empty, creates it — no delete at all; the same idiom on a file with content is one.
         let missing = |_: &str| false;
         for cmd in [
             ": > /work/p/app.log",
@@ -1400,27 +1447,79 @@ mod tests {
             "cp /dev/null /work/p/app.log",
         ] {
             assert_eq!(
-                classify_shell_with(cmd, PathFacts::with_content(&missing)),
+                delete_targets_with(cmd, PathFacts::with_content(&missing)),
                 None,
                 "{cmd} on a missing file"
             );
         }
         let present = |p: &str| p == "/work/p/app.log";
         assert_eq!(
-            classify_shell_with(": > /work/p/app.log", PathFacts::with_content(&present))
-                .and_then(|h| h.path_class),
+            delete_targets_with(": > /work/p/app.log", PathFacts::with_content(&present)),
             Some(Workspace)
         );
         assert_eq!(
-            classify_shell_with(": > /work/p/other.log", PathFacts::with_content(&present)),
+            delete_targets_with(": > /work/p/other.log", PathFacts::with_content(&present)),
             None
         );
         // The view never softens a real delete.
         assert_eq!(
-            classify_shell_with("rm -rf /work/p/build", PathFacts::with_content(&missing))
-                .and_then(|h| h.path_class),
+            delete_targets_with("rm -rf /work/p/build", PathFacts::with_content(&missing)),
             Some(Workspace)
         );
+    }
+
+    /// The incident this rule was rewritten for, and the half that proves the rule still
+    /// exists. Jacob's agent, working in `/work/01M6S2STTSQ0VPW5C03FZQ0CNA` on a Project Euler
+    /// task, ran `sed`, a loop over `p*.py`, then `du -sh .; rm d*.html.bak`. The `rm` named
+    /// files in the agent's own folder and still raised "Run a destructive command
+    /// (file-delete)?", which nobody answered; the card expired and the agent stalled there.
+    ///
+    /// Both halves are asserted together on purpose: the permissive half alone would pass with
+    /// the whole rule deleted.
+    #[test]
+    fn own_workspace_deletes_pass_and_other_projects_still_card() {
+        let mine = "/work/01M6S2STTSQ0VPW5C03FZQ0CNA";
+        let facts = PathFacts::assumed().in_workspace(mine);
+        let card = |cmd: &str| classify_shell_with(cmd, facts).filter(|h| h.class == FILE_DELETE);
+
+        // Its own workspace: no card, named absolutely or relative to the folder its shell
+        // runs in, and for a whole subtree as much as for one file.
+        for cmd in [
+            "du -sh .; rm d*.html.bak",
+            "rm d018.html.bak",
+            "rm -rf /work/01M6S2STTSQ0VPW5C03FZQ0CNA/build",
+            "cd /work/01M6S2STTSQ0VPW5C03FZQ0CNA/out && rm -f results.csv",
+            "find . -name '*.pyc' -delete",
+            "git clean -fdx",
+            // Scratch is inside the permission, not beside it.
+            "rm -rf /tmp/cache /work/tmp/build",
+        ] {
+            assert_eq!(card(cmd), None, "{cmd} deletes only what this agent owns");
+        }
+
+        // Everything it does not own still cards: another project's folder, the box's own
+        // state, the workspace root itself, and the system.
+        for cmd in [
+            "rm -rf /work/01OTHERPROJECT00000000000/exports",
+            "rm -f /work/01OTHERPROJECT00000000000/notes.md",
+            "cd /work/01OTHERPROJECT00000000000 && git reset --hard",
+            "rm -rf /work/.arbos/audit.jsonl",
+            "rm -rf /work",
+            "rm -rf ..",
+            "rm -f /etc/hosts",
+            "sudo rm -rf /var/log/old",
+        ] {
+            let hit = card(cmd).unwrap_or_else(|| panic!("{cmd} must still raise a card"));
+            assert_eq!(hit.risk, Risk::Destructive, "{cmd}");
+            assert_eq!(hit.path_class, Some(PathClass::Anywhere), "{cmd}");
+        }
+
+        // One target outside the workspace cards the whole command, however much of it is
+        // inside: the widest class decides.
+        assert!(card("rm -rf build /work/01OTHERPROJECT00000000000/build").is_some());
+
+        // A folder whose name merely starts with the workspace's is not inside it.
+        assert!(card("rm -rf /work/01M6S2STTSQ0VPW5C03FZQ0CNA-old").is_some());
     }
 
     /// A job deleting a file it wrote itself raises no card, and the exemption reaches nothing
@@ -1432,8 +1531,11 @@ mod tests {
         let facts = PathFacts {
             has_content: &|_| true,
             created_here: &mine,
+            workspace_root: WORKSPACE_ROOT,
         };
-        let class = |cmd: &str| classify_shell_with(cmd, facts).and_then(|h| h.path_class);
+        // The class of what is deleted, not whether a card follows: the exemption's job is to
+        // drop the caller's own files from the targets, whichever class they are in.
+        let class = |cmd: &str| delete_targets_with(cmd, facts);
         // Its own files, named exactly: no card, one at a time or together, and for the
         // truncation idioms too.
         assert_eq!(class("rm -f /work/p/out/report.md"), None);
@@ -1451,8 +1553,7 @@ mod tests {
             Some(PathClass::Workspace)
         );
         assert_eq!(
-            classify_shell_with(": > /work/p/out/report.md", PathFacts::assumed())
-                .and_then(|h| h.path_class),
+            delete_targets_with(": > /work/p/out/report.md", PathFacts::assumed()),
             Some(PathClass::Workspace)
         );
         // Everything around them still cards: the parent folder, a sibling it did not write, a
@@ -1477,10 +1578,10 @@ mod tests {
             Some(PathClass::Anywhere),
             "same file name outside what it wrote"
         );
-        // No list of its own writes: the same commands card, as they did before.
+        // No list of its own writes: the same commands count as deletes, as they did before.
         let none = PathFacts::assumed();
         assert_eq!(
-            classify_shell_with("rm -f /work/p/out/report.md", none).and_then(|h| h.path_class),
+            delete_targets_with("rm -f /work/p/out/report.md", none),
             Some(PathClass::Workspace)
         );
     }
@@ -1520,7 +1621,15 @@ mod tests {
             approval_id: None,
             created_at: 0,
         };
-        let ws = classify_shell("rm -rf build").unwrap();
+        // A workspace-class hit is built here rather than matched from a command: since a
+        // delete inside the agent's own workspace raises no card, no command produces one any
+        // more. The ordering it checks still governs the grants the relay already holds.
+        let ws = RiskMatch {
+            class: FILE_DELETE,
+            risk: Risk::Destructive,
+            why: FILE_DELETE_WHY,
+            path_class: Some(PathClass::Workspace),
+        };
         let any = classify_shell("rm -rf /etc/x").unwrap();
         assert!(grant(PathClass::Workspace, None).covers(&ws, Some("c1")));
         assert!(!grant(PathClass::Workspace, None).covers(&any, Some("c1")));
