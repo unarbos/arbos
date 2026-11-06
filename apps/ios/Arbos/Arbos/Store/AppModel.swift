@@ -1544,9 +1544,8 @@ final class AppModel: ObservableObject {
             if who != user { user = who }
             if cr != credits { credits = cr }
             saveAccountCache()
-            // D92 remote flag `features.leaf_avatars` (absent on an older relay = on).
-            LeafAvatarsFlag.shared.set(features?.leaf_avatars ?? true)
-            LeafAvatarsFlag.shared.setLottie(features?.leaf_lottie ?? true)
+            // D92: `features.leaf_avatars` / `leaf_lottie` are retired. An agent's default
+            // picture is a solid disc with nothing to animate, so there is no flag to read.
             // Voice mode kill switch (absent on an older relay = off).
             VoiceModeFlag.shared.set(features?.voice_mode ?? false)
             // Who may add me to groups (absent on an older relay = anyone).
@@ -2046,7 +2045,7 @@ final class AppModel: ObservableObject {
         // One copy of each agent's avatar everywhere, before the first frame: the record and
         // the roster copies came back from two caches written at different times; the
         // newest wins and every picture URL is rebuilt on the public versioned route (a
-        // pre-#1813 cache held the owner-only blob URL — Jacob's relaunch leaf, 2026-10-26).
+        // pre-#1813 cache held the owner-only blob URL — Jacob's relaunch disc, 2026-10-26).
         reconcileAgentAvatars()
         AvatarImageCache.shared.warm(urls: projects.compactMap(\.imageURL))
         if !projects.isEmpty || !peopleChats.isEmpty { contentOrigin = "store" }
@@ -3217,7 +3216,7 @@ final class AppModel: ObservableObject {
     /// People, agents, or both — never nobody. Agents ride in the create body
     /// (`agent_ids`); whatever the relay did not add (an older relay) is added
     /// one by one afterwards.
-    func createGroup(handles: [String], agentIds: [Id] = [], title: String? = nil, leaf: LeafPick? = nil, picture: DraftPicture? = nil) async -> Bool {
+    func createGroup(handles: [String], agentIds: [Id] = [], title: String? = nil, discColor: UInt8? = nil, picture: DraftPicture? = nil) async -> Bool {
         let cleaned = handles
             .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "@ ")) }
             .filter { !$0.isEmpty }
@@ -3228,7 +3227,7 @@ final class AppModel: ObservableObject {
         do {
             var chat: PeopleChat
             do {
-                chat = try await api.createGroup(handles: cleaned, agentIds: agentIds, title: title, leaf: leaf)
+                chat = try await api.createGroup(handles: cleaned, agentIds: agentIds, title: title, discColor: discColor)
             } catch let e as RelayError where !cleaned.isEmpty && (e.status == 404 || e.status == 405 || e.status == 501) {
                 chat = try await createGroupViaDm(handles: cleaned)
             }
@@ -3410,18 +3409,18 @@ final class AppModel: ObservableObject {
 
     // MARK: Avatar colour (D79)
 
-    /// D92: the owner's leaf and disc colour picks (nil = automatic). Optimistic, then PATCH.
-    func pickAvatarLeaf(_ projectId: Id, leaf: Int?, color: Int?) {
+    /// D92: the owner's disc colour pick (nil = automatic). Optimistic, then PATCH.
+    func pickAvatarDisc(_ projectId: Id, color: Int?) {
         // Optimistic, into every copy (header, rosters, chips) at once; the relay's stamp
         // replaces the local one when it answers.
         let local = (newestAgentAvatar(projectId)?.version ?? 0) + 1
-        applyAgentAvatar(projectId, AgentAvatarFacts(imageKey: nil, avatarLeaf: leaf, avatarLeafColor: color, version: local), force: true)
+        applyAgentAvatar(projectId, AgentAvatarFacts(imageKey: nil, avatarDiscColor: color, version: local), force: true)
         guard !isFixture else { return }
         Task {
             do {
-                let stamped = try await api.setProjectAvatarLeaf(projectId, leaf: leaf, color: color)
+                let stamped = try await api.setProjectAvatarDisc(projectId, color: color)
                 if stamped > 0 {
-                    applyAgentAvatar(projectId, AgentAvatarFacts(imageKey: nil, avatarLeaf: leaf, avatarLeafColor: color, version: stamped), force: true)
+                    applyAgentAvatar(projectId, AgentAvatarFacts(imageKey: nil, avatarDiscColor: color, version: stamped), force: true)
                 }
             } catch {
                 fail("save the picture", error)
@@ -4302,12 +4301,12 @@ final class AppModel: ObservableObject {
         // replaces the local one when it answers.
         let base = newestAgentAvatar(projectId)
         let local = (base?.version ?? 0) + 1
-        applyAgentAvatar(projectId, AgentAvatarFacts(imageKey: key, avatarLeaf: base?.avatarLeaf, avatarLeafColor: base?.avatarLeafColor, version: local), force: true)
+        applyAgentAvatar(projectId, AgentAvatarFacts(imageKey: key, avatarDiscColor: base?.avatarDiscColor, version: local), force: true)
         guard !isFixture else { return true }
         do {
             let stamped = try await api.setProjectImageKey(projectId, key: key)
             if stamped > 0 {
-                applyAgentAvatar(projectId, AgentAvatarFacts(imageKey: key, avatarLeaf: base?.avatarLeaf, avatarLeafColor: base?.avatarLeafColor, version: stamped), force: true)
+                applyAgentAvatar(projectId, AgentAvatarFacts(imageKey: key, avatarDiscColor: base?.avatarDiscColor, version: stamped), force: true)
             }
             return true
         } catch {
@@ -4338,16 +4337,15 @@ final class AppModel: ObservableObject {
         return await patchPeopleChat(chatId, imageKey: key)
     }
 
-    /// D92 amendment: a group's leaf picture (nil = initials); drops the uploaded picture.
-    func setGroupLeaf(chatId: String, pick: LeafPick?) async -> Bool {
+    /// D92 amendment: a group's disc colour (nil = initials); drops the uploaded picture.
+    func setGroupDisc(chatId: String, color: UInt8?) async -> Bool {
         if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
-            peopleChats[i].avatarLeaf = pick.map { Int($0.leaf) }
-            peopleChats[i].avatarLeafColor = pick.map { Int($0.color) }
+            peopleChats[i].avatarDiscColor = color.map { Int($0) }
             peopleChats[i].imageKey = nil
         }
         guard !isFixture else { return true }
         do {
-            let chat = try await api.setPeopleChatLeaf(chatId, pick: pick)
+            let chat = try await api.setPeopleChatDisc(chatId, color: color)
             if let i = peopleChats.firstIndex(where: { $0.id == chatId }) { peopleChats[i] = chat }
             return true
         } catch {
@@ -4682,7 +4680,7 @@ final class AppModel: ObservableObject {
     func foreignAgent(_ projectId: Id) -> Project? {
         for c in peopleChats {
             if let a = c.agents.first(where: { $0.id == projectId }) {
-                // Through the shared identity (#1592): the same name, leaf and picture every
+                // Through the shared identity (#1592): the same name, colour and picture every
                 // other surface draws for this agent.
                 return agent(member: a, chatId: c.id)
             }
@@ -5000,7 +4998,7 @@ final class AppModel: ObservableObject {
                 needServers = true
             case .agentProfileUpdated(let payload):
                 // An agent's avatar changed (the agents' `profile_updated`): the new picture and
-                // stamp land in every copy now; the re-reads bring the leaf picks and the rest.
+                // stamp land in every copy now; the re-reads bring the colour pick and the rest.
                 applyAgentAvatarPush(projectId: payload.project_id, imageKey: payload.image_key, version: Int(payload.avatar_version))
                 await refreshRegistry()
                 needChats = true
@@ -6669,10 +6667,10 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func createProject(name: String, avatarColorIndex: Int? = nil, leaf: LeafPick? = nil, picture: DraftPicture? = nil) {
+    func createProject(name: String, avatarColorIndex: Int? = nil, discColor: UInt8? = nil, picture: DraftPicture? = nil) {
         Task {
             do {
-                let id = try await api.createProject(name: name, avatarColorIndex: avatarColorIndex, leaf: leaf)
+                let id = try await api.createProject(name: name, avatarColorIndex: avatarColorIndex, discColor: discColor)
                 // The Create sheet's picture goes into the new agent's own slot first, so the
                 // list refresh already shows it.
                 if let picture, let id, let jpeg = await draftJpeg(picture) {
@@ -6859,7 +6857,7 @@ final class AppModel: ObservableObject {
                 // relay to copy the source agent's project folder and memory.
                 _ = try await api.createProject(
                     name: name,
-                    leaf: LeafArt.isNeutral(project.avatarLeaf) ? LeafArt.neutralPick : LeafArt.pick(project),
+                    discColor: DiscArt.isNeutral(project.avatarDiscColor) ? UInt8(clamping: DiscArt.neutral) : DiscArt.pick(project),
                     color: project.color,
                     description: project.description,
                     instructions: project.instructions,

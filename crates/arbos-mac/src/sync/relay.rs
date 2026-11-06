@@ -982,9 +982,8 @@ async fn refresh_me(shared: &Arc<Shared>) {
     *shared.me.lock().unwrap() = Some(u);
     let view = account_view_from_me(&dto);
     let _ = shared.events.send(SyncEvent::Account(Some(view)));
-    // D92 remote flags: leaf avatars for agents, and their Lottie playback (absent = on).
-    crate::ui::avatars::set_leaf_avatars(dto.features.leaf_avatars.unwrap_or(true));
-    crate::ui::avatars::set_leaf_lottie(dto.features.leaf_lottie.unwrap_or(true));
+    // D92: `features.leaf_avatars` / `leaf_lottie` are retired. The default agent picture is
+    // a solid disc with nothing to animate, so there is no flag left to read.
     // Voice mode is a relay-side kill switch; absent = off.
     let _ = shared.events.send(SyncEvent::Features {
         voice_mode: dto.features.voice_mode.unwrap_or(false),
@@ -1249,7 +1248,7 @@ fn load_store(shared: &Arc<Shared>) {
     }
     *shared.projects.lock().unwrap() = projects.clone();
     *shared.chats.lock().unwrap() = chats;
-    // Pictures the last run fetched paint with the first content: no leaf placeholder on
+    // Pictures the last run fetched paint with the first content: no disc placeholder on
     // every agent while the fetches are out, and nothing to fetch for an unchanged picture.
     for url in picture_urls(&projects) {
         if let Some(bytes) = cached_avatar(shared, &url) {
@@ -1888,18 +1887,17 @@ fn handle_server_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
         }
         ClientCommand::ServerCreate {
             name,
-            leaf,
+            disc_color,
             picture,
         } => {
             let shared = shared.clone();
             let name = name.clone();
-            let leaf = *leaf;
+            let disc_color = *disc_color;
             let picture = picture.clone();
             tokio::spawn(async move {
                 let mut body = json!({ "name": name });
-                if let Some(l) = leaf {
-                    body["avatar_leaf"] = json!(l.leaf);
-                    body["avatar_leaf_color"] = json!(l.color);
+                if let Some(c) = disc_color {
+                    body["avatar_disc_color"] = json!(c);
                 }
                 match shared
                     .post_json("/servers", body)
@@ -2311,7 +2309,7 @@ async fn fetch_server_detail(shared: &Arc<Shared>, server_id: &str) {
 
 /// Waits between picture fetch attempts. A cold launch fires the first fetch before the
 /// network is up (a Mac that just woke, the relay mid-restart), and until 2026-10-26 one failed
-/// attempt left the URL marked done forever: every surface drew the leaf placeholder for the
+/// attempt left the URL marked done forever: every surface drew the disc placeholder for the
 /// rest of the session — Jacob's "old picture after relaunch" (#1813 / #1862 reopen).
 const AVATAR_RETRY_SECS: [u64; 6] = [2, 5, 10, 20, 40, 60];
 
@@ -2370,7 +2368,7 @@ async fn fetch_avatar(shared: Arc<Shared>, url: String) {
     loop {
         let fetched = match shared.http.get(&full).send().await {
             Ok(resp) if resp.status().is_success() => resp.bytes().await.ok(),
-            // 404 is "no picture": the leaf is right, nothing to retry.
+            // 404 is "no picture": the disc is right, nothing to retry.
             Ok(resp) if resp.status() == reqwest::StatusCode::NOT_FOUND => break,
             Ok(_) | Err(_) => None,
         };
@@ -4341,7 +4339,7 @@ fn with_server_picture(shared: &Shared, mut server: ServerInfo) -> ServerInfo {
 
 /// An agent's picture as the avatar loader fetches it: the relay's public picture route,
 /// stamped with `avatar_version` (`sync::agent_avatar::picture_url`). The blob slot is the
-/// owner's and the guests' only — a viewer who merely shared a group got 403 and the leaf.
+/// owner's and the guests' only — a viewer who merely shared a group got 403 and the disc.
 fn project_image_url(
     http_url: &str,
     project_id: &str,
@@ -5565,7 +5563,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             handles,
             agent_ids,
             title,
-            leaf,
+            disc_color,
             picture,
         } => {
             let shared = shared.clone();
@@ -5583,9 +5581,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 if let Some(t) = title.filter(|t| !t.trim().is_empty()) {
                     body["title"] = json!(t.trim());
                 }
-                if let Some(l) = leaf {
-                    body["avatar_leaf"] = json!(l.leaf);
-                    body["avatar_leaf_color"] = json!(l.color);
+                if let Some(c) = disc_color {
+                    body["avatar_disc_color"] = json!(c);
                 }
                 match shared.post_json("/chats", body).await {
                     Ok(v) => {
@@ -6536,12 +6533,11 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 }
             });
         }
-        ClientCommand::SetGroupLeaf { chat_id, pick } => {
+        ClientCommand::SetGroupDisc { chat_id, color } => {
             {
                 let mut projects = shared.projects.lock().unwrap();
                 if let Some(p) = projects.iter_mut().find(|p| p.id == chat_id) {
-                    p.avatar_leaf = pick.map(|l| l.leaf);
-                    p.avatar_leaf_color = pick.map(|l| l.color);
+                    p.avatar_disc_color = color;
                     p.image_url = None;
                 }
                 let snapshot = projects.clone();
@@ -6551,11 +6547,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             let shared = shared.clone();
             tokio::spawn(async move {
                 // `PATCH /chats` clears the picture on an empty key.
-                let body = json!({
-                    "avatar_leaf": pick.map(|l| l.leaf),
-                    "avatar_leaf_color": pick.map(|l| l.color),
-                    "image_key": "",
-                });
+                let body = json!({ "avatar_disc_color": color, "image_key": "" });
                 if let Err(err) = shared.patch_json(&format!("/chats/{chat_id}"), body).await {
                     shared.fail("save the group picture", &err);
                 }
@@ -6877,13 +6869,9 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 }
             });
         }
-        ClientCommand::SetAvatarLeaf {
-            project_id,
-            leaf,
-            color,
-        } => {
+        ClientCommand::SetAvatarDisc { project_id, color } => {
             {
-                // Optimistic, into every copy (sidebar record and each roster) at once; a leaf
+                // Optimistic, into every copy (sidebar record and each roster) at once; a disc
                 // pick is "not a photo": the picture goes with it.
                 let mut projects = shared.projects.lock().unwrap();
                 let local = super::agent_avatar::newest(&projects, &project_id)
@@ -6894,8 +6882,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     &project_id,
                     &super::agent_avatar::Facts {
                         image_url: None,
-                        leaf,
-                        leaf_color: color,
+                        disc_color: color,
                         version: local,
                     },
                     true,
@@ -6906,8 +6893,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             }
             let shared = shared.clone();
             tokio::spawn(async move {
-                let body =
-                    json!({ "avatar_leaf": leaf, "avatar_leaf_color": color, "image_key": null });
+                let body = json!({ "avatar_disc_color": color, "image_key": null });
                 match shared
                     .patch_json(&format!("/projects/{project_id}"), body)
                     .await
@@ -6921,8 +6907,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                                 &project_id,
                                 &super::agent_avatar::Facts {
                                     image_url: None,
-                                    leaf,
-                                    leaf_color: color,
+                                    disc_color: color,
                                     version: stamp,
                                 },
                                 true,
@@ -7003,8 +6988,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                             &project_id,
                             &super::agent_avatar::Facts {
                                 image_url: url,
-                                leaf: base.leaf,
-                                leaf_color: base.leaf_color,
+                                disc_color: base.disc_color,
                                 version: stamp,
                             },
                             true,
@@ -7161,14 +7145,10 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 }
             });
         }
-        ClientCommand::SetServerLeaf { server_id, pick } => {
+        ClientCommand::SetServerDisc { server_id, color } => {
             let shared = shared.clone();
             tokio::spawn(async move {
-                let body = json!({
-                    "avatar_leaf": pick.map(|l| l.leaf),
-                    "avatar_leaf_color": pick.map(|l| l.color),
-                    "image_key": null,
-                });
+                let body = json!({ "avatar_disc_color": color, "image_key": null });
                 match shared
                     .patch_json(&format!("/servers/{server_id}"), body)
                     .await
@@ -7583,7 +7563,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         ClientCommand::CreateProject {
             name,
             avatar_color_index,
-            leaf,
+            disc_color,
             picture,
             source_project_id,
             description,
@@ -7599,9 +7579,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 if let Some(i) = avatar_color_index {
                     body["avatar_color_index"] = json!(i);
                 }
-                if let Some(l) = leaf {
-                    body["avatar_leaf"] = json!(l.leaf);
-                    body["avatar_leaf_color"] = json!(l.color);
+                if let Some(c) = disc_color {
+                    body["avatar_disc_color"] = json!(c);
                 }
                 if let Some(src) = source_project_id {
                     body["source_project_id"] = json!(src);

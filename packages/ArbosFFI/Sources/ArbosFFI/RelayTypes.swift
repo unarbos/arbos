@@ -32,10 +32,11 @@ public struct AccountUserDto: Codable {
 }
 
 /// `agent_profile_updated` payload: an agent's avatar changed (`PATCH /projects/{id}` with
-/// `image_key`, a leaf pick or a colour pick) — the agents' `profile_updated`. Sent to the
+/// `image_key` or a colour pick) — the agents' `profile_updated`. Sent to the
 /// owner's other devices, the project's members and everyone who shares a people chat with the
-/// agent. `image_key` is the picture now in effect (`null` = the leaf / initials; the leaf
-/// picks come with the registry re-read), `avatar_version` the stamp every copy must reach.
+/// agent. `image_key` is the picture now in effect (`null` = the solid disc / initials; the
+/// colour pick comes with the registry re-read), `avatar_version` the stamp every copy
+/// must reach.
 public struct AgentProfileUpdatedPayloadDto: Codable {
 	public let project_id: String
 	public let avatar_version: Int64
@@ -88,11 +89,10 @@ public struct SenderDto: Codable {
 	public let avatar_url: String?
 	public let avatar_color_index: Int64?
 	public let avatar_color_index_effective: Int64
-	/// D92: agents get the leaf pair in effect; people send JSON null.
-	public let avatar_leaf_effective: Int64?
-	public let avatar_leaf_color_effective: Int64?
+	/// D92: agents get the disc colour in effect; people send JSON null.
+	public let avatar_disc_color_effective: Int64?
 
-	public init(kind: String, id: String, name: String, handle: String, avatar: String?, avatar_color: String?, avatar_url: String?, avatar_color_index: Int64?, avatar_color_index_effective: Int64, avatar_leaf_effective: Int64?, avatar_leaf_color_effective: Int64?) {
+	public init(kind: String, id: String, name: String, handle: String, avatar: String?, avatar_color: String?, avatar_url: String?, avatar_color_index: Int64?, avatar_color_index_effective: Int64, avatar_disc_color_effective: Int64?) {
 		self.kind = kind
 		self.id = id
 		self.name = name
@@ -102,8 +102,7 @@ public struct SenderDto: Codable {
 		self.avatar_url = avatar_url
 		self.avatar_color_index = avatar_color_index
 		self.avatar_color_index_effective = avatar_color_index_effective
-		self.avatar_leaf_effective = avatar_leaf_effective
-		self.avatar_leaf_color_effective = avatar_leaf_color_effective
+		self.avatar_disc_color_effective = avatar_disc_color_effective
 	}
 }
 
@@ -517,11 +516,9 @@ public struct ChatMemberProjectDto: Codable {
 	public let avatar_color: String
 	public let avatar_color_index: Int64?
 	public let avatar_color_index_effective: Int64
-	public let avatar_leaf: Int64?
-	public let avatar_leaf_color: Int64?
+	public let avatar_disc_color: Int64?
 	/// Always sent by relays with D92; optional so older relays still decode.
-	public let avatar_leaf_effective: Int64?
-	public let avatar_leaf_color_effective: Int64?
+	public let avatar_disc_color_effective: Int64?
 	/// D92 amendment: the agent's uploaded / generated picture (blob name in `/blob/{id}/…`).
 	public let image_key: String?
 	/// Stamp (ms) of the last avatar change — the same value `ProjectDto.avatar_version`
@@ -531,7 +528,7 @@ public struct ChatMemberProjectDto: Codable {
 	public let model: String?
 	public let owner: ProjectOwnerDto
 
-	public init(id: String, name: String, icon: String, color: String, avatar: String, avatar_color: String, avatar_color_index: Int64?, avatar_color_index_effective: Int64, avatar_leaf: Int64?, avatar_leaf_color: Int64?, avatar_leaf_effective: Int64?, avatar_leaf_color_effective: Int64?, image_key: String?, avatar_version: Int64?, description: String, model: String?, owner: ProjectOwnerDto) {
+	public init(id: String, name: String, icon: String, color: String, avatar: String, avatar_color: String, avatar_color_index: Int64?, avatar_color_index_effective: Int64, avatar_disc_color: Int64?, avatar_disc_color_effective: Int64?, image_key: String?, avatar_version: Int64?, description: String, model: String?, owner: ProjectOwnerDto) {
 		self.id = id
 		self.name = name
 		self.icon = icon
@@ -540,10 +537,8 @@ public struct ChatMemberProjectDto: Codable {
 		self.avatar_color = avatar_color
 		self.avatar_color_index = avatar_color_index
 		self.avatar_color_index_effective = avatar_color_index_effective
-		self.avatar_leaf = avatar_leaf
-		self.avatar_leaf_color = avatar_leaf_color
-		self.avatar_leaf_effective = avatar_leaf_effective
-		self.avatar_leaf_color_effective = avatar_leaf_color_effective
+		self.avatar_disc_color = avatar_disc_color
+		self.avatar_disc_color_effective = avatar_disc_color_effective
 		self.image_key = image_key
 		self.avatar_version = avatar_version
 		self.description = description
@@ -577,18 +572,16 @@ public struct ChatMemberDto: Codable {
 	public let avatar_color: String?
 	public let avatar_color_index: Int64??
 	public let avatar_color_index_effective: Int64?
-	/// Agent: D92 leaf picks and the pair in effect. Human: omitted.
-	public let avatar_leaf: Int64??
-	public let avatar_leaf_color: Int64??
-	public let avatar_leaf_effective: Int64?
-	public let avatar_leaf_color_effective: Int64?
+	/// Agent: the D92 disc colour pick and the colour in effect. Human: omitted.
+	public let avatar_disc_color: Int64??
+	public let avatar_disc_color_effective: Int64?
 	public let project: ChatMemberProjectDto?
 	public let description: String?
 	/// Agent: owning user id string.
 	public let owner: String?
 	public let owner_handle: String??
 
-	public init(member: String, role: String, added_by: String, joined_at: Int64, handle: String?, avatar_url: String??, name: String??, status: String?, user_id: String?, last_seen_at: Int64??, online: Bool?, read_receipts: Bool?, silenced: Bool?, silenced_until: Int64?, can_mute_ban: Bool?, avatar: String?, avatar_color: String?, avatar_color_index: Int64??, avatar_color_index_effective: Int64?, avatar_leaf: Int64??, avatar_leaf_color: Int64??, avatar_leaf_effective: Int64?, avatar_leaf_color_effective: Int64?, project: ChatMemberProjectDto?, description: String?, owner: String?, owner_handle: String??) {
+	public init(member: String, role: String, added_by: String, joined_at: Int64, handle: String?, avatar_url: String??, name: String??, status: String?, user_id: String?, last_seen_at: Int64??, online: Bool?, read_receipts: Bool?, silenced: Bool?, silenced_until: Int64?, can_mute_ban: Bool?, avatar: String?, avatar_color: String?, avatar_color_index: Int64??, avatar_color_index_effective: Int64?, avatar_disc_color: Int64??, avatar_disc_color_effective: Int64?, project: ChatMemberProjectDto?, description: String?, owner: String?, owner_handle: String??) {
 		self.member = member
 		self.role = role
 		self.added_by = added_by
@@ -608,10 +601,8 @@ public struct ChatMemberDto: Codable {
 		self.avatar_color = avatar_color
 		self.avatar_color_index = avatar_color_index
 		self.avatar_color_index_effective = avatar_color_index_effective
-		self.avatar_leaf = avatar_leaf
-		self.avatar_leaf_color = avatar_leaf_color
-		self.avatar_leaf_effective = avatar_leaf_effective
-		self.avatar_leaf_color_effective = avatar_leaf_color_effective
+		self.avatar_disc_color = avatar_disc_color
+		self.avatar_disc_color_effective = avatar_disc_color_effective
 		self.project = project
 		self.description = description
 		self.owner = owner
@@ -805,16 +796,16 @@ public struct ProjectDto: Codable {
 	public let vision_enabled: Bool
 	public let avatar_color_index: Int64?
 	public let avatar_color_index_effective: Int64
-	/// D92 leaf avatar: the owner's picks (`null` = automatic) and the pair in effect.
-	public let avatar_leaf: Int64?
-	public let avatar_leaf_color: Int64?
-	/// Always sent by relays with D92; optional so older relays still decode.
-	public let avatar_leaf_effective: Int64?
-	public let avatar_leaf_color_effective: Int64?
+	/// D92 solid disc: the owner's colour pick (`null` = automatic from the id). The alias is
+	/// the name an older relay sent the same pick under.
+	public let avatar_disc_color: Int64?
+	/// The colour actually drawn. Always sent by relays with D92; optional so older relays
+	/// still decode.
+	public let avatar_disc_color_effective: Int64?
 	/// D92 amendment: the agent's uploaded / generated picture, a blob name in the project's own
-	/// slot (`GET /blob/{project}/{key}`); wins over the leaf. Absent on older relays.
+	/// slot (`GET /blob/{project}/{key}`); wins over the disc. Absent on older relays.
 	public let image_key: String?
-	/// Stamp (ms) of the agent's last avatar change (picture, leaf or colour pick). Clients
+	/// Stamp (ms) of the agent's last avatar change (picture or colour pick). Clients
 	/// hold several copies of one agent (project record, each roster); the highest stamp is
 	/// the one drawn, so a change never flips back to the old picture. Absent on older relays.
 	public let avatar_version: Int64?
@@ -835,7 +826,7 @@ public struct ProjectDto: Codable {
 	/// owner allowed; empty for everyone but the owner's own clients.
 	public let message_grants: [MessageGrantDto]?
 
-	public init(id: String, name: String, icon: String, color: String, instructions: String, avatar: String, avatar_color: String, state: String, box: String, box_since: Int64, spend_today_usd: Double, spend_cap_usd: Double, created_at: Int64, last_active_at: Int64, description: String, voice: String?, vision_enabled: Bool, avatar_color_index: Int64?, avatar_color_index_effective: Int64, avatar_leaf: Int64?, avatar_leaf_color: Int64?, avatar_leaf_effective: Int64?, avatar_leaf_color_effective: Int64?, image_key: String?, avatar_version: Int64?, primary_chat_id: String?, owner: ProjectOwnerDto, model: String?, machine: MachineDto, shared: Bool?, my_role: String?, owner_handle: String??, archived_at: Int64??, message_grants: [MessageGrantDto]?) {
+	public init(id: String, name: String, icon: String, color: String, instructions: String, avatar: String, avatar_color: String, state: String, box: String, box_since: Int64, spend_today_usd: Double, spend_cap_usd: Double, created_at: Int64, last_active_at: Int64, description: String, voice: String?, vision_enabled: Bool, avatar_color_index: Int64?, avatar_color_index_effective: Int64, avatar_disc_color: Int64?, avatar_disc_color_effective: Int64?, image_key: String?, avatar_version: Int64?, primary_chat_id: String?, owner: ProjectOwnerDto, model: String?, machine: MachineDto, shared: Bool?, my_role: String?, owner_handle: String??, archived_at: Int64??, message_grants: [MessageGrantDto]?) {
 		self.id = id
 		self.name = name
 		self.icon = icon
@@ -855,10 +846,8 @@ public struct ProjectDto: Codable {
 		self.vision_enabled = vision_enabled
 		self.avatar_color_index = avatar_color_index
 		self.avatar_color_index_effective = avatar_color_index_effective
-		self.avatar_leaf = avatar_leaf
-		self.avatar_leaf_color = avatar_leaf_color
-		self.avatar_leaf_effective = avatar_leaf_effective
-		self.avatar_leaf_color_effective = avatar_leaf_color_effective
+		self.avatar_disc_color = avatar_disc_color
+		self.avatar_disc_color_effective = avatar_disc_color_effective
 		self.image_key = image_key
 		self.avatar_version = avatar_version
 		self.primary_chat_id = primary_chat_id
@@ -1423,10 +1412,11 @@ public struct MeDeviceDto: Codable {
 public struct MeFeaturesDto: Codable {
 	/// #1265: the Connect 1Password flow (default off).
 	public let vault_connect: Bool?
-	/// D92: agents without a photo draw a leaf, not initials (default on).
+	/// Retired 2026-11-05: the leaf artwork is gone and agents draw a solid-colour disc. The
+	/// two keys stay because this struct's names are a contract with shipped apps, and the
+	/// relay now sends `false` for both so a build that still carries the art stops drawing
+	/// it. Current builds ignore them.
 	public let leaf_avatars: Bool?
-	/// D92 follow-on: the leaves play their committed Lottie (idle loop + gust) instead of the
-	/// native sway (default on).
 	public let leaf_lottie: Bool?
 	/// Voice mode — spoken replies, the voice picker, reply playback (default off since
 	/// 2026-10-22, Jacob: hidden everywhere until it works end to end). Absent = off.
@@ -1662,9 +1652,8 @@ public struct PeopleChatDto: Codable {
 	public let created_at: Int64
 	public let title: String
 	public let image_key: String?
-	/// D92 amendment: the group's leaf picture, when one was picked (`image_key` wins).
-	public let avatar_leaf: Int64?
-	public let avatar_leaf_color: Int64?
+	/// D92 amendment: the group's disc colour, when one was picked (`image_key` wins).
+	public let avatar_disc_color: Int64?
 	/// Optional about text for a people group (≤200 chars). Absent or empty = none.
 	public let description: String?
 	public let pending: Bool
@@ -1684,7 +1673,7 @@ public struct PeopleChatDto: Codable {
 	public let lock_state: String
 	public let me: ChatMeDto
 
-	public init(id: String, archived_at: Int64?, kind: String, created_by: String, created_at: Int64, title: String, image_key: String?, avatar_leaf: Int64?, avatar_leaf_color: Int64?, description: String?, pending: Bool, members: [ChatMemberDto], banned: [ChatMemberDto]?, room: String, head_seq: Int64, last_activity_at: Int64, read_seq: Int64, unread: Bool, blocked_senders: [String]?, lock_state: String, me: ChatMeDto) {
+	public init(id: String, archived_at: Int64?, kind: String, created_by: String, created_at: Int64, title: String, image_key: String?, avatar_disc_color: Int64?, description: String?, pending: Bool, members: [ChatMemberDto], banned: [ChatMemberDto]?, room: String, head_seq: Int64, last_activity_at: Int64, read_seq: Int64, unread: Bool, blocked_senders: [String]?, lock_state: String, me: ChatMeDto) {
 		self.id = id
 		self.archived_at = archived_at
 		self.kind = kind
@@ -1692,8 +1681,7 @@ public struct PeopleChatDto: Codable {
 		self.created_at = created_at
 		self.title = title
 		self.image_key = image_key
-		self.avatar_leaf = avatar_leaf
-		self.avatar_leaf_color = avatar_leaf_color
+		self.avatar_disc_color = avatar_disc_color
 		self.description = description
 		self.pending = pending
 		self.members = members

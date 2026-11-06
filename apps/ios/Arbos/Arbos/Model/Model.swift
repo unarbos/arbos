@@ -238,8 +238,8 @@ enum WorkspaceState: String, Codable, Equatable {
 
 /// The Create sheet's pending picture, applied once the entity exists (Jacob, 2026-10-25: the
 /// sheet offers Upload and Generate only; with neither the entity is stored neutral —
-/// `avatar_leaf` = `LeafArt.neutral`, the name's initial on a grey disc — never an automatic
-/// leaf).
+/// `avatar_disc_color` = `DiscArt.neutral`, the name's initial on a grey disc — never an
+/// automatic colour).
 enum DraftPicture: Equatable {
     /// The photo as chosen, already the encoded master (PNG or JPEG, ≤ 1024 px —
     /// `PictureMaster`); uploaded into the new entity's slot.
@@ -282,13 +282,12 @@ struct Project: Identifiable, Equatable, Codable {
     var avatarColorIndex: Int? = nil
     var avatarColorIndexEffective: Int? = nil
     var effectiveAvatarColorIndex: Int? { AvatarPalette.clamp(avatarColorIndexEffective) ?? AvatarPalette.clamp(avatarColorIndex) }
-    /// D92: the owner's leaf picks (`avatar_leaf` 0–8, `avatar_leaf_color` 0–9); nil → derived
-    /// from the id by the shared rule (`LeafArt.pick`), the same pair the relay reports as
-    /// `avatar_leaf_effective` / `avatar_leaf_color_effective`.
-    var avatarLeaf: Int? = nil
-    var avatarLeafColor: Int? = nil
+    /// D92: the owner's disc colour pick (`avatar_disc_color` 0–9); nil → derived from the id
+    /// by the shared rule (`DiscArt.pick`), the same colour the relay reports as
+    /// `avatar_disc_color_effective`.
+    var avatarDiscColor: Int? = nil
     /// D92 amendment: the agent's uploaded / generated picture — a blob name in the project's own
-    /// slot (`/blob/{id}/{key}`); wins over the leaf while set.
+    /// slot (`/blob/{id}/{key}`); wins over the disc while set.
     var imageKey: String? = nil
     /// `imageKey` as a fetchable URL — the relay's public picture route
     /// `/projects/{id}/avatar.jpg?v={avatarVersion}` (`Project.pictureURL`), filled in by the
@@ -353,8 +352,7 @@ extension Project {
         self.avatarColor = dto.avatar_color.isEmpty ? nil : dto.avatar_color
         self.avatarColorIndex = dto.avatar_color_index.map(Int.init)
         self.avatarColorIndexEffective = Int(dto.avatar_color_index_effective)
-        self.avatarLeaf = dto.avatar_leaf.map(Int.init)
-        self.avatarLeafColor = dto.avatar_leaf_color.map(Int.init)
+        self.avatarDiscColor = dto.avatar_disc_color.map(Int.init)
         self.imageKey = dto.image_key.flatMap { $0.isEmpty ? nil : $0 }
         self.avatarVersion = dto.avatar_version.map(Int.init) ?? 0
         self.instructions = dto.instructions
@@ -2116,7 +2114,7 @@ extension Project {
     /// the agent's *current* picture, stamped with `avatar_version` so a change is a new URL and
     /// no cache (URLCache, `AvatarImageCache`) ever serves the old bytes. Why not the blob slot:
     /// `/blob/{project}/{key}` is readable by the owner and the project's guests only, so a
-    /// viewer who merely shares a group with the agent got 403 and drew the leaf (Jacob,
+    /// viewer who merely shares a group with the agent got 403 and drew the disc (Jacob,
     /// 2026-10-25, "Hezbola"). nil without a picture or without a relay.
     static func pictureURL(httpUrl: String, id: Id, imageKey: String?, version: Int) -> String? {
         guard let imageKey, !imageKey.isEmpty, !httpUrl.isEmpty else { return nil }

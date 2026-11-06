@@ -81,7 +81,7 @@ final class MentionTable {
             add(slug, MentionEntry(
                 name: p.name.trimmingCharacters(in: .whitespaces),
                 target: .agent(projectId: p.id),
-                picture: AnyView(AgentAvatar(project: p, theme: theme, size: Self.picture, still: true))
+                picture: AnyView(AgentAvatar(project: p, theme: theme, size: Self.picture))
             ))
         }
         for chat in model.peopleChats {
@@ -101,7 +101,7 @@ final class MentionTable {
                 add(slug, MentionEntry(
                     name: p.name,
                     target: .agent(projectId: p.id),
-                    picture: AnyView(AgentAvatar(project: p, theme: theme, size: Self.picture, still: true))
+                    picture: AnyView(AgentAvatar(project: p, theme: theme, size: Self.picture))
                 ))
             }
             if chat.isGroup {
@@ -166,8 +166,7 @@ final class MentionTable {
                 h.combine(p.id)
                 h.combine(p.name)
                 h.combine(p.avatarColorIndex)
-                h.combine(p.avatarLeaf)
-                h.combine(p.avatarLeafColor)
+                h.combine(p.avatarDiscColor)
                 h.combine(p.imageKey)
                 h.combine(p.avatarVersion)
             }
@@ -175,8 +174,7 @@ final class MentionTable {
             for chat in model.peopleChats.sorted(by: { $0.id < $1.id }) {
                 h.combine(chat.id)
                 h.combine(chat.title)
-                h.combine(chat.avatarLeaf)
-                h.combine(chat.avatarLeafColor)
+                h.combine(chat.avatarDiscColor)
                 h.combine(chat.imageKey)
                 for m in chat.members {
                     h.combine(m.id)
@@ -184,8 +182,7 @@ final class MentionTable {
                     h.combine(m.name)
                     h.combine(m.avatarUrl)
                     h.combine(m.project?.name)
-                    h.combine(m.project?.avatarLeaf)
-                    h.combine(m.project?.avatarLeafColor)
+                    h.combine(m.project?.avatarDiscColor)
                     h.combine(m.project?.imageKey)
                     h.combine(m.project?.avatarVersion)
                     h.combine(m.isAgent)

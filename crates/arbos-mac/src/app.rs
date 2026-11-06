@@ -632,8 +632,8 @@ pub struct ConnectReveal {
 #[derive(Clone, Debug, PartialEq)]
 pub struct GroupDraft {
     pub title: String,
-    /// The leaf pair to store: the neutral pair since 2026-10-25 (no leaf grid on the sheet).
-    pub leaf: Option<crate::ui::avatars::LeafPick>,
+    /// The disc colour to store: the neutral value since 2026-10-25 (no swatches on the sheet).
+    pub disc_color: Option<u8>,
     /// The sheet's uploaded / generated picture, if any.
     pub picture: Option<crate::sync::DraftPicture>,
 }
@@ -2396,7 +2396,7 @@ impl AppState {
                         self.command(ClientCommand::CreateProject {
                             name: "Home".into(),
                             avatar_color_index: None,
-                            leaf: None,
+                            disc_color: None,
                             picture: None,
                             source_project_id: None,
                             description: None,
@@ -5444,7 +5444,7 @@ impl AppState {
     pub fn create_server(
         &mut self,
         name: String,
-        leaf: Option<crate::ui::avatars::LeafPick>,
+        disc_color: Option<u8>,
         picture: Option<crate::sync::DraftPicture>,
         cx: &mut Context<Self>,
     ) {
@@ -5456,7 +5456,7 @@ impl AppState {
         self.server_error = None;
         self.command(ClientCommand::ServerCreate {
             name,
-            leaf,
+            disc_color,
             picture,
         });
         cx.notify();
@@ -7398,28 +7398,17 @@ impl AppState {
         }
     }
 
-    /// D92: the owner's leaf and disc-colour picks (`None` = automatic). Optimistic, then PATCH.
-    pub fn set_avatar_leaf(
-        &mut self,
-        project_id: Id,
-        leaf: Option<u8>,
-        color: Option<u8>,
-        cx: &mut Context<Self>,
-    ) {
+    /// D92: the owner's disc-colour pick (`None` = automatic). Optimistic, then PATCH.
+    pub fn set_avatar_disc(&mut self, project_id: Id, color: Option<u8>, cx: &mut Context<Self>) {
         if let Some(p) = self.projects.iter_mut().find(|p| p.id == project_id) {
-            p.avatar_leaf = leaf;
-            p.avatar_leaf_color = color;
+            p.avatar_disc_color = color;
         }
-        self.command(ClientCommand::SetAvatarLeaf {
-            project_id,
-            leaf,
-            color,
-        });
+        self.command(ClientCommand::SetAvatarDisc { project_id, color });
         cx.notify();
     }
 
     /// D92 amendment: the agent's picture from the avatar picker (a file to upload, or a
-    /// generated key). The leaf stays stored underneath; the picture wins while set.
+    /// generated key). The disc colour stays stored underneath; the picture wins while set.
     pub fn set_project_image(
         &mut self,
         project_id: Id,
@@ -7458,37 +7447,25 @@ impl AppState {
         cx.notify();
     }
 
-    /// A server's leaf picture (`None` = initials; drops the uploaded picture).
-    pub fn set_server_leaf(
-        &mut self,
-        server_id: Id,
-        pick: Option<crate::ui::avatars::LeafPick>,
-        cx: &mut Context<Self>,
-    ) {
+    /// A server's disc colour (`None` = initials; drops the uploaded picture).
+    pub fn set_server_disc(&mut self, server_id: Id, color: Option<u8>, cx: &mut Context<Self>) {
         if let Some(s) = self.servers.iter_mut().find(|s| s.id == server_id) {
-            s.avatar_leaf = pick.map(|l| l.leaf);
-            s.avatar_leaf_color = pick.map(|l| l.color);
+            s.avatar_disc_color = color;
             s.image_key = None;
             s.image_url = None;
         }
-        self.command(ClientCommand::SetServerLeaf { server_id, pick });
+        self.command(ClientCommand::SetServerDisc { server_id, color });
         cx.notify();
     }
 
-    /// A group's leaf picture from the avatar picker (`None` = back to initials; also drops
-    /// the uploaded image so the leaf shows).
-    pub fn set_group_leaf(
-        &mut self,
-        chat_id: Id,
-        pick: Option<crate::ui::avatars::LeafPick>,
-        cx: &mut Context<Self>,
-    ) {
+    /// A group's disc colour from the avatar picker (`None` = back to initials; also drops
+    /// the uploaded image so the disc shows).
+    pub fn set_group_disc(&mut self, chat_id: Id, color: Option<u8>, cx: &mut Context<Self>) {
         if let Some(p) = self.projects.iter_mut().find(|p| p.id == chat_id) {
-            p.avatar_leaf = pick.map(|l| l.leaf);
-            p.avatar_leaf_color = pick.map(|l| l.color);
+            p.avatar_disc_color = color;
             p.image_url = None;
         }
-        self.command(ClientCommand::SetGroupLeaf { chat_id, pick });
+        self.command(ClientCommand::SetGroupDisc { chat_id, color });
         cx.notify();
     }
 
@@ -8217,7 +8194,7 @@ impl AppState {
 
     /// A profile picture full-size in the media viewer (Jacob, 2026-10-25: tap the hero on any
     /// pane to view it). Same viewer, same close gestures; the bytes come from the avatar cache
-    /// (fetched now when missing). Nothing opens for an empty URL (letter / leaf avatars).
+    /// (fetched now when missing). Nothing opens for an empty URL (letter / disc avatars).
     pub fn open_picture_viewer(&mut self, name: &str, url: &str, cx: &mut Context<Self>) {
         if url.trim().is_empty() {
             return;
@@ -10216,15 +10193,15 @@ impl AppState {
         self.people_busy = true;
         self.people_error = None;
         self.awaiting_group = Some(handles.clone());
-        let (title, leaf, picture) = match self.new_group_draft.take() {
-            Some(d) => (Some(d.title), d.leaf, d.picture),
+        let (title, disc_color, picture) = match self.new_group_draft.take() {
+            Some(d) => (Some(d.title), d.disc_color, d.picture),
             None => (None, None, None),
         };
         self.command(ClientCommand::CreatePeopleGroup {
             handles,
             agent_ids,
             title,
-            leaf,
+            disc_color,
             picture,
         });
         cx.notify();
@@ -10665,7 +10642,7 @@ impl AppState {
         &mut self,
         name: String,
         avatar_color_index: Option<u8>,
-        leaf: Option<crate::ui::avatars::LeafPick>,
+        disc_color: Option<u8>,
         picture: Option<crate::sync::DraftPicture>,
         cx: &mut Context<Self>,
     ) {
@@ -10674,7 +10651,7 @@ impl AppState {
         self.command(ClientCommand::CreateProject {
             name,
             avatar_color_index,
-            leaf,
+            disc_color,
             picture,
             source_project_id: None,
             description: None,
@@ -10857,17 +10834,19 @@ impl AppState {
             &src.id,
             src.avatar_color_override.or(src.avatar_color_index),
         ));
-        // D92: the fork keeps the source's leaf and colour too — or its neutral disc.
-        let leaf = Some(if crate::ui::avatars::leaf::is_neutral(src.avatar_leaf) {
-            crate::ui::avatars::neutral_pick()
-        } else {
-            crate::ui::avatars::project_leaf(src)
-        });
+        // D92: the fork keeps the source's disc colour too — or its neutral disc.
+        let disc_color = Some(
+            if crate::ui::avatars::disc::is_neutral(src.avatar_disc_color) {
+                crate::ui::avatars::neutral_pick()
+            } else {
+                crate::ui::avatars::disc_color(&src.id, src.avatar_disc_color)
+            },
+        );
         self.awaiting_new_project = true;
         self.command(ClientCommand::CreateProject {
             name,
             avatar_color_index,
-            leaf,
+            disc_color,
             picture: None,
             source_project_id: Some(project_id),
             description,
@@ -12145,8 +12124,7 @@ impl AppState {
             avatar: None,
             avatar_color: None,
             avatar_color_index: None,
-            avatar_leaf: None,
-            avatar_leaf_color: None,
+            avatar_disc_color: None,
             avatar_url: account.map(|a| a.avatar_url).unwrap_or_default(),
         }
     }

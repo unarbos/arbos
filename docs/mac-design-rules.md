@@ -784,8 +784,8 @@ speech bubble of v0.6.302: "use standard versions instead of making them."
 The hand-drawn pack (`ui/icons.rs`) is frozen and now serves only as the
 fallback for a symbol the running macOS lacks (and the Linux dev build);
 its one living custom path is the activity spinner (marked
-`// icon: custom` — SF has no fading-spoke dial). Brand art (the leaf
-avatars, the black-and-white tree) is not an icon and is not in this rule.
+`// icon: custom` — SF has no fading-spoke dial). Brand art (the
+black-and-white tree) is not an icon and is not in this rule.
 
 | Surface rule | Detail | Where |
 |---|---|---|
@@ -1347,7 +1347,7 @@ window top at row 0; pane 639 px = 319.5 pt wide). Points.
 | Share · close discs | **36** each, fill `#1F1F1F`, glyph `#E0E0E0`; **8** apart, **12** from the pane edge, centred on the strip discs' line (top 12 in the 60 band; `grok-chat-1.png` rows 28–99 for both sets) | `glass::control_disc` — the strip's disc (`CONTROL` 36, `surface_2`, `text`); `top_bar()` pads `PANE_DISC_INSET` 12, gaps `CONTROL_GAP` 8; close `xmark` at `PANE_CLOSE_GLYPH` 22 → 11 pt mark (Grok 11); share `share` at `PANE_SHARE_GLYPH` 21 → 14 pt (Grok 14). Before: a 30 pt `glass::circle` with a 6.5 pt × at top 17, inset 10 |
 | Share disc action | — | **agent pane only** (owner: the invite sheet — let a person in on this agent). Every other pane — group, server, person, channel, own profile — draws the × alone on the discs' line (`pane::share_disc_allowed`). Jacob 2026-10-25, [feedback info-pane-no-share-disc-groups-2026-10-25]: "remove this button from side bar on group/" — the group's share disc (Add members) of v0.6.224 is gone; Add members stays the group's first card |
 | Top bar fill | none | none (was `card()`); the body still fades under the pinned hero + pill |
-| Hero picture | plain bot mark, 58 pt, 73.5 under the window top | `HERO_TOP` 14 under the 60 band (was 4); the agent's leaf **without its pastel disc** (`avatars::project_hero_bare`: the hue's pastel as ink on dark, its ink on light) and **no presence dot** — presence stays on the sidebar row; `HERO_AVATAR` 72 kept (Jacob's mock b) |
+| Hero picture | plain bot mark, 58 pt, 73.5 under the window top | `HERO_TOP` 14 under the 60 band (was 4); the agent's solid disc (`avatars::project_hero`) and **no presence dot** — presence stays on the sidebar row; `HERO_AVATAR` 72 kept (Jacob's mock b) |
 | Delete agent | — | **gone from the pane** (footer and `Shell.agent_delete_armed` removed). Deleting an agent is the sidebar row's menu → Delete, at once (`sidebar::row_menu`, the Delete-is-immediate rule below) |
 
 Pinned by `profiles::chrome_tests` (`the_pane_is_the_chats_surface_in_both_appearances`,
@@ -1670,27 +1670,27 @@ snap, mid-slide reversal, no slide on a page swap or a width drag) and
 
 **The Create New Agent / Group / Server sheets offer exactly two picture
 options — the agent avatar picker's own Upload and Generate — and never a
-leaf grid or pastel swatches. An entity created with neither gets the
-name's first letter on a neutral grey disc; no leaf is ever auto-assigned.**
+colour grid. An entity created with neither gets the name's first letter on a
+neutral grey disc; no colour is ever auto-assigned.**
 Existing agents, groups and servers keep the avatars they have (stored or
-automatic leaf, picture): nothing is migrated or re-rendered.
+automatic colour, picture): nothing is migrated or re-rendered.
 
 | Item | Rule |
 |---|---|
 | Options | `avatar_picker::tab_pill` with `Tab::for_target(&Target::Draft)` = `[Upload, Generate]` (Upload first, Jacob's order); the bodies are the picker's `upload_body` / `generate_body` on the shell's `create_picker` (a `Picker` on `Target::Draft`) |
-| Where | capsules at **246** from the sheet top (where Grok's first icon row began), body 16 under; footer 12 under the taller body; the card is 461.5 tall (was 602.5 with the 4 × 4 grid and two swatch rows) |
+| Where | capsules at **246** from the sheet top (where Grok's first icon row began), body 16 under; footer 12 under the taller body; the card is 461.5 tall (was 602.5 with the shape grid and two swatch rows) |
 | Preview | the hero disc (114) shows the chosen file, the generated picture, or the neutral initial of the typed name (an empty grey disc until a name is typed) — `avatars::neutral_element` |
 | Generate before the entity exists | `POST /me/avatar/generate` into my own slot `users:{me}` (#1789); on Create the bytes are copied into the new entity's slot (`sync::relay::adopt_draft_picture`); a relay without the route says "Generate is not on this relay yet; upload a picture instead." |
-| Stored value | `avatar_leaf` = `avatar_leaf_color` = **255** (`arbos_core::avatar::leaf::NEUTRAL`), accepted by the relay's `check_leaf_pick`; `null` stays the automatic leaf, so older agents are untouched. An older client's `pick_for` ignores 255 and draws the automatic leaf |
-| Neutral disc | dark `#3A3A3A` with the letter in `#E5E5E5`; light `#E6E6E6` / `#4A4A4A` (`leaf::NEUTRAL_DARK` / `NEUTRAL_LIGHT`); one letter, semibold at `INITIALS_SCALE`; bubble-bar accent a mid grey (`leaf::neutral_accent`) |
+| Stored value | `avatar_disc_color` = **255** (`arbos_core::avatar::disc::NEUTRAL`), accepted by the relay's `check_disc_color`; `null` stays the automatic colour, so older agents are untouched. An older client's `color_for` ignores 255 and draws the automatic colour |
+| Neutral disc | dark `#3A3A3A` with the letter in `#E5E5E5`; light `#E6E6E6` / `#4A4A4A` (`disc::NEUTRAL_DARK` / `NEUTRAL_LIGHT`); one letter, semibold at `INITIALS_SCALE`; bubble-bar accent a mid grey (`disc::neutral_accent`) |
 | Everywhere | sidebar rows, header pill, pane hero, bubbles, presence row, mention chips and the composer picker all go through `avatars::agent` / `project` / `agent_picture` / `mention::Picture::Neutral`, so the one stored value draws the one disc |
 
-Pinned by `create_entity::tests` (options, stored pair, geometry) and
+Pinned by `create_entity::tests` (options, stored value, geometry) and
 `create_entity::render_tests` (headless render of both sheets: the two
-capsules, no Bot tab, no leaf element, the footer where the constants say,
+capsules, no Bot tab, no coloured disc, the footer where the constants say,
 nothing picked → no picture sent), `avatar_picker::tests::the_draft_offers_upload_and_generate_only_and_hands_over_its_pick`,
 `avatars::tests::neutral_pick_is_the_core_value_and_identity_carries_it`,
-`arbos_core::avatar::leaf::tests::neutral_is_its_own_value_…` and the relay's
+`arbos_core::avatar::disc::tests::neutral_is_its_own_value_…` and the relay's
 `avatar::tests::neutral_pick_is_accepted_and_the_rest_still_validates`.
 Rig: `ARBOS_OPEN_NEW_AGENT=1` / `ARBOS_OPEN_CREATE=group|server` with
 `ARBOS_NEW_AGENT_NAME=…` and `ARBOS_CREATE_PICTURE=upload|generate[:<prompt>]`.

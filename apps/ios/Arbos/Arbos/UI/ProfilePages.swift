@@ -610,7 +610,7 @@ extension View {
 
 /// Jacob, 2026-10-25: a tap on a profile picture opens it full-size in the media viewer chat
 /// photos use (tap / swipe-down closes, pinch zooms). With no picture (`url` empty — initials
-/// or a leaf) the content is just drawn: nothing to view. Panes whose picture opens the avatar
+/// or a disc) the content is just drawn: nothing to view. Panes whose picture opens the avatar
 /// picker instead get **View** inside the picker.
 struct ViewablePicture<Content: View>: View {
     @EnvironmentObject private var model: AppModel
@@ -1098,7 +1098,7 @@ struct UserProfileView: View {
             AnyView(
                 Button { dismiss(); model.open(project: p) } label: {
                     PaneRow(
-                        leading: .avatar(AnyView(AgentAvatar(project: p, theme: theme, size: PaneKit.avatar, still: true))),
+                        leading: .avatar(AnyView(AgentAvatar(project: p, theme: theme, size: PaneKit.avatar))),
                         title: p.name,
                         subtitle: "shared project · @\(p.ownerHandle ?? model.user?.login ?? "")",
                         chevron: true
@@ -1532,22 +1532,22 @@ struct GroupProfileView: View {
         ]
     }
 
-    /// The hero picture: the agent's leaf for a shared project; the group's
+    /// The hero picture: the agent's disc for a shared project; the group's
     /// cluster or picked image for a people group — tap → the edit sheet for the
     /// owner and admins, full-size view (when there is a picture) for everyone else.
     @ViewBuilder private var heroPicture: some View {
         if let project {
             ViewablePicture(name: project.name, url: model.projectImageURL(project)?.absoluteString) {
-                AgentAvatar(project: project, theme: theme, size: PaneKit.heroAvatar, idle: true)
+                AgentAvatar(project: project, theme: theme, size: PaneKit.heroAvatar)
             }
         } else if !canEditGroupSettings {
             ViewablePicture(name: people?.title ?? "", url: groupImageURL) {
-                AvatarCluster(members: clusterMembers, size: 72, imageUrl: groupImageURL, leaf: people?.leafPick, neutralName: people?.isNeutralAvatar == true ? people?.title : nil)
+                AvatarCluster(members: clusterMembers, size: 72, imageUrl: groupImageURL, discColor: people?.avatarDiscColor.map { UInt8(clamping: $0) }, neutralName: people?.isNeutralAvatar == true ? people?.title : nil)
                     .frame(width: PaneKit.heroAvatar, height: PaneKit.heroAvatar)
             }
         } else {
             Button { showEdit = true } label: {
-                AvatarCluster(members: clusterMembers, size: 72, imageUrl: groupImageURL, leaf: people?.leafPick, neutralName: people?.isNeutralAvatar == true ? people?.title : nil)
+                AvatarCluster(members: clusterMembers, size: 72, imageUrl: groupImageURL, discColor: people?.avatarDiscColor.map { UInt8(clamping: $0) }, neutralName: people?.isNeutralAvatar == true ? people?.title : nil)
                     .frame(width: PaneKit.heroAvatar, height: PaneKit.heroAvatar)
                     .paneCrayon()
                     .contentShape(Rectangle())
@@ -1697,7 +1697,7 @@ struct GroupProfileView: View {
     private func memberRow(_ r: Row) -> some View {
         let isMe = r.agent == nil && r.person.id == model.user?.id
         let title = r.agent?.name ?? (isMe ? "\(r.person.displayName) (you)" : r.person.displayName)
-        let avatar: AnyView = r.agent.map { AnyView(AgentAvatar(project: $0, theme: theme, size: PaneKit.avatar, still: true)) }
+        let avatar: AnyView = r.agent.map { AnyView(AgentAvatar(project: $0, theme: theme, size: PaneKit.avatar)) }
             ?? AnyView(PersonAvatar(url: r.person.avatarUrl, handle: r.person.handle, size: PaneKit.avatar, name: r.person.name, id: r.person.id, colorIndex: r.person.avatarColorIndex))
         let member = r.agent == nil ? people?.members.first(where: { !$0.isAgent && $0.id == r.person.id }) : nil
         let isSilenced = member?.isSilencedNow ?? false
@@ -2633,10 +2633,10 @@ struct GroupEditSheet: View {
             ScrollView {
                 VStack(spacing: 22) {
                     // The picture: the avatar picker sheet (D92 amendment — Bot = the group's
-                    // leaf, Upload = a photo; changes apply on Set avatar).
+                    // colour, Upload = a photo; changes apply on Set avatar).
                     Button { showAvatarPicker = true } label: {
                         ZStack(alignment: .bottomTrailing) {
-                            AvatarCluster(members: clusterMembers, size: 72, imageUrl: existingImageURL, leaf: people?.leafPick, neutralName: people?.isNeutralAvatar == true ? people?.title : nil)
+                            AvatarCluster(members: clusterMembers, size: 72, imageUrl: existingImageURL, discColor: people?.avatarDiscColor.map { UInt8(clamping: $0) }, neutralName: people?.isNeutralAvatar == true ? people?.title : nil)
                                 .frame(width: 112, height: 112)
                             GlassCircle(size: 36) { // control-size: exception rowIconTiles
                                 Image(systemName: "camera.fill")

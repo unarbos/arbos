@@ -6,16 +6,16 @@
 //! servers keep their one-line explainer under the field.
 //!
 //! **Picture (Jacob, 2026-10-25, [feedback create-sheet-avatar-upload-generate-mac-2026-10-25]):
-//! the sixteen-leaf grid and the ten pastel swatches are gone. Under the name field sit the
+//! the sixteen-shape grid and the ten pastel swatches are gone. Under the name field sit the
 //! agent avatar picker's own two options — `Upload | Generate` (`avatar_picker::tab_pill`,
 //! `upload_body`, `generate_body` on a draft [`avatar_picker::Picker`]) — and the preview
 //! above the field shows the chosen file, the generated picture, or, when neither was picked,
 //! the fallback every new agent / group / server gets: the name's first letter on a neutral
-//! grey disc (`avatars::neutral_element`). The entity is stored with the neutral pair
-//! (`leaf::NEUTRAL`), never an automatic leaf; existing agents keep theirs.**
+//! grey disc (`avatars::neutral_element`). The entity is stored with the neutral value
+//! (`disc::NEUTRAL`), never an automatic colour; existing agents keep theirs.**
 //!
 //! Header, preview and field keep Grok's sizes, measured on the 2x reference
-//! (`media/leaf-avatars/create-sheet/ref-grok-create-new-bot.png`) and written here in
+//! (`media/agent-avatars/create-sheet/ref-grok-create-new-bot.png`) and written here in
 //! points; the option rows start where Grok's first icon row did.
 
 use gpui::{div, prelude::*, px, Context, Div, FontWeight, Hsla, MouseButton};
@@ -220,9 +220,9 @@ pub fn options() -> Vec<Tab> {
     Tab::for_target(&avatar_picker::Target::Draft)
 }
 
-/// The leaf pair a new entity is stored with: the neutral one, whatever else was picked, so
-/// no leaf is ever auto-assigned (a later Reset lands on the initial, not on a leaf).
-pub fn stored_leaf() -> avatars::LeafPick {
+/// The disc colour a new entity is stored with: the neutral one, whatever else was picked, so
+/// no colour is ever auto-assigned (a later Reset lands on the initial, not on a disc).
+pub fn stored_disc() -> u8 {
     avatars::neutral_pick()
 }
 
@@ -539,31 +539,31 @@ pub fn sheet(shell: &Shell, kind: Kind, cx: &mut Context<Shell>) -> Div {
 mod tests {
     //! Jacob, 2026-10-25: the Create sheets offer Upload and Generate only, and an entity
     //! created without a pick is stored neutral (the name's initial on a grey disc), never
-    //! with an automatic leaf.
+    //! with an automatic colour.
 
     use super::*;
 
     #[test]
     fn the_sheet_offers_upload_and_generate_only() {
         assert_eq!(options(), [Tab::Upload, Tab::Generate]);
-        assert!(!options().contains(&Tab::Bot), "no leaf grid, no swatches");
+        assert!(!options().contains(&Tab::Bot), "no swatches");
     }
 
     #[test]
-    fn a_new_entity_is_stored_neutral_never_with_an_automatic_leaf() {
-        let stored = stored_leaf();
-        assert!(avatars::leaf::is_neutral(Some(stored.leaf)));
-        assert_eq!(stored.color, avatars::leaf::NEUTRAL);
-        // The automatic pair an id would get is not what the sheet sends.
+    fn a_new_entity_is_stored_neutral_never_with_an_automatic_colour() {
+        let stored = stored_disc();
+        assert!(avatars::disc::is_neutral(Some(stored)));
+        assert_eq!(stored, avatars::disc::NEUTRAL);
+        // The automatic colour an id would get is not what the sheet sends.
         for seed in ["new-agent-0", "new-group-3", "new-server-1"] {
-            assert_ne!(avatars::leaf::default_pick(seed), stored);
+            assert_ne!(avatars::disc::default_color(seed), stored);
         }
     }
 
     #[test]
-    fn the_option_rows_sit_where_the_leaf_grid_was_and_the_sheet_got_shorter() {
+    fn the_option_rows_sit_where_the_shape_grid_was_and_the_sheet_got_shorter() {
         // Grok's first icon row: 36 pt rings centred on 264 → top 246. The rows read top to
-        // bottom in order, and the leaf sheet's footer sat at 546 (602.5 tall): without the
+        // bottom in order, and the old sheet's footer sat at 546 (602.5 tall): without the
         // grid the card is shorter.
         let rows = std::hint::black_box([
             OPTIONS_TOP,
@@ -584,7 +584,7 @@ mod tests {
 #[cfg(test)]
 mod render_tests {
     //! Headless render of the Create New Agent and Create New Group sheets (the shell's own
-    //! `create_entity::sheet` on an idle app state): no leaf grid, no swatch, the two options,
+    //! `create_entity::sheet` on an idle app state): no shape grid, no swatch, the two options,
     //! and the neutral initial in the preview when nothing was picked.
 
     use futures::future::BoxFuture;
@@ -688,7 +688,7 @@ mod render_tests {
     }
 
     #[gpui::test]
-    fn both_create_sheets_show_two_options_and_no_leaf_grid(cx: &mut TestAppContext) {
+    fn both_create_sheets_show_two_options_and_no_shape_grid(cx: &mut TestAppContext) {
         let (_rt, state, shell, vcx) = mount(cx);
         for kind in [Kind::Agent, Kind::Group] {
             open(kind, "Field notes", &state, &shell, vcx);
@@ -706,8 +706,8 @@ mod render_tests {
             );
             assert!(!drawn(vcx, "avatar-tab-bot"), "{kind:?}: no Bot tab");
             assert!(
-                !drawn(vcx, "leaf-hover") && !drawn(vcx, "leaf-hero"),
-                "{kind:?}: no leaf anywhere on the sheet (no grid, no leaf preview)"
+                !drawn(vcx, "agent-disc"),
+                "{kind:?}: no coloured disc anywhere on the sheet (no grid, no disc preview)"
             );
             assert!(
                 drawn(vcx, "avatar-upload-choose"),
@@ -776,23 +776,23 @@ mod render_tests {
         assert!(!state.read_with(vcx, |s, _| s.connect_open));
     }
 
-    /// With neither option used, the preview is the neutral initial — no leaf element at all
-    /// on the sheet — and switching to Generate shows the prompt body, still no leaf.
+    /// With neither option used, the preview is the neutral initial — no coloured disc at all
+    /// on the sheet — and switching to Generate shows the prompt body, still no disc.
     #[gpui::test]
     fn the_preview_falls_back_to_the_neutral_initial(cx: &mut TestAppContext) {
         let (_rt, state, shell, vcx) = mount(cx);
         open(Kind::Agent, "Field notes", &state, &shell, vcx);
         assert!(drawn(vcx, "create-entity-preview"));
         assert!(
-            vcx.debug_bounds("leaf-hero").is_none() && vcx.debug_bounds("leaf-hover").is_none(),
-            "the neutral preview draws no leaf"
+            vcx.debug_bounds("agent-disc").is_none(),
+            "the neutral preview draws no coloured disc"
         );
         let has_pending = shell.read_with(vcx, |this, cx| {
             avatar_picker::pending_preview(&this.create_picker, this.state.read(cx), PREVIEW)
                 .is_some()
         });
         assert!(!has_pending);
-        assert_eq!(avatars::leaf::initial("Field notes"), "F");
+        assert_eq!(avatars::disc::initial("Field notes"), "F");
         shell.update(vcx, |this, cx| {
             this.create_picker.tab = Tab::Generate;
             cx.notify();
@@ -801,6 +801,6 @@ mod render_tests {
         assert!(drawn(vcx, "avatar-generate-go"), "the Generate body is up");
         assert!(drawn(vcx, "avatar-generate-status"));
         assert!(!drawn(vcx, "avatar-upload-choose"));
-        assert!(vcx.debug_bounds("leaf-hero").is_none());
+        assert!(vcx.debug_bounds("agent-disc").is_none());
     }
 }

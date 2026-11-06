@@ -80,7 +80,7 @@ and a 250 GB volume (five leftover 13 GB test-simulator clones took it from 60 t
   a line that must draw a group / server / person picture carries `// avatar-lint: allow (<why>)`.
 - The stamp is the only truth: a newer known version never loses to a cached or older copy; at
   equal stamps the caller's order holds (chat roster, my records, other rosters). While a picture
-  loads, the disc is the neutral initial — never an older picture, never the leaf.
+  loads, the disc is the neutral initial — never an older picture, never the coloured disc.
 
 ## One Glass-aware fill (#2801, 2026-11-05)
 

@@ -360,7 +360,7 @@ final class RelayAPI {
     func createProject(
         name: String,
         avatarColorIndex: Int? = nil,
-        leaf: LeafPick? = nil,
+        discColor: UInt8? = nil,
         color: String? = nil,
         description: String? = nil,
         instructions: String? = nil,
@@ -368,8 +368,8 @@ final class RelayAPI {
     ) async throws -> Id? {
         var body: [String: Any] = ["name": name]
         if let avatarColorIndex { body["avatar_color_index"] = avatarColorIndex }
-        // D92: the Create sheet's leaf + colour (forks copy the source's).
-        if let leaf { body["avatar_leaf"] = Int(leaf.leaf); body["avatar_leaf_color"] = Int(leaf.color) }
+        // D92: the Create sheet's disc colour (forks copy the source's).
+        if let discColor { body["avatar_disc_color"] = Int(discColor) }
         if let color { body["color"] = color }
         if let description, !description.isEmpty { body["description"] = String(description.prefix(500)) }
         if let instructions, !instructions.isEmpty { body["instructions"] = instructions }
@@ -920,10 +920,10 @@ final class RelayAPI {
         return chat
     }
 
-    func createGroup(handles: [String], agentIds: [Id] = [], title: String? = nil, leaf: LeafPick? = nil) async throws -> PeopleChat {
+    func createGroup(handles: [String], agentIds: [Id] = [], title: String? = nil, discColor: UInt8? = nil) async throws -> PeopleChat {
         var body: [String: Any] = ["kind": "group", "members": handles, "agent_ids": agentIds]
         if let title, !title.isEmpty { body["title"] = title }
-        if let leaf { body["avatar_leaf"] = Int(leaf.leaf); body["avatar_leaf_color"] = Int(leaf.color) }
+        if let discColor { body["avatar_disc_color"] = Int(discColor) }
         let v = try await json("POST", "/chats", body: body)
         guard let chat = PeopleChat.parse(v) else { throw RelayError(status: 0, message: "The relay returned no chat") }
         return chat
@@ -943,9 +943,9 @@ final class RelayAPI {
     }
 
     /// `POST /servers {name}` → 201 the server (with `#general` and members).
-    func createServer(name: String, leaf: LeafPick? = nil) async throws -> Server {
+    func createServer(name: String, discColor: UInt8? = nil) async throws -> Server {
         var body: [String: Any] = ["name": name.trimmingCharacters(in: .whitespacesAndNewlines)]
-        if let leaf { body["avatar_leaf"] = Int(leaf.leaf); body["avatar_leaf_color"] = Int(leaf.color) }
+        if let discColor { body["avatar_disc_color"] = Int(discColor) }
         let v = try await json("POST", "/servers", body: body)
         guard let s = Server.parse(v) else { throw RelayError(status: 0, message: "The relay returned no server") }
         return s
@@ -961,12 +961,11 @@ final class RelayAPI {
         _ = try await request("PATCH", "/servers/\(id)", body: body)
     }
 
-    /// D92 amendment: a server's leaf picture — `PATCH /servers/{id} {avatar_leaf,
-    /// avatar_leaf_color, image_key: null}` (nil = back to initials; the picture goes with it).
-    func setServerLeaf(_ id: String, pick: LeafPick?) async throws {
+    /// D92 amendment: a server's disc colour — `PATCH /servers/{id} {avatar_disc_color,
+    /// image_key: null}` (nil = back to initials; the picture goes with it).
+    func setServerDisc(_ id: String, color: UInt8?) async throws {
         let body: [String: Any] = [
-            "avatar_leaf": pick.map { Int($0.leaf) as Any } ?? NSNull(),
-            "avatar_leaf_color": pick.map { Int($0.color) as Any } ?? NSNull(),
+            "avatar_disc_color": color.map { Int($0) as Any } ?? NSNull(),
             "image_key": NSNull(),
         ]
         _ = try await request("PATCH", "/servers/\(id)", body: body)
@@ -1090,12 +1089,11 @@ final class RelayAPI {
         _ = try await request("PATCH", "/projects/\(projectId)", body: body)
     }
 
-    /// D92 `PATCH /projects/{id} {"avatar_leaf": 0–8|null, "avatar_leaf_color": 0–9|null}` (null =
-    /// automatic). A leaf pick is "not a photo": the picture goes with it (`image_key: null`).
-    func setProjectAvatarLeaf(_ projectId: Id, leaf: Int?, color: Int?) async throws -> Int {
+    /// D92 `PATCH /projects/{id} {"avatar_disc_color": 0–9|null}` (null = automatic). A colour
+    /// pick is "not a photo": the picture goes with it (`image_key: null`).
+    func setProjectAvatarDisc(_ projectId: Id, color: Int?) async throws -> Int {
         let body: [String: Any] = [
-            "avatar_leaf": leaf.map { $0 as Any } ?? NSNull(),
-            "avatar_leaf_color": color.map { $0 as Any } ?? NSNull(),
+            "avatar_disc_color": color.map { $0 as Any } ?? NSNull(),
             "image_key": NSNull(),
         ]
         return Self.avatarVersion(of: try await json("PATCH", "/projects/\(projectId)", body: body))
@@ -1382,13 +1380,12 @@ final class RelayAPI {
         _ = try await request("PUT", "/chats/\(chatId)/settings", body: body)
     }
 
-    /// D92 amendment: a group's leaf picture from the avatar picker — `PATCH /chats/{id}
-    /// {avatar_leaf, avatar_leaf_color, image_key: ""}` (nil = back to initials; the empty key
-    /// clears the uploaded picture so the leaf shows).
-    func setPeopleChatLeaf(_ chatId: String, pick: LeafPick?) async throws -> PeopleChat {
+    /// D92 amendment: a group's disc colour from the avatar picker — `PATCH /chats/{id}
+    /// {avatar_disc_color, image_key: ""}` (nil = back to initials; the empty key clears the
+    /// uploaded picture so the disc shows).
+    func setPeopleChatDisc(_ chatId: String, color: UInt8?) async throws -> PeopleChat {
         let body: [String: Any] = [
-            "avatar_leaf": pick.map { Int($0.leaf) as Any } ?? NSNull(),
-            "avatar_leaf_color": pick.map { Int($0.color) as Any } ?? NSNull(),
+            "avatar_disc_color": color.map { Int($0) as Any } ?? NSNull(),
             "image_key": "",
         ]
         let v = try await json("PATCH", "/chats/\(chatId)", body: body)

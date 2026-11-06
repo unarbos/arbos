@@ -1685,10 +1685,10 @@ pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<S
         .child(resize)
 }
 
-/// A server's picture: the leaf picked on its Create screen (D92 amendment),
+/// A server's picture: the colour picked on its Create screen (D92 amendment),
 /// else the D79 disc — initials from its name, the relay's gradient index.
 pub fn server_picture(server: &ServerInfo, state: &AppState, size: f32, theme: &Theme) -> Div {
-    // D92 amendment: an uploaded / generated picture wins over the leaf.
+    // D92 amendment: an uploaded / generated picture wins over the disc.
     if let Some(image) = server
         .image_url
         .as_deref()
@@ -1706,19 +1706,11 @@ pub fn server_picture(server: &ServerInfo, state: &AppState, size: f32, theme: &
                     .object_fit(gpui::ObjectFit::Cover),
             );
     }
-    if avatars::leaf::is_neutral(server.avatar_leaf) {
+    if avatars::disc::is_neutral(server.avatar_disc_color) {
         return avatars::neutral_element(&server.name, size, theme);
     }
-    if let (true, Some(leaf), Some(color)) = (
-        avatars::leaf_avatars_on(),
-        server.avatar_leaf,
-        server.avatar_leaf_color,
-    ) {
-        return avatars::leaf_hover(
-            avatars::LeafPick { leaf, color },
-            size,
-            avatars::leaf_hover_key(&server.id, size),
-        );
+    if let Some(color) = server.avatar_disc_color {
+        return avatars::disc_element(color, size);
     }
     avatars::element(
         &server.id,

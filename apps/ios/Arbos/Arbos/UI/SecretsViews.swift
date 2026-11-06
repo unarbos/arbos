@@ -645,7 +645,7 @@ struct SecretPage: View {
     private func agentRow(_ s: SecretItem, _ a: SecretAgentAccess) -> some View {
         HStack(spacing: 14) {
             if let p = model.project(a.projectId) {
-                AgentAvatar(project: p, theme: theme, size: SettingsRow.tile, still: true)
+                AgentAvatar(project: p, theme: theme, size: SettingsRow.tile)
             } else {
                 InitialsAvatar(name: a.name, handle: a.name, id: a.projectId, override: nil, size: SettingsRow.tile)
             }
@@ -1412,7 +1412,7 @@ struct VaultPage: View {
                         // The agent's own D79 avatar, as on the Secret page.
                         HStack(spacing: 14) {
                             if let p = model.project(a.projectId) {
-                                AgentAvatar(project: p, theme: theme, size: SettingsRow.tile, still: true)
+                                AgentAvatar(project: p, theme: theme, size: SettingsRow.tile)
                             } else {
                                 InitialsAvatar(name: a.name, handle: a.name, id: a.projectId, override: nil, size: SettingsRow.tile)
                             }

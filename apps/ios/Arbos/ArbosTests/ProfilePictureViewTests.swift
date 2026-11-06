@@ -3,7 +3,7 @@ import XCTest
 
 /// Jacob, 2026-10-25: a tap on a profile picture opens it full-size in the media viewer chat
 /// photos use; where the tap opens the avatar picker, the picker gains View beside Reset. A
-/// letter / leaf avatar with no picture has nothing to view. The Mac twin is
+/// letter / disc avatar with no picture has nothing to view. The Mac twin is
 /// `crates/arbos-mac/src/ui/avatar_picker.rs` `me_picker_tests`.
 @MainActor
 final class ProfilePictureViewTests: XCTestCase {
@@ -34,7 +34,7 @@ final class ProfilePictureViewTests: XCTestCase {
         let model = AppModel()
         model.projects = [
             project(id: "01PIC", imageKey: "avatar-gen-1.jpg"),
-            project(id: "01LEAF", imageKey: nil),
+            project(id: "01DISC", imageKey: nil),
         ]
         let pic = AvatarPickerSheet.viewablePicture(target: .agent("01PIC"), model: model)
         XCTAssertEqual(pic?.name, "Affine")
@@ -42,7 +42,7 @@ final class ProfilePictureViewTests: XCTestCase {
         // owner-only blob slot.
         XCTAssertEqual(pic?.url, "\(model.relayHttpUrl)/projects/01PIC/avatar.jpg?v=1700000000000")
         XCTAssertFalse(pic?.url.contains("/blob/") ?? true)
-        XCTAssertNil(AvatarPickerSheet.viewablePicture(target: .agent("01LEAF"), model: model), "a leaf has nothing to view")
+        XCTAssertNil(AvatarPickerSheet.viewablePicture(target: .agent("01DISC"), model: model), "a solid disc has nothing to view")
         XCTAssertNil(AvatarPickerSheet.viewablePicture(target: .me, model: model), "no account, no picture")
         XCTAssertEqual(AvatarPickerSheet.tabs(for: .me), [.generate, .upload], "View lives in the bar, not as a tab")
     }

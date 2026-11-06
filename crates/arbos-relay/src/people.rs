@@ -296,10 +296,8 @@ pub(crate) fn member_dto(state: &AppState, m: &Membership) -> ChatMemberDto {
         avatar_color: None,
         avatar_color_index: None,
         avatar_color_index_effective: None,
-        avatar_leaf: None,
-        avatar_leaf_color: None,
-        avatar_leaf_effective: None,
-        avatar_leaf_color_effective: None,
+        avatar_disc_color: None,
+        avatar_disc_color_effective: None,
         project: None,
         description: None,
         owner: None,
@@ -350,13 +348,11 @@ pub(crate) fn member_dto(state: &AppState, m: &Membership) -> ChatMemberDto {
             ));
             dto.avatar = Some(avatar.clone());
             dto.avatar_color = Some(avatar_color.clone());
-            let leaf = crate::avatar::effective_leaf(&p);
+            let disc_color = crate::avatar::effective_disc(&p);
             dto.avatar_color_index = Some(p.avatar_color_index);
             dto.avatar_color_index_effective = Some(effective);
-            dto.avatar_leaf = Some(p.avatar_leaf);
-            dto.avatar_leaf_color = Some(p.avatar_leaf_color);
-            dto.avatar_leaf_effective = Some(i64::from(leaf.leaf));
-            dto.avatar_leaf_color_effective = Some(i64::from(leaf.color));
+            dto.avatar_disc_color = Some(p.avatar_leaf_color);
+            dto.avatar_disc_color_effective = Some(i64::from(disc_color));
             dto.project = Some(ChatMemberProjectDto {
                 id: p.id.clone(),
                 name: p.name.clone(),
@@ -366,10 +362,8 @@ pub(crate) fn member_dto(state: &AppState, m: &Membership) -> ChatMemberDto {
                 avatar_color,
                 avatar_color_index: p.avatar_color_index,
                 avatar_color_index_effective: effective,
-                avatar_leaf: p.avatar_leaf,
-                avatar_leaf_color: p.avatar_leaf_color,
-                avatar_leaf_effective: Some(i64::from(leaf.leaf)),
-                avatar_leaf_color_effective: Some(i64::from(leaf.color)),
+                avatar_disc_color: p.avatar_leaf_color,
+                avatar_disc_color_effective: Some(i64::from(disc_color)),
                 image_key: p.image_key.clone(),
                 avatar_version: Some(p.avatar_version),
                 description: p.description.clone(),
@@ -447,7 +441,6 @@ pub fn rename_agents_that_shadow_people(state: &AppState) {
         if let Err(e) = state.db.update_project(
             &p.id,
             Some(&clear),
-            None,
             None,
             None,
             None,
@@ -571,8 +564,7 @@ pub fn people_chat_dto(
         created_at: cm.chat.created_at,
         title,
         image_key: cm.chat.image_key.clone(),
-        avatar_leaf: cm.chat.avatar_leaf,
-        avatar_leaf_color: cm.chat.avatar_leaf_color,
+        avatar_disc_color: cm.chat.avatar_leaf_color,
         description: cm
             .chat
             .description
@@ -675,7 +667,7 @@ pub(crate) fn member_chat(
 pub(crate) const SETTINGS_ADMIN_ONLY: &str =
     "Only the group's owner and admins can change its name, picture and description.";
 
-/// The chat, if the caller may change its settings (name, picture, description, leaf): the
+/// The chat, if the caller may change its settings (name, picture, description, colour): the
 /// owner or an admin. Everyone else — plain members, agents' boxes, non-members, the admin
 /// token — gets 403, and every attempt leaves an audit row (`settings_audit`).
 ///
@@ -793,9 +785,9 @@ pub async fn avatar_colors() -> Response {
     Json(crate::avatar::palette_json()).into_response()
 }
 
-/// `GET /avatar-leaves` — the D92 leaf shapes, colours and index rule (public, no auth).
-pub async fn avatar_leaves() -> Response {
-    Json(crate::avatar::leaves_json()).into_response()
+/// `GET /avatar-discs` — the D92 disc colours and index rule (public, no auth).
+pub async fn avatar_discs() -> Response {
+    Json(crate::avatar::discs_json()).into_response()
 }
 
 /// `GET /users/{id}` — one person's card for a profile page: handle, name, avatar, status,
@@ -864,13 +856,11 @@ pub struct CreateGroupBody {
     /// A group may be people, agents, or both — never nobody.
     #[serde(default)]
     pub agent_ids: Vec<String>,
-    /// Create screen (D93): the group's name and its leaf picture; all optional.
+    /// Create screen (D93): the group's name and its disc colour; all optional.
     #[serde(default)]
     pub title: Option<String>,
-    #[serde(default)]
-    pub avatar_leaf: Option<i64>,
-    #[serde(default)]
-    pub avatar_leaf_color: Option<i64>,
+    #[serde(default, alias = "avatar_leaf_color")]
+    pub avatar_disc_color: Option<i64>,
     /// Optional about text (≤200 chars).
     #[serde(default)]
     pub description: Option<String>,
@@ -972,10 +962,9 @@ pub async fn chats_create_group(
     if state.db.people_chats_created_since(&me, today).unwrap_or(0) >= limit {
         return rate_limited(((today + 86_400_000 - now_ms()) / 1000).max(1));
     }
-    let leaf = match leaf_patch(b.avatar_leaf.map(Some), b.avatar_leaf_color.map(Some)) {
-        Ok(l) => l.flatten(),
-        Err((st, msg)) => return api_error(st, "bad_leaf", msg),
-    };
+    if let Err((st, msg)) = crate::avatar::check_disc_color(b.avatar_disc_color) {
+        return api_error(st, "bad_disc_color", msg);
+    }
     let chat = PeopleChat {
         id: ulid(),
         kind: "group".into(),
@@ -988,8 +977,8 @@ pub async fn chats_create_group(
             .filter(|t| !t.is_empty())
             .map(|t| t.chars().take(80).collect()),
         image_key: None,
-        avatar_leaf: leaf.map(|l| l.0),
-        avatar_leaf_color: leaf.map(|l| l.1),
+        avatar_leaf: None,
+        avatar_leaf_color: b.avatar_disc_color,
         description: b
             .description
             .as_deref()
@@ -1197,43 +1186,17 @@ pub struct PatchChatBody {
     /// Blob key under `people:{chat}` for the group picture. Empty clears it.
     #[serde(default)]
     pub image_key: Option<String>,
-    /// D92 amendment: the group's leaf picture (0–8) and disc colour (0–9), both or neither;
-    /// `null` for both clears it (back to the member cluster).
+    /// D92 amendment: the group's disc colour (0–9), 255 for "no picture";
+    /// `null` clears it (back to the member cluster).
     #[serde(
         default,
+        alias = "avatar_leaf_color",
         deserialize_with = "crate::api::deserialize_double_option_i64"
     )]
-    pub avatar_leaf: Option<Option<i64>>,
-    #[serde(
-        default,
-        deserialize_with = "crate::api::deserialize_double_option_i64"
-    )]
-    pub avatar_leaf_color: Option<Option<i64>>,
+    pub avatar_disc_color: Option<Option<i64>>,
     /// Optional about text. Empty string clears it.
     #[serde(default)]
     pub description: Option<String>,
-}
-
-/// `None` = untouched, `Some(None)` = clear, `Some(Some((leaf, colour)))` = set.
-type LeafPatch = Option<Option<(i64, i64)>>;
-
-/// `avatar_leaf` + `avatar_leaf_color` from a body, validated.
-fn leaf_patch(
-    leaf: Option<Option<i64>>,
-    color: Option<Option<i64>>,
-) -> Result<LeafPatch, (StatusCode, String)> {
-    match (leaf, color) {
-        (None, None) => Ok(None),
-        (Some(None), Some(None)) | (Some(None), None) | (None, Some(None)) => Ok(Some(None)),
-        (Some(Some(l)), Some(Some(c))) => {
-            crate::avatar::check_leaf_pick(Some(l), Some(c))?;
-            Ok(Some(Some((l, c))))
-        }
-        _ => Err((
-            StatusCode::BAD_REQUEST,
-            "avatar_leaf and avatar_leaf_color go together".to_owned(),
-        )),
-    }
 }
 
 fn safe_image_key(k: &str) -> bool {
@@ -1252,8 +1215,8 @@ fn patched_fields(b: &PatchChatBody) -> Vec<&'static str> {
     if b.image_key.is_some() {
         fields.push("image_key");
     }
-    if b.avatar_leaf.is_some() || b.avatar_leaf_color.is_some() {
-        fields.push("avatar_leaf");
+    if b.avatar_disc_color.is_some() {
+        fields.push("avatar_disc_color");
     }
     if b.description.is_some() {
         fields.push("description");
@@ -1284,10 +1247,9 @@ pub async fn chat_patch(
         Ok(v) => v,
         Err(r) => return *r,
     };
-    let leaf = match leaf_patch(b.avatar_leaf, b.avatar_leaf_color) {
-        Ok(l) => l,
-        Err((st, msg)) => return api_error(st, "bad_leaf", msg),
-    };
+    if let Err((st, msg)) = crate::avatar::check_disc_color(b.avatar_disc_color.flatten()) {
+        return api_error(st, "bad_disc_color", msg);
+    }
     let title = b.title.as_ref().map(|t| {
         let trimmed = t.trim();
         if trimmed.is_empty() {
@@ -1329,11 +1291,13 @@ pub async fn chat_patch(
     let title_ref = title.as_ref().map(|o| o.as_ref().map(|s| s.as_str()));
     let image_ref = image_key.as_ref().map(|o| o.as_ref().map(|s| s.as_str()));
     let description_ref = description.as_ref().map(|o| o.as_ref().map(|s| s.as_str()));
-    if let Err(e) =
-        state
-            .db
-            .update_people_chat_profile(&id, title_ref, image_ref, leaf, description_ref)
-    {
+    if let Err(e) = state.db.update_people_chat_profile(
+        &id,
+        title_ref,
+        image_ref,
+        b.avatar_disc_color,
+        description_ref,
+    ) {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
     }
     // Other members, and this user's other devices (e.g. Mac), refresh the list.
@@ -4137,7 +4101,7 @@ pub fn notify_agent_renamed(state: &AppState, project_id: &str) {
 const AGENT_PROFILE_FAN_OUT_MAX: usize = 2000;
 
 /// The agents' `profile_updated`: an avatar change (`PATCH /projects/{id}` with `image_key`,
-/// a leaf or a colour pick) reaches every device that draws the agent — the owner's other
+/// a colour pick) reaches every device that draws the agent — the owner's other
 /// devices (`except_device` already has the answer), the project's guests and every human in
 /// a people chat the agent sits on — as one `agent_profile_updated` push each, carrying the
 /// picture now in effect and the stamp every copy must reach. Without it (Jacob, 2026-10-25)
@@ -4982,8 +4946,7 @@ mod agent_tests {
                 members: vec!["user32".into(), "@user33".into(), "user32".into()],
                 agent_ids: vec![],
                 title: None,
-                avatar_leaf: None,
-                avatar_leaf_color: None,
+                avatar_disc_color: None,
                 description: None,
             }),
         )
@@ -5030,8 +4993,7 @@ mod agent_tests {
                 members: vec![],
                 agent_ids: vec![],
                 title: None,
-                avatar_leaf: None,
-                avatar_leaf_color: None,
+                avatar_disc_color: None,
                 description: None,
             }),
         )
@@ -5441,8 +5403,7 @@ mod membership_notice_tests {
                 members: vec!["user2".into()],
                 agent_ids: vec![],
                 title: None,
-                avatar_leaf: None,
-                avatar_leaf_color: None,
+                avatar_disc_color: None,
                 description: None,
             }),
         )
@@ -5698,8 +5659,7 @@ mod create_group_tests {
                 members: vec![],
                 agent_ids: vec![bob_proj.clone(), doug_proj.clone()],
                 title: None,
-                avatar_leaf: None,
-                avatar_leaf_color: None,
+                avatar_disc_color: None,
                 description: None,
             }),
         )
@@ -5750,8 +5710,7 @@ mod create_group_tests {
                 members: vec![],
                 agent_ids: vec![],
                 title: None,
-                avatar_leaf: None,
-                avatar_leaf_color: None,
+                avatar_disc_color: None,
                 description: None,
             }),
         )
@@ -5766,8 +5725,7 @@ mod create_group_tests {
                 members: vec![],
                 agent_ids: vec![bobs_proj],
                 title: None,
-                avatar_leaf: None,
-                avatar_leaf_color: None,
+                avatar_disc_color: None,
                 description: None,
             }),
         )
@@ -5852,8 +5810,7 @@ mod group_add_privacy_tests {
                 members: vec![bob_handle.clone()],
                 agent_ids: vec![],
                 title: Some("Spam".into()),
-                avatar_leaf: None,
-                avatar_leaf_color: None,
+                avatar_disc_color: None,
                 description: None,
             }),
         )
@@ -5873,8 +5830,7 @@ mod group_add_privacy_tests {
                 members: vec![],
                 agent_ids: vec![alice_proj],
                 title: Some("Alice's".into()),
-                avatar_leaf: None,
-                avatar_leaf_color: None,
+                avatar_disc_color: None,
                 description: None,
             }),
         )
@@ -5940,8 +5896,7 @@ mod group_add_privacy_tests {
                 members: vec![bob_handle],
                 agent_ids: vec![],
                 title: Some("With Bob".into()),
-                avatar_leaf: None,
-                avatar_leaf_color: None,
+                avatar_disc_color: None,
                 description: None,
             }),
         )
@@ -5956,8 +5911,7 @@ mod group_add_privacy_tests {
                 members: vec![carol_handle],
                 agent_ids: vec![],
                 title: Some("With Carol".into()),
-                avatar_leaf: None,
-                avatar_leaf_color: None,
+                avatar_disc_color: None,
                 description: None,
             }),
         )
@@ -6054,8 +6008,7 @@ mod group_add_privacy_tests {
                 members: vec!["user49".into()],
                 agent_ids: vec![],
                 title: Some("Strangers".into()),
-                avatar_leaf: None,
-                avatar_leaf_color: None,
+                avatar_disc_color: None,
                 description: None,
             }),
         )
@@ -6376,7 +6329,7 @@ mod mention_resolution_tests {
 
 #[cfg(test)]
 mod settings_permission_tests {
-    //! Who may change a people chat's name, picture, description and leaf (P0 2026-10-27):
+    //! Who may change a people chat's name, picture, description and colour (P0 2026-10-27):
     //! owner and admins yes; plain members, agents' boxes, non-members and the admin token
     //! no — 403 `admin_only`, the value untouched, one audit row per attempt.
 
@@ -6450,8 +6403,7 @@ mod settings_permission_tests {
         PatchChatBody {
             title: None,
             image_key: None,
-            avatar_leaf: None,
-            avatar_leaf_color: None,
+            avatar_disc_color: None,
             description: None,
         }
     }
@@ -6526,10 +6478,9 @@ mod settings_permission_tests {
                 }),
             ),
             (
-                "avatar_leaf",
+                "avatar_disc_color",
                 Box::new(|| PatchChatBody {
-                    avatar_leaf: Some(Some(1)),
-                    avatar_leaf_color: Some(Some(2)),
+                    avatar_disc_color: Some(Some(2)),
                     ..body()
                 }),
             ),
@@ -6560,8 +6511,8 @@ mod settings_permission_tests {
                 "{field}: description untouched"
             );
             assert_eq!(
-                after.avatar_leaf, before.avatar_leaf,
-                "{field}: leaf untouched"
+                after.avatar_leaf_color, before.avatar_leaf_color,
+                "{field}: disc colour untouched"
             );
         }
         // 4 fields × 4 denied principals, every one audited as refused.
@@ -6603,8 +6554,7 @@ mod settings_permission_tests {
                 PatchChatBody {
                     image_key: Some("owner.png".into()),
                     description: Some("by the owner".into()),
-                    avatar_leaf: Some(Some(3)),
-                    avatar_leaf_color: Some(Some(4)),
+                    avatar_disc_color: Some(Some(4)),
                     ..body()
                 }
             )
@@ -6615,7 +6565,7 @@ mod settings_permission_tests {
         assert_eq!(now.title.as_deref(), Some("Arbonites Admin"));
         assert_eq!(now.image_key.as_deref(), Some("owner.png"));
         assert_eq!(now.description.as_deref(), Some("by the owner"));
-        assert_eq!((now.avatar_leaf, now.avatar_leaf_color), (Some(3), Some(4)));
+        assert_eq!(now.avatar_leaf_color, Some(4));
         let rows = audit_rows(&state, &c.chat);
         assert_eq!(rows.len(), 18);
         let ok: Vec<&Value> = rows.iter().filter(|r| r["allowed"] == true).collect();
@@ -6625,7 +6575,7 @@ mod settings_permission_tests {
         assert_eq!(ok[1]["role"], "owner");
         assert_eq!(
             ok[1]["fields"],
-            json!(["image_key", "avatar_leaf", "description"])
+            json!(["image_key", "avatar_disc_color", "description"])
         );
         assert!(ok[1]["device_id"].is_string());
     }
@@ -6798,8 +6748,7 @@ mod picture_tests {
             Json(PatchChatBody {
                 title: None,
                 image_key: Some(key.to_owned()),
-                avatar_leaf: None,
-                avatar_leaf_color: None,
+                avatar_disc_color: None,
                 description: None,
             }),
         )

@@ -120,7 +120,7 @@ pub fn names_draft(cmd: &ClientCommand) -> bool {
         | ClientCommand::ArchiveChat { chat_id, .. }
         | ClientCommand::MarkRead { chat_id, .. }
         | ClientCommand::RenameGroup { chat_id, .. }
-        | ClientCommand::SetGroupLeaf { chat_id, .. }
+        | ClientCommand::SetGroupDisc { chat_id, .. }
         | ClientCommand::SetGroupImage { chat_id, .. }
         | ClientCommand::SetGroupImageKey { chat_id, .. }
         | ClientCommand::DeletePeopleChat { chat_id, .. }

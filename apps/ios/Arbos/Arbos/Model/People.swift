@@ -166,8 +166,7 @@ extension ChatMember {
             )
             project?.avatarColorIndex = p.avatar_color_index.map(Int.init)
             project?.avatarColorIndexEffective = Int(p.avatar_color_index_effective)
-            project?.avatarLeaf = p.avatar_leaf.map(Int.init)
-            project?.avatarLeafColor = p.avatar_leaf_color.map(Int.init)
+            project?.avatarDiscColor = p.avatar_disc_color.map(Int.init)
             // The uploaded / generated picture travels with the roster card (#1592); the
             // fetch URL is built by `AppModel.agent(member:)` where the relay token lives.
             project?.imageKey = p.image_key.flatMap { $0.isEmpty ? nil : $0 }
@@ -241,16 +240,11 @@ struct PeopleChat: Identifiable, Equatable {
     var title: String
     /// Blob key under `people:{id}` for an optional group picture.
     var imageKey: String? = nil
-    /// D92 amendment: the group's leaf picture from the Create screen (the uploaded picture wins).
-    var avatarLeaf: Int? = nil
-    var avatarLeafColor: Int? = nil
-    /// The leaf to draw; nil for a group without one — including the neutral pair (Jacob,
-    /// 2026-10-25), which `isNeutralAvatar` names and draws as the title's initial on grey.
-    var leafPick: LeafPick? {
-        guard let l = avatarLeaf, let c = avatarLeafColor, !LeafArt.isNeutral(l) else { return nil }
-        return LeafPick(leaf: UInt8(clamping: l), color: UInt8(clamping: c))
-    }
-    var isNeutralAvatar: Bool { LeafArt.isNeutral(avatarLeaf) }
+    /// D92 amendment: the group's disc colour from the Create screen (the uploaded picture wins).
+    /// nil for a group without one — including the neutral value (Jacob, 2026-10-25), which
+    /// `isNeutralAvatar` names and draws as the title's initial on grey.
+    var avatarDiscColor: Int? = nil
+    var isNeutralAvatar: Bool { DiscArt.isNeutral(avatarDiscColor) }
     /// Optional about text for a people group (≤200 chars).
     var description: String = ""
     var pending: Bool
@@ -318,8 +312,7 @@ extension PeopleChat {
         self.createdAt = dto.created_at
         self.title = dto.title.isEmpty ? "Chat" : dto.title
         self.imageKey = dto.image_key.flatMap { $0.isEmpty ? nil : $0 }
-        self.avatarLeaf = dto.avatar_leaf.map(Int.init)
-        self.avatarLeafColor = dto.avatar_leaf_color.map(Int.init)
+        self.avatarDiscColor = dto.avatar_disc_color.map(Int.init)
         self.description = dto.description?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         self.pending = dto.pending
         self.members = dto.members.map { ChatMember(dto: $0) }

@@ -179,8 +179,7 @@ mod render_tests {
             name: "Affine".into(),
             handle: "affine".into(),
             owner_handle: "sami".into(),
-            avatar_leaf: Some(5),
-            avatar_leaf_color: Some(2),
+            avatar_disc_color: Some(2),
             ..Default::default()
         }
     }

@@ -203,8 +203,7 @@ fn server_json(state: &AppState, s: &Server, me: &ServerMember, detail: bool) ->
         "channels": channels.iter().map(|c| channel_json_for(state, c, &me.user_id)).collect::<Vec<_>>(),
         "general_channel_id": channels.iter().find(|c| c.name == "general").or(channels.first()).map(|c| c.id.clone()),
         "avatar_color_index_effective": crate::avatar::effective_color_index(&s.id, None),
-        "avatar_leaf": s.avatar_leaf,
-        "avatar_leaf_color": s.avatar_leaf_color,
+        "avatar_disc_color": s.avatar_leaf_color,
         "archived_at": state.db.space_archived_at(&me.user_id, &s.id).ok().flatten(),
     });
     // Invite links are the owner's fallback (Jacob 2026-10-22: demoted; Add members by name is
@@ -379,11 +378,9 @@ pub struct CreateBody {
     /// `true` (default) also makes `#announcements` (admins post).
     #[serde(default = "yes")]
     pub announcements: bool,
-    /// Create screen (D93): the server's leaf picture (0–8) and disc colour (0–9), both or neither.
-    #[serde(default)]
-    pub avatar_leaf: Option<i64>,
-    #[serde(default)]
-    pub avatar_leaf_color: Option<i64>,
+    /// Create screen (D93): the server's disc colour (0–9), or 255 for "no picture".
+    #[serde(default, alias = "avatar_leaf_color")]
+    pub avatar_disc_color: Option<i64>,
 }
 
 fn yes() -> bool {
@@ -423,10 +420,9 @@ pub async fn create(
             "too many servers today",
         );
     }
-    if let Err((st, msg)) = crate::avatar::check_leaf_pick(b.avatar_leaf, b.avatar_leaf_color) {
-        return api_error(st, "bad_leaf", msg);
+    if let Err((st, msg)) = crate::avatar::check_disc_color(b.avatar_disc_color) {
+        return api_error(st, "bad_disc_color", msg);
     }
-    let leaf = b.avatar_leaf.zip(b.avatar_leaf_color);
     let now = now_ms();
     let server = Server {
         id: ulid(),
@@ -437,8 +433,8 @@ pub async fn create(
         space_room_id: None,
         created_at: now,
         is_open: false,
-        avatar_leaf: leaf.map(|l| l.0),
-        avatar_leaf_color: leaf.map(|l| l.1),
+        avatar_leaf: None,
+        avatar_leaf_color: b.avatar_disc_color,
     };
     if let Err(e) = state.db.insert_server(&server) {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
@@ -535,17 +531,13 @@ pub struct PatchBody {
     /// `true` = anyone on Arbos can search and join without an invite link.
     #[serde(default)]
     pub open: Option<bool>,
-    /// D92 amendment: the server's leaf picture (`null` = none); set together.
+    /// D92 amendment: the server's disc colour (`null` = automatic from the id).
     #[serde(
         default,
+        alias = "avatar_leaf_color",
         deserialize_with = "crate::api::deserialize_double_option_i64"
     )]
-    pub avatar_leaf: Option<Option<i64>>,
-    #[serde(
-        default,
-        deserialize_with = "crate::api::deserialize_double_option_i64"
-    )]
-    pub avatar_leaf_color: Option<Option<i64>>,
+    pub avatar_disc_color: Option<Option<i64>>,
 }
 
 /// `PATCH /servers/{id} {name?, image_key?, open?}` — owner/admins.
@@ -565,8 +557,8 @@ pub async fn patch(
     if b.open.is_some() {
         fields.push("open");
     }
-    if b.avatar_leaf.is_some() || b.avatar_leaf_color.is_some() {
-        fields.push("avatar_leaf");
+    if b.avatar_disc_color.is_some() {
+        fields.push("avatar_disc_color");
     }
     let (me, _, _) = match settings_server(&state, &principal, &id, "server", &fields) {
         Ok(v) => v,
@@ -619,24 +611,11 @@ pub async fn patch(
     ) {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
     }
-    if b.avatar_leaf.is_some() || b.avatar_leaf_color.is_some() {
-        let leaf = match (b.avatar_leaf, b.avatar_leaf_color) {
-            (Some(Some(l)), Some(Some(c))) => {
-                if let Err((st, msg)) = crate::avatar::check_leaf_pick(Some(l), Some(c)) {
-                    return api_error(st, "bad_leaf", msg);
-                }
-                Some((l, c))
-            }
-            (Some(Some(_)), _) | (_, Some(Some(_))) => {
-                return api_error(
-                    StatusCode::BAD_REQUEST,
-                    "bad_leaf",
-                    "avatar_leaf and avatar_leaf_color go together",
-                )
-            }
-            _ => None,
-        };
-        if let Err(e) = state.db.update_server_leaf(&id, leaf) {
+    if let Some(color) = b.avatar_disc_color {
+        if let Err((st, msg)) = crate::avatar::check_disc_color(color) {
+            return api_error(st, "bad_disc_color", msg);
+        }
+        if let Err(e) = state.db.update_server_disc_color(&id, color) {
             return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
         }
     }
@@ -1313,8 +1292,7 @@ fn open_hit_json(s: &Server, member_count: i64) -> Value {
         "open": true,
         "member_count": member_count,
         "avatar_color_index_effective": crate::avatar::effective_color_index(&s.id, None),
-        "avatar_leaf": s.avatar_leaf,
-        "avatar_leaf_color": s.avatar_leaf_color,
+        "avatar_disc_color": s.avatar_leaf_color,
         "my_role": "",
         "channels": [],
     })
@@ -2002,8 +1980,7 @@ mod settings_permission_tests {
             name: None,
             image_key: None,
             open: None,
-            avatar_leaf: None,
-            avatar_leaf_color: None,
+            avatar_disc_color: None,
         }
     }
 
@@ -2088,10 +2065,9 @@ mod settings_permission_tests {
                     },
                 ),
                 (
-                    "avatar_leaf",
+                    "avatar_disc_color",
                     PatchBody {
-                        avatar_leaf: Some(Some(1)),
-                        avatar_leaf_color: Some(Some(2)),
+                        avatar_disc_color: Some(Some(2)),
                         ..patch_body()
                     },
                 ),
@@ -2261,8 +2237,7 @@ mod picture_tests {
                 name: None,
                 image_key: Some(key),
                 open: None,
-                avatar_leaf: None,
-                avatar_leaf_color: None,
+                avatar_disc_color: None,
             }),
         )
         .await

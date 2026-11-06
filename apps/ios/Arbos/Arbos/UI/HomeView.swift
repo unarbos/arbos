@@ -676,7 +676,7 @@ struct HomeView: View {
                 Button { openGoalId = task.goalId } label: {
                     HStack(spacing: 12) {
                         if let project = model.project(task.projectId) {
-                            AgentAvatar(project: project, theme: theme, size: 28, still: true)
+                            AgentAvatar(project: project, theme: theme, size: 28)
                         } else {
                             Image(systemName: "checklist")
                                 .font(.system(size: 14, weight: .semibold))
@@ -1447,14 +1447,14 @@ struct PeopleRow: View {
         HStack(spacing: 15) {
             ZStack(alignment: .bottomTrailing) {
                 if chat.isGroup {
-                    // The group's picture through the resolver (its upload, else the leaf or
+                    // The group's picture through the resolver (its upload, else the colour or
                     // neutral initial from the Create screen, else the two-person disc).
                     GroupAvatar(chat: chat, model: model, size: Theme.rowAvatar)
                 } else {
                     PersonAvatar(url: other?.avatarUrl, handle: other?.handle ?? "?", size: Theme.rowAvatar, name: other?.name, id: other?.id, colorIndex: other?.avatarColorIndex)
                 }
                 if let a = chat.agents.first {
-                    AgentAvatar(project: model.agent(member: a, chatId: chat.id), theme: theme, size: 18, still: true)
+                    AgentAvatar(project: model.agent(member: a, chatId: chat.id), theme: theme, size: 18)
                         .overlay(Circle().strokeBorder(theme.bg, lineWidth: 2))
                         .offset(x: 3, y: 3)
                 }

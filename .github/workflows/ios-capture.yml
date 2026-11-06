@@ -393,8 +393,9 @@ jobs:
             TEST_RUNNER_ARBOS_SHOT_SCRIPT="$SHOT_SCRIPT" \
             TEST_RUNNER_ARBOS_SHOT_LAUNCH_ENV="$SHOT_LAUNCH_ENV" 2>&1 \
             | tee build/xcodebuild-capture-build.log \
-            | grep -E "error:|\*\* BUILD" || true
-          grep -q "\*\* BUILD SUCCEEDED \*\*" build/xcodebuild-capture-build.log
+            | grep -E "error:|\*\* (TEST )?BUILD" || true
+          # `build-for-testing` ends in `** TEST BUILD SUCCEEDED **`, not `** BUILD SUCCEEDED **`.
+          grep -qE "\*\* (TEST )?BUILD SUCCEEDED \*\*" build/xcodebuild-capture-build.log
       #
       # xcodebuild has sat idle for minutes after a suite finished, still holding the machine. The
       # watchdog below stops it ~20 s after the log carries the verdict, which is the same trick

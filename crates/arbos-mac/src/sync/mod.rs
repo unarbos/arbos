@@ -664,8 +664,8 @@ impl PictureTarget {
 
 /// The Create sheet's pending picture, applied once the entity exists (Jacob, 2026-10-25: the
 /// sheet offers Upload and Generate only; with neither the entity is stored neutral —
-/// `avatar_leaf` = `leaf::NEUTRAL`, the name's initial on a grey disc — never an automatic
-/// leaf).
+/// `avatar_disc_color` = `disc::NEUTRAL`, the name's initial on a grey disc — never an
+/// automatic colour).
 #[derive(Clone, Debug, PartialEq)]
 pub enum DraftPicture {
     /// A file the owner chose; uploaded as the picture master (≤ 1024 px PNG / JPEG) into the new entity's slot.
@@ -718,9 +718,9 @@ pub enum ClientCommand {
     CreatePeopleGroup {
         handles: Vec<String>,
         agent_ids: Vec<Id>,
-        /// D93 Create screen: the group's name and leaf pair, when it came through it.
+        /// D93 Create screen: the group's name and disc colour, when it came through it.
         title: Option<String>,
-        leaf: Option<crate::ui::avatars::LeafPick>,
+        disc_color: Option<u8>,
         /// The Create screen's uploaded / generated picture, applied right after the create.
         picture: Option<DraftPicture>,
     },
@@ -961,11 +961,11 @@ pub enum ClientCommand {
         chat_id: Id,
         title: String,
     },
-    /// A group's leaf picture from the avatar picker: `PATCH /chats/{id} {avatar_leaf,
-    /// avatar_leaf_color, image_key: null}` (`None` = initials).
-    SetGroupLeaf {
+    /// A group's disc colour from the avatar picker: `PATCH /chats/{id}
+    /// {avatar_disc_color, image_key: null}` (`None` = initials).
+    SetGroupDisc {
         chat_id: Id,
-        pick: Option<crate::ui::avatars::LeafPick>,
+        color: Option<u8>,
     },
     /// Give a people group a picture: the file is uploaded to the chat's blob
     /// slot, then `PATCH /chats/{id} {image_key}`.
@@ -998,10 +998,10 @@ pub enum ClientCommand {
         server_id: Id,
         source: PictureSource,
     },
-    /// A server's leaf picture (`None` = initials; clears the uploaded picture too).
-    SetServerLeaf {
+    /// A server's disc colour (`None` = initials; clears the uploaded picture too).
+    SetServerDisc {
         server_id: Id,
-        pick: Option<crate::ui::avatars::LeafPick>,
+        color: Option<u8>,
     },
     /// My own picture (`PUT /me/avatar`, PNG / JPEG master ≤ 3 MB): overrides the GitHub
     /// avatar everywhere the relay serves me.
@@ -1041,9 +1041,9 @@ pub enum ClientCommand {
         name: String,
         /// D79: the owner's swatch pick at creation; `None` = automatic (the id's colour).
         avatar_color_index: Option<u8>,
-        /// D92: the leaf + colour (forks copy the source's; the Create sheet sends the neutral
-        /// pair); `None` = automatic.
-        leaf: Option<crate::ui::avatars::LeafPick>,
+        /// D92: the disc colour (forks copy the source's; the Create sheet sends the neutral
+        /// value); `None` = automatic.
+        disc_color: Option<u8>,
         /// The Create sheet's uploaded / generated picture, applied right after the create.
         picture: Option<DraftPicture>,
         /// Fork: copy this agent's workspace (files + memory) into the new one.
@@ -1151,11 +1151,10 @@ pub enum ClientCommand {
         enabled: bool,
         persist: bool,
     },
-    /// Leaf picker (D92): `PATCH /projects/{id} {avatar_leaf: 0–8|null, avatar_leaf_color: 0–9|null}`;
+    /// Disc colour picker (D92): `PATCH /projects/{id} {avatar_disc_color: 0–9|null}`;
     /// `None` = automatic (derived from the project id).
-    SetAvatarLeaf {
+    SetAvatarDisc {
         project_id: Id,
-        leaf: Option<u8>,
         color: Option<u8>,
     },
     FetchBlob {
@@ -1465,8 +1464,8 @@ pub enum ClientCommand {
     /// D88: `POST /servers {name}`; answered by `ServerOpened`.
     ServerCreate {
         name: String,
-        /// D93 Create screen: the server's leaf pair (the neutral pair since 2026-10-25).
-        leaf: Option<crate::ui::avatars::LeafPick>,
+        /// D93 Create screen: the server's disc colour (the neutral value since 2026-10-25).
+        disc_color: Option<u8>,
         /// The Create screen's uploaded / generated picture, applied right after the create.
         picture: Option<DraftPicture>,
     },

@@ -2331,7 +2331,7 @@ impl Transcript {
         (a.name, a.seed, a.color_index, a.project_id)
     }
 
-    /// `agent_identity` plus the D92 leaf pair in effect — the shared rule
+    /// `agent_identity` plus the D92 disc colour in effect — the shared rule
     /// (`avatars::agent_identity`, #1592): the open chat's roster, then my projects, then
     /// every other roster; the row's own name when no card knows the agent. The presence
     /// row asks the same function with the same row, so the two can never disagree.
@@ -2343,19 +2343,18 @@ impl Transcript {
         let had_id = seed.starts_with("agent:") || seed.starts_with("project:");
         // D92 amendment: the agent's uploaded / generated picture, once the loader has it.
         let image = a.image_key.as_deref().and_then(|url| state.avatar(url));
-        // A neutral agent (no leaf, Jacob 2026-10-25) carries the stored pair on, so every
+        // A neutral agent (no picture, Jacob 2026-10-25) carries the stored value on, so every
         // disc drawn from this identity goes through `avatars::agent`'s neutral branch.
-        let leaf = if a.neutral {
-            let n = avatars::neutral_pick();
-            (Some(n.leaf), Some(n.color))
+        let disc_color = Some(if a.neutral {
+            avatars::neutral_pick()
         } else {
-            (Some(a.leaf.leaf), Some(a.leaf.color))
-        };
+            a.disc_color
+        });
         AgentIdentity {
             name: a.name,
             seed: a.id.clone(),
             color_index: Some(a.color_index),
-            leaf,
+            disc_color,
             image,
             project_id: (a.known || had_id).then_some(a.id),
         }
@@ -2479,8 +2478,7 @@ impl Transcript {
             }
             AttachmentSender::Agent { seed } => {
                 let a = self.agent_identity_full(seed, "Agent", cx);
-                let color =
-                    avatars::agent_accent(&a.seed, a.color_index, a.leaf.0, a.leaf.1, theme);
+                let color = avatars::agent_accent(&a.seed, a.disc_color, theme);
                 let disc = div()
                     .id(SharedString::from(format!("{row_id}#disc")))
                     .debug_selector(|| format!("disc#{row_id}"))
@@ -2535,9 +2533,7 @@ impl Transcript {
             // avatar-lint: allow (the resolver's identity, decoded above)
             &a.seed,
             &a.name,
-            a.color_index,
-            a.leaf.0,
-            a.leaf.1,
+            a.disc_color,
             SENDER_DISC,
             &theme,
         )
@@ -2669,7 +2665,7 @@ impl Transcript {
             .map(|seed| self.agent_identity_full(seed, "Agent", cx));
         let agent_accent = identity
             .as_ref()
-            .map(|a| avatars::agent_accent(&a.seed, a.color_index, a.leaf.0, a.leaf.1, theme));
+            .map(|a| avatars::agent_accent(&a.seed, a.disc_color, theme));
         // Group / channel: the agent's name inside its first bubble, in its
         // colour, with the `agent` tag; the time only appears in the hover rail.
         // The name and the disc are profile targets: one click opens the
@@ -3943,12 +3939,12 @@ impl Render for Transcript {
 // ---------------------------------------------------------------------------
 
 /// Who an agent lane belongs to: display name, disc seed, D79 colour, D92
-/// leaf pair in effect, and the project id when the lane names one.
+/// disc colour in effect, and the project id when the lane names one.
 struct AgentIdentity {
     name: String,
     seed: String,
     color_index: Option<u8>,
-    leaf: (Option<u8>, Option<u8>),
+    disc_color: Option<u8>,
     image: Option<std::sync::Arc<gpui::RenderImage>>,
     project_id: Option<Id>,
 }

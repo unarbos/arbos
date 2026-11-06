@@ -92,7 +92,7 @@ enum CornerMark {
                 content
                     .mask {
                         ZStack(alignment: .bottomTrailing) {
-                            // Wider than the picture: a leaf's sway or a shadow must not be clipped.
+                            // Wider than the picture: a shadow must not be clipped.
                             Rectangle().padding(-size)
                             Circle()
                                 .frame(width: m.ring, height: m.ring)

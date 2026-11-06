@@ -283,17 +283,19 @@ pub struct Project {
     /// Telegram-style initials colour override (D79), 0–6; `None` = derived from the id.
     #[serde(default)]
     pub avatar_color_index: Option<i64>,
-    /// Leaf avatar (D92): the owner's shape pick, 0–8; `None` = derived from the id.
+    /// Dormant: the leaf avatars' shape pick. Kept so a relay on the previous binary still reads
+    /// this table; always written `None` and never read.
     #[serde(default)]
     pub avatar_leaf: Option<i64>,
-    /// Leaf avatar (D92): the owner's disc colour pick, 0–9; `None` = derived from the id.
+    /// Disc avatar: the owner's colour pick, 0–9; `None` = derived from the id. The column keeps
+    /// the old name — renaming it would rewrite the whole `projects` table.
     #[serde(default)]
     pub avatar_leaf_color: Option<i64>,
-    /// D92 amendment: an uploaded or generated picture (blob key in the project's own slot); wins
-    /// over the leaf. `None` = the leaf.
+    /// An uploaded or generated picture (blob key in the project's own slot); wins over the
+    /// disc. `None` = the disc.
     #[serde(default)]
     pub image_key: Option<String>,
-    /// Stamp (ms) of the last avatar change (picture, leaf, colour); `0` = never changed.
+    /// Stamp (ms) of the last avatar change (picture, colour); `0` = never changed.
     /// Clients order their copies of the agent by it (`avatar::identity`).
     #[serde(default)]
     pub avatar_version: i64,
@@ -1215,8 +1217,7 @@ impl Db {
         avatar_color: Option<Option<&str>>,
         description: Option<&str>,
         avatar_color_index: Option<Option<i64>>,
-        avatar_leaf: Option<Option<i64>>,
-        avatar_leaf_color: Option<Option<i64>>,
+        avatar_disc_color: Option<Option<i64>>,
     ) -> Result<()> {
         self.with(|c| {
             c.execute(
@@ -1244,13 +1245,9 @@ impl Db {
                     params![id, idx],
                 )?;
             }
-            if let Some(leaf) = avatar_leaf {
-                c.execute(
-                    "UPDATE projects SET avatar_leaf = ?2 WHERE id = ?1",
-                    params![id, leaf],
-                )?;
-            }
-            if let Some(color) = avatar_leaf_color {
+            // `avatar_leaf_color` kept its column name from the leaf avatars this replaced; the
+            // companion `avatar_leaf` shape column is dormant and nothing reads it.
+            if let Some(color) = avatar_disc_color {
                 c.execute(
                     "UPDATE projects SET avatar_leaf_color = ?2 WHERE id = ?1",
                     params![id, color],
@@ -1259,8 +1256,7 @@ impl Db {
             let avatar_touched = avatar.is_some()
                 || avatar_color.is_some()
                 || avatar_color_index.is_some()
-                || avatar_leaf.is_some()
-                || avatar_leaf_color.is_some();
+                || avatar_disc_color.is_some();
             if avatar_touched {
                 Self::stamp_avatar_version(c, id)?;
             }
@@ -4197,7 +4193,7 @@ mod avatar_migration_tests {
             created + 5
         );
 
-        // Every change moves the stamp strictly forward — picture, reset to the leaf, picture
+        // Every change moves the stamp strictly forward — picture, reset to the disc, picture
         // again — so the states never share a stamp, even inside one millisecond.
         let mut seen = vec![legacy.avatar_version];
         db.set_project_image_key("p_legacy", Some("avatar-new.jpg"))
@@ -4218,7 +4214,6 @@ mod avatar_migration_tests {
             None,
             None,
             Some(Some(2)),
-            Some(Some(3)),
         )
         .unwrap();
         seen.push(db.project("p_legacy").unwrap().unwrap().avatar_version);

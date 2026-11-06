@@ -150,10 +150,12 @@ pub struct PeopleChat {
     /// Blob key under `people:{chat_id}` for an optional group picture.
     #[serde(default)]
     pub image_key: Option<String>,
-    /// D92 amendment: the group's leaf picture (shape 0–8, disc colour 0–9) picked on the
-    /// Create screen; `None` = today's member cluster. A `image_key` picture wins.
+    /// Dormant: the leaf avatars' shape pick. Always written `None` and never read; the column
+    /// stays so a relay on the previous binary still reads this table.
     #[serde(default)]
     pub avatar_leaf: Option<i64>,
+    /// The group's disc colour (0–9) picked on the Create screen; `None` = today's member
+    /// cluster. An `image_key` picture wins.
     #[serde(default)]
     pub avatar_leaf_color: Option<i64>,
     /// Optional about text for a people group (≤200 chars); `None` or empty = unset.
@@ -258,14 +260,16 @@ impl Db {
         chat_id: &str,
         title: Option<Option<&str>>,
         image_key: Option<Option<&str>>,
-        leaf: Option<Option<(i64, i64)>>,
+        disc_color: Option<Option<i64>>,
         description: Option<Option<&str>>,
     ) -> Result<bool> {
         self.with(|c| {
-            if let Some(l) = leaf {
+            // `avatar_leaf_color` kept its column name from the leaf avatars this replaced; the
+            // companion `avatar_leaf` shape column is dormant and nothing reads it.
+            if let Some(color) = disc_color {
                 c.execute(
-                    "UPDATE people_chats SET avatar_leaf = ?2, avatar_leaf_color = ?3 WHERE id = ?1 AND deleted_at IS NULL",
-                    params![chat_id, l.map(|l| l.0), l.map(|l| l.1)],
+                    "UPDATE people_chats SET avatar_leaf_color = ?2 WHERE id = ?1 AND deleted_at IS NULL",
+                    params![chat_id, color],
                 )?;
             }
             if let Some(t) = title {

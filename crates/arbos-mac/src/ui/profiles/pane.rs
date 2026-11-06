@@ -64,7 +64,7 @@ pub struct Hero {
 }
 
 pub enum Picture {
-    /// A photo, initials disc or leaf — `editable_picture(..)` when owned.
+    /// A photo, initials disc or solid disc — `editable_picture(..)` when owned.
     Element(AnyElement),
     /// A glyph tile: "#" for channels, "archive"… (the channel page, bc-55453a88).
     Glyph(&'static str),

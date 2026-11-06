@@ -119,12 +119,10 @@ pub struct Project {
     /// D79: the owner's explicit pick (`avatar_color_index`), `None` = automatic.
     #[serde(default)]
     pub avatar_color_override: Option<u8>,
-    /// D92: the owner's leaf pick (`avatar_leaf`, 0–8), `None` = automatic.
-    #[serde(default)]
-    pub avatar_leaf: Option<u8>,
-    /// D92: the owner's leaf disc colour pick (`avatar_leaf_color`, 0–9), `None` = automatic.
-    #[serde(default)]
-    pub avatar_leaf_color: Option<u8>,
+    /// D92: the owner's disc colour pick (0–9), `None` = automatic. The alias reads an
+    /// on-disk store written by a build that called this field `avatar_leaf_color`.
+    #[serde(default, alias = "avatar_leaf_color")]
+    pub avatar_disc_color: Option<u8>,
     /// A group's custom picture (`PATCH /chats/{id} {image_key}`), as a URL
     /// the avatar loader can fetch; `None` = the initials disc.
     #[serde(default)]
@@ -674,11 +672,9 @@ pub struct Sender {
     /// D79: the agent's avatar gradient in effect (0–6), when the relay sends it.
     #[serde(default)]
     pub avatar_color_index: Option<u8>,
-    /// D92: the agent's leaf avatar in effect (shape, disc colour), when the relay sends it.
-    #[serde(default)]
-    pub avatar_leaf: Option<u8>,
-    #[serde(default)]
-    pub avatar_leaf_color: Option<u8>,
+    /// D92: the agent's disc colour in effect, when the relay sends it.
+    #[serde(default, alias = "avatar_leaf_color")]
+    pub avatar_disc_color: Option<u8>,
     #[serde(default, deserialize_with = "null_to_empty")]
     pub avatar_url: String,
 }
@@ -701,10 +697,8 @@ struct SenderWire {
     avatar_color_index: Option<u8>,
     #[serde(default)]
     avatar_color_index_effective: Option<u8>,
-    #[serde(default)]
-    avatar_leaf_effective: Option<u8>,
-    #[serde(default)]
-    avatar_leaf_color_effective: Option<u8>,
+    #[serde(default, alias = "avatar_leaf_color_effective")]
+    avatar_disc_color_effective: Option<u8>,
     #[serde(default, deserialize_with = "null_to_empty")]
     avatar_url: String,
 }
@@ -722,8 +716,7 @@ impl From<SenderWire> for Sender {
                 w.avatar_color_index,
                 w.avatar_color_index_effective,
             ),
-            avatar_leaf: w.avatar_leaf_effective,
-            avatar_leaf_color: w.avatar_leaf_color_effective,
+            avatar_disc_color: w.avatar_disc_color_effective,
             avatar_url: w.avatar_url,
         }
     }
@@ -772,8 +765,7 @@ impl Sender {
             avatar: None,
             avatar_color: None,
             avatar_color_index: p.avatar_color_index,
-            avatar_leaf: None,
-            avatar_leaf_color: None,
+            avatar_disc_color: None,
             avatar_url: p.avatar_url.clone(),
         }
     }
@@ -787,8 +779,7 @@ impl Sender {
             avatar: a.avatar.clone(),
             avatar_color: a.avatar_color.clone(),
             avatar_color_index: a.avatar_color_index,
-            avatar_leaf: a.avatar_leaf,
-            avatar_leaf_color: a.avatar_leaf_color,
+            avatar_disc_color: a.avatar_disc_color,
             avatar_url: String::new(),
         }
     }
@@ -819,8 +810,7 @@ pub fn call_people(space: &Project, me_id: &str, call_agents: &[Sender]) -> Vec<
             avatar: space.avatar.clone(),
             avatar_color: space.avatar_color.clone(),
             avatar_color_index: space.avatar_color_index,
-            avatar_leaf: space.avatar_leaf,
-            avatar_leaf_color: space.avatar_leaf_color,
+            avatar_disc_color: space.avatar_disc_color,
             avatar_url: String::new(),
         });
     }
@@ -1105,13 +1095,11 @@ pub struct AgentMember {
     /// D79: the agent's avatar gradient in effect (0–6).
     #[serde(default)]
     pub avatar_color_index: Option<u8>,
-    /// D92: the agent's leaf avatar in effect (shape 0–8, disc colour 0–9).
-    #[serde(default)]
-    pub avatar_leaf: Option<u8>,
-    #[serde(default)]
-    pub avatar_leaf_color: Option<u8>,
+    /// D92: the agent's disc colour in effect (0–9).
+    #[serde(default, alias = "avatar_leaf_color")]
+    pub avatar_disc_color: Option<u8>,
     /// D92 amendment: the agent's uploaded / generated picture, as a URL the avatar loader
-    /// fetches; wins over the leaf.
+    /// fetches; wins over the disc.
     #[serde(default)]
     pub image_url: Option<String>,
     /// The relay's stamp of the agent's last avatar change (same value as the owner's
@@ -1154,14 +1142,10 @@ struct AgentMemberWire {
     avatar_color_index: Option<u8>,
     #[serde(default)]
     avatar_color_index_effective: Option<u8>,
-    #[serde(default)]
-    avatar_leaf: Option<u8>,
-    #[serde(default)]
-    avatar_leaf_color: Option<u8>,
-    #[serde(default)]
-    avatar_leaf_effective: Option<u8>,
-    #[serde(default)]
-    avatar_leaf_color_effective: Option<u8>,
+    #[serde(default, alias = "avatar_leaf_color")]
+    avatar_disc_color: Option<u8>,
+    #[serde(default, alias = "avatar_leaf_color_effective")]
+    avatar_disc_color_effective: Option<u8>,
     #[serde(default)]
     description: Option<String>,
     #[serde(default)]
@@ -1172,7 +1156,7 @@ struct AgentMemberWire {
     /// persisted as JSON). Until 2026-10-26 this wire struct dropped both, so every roster
     /// copy came back from a relaunch without its picture; with the stamps equal (agents
     /// whose avatar predates #1813 carry 0) that lossy copy won the resolver and every
-    /// people-chat surface drew the leaf until the next registry read.
+    /// people-chat surface drew the disc until the next registry read.
     #[serde(default)]
     image_url: Option<String>,
     #[serde(default)]
@@ -1196,8 +1180,7 @@ impl From<AgentMemberWire> for AgentMember {
                 w.avatar_color_index,
                 w.avatar_color_index_effective,
             ),
-            avatar_leaf: w.avatar_leaf_effective.or(w.avatar_leaf),
-            avatar_leaf_color: w.avatar_leaf_color_effective.or(w.avatar_leaf_color),
+            avatar_disc_color: w.avatar_disc_color_effective.or(w.avatar_disc_color),
             image_url: w.image_url,
             avatar_version: w.avatar_version,
             description: w.description,
@@ -4335,11 +4318,9 @@ pub struct ServerInfo {
     /// by the relay client; not on the wire.
     #[serde(skip)]
     pub image_url: Option<String>,
-    /// D92 amendment: the leaf picture from the Create screen; `None` = initials.
-    #[serde(default)]
-    pub avatar_leaf: Option<u8>,
-    #[serde(default)]
-    pub avatar_leaf_color: Option<u8>,
+    /// D92 amendment: the disc colour from the Create screen; `None` = initials.
+    #[serde(default, alias = "avatar_leaf_color")]
+    pub avatar_disc_color: Option<u8>,
     #[serde(default)]
     pub owner_user_id: String,
     #[serde(default)]

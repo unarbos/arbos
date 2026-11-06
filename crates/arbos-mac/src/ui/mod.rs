@@ -36,7 +36,6 @@ pub mod key_layout;
 pub mod link_card;
 pub mod link_tile;
 pub mod local;
-pub mod lottie;
 pub mod markdown;
 pub mod marks;
 pub mod math;

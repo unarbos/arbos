@@ -26,7 +26,7 @@ use gpui::{
     CursorStyle, DispatchPhase, Element, ElementId, Entity, FocusHandle, FontWeight,
     GlobalElementId, Hitbox, HitboxBehavior, Hsla, InspectorElementId, IntoElement, LayoutId,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, RenderImage,
-    SharedString, StyledText, TextAlign, TextLayout, TextRun, TransformationMatrix, Window,
+    SharedString, StyledText, TextAlign, TextLayout, TextRun, Window,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -1510,7 +1510,7 @@ thread_local! {
     pub static PAINTED_CHIPS: std::cell::RefCell<Vec<PaintedChip>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// The disc a chip's `@` cell holds — a photo, D79 initials or a D92 leaf —
+/// The disc a chip's `@` cell holds — a photo, D79 initials or a D92 solid colour —
 /// filling `bounds` (square). Shared by bubble chips and composer tokens.
 pub fn paint_picture(
     picture: &mention::Picture,
@@ -1558,28 +1558,15 @@ pub fn paint_picture(
             let x = origin.x + (d - line.width) / 2.0;
             let _ = line.paint(point(x, origin.y), d, TextAlign::Left, None, window, cx);
         }
-        mention::Picture::Leaf(pick) => {
+        mention::Picture::Disc(color) => {
             window.paint_quad(gpui::quad(
                 bounds,
                 radii,
-                avatars::leaf_disc(pick.color),
+                avatars::disc_fill(*color),
                 gpui::Edges::all(px(0.0)),
                 gpui::transparent_black(),
                 gpui::BorderStyle::default(),
             ));
-            let side = d * arbos_core::avatar::leaf::LEAF_SCALE;
-            let leaf = Bounds::new(
-                point(origin.x + (d - side) / 2.0, origin.y + (d - side) / 2.0),
-                size(side, side),
-            );
-            let _ = window.paint_svg(
-                leaf,
-                avatars::leaf_asset(pick.leaf),
-                None,
-                TransformationMatrix::unit(),
-                avatars::leaf_ink(pick.color),
-                cx,
-            );
         }
         mention::Picture::Neutral { name } => {
             let (disc, ink) = avatars::neutral_colors(crate::ui::theme::Theme::of(cx));
@@ -1591,7 +1578,7 @@ pub fn paint_picture(
                 gpui::transparent_black(),
                 gpui::BorderStyle::default(),
             ));
-            let text = arbos_core::avatar::leaf::initial(name);
+            let text = arbos_core::avatar::disc::initial(name);
             let font_size = d * avatars::INITIALS_SCALE;
             let mut font = window.text_style().font();
             font.weight = FontWeight::SEMIBOLD;

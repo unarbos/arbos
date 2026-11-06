@@ -316,9 +316,9 @@ extension AppModel {
     }
 
     /// Rule 8: "Server" in the `+` menu → `POST /servers {name}`, then its channel list.
-    func createServer(name: String, leaf: LeafPick? = nil, picture: DraftPicture? = nil) async -> Bool {
+    func createServer(name: String, discColor: UInt8? = nil, picture: DraftPicture? = nil) async -> Bool {
         do {
-            var s = try await relay.createServer(name: name, leaf: leaf)
+            var s = try await relay.createServer(name: name, discColor: discColor)
             if let picture, let jpeg = await draftJpeg(picture) {
                 let key = "server-\(Int(Date().timeIntervalSince1970 * 1000)).\(PictureMaster.ext(jpeg))"
                 if (try? await relay.putBlob(projectId: "servers:\(s.id)", key: key, mime: PictureMaster.mime(jpeg), data: jpeg)) != nil,
@@ -380,16 +380,15 @@ extension AppModel {
         return (try? await relay.searchOpenServers(q)) ?? []
     }
 
-    /// D92 amendment: a server's leaf picture (nil = initials); drops the uploaded picture.
-    func setServerLeaf(_ id: Id, pick: LeafPick?) async -> Bool {
+    /// D92 amendment: a server's disc colour (nil = initials); drops the uploaded picture.
+    func setServerDisc(_ id: Id, color: UInt8?) async -> Bool {
         if let i = servers.firstIndex(where: { $0.id == id }) {
-            servers[i].avatarLeaf = pick.map { Int($0.leaf) }
-            servers[i].avatarLeafColor = pick.map { Int($0.color) }
+            servers[i].avatarDiscColor = color.map { Int($0) }
             servers[i].imageKey = nil
         }
         guard !isFixture else { return true }
         do {
-            try await relay.setServerLeaf(id, pick: pick)
+            try await relay.setServerDisc(id, color: color)
             await refreshServers()
             return true
         } catch {

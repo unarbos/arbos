@@ -245,12 +245,9 @@ pub struct CreateProjectBody {
     /// Telegram-style initials colour (D79): 0–6. Omitted = automatic from the id.
     #[serde(default)]
     pub avatar_color_index: Option<i64>,
-    /// Leaf avatar shape (D92): 0–8. Omitted = automatic from the id.
-    #[serde(default)]
-    pub avatar_leaf: Option<i64>,
-    /// Leaf avatar disc colour (D92): 0–9. Omitted = automatic from the id.
-    #[serde(default)]
-    pub avatar_leaf_color: Option<i64>,
+    /// Solid disc colour (D92): 0–9, or 255 for "no picture". Omitted = automatic from the id.
+    #[serde(default, alias = "avatar_leaf_color")]
+    pub avatar_disc_color: Option<i64>,
     /// Fork: copy the source project's workspace folder (files + memory) into the new agent.
     /// Own projects only; chat UI history is not copied (the new pinned chat stays empty).
     #[serde(default)]
@@ -362,7 +359,7 @@ pub async fn create_project(
             ));
         }
     }
-    crate::avatar::check_leaf_pick(b.avatar_leaf, b.avatar_leaf_color)?;
+    crate::avatar::check_disc_color(b.avatar_disc_color)?;
     let project = Project {
         id,
         name: name.clone(),
@@ -382,8 +379,8 @@ pub async fn create_project(
         description: clean_description(b.description.as_deref().unwrap_or_default())?,
         primary_chat_id: None,
         avatar_color_index: b.avatar_color_index,
-        avatar_leaf: b.avatar_leaf,
-        avatar_leaf_color: b.avatar_leaf_color,
+        avatar_leaf: None,
+        avatar_leaf_color: b.avatar_disc_color,
         image_key: None,
         avatar_version: 0,
     };
@@ -641,12 +638,14 @@ pub struct PatchProjectBody {
     /// Telegram-style initials colour (D79): 0–6, or `null` to go back to the derived colour.
     #[serde(default, deserialize_with = "deserialize_double_option_i64")]
     pub avatar_color_index: Option<Option<i64>>,
-    /// Leaf avatar shape (D92): 0–8, or `null` to go back to the derived leaf.
-    #[serde(default, deserialize_with = "deserialize_double_option_i64")]
-    pub avatar_leaf: Option<Option<i64>>,
-    /// Leaf avatar disc colour (D92): 0–9, or `null` to go back to the derived colour.
-    #[serde(default, deserialize_with = "deserialize_double_option_i64")]
-    pub avatar_leaf_color: Option<Option<i64>>,
+    /// Solid disc colour (D92): 0–9, 255 for "no picture", or `null` to go back to the
+    /// colour derived from the id.
+    #[serde(
+        default,
+        alias = "avatar_leaf_color",
+        deserialize_with = "deserialize_double_option_i64"
+    )]
+    pub avatar_disc_color: Option<Option<i64>>,
     /// D92 amendment: an uploaded / generated picture — a blob name in the project's own slot
     /// (`PUT /blob/{project}/{key}` or `POST /projects/{id}/avatar/generate`); `null` clears it.
     #[serde(default, deserialize_with = "deserialize_double_option")]
@@ -748,7 +747,7 @@ pub async fn patch_project(
             ));
         }
     }
-    crate::avatar::check_leaf_pick(b.avatar_leaf.flatten(), b.avatar_leaf_color.flatten())?;
+    crate::avatar::check_disc_color(b.avatar_disc_color.flatten())?;
     if let Some(image) = &b.image_key {
         let key = image.as_deref().map(str::trim).filter(|k| !k.is_empty());
         if let Some(k) = key {
@@ -821,8 +820,7 @@ pub async fn patch_project(
             color_patch.as_ref().map(|a| a.as_deref()),
             description.as_deref(),
             b.avatar_color_index,
-            b.avatar_leaf,
-            b.avatar_leaf_color,
+            b.avatar_disc_color,
         )
         .map_err(internal)?;
     // A rename reaches the box at once (#1431): agentd refreshes the agent's identity (system
@@ -846,7 +844,7 @@ pub async fn patch_project(
         .project(&p.id)
         .map_err(internal)?
         .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
-    // The avatar moved (picture, leaf or colour): every device that draws this agent learns
+    // The avatar moved (picture or colour): every device that draws this agent learns
     // the new stamp now — the agents' `profile_updated` (Jacob, 2026-10-25: the chat flipped
     // between the old and the new picture until a roster happened to refresh).
     if p.avatar_version != before_avatar {
@@ -1085,7 +1083,7 @@ pub(crate) async fn project_dto(state: &AppState, p: &Project) -> ProjectDto {
         .map(|u| u.usd)
         .unwrap_or(0.0);
     let voice_settings = state.db.voice_agent_settings(&p.id).ok();
-    let leaf = crate::avatar::effective_leaf(p);
+    let disc_color = crate::avatar::effective_disc(p);
     ProjectDto {
         id: p.id.clone(),
         name: p.name.clone(),
@@ -1119,10 +1117,8 @@ pub(crate) async fn project_dto(state: &AppState, p: &Project) -> ProjectDto {
             &p.id,
             p.avatar_color_index,
         )),
-        avatar_leaf: p.avatar_leaf,
-        avatar_leaf_color: p.avatar_leaf_color,
-        avatar_leaf_effective: Some(i64::from(leaf.leaf)),
-        avatar_leaf_color_effective: Some(i64::from(leaf.color)),
+        avatar_disc_color: p.avatar_leaf_color,
+        avatar_disc_color_effective: Some(i64::from(disc_color)),
         image_key: p.image_key.clone(),
         avatar_version: Some(p.avatar_version),
         primary_chat_id: primary_chat_id(state, p),
@@ -1944,9 +1940,7 @@ fn workspace_json(state: &AppState, p: &Project) -> Result<Value, (StatusCode, S
         &p.id,
         p.avatar_color_index
     ));
-    let leaf = crate::avatar::effective_leaf(p);
-    project["avatar_leaf_effective"] = json!(leaf.leaf);
-    project["avatar_leaf_color_effective"] = json!(leaf.color);
+    project["avatar_disc_color_effective"] = json!(crate::avatar::effective_disc(p));
     // Always true for the box: agentd 0.1.16 (85fd0b4e) read this as "may I open my Projects ⇄
     // tab" and otherwise spilled agent-hosted group traffic into the owner's primary chat. The
     // relay enforces the single-chat rule itself in `create_chat` (plain chats only), so the box
@@ -2670,7 +2664,7 @@ mod agent_avatar_version_tests {
     use crate::state::test_support::test_state;
     use crate::state::AuthMode;
 
-    fn leaf_patch(leaf: i64) -> PatchProjectBody {
+    fn disc_patch(color: i64) -> PatchProjectBody {
         PatchProjectBody {
             name: None,
             icon: None,
@@ -2683,8 +2677,7 @@ mod agent_avatar_version_tests {
             voice: None,
             vision_enabled: None,
             avatar_color_index: None,
-            avatar_leaf: Some(Some(leaf)),
-            avatar_leaf_color: Some(Some(2)),
+            avatar_disc_color: Some(Some(color)),
             image_key: None,
         }
     }
@@ -2748,12 +2741,12 @@ mod agent_avatar_version_tests {
             "a fresh project is stamped at birth (its creation time), never 0"
         );
 
-        // Alice's phone picks a leaf.
+        // Alice's phone picks a colour.
         let r = patch_project(
             State(state.clone()),
             alice_phone.clone(),
             Path(project.clone()),
-            Json(leaf_patch(3)),
+            Json(disc_patch(3)),
         )
         .await
         .unwrap();
@@ -2804,7 +2797,7 @@ mod agent_avatar_version_tests {
             State(state.clone()),
             alice_phone.clone(),
             Path(project.clone()),
-            Json(leaf_patch(4)),
+            Json(disc_patch(4)),
         )
         .await
         .unwrap();
@@ -2812,9 +2805,8 @@ mod agent_avatar_version_tests {
         assert!(again.avatar_version > after.avatar_version);
 
         // A patch that leaves the avatar alone neither stamps nor pushes.
-        let mut rename = leaf_patch(0);
-        rename.avatar_leaf = None;
-        rename.avatar_leaf_color = None;
+        let mut rename = disc_patch(0);
+        rename.avatar_disc_color = None;
         rename.description = Some("A test agent".into());
         patch_project(
             State(state.clone()),
@@ -2830,7 +2822,7 @@ mod agent_avatar_version_tests {
     }
 
     /// The owner-set picture reaches a viewer who only shares a group with the agent (Jacob,
-    /// 2026-10-25: "Hezbola, run by @unarbos" drew the automatic leaf): `/blob/{project}/…`
+    /// 2026-10-25: "Hezbola, run by @unarbos" drew the automatic disc): `/blob/{project}/…`
     /// stays the owner's, `GET /projects/{id}/avatar.jpg` serves the current picture to anyone,
     /// 404 while there is none, and the push names the key the viewer should draw.
     #[tokio::test]
@@ -2864,9 +2856,8 @@ mod agent_avatar_version_tests {
         )
         .await;
         assert_eq!(r.status(), StatusCode::NO_CONTENT);
-        let mut body = leaf_patch(0);
-        body.avatar_leaf = None;
-        body.avatar_leaf_color = None;
+        let mut body = disc_patch(0);
+        body.avatar_disc_color = None;
         body.image_key = Some(Some("avatar-1.png".into()));
         let r = patch_project(
             State(state.clone()),
@@ -2910,9 +2901,9 @@ mod agent_avatar_version_tests {
         let bytes = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
         assert_eq!(&bytes[..], crate::image_sniff::samples::PNG);
 
-        // Reset to the leaf: the route is 404 again, so a viewer's fetch falls back to the leaf
-        // only when the owner really has none.
-        let mut body = leaf_patch(1);
+        // Reset to the disc: the route is 404 again, so a viewer's fetch falls back to the
+        // disc only when the owner really has none.
+        let mut body = disc_patch(1);
         body.image_key = Some(None);
         patch_project(
             State(state.clone()),

@@ -594,8 +594,7 @@ fn testagent_member() -> AgentMember {
         avatar: None,
         avatar_color: None,
         avatar_color_index: Some(3),
-        avatar_leaf: Some(3),
-        avatar_leaf_color: Some(7),
+        avatar_disc_color: Some(7),
         image_url: None,
         avatar_version: 0,
         description: None,
@@ -606,12 +605,12 @@ fn testagent_member() -> AgentMember {
 
 /// Extra agents for the Launch week group beyond the seeded Arbos, so the
 /// group has `ARBOS_FIXTURE_WORKING` agents to show working.
-fn fixture_working_extra_agents() -> Vec<(&'static str, &'static str, &'static str, u8, u8)> {
-    const EXTRA: [(&str, &str, &str, u8, u8); 4] = [
-        ("01J9PROJLIUM00000000000000", "Lium", "lium", 2, 3),
-        ("01J9PROJHOME00000000000000", "Home", "home", 5, 6),
-        ("01J9PROJDOUG00000000000000", "Doug", "doug", 7, 1),
-        ("01J9PROJNOVA00000000000000", "Nova", "nova", 1, 8),
+fn fixture_working_extra_agents() -> Vec<(&'static str, &'static str, &'static str, u8)> {
+    const EXTRA: [(&str, &str, &str, u8); 4] = [
+        ("01J9PROJLIUM00000000000000", "Lium", "lium", 3),
+        ("01J9PROJHOME00000000000000", "Home", "home", 6),
+        ("01J9PROJDOUG00000000000000", "Doug", "doug", 1),
+        ("01J9PROJNOVA00000000000000", "Nova", "nova", 8),
     ];
     EXTRA
         .into_iter()
@@ -1193,11 +1192,11 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         | ClientCommand::DeletePeopleChat { .. }
         | ClientCommand::RenameGroup { .. }
         | ClientCommand::SetGroupImage { .. }
-        | ClientCommand::SetGroupLeaf { .. }
+        | ClientCommand::SetGroupDisc { .. }
         | ClientCommand::SetProjectImage { .. }
         | ClientCommand::SetGroupImageKey { .. }
         | ClientCommand::SetServerImage { .. }
-        | ClientCommand::SetServerLeaf { .. }
+        | ClientCommand::SetServerDisc { .. }
         | ClientCommand::GenerateImage { .. }
         | ClientCommand::CloseChat { .. } => {}
         // D88 servers live on the relay only; the fixture has none.
@@ -1928,16 +1927,11 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             set_machine(shared, MachineState::Stopped, Some("Stopped by you"), None);
         }
         ClientCommand::FocusChat { .. } => {}
-        ClientCommand::SetAvatarLeaf {
-            project_id,
-            leaf,
-            color,
-        } => {
+        ClientCommand::SetAvatarDisc { project_id, color } => {
             {
                 let mut projects = shared.projects.lock().unwrap();
                 if let Some(p) = projects.iter_mut().find(|p| p.id == project_id) {
-                    p.avatar_leaf = leaf;
-                    p.avatar_leaf_color = color;
+                    p.avatar_disc_color = color;
                     p.image_url = None;
                 }
             }
@@ -2084,7 +2078,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         ClientCommand::CreateProject {
             name,
             avatar_color_index,
-            leaf,
+            disc_color,
             picture,
             source_project_id: _,
             description,
@@ -2133,8 +2127,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 avatar_color_index: avatar_color_index
                     .map(|i| crate::ui::avatars::index_for(&id, Some(i))),
                 avatar_color_override: avatar_color_index,
-                avatar_leaf: leaf.map(|l| l.leaf),
-                avatar_leaf_color: leaf.map(|l| l.color),
+                avatar_disc_color: disc_color,
                 image_url: image_url.clone(),
                 avatar_version: 0,
                 message_grants: Vec::new(),
@@ -5443,8 +5436,7 @@ fn seed_projects() -> Vec<Project> {
             vision_enabled: true,
             avatar_color_index: None,
             avatar_color_override: None,
-            avatar_leaf: None,
-            avatar_leaf_color: None,
+            avatar_disc_color: None,
             image_url: None,
             avatar_version: 0,
             message_grants: Vec::new(),
@@ -5484,8 +5476,7 @@ fn seed_projects() -> Vec<Project> {
             vision_enabled: true,
             avatar_color_index: None,
             avatar_color_override: None,
-            avatar_leaf: None,
-            avatar_leaf_color: None,
+            avatar_disc_color: None,
             image_url: None,
             avatar_version: 0,
             message_grants: Vec::new(),
@@ -5525,8 +5516,7 @@ fn seed_projects() -> Vec<Project> {
             vision_enabled: true,
             avatar_color_index: None,
             avatar_color_override: None,
-            avatar_leaf: None,
-            avatar_leaf_color: None,
+            avatar_disc_color: None,
             image_url: None,
             avatar_version: 0,
             message_grants: Vec::new(),
@@ -6900,8 +6890,7 @@ fn people_space(id: &str, other: Person, agents: Vec<AgentMember>) -> Project {
         vision_enabled: true,
         avatar_color_index: None,
         avatar_color_override: None,
-        avatar_leaf: None,
-        avatar_leaf_color: None,
+        avatar_disc_color: None,
         image_url: None,
         avatar_version: 0,
         message_grants: Vec::new(),
@@ -6929,8 +6918,7 @@ fn launch_week() -> Project {
         avatar: None,
         avatar_color: None,
         avatar_color_index: None,
-        avatar_leaf: None,
-        avatar_leaf_color: None,
+        avatar_disc_color: None,
         image_url: None,
         avatar_version: 0,
         description: None,
@@ -6944,7 +6932,7 @@ fn launch_week() -> Project {
     }
     // `ARBOS_FIXTURE_WORKING=<n>` (screenshot rig): the group holds n agents so
     // the presence row can show several of them working at once.
-    for (project_id, name, handle, leaf, color) in fixture_working_extra_agents() {
+    for (project_id, name, handle, color) in fixture_working_extra_agents() {
         agents.push(AgentMember {
             project_id: project_id.into(),
             name: name.into(),
@@ -6957,8 +6945,7 @@ fn launch_week() -> Project {
             avatar: None,
             avatar_color: None,
             avatar_color_index: Some(color),
-            avatar_leaf: Some(leaf),
-            avatar_leaf_color: Some(color),
+            avatar_disc_color: Some(color),
             image_url: None,
             avatar_version: 0,
             description: None,
@@ -7028,8 +7015,7 @@ fn seed_people_projects() -> Vec<Project> {
             vision_enabled: true,
             avatar_color_index: None,
             avatar_color_override: None,
-            avatar_leaf: None,
-            avatar_leaf_color: None,
+            avatar_disc_color: None,
             image_url: None,
             avatar_version: 0,
             message_grants: Vec::new(),
@@ -8005,7 +7991,7 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             handles,
             agent_ids,
             title: draft_title,
-            leaf,
+            disc_color,
             picture,
         } => {
             let mut members: Vec<Person> = Vec::new();
@@ -8046,8 +8032,7 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                                 avatar: p.avatar.clone(),
                                 avatar_color: p.avatar_color.clone(),
                                 avatar_color_index: p.avatar_color_index,
-                                avatar_leaf: p.avatar_leaf,
-                                avatar_leaf_color: p.avatar_leaf_color,
+                                avatar_disc_color: p.avatar_disc_color,
                                 image_url: None,
                                 avatar_version: 0,
                                 description: None,
@@ -8096,8 +8081,7 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             let mut space = people_space(&id, seed, agents);
             space.kind = SpaceKind::Group;
             space.name = title.clone();
-            space.avatar_leaf = leaf.as_ref().map(|l| l.leaf);
-            space.avatar_leaf_color = leaf.as_ref().map(|l| l.color);
+            space.avatar_disc_color = *disc_color;
             if let Some(url) = picture.as_ref().map(|p| draft_picture_url("group", p)) {
                 emit_avatar(shared, &url);
                 space.image_url = Some(url);
@@ -8179,8 +8163,7 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                             avatar: p.avatar.clone(),
                             avatar_color: p.avatar_color.clone(),
                             avatar_color_index: p.avatar_color_index,
-                            avatar_leaf: p.avatar_leaf,
-                            avatar_leaf_color: p.avatar_leaf_color,
+                            avatar_disc_color: p.avatar_disc_color,
                             image_url: None,
                             avatar_version: 0,
                             description: None,
@@ -8397,8 +8380,7 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                                 avatar: p.avatar.clone(),
                                 avatar_color: p.avatar_color.clone(),
                                 avatar_color_index: p.avatar_color_index,
-                                avatar_leaf: p.avatar_leaf,
-                                avatar_leaf_color: p.avatar_leaf_color,
+                                avatar_disc_color: p.avatar_disc_color,
                                 image_url: None,
                                 avatar_version: 0,
                                 description: None,
@@ -8465,12 +8447,11 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             emit_projects(shared);
             true
         }
-        ClientCommand::SetGroupLeaf { chat_id, pick } => {
+        ClientCommand::SetGroupDisc { chat_id, color } => {
             {
                 let mut projects = shared.projects.lock().unwrap();
                 if let Some(p) = projects.iter_mut().find(|p| p.id == *chat_id) {
-                    p.avatar_leaf = pick.map(|l| l.leaf);
-                    p.avatar_leaf_color = pick.map(|l| l.color);
+                    p.avatar_disc_color = *color;
                     p.image_url = None;
                 }
             }
@@ -8560,7 +8541,7 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             emit_projects(shared);
             true
         }
-        ClientCommand::SetServerImage { .. } | ClientCommand::SetServerLeaf { .. } => true,
+        ClientCommand::SetServerImage { .. } | ClientCommand::SetServerDisc { .. } => true,
         _ => false,
     }
 }
@@ -8727,8 +8708,7 @@ fn sender_of(p: &Person) -> Sender {
         avatar: None,
         avatar_color: None,
         avatar_color_index: None,
-        avatar_leaf: None,
-        avatar_leaf_color: None,
+        avatar_disc_color: None,
         avatar_url: p.avatar_url.clone(),
     }
 }
@@ -9121,7 +9101,7 @@ mod create_group_tests {
             handles: vec!["sam".into()],
             agent_ids: vec![PROJECT_ARBOS.into()],
             title: None,
-            leaf: None,
+            disc_color: None,
             picture: None,
         })
         .unwrap();
@@ -9155,7 +9135,7 @@ mod create_group_tests {
             handles: vec![],
             agent_ids: vec![PROJECT_ARBOS.into(), PROJECT_COMMS.into()],
             title: None,
-            leaf: None,
+            disc_color: None,
             picture: None,
         })
         .unwrap();
@@ -9180,7 +9160,7 @@ mod create_group_tests {
             handles: vec![],
             agent_ids: vec![],
             title: None,
-            leaf: None,
+            disc_color: None,
             picture: None,
         })
         .unwrap();

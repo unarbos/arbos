@@ -92,8 +92,8 @@ pub struct Sender {
     pub user_id: Option<String>,
     /// Agent's initials-colour override (D79); people never have one.
     pub avatar_color_index: Option<i64>,
-    /// Agent's leaf avatar in effect (D92: shape 0–8, disc colour 0–9); people never have one.
-    pub leaf: Option<arbos_core::avatar::leaf::LeafPick>,
+    /// Agent's solid disc colour in effect (D92: 0–9); people never have one.
+    pub disc_color: Option<u8>,
 }
 
 impl Sender {
@@ -123,7 +123,7 @@ impl Sender {
             avatar_url: card.avatar_url,
             user_id: Some(user_id.to_owned()),
             avatar_color_index: None,
-            leaf: None,
+            disc_color: None,
         }
     }
 
@@ -144,7 +144,7 @@ impl Sender {
             avatar_url: None,
             user_id: None,
             avatar_color_index: p.avatar_color_index,
-            leaf: Some(crate::avatar::effective_leaf(p)),
+            disc_color: Some(crate::avatar::effective_disc(p)),
         }
     }
 
@@ -162,8 +162,7 @@ impl Sender {
                 &self.id,
                 self.avatar_color_index,
             )),
-            avatar_leaf_effective: self.leaf.map(|l| i64::from(l.leaf)),
-            avatar_leaf_color_effective: self.leaf.map(|l| i64::from(l.color)),
+            avatar_disc_color_effective: self.disc_color.map(i64::from),
         }
     }
 
