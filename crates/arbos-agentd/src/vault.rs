@@ -342,6 +342,40 @@ fn asked_by_user_id(agent: &Agent) -> Option<String> {
     agent.people.current_asker().map(|a| a.user_id)
 }
 
+/// What the relay checks the asker claim against: the row this turn answers, and whether this
+/// box wrote that row itself.
+///
+/// `asked_by` is read out of a chat document, and every member of a chat can write that
+/// document — so on its own it is a claim and not evidence. Naming the row lets the relay settle
+/// it against its own record of which principal pushed that row (`secrets::directing`).
+///
+/// The row id comes from the turn this box is running, not from anything a document says about
+/// who wrote it. The own-work flag comes from [`Agent::wrote_own_row`], which answers from what
+/// this process did: a routine firing, a voice line, a bound channel's message have no human
+/// author for the relay's record to hold, and `deviceId`, `sender` and `senderRole` are all
+/// doc fields, so none of them could stand in for it.
+async fn turn_author(agent: &Agent) -> (Option<String>, bool) {
+    let ask_row = agent
+        .turn
+        .lock()
+        .await
+        .as_ref()
+        .map(|t| t.user_msg_id.clone())
+        .filter(|id| !id.is_empty());
+    let own_work = ask_row.as_deref().is_some_and(|id| agent.wrote_own_row(id));
+    (ask_row, own_work)
+}
+
+/// Add the two fields [`turn_author`] resolves to a relay request body.
+fn add_turn_author(body: &mut Value, ask_row: Option<String>, own_work: bool) {
+    if let Some(id) = ask_row {
+        body["asked_by_message_id"] = json!(id);
+    }
+    if own_work {
+        body["asked_by_own_work"] = json!(true);
+    }
+}
+
 /// The person asking this turn when they are not the owner (a people-chat guest or member).
 fn non_owner_asker(agent: &Agent) -> Option<crate::people::Asker> {
     let asker = agent.people.current_asker()?;
@@ -770,7 +804,7 @@ pub async fn on_push(agent: &Arc<Agent>, kind: &str, payload: &Value) {
             }
             let chat_hint = payload["chat_id"].as_str().unwrap_or("").to_owned();
             let chat_id = agent.approval_chat(&chat_hint).await.unwrap_or(chat_hint);
-            if let Some(host) = agent.sync.host(&chat_id).await {
+            if let Ok(host) = agent.room(&chat_id).await {
                 let h = host.lock().await;
                 h.doc.append_system_note(
                     &ulid(),
@@ -886,10 +920,13 @@ async fn scrub_secret(agent: &Arc<Agent>, secret_id: &str) -> Result<ScrubStats,
     }
 
     // Open every known chat so historical leaks are covered, not only the ones already loaded.
+    // The rooms the scrub opens are closed again below: a scrub of a box with many chats would
+    // otherwise leave a relay socket per chat behind (#2367).
+    let mut opened_to_scrub: Vec<String> = Vec::new();
     if let Ok(chats) = agent.store.chats() {
         for c in chats {
-            if agent.sync.host(&c.id).await.is_none() {
-                let _ = agent.sync.open_room(&c.id).await;
+            if !agent.sync.is_open(&c.id).await && agent.sync.open_room(&c.id).await.is_ok() {
+                opened_to_scrub.push(c.id);
             }
         }
     }
@@ -913,6 +950,12 @@ async fn scrub_secret(agent: &Arc<Agent>, secret_id: &str) -> Result<ScrubStats,
         if n > 0 || repersist {
             let _ = agent.sync.persist(&host).await;
         }
+    }
+
+    // A room whose redaction is still on its way to the relay stays open; the idle close takes
+    // it once the relay has acked it.
+    for id in opened_to_scrub {
+        agent.sync.close_if_settled(&id).await;
     }
 
     let sessions = scrub_session_files(&agent.cfg, &values);
@@ -1169,6 +1212,8 @@ async fn obtain_grant(
     if let Some(uid) = asked_by_user_id(agent) {
         req["asked_by"] = json!(uid);
     }
+    let (ask_row, own_work) = turn_author(agent).await;
+    add_turn_author(&mut req, ask_row, own_work);
     let (status_code, created) = relay_post(agent, "/box/secrets/request", &req)
         .await
         .map_err(err_result)?;
@@ -1268,7 +1313,13 @@ async fn obtain_grant(
             None => chat_id.to_owned(),
         };
         match agent
-            .begin_approval(&card_chat, req, WaitMode::Inline, Some(tx))
+            .begin_approval(
+                &card_chat,
+                req,
+                WaitMode::Inline,
+                Some(tx),
+                crate::approval::approval_ttl_ms(),
+            )
             .await
         {
             Ok(id) => (Some(id), Some(rx)),
@@ -1474,6 +1525,8 @@ pub async fn egress(agent: &Arc<Agent>, args: &Value, chat_id: &str) -> Value {
     if let Some(uid) = asked_by_user_id(agent) {
         egress_body["asked_by"] = json!(uid);
     }
+    let (ask_row, own_work) = turn_author(agent).await;
+    add_turn_author(&mut egress_body, ask_row, own_work);
     let r = agent
         .http_client()
         .post(format!("{}/egress", agent.cfg.relay_url))
@@ -1681,6 +1734,66 @@ pub async fn browser_fill(agent: &Arc<Agent>, args: &Value, chat_id: &str) -> Va
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What the box tells the relay about who is directing a turn: the row it is answering, and
+    /// whether it wrote that row itself.
+    ///
+    /// The own-work answer comes from this process's record of what it appended. It must not be
+    /// derivable from the chat document, because the attacker writes the document: a guest who
+    /// could make `asked_by_own_work` true would put the relay straight back to taking
+    /// `asked_by` at face value.
+    #[tokio::test]
+    async fn own_work_comes_from_what_the_box_wrote_not_from_the_row() {
+        let (agent, _root) = crate::status::tests::test_agent().await;
+
+        // No turn: nothing to name, and nothing claimed.
+        assert_eq!(turn_author(&agent).await, (None, false));
+
+        // A row somebody else wrote. The box names it so the relay can look up its author, and
+        // claims nothing about where it came from.
+        *agent.turn.lock().await = Some(crate::agent::TurnState::claim("chat_1", "m_guest", false));
+        assert_eq!(
+            turn_author(&agent).await,
+            (Some("m_guest".to_owned()), false)
+        );
+
+        // A row the box wrote itself — a routine, a voice line, a bound channel.
+        agent.note_own_row("m_routine");
+        *agent.turn.lock().await =
+            Some(crate::agent::TurnState::claim("chat_1", "m_routine", false));
+        assert_eq!(
+            turn_author(&agent).await,
+            (Some("m_routine".to_owned()), true)
+        );
+
+        // The body carries exactly those two, and says nothing when there is nothing to say.
+        let mut body = json!({});
+        add_turn_author(&mut body, Some("m_routine".to_owned()), true);
+        assert_eq!(body["asked_by_message_id"], "m_routine");
+        assert_eq!(body["asked_by_own_work"], true);
+
+        let mut body = json!({});
+        add_turn_author(&mut body, Some("m_guest".to_owned()), false);
+        assert_eq!(body["asked_by_message_id"], "m_guest");
+        assert!(
+            body.get("asked_by_own_work").is_none(),
+            "a turn the box did not start claims nothing"
+        );
+    }
+
+    /// The record is bounded, and eviction is oldest-first so the row a turn is answering is
+    /// the last one to be forgotten.
+    #[tokio::test]
+    async fn the_record_of_own_rows_is_bounded() {
+        let (agent, _root) = crate::status::tests::test_agent().await;
+        agent.note_own_row("m_first");
+        for i in 0..crate::agent::OWN_ROWS_MAX {
+            agent.note_own_row(&format!("m_{i}"));
+        }
+        assert!(!agent.wrote_own_row("m_first"), "the oldest went first");
+        assert!(agent.wrote_own_row(&format!("m_{}", crate::agent::OWN_ROWS_MAX - 1)));
+        assert!(!agent.wrote_own_row(""), "an absent id is not own work");
+    }
 
     /// The People list reaches the box as `people[]` (rows that are on) plus `others_ask`;
     /// an older relay's `directors[]` still works; the rule line follows the switch.

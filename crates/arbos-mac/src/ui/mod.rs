@@ -1,3 +1,5 @@
+pub mod agent_link_reveal;
+pub mod agent_links;
 pub mod agent_picker;
 pub mod approve;
 pub mod attachments;
@@ -5,6 +7,7 @@ pub mod avatar_picker;
 #[cfg(test)]
 mod avatar_upload_preview_tests;
 pub mod avatars;
+pub mod back_swipe;
 pub mod backdrop;
 pub mod blocked;
 pub mod callview;
@@ -54,6 +57,7 @@ pub mod profile_target;
 pub mod profiles;
 pub mod rail;
 pub mod reactions;
+pub mod reveal;
 pub mod routines;
 pub mod secret_card;
 pub mod secrets;

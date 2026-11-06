@@ -3457,6 +3457,73 @@ pub struct DevicesView {
     pub error: Option<crate::sync::user_error::UserError>,
 }
 
+/// One agent token of my account (`GET /me/agent-links`). Covers both the
+/// agent access links and the read-only reader tokens that predate them; the
+/// relay tells them apart with `origin` and this section lists both, because
+/// "tokens I gave an agent" is one question with one answer.
+///
+/// No field here is or can be a secret: the relay's list route never returns
+/// a bearer or a URL, on any row, ever (`docs/agent-access-link-spec.md` §6.1).
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize)]
+pub struct AgentLinkView {
+    pub id: String,
+    /// `link` (an agent access link) or `export` (a migrated reader token).
+    #[serde(default)]
+    pub origin: String,
+    /// The owner's name for it, shown in the list and in the audit.
+    #[serde(default)]
+    pub label: String,
+    /// `read` | `reply`.
+    #[serde(default)]
+    pub scope: String,
+    pub created_at: i64,
+    /// `None` on a reader token, which never expires.
+    #[serde(default)]
+    pub expires_at: Option<i64>,
+    /// Set the moment something fetched the URL. `None` = nobody has yet.
+    #[serde(default)]
+    pub opened_at: Option<i64>,
+    #[serde(default)]
+    pub revoked_at: Option<i64>,
+    #[serde(default)]
+    pub last_seen_at: Option<i64>,
+    /// The relay's own verdict: not revoked and not past its expiry.
+    #[serde(default)]
+    pub live: bool,
+    /// `waiting` | `in_use` | `revoked` | `expired`.
+    #[serde(default)]
+    pub state: String,
+    /// What the relay wants said about this row (a reader token keeps no
+    /// activity record, and the list says so rather than implying one).
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+/// Settings → Agent access link state.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AgentLinksView {
+    pub items: Vec<AgentLinkView>,
+    pub loaded: bool,
+    /// A mint is in flight: the Create button is spent until the relay answers.
+    pub minting: bool,
+    /// Why the list could not be read, when it could not.
+    pub error: Option<crate::sync::user_error::UserError>,
+}
+
+/// The copy sheet, the one screen a new link's URL exists on. Closed, it is
+/// unrecoverable — which is why Done waits for the Copy (`one-copy` §3).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentLinkReveal {
+    /// The whole URL, for the clipboard.
+    pub url: String,
+    pub label: String,
+    pub scope: String,
+    /// "7 days", for the sheet's one-line restatement of what was granted.
+    pub expires_in: String,
+    /// Copy has been pressed: the capsule reads "Copied" and Done is live.
+    pub copied: bool,
+}
+
 /// Settings → Secrets state (`GET /secrets` + `GET /secrets/requests`).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SecretsView {

@@ -82,6 +82,26 @@ and a 250 GB volume (five leftover 13 GB test-simulator clones took it from 60 t
   equal stamps the caller's order holds (chat roster, my records, other rosters). While a picture
   loads, the disc is the neutral initial — never an older picture, never the leaf.
 
+## One Glass-aware fill (#2801, 2026-11-05)
+
+- On Glass the desktop shows through the window, so an **opaque theme token painted as a fill is a
+  foreign material**, not a slightly wrong grey. Most of those tokens already have a Glass-aware
+  accessor beside them in `ui/theme.rs`, returning the Matte token unchanged and a wash of the text
+  colour on Glass: `surface_2` → `control_fill()`, `field` → `field_fill()`, `surface_1` → `card()`
+  / `popup()`, `pane_card` → `pane_card_fill()`, `sidebar` → `chrome()`, `bubble_assistant` →
+  `filter_on_fill()`, `bubble` → `segment_on_fill()`.
+- `scripts/glass-lint.sh` scans `crates/arbos-mac/src` in CI's Layout job and fails the build. It
+  keys on the **token**, not on the control flow around it: #2801's defect was a bare
+  `.bg(theme.surface_2)` inside an `if selected` leg, which `highlight.rs`'s drift guard — it only
+  reads `.hover(…)`, `.active(…)`, `group_hover(…)` and `.when(selected, …)` — could not see.
+- A line that must paint an opaque token carries `// glass-lint: allow (<why>)`, on the line or in
+  the comment block above it. The reason is free text and may not be empty: a photo viewer's own
+  matte, a call's stage, a modal document panel.
+- `scripts/glass-lint-baseline.txt` carries the sites that predate the guard. It is a **debt list,
+  not an approval** — nothing in it has been judged for Glass. It may only shrink: convert a site
+  to its accessor (or decide it is deliberate and move it to a marker), then
+  `./scripts/glass-lint.sh --write-baseline` and commit the smaller file with the change.
+
 ## No Simulator.app on the gate Mac (2026-10-28 21:40 UTC)
 
 Xcode 27 on the shared EC2 Mac ships **no Simulator.app** (nothing under `Contents/Developer/Applications`,
@@ -109,9 +129,10 @@ builds took the 8-core box to load 263 and ssh timed out for every worker (same 
 load 66–167). Rule, for every rig script under `/Users/Shared/arbos-*/` and every ad-hoc run on the box:
 
 - Before `xcrun simctl boot`, `xcodebuild`, `cargo build`/`cargo run`, `swift build` or launching the Mac app
-  from a rig: `slot=$(/usr/local/bin/arbos-heavy-slot.sh acquire <rig-name> --pid $$)`; after the heavy step
-  (the simulator is up and the app is running, or the build finished): `/usr/local/bin/arbos-heavy-slot.sh
-  release "$slot"`. Screenshots, clicks and `screencapture` on an already-running app need no slot — hold
+  from a rig: acquire a slot in the guarded shape at the top of `arbos-heavy-slot.sh` (the acquire runs in the
+  background, its pid held, and is killed from an `INT`/`TERM` trap), not as a bare `slot=$(… acquire …)`,
+  which leaves the acquire waiting after the rig is killed. After the heavy step (the simulator is up and the
+  app is running, or the build finished): `/usr/local/bin/arbos-heavy-slot.sh release "$slot"`. Screenshots, clicks and `screencapture` on an already-running app need no slot — hold
   the GUI lock (`gui-lock.sh`) for those as before. A slot is for the burst, not the whole session.
 - Builds in a rig run `nice -n 12` with `CARGO_BUILD_JOBS=4` (the gate does the same); a rig never needs the
   `--priority` slot — that is for a pinned hotfix.
@@ -122,6 +143,8 @@ load 66–167). Rule, for every rig script under `/Users/Shared/arbos-*/` and ev
   `uncapped-*` slot, but never during a release or while one is queued.
 - To ask without queueing, pass `--no-wait`: it writes no waiting marker, returns a slot (exit 0) or nothing
   (exit 75) at once, and signals no one. Use it whenever you were told to ask rather than queue.
+- To wait a moment for a handover but not sit in the queue, pass `--wait-max <seconds>`: it queues, and if it
+  is not granted in time it clears its own marker and exits 75. It is never promoted to an `uncapped-*` slot.
 - A waiter whose `--pid` owner has died gives up and clears its queue marker; a rig that holds a slot with no
   heavy process alive is stale and gets reclaimed.
 - Shared simulators stay shut down when the rig is done (`xcrun simctl shutdown <udid>`): a booted idle

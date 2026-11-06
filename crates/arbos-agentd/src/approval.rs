@@ -8,7 +8,7 @@
 //! - **deferred**: `draft_message` posts the card and ends the turn; the decision dispatches the
 //!   draft and prompts the main agent with the outcome as a `[Arbos]` notice.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -17,8 +17,9 @@ use serde_json::{json, Value};
 use tokio::sync::{oneshot, Mutex};
 
 use arbos_core::approval::{
-    classify_tool_with, describe_tool, may_dispatch, ApprovalOutcome, ApprovalRequest,
-    ApprovalState, PathClass, Risk, RiskMatch, ShellGrant, APPROVAL_TTL_MS, GRANTABLE_CLASSES,
+    classify_tool_with, describe_tool, may_dispatch, resolve_path, ApprovalOutcome,
+    ApprovalRequest, ApprovalState, PathClass, PathFacts, Risk, RiskMatch, ShellGrant,
+    APPROVAL_TTL_MS, GRANTABLE_CLASSES, WORKSPACE_ROOT,
 };
 
 /// The box's view for the classifier (#1719): a truncation idiom (`: > f`, `> f`,
@@ -31,16 +32,81 @@ fn file_has_content(path: &str) -> bool {
 }
 
 fn classify_tool(tool: &str, args: &Value) -> Option<RiskMatch> {
-    classify_tool_with(tool, args, &file_has_content)
+    classify_tool_with(tool, args, PathFacts::with_content(&file_has_content))
 }
 use arbos_core::doc::MessageStatus;
 use arbos_core::ids::{now_ms, ulid};
 
 use crate::agent::{Agent, TurnKind};
 use crate::connectors;
+use crate::store::{ApprovalRow, JobRow};
 
 /// A re-run of a gated call is pre-approved for this long after the user approved it late.
 const GRANT_TTL_MS: i64 = 10 * 60 * 1000;
+
+/// The job step while one of its cards waits: what `list_jobs`, the rollout view and the chat's
+/// presence row show, since the card itself is posted in the owner's main chat.
+const APPROVAL_WAIT_STEP: &str = "Waiting for approval";
+
+/// The step of a job that stopped because nobody answered its card.
+const APPROVAL_EXPIRED_STEP: &str = "Stopped: needs your approval";
+
+/// Harness tools whose call writes the file it names (`path` / `file_path`). An edit is in the
+/// list because the file it names may not exist yet; one that does is not recorded either way.
+const WRITE_TOOLS: &[&str] = &[
+    "write",
+    "write_file",
+    "create_file",
+    "edit",
+    "edit_file",
+    "str_replace",
+    "multi_edit",
+];
+
+/// Most paths one job's "it wrote this itself" list holds. A job that writes more than this
+/// keeps the cards it used to get for the rest; the list never grows without a bound.
+const JOB_WRITES_MAX: usize = 512;
+
+/// The error a job carries when one of its own cards expired unanswered. The job stops there:
+/// no second card, no fresh worker, and the result turn tells the user why (Test5 round 2 bug H
+/// — T8 sat through four cards, each expiring after the extension's 14-minute wait, because
+/// every refusal was retried).
+pub(crate) const APPROVAL_EXPIRED_ERROR: &str =
+    "an approval card for this job expired unanswered, so the job stopped; it was not retried";
+
+/// Whether this job stopped because a card of its own expired.
+pub(crate) fn stopped_by_expired_approval(job: &JobRow) -> bool {
+    job.error.as_deref() == Some(APPROVAL_EXPIRED_ERROR)
+}
+
+/// The one line a job's own surfaces get while a card of that job waits in another chat: what
+/// is waiting, and which chat to answer it in.
+///
+/// It names the work, because a notice that does not is worth nothing. Test5 round 3, bug M:
+/// "The background work I started has finished" went out with two jobs in flight, naming
+/// neither, and told the reader nothing they could act on. So the card's own title carries the
+/// line, and its summary — for a shell card, the command itself — is appended when it adds
+/// anything.
+///
+/// `chat` is a name, never an id. A ULID is not a place a person can be asked to go, so the
+/// caller passes a generic pointer to the main chat when the chat it found has no title.
+pub(crate) fn approval_wait_line(title: &str, summary: &str, chat: &str) -> String {
+    let title = title.trim();
+    // Only `describe_tool`'s shell shape opens with a capitalised verb, and only that one needs
+    // lowering to continue this sentence. Its other two shapes — `{provider}: {action}` and
+    // `{tool} ({class})` — read correctly after "to" as they are, and lowering by case alone
+    // turned "Gmail: send" into "gmail: send".
+    let mut what = match (title.strip_prefix("Run "), title.is_empty()) {
+        (Some(rest), _) => format!("run {rest}"),
+        (None, false) => title.to_owned(),
+        (None, true) => "a step of this job".to_owned(),
+    };
+    let summary = summary.trim();
+    if !summary.is_empty() && !what.contains(summary) {
+        what = format!("{what}: {summary}");
+    }
+    format!("Waiting for your approval to {what}. The card is in {chat}.")
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WaitMode {
@@ -71,6 +137,9 @@ pub struct Approvals {
     grants: Mutex<Vec<Grant>>,
     /// Standing shell grants from the relay (#1544), refreshed on `shell_grants_changed`.
     shell_grants: Mutex<Vec<ShellGrant>>,
+    /// Per job id, the absolute paths that job's own writes created: deleting one of those
+    /// destroys nothing the user had, so it raises no card (`Agent::note_job_write`).
+    job_writes: Mutex<HashMap<String, HashSet<String>>>,
 }
 
 /// `approve` payload field a card option B/C sets: the path class to allow from now on.
@@ -120,11 +189,92 @@ fn canonical(v: &Value) -> String {
     }
 }
 
-fn timeout_secs() -> u64 {
+/// The chat's status while a card of it waits: `Waiting for your approval: <card title>`.
+///
+/// It names the card, because the line it replaces — a bare "Waiting for approval" — said that
+/// a decision was wanted without saying which, and with two cards in a chat it named neither.
+///
+/// Clipped, because this is a presence chip and a one-line working row rather than a transcript
+/// sentence. That is also why it is not `approval_wait_line`: #2759's line is a full sentence
+/// for a transcript row and names the chat the card is in, which is the wrong shape and the
+/// wrong length for a status line in the very chat the person is already looking at.
+pub(crate) fn wait_status_line(title: &str) -> String {
+    const TITLE_MAX: usize = 56;
+    let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
+    let title = if title.chars().count() > TITLE_MAX {
+        format!("{}…", title.chars().take(TITLE_MAX - 1).collect::<String>())
+    } else {
+        title
+    };
+    if title.is_empty() {
+        return "Waiting for your approval".to_owned();
+    }
+    format!("Waiting for your approval: {title}")
+}
+
+/// What the harness tells the model when its gated call is parked.
+///
+/// Three things it has to carry, because each was got wrong somewhere in Test5: nothing ran, so
+/// the model may not report the work as done; the call must not be repeated, since the re-run is
+/// Arbos's job once the card is answered; and the turn should end rather than wait, which is the
+/// point of parking it at all.
+///
+/// It names no chat. The model is not told where the card went (`hook_approval`'s pending reply
+/// carries that), so a sentence here would be the invention this is meant to stop.
+fn parked_reason(approval_id: &str) -> String {
+    format!(
+        "Nothing ran. This needs the user's approval and card {approval_id} is waiting for them. \
+         Do not call it again and do not wait for it: say in one short sentence that it needs \
+         their approval, then end your turn. When they approve, Arbos runs the call and gives \
+         you the result."
+    )
+}
+
+/// How long a card is answerable when nothing shorter than the TTL bounds the wait for it:
+/// `APPROVAL_TTL_MS` (24 h), or `ARBOS_APPROVAL_TIMEOUT_SECS` where a box shortens it.
+pub(crate) fn approval_ttl_ms() -> i64 {
     std::env::var("ARBOS_APPROVAL_TIMEOUT_SECS")
         .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or((APPROVAL_TTL_MS / 1000) as u64)
+        .and_then(|s| s.parse::<i64>().ok())
+        .map(|secs| secs.saturating_mul(1000))
+        .filter(|ms| *ms > 0)
+        .unwrap_or(APPROVAL_TTL_MS)
+}
+
+/// How long the harness blocks a gated tool call while it polls `/hook/approval-status`
+/// (`ARBOS_APPROVAL_WAIT_MS`, 14 minutes), after which the call is refused and nothing runs.
+///
+/// agentd owns this number and hands it to the extension in the `/hook/approval` reply, because
+/// the card's deadline has to be the same one the waiter uses. The extension kept its own copy
+/// of the default, and that is the whole of Test5 round 5 bug R: card
+/// `01M6MRB89V75ZEX909EDWQJRDV` advertised `expires_at` at +24 h and was expired by
+/// `arbos:timeout` at +14 min, the moment the extension stopped polling. Round 4 shows the same
+/// fourteen minutes, which is what tells you it was a fixed cap rather than a slow user.
+pub(crate) fn harness_wait_cap_ms() -> i64 {
+    std::env::var("ARBOS_APPROVAL_WAIT_MS")
+        .ok()
+        .and_then(|s| s.parse::<i64>().ok())
+        .filter(|ms| *ms > 0)
+        .unwrap_or(14 * 60 * 1000)
+}
+
+/// How long a main-session gated call blocks inside the harness hook before it is parked and the
+/// chat's turn released (`ARBOS_APPROVAL_PARK_AFTER_MS`).
+///
+/// Short, because every millisecond of it is a millisecond the chat cannot hold a conversation:
+/// the main turn is held for the whole wait, so a new message in that chat can only reach the
+/// quick lane. Round 5 held a side chat's turn this way for fourteen minutes.
+///
+/// Not zero, because approving straight away is the common case, and answering inside the grace
+/// keeps that case on its original tool call — nothing is parked, nothing is re-run, and no
+/// second model call is spent. Ten seconds buys that and still frees the turn long before
+/// anyone has typed a follow-up.
+fn park_after_ms() -> i64 {
+    std::env::var("ARBOS_APPROVAL_PARK_AFTER_MS")
+        .ok()
+        .and_then(|s| s.parse::<i64>().ok())
+        .filter(|ms| *ms > 0)
+        .unwrap_or(10_000)
 }
 
 impl Agent {
@@ -197,12 +347,20 @@ impl Agent {
     }
 
     /// Post the card and register the pending entry. Returns the approval id.
+    ///
+    /// `expires_in_ms` is the deadline this card gets, and it is the caller's statement of when
+    /// its own wait stops. The two cannot be chosen separately: a card is answerable only while
+    /// something is still prepared to act on the answer, so whatever cancels the wait *is* the
+    /// expiry, and `expires_at` has to say so. Round 5 is what happens when they drift — the
+    /// card advertised 24 h to the user while the harness gave up at 14 minutes
+    /// ([`harness_wait_cap_ms`]) and expired it.
     pub async fn begin_approval(
         self: &Arc<Self>,
         chat_id: &str,
         req: ApprovalRequest,
         mode: WaitMode,
         waiter: Option<oneshot::Sender<ApprovalOutcome>>,
+        expires_in_ms: i64,
     ) -> Result<String> {
         let host = self
             .sync
@@ -210,7 +368,7 @@ impl Agent {
             .await
             .ok_or_else(|| anyhow!("approval: chat {chat_id} has no doc"))?;
         let approval_id = ulid();
-        let expires_at = now_ms() + APPROVAL_TTL_MS;
+        let expires_at = now_ms() + expires_in_ms.max(1);
         // An optional card (the secret hand-off's "that looks like a key" offer) asks nothing
         // of the turn: no waiting status, no composer lock, no "Waiting for approval" line.
         let optional = req
@@ -304,29 +462,87 @@ impl Agent {
                 waiter,
             },
         );
-        // Working line / quick-reply status: "Waiting for approval", not the gated tool's
-        // label ("Removing files") — nothing has run yet.
+        // Working line / quick-reply status: the card's own title, not the gated tool's label
+        // ("Removing files") — nothing has run yet.
         if !optional {
-            self.set_approval_wait_activity(chat_id, true).await;
+            self.set_approval_wait_activity(chat_id).await;
         }
+        self.expire_at_deadline(&approval_id, expires_in_ms);
         Ok(approval_id)
     }
 
-    /// Activity while a card of `chat_id` waits for Approve/Reject (or clear when none do).
-    async fn set_approval_wait_activity(&self, chat_id: &str, waiting: bool) {
-        let label = waiting.then(|| "Waiting for approval".to_owned());
-        let (msg_id, row_closed) = {
+    /// Expire this card when its own `expires_at` arrives.
+    ///
+    /// The minute sweep (`expire_approvals`) is the backstop that survives a restart; it cannot
+    /// be the deadline, because a card is then expired up to a minute after the time the user
+    /// was shown. This timer is what makes `expires_at` the answer to "when does it stop being
+    /// answerable" rather than a rounded-down hint.
+    ///
+    /// Firing twice is harmless: `Store::decide_approval` only updates a row still `pending`, so
+    /// the first decision wins and a later one returns `Err` here, where it is dropped.
+    fn expire_at_deadline(self: &Arc<Self>, approval_id: &str, expires_in_ms: i64) {
+        let me = self.clone();
+        let id = approval_id.to_owned();
+        let wait = Duration::from_millis(expires_in_ms.max(1) as u64);
+        tokio::spawn(async move {
+            tokio::time::sleep(wait).await;
+            let _ = me
+                .decide_approval(&id, ApprovalOutcome::Expired, "arbos:expiry")
+                .await;
+        });
+    }
+
+    /// The chat's status while one of its cards waits, or `None` when none does.
+    ///
+    /// Read from the store rather than taken as an argument, so the line always names a card
+    /// that is really still waiting: answer one of two and the line moves to the other instead
+    /// of going stale on the one just decided. `pending_approvals` is ordered by `created_at`,
+    /// so the card named is the one that has waited longest.
+    ///
+    /// An optional card (the secret hand-off's "that looks like a key" offer) asks nothing of
+    /// the chat and is skipped, the same exemption `begin_approval` makes for it.
+    pub(crate) fn approval_wait_label(&self, chat_id: &str) -> Option<String> {
+        self.store
+            .pending_approvals()
+            .unwrap_or_default()
+            .into_iter()
+            .find(|r| {
+                r.chat_id == chat_id
+                    && r.payload.get("optional").and_then(Value::as_bool) != Some(true)
+            })
+            .map(|r| wait_status_line(&r.title))
+    }
+
+    /// Show (or clear) `chat_id`'s waiting-approval status.
+    ///
+    /// Two things changed here for Test5 round 5 bug R, part 3.
+    ///
+    /// The label names the card, because "Waiting for approval" said that a decision was wanted
+    /// without saying which — and with two cards in a chat it named neither.
+    ///
+    /// And it no longer gives up when no turn is running. A parked wait outlives the turn that
+    /// raised it, which is the whole point of parking, so the chat would otherwise look idle
+    /// while it was in fact waiting on the person. The turn's own field is still only touched
+    /// when there is a turn to touch; the relay's presence line is posted either way.
+    ///
+    /// The `sync.host` lookup below has a `None` arm that is unreachable today and becomes live
+    /// under #2395 (rooms that actually close). It is reached only with a turn on the lock whose
+    /// row is still open, so the room is one the turn itself is holding; and a closed room would
+    /// cost the row's `activity` field only, never the presence line, which needs no host.
+    async fn set_approval_wait_activity(&self, chat_id: &str) {
+        let label = self.approval_wait_label(chat_id);
+        let turn_row = {
             let mut tl = self.turn.lock().await;
-            let Some(t) = tl.as_mut().filter(|t| t.chat_id == chat_id) else {
-                return;
-            };
-            if t.activity == label {
-                return;
+            match tl.as_mut().filter(|t| t.chat_id == chat_id) {
+                Some(t) if t.activity == label => return,
+                Some(t) => {
+                    t.activity = label.clone();
+                    Some((t.assistant_msg_id.clone(), t.row_closed))
+                }
+                None => None,
             }
-            t.activity = label.clone();
-            (t.assistant_msg_id.clone(), t.row_closed)
         };
-        if !row_closed {
+        if let Some((msg_id, false)) = turn_row {
             if let Some(host) = self.sync.host(chat_id).await {
                 let h = host.lock().await;
                 h.doc.set_activity(&msg_id, label.as_deref());
@@ -337,14 +553,20 @@ impl Agent {
 
     /// The shared entry point (brief §4): write the card, wait for `approve`/`reject` (or the
     /// 24 h expiry / `ARBOS_APPROVAL_TIMEOUT_SECS`), update its state, audit the decision.
+    ///
+    /// The wait and the card's deadline are the same `approval_ttl_ms()`, so this caller cannot
+    /// cancel a card that still looks answerable. It used to time out on
+    /// `ARBOS_APPROVAL_TIMEOUT_SECS` while the card advertised the fixed 24 h TTL, which on a
+    /// box that set that variable was round 5's bug with a different number in it.
     pub async fn request_approval(
         self: &Arc<Self>,
         chat_id: &str,
         req: ApprovalRequest,
     ) -> ApprovalOutcome {
         let (tx, rx) = oneshot::channel();
+        let ttl = approval_ttl_ms();
         let approval_id = match self
-            .begin_approval(chat_id, req, WaitMode::Inline, Some(tx))
+            .begin_approval(chat_id, req, WaitMode::Inline, Some(tx), ttl)
             .await
         {
             Ok(id) => id,
@@ -355,7 +577,11 @@ impl Agent {
                 };
             }
         };
-        match tokio::time::timeout(Duration::from_secs(timeout_secs()), rx).await {
+        // A second of slack past the card's own deadline, so the expiry that lands is the card's
+        // (`expire_at_deadline`, `decided_by = arbos:expiry`) and this is only the backstop for
+        // a waiter whose card somehow never settled.
+        let backstop = Duration::from_millis(ttl.saturating_add(1_000) as u64);
+        match tokio::time::timeout(backstop, rx).await {
             Ok(Ok(outcome)) => outcome,
             Ok(Err(_)) => ApprovalOutcome::Expired,
             Err(_) => {
@@ -413,7 +639,7 @@ impl Agent {
                         decided_by,
                     )
                     .await;
-                    if let Some(host) = self.sync.host(&row.chat_id).await {
+                    if let Ok(host) = self.room(&row.chat_id).await {
                         host.lock()
                             .await
                             .doc
@@ -463,7 +689,10 @@ impl Agent {
             Some(p) => (p.chat_id.clone(), p.msg_id.clone()),
             None => (row.chat_id.clone(), row.message_id.clone()),
         };
-        if let Some(host) = self.sync.host(&chat_id).await {
+        // An approval waits up to 24 h for its decision, far past the idle window, so by now the
+        // room is very likely closed (#2367). Without opening it the card in the chat would stay
+        // "pending" for ever even though the decision landed.
+        if let Ok(host) = self.room(&chat_id).await {
             let h = host.lock().await;
             h.doc
                 .set_approval_state(approval_id, state, Some(decided_by), reason.as_deref());
@@ -482,10 +711,9 @@ impl Agent {
                     .set_message_fields(&msg_id, &[("waitingApproval", json!(false))]);
             }
         }
-        // Drop the waiting activity once this chat has no undecided cards left.
-        if !self.approval_pending_for(&chat_id).await {
-            self.set_approval_wait_activity(&chat_id, false).await;
-        }
+        // Re-read the waiting status: it clears when this chat has no undecided card left, and
+        // otherwise names the next one rather than staying on the card just decided.
+        self.set_approval_wait_activity(&chat_id).await;
         let _ = self.store.t3_append(
             &chat_id,
             None,
@@ -518,6 +746,9 @@ impl Agent {
             decided_by,
             "approval decided"
         );
+        if state == ApprovalState::Expired {
+            self.fail_job_on_expired_approval(&row).await;
+        }
 
         let request = pending
             .as_ref()
@@ -908,6 +1139,214 @@ impl Agent {
         Some(grants.remove(ix).approval_id)
     }
 
+    /// Remember the files this call of a job is about to create, for `PathFacts::created_here`:
+    /// the target of a `write` / `edit` tool, and the `>` / `>>` redirects of a shell command.
+    /// The call has not run yet, so a target that names nothing on disk is one this job makes.
+    ///
+    /// Three limits keep this from growing into a licence to delete:
+    ///
+    /// - a target that already exists is never recorded (an overwrite is not a creation);
+    /// - a shell command the matcher reads as deleting anything records nothing, so no gated
+    ///   command can widen its own exemption;
+    /// - what is recorded is one exact absolute path per spelling the matcher can produce for
+    ///   that file — relative to the workspace root, which is how `delete_targets` resolves a
+    ///   relative target, and relative to this project's own folder, which is where the file
+    ///   really is. Each spelling is checked against the disk on its own.
+    pub(crate) async fn note_job_write(&self, job_id: &str, tool: &str, input: &Value) {
+        let tool = crate::activity::bare_tool_name(tool);
+        let work_dir = self.cfg.work_dir.to_string_lossy().to_string();
+        let targets: Vec<String> = if WRITE_TOOLS.contains(&tool) {
+            let Some(path) = ["path", "file_path"]
+                .iter()
+                .find_map(|k| input.get(k).and_then(Value::as_str))
+            else {
+                return;
+            };
+            [WORKSPACE_ROOT, &work_dir]
+                .iter()
+                .map(|cwd| resolve_path(cwd, path))
+                .collect()
+        } else if arbos_core::approval::SHELL_TOOLS.contains(&tool) {
+            let cmd = ["command", "cmd"]
+                .iter()
+                .find_map(|k| input.get(k).and_then(Value::as_str))
+                .unwrap_or_default();
+            if arbos_core::approval::delete_targets(cmd).is_some() {
+                return;
+            }
+            [WORKSPACE_ROOT, &work_dir]
+                .iter()
+                .flat_map(|cwd| arbos_core::approval::redirect_targets(cwd, cmd))
+                .collect()
+        } else {
+            return;
+        };
+        let mut writes = self.approvals.job_writes.lock().await;
+        let paths = writes.entry(job_id.to_owned()).or_default();
+        for path in targets {
+            if paths.len() >= JOB_WRITES_MAX || std::fs::metadata(&path).is_ok() {
+                continue;
+            }
+            paths.insert(path);
+        }
+    }
+
+    /// `classify_tool` for one job's call: the paths that job created itself are exempt from the
+    /// deletion rule. Every other caller — the main session, an MCP call that names no session —
+    /// gets the plain view, where nothing is exempt.
+    async fn classify_tool_for_job(
+        &self,
+        tool: &str,
+        args: &Value,
+        job: Option<&JobRow>,
+    ) -> Option<RiskMatch> {
+        let Some(job) = job else {
+            return classify_tool(tool, args);
+        };
+        let mine = self
+            .approvals
+            .job_writes
+            .lock()
+            .await
+            .get(&job.id)
+            .cloned()
+            .unwrap_or_default();
+        classify_tool_with(
+            tool,
+            args,
+            PathFacts {
+                has_content: &file_has_content,
+                created_here: &|p| mine.contains(p),
+            },
+        )
+    }
+
+    /// A job's card is posted where the owner can answer it — their main chat — so the job's own
+    /// surfaces have to say why it stopped: a line in the worker's thread, which the rollout view
+    /// draws, the step `list_jobs` and the chat's presence row read, and one row in the job's own
+    /// chat.
+    ///
+    /// The chat row is the part round 4 was missing. The step alone left the side chat reading as
+    /// silent for fourteen minutes: a presence chip is not the transcript, and it clears the
+    /// moment the job stops running, so a person scrolling that chat afterwards finds no trace of
+    /// what the job was waiting for.
+    ///
+    /// That row is never removed. It states a fact with a time on it — approval was asked for
+    /// then, and the card went to that chat — so nothing later makes it untrue and no supersede
+    /// is owed. Designing the removal out is also what keeps it clear of the relay's refusal of a
+    /// removal it cannot attribute (#2751): were one ever wanted, it would be `retire_row`, never
+    /// `delete_message`. The row is written through the chat's live doc, which signs the box's
+    /// assistant rows `agent:<project_id>`, so it is attributable from birth.
+    async fn note_job_awaits_approval(
+        &self,
+        job: &JobRow,
+        card_chat_id: &str,
+        line: &str,
+        source: &Value,
+    ) {
+        if let Some(sid) = job.subagent_id.as_deref() {
+            let _ = self.store.t3_append(
+                sid,
+                Some(sid),
+                Some(sid),
+                "approval",
+                Some("system"),
+                line,
+                Some(source),
+            );
+        }
+        let _ = self.store.set_job_step(&job.id, APPROVAL_WAIT_STEP);
+        // Only when the card is somewhere else: a notice beside the card it describes is noise.
+        if job.chat_id != card_chat_id {
+            // The job's chat, not the card's: its room may be closed while the card's is open,
+            // and this notice is the only thing that says there why the job stopped (#2367).
+            if let Ok(host) = self.room(&job.chat_id).await {
+                let h = host.lock().await;
+                let last_user = h
+                    .doc
+                    .messages()
+                    .iter()
+                    .rev()
+                    .find(|m| m.role == "user")
+                    .map(|m| m.id.clone())
+                    .unwrap_or_default();
+                let id = ulid();
+                h.doc
+                    .start_assistant_message(&id, &last_user, &self.cfg.device_id);
+                h.doc
+                    .set_message_fields(&id, &[("turn", json!({ "kind": "approval" }))]);
+                h.doc
+                    .add_part_from_json(&id, &json!({ "kind": "text", "text": line }));
+                h.doc.finish_message(&id, MessageStatus::Done);
+            } else {
+                // Reached only when the room cannot be opened at all — a chat the agent was
+                // removed from. Before #2395 this arm meant "the room happens to be shut",
+                // which no box ever was, so it was unreachable rather than rare.
+                tracing::debug!(job = %job.id, chat = %job.chat_id, "the job's chat cannot be opened; its card notice is in the rollout view only");
+            }
+        }
+        self.refresh_job_activity(&job.chat_id).await;
+    }
+
+    /// The job a worker session runs, when its card belongs to one.
+    fn job_of_session(&self, session_id: &str) -> Option<JobRow> {
+        self.store.job_for_subagent(session_id).ok().flatten()
+    }
+
+    /// Where a card went, by a name a person can be sent to.
+    ///
+    /// A ULID is not a place anyone can be asked to go, so this is what a caller may say out
+    /// loud; the id travels beside it for exactness. A chat with no title falls back to a
+    /// pointer to the main chat, which is where `approval_chat` puts a card with nowhere better
+    /// to go.
+    pub(crate) fn card_chat_name(&self, chat_id: &str) -> String {
+        self.store
+            .chat(chat_id)
+            .ok()
+            .flatten()
+            .map(|c| c.title)
+            .filter(|t| !t.trim().is_empty())
+            .unwrap_or_else(|| "your main chat".to_owned())
+    }
+
+    /// One expired card ends the job that raised it: the worker is stopped, the job is failed
+    /// with the reason the result turn relays, and the next gated call of that job is refused
+    /// without another card. Four cards, each expiring after fourteen minutes, was the livelock.
+    async fn fail_job_on_expired_approval(self: &Arc<Self>, row: &ApprovalRow) {
+        let Some(job) = row
+            .payload
+            .get("session_id")
+            .and_then(Value::as_str)
+            .and_then(|sid| self.job_of_session(sid))
+            .filter(JobRow::is_open)
+        else {
+            return;
+        };
+        let _ = self
+            .store
+            .set_job_state(&job.id, "failed", Some(APPROVAL_EXPIRED_ERROR));
+        let _ = self.store.set_job_step(&job.id, APPROVAL_EXPIRED_STEP);
+        if let Some(sid) = job.subagent_id.as_deref() {
+            let _ = self.store.t3_append(
+                sid,
+                Some(sid),
+                Some(sid),
+                "approval",
+                Some("system"),
+                &format!("Your approval expired, so this stopped: {}", row.title),
+                Some(&json!({ "approval_id": row.id, "job_id": job.id, "state": "expired" })),
+            );
+            let adapter = self.adapter(arbos_core::route::Harness::Pi);
+            if let Err(e) = adapter.cancel(sid).await {
+                tracing::debug!(job = %job.id, error = %e, "expired card: falling back to stop");
+                let _ = adapter.stop(sid).await;
+            }
+        }
+        self.release_job_locks(&job.id).await;
+        self.refresh_job_activity(&job.chat_id).await;
+        tracing::warn!(job = %job.id, approval_id = %row.id, "a card of this job expired unanswered; the job stops and is not retried");
+    }
+
     /// `/hook/approval` (pi-ext `tool_call`): classify a harness tool call; risky ones get a card
     /// and the extension polls `/hook/approval-status` until it is decided.
     pub async fn hook_approval(
@@ -917,7 +1356,14 @@ impl Agent {
         session_id: &str,
         role: &str,
     ) -> Value {
-        let Some(hit) = classify_tool(tool, input) else {
+        let job = self.job_of_session(session_id);
+        // A job whose card already expired asks nothing again: the refusal is immediate, so the
+        // worker cannot spend another fourteen minutes on a card nobody will answer.
+        if let Some(j) = job.as_ref().filter(|j| stopped_by_expired_approval(j)) {
+            tracing::warn!(job = %j.id, tool, "a card of this job expired; refusing without another");
+            return json!({ "ok": true, "state": ApprovalState::Expired.as_str(), "approvalId": "", "why": APPROVAL_EXPIRED_ERROR });
+        }
+        let Some(hit) = self.classify_tool_for_job(tool, input, job.as_ref()).await else {
             return json!({ "ok": true, "state": "allowed" });
         };
         if let Some(granted) = self.take_grant(tool, input).await {
@@ -935,17 +1381,53 @@ impl Agent {
         let (title, summary) = describe_tool(tool, input, &hit);
         let req = ApprovalRequest {
             title: title.clone(),
-            summary,
+            summary: summary.clone(),
             risk: hit.risk,
             payload: json!({ "kind": "tool_call", "tool": tool, "input": input, "class": hit.class, "why": hit.why, "session_id": session_id, "role": role,
                 "path_class": hit.path_class.map(PathClass::as_str), "grant_options": grant_options(&hit) }),
         };
+        // How long the caller blocks, and therefore what bounds this card.
+        //
+        // A main-session call is parked when the grace passes (`park_approval`): the turn is
+        // released and the decision is picked up later, so nothing is waiting on a clock and the
+        // card keeps the full TTL. A worker's call is not parked — it has no chat turn to release
+        // and its job is ended by one expired card (`fail_job_on_expired_approval`) — so it is
+        // still bounded by the extension's cap, and the card says so.
+        let parks = role == "main" && job.is_none();
+        let wait_ms = if parks {
+            park_after_ms()
+        } else {
+            harness_wait_cap_ms()
+        };
+        let expires_in = if parks {
+            approval_ttl_ms()
+        } else {
+            harness_wait_cap_ms()
+        };
         match self
-            .begin_approval(&chat_id, req, WaitMode::Polled, None)
+            .begin_approval(&chat_id, req, WaitMode::Polled, None, expires_in)
             .await
         {
             Ok(id) => {
-                json!({ "ok": true, "state": "pending", "approvalId": id, "title": title, "why": hit.why })
+                // Where the card is, by name: a card goes to the chat the owner reads, which is
+                // rarely the chat the call came from.
+                let where_it_is = self.card_chat_name(&chat_id);
+                if let Some(j) = &job {
+                    self.note_job_awaits_approval(
+                        j,
+                        &chat_id,
+                        &approval_wait_line(&title, &summary, &where_it_is),
+                        &json!({ "approval_id": id, "chat_id": chat_id, "job_id": j.id }),
+                    )
+                    .await;
+                }
+                // `chat` and `chatId` are the card's location, for the one session that can act
+                // on it. This reply goes to the session whose call was gated, which is the
+                // session that otherwise tells the user "the card is in this chat" — true only
+                // when the two happen to coincide. The name is what it may say; the id is there
+                // so it is exact. The model is told nothing about location anywhere else.
+                json!({ "ok": true, "state": "pending", "approvalId": id, "title": title, "why": hit.why,
+                    "waitMs": wait_ms, "park": parks, "chat": where_it_is, "chatId": chat_id })
             }
             Err(e) => json!({ "ok": false, "error": e.to_string() }),
         }
@@ -959,6 +1441,68 @@ impl Agent {
             .await
             .values()
             .any(|p| p.chat_id == chat_id)
+    }
+
+    /// `/hook/approval-park`: the harness stopped blocking a main-session call and the turn is
+    /// about to end, but the card is left answerable for its full deadline.
+    ///
+    /// This is Test5 round 5 bug R's second half. The gated call used to hold the chat's main
+    /// turn for the whole wait — fourteen minutes in rounds 4 and 5 — so a message arriving in
+    /// that chat meanwhile could only get a quick-lane answer. Nothing about an approval needs
+    /// the turn to stay open: the card is in the chat, and the user answers the card.
+    ///
+    /// So the mode moves from `Polled` to `Deferred`, which is the whole mechanism. Everything
+    /// that finishes the work already exists for the late-approval case and is reached by that
+    /// one change:
+    ///
+    /// - `decide_approval` treats a `Deferred` entry as deferred, so the decision runs
+    ///   `follow_up` instead of handing the outcome to a waiter that has gone;
+    /// - `follow_up`'s `("tool_call", Approved)` arm records a `Grant` for the identical call and
+    ///   starts a turn in the card's chat telling the agent to run it again;
+    /// - `take_grant` lets that re-run through without a second card.
+    ///
+    /// Nothing here is a new waiting state, and `draft_message` has used this path since S18.
+    pub async fn park_approval(self: &Arc<Self>, approval_id: &str) -> Value {
+        let Some(row) = self.store.approval(approval_id).ok().flatten() else {
+            return json!({ "ok": false, "error": "unknown approval" });
+        };
+        if row.state != ApprovalState::Pending.as_str() {
+            // Decided inside the grace: the caller reads the real state and acts on it.
+            return json!({ "ok": true, "state": row.state, "parked": false });
+        }
+        let parked = {
+            let mut pending = self.approvals.pending.lock().await;
+            match pending.get_mut(approval_id) {
+                Some(p) if p.mode == WaitMode::Polled => {
+                    p.mode = WaitMode::Deferred;
+                    true
+                }
+                _ => false,
+            }
+        };
+        if !parked {
+            return json!({ "ok": true, "state": row.state, "parked": false });
+        }
+        self.set_approval_wait_activity(&row.chat_id).await;
+        let _ = self.store.t3_append(
+            &row.chat_id,
+            None,
+            Some(&row.chat_id),
+            "approval",
+            Some("system"),
+            &format!(
+                "approval parked: {} — the turn was released; the decision resumes it",
+                row.title
+            ),
+            Some(&json!({ "approval_id": approval_id })),
+        );
+        self.append_audit(
+            "approval_parked",
+            json!({ "approval_id": approval_id, "chat_id": row.chat_id, "title": row.title,
+                "expires_at": row.expires_at }),
+        );
+        tracing::info!(approval_id, chat_id = %row.chat_id, "approval parked; the turn is released until the card is decided");
+        json!({ "ok": true, "state": row.state, "parked": true, "reason": parked_reason(approval_id) })
     }
 
     /// `/hook/approval-abandon`: the extension stopped polling (its wait cap passed) and the
@@ -1141,6 +1685,721 @@ mod shell_grant_tests {
             .await
             .unwrap();
         assert_eq!(agent.approvals.shell_grants.lock().await.len(), 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+/// Test5 round 2, bug H: a job stalled on cards the user never saw in the job's own view, got
+/// carded for files it had created itself, and retried every expired card — T8 sat through four
+/// of them, fourteen minutes each.
+#[cfg(test)]
+mod job_approval_tests {
+    use super::*;
+    use crate::status::tests::test_agent;
+    use crate::sync::SharedHost;
+
+    const CHAT: &str = "01TESTCHATJOBAPPROVAL00000";
+    const JOB: &str = "01TESTJOBAPPROVAL000000000";
+    const WORKER: &str = "01TESTJOBWORKER00000000000";
+
+    /// An agent with one running job in a pinned chat, as `start_job` leaves it.
+    async fn agent_running_a_job() -> (Arc<Agent>, SharedHost, std::path::PathBuf) {
+        let (agent, root) = test_agent().await;
+        agent.store.upsert_chat(CHAT, "Main", true, 0).unwrap();
+        let host = agent.sync.open_room(CHAT).await.unwrap();
+        agent
+            .store
+            .insert_job(
+                JOB,
+                CHAT,
+                "01TESTASKMESSAGE0000000000",
+                "Clearing the old exports",
+                "code",
+                "Delete last month's export files.",
+                &[],
+            )
+            .unwrap();
+        agent.store.set_job_subagent(JOB, WORKER).unwrap();
+        agent.store.set_job_state(JOB, "running", None).unwrap();
+        (agent, host, root)
+    }
+
+    const SIDE: &str = "01TESTSIDECHATJOBAPPROVAL0";
+    const SIDE_JOB: &str = "01TESTSIDEJOBAPPROVAL00000";
+    const SIDE_WORKER: &str = "01TESTSIDEJOBWORKER0000000";
+
+    /// Round 4's geometry: the job runs in a side chat, and its card goes to the pinned main
+    /// chat, because that is the chat the owner reads (`approval_chat`). Both rooms are open,
+    /// so a notice in either one is a thing the test could see.
+    async fn agent_running_a_job_in_a_side_chat(
+    ) -> (Arc<Agent>, SharedHost, SharedHost, std::path::PathBuf) {
+        let (agent, root) = test_agent().await;
+        agent.store.upsert_chat(CHAT, "Main", true, 0).unwrap();
+        agent
+            .store
+            .upsert_chat(SIDE, "Trip planning", false, 0)
+            .unwrap();
+        let main = agent.sync.open_room(CHAT).await.unwrap();
+        let side = agent.sync.open_room(SIDE).await.unwrap();
+        agent
+            .store
+            .insert_job(
+                SIDE_JOB,
+                SIDE,
+                "01TESTSIDEASKMESSAGE000000",
+                "Cleaning up the build tree",
+                "code",
+                "Build it, test it, then clean up.",
+                &[],
+            )
+            .unwrap();
+        agent.store.set_job_subagent(SIDE_JOB, SIDE_WORKER).unwrap();
+        agent
+            .store
+            .set_job_state(SIDE_JOB, "running", None)
+            .unwrap();
+        (agent, main, side, root)
+    }
+
+    /// The assistant rows of one chat, as text.
+    fn chat_rows(host: &SharedHost) -> Vec<String> {
+        let h = host.try_lock().expect("host free");
+        h.doc
+            .messages()
+            .into_iter()
+            .filter(|m| m.role == "assistant")
+            .map(|m| m.text())
+            .collect()
+    }
+
+    /// The rows of one chat that tell the reader a card is waiting.
+    fn waiting_rows(host: &SharedHost) -> Vec<String> {
+        chat_rows(host)
+            .into_iter()
+            .filter(|t| t.contains("Waiting for your approval"))
+            .collect()
+    }
+
+    fn approval_lines(agent: &Agent) -> Vec<String> {
+        let job = agent.store.job(JOB).unwrap().unwrap();
+        let doc = crate::jobs_view::document(&agent.store, "p", "Doug", &job.id, 0).unwrap();
+        doc["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["kind"] == "approval")
+            .map(|e| e["text"].as_str().unwrap_or_default().to_owned())
+            .collect()
+    }
+
+    /// The card is posted in the owner's main chat, where they can answer it, and the job's own
+    /// surfaces now say so: the step `list_jobs`, the rollout view and the chat's presence row
+    /// read, and a "needs your approval" line in the job's own exchange.
+    #[tokio::test]
+    async fn a_job_waiting_for_a_card_says_so_in_its_own_view() {
+        let (agent, _host, root) = agent_running_a_job().await;
+        let v = agent
+            .hook_approval(
+                "bash",
+                &json!({ "command": "rm -rf /work/p/exports" }),
+                WORKER,
+                "subagent",
+            )
+            .await;
+        assert_eq!(v["state"], "pending", "{v}");
+        assert_eq!(
+            agent.store.job(JOB).unwrap().unwrap().last_step,
+            APPROVAL_WAIT_STEP
+        );
+        let doc = crate::jobs_view::document(&agent.store, "p", "Doug", JOB, 0).unwrap();
+        assert_eq!(doc["step"], APPROVAL_WAIT_STEP);
+        let lines = approval_lines(&agent);
+        assert_eq!(lines.len(), 1, "one line in the job's own view: {lines:?}");
+        assert!(
+            lines[0].starts_with("Waiting for your approval to"),
+            "{}",
+            lines[0]
+        );
+        assert!(
+            lines[0].contains("rm -rf /work/p/exports"),
+            "the line names the work: {}",
+            lines[0]
+        );
+        assert!(
+            lines[0].ends_with("The card is in Main."),
+            "the line says which chat holds the card: {}",
+            lines[0]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The deletion rule flagged files the job itself had just made. T8's own outputs —
+    /// `out/taxi_app_curl.txt` written by a shell redirect, `out/taxi_app.zip` written by the
+    /// write tool — are exempt now. Everything around them still raises a card: a file the job
+    /// did not write, the folder holding its file, a glob, the `find … -exec rm -rf` walk, a
+    /// write over a file that was already there, a command that deletes while it redirects, and
+    /// the same delete from a session that is no job of ours.
+    #[tokio::test]
+    async fn a_job_deleting_a_file_it_created_itself_raises_no_card() {
+        let (agent, _host, root) = agent_running_a_job().await;
+        agent
+            .note_job_write(
+                JOB,
+                "bash",
+                &json!({ "command": "curl -sS https://example.invalid/x > out/taxi_app_curl.txt" }),
+            )
+            .await;
+        agent
+            .note_job_write(JOB, "write", &json!({ "path": "out/taxi_app.zip" }))
+            .await;
+        let state = |cmd: &str| {
+            let agent = agent.clone();
+            let cmd = cmd.to_owned();
+            async move {
+                agent
+                    .hook_approval("bash", &json!({ "command": cmd }), WORKER, "subagent")
+                    .await["state"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned()
+            }
+        };
+        assert_eq!(state("rm -f out/taxi_app_curl.txt").await, "allowed");
+        assert_eq!(state("rm -f out/taxi_app.zip").await, "allowed");
+        assert_eq!(state("rm -f out/vendor.zip").await, "pending");
+        assert_eq!(
+            state("rm -f out/taxi_app.zip out/vendor.zip").await,
+            "pending",
+            "one file it did not write keeps the card"
+        );
+        assert_eq!(
+            state("rm -rf out").await,
+            "pending",
+            "the folder that holds its file is not its file"
+        );
+        assert_eq!(
+            state("rm -f out/*.zip").await,
+            "pending",
+            "a glob is not an exact path"
+        );
+        assert_eq!(
+            state("find . -name __pycache__ -exec rm -rf {} +").await,
+            "pending",
+            "a walk over a tree names no file this job can be shown to have written"
+        );
+        // A command that deletes records nothing, so no gated command widens its own exemption.
+        agent
+            .note_job_write(
+                JOB,
+                "bash",
+                &json!({ "command": "rm -f out/old.zip > out/clean.log" }),
+            )
+            .await;
+        assert_eq!(state("rm -f out/clean.log").await, "pending");
+        // A write over a file that is already there creates nothing, so it records nothing —
+        // this crate's own manifest stands in for a file the job found rather than made.
+        let already_there = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml");
+        agent
+            .note_job_write(JOB, "write", &json!({ "path": already_there }))
+            .await;
+        assert_eq!(state(&format!("rm -f {already_there}")).await, "pending");
+        // The same delete from a session that is no job of ours: nothing is exempt.
+        assert_eq!(
+            agent
+                .hook_approval(
+                    "bash",
+                    &json!({ "command": "rm -f out/taxi_app.zip" }),
+                    CHAT,
+                    "main"
+                )
+                .await["state"],
+            "pending"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The livelock: every expired card was retried, so T8 waited four times fourteen minutes.
+    /// One expired card ends the job — it is failed with the reason the result turn relays, its
+    /// own view says so, no second card is raised, and no fresh worker is given.
+    #[tokio::test]
+    async fn one_expired_card_fails_the_job_instead_of_raising_another() {
+        let (agent, _host, root) = agent_running_a_job().await;
+        let cmd = json!({ "command": "rm -rf /work/p/exports" });
+        let v = agent.hook_approval("bash", &cmd, WORKER, "subagent").await;
+        let id = v["approvalId"].as_str().expect("a card").to_owned();
+        // The extension stopped waiting after its 14-minute cap.
+        assert_eq!(agent.abandon_approval(&id).await["state"], "expired");
+        let job = agent.store.job(JOB).unwrap().unwrap();
+        assert_eq!(job.state, "failed");
+        assert_eq!(job.error.as_deref(), Some(APPROVAL_EXPIRED_ERROR));
+        assert!(
+            approval_lines(&agent)
+                .iter()
+                .any(|l| l.starts_with("Your approval expired")),
+            "the job's own view says why it stopped: {:?}",
+            approval_lines(&agent)
+        );
+        // The next gated call of that job is refused at once, with no second card.
+        let again = agent.hook_approval("bash", &cmd, WORKER, "subagent").await;
+        assert_eq!(again["state"], "expired", "{again}");
+        assert!(again["approvalId"].as_str().unwrap_or_default().is_empty());
+        assert!(agent.store.pending_approvals().unwrap().is_empty());
+        // And the job is not handed a fresh worker to raise the same card again.
+        assert_eq!(
+            crate::agent::worker_failure(Some(APPROVAL_EXPIRED_ERROR), "", 3, "done").map(|f| f.1),
+            Some(false)
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The sentence itself, which the owner may tune: it names the work and where to answer.
+    #[test]
+    fn the_waiting_line_names_the_work_and_the_chat() {
+        assert_eq!(
+            approval_wait_line(
+                "Run a destructive command (file.delete)",
+                "git clean -fdX",
+                "Main"
+            ),
+            "Waiting for your approval to run a destructive command (file.delete): \
+             git clean -fdX. The card is in Main."
+        );
+        // No summary to add: the title carries it alone.
+        assert_eq!(
+            approval_wait_line("Gmail: send", "", "Trip planning"),
+            "Waiting for your approval to Gmail: send. The card is in Trip planning."
+        );
+        // A chat with no title is pointed at generically, never by id — the caller's fallback.
+        assert!(approval_wait_line(
+            "Run a destructive command (file.delete)",
+            "rm -rf x",
+            "your main chat"
+        )
+        .ends_with("The card is in your main chat."));
+        // Nothing to name is still a sentence.
+        assert_eq!(
+            approval_wait_line("", "", "Main"),
+            "Waiting for your approval to a step of this job. The card is in Main."
+        );
+    }
+
+    /// Test5 round 4, bug H again: the card for `git clean -fdX` was raised in the main chat and
+    /// the side chat the job ran in said nothing at all for fourteen minutes, until the card
+    /// expired. The step alone is not enough — it is a presence chip that clears when the job
+    /// stops running, and it leaves nothing in the transcript the person was reading.
+    ///
+    /// So the job's chat gets one row of its own: what is waiting, and which chat to answer it
+    /// in. One row per card and not one per poll, since the wait is fourteen minutes long and
+    /// the extension polls throughout it.
+    #[tokio::test]
+    async fn a_job_in_a_side_chat_says_in_that_chat_that_a_card_is_waiting() {
+        let (agent, main, side, root) = agent_running_a_job_in_a_side_chat().await;
+        let v = agent
+            .hook_approval(
+                "bash",
+                &json!({ "command": "git clean -fdX" }),
+                SIDE_WORKER,
+                "subagent",
+            )
+            .await;
+        assert_eq!(v["state"], "pending", "{v}");
+        let id = v["approvalId"].as_str().expect("a card").to_owned();
+
+        // The geometry this test exists for: the card is in the pinned main chat, not in the
+        // chat the job runs in. Without that split the two surfaces are the same surface.
+        let card = agent.store.approval(&id).unwrap().unwrap();
+        assert_eq!(card.chat_id, CHAT, "the card belongs to the main chat");
+        assert_eq!(
+            agent.store.job(SIDE_JOB).unwrap().unwrap().chat_id,
+            SIDE,
+            "and the job to the side chat"
+        );
+
+        // The side chat says so in the transcript, naming the work and where to answer it.
+        let rows = waiting_rows(&side);
+        assert_eq!(rows.len(), 1, "one row in the job's own chat: {rows:?}");
+        assert!(
+            rows[0].contains("git clean -fdX"),
+            "the notice names the work, as bug M taught: {}",
+            rows[0]
+        );
+        assert!(
+            rows[0].ends_with("The card is in Main."),
+            "the notice says where to act, by name: {}",
+            rows[0]
+        );
+        assert!(
+            !rows[0].contains(CHAT) && !rows[0].contains(SIDE),
+            "a chat is named, never printed as an id: {}",
+            rows[0]
+        );
+        // The card is already in the main chat; a notice there as well would be noise.
+        assert!(
+            waiting_rows(&main).is_empty(),
+            "the notice goes to the job's chat, not to the card's: {:?}",
+            waiting_rows(&main)
+        );
+        // And the step still moves, as the single-chat test pins.
+        assert_eq!(
+            agent.store.job(SIDE_JOB).unwrap().unwrap().last_step,
+            APPROVAL_WAIT_STEP
+        );
+
+        // Fourteen minutes of polling adds no second row.
+        for _ in 0..8 {
+            assert_eq!(agent.approval_status(&id).await["state"], "pending");
+        }
+        assert_eq!(
+            waiting_rows(&side).len(),
+            1,
+            "one row per card, not one per poll: {:?}",
+            waiting_rows(&side)
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+/// Test5 round 5, bug R, second half: a gated main-session call held the chat's turn for the
+/// whole approval wait, so that chat could only answer from the quick lane meanwhile.
+#[cfg(test)]
+mod park_tests {
+    use super::*;
+    use crate::status::tests::test_agent;
+
+    fn rm() -> Value {
+        json!({ "command": "rm -rf /opt/x" })
+    }
+
+    /// The main session's wait is a short grace, and because the call is parked rather than
+    /// refused at the end of it, nothing shorter than the TTL bounds the card any more — so the
+    /// card goes back to advertising the full TTL, and that is again the truth.
+    #[tokio::test]
+    async fn a_main_session_wait_is_short_and_the_card_keeps_the_full_deadline() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATAPPROVALPARK0000";
+        agent.store.upsert_chat(chat, "Main", true, 0).unwrap();
+        let _host = agent.sync.open_room(chat).await.unwrap();
+
+        let before = now_ms();
+        let v = agent.hook_approval("bash", &rm(), chat, "main").await;
+        assert_eq!(v["state"], "pending", "{v}");
+        assert_eq!(v["park"], json!(true), "a main-session call parks: {v}");
+        let wait = v["waitMs"].as_i64().unwrap();
+        assert!(
+            wait < 30_000,
+            "the turn must be free before a follow-up message arrives: {wait} ms"
+        );
+        assert!(
+            wait < harness_wait_cap_ms(),
+            "round 5 blocked for the whole {} ms cap",
+            harness_wait_cap_ms()
+        );
+        let row = agent
+            .store
+            .approval(v["approvalId"].as_str().unwrap())
+            .unwrap()
+            .unwrap();
+        let life = row.expires_at - before;
+        assert!(
+            (life - approval_ttl_ms()).abs() < 5_000,
+            "a parked card is bounded by nothing but its TTL: {life} ms"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The owner's third test: approving before `expires_at` runs the command and the result
+    /// comes back in the same chat. Parking moves the entry to `Deferred`, which is what hands
+    /// the decision to `follow_up` — the late-approval path that records a `Grant` for the
+    /// identical call and starts a turn to run it. No second card is raised.
+    #[tokio::test]
+    async fn a_parked_card_approved_later_runs_the_call_without_a_second_card() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATAPPROVALPARK0001";
+        agent.store.upsert_chat(chat, "Main", true, 0).unwrap();
+        let _host = agent.sync.open_room(chat).await.unwrap();
+
+        let v = agent.hook_approval("bash", &rm(), chat, "main").await;
+        let id = v["approvalId"].as_str().unwrap().to_owned();
+
+        let parked = agent.park_approval(&id).await;
+        assert_eq!(parked["parked"], json!(true), "{parked}");
+        assert_eq!(
+            parked["state"], "pending",
+            "parking decides nothing: {parked}"
+        );
+        let reason = parked["reason"].as_str().unwrap();
+        assert!(
+            reason.contains("Nothing ran") && reason.contains("end your turn"),
+            "the model must not report work it did not do, and must stop: {reason}"
+        );
+        assert_eq!(
+            agent.approvals.pending.lock().await[&id].mode,
+            WaitMode::Deferred,
+            "the parked entry is what makes the decision deferred"
+        );
+
+        agent
+            .decide_approval_from_command(
+                &id,
+                ApprovalOutcome::Approved,
+                "dev-mac",
+                &json!({ "approvalId": id }),
+            )
+            .await
+            .unwrap();
+
+        // `follow_up` runs on its own task; the grant it records is the observable half.
+        let mut granted = None;
+        for _ in 0..100 {
+            if let Some(g) = agent
+                .approvals
+                .grants
+                .lock()
+                .await
+                .iter()
+                .find(|g| g.approval_id == id)
+            {
+                granted = Some(g.tool.clone());
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            granted.as_deref(),
+            Some("bash"),
+            "an approved parked call is pre-approved for its re-run"
+        );
+        assert_eq!(
+            agent.hook_approval("bash", &rm(), chat, "main").await["state"],
+            "allowed",
+            "the re-run must not raise a second card"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// #2770 sweeps every row a turn opened that shows nothing, and a parked wait outlives its
+    /// turn — so the question is whether the sweep hides the card.
+    ///
+    /// It does not, and the reason is structural rather than lucky. This change opens no row of
+    /// its own: the status it shows is the turn's activity label and the relay's presence line,
+    /// and the only row involved is the one `begin_approval` already writes the card onto. That
+    /// row holds an `approval` part, and `wordless_row` counts anything other than `text` and
+    /// `status` as content the client draws, so the row is not wordless and neither
+    /// `retire_wordless_rows` nor `trim_wordless_result_row` touches it. The assertion below
+    /// hands the row's own id to the real predicate rather than reasoning about it.
+    #[tokio::test]
+    async fn a_parked_cards_row_survives_the_wordless_sweep() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATAPPROVALPARK0002";
+        agent.store.upsert_chat(chat, "Main", true, 0).unwrap();
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            agent.test_open_row(&host, t).await;
+        }
+
+        let v = agent.hook_approval("bash", &rm(), chat, "main").await;
+        let id = v["approvalId"].as_str().unwrap().to_owned();
+        assert_eq!(agent.park_approval(&id).await["parked"], json!(true));
+
+        let (rows, card_row) = {
+            let tl = agent.turn.lock().await;
+            let t = tl.as_ref().unwrap();
+            (t.rows_opened.clone(), t.assistant_msg_id.clone())
+        };
+        assert!(
+            rows.contains(&card_row),
+            "the card is on a row this turn opened, which is what the sweep looks at"
+        );
+
+        let h = host.lock().await;
+        h.doc.finish_message(&card_row, MessageStatus::Done);
+        assert!(
+            !crate::agent::wordless_row(&h.doc.message(&card_row).unwrap()).0,
+            "an approval part is content the client draws"
+        );
+        // `last` is a row the sweep settles elsewhere, so the card's row is really considered.
+        let retired =
+            crate::agent::retire_wordless_rows(&h.doc, &rows, "01NOTAROWOFTHISTURN0000000");
+        assert_eq!(retired, 0, "the card's row must survive its own turn");
+        assert_ne!(
+            h.doc
+                .message(&card_row)
+                .unwrap()
+                .rest
+                .get("hidden")
+                .and_then(Value::as_bool),
+            Some(true),
+            "a hidden row takes the card away from the user who has to answer it"
+        );
+        drop(h);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod card_location_tests {
+    use super::*;
+    use crate::status::tests::test_agent;
+
+    const MAIN: &str = "01TESTCHATCARDWHERE0MAIN00";
+    const SIDE: &str = "01TESTCHATCARDWHERE0SIDE00";
+
+    /// The model is never told where its card went, so it says "the card is in this chat" —
+    /// true only when the asking chat and the card's chat happen to coincide. `approval_chat`
+    /// sends a card to the chat the owner reads, so for a side-chat call they usually do not.
+    ///
+    /// The reply to the gated call is the right channel because it reaches exactly the session
+    /// that tripped the gate, which is the session that writes the false line. The name is what
+    /// it can say to the user; the id is beside it so it is exact. No prompt text changes.
+    #[tokio::test]
+    async fn the_session_that_asked_is_told_which_chat_the_card_is_in() {
+        let (agent, root) = test_agent().await;
+        agent.store.upsert_chat(MAIN, "Main", true, 0).unwrap();
+        agent
+            .store
+            .upsert_chat(SIDE, "Trip planning", false, 1)
+            .unwrap();
+        let _main = agent.sync.open_room(MAIN).await.unwrap();
+        let _side = agent.sync.open_room(SIDE).await.unwrap();
+
+        let v = agent
+            .hook_approval("bash", &json!({ "command": "rm -rf /opt/x" }), SIDE, "main")
+            .await;
+        assert_eq!(v["state"], "pending", "{v}");
+
+        // The geometry first, so this fixture cannot quietly collapse into one chat and then
+        // pass whatever the reply says.
+        let row = agent
+            .store
+            .approval(v["approvalId"].as_str().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            row.chat_id, MAIN,
+            "the card goes to the chat the owner reads"
+        );
+        assert_ne!(row.chat_id, SIDE, "not to the chat the call came from");
+
+        assert_eq!(v["chat"], "Main", "a name the model can say out loud: {v}");
+        assert_eq!(v["chatId"], MAIN, "and the id, so it is exact: {v}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A chat with no title would otherwise put a raw ULID where a place name belongs, and the
+    /// model reads whatever it is given out to the user.
+    #[tokio::test]
+    async fn an_untitled_chat_is_named_rather_than_spelled_out() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATCARDWHERE0BLANK0";
+        agent.store.upsert_chat(chat, "", true, 0).unwrap();
+        let _host = agent.sync.open_room(chat).await.unwrap();
+
+        let v = agent
+            .hook_approval("bash", &json!({ "command": "rm -rf /opt/x" }), chat, "main")
+            .await;
+        assert_eq!(v["chat"], "your main chat", "{v}");
+        assert!(
+            !v["chat"].as_str().unwrap().contains(chat),
+            "a ULID is not a place a person can be sent to: {v}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+    use crate::status::tests::test_agent;
+
+    /// Test5 round 5, bug R. Card `01M6MRB89V75ZEX909EDWQJRDV` was posted at 20:24:29 with
+    /// `expires_at` 1793931869499 — exactly +24 h, `APPROVAL_TTL_MS` — and was expired by
+    /// `arbos:timeout` at 20:38:29, +14 minutes. Round 4 landed on the same fourteen minutes
+    /// (19:19:17 → 19:33:18), which is what says "fixed cap" rather than "slow user": the
+    /// extension stops polling at `ARBOS_APPROVAL_WAIT_MS` and nothing told the card.
+    ///
+    /// The card now carries the deadline its own waiter enforces, and the reply hands that
+    /// waiter the number instead of letting it keep a second copy of the default.
+    #[tokio::test]
+    async fn a_gated_card_advertises_the_deadline_its_waiter_enforces() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATAPPROVALTTL00000";
+        agent.store.upsert_chat(chat, "Main", true, 0).unwrap();
+        let _host = agent.sync.open_room(chat).await.unwrap();
+
+        // A worker's call is not parked — it has no chat turn to release — so the extension's cap
+        // is still what bounds it, and the card has to say so rather than claim 24 hours.
+        let before = now_ms();
+        let v = agent
+            .hook_approval(
+                "bash",
+                &json!({ "command": "rm -rf /opt/x" }),
+                chat,
+                "subagent",
+            )
+            .await;
+        assert_eq!(v["state"], "pending", "{v}");
+        assert_eq!(
+            v["park"],
+            json!(false),
+            "a worker's call is not parked: {v}"
+        );
+        let row = agent
+            .store
+            .approval(v["approvalId"].as_str().unwrap())
+            .unwrap()
+            .unwrap();
+        let life = row.expires_at - before;
+        assert!(
+            (life - harness_wait_cap_ms()).abs() < 5_000,
+            "the card must expire when its waiter stops waiting: {life} ms"
+        );
+        assert!(
+            life < APPROVAL_TTL_MS,
+            "round 5 advertised the whole 24 h TTL on a card capped at 14 minutes: {life} ms"
+        );
+        assert_eq!(
+            v["waitMs"].as_i64(),
+            Some(harness_wait_cap_ms()),
+            "the waiter reads agentd's cap, so the two cannot drift apart again: {v}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The owner's first test: leave a card undecided and its real expiry matches `expires_at`
+    /// within five seconds. The minute sweep cannot answer that on its own — it would expire a
+    /// card up to 60 s after the time the user was shown — so each card carries a timer for its
+    /// own deadline and the sweep stays the restart backstop.
+    #[tokio::test]
+    async fn an_undecided_card_expires_at_the_time_it_advertises() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATAPPROVALTTL00001";
+        agent.store.upsert_chat(chat, "Main", true, 0).unwrap();
+        let _host = agent.sync.open_room(chat).await.unwrap();
+
+        let req = ApprovalRequest {
+            title: "Run a destructive command (file.delete)".into(),
+            summary: "rm -rf /opt/x".into(),
+            risk: Risk::Destructive,
+            payload: json!({ "kind": "tool_call", "tool": "bash" }),
+        };
+        let id = agent
+            .begin_approval(chat, req, WaitMode::Polled, None, 200)
+            .await
+            .unwrap();
+        let row = agent.store.approval(&id).unwrap().unwrap();
+        assert_eq!(agent.approval_status(&id).await["state"], "pending");
+
+        tokio::time::sleep(Duration::from_millis(900)).await;
+        let after = agent.store.approval(&id).unwrap().unwrap();
+        assert_eq!(after.state, "expired", "the deadline must be enforced");
+        let late = after.decided_at.unwrap() - row.expires_at;
+        assert!(
+            late.abs() < 5_000,
+            "expired {late} ms away from the advertised deadline"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }

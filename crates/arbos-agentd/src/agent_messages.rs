@@ -128,8 +128,8 @@ impl Agent {
     }
 
     /// The `send_message` tool. Inside a group chat with no `to` (or a `to` that names a
-    /// participant) the words go to the group as before; otherwise `to` names an agent and the
-    /// text is delivered into that agent's own chat.
+    /// participant) the words go to the group as before; with `to` they are delivered into that
+    /// agent's own chat; with no `to` outside a group they are a bubble in this chat.
     pub async fn send_message_from_turn(
         self: &Arc<Self>,
         to: Option<&str>,
@@ -148,10 +148,137 @@ impl Agent {
         }
         match to {
             Some(t) => self.agent_send_from_turn(t, text).await,
-            None => Err(anyhow!(
-                "say who to message: `to` is an agent's name, @handle or id (this chat is not a group)"
-            )),
+            None => self.post_to_this_chat_from_turn(text).await,
         }
+    }
+
+    /// `send_message(text)` with no `to` outside a group: the words are a bubble in the chat this
+    /// turn runs in, which is what the tool's own description has always promised.
+    ///
+    /// Jacob, Test5 round 5 (bug Q, r5giant 20:22): a `codemode` script built a 1,500-row,
+    /// 51,372-character markdown table and posted it with `mcp__arbos__send_message({text})`.
+    /// That call went down the agent-to-agent branch, refused the message for want of a `to`,
+    /// and the turn told the user the table was too big for one chat message — and that an
+    /// earlier 200-row table had needed four. Neither was true. No size limit exists unless an
+    /// operator sets one (`Config::chat_text_max`, enforced by `hook_send_message` so both text
+    /// surfaces refuse alike); the harness tool of the same name reaches this very path through
+    /// `/hook/send_message`, but scripts may not call it (`DIRECT_ONLY_TOOLS`), which left the
+    /// MCP tool as the only text surface a script had.
+    ///
+    /// The row itself is written by `hook_send_message`, which opens the room itself now, for
+    /// the writers that reach it without coming through here. This path still opens first, and
+    /// the reason is the ordering rather than the outcome: here it happens **outside every
+    /// lock**, where `hook_send_message` has to release the turn lock and re-take it to do the
+    /// same, so the common case is a live host by the time it looks.
+    async fn post_to_this_chat_from_turn(self: &Arc<Self>, text: &str) -> Result<String> {
+        let chars = text.chars().count();
+        let chat_id = self
+            .turn
+            .lock()
+            .await
+            .as_ref()
+            .map(|t| t.chat_id.clone())
+            .ok_or_else(|| anyhow!("no turn is running"))?;
+        self.room(&chat_id).await?;
+        self.hook_send_message(text, None, None)
+            .await
+            .map_err(|e| anyhow!(e))?;
+        Ok(json!({ "status": "posted", "chars": chars,
+            "note": "Posted in this chat as its own bubble. Do not repeat it; anything you write outside send_message is not shown.",
+        })
+        .to_string())
+    }
+
+    /// A worker's `send_message(text)` with no `to`: a note in the chat its job runs beside,
+    /// posted as its own finished row.
+    ///
+    /// Jacob, Test5 round 6 (bug T, r6cardjob): the user asked a job to post a note naming the
+    /// approval card it was waiting on. Its script called `mcp__arbos__send_message` — the only
+    /// text surface a script has — and read back "send_message is available to the main agent
+    /// only". The job stopped there, the card was never raised, and the user got nothing. Two
+    /// walls, one behind the other: the path was shut, and the sentence that shut it named no
+    /// other way through (`refusal_for` now names one).
+    ///
+    /// `post_to_this_chat_from_turn` cannot serve a worker. It posts into the running turn's own
+    /// row, and a job runs beside the chat with no turn of its own; the main turn that started
+    /// it ended long before. So the chat comes from this worker's job row, and the words become
+    /// a standalone finished row rather than text appended to somebody else's.
+    ///
+    /// The room is reopened first, for the reason `post_to_this_chat_from_turn` reopens it: a
+    /// shut room has no host, writing into one fails with "no room for this chat", and #2395
+    /// makes rooms really close. `Agent::room` is host-or-`open_room` and runs outside every
+    /// lock, before the writer takes one.
+    pub async fn post_to_job_chat(
+        self: &Arc<Self>,
+        session_id: &str,
+        text: &str,
+    ) -> Result<String> {
+        let session_id = session_id.trim();
+        if session_id.is_empty() {
+            return Err(anyhow!(
+                "send_message with no `to` posts in the chat of the job you run, and this session did not say which it is"
+            ));
+        }
+        let Some(job) = self.store.job_for_subagent(session_id).ok().flatten() else {
+            return Err(anyhow!(
+                "send_message with no `to` posts in the chat of the job you run, and this session runs no job; report back and let the main agent speak for the Project"
+            ));
+        };
+        // A cancelled job is done speaking (bug S). This is a writer in its own right — the
+        // words come from the worker's script and reach the chat without passing anything in
+        // `run_subagent` — so it asks about the cancel itself rather than inheriting a check
+        // made around the result. Asked before `Agent::room` below, so a cancelled job does not
+        // reopen a cold room either: the one the cancel retired its rows in stays the one the
+        // hub has.
+        if self.job_is_cancelled(&job.id) {
+            return Err(anyhow!(
+                "this job was cancelled, so nothing more of it goes into the chat; the note was NOT posted. Stop working and end your turn."
+            ));
+        }
+        // The same backstop and the same configured limit the turn surfaces apply (D19, and
+        // `config::chat_text_max`): one chat is one set of rules, however the words reach it.
+        let text = crate::store::redact(&crate::agent::ProseFilter::clean_prose(text.trim()));
+        let text = text.trim();
+        if text.is_empty() {
+            return Err(anyhow!("nothing to send"));
+        }
+        let chars = text.chars().count();
+        if let Some(max) = self.cfg.chat_text_max() {
+            if chars > max {
+                return Err(anyhow!(crate::agent::chat_text_over_limit(chars, max)));
+            }
+        }
+        // No clock in the box measures how much longer the work takes, so a note that says it is
+        // refused here exactly as it is on the turn surfaces (Test5 T7).
+        if crate::agent::promises_a_time(text) {
+            return Err(anyhow!(crate::agent::TIME_PROMISE_REFUSAL));
+        }
+        let host = self.room(&job.chat_id).await?;
+        self.post_chat_line(
+            &host,
+            &job.chat_id,
+            &job.ask_message_id,
+            &format!("job:{}:note:{}", job.id, ulid()),
+            text,
+        )
+        .await;
+        let _ = self.store.t3_append(
+            &job.chat_id,
+            Some(session_id),
+            Some(&job.chat_id),
+            "job_note",
+            Some("assistant"),
+            text,
+            Some(&json!({ "job_id": job.id, "chat_id": job.chat_id })),
+        );
+        self.audit(json!({
+            "ts": now_ms(), "kind": "job_note", "job_id": job.id, "chat_id": job.chat_id,
+            "subagent_id": session_id, "chars": chars,
+        }));
+        Ok(json!({ "status": "posted", "chars": chars,
+            "note": "Posted in this chat as its own row. Do not repeat it; your words reach the user only through this call and your final result.",
+        })
+        .to_string())
     }
 
     /// Deliver `text` to agent `to` through the relay and write the hand-off row in the chat
@@ -278,7 +405,7 @@ impl Agent {
         delivery: &Delivery,
         text: &str,
     ) {
-        let Some(host) = self.sync.host(chat_id).await else {
+        let Ok(host) = self.room(chat_id).await else {
             return;
         };
         let h = host.lock().await;
@@ -309,7 +436,7 @@ impl Agent {
     }
 
     async fn write_paused_line(&self, chat_id: &str, reason: &str) {
-        let Some(host) = self.sync.host(chat_id).await else {
+        let Ok(host) = self.room(chat_id).await else {
             return;
         };
         let line = reason
@@ -601,7 +728,10 @@ impl Agent {
         let kind = TurnKind::SubagentResult {
             subagent_id: format!("agent-message:{mid}"),
             name: from_name.clone(),
+            job_id: None,
             status: status.clone(),
+            title: format!("my message to {from_name}"),
+            result: text.clone(),
         };
         self.run_notice_turn_unless_relayed(
             &chat_id,
@@ -742,6 +872,201 @@ mod tests {
         assert!(agent_reply_prompt("lane-b", "done", "hello", "fine")
             .contains("[Arbos] lane-b replied"));
         assert!(agent_reply_prompt("lane-b", "empty", "hello", "").contains("wrote nothing back"));
+    }
+
+    /// A box held below a limit by its operator: the refusal names that number and nothing else,
+    /// so the sentence the model writes for the user carries the true figure. Both text surfaces
+    /// refuse alike, because `hook_send_message` is the single writer behind them. Without the
+    /// file there is no limit, and the same text posts (bug Q, Test5 round 5).
+    #[tokio::test]
+    async fn a_configured_limit_is_named_in_the_refusal_and_is_absent_by_default() {
+        let (agent, root) = crate::status::tests::test_agent().await;
+        let chat = "01TESTCHATTEXTLIMIT0000001";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().expect("the held turn");
+            agent.test_open_row(&host, t).await;
+        }
+        let text = "x".repeat(5_000);
+
+        assert_eq!(agent.cfg.chat_text_max(), None, "no limit by default");
+        agent
+            .send_message_from_turn(None, &text)
+            .await
+            .expect("with no limit configured, 5,000 characters post");
+
+        std::fs::write(agent.cfg.state_dir.join("chat-text-max"), "4000").unwrap();
+        assert_eq!(agent.cfg.chat_text_max(), Some(4_000));
+        let err = agent
+            .send_message_from_turn(None, &text)
+            .await
+            .expect_err("over the configured limit")
+            .to_string();
+        assert!(
+            err.contains("5000 characters is over this box's configured chat-message limit of 4000 characters"),
+            "{err}"
+        );
+        assert!(
+            err.contains("tell the user the limit is 4000 characters"),
+            "the refusal must hand the model the figure to quote: {err}"
+        );
+        assert_eq!(
+            agent.hook_send_message(&text, None, None).await,
+            Err(crate::agent::chat_text_over_limit(5_000, 4_000)),
+            "the harness surface must refuse with the same figure"
+        );
+
+        std::fs::write(agent.cfg.state_dir.join("chat-text-max"), "off").unwrap();
+        assert_eq!(agent.cfg.chat_text_max(), None, "`off` is no limit");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// #2395 closes the rooms agentd never releases today, which turns every "no open room" arm
+    /// from dead code into a live path — the shape that shipped broken twice (#2757, #2759). The
+    /// row here is written by `hook_send_message`, whose own lookup refuses a shut room, so this
+    /// path reopens the room first and the answer still lands.
+    ///
+    /// The close is the cold one, which is what this test has always meant: a room taken for
+    /// being idle belongs to a chat the agent is still in, so the next write opens it again.
+    /// Leaving the chat is the other close, and a reopen there is #1440's 403 every 16 s.
+    #[tokio::test]
+    async fn a_closed_room_is_reopened_instead_of_swallowing_the_message() {
+        let (agent, root) = crate::status::tests::test_agent().await;
+        let chat = "01TESTCHATREOPENPOST000001";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().expect("the held turn");
+            agent.test_open_row(&host, t).await;
+        }
+        agent.sync.persist(&host).await.unwrap();
+        drop(host);
+        agent.sync.test_close_cold(chat).await;
+        assert!(agent.sync.host(chat).await.is_none(), "the room is shut");
+
+        agent
+            .send_message_from_turn(None, "One message, as asked.")
+            .await
+            .expect("a shut room is reopened, not an error the user reads as a limit");
+
+        let reopened = agent.sync.host(chat).await.expect("the room is open again");
+        let posted: Vec<String> = {
+            let h = reopened.lock().await;
+            h.doc
+                .messages()
+                .into_iter()
+                .filter(|m| m.has_visible_content())
+                .map(|m| m.text())
+                .collect()
+        };
+        assert_eq!(posted, vec!["One message, as asked.".to_owned()]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Bug T, Test5 round 6 (r6cardjob, agentd 0.1.193): the user asked a job to post a note
+    /// naming the approval card it was waiting on. The job's script called
+    /// `mcp__arbos__send_message` and read back "send_message is available to the main agent
+    /// only". It stopped there: no note, no card, and nothing in the chat for the user.
+    ///
+    /// The behaviour, as the user would state it: a job that posts three progress notes
+    /// mid-run puts three rows in its chat, before its result. No turn runs while it does —
+    /// the main turn that started the job ended long before the worker spoke.
+    #[tokio::test]
+    async fn a_job_posts_three_progress_notes_as_three_rows_before_its_result() {
+        let (agent, root) = crate::status::tests::test_agent().await;
+        let chat = "01TESTCHATJOBPROGRESS00001";
+        let ask = "01TESTASKJOBPROGRESS000001";
+        let job_id = "01TESTJOBPROGRESS00000001";
+        let worker = "01TESTWORKERPROGRESS00001";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        {
+            let h = host.lock().await;
+            h.doc
+                .append_user_message(
+                    ask,
+                    "Raise the card to delete the stale branches, and tell me which card you are waiting on.",
+                    "dev-mac",
+                    &Default::default(),
+                )
+                .unwrap();
+        }
+        agent
+            .store
+            .insert_subagent(
+                worker,
+                "job-raising-the-card-0001",
+                "raise the card",
+                "pi",
+                chat,
+            )
+            .unwrap();
+        agent
+            .store
+            .insert_job(
+                job_id,
+                chat,
+                ask,
+                "Raising the card",
+                "ops",
+                "Raise the approval card for the branch delete and name it in the chat.",
+                &[],
+            )
+            .unwrap();
+        agent.store.set_job_subagent(job_id, worker).unwrap();
+        assert!(
+            agent.turn.lock().await.is_none(),
+            "a job runs beside the chat: there is no turn to post into"
+        );
+
+        let notes = [
+            "Cloned the repository and listed 12 stale branches.",
+            "Card raised: \"Delete 12 stale branches\" — that is the one I am waiting on.",
+            "Approved. Deleting them now.",
+        ];
+        for note in notes {
+            let answer = agent
+                .post_to_job_chat(worker, note)
+                .await
+                .expect("a job posts in the chat it runs beside");
+            assert!(answer.contains("\"status\":\"posted\""), "{answer}");
+        }
+        // The result lands after them, as the finished job's own row does.
+        let result = "Done: 12 branches deleted.";
+        agent
+            .post_chat_line(&host, chat, ask, &format!("job:{job_id}:result"), result)
+            .await;
+
+        let rows: Vec<String> = {
+            let h = host.lock().await;
+            h.doc
+                .messages()
+                .into_iter()
+                .filter(|m| m.role == "assistant" && m.has_visible_content())
+                .map(|m| m.text())
+                .collect()
+        };
+        assert_eq!(
+            rows,
+            vec![
+                notes[0].to_owned(),
+                notes[1].to_owned(),
+                notes[2].to_owned(),
+                result.to_owned(),
+            ],
+            "three notes, each its own row, then the result"
+        );
+
+        // A session that runs no job is still the D69 case: it reports back, and the refusal
+        // says so rather than leaving it to guess.
+        let orphan = agent
+            .post_to_job_chat("01TESTWORKERNOJOB00000001", "anything")
+            .await
+            .expect_err("a session with no job has no chat of its own");
+        assert!(orphan.to_string().contains("runs no job"), "{orphan}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Arbonites, 2026-10-28 (01M627S7…): a hand-off row in a group came out as bare
@@ -893,6 +1218,115 @@ mod tests {
             );
             assert!(!note.contains("@bob talk to @bubble"), "{note}");
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The guard, on the writer that holds no handle: `hooks.rs` calls `hook_send_message`
+    /// directly, so after `close_room` has taken the host out of the hub there is nothing for
+    /// this writer to consult but the hub's own record. Reopening here is #1440's 403 every 16 s.
+    #[tokio::test]
+    async fn a_handle_less_hook_send_does_not_reopen_a_room_the_agent_left() {
+        let (agent, root) = crate::status::tests::test_agent().await;
+        let chat = "01TESTCHATHOOKLEFT000001";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        agent.sync.persist(&host).await.unwrap();
+        drop(host);
+
+        agent.sync.close_room(chat).await;
+        assert!(agent.sync.host(chat).await.is_none(), "premise: no handle");
+
+        let got = agent
+            .hook_send_message("One message, as asked.", None, None)
+            .await;
+        let err = got.expect_err("a hook send reopened a chat the agent was removed from");
+        assert!(
+            err.contains("not in chat"),
+            "the refusal must come from the record, not from a missing host: {err}"
+        );
+        assert!(
+            !agent.sync.is_open(chat).await,
+            "and it left no room open to redial the relay with"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The other half, and the reason the guard cannot simply be "never reopen": the same writer
+    /// must reopen a room the idle close or the room cap merely took, or #2367's own eviction
+    /// swallows the message it was supposed to keep.
+    #[tokio::test]
+    async fn a_handle_less_hook_send_reopens_a_room_that_went_cold() {
+        let (agent, root) = crate::status::tests::test_agent().await;
+        let chat = "01TESTCHATHOOKCOLD000001";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        agent.sync.persist(&host).await.unwrap();
+        drop(host);
+
+        agent.sync.test_close_cold(chat).await;
+        assert!(agent.sync.host(chat).await.is_none(), "premise: no handle");
+        assert!(agent.sync.may_open(chat).await, "premise: nothing recorded");
+
+        agent
+            .hook_send_message("One message, as asked.", None, None)
+            .await
+            .expect("a cold room is reopened, not a refusal the model reads as a limit");
+        assert!(
+            agent.sync.is_open(chat).await,
+            "the message went somewhere nothing will push it"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The background-job hook is a writer too, and it refused with "no room for this chat" —
+    /// which the model reads as a box that cannot run jobs, so it does the work in the turn
+    /// instead. A chat quiet long enough for the idle close is exactly the chat someone comes
+    /// back to with a long ask, so this is the likeliest of all the write paths to meet a cold
+    /// room.
+    #[tokio::test]
+    async fn a_background_job_starts_in_a_room_the_idle_close_took() {
+        use arbos_core::doc::UserMessageOpts;
+
+        let (agent, root) = crate::status::tests::test_agent().await;
+        let chat = "01TESTCHATJOBCOLD0000001";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn_for(chat, "m-job").await;
+        {
+            let h = host.lock().await;
+            h.doc
+                .append_user_message(
+                    "m-job",
+                    "Find me surf schools in Ericeira",
+                    "dev-mac",
+                    &UserMessageOpts::default(),
+                )
+                .expect("user message");
+        }
+        agent.sync.persist(&host).await.unwrap();
+        drop(host);
+
+        agent.sync.test_close_cold(chat).await;
+        assert!(agent.sync.host(chat).await.is_none(), "premise: no handle");
+        assert!(agent.sync.may_open(chat).await, "premise: nothing recorded");
+
+        let got = agent
+            .hook_start_job(
+                "Searching for surf schools",
+                "Find surf schools in Ericeira that take beginners, and return a list with prices.",
+                "research",
+                vec![],
+            )
+            .await;
+        if let Err(e) = &got {
+            assert!(
+                !e.contains("no room"),
+                "a cold room is reopened for a job, not reported as a box with no room: {e}"
+            );
+        }
+        assert!(
+            agent.sync.is_open(chat).await,
+            "the job has a room to write its rows into"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }

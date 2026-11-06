@@ -31,6 +31,7 @@ use arbos_core::ids::{now_ms, ulid};
 
 use crate::config::Config;
 use crate::llm::Llm;
+use crate::settings::{LiveModels, ModelRole};
 use crate::store::{Store, T3Row};
 
 pub const SCHEMA: &str = r#"
@@ -133,6 +134,24 @@ impl TreeMode {
             Self::On => "on",
             Self::Log => "log",
             Self::Off => "off",
+        }
+    }
+
+    /// The mode as one byte, so the live value can be mirrored in an atomic and read from sync
+    /// code without the async settings lock (`LiveModels::tree_mode`).
+    pub fn code(self) -> u8 {
+        match self {
+            Self::On => 0,
+            Self::Log => 1,
+            Self::Off => 2,
+        }
+    }
+
+    pub fn from_code(c: u8) -> Self {
+        match c {
+            1 => Self::Log,
+            2 => Self::Off,
+            _ => Self::On,
         }
     }
 }
@@ -313,12 +332,12 @@ struct Gathered {
 pub struct Tree {
     project_id: String,
     project_name: String,
-    /// Chat model for the cards (the project's `decision_model` slot).
-    card_model: String,
+    /// Chat model for the cards: the project's live `decision_model` slot, read per pass so a
+    /// model change in the app reaches the cards without a box restart (Jacob, 2026-11-04).
+    models: LiveModels,
     store: Store,
     llm: Arc<Llm>,
     build_lock: tokio::sync::Mutex<()>,
-    cap_warned: std::sync::Mutex<Option<i64>>,
 }
 
 pub fn est_tokens(s: &str) -> usize {
@@ -479,20 +498,14 @@ fn cache_ctx(words: &[String], asked_at: i64, asker: &str, restricted: bool) -> 
 }
 
 impl Tree {
-    pub fn new(cfg: &Config, store: Store, llm: Arc<Llm>) -> Self {
-        Self::with_ids(
-            &cfg.project_id,
-            &cfg.project_name,
-            &cfg.decision_model,
-            store,
-            llm,
-        )
+    pub fn new(cfg: &Config, store: Store, llm: Arc<Llm>, models: LiveModels) -> Self {
+        Self::with_ids(&cfg.project_id, &cfg.project_name, models, store, llm)
     }
 
     pub fn with_ids(
         project_id: &str,
         project_name: &str,
-        card_model: &str,
+        models: LiveModels,
         store: Store,
         llm: Arc<Llm>,
     ) -> Self {
@@ -503,11 +516,10 @@ impl Tree {
         let tree = Self {
             project_id: project_id.to_owned(),
             project_name: project_name.to_owned(),
-            card_model: card_model.to_owned(),
+            models,
             store,
             llm,
             build_lock: tokio::sync::Mutex::new(()),
-            cap_warned: std::sync::Mutex::new(None),
         };
         tree.backfill_cards_fts();
         tree
@@ -531,29 +543,6 @@ impl Tree {
 
     // ---- settings -----------------------------------------------------------------------------
 
-    /// Per-box daily cap on tree spend (cards + Jev), USD. `ARBOS_MEMORY_TREE_DAILY_CAP_USD`,
-    /// default 0.80 so six boxes stay under the $5/day rule.
-    pub fn daily_cap_usd() -> f64 {
-        std::env::var("ARBOS_MEMORY_TREE_DAILY_CAP_USD")
-            .ok()
-            .and_then(|s| s.parse::<f64>().ok())
-            .filter(|v| *v >= 0.0)
-            .unwrap_or(0.80)
-    }
-
-    pub fn spend_today(&self) -> f64 {
-        let since = day_start_ms(now_ms());
-        self.store
-            .with(|c| {
-                c.query_row(
-                    "SELECT COALESCE(SUM(usd), 0) FROM tree_cost WHERE created_at >= ?1",
-                    params![since],
-                    |r| r.get::<_, f64>(0),
-                )
-            })
-            .unwrap_or(0.0)
-    }
-
     /// Spend today split by kind, plus a straight-line projection to 24 h.
     pub fn spend_report(&self) -> Value {
         let now = now_ms();
@@ -573,28 +562,7 @@ impl Tree {
             "today_usd": total,
             "by_kind": rows.iter().map(|(k, u, n)| json!({"kind": k, "usd": u, "calls": n})).collect::<Vec<_>>(),
             "projected_24h_usd": total / elapsed_h * 24.0,
-            "cap_usd": Self::daily_cap_usd(),
-            "capped": self.capped(),
         })
-    }
-
-    /// True once today's spend reached the cap; warns once a day.
-    pub fn capped(&self) -> bool {
-        let cap = Self::daily_cap_usd();
-        if cap <= 0.0 {
-            return false;
-        }
-        let spent = self.spend_today();
-        if spent < cap {
-            return false;
-        }
-        let today = day_start_ms(now_ms());
-        let mut w = self.cap_warned.lock().expect("cap warned");
-        if *w != Some(today) {
-            *w = Some(today);
-            tracing::warn!(project = %self.project_id, spent_usd = spent, cap_usd = cap, "memory tree: daily spend cap reached; builder and walk paused until tomorrow (UTC)");
-        }
-        true
     }
 
     fn add_cost(&self, kind: &str, usage: &Value) {
@@ -1097,7 +1065,7 @@ impl Tree {
         self.ensure_root();
         self.expire_score_cache();
         let t0 = Instant::now();
-        let mut stats = json!({ "leaves": 0, "episodes_new": 0, "cards": 0, "page_cards": 0, "skipped_cap": false });
+        let mut stats = json!({ "leaves": 0, "episodes_new": 0, "cards": 0, "page_cards": 0 });
         // 1. leaves → episodes (no model calls)
         let through = self.state_get("built_through").unwrap_or_default();
         let rows = self.t3_rows(
@@ -1183,12 +1151,7 @@ impl Tree {
         }
         stats["leaves"] = json!(rows.len());
         stats["episodes_new"] = json!(new_eps);
-        if self.capped() {
-            stats["skipped_cap"] = json!(true);
-            stats["ms"] = json!(t0.elapsed().as_millis() as i64);
-            return Ok(stats);
-        }
-        let model = self.card_model();
+        let model = self.card_model().await;
         let mut calls = 0usize;
         let mut errors = 0usize;
         // 2. page cards for big tool results (deduped by content)
@@ -1476,8 +1439,8 @@ impl Tree {
         Ok(stats)
     }
 
-    fn card_model(&self) -> String {
-        self.card_model.clone()
+    async fn card_model(&self) -> String {
+        self.models.resolve(ModelRole::Decision).await
     }
 
     async fn write_card(
@@ -2307,12 +2270,6 @@ impl Tree {
                 reason: Some("tree not built yet".into()),
                 ..Default::default()
             }
-        } else if self.capped() {
-            Pack {
-                outcome: "fallback".into(),
-                reason: Some("daily cap".into()),
-                ..Default::default()
-            }
         } else {
             match tokio::time::timeout(
                 Duration::from_millis(WALK_DEADLINE_MS + 600),
@@ -2397,12 +2354,7 @@ impl Tree {
                 + st.get("page_cards").and_then(Value::as_i64).unwrap_or(0)
                 + st.get("leaves").and_then(Value::as_i64).unwrap_or(0);
             passes.push(st.clone());
-            if did == 0
-                || st
-                    .get("skipped_cap")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false)
-            {
+            if did == 0 {
                 break;
             }
         }
@@ -2782,6 +2734,83 @@ mod tests {
         p.leaf_ids.iter().cloned().collect()
     }
 
+    /// The tree used to stop building and walking once its own $0.80 day was spent, which is
+    /// how Test5's walks came back empty 41 s into the day (2026-11-05). It has no spend cap of
+    /// its own now: spending is one ledger on the account at the relay, and the relay refuses.
+    /// What stays here is the per-source record of what the tree spent.
+    #[tokio::test]
+    async fn a_spent_day_does_not_pause_the_builder() {
+        let port = spawn_mock_relay().await;
+        let dir = std::env::temp_dir().join(format!("arbos-tree-nocap-{}", ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir.join("agentd.db")).unwrap();
+        let fixture: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/memory-walk-recall.json"))
+                .unwrap();
+        load_fixture(&store, &fixture, now_ms());
+        let llm = Llm::with_endpoints(
+            &format!("http://127.0.0.1:{port}/v1"),
+            &format!("http://127.0.0.1:{port}/decisions"),
+            "test-token",
+        );
+        let tree = Tree::with_ids(
+            "p-test",
+            "Bob",
+            crate::settings::LiveModels::fixed("mock-card-model"),
+            store,
+            Arc::new(llm),
+        );
+        // Far past every cap this subsystem ever had.
+        tree.add_cost("cards", &json!({ "cost": 500.0 }));
+
+        let mut cards = 0i64;
+        for _ in 0..10 {
+            let st = tree.build_pass().await.unwrap();
+            cards += st["cards"].as_i64().unwrap_or(0) + st["page_cards"].as_i64().unwrap_or(0);
+            assert!(
+                st.get("skipped_cap").is_none(),
+                "no spend of the box's own stops a pass: {st}"
+            );
+            if st["cards"].as_i64().unwrap_or(0) == 0 && st["leaves"].as_i64().unwrap_or(0) == 0 {
+                break;
+            }
+        }
+        assert!(cards > 0, "cards were written on a day already spent");
+
+        let pack = tree
+            .walk_inner(
+                "mock-jev",
+                "c1",
+                false,
+                "what did we decide",
+                "the project owner",
+                "",
+                WalkOptions {
+                    compact: true,
+                    fast: true,
+                },
+            )
+            .await;
+        assert_ne!(
+            pack.outcome, "fallback",
+            "the walk still runs on a day already spent: {:?}",
+            pack.reason
+        );
+
+        // The breakdown the ledger wants kept: what the tree spent, by source.
+        let report = tree.spend_report();
+        assert!(report["today_usd"].as_f64().unwrap_or(0.0) >= 500.0);
+        assert!(report.get("cap_usd").is_none(), "no per-box cap to report");
+        assert!(report.get("capped").is_none(), "nothing to be capped by");
+        assert!(
+            report["by_kind"]
+                .as_array()
+                .is_some_and(|k| k.iter().any(|r| r["kind"] == "cards")),
+            "spend is still logged per source: {report}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[tokio::test]
     async fn fast_walk_keeps_every_cross_chat_hit() {
         let port = spawn_mock_relay().await;
@@ -2797,7 +2826,13 @@ mod tests {
             &format!("http://127.0.0.1:{port}/decisions"),
             "test-token",
         );
-        let tree = Tree::with_ids("p-test", "Bob", "mock-card-model", store, Arc::new(llm));
+        let tree = Tree::with_ids(
+            "p-test",
+            "Bob",
+            crate::settings::LiveModels::fixed("mock-card-model"),
+            store,
+            Arc::new(llm),
+        );
         for _ in 0..10 {
             let st = tree.build_pass().await.unwrap();
             if st["cards"].as_i64().unwrap_or(0) == 0 && st["leaves"].as_i64().unwrap_or(0) == 0 {
@@ -2917,7 +2952,13 @@ mod tests {
             &format!("http://127.0.0.1:{port}/decisions"),
             "test-token",
         );
-        let tree = Tree::with_ids("p-test", "Bob", "mock-card-model", store, Arc::new(llm));
+        let tree = Tree::with_ids(
+            "p-test",
+            "Bob",
+            crate::settings::LiveModels::fixed("mock-card-model"),
+            store,
+            Arc::new(llm),
+        );
         for _ in 0..10 {
             let st = tree.build_pass().await.unwrap();
             if st["cards"].as_i64().unwrap_or(0) == 0 && st["leaves"].as_i64().unwrap_or(0) == 0 {

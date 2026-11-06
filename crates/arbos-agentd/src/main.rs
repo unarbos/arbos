@@ -8,9 +8,16 @@ mod channels;
 mod chart;
 mod config;
 mod connectors;
+#[cfg(test)]
+mod cross_workspace_auth_tests;
 mod disk;
 mod eval;
 mod feedback;
+mod forced_job;
+#[cfg(test)]
+mod forced_job_burst_tests;
+#[cfg(test)]
+mod forced_job_tests;
 mod goals;
 mod groups;
 mod handoff;
@@ -20,6 +27,21 @@ mod http;
 mod identity;
 mod inspect;
 mod isolation;
+#[cfg(test)]
+mod job_background_claim_tests;
+mod job_backgrounded;
+#[cfg(test)]
+mod job_cancel_tests;
+#[cfg(test)]
+mod job_leftover_tests;
+#[cfg(test)]
+mod job_note_tests;
+#[cfg(test)]
+mod job_notice_tests;
+#[cfg(test)]
+mod job_reparent_tests;
+#[cfg(test)]
+mod job_steer_race_tests;
 mod jobs_view;
 mod llm;
 mod local;
@@ -27,23 +49,37 @@ mod markdown_tables;
 mod mcp;
 mod media;
 mod memory;
+#[cfg(test)]
+mod model_switch_tests;
 mod people;
+#[cfg(test)]
+mod pi_crash_loop_tests;
 mod relay_error;
 mod reply;
 mod resources;
 mod responders;
+#[cfg(test)]
+mod room_marks_tests;
 mod routines;
 mod rpc_child;
 mod selfref;
+mod send_order;
+#[cfg(test)]
+mod send_order_tests;
 mod settings;
 mod silence;
 mod sites;
 mod skills;
 mod status;
+mod steer_gate;
 mod store;
 mod sync;
 mod tree;
 mod truncate;
+#[cfg(test)]
+mod turn_end_race_tests;
+#[cfg(test)]
+mod turn_marks_tests;
 mod vault;
 mod voice;
 mod web;
@@ -222,7 +258,13 @@ async fn eval_tree(
         }
     };
     let store = store::Store::open(std::path::Path::new(&db))?;
-    let tree = tree::Tree::with_ids("eval", "eval", &card_model, store, std::sync::Arc::new(llm));
+    let tree = tree::Tree::with_ids(
+        "eval",
+        "eval",
+        settings::LiveModels::fixed(&card_model),
+        store,
+        std::sync::Arc::new(llm),
+    );
     let report = tree.eval(&scorer, &chat, &query, opts).await?;
     let text = serde_json::to_string_pretty(&report)?;
     match out {
@@ -472,6 +514,21 @@ async fn boot() -> Result<()> {
                     poll_failures = 0;
                 }
                 sup2.apply_listing(&v).await;
+            }
+        });
+    }
+    // Box-wide room ceiling (30 s): the per-workspace cap bounds each hub's rooms and nothing
+    // bounds their sum, so this is the only pass that can see a box over its CPU quota with
+    // every workspace inside its own cap. A box under the ceiling pays one cheap count for it.
+    //
+    // A sweep rather than a check on the open path, because the sum moves for reasons no single
+    // open knows about: a workspace being added puts the box over without any room opening.
+    {
+        let sup2 = sup.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                sup2.enforce_box_room_ceiling().await;
             }
         });
     }

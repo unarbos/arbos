@@ -561,6 +561,7 @@ mod error_ui_lint {
             ("secrets-error", "ui/secrets.rs"),
             ("feedback-error", "ui/feedback.rs"),
             ("devices-error", "ui/profiles/me.rs"),
+            ("agent-links-error", "ui/profiles/me.rs"),
             ("update-error", "ui/profiles/me.rs"),
             ("routine-error", "ui/routines.rs"),
             ("question-card-error", "ui/widgets.rs"),

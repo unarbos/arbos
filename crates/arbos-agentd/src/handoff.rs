@@ -118,7 +118,13 @@ pub async fn request_secret(agent: &Arc<Agent>, args: &Value, chat_id: &str) -> 
             "answers": [] }),
     };
     let approval_id = match agent
-        .begin_approval(chat_id, req, WaitMode::Inline, Some(tx))
+        .begin_approval(
+            chat_id,
+            req,
+            WaitMode::Inline,
+            Some(tx),
+            crate::approval::approval_ttl_ms(),
+        )
         .await
     {
         Ok(id) => id,
@@ -379,7 +385,13 @@ pub async fn on_user_message(
             ] }),
     };
     if let Err(e) = agent
-        .begin_approval(chat_id, req, WaitMode::Deferred, None)
+        .begin_approval(
+            chat_id,
+            req,
+            WaitMode::Deferred,
+            None,
+            crate::approval::approval_ttl_ms(),
+        )
         .await
     {
         tracing::warn!(error = %e, chat_id, "secret hand-off: offer card could not be posted");

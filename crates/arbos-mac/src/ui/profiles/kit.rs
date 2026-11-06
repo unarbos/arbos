@@ -89,6 +89,14 @@ pub enum Leading {
     Glyph(&'static str),
 }
 
+/// The glyph slot inside a [`Leading::Glyph`] tile. `sf_symbols::glyph` draws
+/// at [`sf_symbols::GLYPH_POINT_RATIO`] of the slot, so 20 is a 17 pt symbol —
+/// what the iPhone's `PaneLeading.glyph` puts in the same 36 pt tile. The mac
+/// asked for an 18 pt slot, which is a 15 pt symbol: the same mark 2 pt
+/// smaller than its iPhone twin, and the thinner half of what the group pane's
+/// Add members and Description tiles were read as.
+const GLYPH_TILE_SLOT: f32 = 20.0;
+
 /// The grouped card: one fill, one radius, one margin.
 pub fn card(theme: &Theme) -> Div {
     div()
@@ -197,7 +205,11 @@ fn leading_el(leading: Leading, theme: &Theme) -> Option<AnyElement> {
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(sf_symbols::glyph(glyph, 18.0, theme.label_muted()))
+                .child(sf_symbols::glyph(
+                    glyph,
+                    GLYPH_TILE_SLOT,
+                    theme.label_muted(),
+                ))
                 .into_any_element(),
         ),
     }

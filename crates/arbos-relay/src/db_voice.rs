@@ -381,29 +381,6 @@ impl Db {
 
     // ---- settings ---------------------------------------------------------------------------------
 
-    pub fn voice_user_cap(&self, user_id: &str) -> Result<Option<f64>> {
-        self.with(|c| {
-            c.query_row(
-                "SELECT daily_cap_usd FROM voice_user_settings WHERE user_id = ?1",
-                params![user_id],
-                |r| r.get::<_, Option<f64>>(0),
-            )
-            .optional()
-            .map(|v| v.flatten())
-        })
-    }
-
-    pub fn set_voice_user_cap(&self, user_id: &str, cap: Option<f64>) -> Result<()> {
-        self.with(|c| {
-            c.execute(
-                "INSERT INTO voice_user_settings(user_id, daily_cap_usd) VALUES (?1, ?2)
-                 ON CONFLICT(user_id) DO UPDATE SET daily_cap_usd = excluded.daily_cap_usd",
-                params![user_id, cap],
-            )
-            .map(|_| ())
-        })
-    }
-
     pub fn voice_agent_settings(&self, project_id: &str) -> Result<VoiceAgentSettings> {
         self.with(|c| {
             let row = c

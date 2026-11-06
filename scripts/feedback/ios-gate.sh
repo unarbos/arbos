@@ -200,15 +200,33 @@ teardown_sims() {
     grep -qx "$u" <<< "$SIMS_BEFORE" || { xcrun simctl shutdown "$u" >/dev/null 2>&1 && echo "== simulator $u shut down (booted by this run)"; }
   done
 }
+# Where the FFI cross builds actually land. build-xcframework.sh reads CARGO_TARGET_DIR and falls back to
+# the tree's own target/, so the gate's artefacts follow whatever the caller exported: rust-gate.sh points
+# it at the scratch volume (/Volumes/ArbosScratch/ec2-user/arbos-rust-gate-target). Resolve it the same way
+# the build does, never by name — the prune below was hard-coded to ~/arbos-gate/target, a directory that
+# does not exist under the scratch target dir, so it has never once removed a file. The volume filled and
+# the iOS gate died on "No space left on device" at 02:35 on 2026-10-30; the disk was cleared by hand and
+# the cause left in place to do it again.
+ffi_target_dir() { echo "${CARGO_TARGET_DIR:-${ROOT:-$HOME/arbos-gate}/target}"; }
 teardown() {
   teardown_sims
-  # Each run leaves a fresh libarbos_ffi-<hash>.a per iOS target under target/*/release/deps (0.2-0.3 GB each;
-  # 77 of them filled 13 GB on 2026-10-22). Keep the newest two per directory, drop the rest.
-  local deps
-  for deps in "$HOME"/arbos-gate/target/*/release/deps; do
+  # Each run leaves a fresh libarbos_ffi-<hash>.a per iOS target under <target dir>/<triple>/release/deps
+  # (0.2-0.3 GB each; 77 of them filled 13 GB on 2026-10-22). Keep the newest two per directory, drop the
+  # rest. Only the Apple-iOS triples build-xcframework.sh builds: the scratch target dir is shared with the
+  # Mac half, whose own artefacts sit under <target dir>/release and must be left alone.
+  local deps gone n=0
+  for deps in "$(ffi_target_dir)"/*apple-ios*/release/deps; do
     [ -d "$deps" ] || continue
-    ls -t "$deps"/libarbos_ffi-*.a 2>/dev/null | tail -n +3 | xargs -r rm -f
+    gone=$(ls -t "$deps"/libarbos_ffi-*.a 2>/dev/null | tail -n +3)
+    [ -n "$gone" ] || continue
+    n=$(( n + $(printf '%s\n' "$gone" | grep -c .) ))
+    printf '%s\n' "$gone" | xargs -r rm -f
   done
+  # Not `(( n > 0 )) && echo …`: this runs in the EXIT trap, and a trap must not end on a false test
+  # (the same shape cost rust-gate.sh's `status` its verdict once — a trailing grep that matched nothing
+  # read as "Mac unreachable").
+  if (( n > 0 )); then echo "== prune: dropped $n stale libarbos_ffi-*.a under $(ffi_target_dir)"; fi
+  return 0
 }
 trap teardown EXIT
 cd ~/arbos-gate || exit 2

@@ -22,12 +22,12 @@ use crate::model::{
     MembershipNotice, NoticeSubject, OptimisticNotice, Person, Reachable, Sender, Voice,
 };
 use crate::model::{
-    new_id, now_ms, Attachment, AttachmentKind, AttachmentSource, BoxReport, BoxState, ChannelSel,
-    ChannelsView, Chat, ChatKind, ConnectorsView, DevicesView, Effort, GifPage, Id, Job,
-    JobRollout, Link, LinkState, LocalView, Machine, MediaPick, Message, MessageBody,
-    MessageStatus, NewSecret, Part, Project, ProjectDocView, ProjectSecrets, QuestionState,
-    ReplyRef, Role, Routine, RoutineRun, RoutineTrigger, SecretDirector, SecretScope, SecretsView,
-    ServerInfo, Skill, StatusKind, StickerPack,
+    new_id, now_ms, AgentLinkReveal, AgentLinksView, Attachment, AttachmentKind, AttachmentSource,
+    BoxReport, BoxState, ChannelSel, ChannelsView, Chat, ChatKind, ConnectorsView, DevicesView,
+    Effort, GifPage, Id, Job, JobRollout, Link, LinkState, LocalView, Machine, MediaPick, Message,
+    MessageBody, MessageStatus, NewSecret, Part, Project, ProjectDocView, ProjectSecrets,
+    QuestionState, ReplyRef, Role, Routine, RoutineRun, RoutineTrigger, SecretDirector,
+    SecretScope, SecretsView, ServerInfo, Skill, StatusKind, StickerPack,
 };
 use crate::palette;
 use crate::search;
@@ -870,6 +870,11 @@ pub struct AppState {
     pub secrets: SecretsView,
     /// Settings → Devices (`GET /auth/devices`).
     pub devices: DevicesView,
+    /// Settings → Agent access link (`GET /me/agent-links`).
+    pub agent_links: AgentLinksView,
+    /// The copy sheet over the page, after a mint: the one screen a link's URL
+    /// exists on. It is never written anywhere else and never comes back.
+    pub agent_link_reveal: Option<AgentLinkReveal>,
     /// Agent profile → Secrets, per project.
     pub project_secrets: std::collections::HashMap<Id, ProjectSecrets>,
     /// Standing shell approvals per agent (#1544), loaded when the agent pane opens.
@@ -1345,6 +1350,8 @@ impl AppState {
             connectors: ConnectorsView::default(),
             secrets: SecretsView::default(),
             devices: DevicesView::default(),
+            agent_links: AgentLinksView::default(),
+            agent_link_reveal: None,
             project_secrets: std::collections::HashMap::new(),
             shell_grants: std::collections::HashMap::new(),
             handoff: std::collections::HashMap::new(),
@@ -2074,6 +2081,14 @@ impl AppState {
                 handle,
                 active,
             } => {
+                // My own account, on any device, is never a typing row ([feedback
+                // own-typing-row-mac-2026-11-05]). The relay frame is dropped a
+                // layer down only when it came from THIS device
+                // (`RoomAction::Presence.mine` compares device ids), so my phone's
+                // keystrokes arrive here looking like a stranger's.
+                if self.is_me_handle(&handle) {
+                    return;
+                }
                 let entry = self.typing.entry(chat_id).or_default();
                 entry.retain(|(h, _)| *h != handle);
                 if active {
@@ -3161,6 +3176,28 @@ impl AppState {
                     Err(why) => self.devices.error = Some(why),
                 }
                 self.devices.loaded = true;
+                cx.notify();
+            }
+            SyncEvent::AgentLinks(result) => {
+                match result {
+                    Ok(items) => {
+                        self.agent_links.items = items;
+                        self.agent_links.error = None;
+                    }
+                    Err(why) => self.agent_links.error = Some(why),
+                }
+                self.agent_links.loaded = true;
+                cx.notify();
+            }
+            SyncEvent::AgentLinkMinted(result) => {
+                self.agent_links.minting = false;
+                match result {
+                    Ok(reveal) => {
+                        self.agent_links.error = None;
+                        self.agent_link_reveal = Some(reveal);
+                    }
+                    Err(why) => self.agent_links.error = Some(why),
+                }
                 cx.notify();
             }
             SyncEvent::Routines {
@@ -5328,6 +5365,11 @@ impl AppState {
         // Open only when Matrix already lists the room. A registry room_id alone can
         // race sliding sync (memory store empty until the next snapshot) or point at a
         // gone room — both yield "no such room", which is not a product bug.
+        // Clear banners as soon as the channel is opened — even before Matrix lists the
+        // room (MarkRead waits on sync; Notification Center should not).
+        if let Some(ref rid) = room_id {
+            notify::withdraw_chat(rid);
+        }
         let synced = room_id.as_ref().is_some_and(|rid| {
             self.matrix_snapshot
                 .channels
@@ -9239,6 +9281,7 @@ impl AppState {
                     .as_ref()
                     .and_then(|c| c.room_id.clone())
                 {
+                    notify::withdraw_chat(&room_id);
                     self.command(ClientCommand::ChannelMarkRead { room_id });
                 }
             }
@@ -9695,6 +9738,14 @@ impl AppState {
                     String::new()
                 }
             })
+    }
+
+    /// Is `handle` the signed-in account — whichever device it reached us from?
+    /// Case-insensitive: a login is one identity however it is spelled, and the
+    /// sending device need not spell it the way this one stored it.
+    pub fn is_me_handle(&self, handle: &str) -> bool {
+        let me = self.me_handle();
+        !me.is_empty() && me.eq_ignore_ascii_case(handle)
     }
 
     /// The signed-in user's display name, else their handle.
@@ -11372,6 +11423,65 @@ impl AppState {
         cx.notify();
     }
 
+    // ----- agent access links (Settings → Agent access link) --------------
+
+    /// The page opened: ask the relay for the list. The last list shows
+    /// meanwhile, so the page is never blank on a revisit.
+    pub fn agent_links_refresh(&mut self, cx: &mut Context<Self>) {
+        self.agent_links.error = None;
+        self.command(ClientCommand::AgentLinksRefresh);
+        cx.notify();
+    }
+
+    /// Make one link. The URL comes back on the copy sheet and nowhere else,
+    /// so there is nothing optimistic to show here: the list waits for the
+    /// relay.
+    pub fn mint_agent_link(
+        &mut self,
+        label: String,
+        scope: crate::ui::agent_links::Scope,
+        ttl_hours: i64,
+        cx: &mut Context<Self>,
+    ) {
+        if self.agent_links.minting {
+            return;
+        }
+        self.agent_links.minting = true;
+        self.agent_links.error = None;
+        self.command(ClientCommand::AgentLinkMint {
+            label,
+            scope: scope.wire(),
+            ttl_hours,
+        });
+        cx.notify();
+    }
+
+    /// Cut a link off. The row goes at once, as the footnote promises; the
+    /// relay's next list confirms it.
+    pub fn revoke_agent_link(&mut self, id: Id, cx: &mut Context<Self>) {
+        if !crate::ui::agent_links::remove(&mut self.agent_links.items, &id) {
+            return;
+        }
+        self.command(ClientCommand::AgentLinkRevoke { id });
+        cx.notify();
+    }
+
+    /// The copy row was pressed. This unlocks Done: the sheet will not let the
+    /// user leave a link they never took.
+    pub fn mark_agent_link_copied(&mut self, cx: &mut Context<Self>) {
+        if let Some(reveal) = self.agent_link_reveal.as_mut() {
+            reveal.copied = true;
+            cx.notify();
+        }
+    }
+
+    /// Done or ×. The URL leaves memory with the sheet.
+    pub fn close_agent_link_reveal(&mut self, cx: &mut Context<Self>) {
+        self.agent_link_reveal = None;
+        self.command(ClientCommand::AgentLinksRefresh);
+        cx.notify();
+    }
+
     pub fn project_secrets_refresh(&mut self, project_id: Id, cx: &mut Context<Self>) {
         self.command(ClientCommand::ProjectSecretsRefresh { project_id });
         cx.notify();
@@ -12262,6 +12372,7 @@ impl AppState {
                 body: missed.notification_body(),
                 count: 1,
                 chat_id: Some(missed.chat_id.clone()),
+                chats: Vec::new(),
                 image,
             });
         }
@@ -14976,5 +15087,238 @@ fn sync_event_label(event: &SyncEvent) -> String {
         "event".to_owned()
     } else {
         head.0
+    }
+}
+
+#[cfg(test)]
+mod coalesced_banner_withdraw_tests {
+    //! #2427: channel banners coalesce per server, so a "N updates in <server>" banner stands
+    //! for several channels at once. A read of any channel it names takes it down; a channel it
+    //! does not name leaves it up. The DM question the issue leaves open is settled here too: a
+    //! people space is one chat under the space's own id, so a DM batch can only ever name the
+    //! chat the DM opens.
+    use std::sync::{Arc, Mutex};
+
+    use futures::future::BoxFuture;
+    use gpui::{AppContext as _, Entity, TestAppContext};
+    use tokio::sync::mpsc;
+
+    use super::*;
+    use crate::model::{AccountView, ChatKind, Sender, ServerChannel, ServerInfo, SpaceKind};
+
+    const HQ: &str = "hq";
+    const GENERAL: (&str, &str, &str) = ("c-general", "general", "!general:hq.example");
+    const DESIGN: (&str, &str, &str) = ("c-design", "design", "!design:hq.example");
+    const RANDOM: (&str, &str, &str) = ("c-random", "random", "!random:hq.example");
+    /// A people space: the Project id and its one chat's id are the same string.
+    const DM: &str = "01SAMDMCHAT";
+
+    type Commands = Arc<Mutex<Option<mpsc::UnboundedReceiver<ClientCommand>>>>;
+
+    struct Recording(Commands);
+
+    impl SyncSource for Recording {
+        fn name(&self) -> &'static str {
+            "recording"
+        }
+
+        fn run(
+            self: Box<Self>,
+            _events: mpsc::UnboundedSender<SyncEvent>,
+            commands: mpsc::UnboundedReceiver<ClientCommand>,
+        ) -> BoxFuture<'static, anyhow::Result<()>> {
+            *self.0.lock().expect("commands slot") = Some(commands);
+            Box::pin(std::future::pending())
+        }
+    }
+
+    fn channel((id, name, room): (&str, &str, &str)) -> ServerChannel {
+        ServerChannel {
+            id: id.into(),
+            server_id: HQ.into(),
+            name: name.into(),
+            room_id: Some(room.into()),
+            ..ServerChannel::default()
+        }
+    }
+
+    /// Server "Arbos HQ" with three channels, and a DM with Sam. The window is not focused,
+    /// so every arrival is news.
+    fn mount(cx: &mut TestAppContext) -> (tokio::runtime::Runtime, Entity<AppState>) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio");
+        let handle = rt.handle().clone();
+        cx.update(|cx| gpui_tokio::init_from_handle(cx, handle));
+        let commands: Commands = Arc::new(Mutex::new(None));
+        let state = cx.new(|cx| AppState::new(Box::new(Recording(commands)), cx));
+        cx.run_until_parked();
+        for _ in 0..3 {
+            rt.block_on(tokio::task::yield_now());
+        }
+        state.update(cx, |s, _cx| {
+            s.account = Some(AccountView {
+                id: "gh_1".into(),
+                login: "scout".into(),
+                name: "Scout".into(),
+                avatar_url: String::new(),
+                device_name: "test".into(),
+                balance_usd: 0.0,
+                spent_today_usd: 0.0,
+                daily_cap_usd: None,
+            });
+            s.servers = vec![ServerInfo {
+                id: HQ.into(),
+                name: "Arbos HQ".into(),
+                channels: vec![channel(GENERAL), channel(DESIGN), channel(RANDOM)],
+                ..ServerInfo::default()
+            }];
+            s.projects = vec![Project {
+                id: DM.into(),
+                name: "Sam".into(),
+                kind: SpaceKind::Dm,
+                people: vec![Person {
+                    id: "gh_2".into(),
+                    handle: "sam".into(),
+                    ..Person::default()
+                }],
+                ..Project::default()
+            }];
+            s.chats.insert(
+                DM.into(),
+                vec![Chat {
+                    id: DM.into(),
+                    project_id: DM.into(),
+                    title: "sam".into(),
+                    is_pinned: true,
+                    is_system: false,
+                    unread: false,
+                    unread_count: 0,
+                    last_message_at: 1_000,
+                    archived_at: None,
+                    kind: ChatKind::Chat,
+                    participants: Vec::new(),
+                }],
+            );
+            s.window_active = false;
+        });
+        let _ = notify::record::take();
+        (rt, state)
+    }
+
+    fn from_sam() -> Sender {
+        Sender {
+            kind: "user".into(),
+            id: "gh_2".into(),
+            name: "Sam".into(),
+            handle: "sam".into(),
+            ..Sender::default()
+        }
+    }
+
+    fn channel_message((id, name, room): (&str, &str, &str), text: &str) -> SyncEvent {
+        SyncEvent::ChannelMessage {
+            server_id: HQ.into(),
+            server_name: "Arbos HQ".into(),
+            channel_id: id.into(),
+            channel_name: name.into(),
+            room_id: room.into(),
+            sender: from_sam(),
+            text: Some(text.into()),
+        }
+    }
+
+    fn dm_message(n: usize, text: &str) -> SyncEvent {
+        SyncEvent::MessageUpsert {
+            chat_id: DM.into(),
+            message: Box::new(
+                serde_json::from_value(serde_json::json!({
+                    "id": format!("m{n}"), "chatId": DM, "role": "user", "sender": "user:gh_2",
+                    "senderHandle": "sam", "senderName": "Sam", "status": "done",
+                    "createdAt": 1_000 + n as u64, "completedAt": 1_000 + n as u64,
+                    "parts": [{ "id": format!("m{n}-t"), "kind": "text", "text": text }],
+                }))
+                .expect("message"),
+            ),
+        }
+    }
+
+    /// Flush the batch the way the notification tick does, a window later.
+    fn flush(s: &mut AppState) {
+        s.notifier
+            .tick(now_ms() + notify::WINDOW_MS, |_| Gate::default());
+    }
+
+    #[gpui::test]
+    fn a_server_banner_comes_down_when_any_channel_it_names_is_opened(cx: &mut TestAppContext) {
+        let (_rt, state) = mount(cx);
+        state.update(cx, |s, cx| {
+            s.apply(channel_message(GENERAL, "gate is green"), cx);
+            s.apply(channel_message(DESIGN, "new mock up"), cx);
+            s.apply(channel_message(RANDOM, "coffee?"), cx);
+            flush(s);
+        });
+
+        let posted = notify::record::take().delivered;
+        assert_eq!(posted.len(), 2, "#general on its own, then the batch");
+        let batch = &posted[1];
+        assert_eq!(batch.title, "2 updates in Arbos HQ");
+        assert_eq!(batch.body, "@sam: coffee?", "the last line folded in");
+        assert_eq!(batch.chats, [DESIGN.2, RANDOM.2]);
+        let id = notify::request_id(batch, 1_700_000_000_000);
+
+        // Opening #design is the reported case: the banner's body names #random, not #design.
+        state.update(cx, |s, cx| {
+            s.select_channel(HQ.into(), DESIGN.0.into(), cx);
+        });
+        assert!(
+            notify::record::take().withdrawn.contains(&DESIGN.2.into()),
+            "opening the channel reads it"
+        );
+        assert_eq!(
+            notify::withdrawn_ids(DESIGN.2, [id.as_str()]),
+            vec![id.clone()],
+            "the server's coalesced banner stayed up"
+        );
+        // #general's own banner is a separate request; the batch does not speak for it.
+        assert!(notify::withdrawn_ids(GENERAL.2, [id.as_str()]).is_empty());
+    }
+
+    #[gpui::test]
+    fn a_dm_banner_names_the_one_chat_the_dm_opens(cx: &mut TestAppContext) {
+        let (_rt, state) = mount(cx);
+        state.update(cx, |s, cx| {
+            for (n, text) in ["hey", "you there", "?"].iter().enumerate() {
+                s.apply(dm_message(n, text), cx);
+            }
+            flush(s);
+        });
+
+        let posted = notify::record::take().delivered;
+        assert_eq!(posted.len(), 2);
+        let batch = &posted[1];
+        assert_eq!(batch.title, "2 updates in Sam");
+        assert_eq!(
+            batch.chats,
+            [DM],
+            "a people space is one chat, so its batch can name only that chat"
+        );
+        let id = notify::request_id(batch, 7);
+        assert_eq!(
+            id,
+            format!("chat:{DM}:7"),
+            "the shape #2411 already cleared"
+        );
+
+        state.update(cx, |s, cx| {
+            s.select_project(DM.into(), cx);
+        });
+        let _ = notify::record::take();
+        state.update(cx, |s, cx| {
+            s.select_tab(DM.into(), cx);
+        });
+        assert!(notify::record::take().withdrawn.contains(&DM.into()));
+        assert_eq!(notify::withdrawn_ids(DM, [id.as_str()]), vec![id]);
     }
 }

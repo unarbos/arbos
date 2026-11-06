@@ -276,6 +276,26 @@ fn warnings_after(since: i64, project_id: Option<&str>) -> Vec<Event> {
 
 // ---- audit tail -------------------------------------------------------------------------------
 
+/// The last `bytes` of a file as text, dropping the first (almost surely partial) line when the
+/// read started inside one. Used for a log tail an event carries with it.
+pub(crate) fn tail_text(path: &std::path::Path, bytes: u64) -> std::io::Result<String> {
+    let mut f = std::fs::File::open(path)?;
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    let start = len.saturating_sub(bytes);
+    f.seek(SeekFrom::Start(start))?;
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf)?;
+    let text = String::from_utf8_lossy(&buf).into_owned();
+    match start > 0 {
+        true => Ok(text
+            .split_once('\n')
+            .map(|(_, r)| r)
+            .unwrap_or("")
+            .to_owned()),
+        false => Ok(text),
+    }
+}
+
 /// The last `AUDIT_TAIL_BYTES` of `audit.jsonl` as parsed lines with `ts > since`.
 fn audit_after(path: &std::path::Path, since: i64) -> Vec<Event> {
     let Ok(mut f) = std::fs::File::open(path) else {
@@ -494,6 +514,19 @@ pub async fn turn_json(agent: &Agent) -> Value {
         "running": agent.any_turn_running(),
         "sends_waiting": agent.sends_waiting(),
         "pi_ready": agent.pi_ready.load(std::sync::atomic::Ordering::SeqCst),
+        // Bug Y: `pi_ready: false` was the whole of what this said for three hours, and in a
+        // crash loop it flickers true between starts, so on its own it reads as a healthy box
+        // caught between turns. These say which it is: how long there has been no ready child,
+        // how many have been lost since one last worked, whether the box has reported itself
+        // degraded, and when the supervisor last went round — a supervisor that has stopped is
+        // a silence nothing else here reports.
+        "pi_parked": agent.pi_parked.load(std::sync::atomic::Ordering::SeqCst),
+        "pi_degraded": agent.pi_degraded.load(std::sync::atomic::Ordering::SeqCst),
+        "pi_deaths": agent.pi_deaths.load(std::sync::atomic::Ordering::SeqCst),
+        "pi_ready_for_ms": agent.pi_ready_for_ms(),
+        "pi_unready_for_ms": agent.pi_unready_for_ms(),
+        "pi_supervisor_tick_ms": agent.pi_supervisor_tick_ms.load(std::sync::atomic::Ordering::SeqCst),
+        "sends_owed": agent.pi_owed_sends.lock().await.len(),
         "current": t.as_ref().map(|t| json!({
             "chat_id": t.chat_id, "user_message_id": t.user_msg_id, "assistant_message_id": t.assistant_msg_id,
             "elapsed_ms": t.started.elapsed().as_millis() as u64,
@@ -616,7 +649,28 @@ pub async fn box_state(sup: &Supervisor) -> Value {
         "resources": resources,
         "held": sup.held.read().await.iter().cloned().collect::<Vec<_>>(),
         "warnings_in_ring": warnings,
+        "rooms": rooms_json(sup).await,
         "workspaces": workspaces,
+    })
+}
+
+/// The box's whole room budget in one place, because no per-workspace `links` block can show it:
+/// the ceiling bounds the sum across workspaces, and the sum is what a box over its CPU quota is
+/// over by.
+///
+/// `exempt` is here to settle a question that has only ever been inferred. `keep_open` rooms —
+/// the project doc of each workspace and every `people/` room — are skipped by the idle close and
+/// by both caps, so they are the part of a box's socket count that no bound can reclaim. How
+/// large that part is on a loaded box decides how much the ceiling is worth, and until now it
+/// could only be guessed at from the workspace count.
+async fn rooms_json(sup: &Supervisor) -> Value {
+    let (open, exempt) = sup.room_counts().await;
+    json!({
+        "open": open,
+        "exempt": exempt,
+        "ceiling": crate::sync::max_box_rooms(),
+        "per_workspace_cap": crate::sync::max_open_rooms(),
+        "cores": crate::resources::box_cores(),
     })
 }
 

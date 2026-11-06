@@ -1,7 +1,8 @@
 //! The rollout view's document for one job (`GET /w/{project}/jobs/{job_id}?after=<seq>`, served
 //! to the relay, which passes it through as `GET /projects/{id}/jobs/{jobId}`): the brief, the
 //! job's own exchange — prompt, text, tool steps with plain-words labels and durations, steers,
-//! the result — its state and step, built from the `jobs` row and the worker's T3 thread.
+//! the cards it waits on, the result — its state and step, built from the `jobs` row and the
+//! worker's T3 thread.
 //!
 //! Why the box and not a relay mirror: the transcript already lives here (T3 rows of the job's
 //! subagent id, written as the worker runs); the relay holds no copy of any box's T3 and would
@@ -75,6 +76,9 @@ pub fn entries_for_thread(
             // the brief as sent to the worker; a restart after a box reboot sends it again
             "user" => Some(json!({ "kind": "prompt", "text": clip(&row.text) })),
             "steer" => Some(json!({ "kind": "steer", "text": clip(&row.text) })),
+            // A card of this job is waiting, or expired unanswered: the card itself is in the
+            // owner's main chat, so this is where the job's own view says it is stopped.
+            "approval" => Some(json!({ "kind": "approval", "text": clip(&row.text) })),
             "tool_call" => {
                 tool_calls += 1;
                 Some(tool_entry(row, source.as_ref(), &rows[i + 1..]))

@@ -11,12 +11,14 @@
 //! `GET /outside-agents/{id}`, `POST /outside-agents/{id}/rotate`, `DELETE /outside-agents/{id}`.
 //! Agent side (bearer `arbk_…`): `GET /asp/me`, `GET /asp/inbox?since=&wait=`, `WS /asp/socket`,
 //! `POST /asp/events` (`message.post` · `message.start` · `message.delta` · `message.end` ·
-//! `typing` · `status` · `presence.heartbeat`).
+//! `typing` · `status` · `presence.heartbeat` · `approval.request`),
+//! `GET /asp/approvals/{id}`.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 
+use arbos_core::approval::{ApprovalRequest, ApprovalState, Risk, APPROVAL_TTL_MS};
 use arbos_core::auth::hash;
 use arbos_core::doc::{ChatDoc, CommandStatus, MessageStatus};
 use arbos_core::ids::{now_ms, ulid};
@@ -493,25 +495,41 @@ fn handle_of(p: &Project) -> String {
     people::agent_slug(&p.name)
 }
 
+/// Does this message wake the agent by naming it? An explicit `@handle` in the prose does, and
+/// so does a declared `agent:<id>` the writer resolved — a chip with no handle in the sentence.
+///
+/// A collective (`@here`, `@agents`) does **not**, and that is a deliberate carve-out rather
+/// than an oversight. `@here` names every agent in a chat (Jacob, 2026-10-24) and the event now
+/// carries that expansion, as the row always has, so the array alone would wake every agent in
+/// the room. For an outside agent the `wake` flag is the only signal it gets and it reads as
+/// "answer this" rather than "you have a turn", so a single `@here` in a room with three agents
+/// would produce three answers. Waking them is the right behaviour only once a turn and a
+/// verdict are separate fields, which is an open protocol question; until it is answered the
+/// collective names the agent in the event and leaves the wake where it was. An agent that
+/// wants to act on one can read `mentions` itself.
 fn mentions_agent(text: &str, mentions: &[String], project: &Project) -> bool {
-    let me = format!("agent:{}", project.id);
-    if mentions.iter().any(|m| m == &me) {
-        return true;
-    }
-    let handle = handle_of(project);
-    if handle.is_empty() {
-        return false;
-    }
-    let needle = format!("@{handle}");
     let lower = text.to_ascii_lowercase();
-    lower
-        .match_indices(&needle.to_ascii_lowercase())
-        .any(|(i, _)| {
+    let handle = handle_of(project);
+    let tagged = !handle.is_empty() && {
+        let needle = format!("@{handle}").to_ascii_lowercase();
+        lower.match_indices(&needle).any(|(i, _)| {
             lower[i + needle.len()..]
                 .chars()
                 .next()
                 .is_none_or(|c| !(c.is_alphanumeric() || c == '_' || c == '-'))
         })
+    };
+    if tagged {
+        return true;
+    }
+    // A collective in the prose is why this agent may be in `mentions` at all, and it is not a
+    // reason to wake; a declared id without one still is.
+    if people::names_a_collective(&lower) {
+        return false;
+    }
+    mentions
+        .iter()
+        .any(|m| m == &format!("agent:{}", project.id))
 }
 
 /// How long an announce waits for its own row to reach the relay's doc. The apps send
@@ -544,6 +562,17 @@ pub fn on_announce(
     );
 }
 
+/// Why an announced message would wake one agent. `WhenMentioned` is answered from the message
+/// body, so it is answered in [`deliver_announced`] once the stored row is in rather than at
+/// announce time: the announce body is only the sending client's push preview (#2413).
+#[derive(Clone, Copy)]
+enum WakeRule {
+    /// Its own chat, or a DM: every message in it is for the agent.
+    Always,
+    /// A group: only when the message tags the agent.
+    WhenMentioned,
+}
+
 /// The event of one announced message, waiting for its row.
 struct Announced {
     chat: ChatRef,
@@ -552,7 +581,7 @@ struct Announced {
     text: String,
     reply_to: Option<String>,
     mentions: Vec<String>,
-    targets: Vec<(Project, bool, Value)>,
+    targets: Vec<(Project, WakeRule, Value)>,
 }
 
 /// [`on_announce`] that waits up to `wait` for the row when the relay's doc does not hold it
@@ -570,7 +599,7 @@ pub(crate) fn on_announce_waiting(
     mentions: &[String],
     wait: std::time::Duration,
 ) {
-    let targets: Vec<(Project, bool, Value)> = match &chat.project_id {
+    let targets: Vec<(Project, WakeRule, Value)> = match &chat.project_id {
         Some(pid) => {
             if !is_outside(state, pid) {
                 return;
@@ -587,7 +616,7 @@ pub(crate) fn on_announce_waiting(
                 .unwrap_or_default();
             vec![(
                 p,
-                true,
+                WakeRule::Always,
                 json!({ "id": chat.chat_id, "kind": "agent", "project_id": pid, "title": title }),
             )]
         }
@@ -603,10 +632,14 @@ pub(crate) fn on_announce_waiting(
                 .filter(|pid| is_outside(state, pid))
                 .filter_map(|pid| state.db.project(&pid).ok().flatten())
                 .map(|p| {
-                    let wake = kind == "dm" || mentions_agent(text, mentions, &p);
+                    let rule = if kind == "dm" {
+                        WakeRule::Always
+                    } else {
+                        WakeRule::WhenMentioned
+                    };
                     (
                         p,
-                        wake,
+                        rule,
                         json!({ "id": chat.chat_id, "kind": kind, "project_id": Value::Null, "title": title }),
                     )
                 })
@@ -676,15 +709,20 @@ fn load_announced_doc(state: &AppState, chat: &ChatRef) -> Option<ChatDoc> {
         .flatten()
 }
 
-/// One `message.received` per target. `attachments` is the row's own list when `doc` holds
-/// the row; otherwise the field is left out and `attachments_unknown` is set.
+/// One `message.received` per target. `text`, `attachments` and `wake` all come from the row
+/// itself when `doc` holds it; otherwise `attachments_unknown` is set and both the body and the
+/// wake decision fall back to the announce's own preview.
 fn deliver_announced(state: &AppState, ev: &Announced, doc: Option<&ChatDoc>) {
     let chat = &ev.chat;
     let sender = &ev.sender;
     let message_id = ev.message_id.as_str();
-    let attachments = doc
-        .and_then(|d| d.message(message_id))
-        .map(|row| attachments_of(&row, chat));
+    let row = doc.and_then(|d| d.message(message_id));
+    let attachments = row.as_ref().map(|row| attachments_of(row, chat));
+    // The announce body is a push preview: the sending client cuts it to a fixed length
+    // (iPhone 140 chars, Mac 600) for the alert, so it is not the message. The row is.
+    let text = row
+        .as_ref()
+        .map_or_else(|| ev.text.clone(), |row| row.text());
     if attachments.is_none() {
         tracing::warn!(
             chat = %chat.chat_id,
@@ -693,7 +731,7 @@ fn deliver_announced(state: &AppState, ev: &Announced, doc: Option<&ChatDoc>) {
         );
     }
     let reply_to = reply_json(state, doc, chat, ev.reply_to.as_deref());
-    for (p, wake, chat_json) in &ev.targets {
+    for (p, rule, chat_json) in &ev.targets {
         // Its own message, announced by the relay on its behalf: not news to it.
         if sender.kind == "agent" && sender.id == p.id {
             continue;
@@ -707,9 +745,35 @@ fn deliver_announced(state: &AppState, ev: &Announced, doc: Option<&ChatDoc>) {
         {
             continue;
         }
+        // Asked here rather than at announce time so the question is put to `text` above — the
+        // stored row when it arrived. A tag typed past the client's preview cut is in the row
+        // and not in the preview, and deciding from the preview dropped the message entirely:
+        // the agent was never woken and nobody answered the tester (#2413).
+        let wake = match rule {
+            WakeRule::Always => true,
+            WakeRule::WhenMentioned => mentions_agent(&text, &ev.mentions, p),
+        };
+        // `body` says which text the decision was put to: the stored row, or the announce
+        // preview because the row was not in the doc. Without it a wake has to be inferred
+        // from the delivered payload, which is the same field either way.
+        tracing::info!(
+            chat = %chat.chat_id,
+            agent = %p.id,
+            handle = %handle_of(p),
+            message = %message_id,
+            wake,
+            rule = match rule {
+                WakeRule::Always => "always",
+                WakeRule::WhenMentioned => "when_mentioned",
+            },
+            body = if row.is_some() { "row" } else { "preview" },
+            body_chars = text.chars().count(),
+            announce_chars = ev.text.chars().count(),
+            "outside agent wake decided"
+        );
         let mut message = json!({
             "id": message_id,
-            "text": ev.text,
+            "text": text,
             "from": {
                 "kind": sender.kind,
                 "id": sender.id,
@@ -1700,6 +1764,117 @@ fn settle_send(doc: &ChatDoc, reply_to: Option<&str>, status: CommandStatus) {
     }
 }
 
+// ---- approval cards (scope `approval.request`) ----------------------------------------------
+//
+// An outside agent's tool call is a command on the owner's own computer, so it gets the same
+// card every other risky action gets (design §10): an `approval` doc-part the Mac and the phone
+// already draw, decided with the Approve / Reject rows they already write as `approve` /
+// `reject` doc commands. Nothing new is stored: the card is a part, the decision is a command,
+// and `devices` already says which person a command came from.
+//
+// Two properties this code exists to hold, both tested:
+//
+// 1. **The card goes to the owner, never to the room the request came from.** A card raised in
+//    a people group would be visible — and tappable — to every member of that group, and after
+//    `group_join` that is anyone holding an invite link any member could mint. The requesting
+//    chat is recorded in the card's payload as context and decides nothing.
+// 2. **Only the owner's decision counts.** A command this relay cannot attribute to the
+//    owner's own device never approves anything. A device it cannot resolve at all leaves the
+//    card pending rather than deciding it either way.
+
+/// Shortest and longest an agent may ask a card to stand for. The bridge's own deadline and the
+/// card's `expiresAt` are the same instant on purpose: a card that outlived the turn it was
+/// raised for would invite the owner to approve a command nobody is waiting for any more.
+const APPROVAL_WINDOW_MIN_MS: i64 = 10_000;
+
+/// The chat an approval card goes to: the owner's own chat with this agent (the pinned one when
+/// there is one), never the chat the request came from. `None` means there is nowhere to ask,
+/// and the caller must refuse — an unaskable request is a denied request.
+fn owner_card_chat(state: &AppState, project_id: &str) -> Option<Chat> {
+    let chats = state.db.list_chats(project_id).ok()?;
+    chats
+        .iter()
+        .find(|c| c.is_pinned)
+        .or_else(|| chats.first())
+        .cloned()
+}
+
+/// Who tapped Approve / Reject on a card, by the device the command was issued from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Decider {
+    /// The agent's owner: their decision is the one that counts.
+    Owner,
+    /// A person who is not the owner. Their tap is refused and recorded.
+    NotOwner,
+    /// The device could not be resolved — an unknown device, or the lookup itself failed. The
+    /// card stays pending: an unattributable tap is never read as the owner's.
+    Unattributed,
+}
+
+/// Resolve one command's issuing device to [`Decider`]. A failed read is `Unattributed`, never
+/// `NotOwner` and never `Owner`: this relay has mistaken a swallowed `device_user` error for an
+/// answer before (see `auth::tests`), and here the answer would be "approved".
+fn decider_of(state: &AppState, device_id: &str, owner_user_id: &str) -> Decider {
+    match state.db.device_user(device_id) {
+        Ok(Some(u)) if u == owner_user_id => Decider::Owner,
+        Ok(Some(_)) => Decider::NotOwner,
+        Ok(None) => Decider::Unattributed,
+        Err(e) => {
+            tracing::warn!(device = %device_id, error = %e, "approval: device lookup failed; the card stays pending");
+            Decider::Unattributed
+        }
+    }
+}
+
+/// One Approve / Reject command aimed at `approval_id`, with the person behind it resolved.
+struct ApprovalCommand {
+    id: String,
+    approve: bool,
+    reason: Option<String>,
+    decider: Decider,
+}
+
+/// Candidate decisions for one card, oldest first, each with its decider resolved.
+fn approval_commands(
+    state: &AppState,
+    doc: &ChatDoc,
+    approval_id: &str,
+    owner_user_id: &str,
+) -> Vec<ApprovalCommand> {
+    doc.commands()
+        .into_iter()
+        .filter(|c| c.kind == "approve" || c.kind == "reject")
+        .filter(|c| c.payload["approvalId"].as_str() == Some(approval_id))
+        .filter(|c| c.status == "pending" || c.status == "taken")
+        .map(|c| ApprovalCommand {
+            approve: c.kind == "approve",
+            reason: c.payload["reason"].as_str().map(str::to_owned),
+            decider: decider_of(state, &c.issued_by, owner_user_id),
+            id: c.id,
+        })
+        .collect()
+}
+
+/// What `GET /asp/approvals/{id}` answers with, and why. `reason` is always set on a refusal:
+/// a bridge that reads only the state cannot tell a denial from a card it failed to deliver,
+/// and those two must not look alike.
+struct ApprovalVerdict {
+    state: ApprovalState,
+    reason: Option<String>,
+}
+
+impl ApprovalVerdict {
+    fn json(&self, approval_id: &str, chat_id: &str, expires_at: i64) -> Value {
+        json!({
+            "approval": approval_id,
+            "chat": chat_id,
+            "state": self.state.as_str(),
+            "reason": self.reason,
+            "expires_at": expires_at,
+        })
+    }
+}
+
 /// Why a `message.delta` / `message.end` was refused before anything was written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StreamRefused {
@@ -2024,8 +2199,245 @@ pub(crate) async fn apply_event(state: &AppState, me: &AgentPrincipal, e: &Value
             let _ = state.db.touch_outside_agent(&pid, None);
             Ok(json!({ "ok": true, "type": ty, "message": msg_id, "chat": chat_id, "on": on }))
         }
+        "approval.request" => {
+            if !me.agent.allows("approval.request") {
+                return Err((
+                    "scope",
+                    "asking the owner for approval is switched off for this agent".to_owned(),
+                ));
+            }
+            let title = field(e, "title")
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .ok_or(("bad_request", "title required".to_owned()))?
+                .chars()
+                .take(200)
+                .collect::<String>();
+            let summary = field(e, "summary").unwrap_or_default();
+            if summary.len() > TEXT_MAX {
+                return Err(("too_large", "summary over 16 KB".to_owned()));
+            }
+            // Context only. The chat the tool call came from never decides where the card goes,
+            // and a chat this agent is not in is not named on the owner's card at all.
+            let asked_in = field(e, "chat")
+                .filter(|c| chat_json_for(state, &me.project, c).is_some())
+                .map(str::to_owned);
+            let card_chat = owner_card_chat(state, &pid).ok_or((
+                "no_owner_chat",
+                "this agent has no chat with its owner to ask in".to_owned(),
+            ))?;
+            let window = e
+                .get("timeout_ms")
+                .and_then(Value::as_i64)
+                .unwrap_or(APPROVAL_TTL_MS)
+                .clamp(APPROVAL_WINDOW_MIN_MS, APPROVAL_TTL_MS);
+            let expires_at = now_ms() + window;
+            let mut payload = e.get("payload").cloned().unwrap_or_else(|| json!({}));
+            if !payload.is_object() {
+                payload = json!({ "detail": payload });
+            }
+            if let (Some(o), Some(c)) = (payload.as_object_mut(), asked_in.as_deref()) {
+                o.insert("askedIn".into(), json!(c));
+            }
+            let req = ApprovalRequest {
+                title: title.clone(),
+                summary: summary.to_owned(),
+                // An outside agent's tools run on the owner's own computer, so that is the
+                // risk class unless the agent names a narrower one.
+                risk: Risk::parse(field(e, "risk").unwrap_or("computer")),
+                payload,
+            };
+            let approval_id = ulid();
+            let msg_id = ulid();
+            let device = device_of(&pid);
+            let (m, d) = (msg_id.clone(), device.clone());
+            let a = approval_id.clone();
+            crate::notices::write_doc_as(state, Some(&pid), &card_chat.id, &device, move |doc| {
+                doc.start_assistant_message(&m, "", &d);
+                doc.add_approval_part(&m, &a, &req, expires_at)
+                    .ok_or_else(|| anyhow::anyhow!("the card could not be written"))?;
+                doc.finish_message(&m, MessageStatus::Done);
+                Ok(())
+            })
+            .await
+            .map_err(|e| ("write_failed", e.to_string()))?;
+            // The owner has to be reachable for a card to mean anything, so it is announced
+            // like any other row: pushes, badge, Matrix mirror. The title only — the summary
+            // and the payload carry the command, and a push body reaches every device in clear
+            // text (#2628).
+            if let Some(chat_json) = chat_json_for(state, &me.project, &card_chat.id) {
+                announce(
+                    state,
+                    &me.project,
+                    &chat_json,
+                    &msg_id,
+                    &format!("needs your approval: {title}"),
+                )
+                .await;
+            }
+            tracing::info!(
+                agent = %pid, chat = %card_chat.id, approval = %approval_id,
+                asked_in = asked_in.as_deref().unwrap_or("-"), window_ms = window,
+                "approval card raised for the owner"
+            );
+            Ok(json!({
+                "ok": true, "type": ty, "approval": approval_id,
+                "chat": card_chat.id, "expires_at": expires_at,
+            }))
+        }
         other => Err(("unknown_type", format!("unknown event type {other}"))),
     }
+}
+
+/// `GET /asp/approvals/{id}` (agent key) — the state of one card this agent raised.
+///
+/// The read is also the resolver, as agentd is for its own cards: it applies the owner's
+/// Approve / Reject command to the part, refuses everyone else's, and expires a card whose
+/// window has closed. It never answers `approved` for anything but the owner's own tap.
+pub async fn approval_read(
+    State(state): State<AppState>,
+    me: AgentPrincipal,
+    Path(approval_id): Path<String>,
+) -> Response {
+    let pid = me.project.id.clone();
+    if !me.agent.allows("approval.request") {
+        return api_error(
+            StatusCode::FORBIDDEN,
+            "scope",
+            "asking the owner for approval is switched off for this agent",
+        );
+    }
+    let Some(card_chat) = owner_card_chat(&state, &pid) else {
+        return api_error(
+            StatusCode::CONFLICT,
+            "no_owner_chat",
+            "this agent has no chat with its owner to ask in",
+        );
+    };
+    let doc = match crate::matrix::backfill::load_doc(&state, &card_chat.id, Some(&pid)) {
+        Ok(Some(d)) => d,
+        // No doc, or a doc that would not load: the card cannot be shown to be approved, so it
+        // is not approved. The bridge turns this into a refusal with this reason.
+        Ok(None) => {
+            return api_error(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "no such approval for this agent",
+            )
+        }
+        Err(e) => {
+            tracing::warn!(agent = %pid, approval = %approval_id, error = %e, "approval: chat doc would not load");
+            return api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "unavailable",
+                "the owner's chat could not be read",
+            );
+        }
+    };
+    let Some(part) = doc.approval(&approval_id) else {
+        return api_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "no such approval for this agent",
+        );
+    };
+    let expires_at = part["expiresAt"].as_i64().unwrap_or(0);
+    let stored = part["state"].as_str().unwrap_or("pending");
+    if stored != ApprovalState::Pending.as_str() {
+        let verdict = ApprovalVerdict {
+            state: match stored {
+                "approved" => ApprovalState::Approved,
+                "rejected" => ApprovalState::Rejected,
+                _ => ApprovalState::Expired,
+            },
+            reason: part["reason"].as_str().map(str::to_owned),
+        };
+        return Json(verdict.json(&approval_id, &card_chat.id, expires_at)).into_response();
+    }
+    // Resolve the deciders outside the doc write: the lookup is a database read, and the write
+    // closure has to be able to say exactly which command ids it is applying.
+    let cmds = approval_commands(&state, &doc, &approval_id, &me.agent.user_id);
+    let owner = cmds.iter().find(|c| c.decider == Decider::Owner);
+    let refused: Vec<String> = cmds
+        .iter()
+        .filter(|c| c.decider == Decider::NotOwner)
+        .map(|c| c.id.clone())
+        .collect();
+    let unattributed = cmds.iter().any(|c| c.decider == Decider::Unattributed);
+    let expired = owner.is_none() && expires_at > 0 && now_ms() >= expires_at;
+    let verdict = match owner {
+        Some(c) if c.approve => ApprovalVerdict {
+            state: ApprovalState::Approved,
+            reason: None,
+        },
+        Some(c) => ApprovalVerdict {
+            state: ApprovalState::Rejected,
+            reason: Some(
+                c.reason
+                    .clone()
+                    .unwrap_or_else(|| "the owner rejected it".to_owned()),
+            ),
+        },
+        None if expired => ApprovalVerdict {
+            state: ApprovalState::Expired,
+            reason: Some("the owner did not answer before the card expired".to_owned()),
+        },
+        None => ApprovalVerdict {
+            state: ApprovalState::Pending,
+            reason: if unattributed {
+                Some(
+                    "a decision from a device this relay cannot identify was not counted"
+                        .to_owned(),
+                )
+            } else if !refused.is_empty() {
+                Some("only the agent's owner can answer this card".to_owned())
+            } else {
+                None
+            },
+        },
+    };
+    if verdict.state != ApprovalState::Pending || !refused.is_empty() {
+        let settle = verdict.state;
+        let reason = verdict.reason.clone();
+        let owner_cmd = owner.map(|c| c.id.clone());
+        // Only an owner decision is attributed; an expiry was nobody's choice.
+        let decided_by = owner.map(|_| format!("user:{}", me.agent.user_id));
+        let a = approval_id.clone();
+        if let Err(e) = crate::notices::write_doc_as(
+            &state,
+            Some(&pid),
+            &card_chat.id,
+            &device_of(&pid),
+            move |doc| {
+                for id in &refused {
+                    doc.set_command_status(
+                        id,
+                        CommandStatus::Failed,
+                        Some(json!({ "error": "only the agent's owner can answer this card" })),
+                    );
+                }
+                if settle != ApprovalState::Pending {
+                    doc.set_approval_state(&a, settle, decided_by.as_deref(), reason.as_deref());
+                    if let Some(id) = &owner_cmd {
+                        doc.set_command_status(id, CommandStatus::Done, None);
+                    }
+                }
+                Ok(())
+            },
+        )
+        .await
+        {
+            // The verdict is already decided; failing to record it must not turn a refusal
+            // into an approval, so it is logged and the verdict stands as read.
+            tracing::warn!(agent = %pid, approval = %approval_id, error = %e, "approval: the card's state could not be written back");
+        }
+    }
+    tracing::info!(
+        agent = %pid, approval = %approval_id, chat = %card_chat.id,
+        state = verdict.state.as_str(), refused = cmds.iter().filter(|c| c.decider != Decider::Owner).count(),
+        "approval card read"
+    );
+    Json(verdict.json(&approval_id, &card_chat.id, expires_at)).into_response()
 }
 
 /// What agentd does after each finished message: announce it (pushes, Matrix mirror, badges).
@@ -2381,8 +2793,20 @@ pub async fn connect_page(State(state): State<AppState>, Path(id): Path<String>)
          On a nudge: GET {relay}/asp/inbox?since=<last next>  and answer the events with wake=true.\n\
          At most one nudge per 5 s per agent; keep a slow poll (every 5 min) as the fallback.\n\
          Test from the agent side: POST {relay}/asp/wake/test (same key) → {{ok,status,error}}.\n\n\
-         Claude Code / Codex on a Mac: cargo install --git https://github.com/unarbos/arbos arbos-acp\n\
-         then ARBOS_AGENT_KEY=arbk_… arbos-acp --relay {relay} --agent claude-agent-acp\n"
+         Claude Code or Codex on your own computer — one command, and it asks you before it acts:\n\
+         curl -fsSL {relay}/acp/install.sh | sh -s -- --cwd ~/your-project\n\n\
+         It finds or builds arbos-acp, asks for the key with the terminal echo off, and starts\n\
+         the bridge. Point --cwd at the project you actually want worked on. The key is never in\n\
+         the command, so it is not in your shell history or visible to ps. Add --dry-run to see\n\
+         what it would run without starting anything.\n\n\
+         Nothing to install from npm and nothing to edit in ~/.claude/settings.json: arbos-acp\n\
+         starts Claude Code itself and refuses the permission bypass at the session, so a\n\
+         settings file cannot turn the asking off. When the agent wants to run a command or edit\n\
+         a file, an approval card appears in your own chat with it, naming the command and who\n\
+         asked for it. Only your answer counts, and anything else — you are away, the card does\n\
+         not arrive, five minutes pass — refuses.\n\
+         Only you can make it act. A chat's membership can grow without you, so widening it to\n\
+         the people in a chat is something you ask for: -- --allow owner,chats\n"
     );
     (
         StatusCode::OK,
@@ -2474,6 +2898,19 @@ mod tests {
         assert!(mentions_agent("", &["agent:p1".into()], &p));
         assert!(!mentions_agent(&format!("@{handle}x no"), &[], &p));
         assert!(!mentions_agent("nothing here", &["user:u9".into()], &p));
+        // A collective names every agent in the chat and wakes none of them on its own; the
+        // agent's own handle in the same sentence still does.
+        assert!(!mentions_agent("@here standup", &["agent:p1".into()], &p));
+        assert!(!mentions_agent(
+            "@agents take this",
+            &["agent:p1".into()],
+            &p
+        ));
+        assert!(mentions_agent(
+            &format!("@here and @{handle}"),
+            &["agent:p1".into()],
+            &p
+        ));
     }
 
     /// A person writes in the group and in the agent's own chat → one `message.received` each,
@@ -2987,6 +3424,266 @@ mod tests {
         assert!(msg.get("attachments_unknown").is_none());
     }
 
+    /// The announce body is the push preview the sending client cut to a fixed length
+    /// (`RelayAPI.swift` takes 140 chars, `arbos-mac` 600). Delivering it as the message gave
+    /// outside agents a body cut mid-word with no marker: Arbonites 01M5MHDEZF… asp_event 845
+    /// ended "…to a view with the result messa" and the tester had to re-send the rest by hand.
+    #[tokio::test]
+    async fn announce_delivers_the_row_not_the_push_preview() {
+        let full = "@grok on mobile when you press search and type in keyword and tap on \
+                    result message sometimes it scrolls you to a view with the result message \
+                    in view but sometimes it takes you to an area where the result message is \
+                    not in view but nearby";
+        let preview: String = full.chars().take(140).collect();
+        assert!(full.len() > preview.len(), "the preview is the shorter one");
+
+        let (state, pid, g, other) = outside_group(7221);
+        let msg_id = ulid();
+        let (m, o, f) = (msg_id.clone(), other.clone(), full.to_owned());
+        crate::notices::write_doc(&state, None, &g, move |doc| {
+            doc.append_user_message(
+                &m,
+                &f,
+                "dev:phone",
+                &arbos_core::doc::UserMessageOpts {
+                    sender: Some(format!("user:{o}")),
+                    ..Default::default()
+                },
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let me = Sender::user(&state, &other);
+        on_announce_waiting(
+            &state,
+            &ChatRef::people(&g),
+            &me,
+            &msg_id,
+            &preview,
+            None,
+            &[],
+            std::time::Duration::from_secs(1),
+        );
+        let events = events_eventually(&state, &pid).await;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].1["message"]["text"], full);
+    }
+
+    /// #2413: the tag itself can fall past the client's preview cut. Arbonites 01M66NSXQW…
+    /// (asp_event 732) stored 142 characters ending "can you investigate the @grok"; the iPhone's
+    /// 140-character preview left "the @gr", so deciding `wake` from the preview sent the event
+    /// with `wake: false`. The agent was never woken, the attached screenshot was never opened
+    /// and nobody answered the tester. The row carries the tag, so the row is what decides.
+    #[tokio::test]
+    async fn a_mention_past_the_preview_cut_still_wakes_the_agent() {
+        let full = "On iOS often times when people send messages while im typing the chat just \
+                    goes black like in the attached image can you investigate the @grok-bot";
+        let preview: String = full.chars().take(140).collect();
+        assert!(
+            !preview.contains("@grok-bot"),
+            "the preview must not carry the tag, or the test proves nothing: {preview:?}"
+        );
+
+        let (state, pid, g, other) = outside_group(7231);
+        let msg_id = ulid();
+        let (m, o, f) = (msg_id.clone(), other.clone(), full.to_owned());
+        crate::notices::write_doc(&state, None, &g, move |doc| {
+            doc.append_user_message(
+                &m,
+                &f,
+                "dev:phone",
+                &arbos_core::doc::UserMessageOpts {
+                    sender: Some(format!("user:{o}")),
+                    ..Default::default()
+                },
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let me = Sender::user(&state, &other);
+        on_announce_waiting(
+            &state,
+            &ChatRef::people(&g),
+            &me,
+            &msg_id,
+            &preview,
+            None,
+            // The iPhone sends no `mentions`, so the text is all there is to go on.
+            &[],
+            std::time::Duration::from_secs(1),
+        );
+        let events = events_eventually(&state, &pid).await;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].1["message"]["text"], full);
+        assert_eq!(
+            events[0].1["wake"], true,
+            "the tag is in the row, so the agent wakes: {}",
+            events[0].1
+        );
+    }
+
+    /// Every app announces a message with `mentions` left out — it resolves them into the row it
+    /// writes and posts the id and the text alone — so the documented `mentions` on
+    /// `message.received` was empty for every message a person ever sent from an app, while a
+    /// refetch of the same row a second later listed them. The relay resolves them on the
+    /// announce now, from the roster it already has.
+    ///
+    /// `@here` is everyone in the chat including its agents (Jacob, 2026-10-24), so the event
+    /// names this agent — and deliberately does not wake it. `wake` is the only signal an
+    /// outside agent gets and it reads as "answer this", so one `@here` in a room with three
+    /// agents would be three answers. The array is corrected here; the wake waits for the
+    /// protocol question (a turn and a verdict as separate fields) to be answered.
+    #[tokio::test]
+    async fn an_app_announce_resolves_the_mentions_it_left_out() {
+        let (state, pid, g, other) = outside_group(7281);
+        let msg_id = ulid();
+        let me = Sender::user(&state, &other);
+        crate::notify::announce_with(
+            &state,
+            &ChatRef::people(&g),
+            &me,
+            &msg_id,
+            "@here standup in five",
+            None,
+            // What the announce carries today: nothing.
+            &[],
+        )
+        .await;
+
+        let events = events_eventually(&state, &pid).await;
+        assert_eq!(events.len(), 1);
+        let mentions = events[0].1["message"]["mentions"].clone();
+        let owner = state.db.project(&pid).unwrap().unwrap().user_id;
+        let named: Vec<&str> = mentions
+            .as_array()
+            .expect("mentions")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert_eq!(named.len(), 2, "{mentions}");
+        assert!(named.contains(&format!("user:{owner}").as_str()));
+        assert!(named.contains(&format!("agent:{pid}").as_str()));
+        assert!(
+            !named.contains(&format!("user:{other}").as_str()),
+            "the writer is not mentioned by their own @here"
+        );
+        assert_eq!(
+            events[0].1["wake"], false,
+            "a collective names the agent and leaves the wake as it is: {}",
+            events[0].1
+        );
+    }
+
+    /// The carve-out above must not swallow a real tag: `@here` alongside the agent's own handle
+    /// wakes it, as the handle alone always has.
+    #[tokio::test]
+    async fn a_tag_still_wakes_when_a_collective_names_everyone() {
+        let (state, pid, g, other) = outside_group(7282);
+        let handle = handle_of(&state.db.project(&pid).unwrap().unwrap());
+        assert!(!handle.is_empty());
+        let msg_id = ulid();
+        let me = Sender::user(&state, &other);
+        crate::notify::announce_with(
+            &state,
+            &ChatRef::people(&g),
+            &me,
+            &msg_id,
+            &format!("@here and @{handle} please take this one"),
+            None,
+            &[],
+        )
+        .await;
+
+        let events = events_eventually(&state, &pid).await;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].1["wake"], true, "{}", events[0].1);
+    }
+
+    /// The other half of #2413: a group message that tags nobody must still not wake the agent.
+    /// Deciding from the row must not turn the wake rule into "always".
+    #[tokio::test]
+    async fn a_long_group_message_that_tags_nobody_does_not_wake_the_agent() {
+        let full = "I do also see the appeal of swipe to reply but having to swipe on a specific \
+                    area that is not another persons chat to swipe out of the chat is too \
+                    arbitrary and it keeps catching me out";
+        let preview: String = full.chars().take(140).collect();
+        assert!(full.chars().count() > 140, "the body outruns the preview");
+
+        let (state, pid, g, other) = outside_group(7241);
+        let msg_id = ulid();
+        let (m, o, f) = (msg_id.clone(), other.clone(), full.to_owned());
+        crate::notices::write_doc(&state, None, &g, move |doc| {
+            doc.append_user_message(
+                &m,
+                &f,
+                "dev:phone",
+                &arbos_core::doc::UserMessageOpts {
+                    sender: Some(format!("user:{o}")),
+                    ..Default::default()
+                },
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let me = Sender::user(&state, &other);
+        on_announce_waiting(
+            &state,
+            &ChatRef::people(&g),
+            &me,
+            &msg_id,
+            &preview,
+            None,
+            &[],
+            std::time::Duration::from_secs(1),
+        );
+        let events = events_eventually(&state, &pid).await;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].1["message"]["text"], full);
+        assert_eq!(
+            events[0].1["wake"], false,
+            "nobody was tagged: {}",
+            events[0].1
+        );
+    }
+
+    /// When the row never arrives the body falls back to the preview, and so must the wake
+    /// decision — a missing row must not silently become "no". Here the preview carries the tag,
+    /// so the agent wakes even though there is no row to confirm it from.
+    #[tokio::test]
+    async fn with_no_row_the_wake_decision_falls_back_to_the_preview() {
+        let (state, pid, g, other) = outside_group(7251);
+        let me = Sender::user(&state, &other);
+        let msg_id = ulid();
+        on_announce_waiting(
+            &state,
+            &ChatRef::people(&g),
+            &me,
+            &msg_id,
+            "@grok-bot are you there?",
+            None,
+            &[],
+            std::time::Duration::ZERO,
+        );
+        let events = state.db.asp_events_after(&pid, 0, 10).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].1["message"]["attachments_unknown"], true,
+            "no row: {}",
+            events[0].1
+        );
+        assert_eq!(
+            events[0].1["wake"], true,
+            "the preview carries the tag: {}",
+            events[0].1
+        );
+    }
+
     /// #2305, divergent chat: the row is stored but depends on history the relay lost, so the
     /// rebuilt doc cannot show it. The event must not claim `attachments: []`.
     #[tokio::test]
@@ -3397,5 +4094,402 @@ mod tests {
         assert_eq!(a.status(), "away");
         a.revoked_at = Some(1);
         assert_eq!(a.status(), "revoked");
+    }
+}
+
+#[cfg(test)]
+mod approval_card_tests {
+    //! The owner's approval card for an outside agent's tool call (inbox 1460).
+    //!
+    //! The shape every test here is built on: Affinity owns the agent and added it to a group;
+    //! Mallory is another member of that group — in the live product, anyone `member_add` or an
+    //! invite link let in. Mallory can wake the agent with `@handle`, so Mallory can make it ask
+    //! for permission. What Mallory must never be able to do is *answer*.
+
+    use axum::body::to_bytes;
+    use axum::extract::{Path, State};
+    use serde_json::{json, Value};
+
+    use super::*;
+    use crate::people::tests_support::{group, person, project_of};
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    /// `{"approval.request": on}` in the shape `set_outside_scopes` takes.
+    fn scope_patch(on: bool) -> &'static serde_json::Map<String, Value> {
+        use std::sync::OnceLock;
+        static ON: OnceLock<serde_json::Map<String, Value>> = OnceLock::new();
+        static OFF: OnceLock<serde_json::Map<String, Value>> = OnceLock::new();
+        let build = |v: bool| {
+            let mut m = serde_json::Map::new();
+            m.insert("approval.request".into(), Value::Bool(v));
+            m
+        };
+        if on {
+            ON.get_or_init(|| build(true))
+        } else {
+            OFF.get_or_init(|| build(false))
+        }
+    }
+
+    struct Fixture {
+        state: AppState,
+        me: AgentPrincipal,
+        /// The agent's own chat with its owner: where a card belongs.
+        owner_chat: String,
+        /// The group the tool call was triggered from: where a card must never appear.
+        group_chat: String,
+        owner_device: String,
+        mallory_device: String,
+    }
+
+    fn fixture(seed: i64) -> Fixture {
+        let state = test_state(AuthMode::Github);
+        let (owner, owner_p) = person(&state, seed);
+        let (mallory, mallory_p) = person(&state, seed + 1);
+        let pid = project_of(&state, &owner, "Grok Bot");
+        state
+            .db
+            .insert_outside_agent(&pid, &owner, "acp", &hash(&mint_key()))
+            .unwrap();
+        let group_chat = group(&state, &[&owner, &mallory]);
+        state
+            .db
+            .add_member(
+                &group_chat,
+                &format!("agent:{pid}"),
+                "agent",
+                &owner,
+                &json!({}),
+            )
+            .unwrap();
+        let owner_chat = state.db.list_chats(&pid).unwrap()[0].id.clone();
+        let device = |p: &crate::auth::Principal| match p {
+            crate::auth::Principal::Device { id, .. } => id.clone(),
+            other => panic!("expected a device principal, got {other:?}"),
+        };
+        Fixture {
+            me: AgentPrincipal {
+                agent: state.db.outside_agent(&pid).unwrap().unwrap(),
+                project: state.db.project(&pid).unwrap().unwrap(),
+            },
+            owner_chat,
+            group_chat,
+            owner_device: device(&owner_p),
+            mallory_device: device(&mallory_p),
+            state,
+        }
+    }
+
+    impl Fixture {
+        async fn ask(&self, body: Value) -> Result<Value, (&'static str, String)> {
+            apply_event(&self.state, &self.me, &body).await
+        }
+
+        async fn read(&self, approval_id: &str) -> Value {
+            let r = approval_read(
+                State(self.state.clone()),
+                self.me.clone(),
+                Path(approval_id.to_owned()),
+            )
+            .await;
+            let body = to_bytes(r.into_body(), 1 << 20).await.unwrap();
+            serde_json::from_slice(&body).unwrap()
+        }
+
+        /// Tap Approve or Reject as one device, exactly as the Mac and the phone write it.
+        async fn tap(&self, device: &str, approve: bool, approval_id: &str) {
+            let (d, a) = (device.to_owned(), approval_id.to_owned());
+            crate::notices::write_doc(
+                &self.state,
+                Some(&self.me.project.id),
+                &self.owner_chat,
+                move |doc| {
+                    doc.append_approval_command(approve, &a, None, &d);
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap();
+        }
+
+        fn card(&self, approval_id: &str) -> Option<Value> {
+            crate::matrix::backfill::load_doc(
+                &self.state,
+                &self.owner_chat,
+                Some(&self.me.project.id),
+            )
+            .unwrap()?
+            .approval(approval_id)
+        }
+    }
+
+    /// The card is raised in the owner's own chat with the agent and **not** in the group the
+    /// tool call came from, which is the whole point: a card in the group would be tappable by
+    /// every member of it. The group is named in the payload as context only.
+    #[tokio::test]
+    async fn the_card_goes_to_the_owner_not_the_room_that_asked() {
+        let f = fixture(9301);
+        let r = f
+            .ask(json!({
+                "type": "approval.request",
+                "chat": f.group_chat,
+                "title": "Run a command",
+                "summary": "rm -rf ~/Documents",
+                "risk": "destructive",
+                "payload": { "command": "rm -rf ~/Documents" },
+            }))
+            .await
+            .expect("the request is accepted");
+        let id = r["approval"].as_str().unwrap();
+        assert_eq!(
+            r["chat"].as_str(),
+            Some(f.owner_chat.as_str()),
+            "the card is in the owner's chat: {r}"
+        );
+
+        let card = f.card(id).expect("the card is in the owner's chat");
+        assert_eq!(card["state"], "pending");
+        assert_eq!(card["risk"], "destructive");
+        assert_eq!(card["payload"]["command"], "rm -rf ~/Documents");
+        assert_eq!(
+            card["payload"]["askedIn"], f.group_chat,
+            "the asking chat is recorded as context: {card}"
+        );
+
+        // Positive control for the assertion above: the instrument can see cards in the group's
+        // doc, and there is none there.
+        let group_doc = crate::matrix::backfill::load_doc(&f.state, &f.group_chat, None).unwrap();
+        let in_group = group_doc.map(|d| d.approvals().len()).unwrap_or(0);
+        assert_eq!(in_group, 0, "no card was written into the group");
+    }
+
+    /// The owner's Approve is the one that counts, and it reads back as approved once.
+    #[tokio::test]
+    async fn the_owners_tap_decides_the_card() {
+        let f = fixture(9311);
+        let r = f
+            .ask(
+                json!({ "type": "approval.request", "chat": f.group_chat, "title": "Edit a file" }),
+            )
+            .await
+            .unwrap();
+        let id = r["approval"].as_str().unwrap().to_owned();
+
+        // Before any tap: pending, with no reason to mistake for a decision.
+        let v = f.read(&id).await;
+        assert_eq!(v["state"], "pending", "{v}");
+        assert_eq!(v["reason"], Value::Null, "{v}");
+
+        f.tap(&f.owner_device, true, &id).await;
+        let v = f.read(&id).await;
+        assert_eq!(v["state"], "approved", "{v}");
+        assert_eq!(f.card(&id).unwrap()["state"], "approved");
+    }
+
+    /// **The case the whole fix turns on.** Mallory is in the group, so Mallory can make the
+    /// agent ask — but Mallory's Approve decides nothing. The card stays pending, the refusal
+    /// says why rather than only reporting a status, and Mallory's command is marked failed so
+    /// it is not reconsidered. Then the owner rejects and that is what lands.
+    #[tokio::test]
+    async fn a_member_who_is_not_the_owner_cannot_approve() {
+        let f = fixture(9321);
+        let r = f
+            .ask(json!({ "type": "approval.request", "chat": f.group_chat, "title": "Run a command" }))
+            .await
+            .unwrap();
+        let id = r["approval"].as_str().unwrap().to_owned();
+
+        f.tap(&f.mallory_device, true, &id).await;
+        let v = f.read(&id).await;
+        assert_eq!(
+            v["state"], "pending",
+            "a non-owner's approval does not approve: {v}"
+        );
+        assert_eq!(
+            v["reason"], "only the agent's owner can answer this card",
+            "the refusal states its own reason: {v}"
+        );
+        assert_eq!(f.card(&id).unwrap()["state"], "pending");
+        let doc =
+            crate::matrix::backfill::load_doc(&f.state, &f.owner_chat, Some(&f.me.project.id))
+                .unwrap()
+                .unwrap();
+        let mallorys = doc
+            .commands()
+            .into_iter()
+            .find(|c| c.payload["approvalId"].as_str() == Some(id.as_str()))
+            .expect("Mallory's command is in the doc");
+        assert_eq!(
+            mallorys.status, "failed",
+            "it is recorded as refused, not left to be retried: {mallorys:?}"
+        );
+
+        // Positive control: the same tap from the owner's device *does* decide, so the test
+        // above failed for the identity of the tapper and not because taps never register.
+        f.tap(&f.owner_device, false, &id).await;
+        let v = f.read(&id).await;
+        assert_eq!(v["state"], "rejected", "{v}");
+        assert_eq!(v["reason"], "the owner rejected it", "{v}");
+    }
+
+    /// A tap from a device this relay cannot place is not the owner's. The card stays pending
+    /// and says so; it never reads as approved.
+    #[tokio::test]
+    async fn a_tap_from_an_unknown_device_is_not_the_owners() {
+        let f = fixture(9331);
+        let r = f
+            .ask(json!({ "type": "approval.request", "chat": f.group_chat, "title": "Run a command" }))
+            .await
+            .unwrap();
+        let id = r["approval"].as_str().unwrap().to_owned();
+
+        f.tap("dev:not-a-registered-device", true, &id).await;
+        let v = f.read(&id).await;
+        assert_eq!(v["state"], "pending", "{v}");
+        assert_eq!(
+            v["reason"], "a decision from a device this relay cannot identify was not counted",
+            "{v}"
+        );
+    }
+
+    /// An agent cannot ask for a window shorter than the floor: a one-millisecond card would
+    /// expire before the owner's phone had finished buzzing.
+    #[tokio::test]
+    async fn a_window_shorter_than_the_floor_is_clamped_up() {
+        let f = fixture(9341);
+        let r = f
+            .ask(json!({
+                "type": "approval.request", "chat": f.group_chat,
+                "title": "Run a command", "timeout_ms": 1,
+            }))
+            .await
+            .unwrap();
+        assert!(
+            r["expires_at"].as_i64().unwrap() - now_ms() >= APPROVAL_WINDOW_MIN_MS - 1_000,
+            "a one-millisecond window is clamped up, not honoured: {r}"
+        );
+        assert_eq!(
+            f.read(r["approval"].as_str().unwrap()).await["state"],
+            "pending"
+        );
+    }
+
+    /// Nobody answered and the window closed: the card expires with a reason, so a bridge
+    /// reading it refuses the tool rather than waiting for ever.
+    ///
+    /// The card is written here with a past `expiresAt` through the same `add_approval_part`
+    /// the relay uses, because `now_ms` is the wall clock and no test clock moves it.
+    #[tokio::test]
+    async fn an_unanswered_card_expires_with_a_reason() {
+        let f = fixture(9342);
+        let id = ulid();
+        let (a, msg) = (id.clone(), ulid());
+        let stale = now_ms() - 1_000;
+        crate::notices::write_doc(
+            &f.state,
+            Some(&f.me.project.id),
+            &f.owner_chat,
+            move |doc| {
+                doc.start_assistant_message(&msg, "", "dev:test");
+                doc.add_approval_part(
+                    &msg,
+                    &a,
+                    &ApprovalRequest {
+                        title: "Run a command".into(),
+                        summary: String::new(),
+                        risk: Risk::Computer,
+                        payload: json!({}),
+                    },
+                    stale,
+                )
+                .expect("the card is written");
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+
+        let v = f.read(&id).await;
+        assert_eq!(v["state"], "expired", "{v}");
+        assert_eq!(
+            v["reason"], "the owner did not answer before the card expired",
+            "{v}"
+        );
+        assert_eq!(f.card(&id).unwrap()["state"], "expired");
+
+        // Positive control: the only difference is the instant, so the test above expired for
+        // the window closing and not because every card reads as expired.
+        let fresh = ulid();
+        let (b, msg2) = (fresh.clone(), ulid());
+        let ahead = now_ms() + 60_000;
+        crate::notices::write_doc(
+            &f.state,
+            Some(&f.me.project.id),
+            &f.owner_chat,
+            move |doc| {
+                doc.start_assistant_message(&msg2, "", "dev:test");
+                doc.add_approval_part(
+                    &msg2,
+                    &b,
+                    &ApprovalRequest {
+                        title: "Run a command".into(),
+                        summary: String::new(),
+                        risk: Risk::Computer,
+                        payload: json!({}),
+                    },
+                    ahead,
+                )
+                .expect("the card is written");
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(f.read(&fresh).await["state"], "pending");
+    }
+
+    /// The owner's switch still governs: with `approval.request` off, the agent cannot raise a
+    /// card at all — and the bridge's rule is that a card it cannot raise is a refused tool.
+    #[tokio::test]
+    async fn the_owner_can_switch_the_card_off() {
+        let mut f = fixture(9351);
+        f.state
+            .db
+            .set_outside_scopes(&f.me.project.id, scope_patch(false))
+            .unwrap();
+        f.me.agent = f.state.db.outside_agent(&f.me.project.id).unwrap().unwrap();
+        let e = f
+            .ask(json!({ "type": "approval.request", "chat": f.group_chat, "title": "x" }))
+            .await
+            .expect_err("the scope is off");
+        assert_eq!(e.0, "scope", "{e:?}");
+
+        // Positive control: the same call with the scope back on is accepted, so the refusal
+        // above came from the switch and not from a malformed request.
+        f.state
+            .db
+            .set_outside_scopes(&f.me.project.id, scope_patch(true))
+            .unwrap();
+        f.me.agent = f.state.db.outside_agent(&f.me.project.id).unwrap().unwrap();
+        f.ask(json!({ "type": "approval.request", "chat": f.group_chat, "title": "x" }))
+            .await
+            .expect("accepted with the scope on");
+    }
+
+    /// A chat the agent is not in is not named on the owner's card: the `askedIn` field is a
+    /// relay-checked chat id, not whatever the agent put in the event.
+    #[tokio::test]
+    async fn a_foreign_chat_is_not_named_on_the_card() {
+        let f = fixture(9361);
+        let r = f
+            .ask(json!({
+                "type": "approval.request", "chat": "a-chat-this-agent-is-not-in",
+                "title": "Run a command",
+            }))
+            .await
+            .unwrap();
+        let card = f.card(r["approval"].as_str().unwrap()).unwrap();
+        assert_eq!(card["payload"]["askedIn"], Value::Null, "{card}");
     }
 }

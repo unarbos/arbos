@@ -16,7 +16,7 @@ use axum::Json;
 use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::json;
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 
 use arbos_core::api::{LocalDeviceDto, LocalDevicesDto};
 use arbos_core::ids::ulid;
@@ -36,6 +36,13 @@ const RESULT_MAX_BYTES: usize = 4 * 1024 * 1024;
 pub struct LocalConn {
     pub tx: mpsc::Sender<String>,
     pending: Mutex<HashMap<String, oneshot::Sender<LocalResult>>>,
+    /// Fired by [`disconnect`] to stop [`run`]. Taking the connection out of `local_conns` does
+    /// not end it: `run` holds its own `Arc<LocalConn>`, so the channel stays open and the loop
+    /// keeps reading. Until the re-review's probe B that meant a signed-out machine could still
+    /// rewrite its `local_devices` row — hostname, os, home and `last_seen` — and the row stayed
+    /// `connected = true` for ever, because the teardown only clears it while this connection is
+    /// still the registered one.
+    closed: Notify,
 }
 
 pub type LocalConns = Arc<Mutex<HashMap<String, Arc<LocalConn>>>>;
@@ -44,6 +51,35 @@ type ApiResult = Result<Response, (StatusCode, String)>;
 
 fn internal(e: impl std::fmt::Display) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+}
+
+/// Whether this principal may act on `device_id`.
+///
+/// `local_devices` has no owner column: a helper's row is keyed by the relay `devices.id` its
+/// token was minted for, so the owner is that device row's user. Nothing in this module checked
+/// it, and a device id is not a secret — `GET /local/devices` listed every helper on the relay to
+/// any caller, and the `reachable` block of a call start hands out each callee's device ids — so
+/// one signed-in user could sign another user's device out, flip their helper's "read without
+/// asking" switch, and have a box run ops against their computer.
+///
+/// A device that is not the caller's answers like a device that does not exist, so these handlers
+/// cannot be used to test whether an id is real.
+fn owns_device(
+    state: &AppState,
+    principal: &Principal,
+    device_id: &str,
+) -> Result<bool, (StatusCode, String)> {
+    let Some(caller) = principal.user_id() else {
+        // The admin token acts for no user and may reach any device, as it does on
+        // `DELETE /auth/devices/{id}`.
+        return Ok(matches!(principal, Principal::Admin));
+    };
+    let owner = state.db.device_user(device_id).map_err(internal)?;
+    Ok(owner.as_deref() == Some(caller))
+}
+
+fn no_such_device() -> (StatusCode, String) {
+    (StatusCode::NOT_FOUND, "no such local device".to_owned())
 }
 
 /// `WS /local/{deviceId}` — the helper's own device token only.
@@ -72,6 +108,7 @@ async fn run(socket: WebSocket, state: AppState, device_id: String) {
     let conn = Arc::new(LocalConn {
         tx,
         pending: Mutex::new(HashMap::new()),
+        closed: Notify::new(),
     });
     // A reconnect replaces the previous socket for this device; its pending ops fail below.
     let previous = state
@@ -130,6 +167,10 @@ async fn run(socket: WebSocket, state: AppState, device_id: String) {
                     break;
                 }
             }
+            _ = conn.closed.notified() => {
+                tracing::info!(%device_id, "local helper cut off: its device was signed out");
+                break;
+            }
         }
     }
     let mut conns = state.local_conns.lock().await;
@@ -152,6 +193,24 @@ async fn fail_pending(conn: &LocalConn, why: &str) {
     }
 }
 
+/// Unregister a helper socket, fail whatever it was asked to do, and end the connection.
+/// Revoking the device row does not reach the socket: the helper registered once and stays in
+/// `local_conns` until it disconnects, so without this a signed-out machine still answers ops.
+///
+/// All three steps are needed. Unregistering alone leaves `run` reading from a socket the
+/// account has signed out, which keeps writing the machine's `local_devices` row and leaves it
+/// showing as online for ever, because the teardown in `run` only clears `connected` while this
+/// connection is still the registered one — which unregistering has just made false. So the
+/// `connected` flag is cleared here instead, and `closed` stops the loop.
+pub(crate) async fn disconnect(state: &AppState, device_id: &str, why: &str) {
+    let Some(conn) = state.local_conns.lock().await.remove(device_id) else {
+        return;
+    };
+    fail_pending(&conn, why).await;
+    let _ = state.db.local_device_seen(device_id, false);
+    conn.closed.notify_one();
+}
+
 /// `POST /projects/{id}/local/{device}/exec` (box token): body = one `LocalOp`.
 pub async fn exec(
     State(state): State<AppState>,
@@ -168,9 +227,21 @@ pub async fn exec(
     if state.db.project(&project_id).map_err(internal)?.is_none() {
         return Err((StatusCode::NOT_FOUND, "no such project".into()));
     }
+    // The project is the caller's (`allows` above); the computer has to be the caller's too.
+    // Without this a box could run ops against any helper whose device id it had seen.
+    if !owns_device(&state, &principal, &device_id)? {
+        return Err(no_such_device());
+    }
+    // And it has to still be signed in. `disconnect` takes a revoked device out of
+    // `local_conns`, but that is a teardown racing a request rather than a check: the
+    // re-review's probe C ran file operations against a signed-out computer for the whole of a
+    // hung Matrix logout. The map is a cache of who is reachable; `devices` is the authority.
+    if !state.device_is_live(&device_id) {
+        return Err(no_such_device());
+    }
     let known = state.db.local_device(&device_id).map_err(internal)?;
     if known.is_none() {
-        return Err((StatusCode::NOT_FOUND, "no such local device".into()));
+        return Err(no_such_device());
     }
     let conn = state.local_conns.lock().await.get(&device_id).cloned();
     let Some(conn) = conn else {
@@ -215,9 +286,15 @@ pub async fn exec(
     Ok(Json(serde_json::to_value(result).map_err(internal)?).into_response())
 }
 
-/// `GET /local/devices` — device tokens (Settings → This Mac) and box tokens (`local_devices` tool).
-pub async fn list(State(state): State<AppState>, _principal: Principal) -> ApiResult {
-    let devices = state.db.local_devices().map_err(internal)?;
+/// `GET /local/devices` — device tokens (Settings → This Mac) and box tokens (`local_devices`
+/// tool). The caller's own helpers only: this list used to be every helper on the relay, which
+/// is where another user's device ids came from.
+pub async fn list(State(state): State<AppState>, principal: Principal) -> ApiResult {
+    let devices = match principal.user_id() {
+        Some(user) => state.db.local_devices_of_user(user),
+        None => state.db.local_devices(),
+    }
+    .map_err(internal)?;
     let online = state.local_conns.lock().await;
     let items: Vec<LocalDeviceDto> = devices
         .into_iter()
@@ -258,24 +335,31 @@ pub async fn patch(
             "box tokens cannot change device settings".into(),
         ));
     }
+    if !owns_device(&state, &principal, &device_id)? {
+        return Err(no_such_device());
+    }
     if let Some(allow) = b.allow_reads {
         let ok = state
             .db
             .local_device_set_allow_reads(&device_id, allow)
             .map_err(internal)?;
         if !ok {
-            return Err((StatusCode::NOT_FOUND, "no such local device".into()));
+            return Err(no_such_device());
         }
     }
     let d = state
         .db
         .local_device(&device_id)
         .map_err(internal)?
-        .ok_or((StatusCode::NOT_FOUND, "no such local device".to_owned()))?;
+        .ok_or_else(no_such_device)?;
     Ok(Json(serde_json::to_value(d).map_err(internal)?).into_response())
 }
 
 /// `DELETE /local/devices/{id}` (device token): forget the helper and revoke its token.
+///
+/// The revoke is the full one: the `devices` row, its refresh tokens and its Matrix session.
+/// The older weak revoke only flagged the device row, so a "removed" helper could still mint
+/// access tokens from a refresh token it already held.
 pub async fn delete(
     State(state): State<AppState>,
     principal: Principal,
@@ -287,15 +371,381 @@ pub async fn delete(
             "box tokens cannot remove devices".into(),
         ));
     }
-    let ok = state.db.local_device_delete(&device_id).map_err(internal)?;
-    let _ = state.db.revoke_device(&device_id);
-    if let Some(conn) = state.local_conns.lock().await.remove(&device_id) {
-        fail_pending(&conn, "device removed").await;
+    if !owns_device(&state, &principal, &device_id)? {
+        return Err(no_such_device());
     }
+    let ok = state.db.local_device_delete(&device_id).map_err(internal)?;
+    // `revoke_device_everywhere` disconnects the helper too; this says why in the error the
+    // pending ops get.
+    disconnect(&state, &device_id, "device removed").await;
+    crate::signin::revoke_device_everywhere(&state, &device_id)
+        .await
+        .map_err(internal)?;
     Ok(if ok {
         StatusCode::NO_CONTENT
     } else {
         StatusCode::NOT_FOUND
     }
     .into_response())
+}
+
+#[cfg(test)]
+mod owner_tests {
+    //! A helper belongs to one user. Every handler here used to take a device id on trust, and a
+    //! device id is not a secret: the box roster of a shared chat names each member's devices
+    //! (`people::box_roster_carries_member_devices_and_the_app_roster_does_not`), the `reachable`
+    //! block of a call start names each callee's, and `GET /local/devices` used to list every
+    //! helper on the relay to anyone who asked.
+
+    use axum::body::to_bytes;
+    use serde_json::Value;
+
+    use crate::db::Project;
+    use crate::people::tests_support::person;
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    use super::*;
+
+    fn helper(state: &AppState, owner_device: &str) {
+        state
+            .db
+            .local_device_hello(owner_device, "mac.local", "macos", "/Users/t")
+            .expect("hello");
+    }
+
+    fn live(state: &AppState, device_id: &str) -> bool {
+        matches!(state.db.device_status(device_id), Ok(Some((_, false))))
+    }
+
+    fn allow_reads(state: &AppState, device_id: &str) -> bool {
+        state
+            .db
+            .local_device(device_id)
+            .unwrap()
+            .expect("row")
+            .allow_reads
+    }
+
+    /// These handlers report "no such device" as an error and success as a response, and the
+    /// older ones reported a missing row as an `Ok(404)`. The tests care about the status either
+    /// way, so that a refusal that never happened fails on what it let through, not on shape.
+    fn status_of(r: ApiResult) -> StatusCode {
+        match r {
+            Ok(res) => res.status(),
+            Err((code, _)) => code,
+        }
+    }
+
+    fn box_of(user: &str) -> Principal {
+        Principal::Box {
+            user_id: user.to_owned(),
+        }
+    }
+
+    fn project_of(state: &AppState, id: &str, user: &str) {
+        state
+            .db
+            .insert_project(&Project {
+                id: id.into(),
+                name: id.into(),
+                icon: "P".into(),
+                instructions: String::new(),
+                models: json!({}),
+                state: "awake".into(),
+                created_at: 0,
+                last_active_at: 0,
+                spend_cap_daily: 25.0,
+                color: "#000".into(),
+                user_id: user.into(),
+                workspace_state: "stopped".into(),
+                avatar: None,
+                avatar_color: None,
+                description: String::new(),
+                primary_chat_id: None,
+                avatar_color_index: None,
+                avatar_leaf: None,
+                avatar_leaf_color: None,
+                image_key: None,
+                avatar_version: 0,
+            })
+            .expect("project");
+    }
+
+    /// The one that matters: Alice signing Bob's device out. Before the owner check this
+    /// answered 404 — because Bob has no `local_devices` row — and revoked him anyway.
+    #[tokio::test]
+    async fn one_users_token_cannot_sign_another_users_device_out() {
+        let state = test_state(AuthMode::Github);
+        let (_alice, alice_dev) = person(&state, 21);
+        let (_bob, bob_dev) = person(&state, 22);
+        let Principal::Device { id: bob_id, .. } = &bob_dev else {
+            panic!("device")
+        };
+
+        let bob_id = bob_id.clone();
+        let r = delete(State(state.clone()), alice_dev, Path(bob_id.clone())).await;
+        assert!(
+            live(&state, &bob_id),
+            "Alice's token signed Bob's device out"
+        );
+        assert_eq!(
+            status_of(r),
+            StatusCode::NOT_FOUND,
+            "another user's device answers like no device at all"
+        );
+    }
+
+    /// `allow_reads` is the switch that lets an agent read files without asking each time.
+    #[tokio::test]
+    async fn one_users_token_cannot_flip_another_users_read_switch() {
+        let state = test_state(AuthMode::Github);
+        let (_alice, alice_dev) = person(&state, 23);
+        let (_bob, bob_dev) = person(&state, 24);
+        let Principal::Device { id: bob_id, .. } = &bob_dev else {
+            panic!("device")
+        };
+        let bob_id = bob_id.clone();
+        helper(&state, &bob_id);
+
+        let r = patch(
+            State(state.clone()),
+            alice_dev,
+            Path(bob_id.clone()),
+            Json(PatchBody {
+                allow_reads: Some(true),
+            }),
+        )
+        .await;
+        assert!(
+            !allow_reads(&state, &bob_id),
+            "Alice's token turned on reads-without-asking on Bob's computer"
+        );
+        assert_eq!(status_of(r), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn the_device_list_is_only_the_callers_own() {
+        let state = test_state(AuthMode::Github);
+        let (_alice, alice_dev) = person(&state, 25);
+        let (_bob, bob_dev) = person(&state, 26);
+        let (Principal::Device { id: alice_id, .. }, Principal::Device { id: bob_id, .. }) =
+            (&alice_dev, &bob_dev)
+        else {
+            panic!("devices")
+        };
+        let (alice_id, bob_id) = (alice_id.clone(), bob_id.clone());
+        helper(&state, &alice_id);
+        helper(&state, &bob_id);
+
+        let r = list(State(state.clone()), alice_dev).await.expect("list");
+        let body = to_bytes(r.into_body(), 1 << 20).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        let ids: Vec<&str> = v["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|d| d["device_id"].as_str())
+            .collect();
+        assert_eq!(ids, vec![alice_id.as_str()], "no other user's helper");
+    }
+
+    /// The other two arms of the same `match`, which the test above does not reach: a box asks
+    /// on behalf of the user it serves (that is what the `local_devices` tool is for, so an
+    /// empty answer there would break it silently), and the admin token has no user and keeps
+    /// the whole list. Both would survive a change that only kept the device arm honest.
+    #[tokio::test]
+    async fn a_box_sees_its_own_users_helpers_and_the_admin_token_sees_every_one() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 29);
+        let (_bob, bob_dev) = person(&state, 30);
+        let (Principal::Device { id: alice_id, .. }, Principal::Device { id: bob_id, .. }) =
+            (&alice_dev, &bob_dev)
+        else {
+            panic!("devices")
+        };
+        let (alice_id, bob_id) = (alice_id.clone(), bob_id.clone());
+        helper(&state, &alice_id);
+        helper(&state, &bob_id);
+
+        let ids = |r: ApiResult| -> Vec<String> {
+            let body = r.expect("list").into_body();
+            let bytes = futures::executor::block_on(to_bytes(body, 1 << 20)).expect("body");
+            let v: Value = serde_json::from_slice(&bytes).unwrap();
+            v["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|d| d["device_id"].as_str().map(str::to_owned))
+                .collect()
+        };
+
+        assert_eq!(
+            ids(list(State(state.clone()), box_of(&alice)).await),
+            vec![alice_id.clone()],
+            "Alice's box must still see Alice's helper"
+        );
+        let mut all = ids(list(State(state.clone()), Principal::Admin).await);
+        all.sort();
+        let mut both = vec![alice_id, bob_id];
+        both.sort();
+        assert_eq!(all, both, "the admin token keeps the whole list");
+    }
+
+    /// A box runs ops on a computer. It may only reach its own user's.
+    #[tokio::test]
+    async fn a_box_cannot_run_ops_on_another_users_computer() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _alice_dev) = person(&state, 27);
+        let (_bob, bob_dev) = person(&state, 28);
+        let Principal::Device { id: bob_id, .. } = &bob_dev else {
+            panic!("device")
+        };
+        helper(&state, bob_id);
+        project_of(&state, "p_alice", &alice);
+
+        let r = exec(
+            State(state.clone()),
+            box_of(&alice),
+            Path(("p_alice".to_owned(), bob_id.clone())),
+            Json(LocalOp::ListDir { path: "/".into() }),
+        )
+        .await;
+        assert_eq!(
+            status_of(r),
+            StatusCode::NOT_FOUND,
+            "Alice's box reached a helper belonging to Bob"
+        );
+    }
+
+    /// Adversarial re-review of #2460, M2's second half. `disconnect` takes a revoked device
+    /// out of `local_conns`, but that is a teardown racing a request rather than a check: with a
+    /// homeserver that never answers, the row was revoked in milliseconds and the device sat in
+    /// the map for the whole ten-second Matrix timeout, dispatching file operations against a
+    /// computer the account had just signed out. `devices` is the authority, so `exec` asks it.
+    #[tokio::test]
+    async fn file_operations_are_refused_against_a_signed_out_computer() {
+        let state = test_state(AuthMode::Github);
+        let (alice, dev) = person(&state, 30);
+        let Principal::Device { id, .. } = &dev else {
+            panic!("device")
+        };
+        let id = id.clone();
+        helper(&state, &id);
+        project_of(&state, "p_alice", &alice);
+
+        // Still signed in: the op gets as far as looking for a live socket, which is the
+        // "device is offline" answer rather than a refusal.
+        let before = exec(
+            State(state.clone()),
+            box_of(&alice),
+            Path(("p_alice".to_owned(), id.clone())),
+            Json(LocalOp::ListDir { path: "/".into() }),
+        )
+        .await;
+        assert_eq!(status_of(before), StatusCode::SERVICE_UNAVAILABLE);
+
+        state.db.revoke_device_fully(&id).expect("revoke");
+        let after = exec(
+            State(state.clone()),
+            box_of(&alice),
+            Path(("p_alice".to_owned(), id.clone())),
+            Json(LocalOp::ListDir { path: "/".into() }),
+        )
+        .await;
+        assert_eq!(
+            status_of(after),
+            StatusCode::NOT_FOUND,
+            "a signed-out computer is not reachable, whatever is still in local_conns"
+        );
+    }
+
+    /// Adversarial re-review of #2460, L1. Unregistering the helper is not the same as ending
+    /// it: `run` holds its own `Arc<LocalConn>`, so the loop kept reading from a socket whose
+    /// device had been signed out, and the `local_devices` row stayed `connected = true` for
+    /// ever because the teardown only clears that flag while the connection is still the
+    /// registered one — which unregistering has just made false.
+    #[tokio::test]
+    async fn signing_a_device_out_ends_its_helper_socket_and_marks_it_offline() {
+        let state = test_state(AuthMode::Github);
+        let (_alice, dev) = person(&state, 31);
+        let Principal::Device { id, .. } = &dev else {
+            panic!("device")
+        };
+        let id = id.clone();
+        helper(&state, &id);
+        let _ = state.db.local_device_seen(&id, true);
+
+        let (tx, _rx) = mpsc::channel::<String>(4);
+        let conn = Arc::new(LocalConn {
+            tx,
+            pending: Mutex::new(HashMap::new()),
+            closed: Notify::new(),
+        });
+        state
+            .local_conns
+            .lock()
+            .await
+            .insert(id.clone(), conn.clone());
+        // A pending op, so the caller is answered rather than left hanging.
+        let (done, waiting) = oneshot::channel();
+        conn.pending.lock().await.insert("op1".into(), done);
+        // Somebody has to be listening when `disconnect` fires, the way `run`'s select arm is.
+        let woken = tokio::spawn({
+            let conn = conn.clone();
+            async move { conn.closed.notified().await }
+        });
+        tokio::task::yield_now().await;
+
+        disconnect(&state, &id, "device signed out").await;
+
+        assert!(
+            !state.local_conns.lock().await.contains_key(&id),
+            "the socket is unregistered"
+        );
+        assert!(
+            matches!(waiting.await, Ok(LocalResult::Error { .. })),
+            "whatever it was asked to do is failed rather than left pending"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), woken)
+                .await
+                .is_ok(),
+            "and the read loop is told to stop, so the machine cannot keep writing"
+        );
+        assert_eq!(
+            state.db.local_device(&id).unwrap().map(|d| d.connected),
+            Some(false),
+            "a signed-out computer must not keep showing as online"
+        );
+    }
+
+    /// The owner still works, and the removal now takes the device's refresh tokens with it.
+    #[tokio::test]
+    async fn the_owner_removes_their_own_helper_and_its_tokens_die() {
+        let state = test_state(AuthMode::Github);
+        let (user, dev) = person(&state, 29);
+        let Principal::Device { id, .. } = &dev else {
+            panic!("device")
+        };
+        let id = id.clone();
+        helper(&state, &id);
+        let tokens = crate::signin::issue_tokens(&state, &user, &id).expect("tokens");
+        let h = arbos_core::auth::hash(&tokens.refresh_token);
+
+        let r = delete(State(state.clone()), dev, Path(id.clone())).await;
+        assert_eq!(status_of(r), StatusCode::NO_CONTENT);
+        assert!(state.db.local_device(&id).unwrap().is_none());
+        assert!(!live(&state, &id), "the device is signed out");
+        assert!(
+            state
+                .db
+                .refresh_row(&h)
+                .unwrap()
+                .expect("row")
+                .revoked_at
+                .is_some(),
+            "a removed helper cannot mint a new access token from a refresh token it kept"
+        );
+    }
 }

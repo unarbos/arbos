@@ -87,6 +87,7 @@ struct HomeView: View {
     private var searching: Bool { searchFocused || !query.isEmpty }
 
     var body: some View {
+        let _ = FrameProbe.count(.homeBody)
         NavigationStack(path: $model.path) {
             ZStack(alignment: .top) {
                 theme.bg.ignoresSafeArea()
@@ -105,7 +106,9 @@ struct HomeView: View {
             // 2026-10-28], see-through since [feedback iphone-composer-see-through-2026-10-28]):
             // the fade is one layer at the canvas's bottom (over the rows, under the capsule),
             // not the bar's own background; rows stay readable through and between the pills.
-            .overlay(alignment: .bottom) { BottomBarFadeView(spec: BottomBarFade.home) }
+            .overlay(alignment: .bottom) {
+                BottomBarFadeView { geo, _ in BottomBarFade.home(bottomInset: geo.safeAreaInsets.bottom) }
+            }
             .safeAreaInset(edge: .bottom, spacing: 0) { bottomBar }
             .animation(.easeOut(duration: 0.18), value: searching)
             .task(id: model.link) {
@@ -132,6 +135,14 @@ struct HomeView: View {
                     // D88: the server's channel list (the slid-in left pane).
                     ServerChannelsView(serverId: serverId)
                         .id(serverId)
+                case .profile(let target):
+                    // Jacob 2026-11-01: a profile comes in from the right like any other
+                    // page. `backSwipeToPop` is what gives it the stack's back swipe —
+                    // the pages draw their own `ProfileTopBar` instead of the system bar,
+                    // so without it they would have no swipe back of any kind.
+                    ProfilePage(target: target)
+                        .id(target.id)
+                        .backSwipeToPop()
                 }
             }
             .navigationDestination(isPresented: $showHidden) {
@@ -154,6 +165,7 @@ struct HomeView: View {
             .sheet(isPresented: $showSettings, onDismiss: { model.pendingSettingsLanding = nil }) {
                 SettingsView(landing: model.pendingSettingsLanding ?? DebugHooks.settingsPage)
                     .environmentObject(model).environment(\.theme, theme)
+                    .onAppear { PerfSignpost.endAfterCommit(.settingsSheet) }
             }
             // A Settings row picked in search: the sheet opens straight on that page.
             .onChange(of: model.pendingSettingsLanding) { _, landing in
@@ -348,13 +360,14 @@ struct HomeView: View {
         case .people(let chat):
             let pinned = model.isHomePinned(peopleChatId: chat.id)
             Button { model.open(peopleChat: chat) } label: {
-                PeopleRow(chat: chat, preview: entry.hit.reason ?? peoplePreview(chat), time: timeLabel(ms: peopleActivity(chat)),
+                PeopleRow(chat: chat, preview: entry.hit.reason ?? HomeView.peoplePreview(chat, in: model), time: timeLabel(ms: peopleActivity(chat)),
                           unread: model.peopleUnread.contains(chat.id) || model.unreadCount(for: chat) > 0,
                           streaming: model.isStreaming(chat.id),
                           count: model.unreadCount(for: chat), me: model.user?.id,
                           pinned: pinned)
             }
             .buttonStyle(.borderless)
+            .accessibilityIdentifier("home-row:\(chat.id)")
             .contextMenu {
                 // Long-press: Pin, reorder when pinned, Archive,
                 // Mute (groups), Profile/Group info, Delete.
@@ -763,7 +776,10 @@ struct HomeView: View {
 
     private var topBarRow: some View {
         HStack(spacing: 10) {
-            Button { showSettings = true } label: {
+            Button {
+                PerfSignpost.begin(.settingsSheet)
+                showSettings = true
+            } label: {
                 // My picture with the machine mark through the one presence badge (in
                 // front, ring cut out of the picture) — never a coloured dot (2026-10-27).
                 PersonAvatar(url: model.user?.avatarUrl, handle: model.user?.login ?? "?", size: Theme.control, name: model.user?.name, id: model.user?.id, colorIndex: model.user?.avatarColorIndexEffective)
@@ -959,17 +975,38 @@ struct HomeView: View {
         max(c.lastActivityAt, model.messages(of: c.id).last?.createdAt ?? 0)
     }
 
-    private func peoplePreview(_ c: PeopleChat) -> String {
-        // Skip group deletion audits (hidden in the chat; Activity only) so the
-        // home row matches what you see when you open the conversation.
+    /// The one builder behind every people row's preview line — Home's list and the
+    /// Hidden chats list both call it, so the line can only ever be composed one way.
+    /// It used to be written out twice, and the copies drifted: the block filter of
+    /// [feedback blocked-state-ios-2026-10-26] reached the hidden list alone, and the
+    /// `@handle` rule had to be stated in both.
+    ///
+    /// Skips group deletion audits (hidden in the chat; Activity only) and rows hidden
+    /// for me (someone I blocked), so a row matches what opening the chat shows.
+    static func peoplePreview(_ c: PeopleChat, in model: AppModel) -> String {
         guard let m = model.messages(of: c.id).last(where: {
-            !$0.voice && !$0.plainText.isEmpty && !GroupActivity.isAuditLine($0.plainText)
+            !$0.voice && !$0.plainText.isEmpty
+                && !model.hidesMessage($0, chatId: c.id)
+                && !GroupActivity.isAuditLine($0.plainText)
         }) else {
             return c.pending ? "Invited · opens when they sign in" : "Say hi"
         }
         let line = m.plainText.split(separator: "\n").first.map(String.init) ?? ""
-        let who = m.sender == model.myUserId ? "You" : (m.senderHandle.map { "@\($0)" } ?? "")
+        let who = previewWho(group: c.isGroup, mine: m.sender == model.myUserId,
+                             sender: m.sender, handle: m.senderHandle)
         return (who.isEmpty ? "" : who + ": ") + HomeView.plain(line)
+    }
+
+    /// The label before a people row's preview text: "You" for my own line, `@handle`
+    /// for anyone else — but not for the other person of a 1:1 chat, whom the row's own
+    /// header already names. Labelling them there printed the handle twice, "Affinity @Z"
+    /// over "@Z: hahahaha" ([feedback doubled-sender-prefix-2026-10-30], seen again
+    /// 2026-11-05). A group row is headed by the group and carries no handle, and an
+    /// agent in a 1:1 chat is not the person the header names, so both keep their label.
+    static func previewWho(group: Bool, mine: Bool, sender: String, handle: String?) -> String {
+        if mine { return "You" }
+        if !group, sender.hasPrefix("user:") { return "" }
+        return handle.map { "@\($0)" } ?? ""
     }
 
     /// Newest message with prose (or an open question) across the project's chats.
@@ -1187,7 +1224,7 @@ struct HiddenChatsView: View {
                         }
                     case .people(let chat):
                         Button { model.open(peopleChat: chat) } label: {
-                            PeopleRow(chat: chat, preview: HiddenChatsView.peoplePreview(chat, in: model), time: "",
+                            PeopleRow(chat: chat, preview: HomeView.peoplePreview(chat, in: model), time: "",
                                       unread: false, count: 0, me: model.user?.id)
                         }
                         .buttonStyle(.borderless)
@@ -1284,20 +1321,6 @@ struct HiddenChatsView: View {
         return (m.role == .user ? "You: " : "") + HomeView.plain(line)
     }
 
-    static func peoplePreview(_ c: PeopleChat, in model: AppModel) -> String {
-        // A row hidden for me (someone I blocked) never previews. Deletion
-        // audits stay out too — same filter as the open chat (Transcript).
-        guard let m = model.messages(of: c.id).last(where: {
-            !$0.voice && !$0.plainText.isEmpty
-                && !model.hidesMessage($0, chatId: c.id)
-                && !GroupActivity.isAuditLine($0.plainText)
-        }) else {
-            return c.pending ? "Invited · opens when they sign in" : "Say hi"
-        }
-        let line = m.plainText.split(separator: "\n").first.map(String.init) ?? ""
-        let who = m.sender == model.myUserId ? "You" : (m.senderHandle.map { "@\($0)" } ?? "")
-        return (who.isEmpty ? "" : who + ": ") + HomeView.plain(line)
-    }
 }
 
 struct AgentRow: View {

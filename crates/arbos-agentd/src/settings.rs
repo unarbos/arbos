@@ -117,6 +117,26 @@ impl Models {
         }
     }
 
+    /// The slots a workspace boots with: the project's own settings where it has them, the box
+    /// defaults where it does not.
+    pub fn from_cfg(cfg: &crate::config::Config) -> Models {
+        Models {
+            talking: Slot {
+                id: cfg.talking_model.clone(),
+                effort: "off".into(),
+            },
+            subagent: Slot {
+                id: cfg.subagent_model.clone(),
+                effort: "medium".into(),
+            },
+            decision: Slot {
+                id: cfg.decision_model.clone(),
+                effort: "off".into(),
+            },
+            decision_cfg: cfg.decision_cfg.clone(),
+        }
+    }
+
     pub fn to_json(&self) -> Value {
         json!({
             "talking_model": { "id": self.talking.id, "effort": self.talking.effort },
@@ -167,6 +187,12 @@ fn clamp_effort_for_model(model: &str, effort: &str) -> String {
     }
 }
 
+/// The relay's "no daily limit" for a project (`credits::PROJECT_CAP_UNLIMITED`), which is what
+/// it sends for every project it creates. The box starts here so it never reports a limit of its
+/// own before the first settings payload arrives: a boot default of `25.0` had the apps show a
+/// $25/day cap on an account with no limit at all (Jacob, Test5 round 13).
+pub const UNLIMITED_SPEND_CAP: f64 = -1.0;
+
 #[derive(Debug, Default, Clone)]
 pub struct SettingsState {
     pub name: String,
@@ -177,6 +203,9 @@ pub struct SettingsState {
     /// Avatar colour slug (`Project.avatar_color`).
     pub avatar_color: String,
     pub instructions: String,
+    /// The account's daily limit as the relay reports it (`Project.spend_cap_daily`), for display
+    /// only: nothing on the box gates on it, and the relay's ledger is the one thing that
+    /// refuses a spend. [`UNLIMITED_SPEND_CAP`] is the relay's "no limit".
     pub spend_cap_usd: f64,
     /// Visible note when a configured model id was unknown and a default took its place.
     pub model_note: String,
@@ -200,8 +229,148 @@ pub const DEFAULT_TALKING_MODEL: &str = "anthropic/claude-haiku-5.5";
 pub const DEFAULT_SUBAGENT_MODEL: &str = "anthropic/claude-sonnet-5.5";
 pub const DEFAULT_DECISION_MODEL: &str = "anthropic/claude-haiku-5.5";
 
+/// What a model call is for. Every model choice in agentd resolves through
+/// [`LiveModels::resolve`], so an agent's own pick in its Model setting governs the work that
+/// runs away from the main session as well: jobs, continuation jobs, subagents, quick replies,
+/// compaction, memory passes.
+#[derive(Debug, Clone)]
+pub enum ModelRole<'a> {
+    /// The main session and everything else the user reads as the agent speaking.
+    Talking,
+    /// A job or subagent doing this agent's work. `job_kind` is the job's kind (`research`,
+    /// `code`, `other`) and `None` for a subagent that is not a job; `research` is the
+    /// research-worker override in force (`Config::research_worker_model`).
+    Worker {
+        job_kind: Option<&'a str>,
+        research: Option<&'a str>,
+    },
+    /// The quick reply a busy agent gives. `env_override` is `ARBOS_QUICK_REPLY_MODEL`: a
+    /// cheaper lane for an agent on the box default, ignored for an agent with a model of its own.
+    QuickReply { env_override: Option<&'a str> },
+    /// Memory write/read decisions and memory-tree cards (the `decision_model` slot).
+    Decision,
+}
+
+/// The agent's live model slots, as one handle. Everything that makes a model call holds a clone
+/// of this instead of reading the boot values out of `Config`, so a model change in the app
+/// reaches each of them on the next call, with no respawn and no restart.
+#[derive(Clone)]
+pub struct LiveModels {
+    slots: Arc<RwLock<Models>>,
+    /// The memory-tree mode of `slots`, mirrored as one byte. `Agent::tree_mode` is called from
+    /// sync code, where the only way to read `slots` was `try_read`; a fair lock hands that a
+    /// failure whenever the 3 s registry poll has a writer queued, and the box default took the
+    /// project's choice's place — so an agent's recall flipped mode on an ordinary timer.
+    tree_mode: Arc<std::sync::atomic::AtomicU8>,
+    box_default_talking: String,
+    box_default_subagent: String,
+}
+
+impl LiveModels {
+    pub fn new(cfg: &crate::config::Config) -> Self {
+        let slots = Models::from_cfg(cfg);
+        Self {
+            tree_mode: Arc::new(std::sync::atomic::AtomicU8::new(
+                slots.decision_cfg.memory_tree.code(),
+            )),
+            slots: Arc::new(RwLock::new(slots)),
+            box_default_talking: cfg.box_default_talking_model.clone(),
+            box_default_subagent: cfg.box_default_subagent_model.clone(),
+        }
+    }
+
+    /// One id for every role: the `eval-*` subcommands and tests, which have no project settings
+    /// and no box defaults to compare against.
+    pub fn fixed(id: &str) -> Self {
+        let slot = || Slot {
+            id: id.to_owned(),
+            effort: "off".into(),
+        };
+        Self {
+            slots: Arc::new(RwLock::new(Models {
+                talking: slot(),
+                subagent: slot(),
+                decision: slot(),
+                decision_cfg: DecisionConfig {
+                    provider: DecisionProvider::Jev,
+                    scorer: crate::config::DEFAULT_DECISION_SCORER.to_owned(),
+                    threshold: crate::config::DEFAULT_DECISION_THRESHOLD,
+                    memory_tree: crate::tree::TreeMode::On,
+                },
+            })),
+            tree_mode: Arc::new(std::sync::atomic::AtomicU8::new(
+                crate::tree::TreeMode::On.code(),
+            )),
+            box_default_talking: id.to_owned(),
+            box_default_subagent: id.to_owned(),
+        }
+    }
+
+    pub async fn read(&self) -> tokio::sync::RwLockReadGuard<'_, Models> {
+        self.slots.read().await
+    }
+
+    /// Replace the slots.
+    ///
+    /// **This is the only writer, and the sync-readable mirrors below are correct only because
+    /// it is.** `slots` is private and nothing else takes its write lock, so `tree_mode` cannot
+    /// drift from `decision_cfg.memory_tree`. A second writer would silently break that: add one
+    /// here, or have it update every mirror this function updates.
+    pub async fn set(&self, m: Models) {
+        self.tree_mode.store(
+            m.decision_cfg.memory_tree.code(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        *self.slots.write().await = m;
+    }
+
+    /// The memory-tree mode, without the async lock and without a fallback.
+    pub fn tree_mode(&self) -> crate::tree::TreeMode {
+        crate::tree::TreeMode::from_code(self.tree_mode.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    pub fn try_read(
+        &self,
+    ) -> Result<tokio::sync::RwLockReadGuard<'_, Models>, tokio::sync::TryLockError> {
+        self.slots.try_read()
+    }
+
+    /// The model one piece of this agent's work runs on.
+    ///
+    /// A slot that differs from its box default was chosen for this agent, and a chosen model
+    /// wins over every cheaper lane: the user who picks Opus gets Opus for the reading and the
+    /// writing, not only for the sentence that answers (Jacob, 2026-11-04: "why did it use
+    /// Haiku? the model is opus"). An agent left on the box default keeps the lanes as they
+    /// were, so no default moves and nothing costs more than today.
+    ///
+    /// Every role answers from one read of the slots. The registry poll queues a writer here
+    /// every 3 s and `tokio`'s lock is fair, so two reads around one decision are two chances to
+    /// straddle that write and answer from two different settings.
+    pub async fn resolve(&self, role: ModelRole<'_>) -> String {
+        let m = self.read().await;
+        let chose_talking = m.talking.id != self.box_default_talking;
+        match role {
+            ModelRole::Talking => m.talking.id.clone(),
+            ModelRole::Decision => m.decision.id.clone(),
+            ModelRole::QuickReply { env_override } => match env_override {
+                Some(cheap) if !chose_talking => cheap.to_owned(),
+                _ => m.talking.id.clone(),
+            },
+            ModelRole::Worker { job_kind, research } => {
+                if m.subagent.id != self.box_default_subagent {
+                    return m.subagent.id.clone();
+                }
+                if chose_talking {
+                    return m.talking.id.clone();
+                }
+                crate::config::worker_model_for(job_kind.unwrap_or(""), research, &m.subagent.id)
+            }
+        }
+    }
+}
+
 pub struct Settings {
-    pub models: RwLock<Models>,
+    pub models: LiveModels,
     pub state: RwLock<SettingsState>,
     pub catalog: RwLock<Option<ModelCatalog>>,
     /// Boot-time slots: the fallback when a client or the registry names an unknown model.
@@ -209,32 +378,19 @@ pub struct Settings {
 }
 
 impl Settings {
-    pub fn new(cfg: &crate::config::Config) -> Self {
-        let models = Models {
-            talking: Slot {
-                id: cfg.talking_model.clone(),
-                effort: "off".into(),
-            },
-            subagent: Slot {
-                id: cfg.subagent_model.clone(),
-                effort: "medium".into(),
-            },
-            decision: Slot {
-                id: cfg.decision_model.clone(),
-                effort: "off".into(),
-            },
-            decision_cfg: cfg.decision_cfg.clone(),
-        };
+    /// `models` is the handle every component shares (`LiveModels`), so a change applied here is
+    /// the change a job, a quick reply or a memory pass sees on its next call.
+    pub fn new(cfg: &crate::config::Config, models: LiveModels) -> Self {
         Self {
-            models: RwLock::new(models.clone()),
+            models,
             state: RwLock::new(SettingsState {
                 name: cfg.project_name.clone(),
                 instructions: cfg.instructions.clone(),
-                spend_cap_usd: 25.0,
+                spend_cap_usd: UNLIMITED_SPEND_CAP,
                 ..Default::default()
             }),
             catalog: RwLock::new(None),
-            defaults: models,
+            defaults: Models::from_cfg(cfg),
         }
     }
 }
@@ -489,7 +645,7 @@ impl Agent {
     pub async fn apply_models(self: &Arc<Self>, m: &Models) -> Result<()> {
         let prev = self.settings.models.read().await.clone();
         // Remember first so a respawn / system-prompt rewrite reads the new slots.
-        *self.settings.models.write().await = m.clone();
+        self.settings.models.set(m.clone()).await;
         // The new models need their context-window override before pi (re)reads models.json.
         if let Err(e) =
             crate::workspace::write_models_json(&self.cfg, &m.talking.id, &m.subagent.id)
@@ -507,6 +663,7 @@ impl Agent {
                     })
                     .await?;
                 if r.success {
+                    *self.pi_model.lock().await = Some(m.talking.id.clone());
                     switched = true;
                 } else {
                     // pi's in-session catalog may not list the new id yet; respawn
@@ -546,6 +703,71 @@ impl Agent {
             "models applied"
         );
         Ok(())
+    }
+
+    /// Put the live pi session on the agent's chosen talking model, if it is not on it already.
+    ///
+    /// Every lane but one resolves its model on the call it is about to make, straight from the
+    /// live slots ([`LiveModels::resolve`]): quick replies, workers, memory passes. The main
+    /// session cannot, because pi owns its model between spawns — so [`Agent::apply_models`]
+    /// pushes a change to it with a single `set_model`, once, when the change is first seen.
+    ///
+    /// That one push is not guaranteed to land. The registry pass carrying it is bounded at
+    /// `REGISTRY_CALL_TIMEOUT` (10 s) and dropped when it overruns, while `Agent::pi` may wait
+    /// 20 s for a parked or respawning child and `RpcChild::call` 60 s for the answer; the call
+    /// can also simply fail. And nothing retries it: `settings_from_relay` compares the registry
+    /// against the live slots, which `apply_models` moves *before* it pushes, so every later
+    /// poll sees them equal and tries nothing. The main session then speaks on the old model
+    /// until the box restarts, while every other lane speaks on the new one — exactly the split
+    /// seen on 2026-11-04, quick replies on Opus 5.5 and the main turn still on Haiku.
+    ///
+    /// Re-asserting at the turn boundary gives the main session the same property as the rest:
+    /// the model is resolved at the point of use, and a lost push costs one turn, not the life
+    /// of the box.
+    pub(crate) async fn sync_pi_model(self: &Arc<Self>) {
+        let want = self.live_models().await.0;
+        match self.pi_model.lock().await.as_deref() {
+            // A retry deliberately holds the session on the fallback model.
+            None => return,
+            Some(on) if on == want => return,
+            Some(_) => {}
+        }
+        // No live child: the next `start_pi` / `respawn_pi` reads `live_models()` itself.
+        let Ok(pi) = self.pi_child().await else {
+            return;
+        };
+        let refused = match pi
+            .call_timeout(
+                RpcCommand::SetModel {
+                    id: pi.next_id("sm"),
+                    provider: self.cfg.pi_provider(),
+                    model_id: want.clone(),
+                },
+                Duration::from_secs(10),
+            )
+            .await
+        {
+            Ok(r) if r.success => {
+                *self.pi_model.lock().await = Some(want.clone());
+                tracing::info!(model = %want, "main session put back on the agent's model");
+                false
+            }
+            Ok(r) => {
+                tracing::warn!(model = %want, error = ?r.error, "set_model refused at the turn boundary");
+                true
+            }
+            Err(e) => {
+                tracing::warn!(model = %want, error = %e, "set_model failed at the turn boundary");
+                true
+            }
+        };
+        // Same recovery `apply_models` uses: a respawn boots on `live_models()`, so the prompt
+        // that follows goes out on the agent's model rather than on the stale one.
+        if refused {
+            if let Err(e) = self.respawn_pi_current().await {
+                tracing::warn!(error = %e, "pi respawn after a refused turn-boundary set_model");
+            }
+        }
     }
 
     /// Mirror the registry settings into the project doc (`settings` map, crdt-sync §6.3).
