@@ -19,6 +19,40 @@ corroborating, both short by the same one, with no signal anywhere.
 Ask what the two methods share before you treat them as independent. If they read the same stream,
 parse the same shape, or trust the same absence, they are one measurement with two names.
 
+### What to write down: prefer the thing that fires at the point of action
+
+**A principle is read when it is written and nowhere near when it is needed. A command, a type
+or a deletion fires at the point of use, because using it *is* the action.** Where both are
+available, the second is worth more than an accurate description of the first.
+
+Three instances converged on this in one night, and they are far enough apart that nobody would
+connect them from the individual notes:
+
+1. **A scope warning versus a runnable command.** This lane's collision table is the right
+   population for ordering the queue and the wrong one for "is this file claimed". A warning
+   saying so was written — and then the author of it made that exact error in the same turn,
+   verifying a claim about open PRs against a hand-picked 27-PR subset. What caught it was
+   running the documented command verbatim, not having written the warning. The command now
+   sits **above** the table so a reader cannot reach the table without passing its replacement.
+2. **A helper returning `-> ()` instead of a value.** Making the type force the caller to deal
+   with a timeout meant eleven panicking helpers needed no review at all. *(Another lane's
+   finding, relayed; not measured here.)*
+3. **Deleting a `Deserialize` derive.** Removing the derive makes an unreachable decode path
+   unable to come back, where a comment saying "this path is unreachable" only survives until
+   someone makes it reachable. *(Likewise relayed.)*
+
+The common form: **make the error impossible at the point of action rather than describe it
+accurately somewhere a reader might arrive.** When writing up a finding, ask whether it can be
+spent on a command, a type signature, a deletion or a gate instead of a paragraph. Prose is the
+fallback, not the default — and when prose is genuinely the only option, put the executable part
+first and physically before whatever it is protecting.
+
+**The practical half: publish nothing executable you have not run verbatim.** Developing a
+command and then publishing the version you developed it *from* produces a different artefact,
+and the only thing that distinguishes them is running the pasted text. That standard is cheaper
+than the error it prevents by a wide margin, and it is how instance 1 was caught: pasting the
+command back and running it disagreed with the subset answer and surfaced a third claimant.
+
 ### The companion principle, and the one that says what to do about it
 
 **The quantity that settles a question must come from outside the thing being questioned.**
