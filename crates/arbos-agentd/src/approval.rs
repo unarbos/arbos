@@ -2105,6 +2105,72 @@ mod job_approval_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// The premise the two tests below rest on, asserted here rather than inherited from
+    /// wherever the checkout sits: one delete, in the same place relative to the box, is
+    /// allowed on a box whose workspace is inside a scratch root and carded on a box outside
+    /// one.
+    ///
+    /// Both sides are asserted because only one of them can fail by itself. A box inside
+    /// scratch cards nothing, so "this delete needs no card" holds there for a reason that has
+    /// nothing to do with the workspace boundary and would keep holding with the boundary
+    /// deleted — the quiet direction. Asking the same question of both fixtures makes any
+    /// wrong premise break the other arm instead, loudly, and in one test rather than in every
+    /// test that happens to use the fixture.
+    #[tokio::test]
+    async fn the_scratch_boundary_decides_the_card_and_both_sides_are_asserted() {
+        let ask = |agent: Arc<Agent>, root: std::path::PathBuf| async move {
+            // Another project's folder beside the box's own workspace: outside the boundary on
+            // a box the boundary applies to, and in scratch on a box that sits in scratch.
+            let target = root.join("01TESTOTHERPROJECT00000000").join("exports");
+            let class = arbos_core::approval::classify_path(
+                &target.to_string_lossy(),
+                &agent.cfg.work_dir.to_string_lossy(),
+            );
+            let state = agent
+                .hook_approval(
+                    "bash",
+                    &json!({ "command": format!("rm -rf {}", target.display()) }),
+                    WORKER,
+                    "subagent",
+                )
+                .await["state"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned();
+            (class, state)
+        };
+
+        let (agent, _host, root) = agent_running_a_job().await;
+        assert_eq!(
+            ask(agent, root.clone()).await,
+            (
+                arbos_core::approval::PathClass::Scratch,
+                "allowed".to_owned()
+            ),
+            "the ordinary fixture's root is `std::env::temp_dir()`, which is a scratch root, so \
+             every path on that box reads as scratch and nothing in it is carded. A test about \
+             the workspace boundary must use `test_agent_outside_scratch` instead. If this arm \
+             fails, that box has moved out of scratch — check `TMPDIR` — and the comment on \
+             `test_agent_outside_scratch` is now wrong. Root: {}",
+            root.display(),
+        );
+        let _ = std::fs::remove_dir_all(&root);
+
+        let (agent, _host, root) = agent_running_a_job_outside_scratch().await;
+        assert_eq!(
+            ask(agent, root.clone()).await,
+            (
+                arbos_core::approval::PathClass::Anywhere,
+                "pending".to_owned()
+            ),
+            "off this box's own workspace and out of scratch, a delete is carded. If this arm \
+             fails while the other passes, the checkout itself is under a scratch root and the \
+             boundary cases here were measuring the checkout's location. Root: {}",
+            root.display(),
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// The deletion rule flagged files the job itself had just made. T8's own outputs —
     /// `out/taxi_app_curl.txt`, `out/taxi_app.zip` — are not even a question now: they sit in
     /// the job's own workspace, and nothing in there is carded.
@@ -2186,9 +2252,14 @@ mod job_approval_tests {
             state(format!("rm -f {}", out("clean.log"))).await,
             "pending"
         );
-        // A write over a file that is already there creates nothing, so it records nothing —
-        // this crate's own manifest stands in for a file the job found rather than made.
-        let already_there = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml");
+        // A write over a file that is already there creates nothing, so it records nothing. The
+        // file stands for one the job found rather than made, and it is made here under the
+        // fixture's own root: a path borrowed from the checkout (`CARGO_MANIFEST_DIR`) would
+        // carry whatever class the checkout's location gives it.
+        std::fs::create_dir_all(&outside).unwrap();
+        let found = outside.join("found.txt");
+        std::fs::write(&found, "written by someone else").unwrap();
+        let already_there = found.to_string_lossy().to_string();
         agent
             .note_job_write(JOB, "write", &json!({ "path": already_there }))
             .await;

@@ -1287,6 +1287,11 @@ pub(crate) mod tests {
     /// about where the workspace boundary falls cannot use that box: every path in it would
     /// pass for the wrong reason, and would keep passing with the boundary removed. The build's
     /// own `target/` is writable wherever `cargo test` runs and is not scratch.
+    ///
+    /// Not scratch *wherever the checkout is*, which is the part the box cannot assume:
+    /// `assert_outside_scratch` makes it say so, and
+    /// `the_scratch_boundary_decides_the_card_and_both_sides_are_asserted` holds the other
+    /// side — that the ordinary box really is in scratch, so this one is worth having.
     pub(crate) async fn test_agent_outside_scratch() -> (Arc<Agent>, std::path::PathBuf) {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -1295,22 +1300,33 @@ pub(crate) mod tests {
             .join("target")
             .join("approval-boxes")
             .join(ulid());
-        // The premise, checked rather than assumed. `CARGO_MANIFEST_DIR` is wherever the
-        // checkout happens to be, so a clone under `/tmp` — a scratch root — would put this
-        // box's whole workspace back inside scratch and make every boundary case here pass for
-        // the wrong reason, silently. Only the vacuous direction is quiet, which is why this
-        // fixture refuses to hand out a box it cannot vouch for.
-        assert!(
-            !arbos_core::approval::SCRATCH_ROOTS
-                .iter()
-                .any(|r| root.starts_with(r)),
-            "this fixture promises a workspace outside scratch and {} is inside one \
-             ({:?}): run the suite from a checkout that is not under a scratch root, or the \
-             boundary cases it serves would pass with the boundary removed",
-            root.display(),
+        assert_outside_scratch(&root);
+        test_agent_full_in(axum::Router::new(), "/nonexistent/pi", None, root).await
+    }
+
+    /// The premise `test_agent_outside_scratch` promises, checked rather than assumed.
+    ///
+    /// Its root comes from `CARGO_MANIFEST_DIR`, which is wherever the checkout happens to be,
+    /// so a clone under `/tmp` — a `SCRATCH_ROOTS` entry — puts the box's whole workspace back
+    /// inside scratch, where no delete raises a card. A test built on that box then measures
+    /// where its own source tree sits rather than where the workspace boundary falls, and the
+    /// permissive direction of such a test passes **silently**: "a delete in scratch needs no
+    /// card" is true for the wrong reason, and stays true with the boundary deleted.
+    ///
+    /// So the fixture refuses a box it cannot vouch for, and names the path in the failure. The
+    /// question is put to `classify_path`, the same function the gate uses, rather than to a
+    /// prefix test of `SCRATCH_ROOTS`: `starts_with("/tmp")` also matches `/tmpfoo`, which is
+    /// not scratch, and a premise check that is wrong in its own direction is worse than none.
+    pub(crate) fn assert_outside_scratch(root: &std::path::Path) {
+        let root = root.to_string_lossy();
+        assert_ne!(
+            arbos_core::approval::classify_path(&root, &root),
+            arbos_core::approval::PathClass::Scratch,
+            "this fixture promises a workspace outside scratch, and {root} is inside one \
+             ({:?}). Run the suite from a checkout that is not under a scratch root; the \
+             boundary cases built on this box would otherwise pass with the boundary removed.",
             arbos_core::approval::SCRATCH_ROOTS,
         );
-        test_agent_full_in(axum::Router::new(), "/nonexistent/pi", None, root).await
     }
 
     /// A test's own `tracing` output, kept so what the box logged can be read back as evidence
