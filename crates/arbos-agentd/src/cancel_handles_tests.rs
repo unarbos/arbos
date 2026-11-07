@@ -115,6 +115,16 @@ async fn the_cancel_finds_a_workers_setsid_descendant_by_session_id() {
     let mark = crate::harness::worker_name("prime", &sid);
     let flag = std::env::temp_dir().join(format!("ai-{sid}"));
     let mut root = worker_with_setsid_grandchild(&mark, &flag);
+    // What production records, at the point production records it: `RpcChild::spawn`'s caller
+    // calls `note_worker_pgid` as soon as the child exists (agent.rs, bug Z), and
+    // `worker_tree` reads it back as BOTH the sid and the pgid handle. Without it `leader` is
+    // `None`, the tree degrades to mark-only, and the root's only handle becomes the one that
+    // reads `/proc/<pid>/environ` and skips silently when that read fails — a configuration
+    // nothing ships. The root called `setsid` in `pre_exec`, so it leads its own session and
+    // group and its pid is both. The descendant still escapes sid and pgid by making its own
+    // session, so it is still found only by the mark: the thing this test exists to check is
+    // untouched, and only the root moves onto a handle that cannot drop it.
+    agent.note_worker_pgid(&sid, root.id()).await;
     wait_until("the worker and its setsid descendant are up", || {
         marked_pids(&mark).len() >= 2
     });
@@ -123,12 +133,36 @@ async fn the_cancel_finds_a_workers_setsid_descendant_by_session_id() {
     let tree = agent.worker_tree(&sid).await;
     let found = tree.members();
 
+    // Name the two roles rather than asserting one of them: a message that calls whatever is
+    // missing "the descendant that called setsid" names the half that was found whenever it is
+    // the root that went missing, and sends its reader to the wrong side of the test.
+    let root_pid = root.id();
+    let descendants: Vec<u32> = planted.iter().copied().filter(|p| *p != root_pid).collect();
+
+    // The floor, asserted before anything is checked. Without it a planted set that somehow held
+    // only the root would make the loop below trivially true, and a pass would mean nothing —
+    // strictly worse than a failure, because a failure at least reports.
+    assert!(
+        !descendants.is_empty(),
+        "this test has nothing left to assert: the planted set {planted:?} holds only the root \
+         {root_pid}, so the setsid descendant this test exists to find was never there and a \
+         pass here would mean nothing"
+    );
+
     for pid in &planted {
+        let role = if *pid == root_pid {
+            "the worker root"
+        } else {
+            "the descendant that called setsid"
+        };
         assert!(
             found.contains(pid),
-            "the cancel must reach everything the worker left, including the descendant that \
-             called setsid: {pid} missing from {found:?} (tree mark {:?})",
-            tree.mark
+            "the cancel must reach everything the worker left: {role} ({pid}) is missing from \
+             {found:?} — root {root_pid}, descendant(s) {descendants:?} (tree mark {:?}, sid {:?}, \
+             pgid {:?})",
+            tree.mark,
+            tree.sid,
+            tree.pgid
         );
     }
 
