@@ -7,7 +7,10 @@ import ArbosFFI
 import SwiftUI
 
 /// A server in the home list: the D79 initials disc, the name, the newest line
-/// across its channels, the time, the unread count pill (never a dot — Jacob 2026-10-27).
+/// across its channels, the time, and the unread count pill. A home chat row
+/// shows a dot instead (`UnreadDot`); a server keeps the pill because a server
+/// is not in the parity reference, so there is nothing to match it to. The
+/// 2026-10-27 "never a dot" rule is superseded and is not the reason.
 struct ServerRow: View {
     @Environment(\.theme) private var theme
     let server: Server

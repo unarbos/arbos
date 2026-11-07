@@ -762,16 +762,16 @@ pub(crate) struct RowView {
     pub(crate) unread_count: usize,
     pub(crate) typing: bool,
     pub(crate) preview: String,
-    pub(crate) time: String,
     pub(crate) person_image: Option<Arc<RenderImage>>,
     pub(crate) guests: people::PeopleWithAvatars,
     /// In the Pinned section ([feedback sidebar-pinning-mac-2026-10-28]): the row carries
-    /// the muted `pin.fill` before its time.
+    /// the muted `pin.fill` at the end of its name line.
     pub(crate) pinned: bool,
 }
 
-/// A server in the chat list (D88 rule 1): the same row as a group — disc, name, preview,
-/// time, unread dot — sorted among the chats by last activity.
+/// A server in the chat list (D88 rule 1): disc, name, preview, time, unread count pill —
+/// sorted among the chats by last activity. Unlike a chat row it keeps its time and its
+/// count (`docs/mac-design-rules.md` § Row contents): a server is not in the reference.
 pub(crate) struct ServerRowView {
     pub(crate) server: ServerInfo,
     pub(crate) selected: bool,
@@ -969,7 +969,6 @@ fn unsorted_entries(shell: &Shell, cx: &Context<Shell>) -> Vec<ListEntry> {
                 .sum(),
             typing: !state.typing_in(&p.id).is_empty(),
             preview: hit.reason.unwrap_or_else(|| preview(state, p)),
-            time: time_label(last_activity(state, p)),
             person_image: p.person().and_then(|x| state.avatar(&x.avatar_url)),
             guests: shown_people
                 .into_iter()
@@ -1136,15 +1135,23 @@ pub const LIST_FADE_BAND: f32 = 14.0;
 /// softening the sidebar must not reshape every other list in the app.
 pub const ROW_RADIUS: f32 = 12.0;
 
-/// The vertical padding inside a sidebar row, which sets the row's pitch.
-///
-/// **This is the one value that decides how tall the rows are.** 11 pt gives a
-/// 69.5 pt pitch, which is what we ship; the approved mock measures 58 pt, so
-/// the mock is the *denser* of the two — about fourteen rows where we fit
-/// twelve. Jacob's brief asks for taller rows, which points the other way, so
-/// the number is kept here on its own rather than spread through the layout:
-/// settling the question costs one line.
-pub const ROW_PAD_Y: f32 = 11.0;
+/// **The one value that decides how tall sidebar rows are**: the distance
+/// from one row's top to the next, 58 pt on the approved reference
+/// (`docs/mac-design-rules.md` § Row pitch). We shipped 69.5 pt, so the
+/// reference is the *denser* of the two — about fourteen rows in the height
+/// where we fit twelve.
+pub const ROW_PITCH: f32 = 58.0;
+
+/// How far the selected pill is inset above and below inside the row's slot.
+/// The reference draws a 54 pt pill in a 58 pt slot; ours filled its slot edge
+/// to edge, so selected rows touched each other.
+pub const ROW_INSET_Y: f32 = 2.0;
+
+/// A row's own box — the pill the selection paints. Set as a height rather
+/// than as padding so [`ROW_PITCH`] is exact by construction: there is no
+/// content measurement in between that could be wrong. Both lines of text
+/// truncate, so nothing can grow past it.
+pub const ROW_HEIGHT: f32 = ROW_PITCH - 2.0 * ROW_INSET_Y;
 
 /// The wrapper is a flex column: the list inside keeps `flex_1 / min_h_0`, so
 /// it stays bounded and scrolls. (#1497's first try used a block div here —
@@ -1803,7 +1810,8 @@ fn render_server_row(
         .items_center()
         .gap(px(identity::ROW_GAP))
         .px(px(12.0))
-        .py(px(ROW_PAD_Y))
+        .h(px(ROW_HEIGHT))
+        .my(px(ROW_INSET_Y))
         .rounded(px(ROW_RADIUS))
         .map(|el| {
             if lifted {
@@ -1898,7 +1906,11 @@ fn render_server_row(
                                 .text_color(theme.text_muted)
                                 .child(preview),
                         )
-                        // Unread = the count pill, never a dot (Jacob, 2026-10-27).
+                        // A server row keeps its count pill where a chat row now
+                        // shows a dot: a server is not in the reference, so there is
+                        // nothing to match it to (`docs/mac-design-rules.md`
+                        // § Row contents). This is not the superseded 2026-10-27
+                        // "never a dot" rule, which no longer holds anywhere.
                         .when(unread, |el| {
                             el.child(crate::ui::marks::unread_pill(unread_count, theme))
                         }),
@@ -2304,10 +2316,10 @@ fn render_row(
         selected,
         streaming,
         unread,
-        unread_count,
+        // A chat row shows the unread dot, not a count (`unread_mark`).
+        unread_count: _,
         typing,
         preview,
-        time,
         person_image: _,
         guests: _,
         pinned,
@@ -2332,16 +2344,6 @@ fn render_row(
     // Groups: the chat title (custom or member handles from the relay),
     // matching iOS PeopleRow. DMs: the other person's display name.
     let name = row_name(&space);
-    // The name wins over the time as the column narrows: the time shrinks,
-    // then hides, and the `@handle` goes first (`ui::sidebar_fit::row_time`,
-    // [feedback sidebar-narrow-wrap-2026-10-27]).
-    let handle_shown = sidebar_fit::handle_shown(shell.state.read(cx).sidebar_width);
-    // A group row reads like an agent row: name and preview, no member count.
-    let handle = space
-        .person()
-        .filter(|_| space.is_people() && !space.is_people_group())
-        .filter(|_| handle_shown)
-        .map(|p| format!("@{}", p.handle));
     let preview = if typing {
         "typing…".to_string()
     } else {
@@ -2357,8 +2359,13 @@ fn render_row(
         .items_center()
         .gap(px(identity::ROW_GAP))
         .px(px(12.0))
-        .py(px(ROW_PAD_Y))
+        .h(px(ROW_HEIGHT))
+        .my(px(ROW_INSET_Y))
         .rounded(px(ROW_RADIUS))
+        .debug_selector({
+            let id = id.clone();
+            move || format!("row-{id}")
+        })
         .map(|el| {
             if lifted {
                 highlight::lifted(el, theme)
@@ -2465,25 +2472,8 @@ fn render_row(
                                 })
                                 .into_any_element()
                         })
-                        .when_some(handle, |el, h| {
-                            let handle_id = id.clone();
-                            el.child(
-                                div()
-                                    .flex_shrink_0()
-                                    .text_size(px(TEXT_TINY))
-                                    .text_color(theme.text_muted)
-                                    .debug_selector(move || format!("row-handle-{handle_id}"))
-                                    .child(h),
-                            )
-                        })
                         .child(div().flex_1())
-                        .when(pinned, |el| el.child(pin_mark(&id, theme)))
-                        .when_some(row_time_size(shell, cx), |el, size| {
-                            el.child(
-                                time_el(time, size, theme)
-                                    .debug_selector(|| format!("row-time-{id}")),
-                            )
-                        }),
+                        .when(pinned, |el| el.child(pin_mark(&id, theme))),
                 )
                 .child(
                     div()
@@ -2500,14 +2490,13 @@ fn render_row(
                                 .text_color(theme.text_muted)
                                 .child(preview),
                         )
-                        // The status cell under the time (Jacob, 2026-10-27): the
-                        // braille spinner while the chat's agent works (one shared
-                        // ticker); the unread count pill; nothing for a person typing
-                        // (the preview says "typing…") or a quiet read chat. Never a
-                        // coloured dot.
+                        // The status cell at the end of the preview line (Jacob,
+                        // 2026-10-27): the braille spinner while the chat's agent
+                        // works (one shared ticker); the unread mark; nothing for a
+                        // person typing (the preview says "typing…") or a quiet read
+                        // chat. Never a coloured status dot.
                         .children(row_status_cell(
                             RowStatus::of(streaming, typing, unread),
-                            unread_count,
                             &id,
                             theme,
                             cx,
@@ -2518,18 +2507,24 @@ fn render_row(
 
 /// What the status cell under a row's time shows (Jacob, 2026-10-27,
 /// [feedback working-braille-spinner-mac-2026-10-27] + [feedback
-/// neon-dots-mac-2026-10-27]). One cell, one mark, never a coloured dot: a
-/// person typing shows nothing in the cell (the spinner is the *agent's*
-/// working sign, never a human's; the preview reads "typing…"); the spinner
-/// while the chat's agent works; the unread **count pill** otherwise; a quiet
-/// read chat shows nothing.
+/// neon-dots-mac-2026-10-27]). One cell, one mark: a person typing shows
+/// nothing in the cell (the spinner is the *agent's* working sign, never a
+/// human's; the preview reads "typing…"); the spinner while the chat's agent
+/// works; the unread **dot** otherwise (see [`unread_mark`]); a quiet read
+/// chat shows nothing.
+///
+/// No coloured **status or progress** dot — that rule is unchanged, and the
+/// spinner and the fault glyph are what carry those. An unread dot is a
+/// count, and Jacob allowed it on 2026-11-05.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RowStatus {
     /// A person is typing: no mark in the cell (the preview carries it).
     Typing,
     /// The chat's agent is working: the braille spinner.
     Working,
-    /// Unread messages: the count pill.
+    /// Unread messages. On a chat row this is the 8 pt dot ([`unread_mark`]);
+    /// a server row keeps the count pill. The mark differs by row, so this
+    /// variant names the state and not the shape.
     Unread,
     /// Nothing.
     Quiet,
@@ -2550,13 +2545,7 @@ impl RowStatus {
     }
 }
 
-fn row_status_cell(
-    status: RowStatus,
-    unread_count: usize,
-    id: &Id,
-    theme: &Theme,
-    cx: &mut App,
-) -> Option<AnyElement> {
+fn row_status_cell(status: RowStatus, id: &Id, theme: &Theme, cx: &mut App) -> Option<AnyElement> {
     match status {
         RowStatus::Typing | RowStatus::Quiet => None,
         RowStatus::Working => Some(
@@ -2565,11 +2554,33 @@ fn row_status_cell(
                 .into_any_element(),
         ),
         RowStatus::Unread => Some(
-            crate::ui::marks::unread_pill(unread_count, theme)
+            unread_mark(theme)
                 .debug_selector(|| format!("row-status-unread-{id}"))
                 .into_any_element(),
         ),
     }
+}
+
+/// **The one place a chat row's unread mark is chosen.**
+///
+/// It is the 8 pt dot (`marks::unread_dot`), **not** the count pill.
+///
+/// **Do not restore the pill from the 2026-10-27 "never a dot" note.** That
+/// note is superseded by Jacob's 2026-11-05 ruling: "Unread dot is fine. No
+/// coloured dots refers to status or progress indicators." Unread is a count,
+/// not a status. The no-coloured-dots rule still governs status and progress
+/// — waking, faulted, working — and those are carried by the braille spinner
+/// (`ui::working`) and the fault glyph (`marks::fault_glyph`) only.
+///
+/// The dot also restores something the pill had taken away: the status cell
+/// is fixed so the row never re-flows while the spinner turns, and the pill
+/// is 16 pt wide before its digits and grows with each one. See
+/// `docs/mac-design-rules.md` § The unread mark.
+///
+/// What a user loses is the exact count at a glance; that section says where
+/// it still lives.
+fn unread_mark(theme: &Theme) -> Div {
+    crate::ui::marks::unread_dot(theme)
 }
 
 /// The right-click menu of a sidebar row, anchored at the click. An agent
@@ -3976,6 +3987,120 @@ mod row_bounds_tests {
 }
 
 #[cfg(test)]
+mod row_pitch_tests {
+    //! The reference's rows sit on a 58 pt pitch with a 54 pt pill between
+    //! them, measured on `design/grok-parity-2026-11-05/grok-reference.png`
+    //! two ways that agree — the spacing of the name text bands and the
+    //! spacing of the avatar centres, both 116 px at 2 px/pt.
+    //!
+    //! These tests render the real boxes and read their bounds, because the
+    //! arithmetic on its own would only be checking the constants against
+    //! themselves. The first test is the control: it recovers the pitch from
+    //! a laid-out row rather than from the formula that produced it.
+
+    use gpui::{div, prelude::*, px, TestAppContext};
+
+    use super::{ROW_HEIGHT, ROW_INSET_Y, ROW_PITCH};
+
+    /// A stack of rows framed as the list frames them: the row's own box with
+    /// its vertical inset, in a plain flex column.
+    struct Rows;
+
+    impl gpui::Render for Rows {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let mut list = div().flex().flex_col().w(px(280.0));
+            for i in 0..3 {
+                let sel: &'static str = Box::leak(format!("pitch-row-{i}").into_boxed_str());
+                list = list.child(
+                    div()
+                        .h(px(ROW_HEIGHT))
+                        .my(px(ROW_INSET_Y))
+                        .flex_shrink_0()
+                        .debug_selector(move || sel.into()),
+                );
+            }
+            div().w(px(280.0)).h(px(400.0)).child(list)
+        }
+    }
+
+    #[gpui::test]
+    fn rows_land_on_the_references_pitch_with_its_gap(cx: &mut TestAppContext) {
+        let (_view, vcx) = cx.add_window_view(|_, _| Rows);
+        vcx.run_until_parked();
+
+        let bounds: Vec<(f32, f32)> = (0..3)
+            .map(|i| {
+                let sel: &'static str = Box::leak(format!("pitch-row-{i}").into_boxed_str());
+                let b = vcx.debug_bounds(sel).expect("row drawn");
+                (b.origin.y.into(), b.bottom().into())
+            })
+            .collect();
+
+        for (i, (top, bottom)) in bounds.iter().enumerate() {
+            assert!(
+                (bottom - top - ROW_HEIGHT).abs() <= 0.5,
+                "row {i} is {} tall, expected the reference's {ROW_HEIGHT} pill",
+                bottom - top
+            );
+        }
+        for w in bounds.windows(2) {
+            let pitch = w[1].0 - w[0].0;
+            assert!(
+                (pitch - ROW_PITCH).abs() <= 0.5,
+                "rows sit {pitch} apart, expected the reference's {ROW_PITCH}"
+            );
+            let gap = w[1].0 - w[0].1;
+            assert!(
+                (gap - 2.0 * ROW_INSET_Y).abs() <= 0.5,
+                "selected pills would be {gap} apart, expected {} — they used to touch",
+                2.0 * ROW_INSET_Y
+            );
+        }
+    }
+
+    /// What we shipped, so the size of the change is on the record and a
+    /// later "correction" back toward it is a deliberate act. Counted off a
+    /// laid-out column rather than off the constants, so it is the rendering
+    /// that has to hold, not the arithmetic.
+    #[gpui::test]
+    fn the_reference_is_the_denser_of_the_two_designs(cx: &mut TestAppContext) {
+        const SHIPPED_PITCH: f32 = 69.5;
+        let (_view, vcx) = cx.add_window_view(|_, _| Rows);
+        vcx.run_until_parked();
+        let first: f32 = vcx
+            .debug_bounds("pitch-row-0")
+            .expect("row")
+            .origin
+            .y
+            .into();
+        let second: f32 = vcx
+            .debug_bounds("pitch-row-1")
+            .expect("row")
+            .origin
+            .y
+            .into();
+        let pitch = second - first;
+
+        // The height a dozen of the old rows filled.
+        let column = 12.0 * SHIPPED_PITCH;
+        let fits = (column / pitch).floor();
+        assert!(
+            pitch < SHIPPED_PITCH,
+            "rows draw {pitch} apart; the reference is denser than the {SHIPPED_PITCH} \
+             we shipped, not taller"
+        );
+        assert!(
+            fits >= 14.0,
+            "the column that held twelve rows now holds {fits}, expected fourteen"
+        );
+    }
+}
+
+#[cfg(test)]
 mod channel_preview_tests {
     //! A server row's "#general · …" preview labels a person as a group's preview does
     //! (`@handle:`), me as "You", an agent by name — never a bare handle as if it were a
@@ -4204,11 +4329,10 @@ mod status_cell_tests {
     use gpui::{AppContext as _, Bounds, Entity, Pixels, TestAppContext, VisualTestContext};
     use tokio::sync::mpsc;
 
-    use super::RowStatus;
+    use super::{RowStatus, ROW_HEIGHT};
     use crate::app::AppState;
     use crate::model::{Chat, Message, Person, Project, SpaceKind};
     use crate::sync::{ClientCommand, SyncEvent, SyncSource};
-    use crate::ui::marks::UNREAD_PILL_H;
     use crate::ui::motion::PulseClock;
     use crate::ui::shell::Shell;
     use crate::ui::theme::{Surface, Theme};
@@ -4371,30 +4495,23 @@ mod status_cell_tests {
         f32::from(b.origin.y) + f32::from(b.size.height) / 2.0
     }
 
-    /// The spinner sits exactly where the dot sat: its right edge is the time
-    /// label's right edge (the unread dot's too), it is centred on the preview
-    /// line, and it is the fixed cell. The unread row keeps its accent dot,
-    /// the quiet row shows nothing, the typing DM keeps its green pulse.
+    /// The spinner and the unread dot are the same cell in the same place:
+    /// at the right end of the preview line, sharing a right edge, centred on
+    /// that line. The row carries no time to sit under any more
+    /// (`docs/mac-design-rules.md` § Row contents), so the cell's own
+    /// geometry is what holds the slot still — which is the reason the dot
+    /// replaced the count pill, and this test is where that is checked.
     #[gpui::test]
-    fn the_spinner_sits_under_the_time_where_the_dot_was(cx: &mut TestAppContext) {
+    fn the_spinner_and_the_dot_are_one_cell_at_the_lines_end(cx: &mut TestAppContext) {
         let (_rt, _state, _shell, vcx) = mount(cx);
         let spinner = vcx
             .debug_bounds("row-status-working-working")
             .expect("the working agent's row draws the spinner");
-        let time = vcx
-            .debug_bounds("row-time-working")
-            .expect("its time label");
         let line = vcx
             .debug_bounds("row-preview-line-working")
             .expect("its preview line");
         assert_eq!(f32::from(spinner.size.width), CELL_W, "cell width");
         assert_eq!(f32::from(spinner.size.height), CELL_H, "cell height");
-        assert!(
-            close(right(spinner), right(time)),
-            "spinner right {} = time right {}",
-            right(spinner),
-            right(time)
-        );
         assert!(
             close(centre_y(spinner), centre_y(line)),
             "spinner centre {} = preview line centre {}",
@@ -4402,30 +4519,39 @@ mod status_cell_tests {
             centre_y(line)
         );
         assert!(
-            f32::from(spinner.origin.y)
-                > f32::from(time.origin.y) + f32::from(time.size.height) - 1.0,
-            "under the time, not beside it"
+            close(right(spinner), right(line)),
+            "spinner right {} = preview line right {}",
+            right(spinner),
+            right(line)
         );
 
-        let pill = vcx
+        assert!(
+            vcx.debug_bounds("row-time-working").is_none(),
+            "no row prints a time any more"
+        );
+        assert!(
+            vcx.debug_bounds("row-handle-dm").is_none(),
+            "no row prints an @handle any more"
+        );
+
+        let dot = vcx
             .debug_bounds("row-status-unread-unread")
-            .expect("the unread agent's row shows the count pill (never a dot)");
-        assert_eq!(f32::from(pill.size.height), UNREAD_PILL_H);
-        assert!(
-            f32::from(pill.size.width) >= UNREAD_PILL_H,
-            "at least as wide as tall"
+            .expect("the unread agent's row shows the dot");
+        assert_eq!(
+            f32::from(dot.size.width),
+            CELL_W,
+            "the dot takes the cell, so the row holds still when the mark changes"
+        );
+        assert_eq!(f32::from(dot.size.height), CELL_H);
+        assert_eq!(
+            dot.size, spinner.size,
+            "spinner and dot are the same box: that is the whole point of the cell"
         );
         assert!(
-            close(
-                right(pill),
-                right(vcx.debug_bounds("row-time-unread").expect("time"))
-            ),
-            "the pill ends under its time too"
+            close(right(dot), right(spinner)),
+            "dot and spinner share the right edge"
         );
-        assert!(
-            close(right(pill), right(spinner)),
-            "pill and spinner share the right edge under the time"
-        );
+
         assert!(
             vcx.debug_bounds("row-status-working-unread").is_none(),
             "an unread row that is not working shows no spinner"
@@ -4518,17 +4644,21 @@ mod status_cell_tests {
         );
     }
 
-    /// Where a row's `@handle` sits against its own preview line — the one
-    /// measure that is the same for every DM row whatever its name is drawn with.
-    fn handle_offset(vcx: &mut VisualTestContext, id: &'static str) -> (f32, f32) {
-        let handle = vcx
+    /// Where a row's preview line sits inside the row, and how tall the row
+    /// is — the two measures that are the same for every DM row whatever its
+    /// name is drawn with. This used to probe the `@handle`, which the row no
+    /// longer carries (`docs/mac-design-rules.md` § Row contents); the
+    /// regression it guards is about the *name*, so the probe moved rather
+    /// than the test going away.
+    fn row_metrics(vcx: &mut VisualTestContext, id: &'static str) -> (f32, f32) {
+        let row = vcx
             .debug_bounds(match id {
-                "dm" => "row-handle-dm",
-                "dm-emoji" => "row-handle-dm-emoji",
-                "dm-mixed" => "row-handle-dm-mixed",
+                "dm" => "row-dm",
+                "dm-emoji" => "row-dm-emoji",
+                "dm-mixed" => "row-dm-mixed",
                 _ => unreachable!(),
             })
-            .unwrap_or_else(|| panic!("{id}: the DM row shows its @handle"));
+            .unwrap_or_else(|| panic!("{id}: the DM row"));
         let line = vcx
             .debug_bounds(match id {
                 "dm" => "row-preview-line-dm",
@@ -4538,16 +4668,17 @@ mod status_cell_tests {
             })
             .unwrap_or_else(|| panic!("{id}: its preview line"));
         (
-            f32::from(line.origin.y) - f32::from(handle.origin.y),
-            f32::from(handle.size.height),
+            f32::from(line.origin.y) - f32::from(row.origin.y),
+            f32::from(row.size.height),
         )
     }
 
     /// [feedback emoji-name-handle-offset-mac-2026-10-28]: a DM whose person is
-    /// named with one emoji (and one with a mixed name) draws its `@handle` at
-    /// the same height as a text name's — and the rows stay the same height.
+    /// named with one emoji (and one with a mixed name) lays out exactly as a
+    /// text name's does — same preview line, same row height. A taller glyph
+    /// in the name must not push the row around.
     #[gpui::test]
-    fn an_emoji_name_keeps_the_dm_rows_handle_where_text_names_have_it(cx: &mut TestAppContext) {
+    fn an_emoji_name_lays_the_dm_row_out_as_a_text_name_does(cx: &mut TestAppContext) {
         let (_rt, state, shell, vcx) = mount(cx);
         let now = crate::model::now_ms();
         state.update(vcx, |s, cx| {
@@ -4577,23 +4708,21 @@ mod status_cell_tests {
             shell.update(vcx, |_, cx| cx.notify());
             vcx.run_until_parked();
         }
-        let text = handle_offset(vcx, "dm");
-        let emoji = handle_offset(vcx, "dm-emoji");
-        let mixed = handle_offset(vcx, "dm-mixed");
+        let text = row_metrics(vcx, "dm");
+        let emoji = row_metrics(vcx, "dm-emoji");
+        let mixed = row_metrics(vcx, "dm-mixed");
         assert_eq!(
             emoji, text,
-            "emoji name: handle offset / height as for text"
+            "emoji name: preview line offset / row height as for text"
         );
         assert_eq!(
             mixed, text,
-            "mixed name: handle offset / height as for text"
+            "mixed name: preview line offset / row height as for text"
         );
-        let row_h = |vcx: &mut VisualTestContext, sel: &'static str| {
-            f32::from(vcx.debug_bounds(sel).expect(sel).size.height)
-        };
-        let text_h = row_h(vcx, "row-preview-line-dm");
-        assert_eq!(row_h(vcx, "row-preview-line-dm-emoji"), text_h);
-        assert_eq!(row_h(vcx, "row-preview-line-dm-mixed"), text_h);
+        assert_eq!(
+            text.1, ROW_HEIGHT,
+            "and every one of them is the reference's row"
+        );
     }
 }
 
@@ -4743,7 +4872,7 @@ mod pin_tests {
             );
         }
         assert!(
-            vcx.debug_bounds("row-time-arbos").is_some(),
+            vcx.debug_bounds("row-preview-line-arbos").is_some(),
             "the list is drawn"
         );
     }
@@ -4771,8 +4900,14 @@ mod pin_tests {
         let affine = vcx
             .debug_bounds("row-pin-affine")
             .expect("Affine's pin mark");
-        let arbos = vcx.debug_bounds("row-time-arbos").expect("Arbos, unpinned");
-        let lium = vcx.debug_bounds("row-time-lium").expect("Lium, unpinned");
+        // The row's preview line stands for the row; it used to be the time,
+        // which no row prints now (`docs/mac-design-rules.md` § Row contents).
+        let arbos = vcx
+            .debug_bounds("row-preview-line-arbos")
+            .expect("Arbos, unpinned");
+        let lium = vcx
+            .debug_bounds("row-preview-line-lium")
+            .expect("Lium, unpinned");
         assert!(top(header) < top(dm), "header above the first pin");
         assert!(
             top(dm) < top(srv) && top(srv) < top(affine),

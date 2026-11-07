@@ -144,24 +144,35 @@ final class WorkingSpinnerTests: XCTestCase {
         XCTAssertEqual(RowStatus.of(streaming: false, unread: false), .quiet)
     }
 
-    func testAPeopleRowsCountPillWinsTheSlotOverTheSpinner() throws {
-        // Information over animation: `PeopleRow` shows the unread count pill ahead
-        // of the spinner; the spinner replaces only the plain dot. Pinned on the
-        // source's branch order (the row is a view, not a pure function).
+    func testTheSpinnerWinsAPeopleRowsSlotAndNoPillCompetesForIt() throws {
+        // A convergence, not a reversal (`docs/mac-design-rules.md` § Which
+        // mark wins when a row is both working and unread). `RowStatus.of`
+        // has always tested `streaming` first, and `AgentRow` has always
+        // followed it. `PeopleRow` was the one place that did not use
+        // `RowStatus` at all: it ran its own chain with the count pill ahead
+        // of the spinner, on "information over animation". The pill is gone
+        // from a home row (Jacob 2026-11-05, `UnreadDot`), so the information
+        // that argument rested on is gone with it, and this row now follows
+        // the shared rule. Pinned on the source's branch order, because the
+        // row is a view, not a pure function.
         let path = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("Arbos/UI/HomeView.swift").path
         let source = try String(contentsOfFile: path, encoding: .utf8)
         guard let peopleRow = source.range(of: "struct PeopleRow: View") else { return XCTFail("PeopleRow not found") }
-        let body = source[peopleRow.lowerBound...]
-        let pill = body.range(of: "if count > 0 {")
-        let spinner = body.range(of: "} else if streaming {")
-        let dot = body.range(of: "} else if unread {")
-        XCTAssertNotNil(pill); XCTAssertNotNil(spinner); XCTAssertNotNil(dot)
-        if let pill, let spinner, let dot {
-            XCTAssertLessThan(pill.lowerBound, spinner.lowerBound, "the count pill is tested first")
-            XCTAssertLessThan(spinner.lowerBound, dot.lowerBound, "the spinner beats the plain dot")
+        // Stop at the next top-level declaration, so a later row's code cannot
+        // answer for this one.
+        let rest = source[peopleRow.upperBound...]
+        let body = rest[..<(rest.range(of: "\nstruct ")?.lowerBound ?? rest.endIndex)]
+        let spinner = body.range(of: "if streaming {")
+        let dot = body.range(of: "} else if unread || count > 0 {")
+        XCTAssertNotNil(spinner, "the spinner branch")
+        XCTAssertNotNil(dot, "the unread branch, which a count only triggers")
+        if let spinner, let dot {
+            XCTAssertLessThan(spinner.lowerBound, dot.lowerBound, "the spinner is tested first")
         }
+        XCTAssertNil(body.range(of: "UnreadMark("),
+                     "a home row draws no count pill; `UnreadMark` is for server and channel rows")
     }
 
     func testTheSpinnerCellLaysOutAtTheDotsSize() {
