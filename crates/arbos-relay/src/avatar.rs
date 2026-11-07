@@ -103,8 +103,9 @@ pub fn effective_disc(p: &crate::db::Project) -> u8 {
 
 /// Validate `avatar_disc_color` from a request body. Besides the colour index it accepts
 /// [`disc::NEUTRAL`] (255) — "no picture": the Create sheets store it when nothing was uploaded
-/// or generated, and the clients draw the name's initial on a neutral grey disc (Jacob,
-/// 2026-10-25). `null` stays the automatic colour.
+/// or generated, and deployed clients still send it. It names no colour of its own, so
+/// [`disc::color_for`] resolves it exactly as `null`, to the id's automatic colour (Jacob,
+/// 2026-11-06). `null` is unchanged.
 pub fn check_disc_color(color_idx: Option<i64>) -> Result<(), (axum::http::StatusCode, String)> {
     let neutral = i64::from(disc::NEUTRAL);
     if let Some(c) = color_idx {
@@ -131,7 +132,7 @@ pub fn discs_json() -> Value {
             "color": "hash mod 10",
             "render": "fill the circle with colors[color].hex; no glyph",
             "override": "avatar_disc_color 0–9 on PATCH /projects/{id}; null = automatic",
-            "neutral": "avatar_disc_color = 255: no picture — draw the name's first letter on a neutral disc (dark #3A3A3A / #E5E5E5, light #E6E6E6 / #4A4A4A); never an automatic colour",
+            "neutral": "avatar_disc_color = 255 means no picture was chosen. It names no colour of its own: resolve it exactly as null, to the automatic colour from the rule above. Every project also carries avatar_disc_color_effective, the colour this relay resolved — prefer it over deriving your own. Before 2026-11-06 this value asked for the name's first letter on a grey disc; no client draws one now.",
         },
         "colors": disc::COLORS.iter().enumerate().map(|(i, c)| json!({
             "index": i, "name": c.name, "hex": c.rgb.hex(),
@@ -420,6 +421,49 @@ mod tests {
         assert_eq!(effective_disc(&stored), disc::default_color("01M5AGENT"));
         assert!(effective_disc(&stored) < disc::COLOR_COUNT);
         assert_eq!(effective_disc(&stored), 7, "cross-surface vector");
+    }
+
+    /// Jacob, 2026-11-07. `GET /avatar-discs` is the only account of the disc rule a client
+    /// outside this tree has, so it has to describe the resolution the relay performs rather
+    /// than the grey disc the clients drew before 2026-11-06.
+    ///
+    /// The clause is corrected and not dropped. `255` is still a value deployed clients send
+    /// and still sits in stored rows, so a rule that said nothing about it would leave a third
+    /// client to guess — and the published rule is the only place that gives it a meaning.
+    #[test]
+    fn the_published_rule_describes_the_resolution_the_relay_performs() {
+        let rule = discs_json()["rule"].clone();
+        let neutral = rule["neutral"]
+            .as_str()
+            .expect("255 keeps a published meaning");
+
+        // What a third client should now do with 255, and where to read the answer off a payload.
+        assert!(
+            neutral.contains("null"),
+            "255 is defined by what it resolves to"
+        );
+        assert!(neutral.contains("avatar_disc_color_effective"));
+
+        // What the rule no longer promises: the sentence that contradicted every client, and
+        // the two greys it named.
+        assert!(!neutral.contains("never an automatic colour"));
+        assert!(!neutral.contains("#3A3A3A") && !neutral.contains("#E6E6E6"));
+
+        // The promise and the read path are one claim, so they are checked against each other.
+        let project = |pick: Value| -> crate::db::Project {
+            serde_json::from_value(json!({
+                "id": "01M5AGENT", "name": "A", "icon": "", "instructions": "",
+                "models": {}, "state": "ready", "created_at": 0, "last_active_at": 0,
+                "spend_cap_daily": 1.0, "color": "", "user_id": "u",
+                "workspace_state": "stopped", "avatar_leaf_color": pick,
+            }))
+            .unwrap()
+        };
+        assert_eq!(
+            effective_disc(&project(json!(i64::from(disc::NEUTRAL)))),
+            effective_disc(&project(json!(null))),
+            "the rule says 255 resolves as null; the relay must agree"
+        );
     }
 
     #[test]
