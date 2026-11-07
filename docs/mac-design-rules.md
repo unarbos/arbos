@@ -798,6 +798,29 @@ its digits and grows with each one, so it had been breaking that invariant.
 reaches the app icon badge, and opening a chat still shows the "NEW" divider
 at the boundary.
 
+### Which mark wins when a row is both working and unread
+
+**The spinner. One cell, one mark, and the spinner takes it.** A row whose
+agent is working shows the spinner even when the row is also unread; the dot
+appears only once the work stops.
+
+This is not new and was not decided here. Both clients' `RowStatus::of`
+test `streaming` first and have always done so — `sidebar.rs` on the Mac,
+`HomeView.swift` on the iPhone — and the Mac sidebar and the iPhone's
+`AgentRow` have always followed it.
+
+The one place that disagreed was the iPhone's `PeopleRow`, which did not use
+`RowStatus` at all. It ran its own chain with the count pill ahead of the
+spinner, on "information over animation": a number tells you more than an
+animation, so the number won. Removing the pill removes the information that
+argument rested on, and `PeopleRow` now follows the shared rule like
+everything else.
+
+So the honest description of the change is **a convergence, not a reversal**.
+Before this item the app held two contradictory rules and a passing test for
+each. If you are restoring a precedence here, change `RowStatus::of` and let
+every row follow, rather than giving one row its own chain again.
+
 ## Row pitch (Jacob 2026-11-06, same reference)
 
 **58 pt, and the selected pill is 54 pt inside it.**

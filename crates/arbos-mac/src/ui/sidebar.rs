@@ -1906,7 +1906,11 @@ fn render_server_row(
                                 .text_color(theme.text_muted)
                                 .child(preview),
                         )
-                        // Unread = the count pill, never a dot (Jacob, 2026-10-27).
+                        // A server row keeps its count pill where a chat row now
+                        // shows a dot: a server is not in the reference, so there is
+                        // nothing to match it to (`docs/mac-design-rules.md`
+                        // § Row contents). This is not the superseded 2026-10-27
+                        // "never a dot" rule, which no longer holds anywhere.
                         .when(unread, |el| {
                             el.child(crate::ui::marks::unread_pill(unread_count, theme))
                         }),
@@ -2518,7 +2522,9 @@ pub enum RowStatus {
     Typing,
     /// The chat's agent is working: the braille spinner.
     Working,
-    /// Unread messages: the count pill.
+    /// Unread messages. On a chat row this is the 8 pt dot ([`unread_mark`]);
+    /// a server row keeps the count pill. The mark differs by row, so this
+    /// variant names the state and not the shape.
     Unread,
     /// Nothing.
     Quiet,
