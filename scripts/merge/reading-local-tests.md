@@ -1350,6 +1350,55 @@ satisfied — gate 5 asks whether the code compiles. It does **not** follow that
 CI's toolchain: that needs the pinned release, and `check` says so when the compiler it found is
 not the pin. Report the compile as having cleared the floor, not as having used CI's build.
 
+### Gate 5 is a WHOLE-WORKSPACE check, not a per-crate one — and why that is stronger
+
+The `-p <crate>` form is a workaround for a problem that is solved, and
+`scripts/workspace-test-deps.sh`'s own header says so in those words. Run the whole workspace:
+
+```sh
+./scripts/workspace-test-deps.sh cargo check --workspace --all-targets --locked
+```
+
+**Use the wrapper form.** The script's job is half install and half `export CC`/`CXX`, and the
+exports reach only the shell it wraps. Piping it — `… | tail -3` — throws the exports away while
+the install still succeeds, which produces the most confusing possible outcome: the box now *has*
+clang 21 and the build that follows still panics in `webrtc-sys`. That failure has been
+misdiagnosed twice as "the workspace cannot be built locally".
+
+**Why whole-workspace is a real strengthening rather than a convenience.** A per-crate compile
+cannot see a signature change rippling into a crate the PR does not name — and that is precisely
+what a rebase onto a moved trunk introduces, which is the failure gate 5 exists to catch. Scoping
+to the crates in the diff scopes out the only interactions the gate is there to find. All twelve
+members are covered by `--workspace`, and `--all-targets` reaches every test target.
+
+#### Budget three separate costs, because conflating them is how this got mis-stated twice
+
+| cost | measured | pay it |
+| --- | --- | --- |
+| LLVM install (download + unpack) | **~13 min** | once per box |
+| workspace check, **cold** cargo cache | **4m 40s** | once per box |
+| workspace check, **warm** | **~1m 42s** | every gate 5 |
+
+**The install is NOT in the environment image — verify, do not assume.** Checked independently on
+two boxes and false on both: `/usr/lib/llvm-21` post-dates boot (on one box by 27 minutes, on
+another by 6h30m), the files inside carry the upstream tarball's own `2025-12-16` dates, and a
+fresh login shell still reports `clang 18.1.3` with empty `CC`/`CXX`. It is **per-box runtime
+state left by an earlier run of the script**, so a box that has not run it hits the same
+`webrtc-sys` panic — per-crate builds included.
+
+```sh
+uptime -s; stat -c '%n %z' /usr/lib/llvm-21        # directory newer than boot ⇒ runtime, not baked
+env -i bash -lc 'clang --version | head -1'        # what a fresh shell actually gets
+```
+
+Keep three claims apart, because they travel as one and only the first is unconditional: **the
+script works**; **this box has clang 21**; **the image carries it**. The second is per-run state
+and the third has been false every time it was checked.
+
+**For a lane running gate 5 across a long queue, paying the thirteen minutes once is clearly
+worth it** — but it is a setup step to take deliberately at the start, not a capability that is
+simply there. Take it before the first merge, not mid-sequence with a window open.
+
 ## `image.yml`: the step that always fails is load-bearing
 
 `Register the Daytona snapshot` in `image.yml` has failed on **every** image run since 0.1.183 —
