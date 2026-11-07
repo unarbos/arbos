@@ -275,18 +275,83 @@ fn shell_script(body: String) -> Response {
 mod tests {
     use super::*;
 
+    /// Does this text carry something shaped like a live credential: one of the relay's key
+    /// prefixes followed by the forty hex characters a mint produces?
+    ///
+    /// The prefix alone is not the shape. Every one of these texts names its prefix on purpose,
+    /// to tell the reader what a key looks like, so a guard may only fire on the whole shape.
+    fn carries_a_key(text: &str) -> bool {
+        [crate::outside::KEY_PREFIX, crate::agent_link::TOKEN_PREFIX]
+            .iter()
+            .flat_map(|prefix| text.match_indices(prefix).map(|(i, p)| i + p.len()))
+            .any(|at| {
+                text[at..]
+                    .chars()
+                    .take(40)
+                    .filter(char::is_ascii_hexdigit)
+                    .count()
+                    == 40
+            })
+    }
+
+    /// No served text carries a live key, asserted on the key's shape rather than on a guess at
+    /// its first character. These three name their prefixes in prose on purpose, so they cannot
+    /// use the strict form `agent_link` uses for its own sheet (`!SHEET.contains(TOKEN_PREFIX)`),
+    /// which is why the shape is the right predicate here.
+    ///
+    /// The guard this replaces was `!contains("arbk_7") && !contains("arbk_0")`. A minted key is
+    /// forty lowercase hex characters, so its first is uniformly one of sixteen: that guard
+    /// caught one pasted key in eight and waved seven through. The predicate, not the subject,
+    /// was the weak part — `LLMS_TXT` is a global constant that the assertions above already pin
+    /// positively — which is why this is one predicate rather than a restructured test.
     #[test]
-    fn texts_name_the_relay_and_no_secret() {
+    fn no_served_text_carries_a_key() {
+        for (name, text) in [
+            ("llms.txt", LLMS_TXT),
+            ("sidecar-install.sh", INSTALL_SH),
+            ("acp-install.sh", ACP_INSTALL_SH),
+        ] {
+            assert!(!carries_a_key(text), "{name} carries a live key");
+        }
+
+        // The control an absence assertion cannot have on its own: the predicate catches a real
+        // key, so the three passes above mean the texts are clean rather than the check is blind.
+        let minted = crate::outside::mint_key();
+        assert!(carries_a_key(&minted), "{minted} is a minted key");
+        assert!(
+            carries_a_key(&format!("paste it here: {minted} and keep reading")),
+            "a key embedded in prose is still a key"
+        );
+        // And it does not fire on the prefixes the texts legitimately name.
+        assert!(!carries_a_key("the key looks like arbk_ plus 40 hex"));
+        assert!(!carries_a_key("your bearer is arbl_<secret>"));
+    }
+
+    #[test]
+    fn texts_name_the_relay_and_the_installer_never_handles_the_key() {
         assert!(LLMS_TXT.contains("/sidecar/install.sh"));
         assert!(LLMS_TXT.contains("ask your user"));
-        // The instructions describe the key's shape and never carry a real one.
-        assert!(!LLMS_TXT.contains("arbk_7") && !LLMS_TXT.contains("arbk_0"));
         assert!(INSTALL_SH.starts_with("#!/bin/sh"));
         assert!(INSTALL_SH.contains("\" init --relay"));
         assert!(INSTALL_SH.contains("install-service"));
-        // The installer never echoes the key.
-        assert!(!INSTALL_SH.contains("echo \"$KEY\""));
-        assert!(!INSTALL_SH.contains("echo $KEY"));
+        // The key never passes through the shell at all: the binary reads it from /dev/tty, or
+        // the caller pipes it to `--key-stdin`. So the invariant is not "the installer does not
+        // echo $KEY" in some particular spelling - the two spellings the old guard enumerated
+        // missed `printf '%s' "$KEY"` and `echo ${KEY}` - but that no key variable exists for a
+        // later edit to print.
+        let holds_the_key = INSTALL_SH.contains("${KEY}")
+            || INSTALL_SH.match_indices("$KEY").any(|(at, m)| {
+                // `$KEY_STDIN` is the flag, not the key.
+                !INSTALL_SH[at + m.len()..]
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_alphanumeric() || c == '_')
+            });
+        assert!(
+            !holds_the_key,
+            "the installer must not hold the key in a variable"
+        );
+        assert!(INSTALL_SH.contains("--key-stdin"));
     }
 
     /// The ACP connect is one command, and the script is the thing a sceptical agent reads

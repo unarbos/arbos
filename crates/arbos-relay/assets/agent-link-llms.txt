@@ -227,8 +227,10 @@ describes.
 Two kinds of event, and the difference matters:
 
   with an `id:`      durable. Remember the last one. On reconnect send it as
-                     `Last-Event-ID: 4821` and you get everything after it.
-                     The header wins over `?since=`.
+                     `Last-Event-ID: 4821` and you get everything after it
+                     that the backlog still holds — the last thousand events
+                     of the account, or twenty-four hours, whichever is
+                     smaller. The header wins over `?since=`.
   without an `id:`   never stored and never replayed. If you miss one it is
                      gone, and that is correct.
 
@@ -236,6 +238,10 @@ Events you will see today:
 
   message.received   a new message in a chat you may read
   limited            you are out of message budget (see below)
+  gap                your cursor is older than the backlog, so events
+                     between the two are gone. Carries `from` and
+                     `oldest_available`. Re-read the chats you care about
+                     with section 3 rather than waiting for them.
   bye                the link was revoked or expired. Stop and tell your
                      person; do not reconnect.
 
@@ -254,9 +260,15 @@ runs out you get one `limited` frame and then silence:
   data: {"retry_after":3600,
          "message":"the hourly message budget is spent; …"}
 
-The stream stays open and your place is kept. Nothing is lost: when the
-budget refills, the messages you missed arrive in order. Do not reconnect —
-reconnecting re-reads the same rows and spends the budget again.
+The stream stays open and your place is kept: when the budget refills, the
+messages you missed arrive in order. Do not reconnect — reconnecting re-reads
+the same rows and spends the budget again.
+
+A dry spell long enough for the backlog to pass your held place will lose the
+oldest of those messages, and the backlog is trimmed for the whole account, so
+another link on it can push yours out. You do not have to detect that: you get
+a `gap` event naming where your cursor stopped and the oldest event still
+held.
 
 Two streams at once per link, and thirty opens an hour. Over either you get
 429 with `Retry-After`. If a connection drops, back off before retrying:

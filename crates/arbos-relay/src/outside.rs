@@ -386,6 +386,18 @@ impl crate::db::Db {
         })
     }
 
+    /// The oldest inbox event still held for a project, or 0 when none is. A cursor below this
+    /// has lost the events in between to `prune_asp_events`.
+    pub fn asp_events_oldest(&self, project_id: &str) -> anyhow::Result<i64> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT COALESCE(MIN(id), 0) FROM asp_events WHERE project_id = ?1",
+                params![project_id],
+                |r| r.get(0),
+            )
+        })
+    }
+
     pub fn asp_events_head(&self, project_id: &str) -> anyhow::Result<i64> {
         self.with(|c| {
             c.query_row(
@@ -1597,7 +1609,7 @@ pub struct InboxQuery {
     pub context: usize,
 }
 
-fn events_json(events: Vec<(i64, Value)>, since: i64) -> Value {
+fn events_json(events: Vec<(i64, Value)>, since: i64, oldest: Option<i64>) -> Value {
     let next = events.last().map(|(id, _)| *id).unwrap_or(since);
     let list: Vec<Value> = events
         .into_iter()
@@ -1606,7 +1618,30 @@ fn events_json(events: Vec<(i64, Value)>, since: i64) -> Value {
             e
         })
         .collect();
-    json!({ "events": list, "next": next })
+    let mut out = json!({ "events": list, "next": next });
+    // The inbox is pruned (`prune_asp_events`), so a cursor older than the oldest surviving row
+    // has lost the events in between. `id > since` returns the survivors and is indistinguishable
+    // from a cursor that missed nothing, so the reader is told rather than left to assume: an
+    // agent that was offline past the horizon can re-read the chats it cares about from history.
+    if let Some(oldest) = oldest {
+        out["gap"] = json!({ "from": since, "oldest_available": oldest });
+    }
+    out
+}
+
+/// Did a cursor fall off the inbox's retention window? `None` when nothing was lost, which is
+/// every ordinary call.
+fn inbox_gap(state: &AppState, project_id: &str, since: i64) -> Option<i64> {
+    if since <= 0 {
+        return None;
+    }
+    let oldest = state.db.asp_events_oldest(project_id).ok()?;
+    if oldest == 0 {
+        // Nothing is held. Loss cannot be ruled out unless this account never got that far.
+        let head = state.db.asp_events_head(project_id).unwrap_or(0);
+        return (head < since).then_some(0);
+    }
+    (oldest > since + 1).then_some(oldest)
 }
 
 /// `GET /asp/inbox?since=<id>&wait=<s>` — events after `since`; parks up to `wait` seconds (≤ 25)
@@ -1627,6 +1662,8 @@ pub async fn inbox(
     let wait = q.wait.min(WAIT_MAX_S);
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(wait);
     let n = waiter(&me.project.id);
+    // Measured once: the loss is already in the past, and parking for 25 s cannot undo it.
+    let gap = inbox_gap(&state, &me.project.id, q.since);
     loop {
         // Register interest *before* reading the table: `notify_waiters` wakes only waiters that
         // already exist, so an event stored between the read and the wait would otherwise park
@@ -1640,12 +1677,12 @@ pub async fn inbox(
             .unwrap_or_default();
         if !events.is_empty() || wait == 0 {
             crate::outside_sidecar::attach_context(&state, &me.project, &mut events, q.context);
-            return Json(events_json(events, q.since)).into_response();
+            return Json(events_json(events, q.since, gap)).into_response();
         }
         tokio::select! {
             _ = &mut notified => {}
             _ = tokio::time::sleep_until(deadline) => {
-                return Json(events_json(Vec::new(), q.since)).into_response();
+                return Json(events_json(Vec::new(), q.since, gap)).into_response();
             }
         }
     }
@@ -2458,11 +2495,17 @@ async fn run_socket(
 ) {
     let (mut sink, mut stream) = socket.split();
     let pid = me.project.id.clone();
-    let hello = json!({
+    let mut hello = json!({
         "type": "hello", "protocol": PROTOCOL,
         "agent": { "id": pid, "name": me.project.name, "handle": handle_of(&me.project) },
         "since": cursor,
     });
+    // The socket resumes from a cursor exactly as the inbox does, so it owes the same answer:
+    // a cursor older than the retained window has lost events, and nothing in the pushed stream
+    // would show it.
+    if let Some(oldest) = inbox_gap(&state, &pid, cursor) {
+        hello["gap"] = json!({ "from": cursor, "oldest_available": oldest });
+    }
     if sink
         .send(Message::Text(hello.to_string().into()))
         .await
@@ -2756,6 +2799,9 @@ pub async fn spawn_sweeper(state: AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::people::tests_support::{person, project_of};
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
 
     fn project(name: &str) -> Project {
         Project {
@@ -3944,6 +3990,90 @@ mod tests {
         assert_eq!(a.status(), "away");
         a.revoked_at = Some(1);
         assert_eq!(a.status(), "revoked");
+    }
+
+    /// The inbox is pruned, so an agent offline past the horizon has lost events — and `since`
+    /// alone cannot show it, because `id > since` returns the survivors and looks like a cursor
+    /// that missed nothing. A `gap` object says so.
+    ///
+    /// A pair of counts rather than one absence: the test plants its own events, so a wrong
+    /// project id returns no events and no gap, which neither half accepts.
+    #[tokio::test]
+    async fn a_cursor_past_the_inbox_prune_is_told_and_an_intact_one_is_not() {
+        let state = test_state(AuthMode::Github);
+        let (owner, _) = person(&state, 7401);
+        let pid = project_of(&state, &owner, "Gap Bot");
+        let key = mint_key();
+        state
+            .db
+            .insert_outside_agent(&pid, &owner, "custom", &hash(&key))
+            .unwrap();
+        let agent = state
+            .db
+            .outside_agent_by_key_hash(&hash(&key))
+            .unwrap()
+            .unwrap();
+        let project = state.db.project(&pid).unwrap().unwrap();
+
+        let ids: Vec<i64> = (0..4)
+            .map(|n| {
+                state
+                    .db
+                    .insert_asp_event(&pid, &json!({ "type": "message.received", "n": n }))
+                    .unwrap()
+            })
+            .collect();
+
+        let ask = |since: i64| {
+            let me = AgentPrincipal {
+                agent: agent.clone(),
+                project: project.clone(),
+            };
+            let state = state.clone();
+            async move {
+                let r = inbox(
+                    State(state),
+                    me,
+                    Query(InboxQuery {
+                        since,
+                        wait: 0,
+                        limit: None,
+                        context: 0,
+                    }),
+                )
+                .await;
+                let b = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
+                serde_json::from_slice::<Value>(&b).unwrap()
+            }
+        };
+
+        // Intact: the cursor is still inside the window, so there is no gap to report.
+        let intact = ask(ids[0]).await;
+        assert_eq!(intact["events"].as_array().unwrap().len(), 3);
+        assert_eq!(intact["gap"], Value::Null, "nothing was pruned: {intact}");
+
+        // Pruned: the two oldest rows age out, and the same cursor has now lost one.
+        state
+            .db
+            .with(|c| {
+                c.execute(
+                    "DELETE FROM asp_events WHERE project_id = ?1 AND id <= ?2",
+                    params![&pid, ids[1]],
+                )
+                .map(|_| ())
+            })
+            .unwrap();
+        let lost = ask(ids[0]).await;
+        assert_eq!(
+            lost["events"].as_array().unwrap().len(),
+            2,
+            "the survivors, all of them: {lost}"
+        );
+        assert_eq!(lost["gap"]["from"], ids[0]);
+        assert_eq!(
+            lost["gap"]["oldest_available"], ids[2],
+            "the floor to re-read from: {lost}"
+        );
     }
 }
 

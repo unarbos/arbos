@@ -277,6 +277,19 @@ impl Db {
         })
     }
 
+    /// The oldest event id still held for an account, or 0 when the backlog is empty. A cursor
+    /// below this has lost the events in between to [`BACKLOG_ROWS`] or [`BACKLOG_MS`], and no
+    /// reader can work that out from its own cursor.
+    pub fn link_events_oldest(&self, user_id: &str) -> anyhow::Result<i64> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT COALESCE(MIN(id), 0) FROM link_events WHERE user_id = ?1",
+                params![user_id],
+                |r| r.get(0),
+            )
+        })
+    }
+
     /// The newest event id of an account, or 0. A stream opened without a cursor starts here:
     /// "from now on" is what a fresh connection means, and replaying a day of backlog to an
     /// agent that never asked for it would spend the owner's read budget on history it has.
@@ -443,6 +456,7 @@ pub async fn stream(
         pending,
         headers,
         told_limited: false,
+        gap_told: false,
         done: false,
         _open: open,
     };
@@ -465,6 +479,10 @@ struct Watch {
     /// Has the agent already been told it is out of message budget? Said once per dry spell,
     /// not once per wake.
     told_limited: bool,
+    /// Has the agent already been told its cursor fell off the backlog? Said once per gap:
+    /// cleared when rows are delivered, because the cursor can fall behind again during a dry
+    /// spell that holds it.
+    gap_told: bool,
     done: bool,
     /// Holds the stream slot and writes the closing audit row. Dropped when the stream ends —
     /// including when the agent simply disconnects, which is how most streams end and which no
@@ -525,9 +543,61 @@ fn frames(watch: Watch) -> impl Stream<Item = Result<Event, std::convert::Infall
     })
 }
 
+/// Has this stream's cursor fallen off the backlog, and if so, say it once.
+///
+/// The backlog is bounded by [`BACKLOG_ROWS`] and [`BACKLOG_MS`] and trimmed **per account** on
+/// every insert, so events between a cursor and the oldest surviving row are gone. A reader
+/// cannot detect that: `id > cursor` returns the surviving rows and looks exactly like a stream
+/// with nothing missed. Without this, "send `Last-Event-ID` and you get everything after it" is
+/// a promise the reader has no way to check.
+///
+/// It is checked on every pass rather than only at open, because the cursor can fall behind
+/// while the stream is connected: the read budget holds the cursor for up to an hour, and the
+/// cap is per account, so another link's traffic can prune past it in the meantime.
+///
+/// The event carries no `id:`, so it is not a cursor and is never replayed.
+fn gap_check(w: &mut Watch) {
+    if w.gap_told || w.cursor <= 0 {
+        return;
+    }
+    let oldest = match w.state.db.link_events_oldest(&w.link.user_id) {
+        Ok(o) => o,
+        Err(e) => {
+            tracing::warn!(error = %e, link = %w.link.id, "agent link: backlog floor unreadable");
+            return;
+        }
+    };
+    // An empty backlog after a non-zero cursor means the account's rows are all gone, so loss
+    // cannot be ruled out either. `oldest == cursor + 1` is the clean case: nothing was missed.
+    let lost = if oldest == 0 {
+        w.state.db.link_events_head(&w.link.user_id).unwrap_or(0) < w.cursor
+    } else {
+        oldest > w.cursor + 1
+    };
+    if !lost {
+        return;
+    }
+    w.gap_told = true;
+    tracing::info!(
+        link = %w.link.id, cursor = w.cursor, oldest,
+        "agent link: stream resumed past a pruned backlog"
+    );
+    w.pending.push_back(
+        Event::default().event("gap").data(
+            json!({
+                "from": w.cursor,
+                "oldest_available": oldest,
+                "message": "events between your cursor and the backlog are gone; re-read the chats you care about from their history",
+            })
+            .to_string(),
+        ),
+    );
+}
+
 /// Turn every durable row this stream may send into a frame, and advance the cursor past the
 /// ones it may not.
 fn drain(w: &mut Watch) {
+    gap_check(w);
     let rows = match w
         .state
         .db
@@ -587,6 +657,7 @@ fn drain(w: &mut Watch) {
         return;
     }
     w.told_limited = false;
+    w.gap_told = false;
     let mut charged: HashMap<String, i64> = HashMap::new();
     for (id, view, payload) in sendable {
         w.pending.push_back(
@@ -1095,6 +1166,139 @@ mod tests {
         assert_eq!(sent[0].data["message"]["text"], "line 1");
         assert_eq!(sent[1].data["message"]["text"], "line 2");
         assert_eq!(sent[0].id.as_deref(), Some(ids[1].to_string().as_str()));
+    }
+
+    /// A cursor older than the backlog is told so, and still gets everything that survived.
+    ///
+    /// The sheet promises that a reconnect "gets everything after" the cursor, which the cap
+    /// makes false; `id > cursor` returns the survivors and is indistinguishable from a stream
+    /// that missed nothing. So the gap is announced rather than left for the reader to infer.
+    ///
+    /// Asserted as counts, which this test can do because it plants its own events: one `gap`
+    /// frame naming the cursor and the floor, and exactly the two surviving messages. An
+    /// assertion that merely looked for a missing message would pass against a wrong user id,
+    /// which returns nothing at all.
+    #[tokio::test]
+    async fn a_cursor_that_fell_off_the_backlog_is_told_and_gets_what_survived() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 7651);
+        let project = project_of(&state, &alice, "codingarbos");
+        let chat = agent_chat(&state, &project, "Launch week");
+        let link = link_for(&state, &alice, Scope::Read, None);
+
+        let mut ids = Vec::new();
+        for n in 0..4 {
+            let mid = format!("m-pruned-{n}");
+            say(&state, &chat, Some(&project), &mid, &format!("line {n}"));
+            on_announce(
+                &state,
+                &ChatRef::project(&project, &chat),
+                &sender_of(&state, &alice),
+                &mid,
+                &format!("line {n}"),
+                None,
+                &[],
+            );
+            ids.push(state.db.link_events_head(&alice).unwrap());
+        }
+        // The prune the agent cannot see: the two oldest events age out of the window.
+        state
+            .db
+            .with(|c| {
+                c.execute(
+                    "DELETE FROM link_events WHERE user_id = ?1 AND id <= ?2",
+                    params![&alice, ids[1]],
+                )
+                .map(|_| ())
+            })
+            .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert("last-event-id", ids[0].to_string().parse().unwrap());
+        let r = open(
+            &state,
+            &link,
+            StreamQuery {
+                since: None,
+                chat: None,
+            },
+            headers,
+        )
+        .await;
+        let frames = frames_of(r.into_body(), 4).await;
+
+        let gaps: Vec<&Frame> = frames.iter().filter(|f| f.event == "gap").collect();
+        assert_eq!(gaps.len(), 1, "one gap, said once: {frames:?}");
+        assert_eq!(gaps[0].data["from"], ids[0]);
+        assert_eq!(
+            gaps[0].data["oldest_available"], ids[2],
+            "the floor the agent must re-read from"
+        );
+        assert!(
+            gaps[0].id.is_none(),
+            "a gap is not a cursor and must not be replayed as one"
+        );
+
+        let sent: Vec<&Frame> = frames
+            .iter()
+            .filter(|f| f.event == "message.received")
+            .collect();
+        assert_eq!(sent.len(), 2, "the survivors, all of them: {frames:?}");
+        assert_eq!(sent[0].data["message"]["text"], "line 2");
+        assert_eq!(sent[1].data["message"]["text"], "line 3");
+    }
+
+    /// The companion to the test above, and the reason it is a pair: an ordinary reconnect that
+    /// missed nothing must not be told it did. One cursor, two measurements, both asserted.
+    #[tokio::test]
+    async fn a_cursor_still_inside_the_backlog_is_not_told_of_a_gap() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 7652);
+        let project = project_of(&state, &alice, "codingarbos");
+        let chat = agent_chat(&state, &project, "Launch week");
+        let link = link_for(&state, &alice, Scope::Read, None);
+
+        let mut ids = Vec::new();
+        for n in 0..2 {
+            let mid = format!("m-intact-{n}");
+            say(&state, &chat, Some(&project), &mid, &format!("line {n}"));
+            on_announce(
+                &state,
+                &ChatRef::project(&project, &chat),
+                &sender_of(&state, &alice),
+                &mid,
+                &format!("line {n}"),
+                None,
+                &[],
+            );
+            ids.push(state.db.link_events_head(&alice).unwrap());
+        }
+
+        let mut headers = HeaderMap::new();
+        headers.insert("last-event-id", ids[0].to_string().parse().unwrap());
+        let r = open(
+            &state,
+            &link,
+            StreamQuery {
+                since: None,
+                chat: None,
+            },
+            headers,
+        )
+        .await;
+        let frames = frames_of(r.into_body(), 2).await;
+
+        assert_eq!(
+            frames.iter().filter(|f| f.event == "gap").count(),
+            0,
+            "nothing was pruned: {frames:?}"
+        );
+        let sent: Vec<&Frame> = frames
+            .iter()
+            .filter(|f| f.event == "message.received")
+            .collect();
+        assert_eq!(sent.len(), 1, "the one event after the cursor: {frames:?}");
+        assert_eq!(sent[0].data["message"]["text"], "line 1");
     }
 
     /// A fresh connection without a cursor means "from now on". Replaying a day of backlog
