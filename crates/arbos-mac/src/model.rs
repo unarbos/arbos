@@ -1917,7 +1917,10 @@ fn de_widget<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Widget>, D
 /// One skill of the library (F5); the relay's `Skill` shape, reused as the client view.
 pub type Skill = arbos_core::skill::Skill;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+/// `Deserialize` is derived so an unrecognised wire value lands on `Unrecognised` instead of being
+/// absorbed by `Other`, which is a category a producer can legitimately choose. `Serialize` is
+/// written by hand for the sentinel's sake: see the impl below.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalRisk {
     Send,
@@ -1925,9 +1928,28 @@ pub enum ApprovalRisk {
     Money,
     Credential,
     Computer,
+    /// A real category, which agentd may send and which round-trips as `"other"`.
+    ///
+    /// `#[default]` covers a part with no `risk` key, which is a third fact again — "nothing was
+    /// said" rather than "other" or "something I do not know". That conflation is real but
+    /// invisible, and no producer in the tree omits the key (`arbos_core::doc` always inserts it,
+    /// the impl below always emits it, `arbos-acp` always sets it). **Do not tidy `#[default]`
+    /// onto `Unrecognised`**: the sentinel has no wire form, so an absent key would make the part
+    /// unserializable, and `write_parts` *skips* a part that refuses to serialise — trading an
+    /// invisible mislabel for a part dropped from a write. Giving "unspecified" its own fact means
+    /// `#[serde(default = "…")]` on the field rather than a default variant here (AF-1355).
     #[default]
-    #[serde(other)]
     Other,
+    /// A category only a newer box knows, kept distinct from `Other` so this build cannot
+    /// overwrite a value it merely failed to recognise.
+    ///
+    /// Nothing in this tree gates on a risk, so there is no branch for this variant to be
+    /// cautious in; it renders as itself and the card keeps its buttons (see
+    /// `unrecognised_approval_risk_tests`). The first surface that *does* gate on a risk must give
+    /// this variant the most restrictive branch it offers — and must say so explicitly, because no
+    /// `_` arm matches this enum anywhere, so that surface cannot compile without deciding.
+    #[serde(other)]
+    Unrecognised,
 }
 
 impl ApprovalRisk {
@@ -1939,7 +1961,43 @@ impl ApprovalRisk {
             ApprovalRisk::Credential => "credential",
             ApprovalRisk::Computer => "computer",
             ApprovalRisk::Other => "other",
+            // Not promoted to the gravest known category: the audit line reports what the
+            // producer said, and substituting `destructive` for a risk it called something else
+            // would put a category nobody sent into the one artifact whose value is that it says
+            // what happened.
+            ApprovalRisk::Unrecognised => "unrecognised",
         }
+    }
+}
+
+/// Hand-written so `Unrecognised` has no wire form, while the six real categories — `Other`
+/// included — serialise byte-identically to the derive this replaced.
+///
+/// A derived impl would emit `"unrecognised"` and overwrite the category it merely failed to
+/// parse. Returning an error instead makes that write unrepresentable rather than discouraged.
+///
+/// **The precondition:** no caller writes back a part it decoded. The only `Part` → JSON path in
+/// this crate is `sync/fixture.rs`, the local offline source, and it writes parts it authored
+/// itself; the relay path writes a decision (`append_approval_command`), not a part. A refusal is
+/// therefore unreachable for any part a caller legitimately built. A future caller that *does*
+/// write a decoded part back turns this correct refusal into a failure — under `write_parts` the
+/// part is skipped — so such a caller has to carry the original value rather than this sentinel.
+impl Serialize for ApprovalRisk {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let name = match self {
+            ApprovalRisk::Send => "send",
+            ApprovalRisk::Destructive => "destructive",
+            ApprovalRisk::Money => "money",
+            ApprovalRisk::Credential => "credential",
+            ApprovalRisk::Computer => "computer",
+            ApprovalRisk::Other => "other",
+            ApprovalRisk::Unrecognised => {
+                return Err(serde::ser::Error::custom(
+                    "a risk category this build does not know cannot be written back",
+                ))
+            }
+        };
+        s.serialize_str(name)
     }
 }
 
@@ -5241,5 +5299,137 @@ mod unknown_approval_state_tests {
                 "{wire} no longer round-trips"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod unrecognised_approval_risk_tests {
+    //! The write-side half of `unknown_approval_state_tests`, one field over, with one thing it
+    //! must not copy.
+    //!
+    //! `other` is three facts at once in the old enum: the category a producer chose, the
+    //! category this build failed to recognise, and the absent field. Only the middle one is a
+    //! defect, and only on the way out: an unrecognised value was re-serialised as `"other"`, so
+    //! a category a newer box sent was destroyed for every participant rather than merely
+    //! misread here.
+    //!
+    //! **The thing not to copy.** A mitigation is justified by the field's role, not inherited
+    //! because the field beside it had one. An unknown *state* earned inertness because the state
+    //! is what makes a card actionable; an unknown *risk* is descriptive, so the card renders and
+    //! keeps its buttons. Copying inertness across would strand the user on an answerable card
+    //! for no gain — the expiry stall, rebuilt out of caution.
+
+    use super::*;
+    use serde_json::json;
+
+    fn row(risk: &str) -> serde_json::Value {
+        json!({
+            "id": "msg_1",
+            "role": "assistant",
+            "status": "done",
+            "parts": [
+                { "kind": "text", "id": "p0", "text": "I need your approval to do this." },
+                {
+                    "kind": "approval",
+                    "id": "p1",
+                    "approvalId": "apr_1",
+                    "title": "Do the thing",
+                    "risk": risk,
+                    "state": "pending",
+                }
+            ],
+        })
+    }
+
+    fn card(m: &Message) -> (ApprovalRisk, ApprovalState) {
+        m.parts
+            .iter()
+            .find_map(|p| match p {
+                Part::Approval { risk, state, .. } => Some((*risk, *state)),
+                _ => None,
+            })
+            .expect("the card survived")
+    }
+
+    /// The distinction the old enum could not make. `other` is a category a producer may choose
+    /// and must keep meaning exactly that; a value this build has never heard of is a different
+    /// fact and lands on the sentinel.
+    ///
+    /// This fails if anyone moves `#[serde(other)]` back onto `Other`, which is the edit that
+    /// silently restores the overload.
+    #[test]
+    fn an_unrecognised_risk_is_not_the_other_category() {
+        for wire in ["legal", "privacy", "something_from_2027"] {
+            let m: Message = serde_json::from_value(row(wire))
+                .unwrap_or_else(|e| panic!("`{wire}` cost the user the row: {e}"));
+            assert_eq!(
+                card(&m).0,
+                ApprovalRisk::Unrecognised,
+                "`{wire}` was absorbed by a category the producer did not send"
+            );
+        }
+        let m: Message = serde_json::from_value(row("other")).expect("a stated `other`");
+        assert_eq!(
+            card(&m).0,
+            ApprovalRisk::Other,
+            "a producer that said `other` must still be heard as saying it"
+        );
+        assert_eq!(
+            serde_json::to_string(&ApprovalRisk::Other).expect("`other` is writable"),
+            "\"other\"",
+            "the real category lost its wire form"
+        );
+    }
+
+    /// **The property that matters.** A category this build does not understand has no wire form,
+    /// so no write can replace it with one that was never sent.
+    ///
+    /// This fails if anyone re-derives `Serialize` or maps the sentinel onto `Other`: either
+    /// change makes these writes succeed, which is the destruction being prevented.
+    #[test]
+    fn an_unrecognised_risk_can_never_be_written_back() {
+        assert!(
+            serde_json::to_value(ApprovalRisk::Unrecognised).is_err(),
+            "an unrecognised risk gained a wire form, so it can now overwrite the real one"
+        );
+
+        let m: Message = serde_json::from_value(row("legal")).expect("row survives");
+        let unknown_card = m
+            .parts
+            .iter()
+            .find(|p| matches!(p, Part::Approval { .. }))
+            .expect("card");
+        assert!(
+            serde_json::to_value(unknown_card).is_err(),
+            "a card with an unrecognised risk serialised, so writing it back would destroy it"
+        );
+        // And the whole row cannot be written back either, so no caller can launder it.
+        assert!(serde_json::to_value(&m).is_err());
+    }
+
+    /// The asymmetry with `ApprovalState::Unknown`, asserted so the next person cannot copy the
+    /// inertness across without a test objecting. A pending card whose risk this build cannot
+    /// name is still a card the user must be able to answer.
+    #[test]
+    fn an_unrecognised_risk_keeps_the_card_answerable() {
+        let m: Message = serde_json::from_value(row("legal")).expect("row survives");
+        assert_eq!(m.parts.len(), 2, "the row lost a part");
+        assert!(
+            matches!(m.parts[0], Part::Text { .. }),
+            "the row lost the prose"
+        );
+        let (risk, state) = card(&m);
+        assert_eq!(risk, ApprovalRisk::Unrecognised);
+        assert_eq!(
+            state,
+            ApprovalState::Pending,
+            "an unrecognised risk must not close a card the user still has to answer"
+        );
+        assert_eq!(
+            m.pending_approvals().count(),
+            1,
+            "the card dropped out of the pending set, so nothing will ask the user"
+        );
+        assert_eq!(risk.label(), "unrecognised");
     }
 }
