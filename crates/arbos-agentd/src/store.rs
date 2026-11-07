@@ -1198,6 +1198,84 @@ impl Store {
         })
     }
 
+    /// Every other TEXT column the schema has, found by walking the schema rather than by naming
+    /// the stores.
+    ///
+    /// A job's brief, a drafted message body, a scratch value, an ask, an approval payload and a
+    /// handle's note all carried pasted text that the two passes above never reached, because
+    /// those passes name their tables and nothing obliged the names to keep up with the schema.
+    /// Walking `sqlite_master` means a table added later is swept the day it exists.
+    ///
+    /// Run it after [`Store::t3_scrub`] and [`Store::memory_scrub`], which own the `text` column
+    /// of the two indexed tables and the size that describes it. This pass reaches everything
+    /// those two leave behind, including their own `source` columns, and rebuilds a table's
+    /// full-text index when it rewrote any of its rows.
+    ///
+    /// Primary keys are skipped: an id is never a pasted secret, and rewriting one would break
+    /// every row that refers to it. Only columns the schema declares `TEXT` are touched, so a
+    /// Loro snapshot stored as a BLOB is left alone.
+    pub fn scrub_all_text(&self, values: &[String]) -> Result<usize> {
+        let needles: Vec<&str> = values
+            .iter()
+            .map(String::as_str)
+            .filter(|v| v.len() >= 6)
+            .collect();
+        if needles.is_empty() {
+            return Ok(0);
+        }
+        self.with(|c| {
+            let tables: Vec<String> = c
+                .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")?
+                .query_map([], |r| r.get(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut n = 0;
+            for t in &tables {
+                if t.contains("_fts") {
+                    continue;
+                }
+                let cols: Vec<String> = c
+                    .prepare(&format!("PRAGMA table_info({t})"))?
+                    .query_map([], |r| {
+                        Ok((
+                            r.get::<_, String>(1)?,
+                            r.get::<_, String>(2)?,
+                            r.get::<_, i64>(5)?,
+                        ))
+                    })?
+                    .filter_map(Result::ok)
+                    .filter(|(_, ty, pk)| ty.eq_ignore_ascii_case("TEXT") && *pk == 0)
+                    .map(|(name, _, _)| name)
+                    .collect();
+                let mut hit = 0;
+                for col in cols {
+                    for v in &needles {
+                        hit += c.execute(
+                            &format!(
+                                "UPDATE {t} SET {col} = replace({col}, ?1, ?2) WHERE {col} LIKE '%' || ?1 || '%'"
+                            ),
+                            params![v, "[REDACTED:vault]"],
+                        )?;
+                    }
+                }
+                n += hit;
+                let fts = format!("{t}_fts");
+                if hit > 0 && tables.contains(&fts) {
+                    let mirrored: Vec<String> = c
+                        .prepare(&format!("PRAGMA table_info({fts})"))?
+                        .query_map([], |r| r.get::<_, String>(1))?
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let list = mirrored.join(",");
+                    c.execute(&format!("DELETE FROM {fts}"), [])?;
+                    c.execute(
+                        &format!("INSERT INTO {fts}({list}) SELECT {list} FROM {t}"),
+                        [],
+                    )?;
+                }
+            }
+            Ok(n)
+        })
+    }
+
     // ---- memory -------------------------------------------------------------------------------
 
     #[allow(clippy::too_many_arguments)]
@@ -1726,6 +1804,92 @@ fn fts_query(q: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A vaulted value must not survive in any TEXT column the schema has.
+    ///
+    /// The cases are read off the live schema rather than listed, so a table or column added
+    /// later is covered the day it exists or this fails. Before `scrub_all_text`, six columns
+    /// kept the value: `jobs.brief`, `outbox.body`, `scratch.value`, `asks.question`,
+    /// `approvals.payload` and `handles.note`.
+    ///
+    /// The value has no recognisable key shape on purpose: no pattern can match it, so this
+    /// measures the sweep and nothing else.
+    #[test]
+    fn no_text_column_keeps_a_vaulted_value() {
+        const V: &str = "Zq7Z4x9W2m5K8n1P6r3T0v";
+        let store = job_store();
+        let mut planted: Vec<(String, String)> = Vec::new();
+
+        store
+            .with(|c| {
+                let tables: Vec<String> = c
+                    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")?
+                    .query_map([], |r| r.get(0))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                for (i, t) in tables.iter().filter(|t| !t.contains("_fts")).enumerate() {
+                    let cols: Vec<(String, String, i64)> = c
+                        .prepare(&format!("PRAGMA table_info({t})"))?
+                        .query_map([], |r| Ok((r.get(1)?, r.get(2)?, r.get(5)?)))?
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let names: Vec<String> = cols.iter().map(|(n, _, _)| n.clone()).collect();
+                    let vals: Vec<String> = cols
+                        .iter()
+                        .enumerate()
+                        .map(|(j, (n, ty, pk))| {
+                            if !ty.eq_ignore_ascii_case("TEXT") {
+                                "0".to_owned()
+                            } else if *pk != 0 {
+                                format!("'id-{i}-{j}'")
+                            } else {
+                                planted.push((t.clone(), n.clone()));
+                                format!("'{n} holds {V} here'")
+                            }
+                        })
+                        .collect();
+                    c.execute(
+                        &format!(
+                            "INSERT INTO {t}({}) VALUES ({})",
+                            names.join(","),
+                            vals.join(",")
+                        ),
+                        [],
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap();
+
+        assert!(
+            planted.len() >= 20,
+            "schema walk found too little: {planted:?}"
+        );
+
+        let vals = [V.to_owned()];
+        store.t3_scrub(&vals).unwrap();
+        store.memory_scrub(&vals).unwrap();
+        store.scrub_all_text(&vals).unwrap();
+
+        let survivors: Vec<String> = planted
+            .iter()
+            .filter(|(t, col)| {
+                store
+                    .with(|c| {
+                        c.query_row(
+                            &format!("SELECT count(*) FROM {t} WHERE {col} LIKE '%' || ?1 || '%'"),
+                            params![V],
+                            |r| r.get::<_, i64>(0),
+                        )
+                    })
+                    .unwrap_or(0)
+                    > 0
+            })
+            .map(|(t, col)| format!("{t}.{col}"))
+            .collect();
+        assert!(
+            survivors.is_empty(),
+            "kept the vaulted value: {survivors:?}"
+        );
+    }
 
     /// D19 redaction is applied before anything lands in T3.
     #[test]
