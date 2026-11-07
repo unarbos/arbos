@@ -312,6 +312,32 @@ A cheap way to close the loop on the Rust half: a static extractor's declared co
 run's `passed + ignored` should agree exactly. On #2894 both were 2304, which makes each a check
 on the other rather than two readings of the same thing.
 
+### A repetition harness must prove it selected a population before it counts anything
+
+The same defect, in the tool you reach for to *diagnose* a flake. A loop that runs a filtered
+test N times and tallies outcomes is counting two different things under one name: how often the
+test failed, and how often no test ran at all. Those print as the same number and mean opposite
+things.
+
+Measured on 2026-11-07, diagnosing an `arbos-agentd` flake: the harness reported **20 failures
+out of 20**, which was not believable because it could not move. `cargo test -p arbos-agentd
+<bare_name> -- --exact` needs the full module path, so the filter matched nothing, every run
+produced `running 0 tests`, and the loop scored each silent success as a failure. With
+`cancel_handles_tests::` prefixed it was **25 passes out of 25** — the opposite verdict, from the
+same host, minutes apart.
+
+So, before the loop counts a single outcome:
+
+```sh
+cargo test --locked -p <crate> "$T" -- --exact --list   # must say exactly "1 test"
+```
+
+and inside the loop, treat "no test ran" as a distinct, loud outcome rather than folding it into
+failure. A harness that cannot tell an absent test from a failing one is not measuring the flake;
+it is measuring its own filter. This is the vacuity rule above turned on the diagnostic tooling,
+and it was committed by the person who had written that rule an hour earlier — which is the
+reason it is worth its own heading.
+
 ## Reading a Release run: no line in the log is load-bearing
 
 Three outcomes have to be distinguished after a merge, and the log distinguishes none of them.
