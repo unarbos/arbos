@@ -147,6 +147,7 @@ enum GlobalSearch {
         case connectOnePassword = "connect"
         case textSize = "textsize"
         case connectedApps = "connectors"
+        case relay
         /// The Settings list itself (On this iPhone has no page of its own).
         case root = "settings"
     }
@@ -192,6 +193,15 @@ enum GlobalSearch {
         case .textSize: return .page(.textSize)
         case .credits: return .page(.credits)
         case .connectedApps: return .page(.connectedApps)
+        // The Relay page is a Debug-only build artefact (`RelayPage` is inside
+        // `#if DEBUG`, as is its Settings row), so a Release build has no page to
+        // land on. The shared index carries the entry for every platform; it is the
+        // client that decides what it can reach, and a routeless hit is dropped.
+        #if DEBUG
+        case .relay: return .page(.relay)
+        #else
+        case .relay: return nil
+        #endif
         case .profile: return .profile
         case .agentModel, .agentReasoning, .agentVoice: return nil
         }
@@ -212,6 +222,7 @@ enum GlobalSearch {
             case .credits: return "creditcard.fill"
             case .textSize: return "textformat.size"
             case .connectedApps: return "link"
+            case .relay: return "network"
             case .root: return "iphone"
             }
         case .feedback: return "exclamationmark.bubble.fill"

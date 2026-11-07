@@ -110,6 +110,56 @@ final class SearchSettingsTests: XCTestCase {
 
     // MARK: Navigation targets and structure
 
+    /// Every regex match in `text`, as its capture groups (group 0 is the whole match).
+    private func matches(_ pattern: String, in text: String) throws -> [[String]] {
+        try NSRegularExpression(pattern: pattern)
+            .matches(in: text, range: NSRange(text.startIndex..., in: text))
+            .map { m in
+                (0 ..< m.numberOfRanges).map { i in
+                    Range(m.range(at: i), in: text).map { String(text[$0]) } ?? ""
+                }
+            }
+    }
+
+    /// The assertion that would have caught Relay, which shipped with a page, a
+    /// `navigationDestination` and a deep link but no route, so search could not
+    /// find it.
+    ///
+    /// `testEveryListedSettingsPageIsIndexedWithARoute` below cannot catch that:
+    /// it iterates `SettingsView.listedPages`, a hand-maintained list, so a page
+    /// that never reached the list is never checked. Its population is the list,
+    /// not the screen. This reads the screen.
+    func testEverySettingsPageOnTheScreenHasARoute() throws {
+        // apps/ios/Arbos/ArbosTests/ThisFile.swift → apps/ios/Arbos/Arbos
+        let source = try String(
+            contentsOf: URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent("Arbos/UI/SettingsView.swift"),
+            encoding: .utf8
+        )
+
+        let pages = try matches(#"navigationDestination\(isPresented: \$show(\w+)Page\)"#, in: source)
+            .map { $0[1] }
+        // The floor is load-bearing: without it this absence assertion passes
+        // just as happily when the read returns something with no pages in it.
+        // Measured at 11 when written.
+        XCTAssertGreaterThan(pages.count, 8, "found \(pages.count) settings pages — this is reading the wrong thing")
+
+        let routes = Set(GlobalSearch.SettingsPageRoute.allCases.map { $0.rawValue })
+        for page in pages {
+            // A page is routed under its own name, or under the landing string
+            // its state is initialised from (`connectors` opens showConnectorsPage).
+            let inits = try matches("_show" + page + "Page = State\\(initialValue: ([^\n]*)\\)", in: source)
+            let landings = try inits.flatMap { try matches(#"landing == "([^"]+)""#, in: $0[1]).map { $0[1] } }
+            let keys = [page.lowercased()] + landings
+            XCTAssertTrue(
+                keys.contains { routes.contains($0) },
+                "the \(page) page has no SettingsPageRoute, so Settings search cannot find it (tried \(keys))"
+            )
+        }
+    }
+
     /// Every page the Settings list shows is reachable from search with its own
     /// route — and so are the Secrets forms, the feedback sheet and Profile.
     func testEveryListedSettingsPageIsIndexedWithARoute() {

@@ -240,10 +240,12 @@ pub fn setting_target(item: SettingsItem) -> Option<SettingTarget> {
         SettingsItem::SendFeedback => SettingTarget::Feedback,
         SettingsItem::About => SettingTarget::Page(SettingsPage::About),
         SettingsItem::Profile => SettingTarget::Profile,
+        // Relay is a value row inside On this Mac here, not a page of its own.
         SettingsItem::Privacy
         | SettingsItem::TextSize
         | SettingsItem::Credits
-        | SettingsItem::ConnectedApps => return None,
+        | SettingsItem::ConnectedApps
+        | SettingsItem::Relay => return None,
         // Per-agent rows are built by `settings_entries` with the agent id.
         SettingsItem::AgentModel | SettingsItem::AgentReasoning | SettingsItem::AgentVoice => {
             return None

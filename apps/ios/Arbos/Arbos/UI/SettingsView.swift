@@ -52,10 +52,18 @@ struct SettingsView: View {
     @State private var showSecretsPage: Bool
 
     /// The pages the Settings list shows (`settingsSections`), as search routes;
-    /// the structure test checks the shared index finds each of them.
-    static let listedPages: [GlobalSearch.SettingsPageRoute] = [
-        .credits, .connectedApps, .secrets, .devices, .machine, .notifications, .privacy, .appearance, .textSize, .about,
-    ]
+    /// the structure test checks the shared index finds each of them. Relay is
+    /// listed only in Debug, because its row and its page both are.
+    static let listedPages: [GlobalSearch.SettingsPageRoute] = {
+        var pages: [GlobalSearch.SettingsPageRoute] = [
+            .credits, .connectedApps, .secrets, .devices, .machine, .notifications, .privacy, .appearance,
+            .textSize, .about,
+        ]
+        #if DEBUG
+        pages.append(.relay)
+        #endif
+        return pages
+    }()
 
     init(landing: String? = DebugHooks.settingsPage) {
         self.landing = landing
