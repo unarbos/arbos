@@ -392,6 +392,28 @@ branch changed it. `git log <merge-base>..origin/main -- <path>` answers that in
 The general form: **a difference has two ends, and a gate that names only one of them is
 guessing.** Before adjudicating any dropped name, establish which side actually moved.
 
+### The repo already implements this rule — cite it rather than the kit
+
+`scripts/release/swift-gate-applies.sh` arrived at the same principle independently, and a rule
+the codebase already follows somewhere is far easier for the next worker to accept than one that
+exists only here. It does three things worth copying:
+
+1. it extracts the quoted patterns with an awk block **shared verbatim** with `checks.sh`'s
+   `gate_patterns` — "unchanged on purpose. The two read the same bytes and must agree", so the
+   two cannot drift into disagreeing about what the gate covers;
+2. it judges applicability on the **three-dot** diff — what the merge would introduce, not what
+   the two tips happen to differ by;
+3. it **unions this head's `paths:` block with `origin/main`'s**, so a pattern added to `main`
+   after a branch forked still gates the merged result. Judging by either list alone "reopens the
+   hole from the other side".
+
+**Be precise about what the union defends, because it is narrower than it looks.** It defends
+against **pattern drift** — the gate's own definition changing under the branch. It does *not*
+defend against **content staleness**: a leg that ran green at an old base is still a verdict
+about old content, however correctly the gate decided it applied. That residue is what gate 3
+and the rebase-then-rerun discipline cover. The two are complementary, not redundant, and a
+worker who reads the union as "the base question is handled" will skip the rebase.
+
 ## Equal name-set sizes prove nothing about meaning
 
 Gate 4 compares test **names**. A rename is therefore the cheapest thing in the world to get
