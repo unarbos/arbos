@@ -1661,6 +1661,75 @@ gh run list -b main -L 20 --json headSha # a route that does not use the identif
 
 Confirm the identifier resolves **before** reading the emptiness as a result.
 
+## A run's conclusion and its jobs' conclusions are independent, in both directions
+
+Gate 1 was suspected of being vacuous. The hypothesis: `gate_state` returns `PASS` on the first
+run at the sha whose conclusion is `success`, and every gated head carries **two** runs of
+`swift-core-check` — the `push` run with the real verdict, and a `pull_request` twin whose jobs
+are filtered away. If the twin concluded `success`, it would supply a pass regardless of what the
+push run did.
+
+**Measured, and the gate is sound.** Every sha in the last 200 runs where the push run concluded
+non-success *and* a twin existed — twelve of them, four `failure` and eight `cancelled` — returns:
+
+```
+RED 2 run(s) on this head, none successful: <twin> (pull_request, skipped),<push> (push, failure)
+```
+
+**The premise was wrong at GitHub, not in the script. A run whose jobs are ALL skipped concludes
+`skipped`, not `success`.** So `pass` (`$4=="success"`) never matches the twin, and the ordering
+of the tests is not a hole. The `red` filter excludes `skipped` and `neutral` too, so what
+classifies the head is the push run. A head carrying *only* a skipped twin falls through to
+`NOVERDICT`.
+
+That exclusion is deliberate and it is what made the hypothesis unreachable: **skipped and neutral
+are kept out of the red filter so they cannot be read as verdicts in either direction.** A design
+that refuses to let a non-verdict mean "pass" has to refuse to let it mean "fail" as well, and the
+cost of that symmetry is the `NOVERDICT` branch existing at all.
+
+### The boundary, because "skipped runs are harmless" and "skipped jobs are dangerous" are both true
+
+| shape | run concludes | `gate_state` |
+|---|---|---|
+| **every** job skipped | `skipped` | not a pass — falls to RED beside a real run, else `NOVERDICT` |
+| any job `success` beside a **skipped heavy leg** | **`success`** | **`PASS`** |
+
+The twin is the first kind. A mis-triggered speculative run is the second. Confirmed on
+`e2a8125fb`, run `42333607431`: `Swift core check applies?` → `success`,
+`build-xcframework + fastlane test` → `skipped`, run → `success`, `gate_state` → `PASS`.
+
+### Why a real branch cannot reach the dangerous shape
+
+`require_gates` calls `gate_applies` **before** `gate_state`, and consults the latter only when the
+former returns 0. `gate_applies` and the in-run `swift-gate-applies.sh` decide on the same
+union-of-patterns basis — that is the entire reason that script exists — so **a run that skipped
+the heavy leg is precisely a run whose gate does not apply**, and its `PASS` is never read.
+
+Anything that computes applicability on a *different* basis breaks that coupling and re-opens the
+hole. A scratch-branch pre-warm does exactly this: `gate_applies` reads the pull request's files
+while the in-run `changed()` computes `git merge-base origin/main HEAD` on the scratch ref.
+
+### The error class, stated once
+
+The hypothesis came from inferring a **run**'s conclusion from its **jobs'** conclusions. Reading
+job status off run status is the mistake this kit already warns about; this is the same mistake
+walked backwards. **The container and its contents carry independent statuses and neither
+determines the other, in either direction.** Read whichever one your claim is actually about:
+
+```sh
+gh api "repos/$R/actions/runs/$RUN" --jq .conclusion                      # the container
+gh api "repos/$R/actions/runs/$RUN/jobs" \
+  --jq '.jobs[]|"\(.name) \(.conclusion)"'                                # the contents
+```
+
+### A sizing check on a verdict
+
+A green `build-xcframework + fastlane test` has never finished in under **55 minutes** across 17
+observations. So a heavy job reporting `success` in well under that is either a new fast path or
+**not the heavy leg**. Flag it and read the log; do not fail automatically, because the floor is
+empirical and a legitimate speedup would trip it. Same sizing instrument as everywhere else in
+this file, pointed at a verdict instead of a measurement.
+
 ## The field labelled "author" is not the author: trusting a schema's naming over its content
 
 A commit appeared on #2882's branch adding a test guard to a file #2902 owned. Two readers
