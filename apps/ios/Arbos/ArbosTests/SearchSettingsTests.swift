@@ -166,8 +166,10 @@ final class SearchSettingsTests: XCTestCase {
             body.contains("default:"),
             "pageDestination has a default arm, so a new SettingsPageRoute would silently draw nothing"
         )
+        // `_` as a whole arm, not a binding that merely starts with one: `case _foo`
+        // is an ordinary pattern and must not read as a catch-all.
         XCTAssertNil(
-            try matches(#"case +_"#, in: body).first,
+            try matches(#"case +_\s*[:,]"#, in: body).first,
             "pageDestination has a wildcard arm, so a new SettingsPageRoute would silently draw nothing"
         )
     }
