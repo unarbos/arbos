@@ -1730,15 +1730,44 @@ observations. So a heavy job reporting `success` in well under that is either a 
 empirical and a legitimate speedup would trip it. Same sizing instrument as everywhere else in
 this file, pointed at a verdict instead of a measurement.
 
+## An instrument that does not name its population returns whichever answer the asker expected
+
+This is the general form of every wrong-population error in this file — the four stacks, the
+pbxproj occurrences, the ten rollup rows, 56 against 105, the `-L 100` cap. It also explains why
+each was invisible: **with the population left implicit, the asker's implicit population fills in,
+and that is always the one that confirms what they already believed.**
+
+So name the set before reading the number. The worked example below returns three different
+answers to one question, and only one of them is about anything.
+
 ## The field labelled "author" is not the author: trusting a schema's naming over its content
 
 A commit appeared on #2882's branch adding a test guard to a file #2902 owned. Two readers
 concluded, independently and wrongly, that a second engineer had found the same defect from a
 different direction. **It was #2902's own author, pushing to the wrong branch.**
 
-The identifier everyone reached for was the commit's author field. On this repository it is
-`Cursor Agent <cursoragent@cursor.com>` on **every commit ever made**. It is a field named
-"author" that carries no authorship — uniform noise with an authoritative label.
+The identifier everyone reached for was the commit's author field. **Measured three ways, it gives
+three different answers, and the first two are not about anything:**
+
+| population | distinct author emails |
+|---|---|
+| last 2000 commits, whole repository | **26** — the field varies freely |
+| heads of all 294 open `cursor/*` PRs | **9**, but 286 of 294 are `cursoragent@cursor.com` |
+| **the two PRs actually confused** | **1** — both `cursoragent@cursor.com` |
+
+Only the third is the question. #2882 and #2902 do not differ in this field, and no fact about
+the other 299 pull requests changes that.
+
+**So "does this field vary?" is itself a population-free instrument.** Nine distinct values over
+294 rows reads like variation and is worthless here; twenty-six repo-wide is positively
+reassuring and is about a population nobody was discriminating within. The question is never how
+many values a field takes — it is **whether the specific members you are telling apart differ in
+it.**
+
+The identifier that does discriminate sits in the branch name. Branches here are
+`cursor/<description>-<4 hex>`, and that suffix is **the last four characters of the authoring
+agent's id**. Across the same 294 branches it takes **147 distinct values** against the author
+field's 9:
 
 The identifier that was actually available sits in the branch name. Branches here are
 `cursor/<description>-<4 hex>`, and that suffix is **the last four characters of the authoring
@@ -1758,19 +1787,32 @@ the right label instead of the field with the right content.** A schema's naming
 about intent, and intent is not a measurement: `author` was named by whoever designed the commit
 format, for a world where humans commit. The suffix was named by nobody and carries the fact.
 
-The repair is the same as everywhere else in this file: before trusting a field to distinguish
-two things, **check that it distinguishes anything** — read it across several rows and confirm it
-varies. A field that is constant over your whole population cannot separate members of it, and
-will instead return the same confident answer for every question you ask it.
+The repair is the non-vacuity check aimed at a field rather than a set, **with its population
+named**: before trusting a field to distinguish two things, read it across *the set you are
+discriminating within* and confirm it varies there.
 
 ```sh
-# does this field discriminate at all, or is it constant?
-for p in $PRS; do gh pr view $p -R $R --json headRefName --jq .headRefName; done \
-  | sed 's/.*-//' | sort | uniq -c | sort -rn
+# name the population first; here it is open cursor/* PR heads, not "the repository"
+gh api graphql -f q="repo:$R is:pr is:open" -f query='
+query($q:String!,$endCursor:String){search(query:$q,type:ISSUE,first:50,after:$endCursor){
+pageInfo{hasNextPage endCursor}
+nodes{... on PullRequest{number headRefName commits(last:1){nodes{commit{author{email}}}}}}}}' \
+  --paginate --jq '.data.search.nodes[]|[.headRefName,(.commits.nodes[0].commit.author.email)]|@tsv' \
+  | tee /tmp/pop.tsv | cut -f2 | sort | uniq -c | sort -rn   # the labelled field
+cut -f1 /tmp/pop.tsv | sed 's/.*-//' | sort | uniq -c | sort -rn   # the undesigned one
 ```
 
-That is the non-vacuity check again, aimed at a field rather than a set: *one distinct value
-across the whole population means the field is noise, however it is labelled.*
+*A field that does not vary across the set you are discriminating within is noise, however it is
+labelled — and its behaviour outside that set is not evidence either way.*
+
+### The real fix is a config line, not this section
+
+**The author field is capable of carrying the agent id, and six commits in this repository
+already do it**: `bc-39cc673a@arbos.life`, `bc-7d70b9a4@cursor.agents`,
+`bc-7eefe9bf@arbos.loop`, `bc-c005638e@cursor.agents`, `bc-d9799fde@agents.arbos.life`. Cursor
+cloud agents simply do not set it. A `git config user.email` carrying the agent id would retire
+this entire failure mode at the point of action, for the same reason a version in a path beats a
+version in a comment. **Treat the guidance above as the interim.**
 
 ## `image.yml`: the step that always fails is load-bearing
 
