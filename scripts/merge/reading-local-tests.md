@@ -733,9 +733,31 @@ merge call, after the gates have been run and the window spent.
 #### Therefore: the base-ref audit is a standing step, not a reaction
 
 **Enumerate the base ref of every PR in the queue whenever the queue changes or the window is
-shut.** One `gh pr view --json baseRefName,headRefName,headRefOid` per PR, a few seconds for a
-queue of twenty, and it can be run at the one time when nothing else can be: while merging is
-blocked. It is the cheapest read in the lane and the only one that answers *where would this go*.
+shut.** It can be run at the one time when nothing else can be — while merging is blocked — and
+it is the only read that answers *where would this go*. Run the check, do not re-derive it:
+
+```sh
+R=unarbos/arbos
+gh pr list -R $R --state open -L 500 --json number,headRefName,headRefOid \
+  --jq '.[]|[.headRefName,(.number|tostring),.headRefOid]|@tsv' | sort > /tmp/open_heads.tsv
+for PR in "$@"; do
+  read -r base head oid < <(gh pr view "$PR" -R $R --json baseRefName,headRefName,headRefOid \
+    --jq '[.baseRefName,.headRefName,.headRefOid]|@tsv')
+  [ "$base" = main ] && { printf 'ok    #%-5s base=main\n' "$PR"; continue; }
+  parent=$(awk -F'\t' -v b="$base" '$1==b{print $2"\t"$3}' /tmp/open_heads.tsv)
+  [ -z "$parent" ] && { printf 'DEAD  #%-5s base=%s (no OPEN pr has this head)\n' "$PR" "$base"; continue; }
+  pnum=${parent%%$'\t'*}; poid=${parent##*$'\t'}
+  boid=$(git ls-remote origin "refs/heads/$base" | cut -f1)
+  if [ "$boid" = "$poid" ]; then printf 'stack #%-5s base=%s -> OPEN #%s, oid matches\n' "$PR" "$base" "$pnum"
+  else printf 'DRIFT #%-5s base=%s -> #%s base=%s parent-head=%s\n' "$PR" "$base" "$pnum" "${boid:0:9}" "${poid:0:9}"; fi
+done
+```
+
+Measured on the 24-PR queue: ~10s, and it emitted exactly three `stack` rows and twenty-one
+`ok`. **It also corrected a note this document had carried in prose** — two PRs recorded as
+"stacked behind #2879" are in fact a three-deep chain, #2879 → #2881 → #2883, because #2883's
+base is #2881's head and not #2879's. Prose had flattened a chain into a fan, which is a
+different merge order. The command said so in one line; the note had been read many times.
 
 Run it as the two-way check, because `!= main` alone is vacuous on a stack. For each PR the base
 must be **either `main`, or the head branch of a parent you have independently confirmed `OPEN`
