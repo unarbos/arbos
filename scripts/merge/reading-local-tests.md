@@ -276,9 +276,52 @@ date, the body asserts the new order positively, and it adds `XCTAssertNil(body.
 production code moved in the same commit, from `if count > 0 { … } else if streaming {` to `if
 streaming { … } else if unread || count > 0 {`.
 
-### Coherent is not the same as wanted: requirement 2 needs a record the author did not write
+### The cheapest discriminator: did the deletion remove a dissenter from an existing invariant?
 
-Those three checks establish the inversion is **coherent**. They cannot establish it is
+**Check this first. It is cheaper than anything else here and much harder to fake.**
+
+**When a deleted assertion contradicted an invariant asserted elsewhere, and that other
+assertion predates the branch and passes untouched, the deletion is a convergence rather than a
+reversal.**
+
+A test bent to match a regression **cannot produce that shape**. It has no older sibling already
+asserting the new behaviour — if such a sibling existed and passed, the "regression" would be the
+codebase agreeing with itself. The shape is self-authenticating in a way a comment is not.
+
+What to establish, all of it from the tree and none of it from the change's own prose:
+
+1. an assertion of the invariant that **exists at the merge-base**;
+2. is **byte-identical at the head** — diff the function, not the file, since the branch may
+   legitimately touch the file for other reasons;
+3. and that the deleted test **contradicted** it.
+
+Worked instance, #2881. The deleted
+`testAPeopleRowsCountPillWinsTheSlotOverTheSpinner` said the count pill outranks the spinner.
+Meanwhile:
+
+- `WorkingSpinnerTests.testTheRowStatusShowsOneThingInThisOrder` is **byte-identical at
+  `4cb9567db` and `9a09c8166`** and asserts `RowStatus.of(streaming: true, unread: true) ==
+  .working` — streaming wins.
+- Swift `RowStatus.of` in `HomeView.swift` is byte-identical across the branch: `if streaming {
+  return .working }` first.
+- Rust `RowStatus::of` in `crates/arbos-mac/src/ui/sidebar.rs` is byte-identical across the
+  branch and does the same, on the other client.
+
+So **both clients had always put streaming first**, asserted by a test the branch does not touch,
+while `PeopleRow` was the single dissenter running its own chain and never consulting the shared
+rule. The app held two contradictory rules with a passing test for each, because the dissenting
+row never asked the shared one. Deleting the dissenter is convergence.
+
+The diagnostic worth generalising beyond this case: **a passing test is not evidence of a single
+rule.** Two contradictory rules can both be green indefinitely, as long as nothing makes one
+consult the other. When a deletion resolves such a pair, the "dropped test" is the bug report.
+
+### When there is no such sibling: requirement 2 needs a record the author did not write
+
+This is the **fallback**, for an inversion with no older sibling to converge on. Use the
+discriminator above first.
+
+The three checks establish the inversion is **coherent**. They cannot establish it is
 **wanted** — and that gap is the whole risk, because **a test bent to match a regression scores
 identically on all three.** It states its new behaviour positively, production "moves with it"
 (that is what the regression *is*), and no stale citation remains (the author removed them).
