@@ -174,6 +174,33 @@ log, and a status write that lands *within* a reporter line bisects it. Learn th
 a reader who knows only that counts can be short will still believe the order, and a reader who
 knows only that the order lies will still trust a count.
 
+## A method that reads outcomes can only count the lines that survived
+
+This is a failure mode in its own right, separate from truncation. Truncation is the *cause* in
+the Swift case; this is the *class*, and it applies to any log-derived count.
+
+Counting outcomes — verdict lines, result records, anything the run emitted — measures **what the
+log retained**, which is not the same as what ran. When a line is lost, the count is short and
+**nothing in it says so**. The usual integrity checks cannot find the hole:
+
+- **Internal consistency** passes, because the log really is self-consistent. Fewer lines, all
+  agreeing.
+- **A duplicate check** passes, because a missing line creates no duplicate.
+- **Repeating the run** reproduces it when the loss is systematic rather than random.
+- **A second person counting the same way** gets the same number, which feels like corroboration
+  and is not. *Two measurements with the same failure mode are one measurement.*
+
+So: **reconcile an outcome-reading count against a declaration-reading count.** The two fail in
+opposite directions — outcome counting is blind to a line that was destroyed; declaration
+counting only ever reports what a regex believes the runner will discover, and has been wrong
+both high and low. Agreement between them is informative precisely because neither alone is.
+
+Worked instance: on #2881 and #2883 an outcome count gave 617 and a declaration census gave 618.
+The method that produced 617 was **sound, carefully checked, and still silently one short** — one
+verdict line had been bisected. The arithmetic is in the gate 4 section below. The diagnosis to
+carry is the classification: a one-test gap between two counting methods is as likely to be a
+destroyed line as a dropped test, and the two are indistinguishable until the methods agree.
+
 ## The Swift per-case log is an artefact, not `gh run view --log`
 
 `gh run view --log` on a Mac leg returns a **truncated** archive. On runs 42286751308 and
@@ -247,8 +274,29 @@ three things from whoever owns it:
 date, the body asserts the new order positively, and it adds `XCTAssertNil(body.range(of:
 "UnreadMark("))` so the absence of the pill is asserted rather than merely no longer checked. The
 production code moved in the same commit, from `if count > 0 { … } else if streaming {` to `if
-streaming { … } else if unread || count > 0 {`. That is what a legitimate inversion looks like —
-and the point of the rule is that it looks *identical to an illegitimate one* in a name diff.
+streaming { … } else if unread || count > 0 {`.
+
+### Coherent is not the same as wanted: requirement 2 needs a record the author did not write
+
+Those three checks establish the inversion is **coherent**. They cannot establish it is
+**wanted** — and that gap is the whole risk, because **a test bent to match a regression scores
+identically on all three.** It states its new behaviour positively, production "moves with it"
+(that is what the regression *is*), and no stale citation remains (the author removed them).
+
+**A comment naming a ruling is the change's own testimony, exactly like a PR body claiming
+green.** The lane does not accept a PR body's word for CI; it reads the step list. Apply the same
+standard here.
+
+So requirement 2 above is not discharged by the comment. It is discharged by **naming the
+external authorization and where it was found** — a record the author could not edit as part of
+the change. #2881's was discharged from the issue tracker, not from the diff: **AF-1312, "Rule on
+the unread mark, since the reference contradicts two standing instructions", in Done** — an
+escalation the user answered — and **AF-1317, "Give the collapsed rail's picture badges the same
+unread dot", open** — the same ruling propagating a dot where a pill used to be. Two rows this PR
+cannot touch, agreeing with the comment's citation of Jacob on 2026-11-05.
+
+**"The comment says Jacob asked for it" is not a discharge.** Name the record and where you read
+it, or the requirement is outstanding.
 
 ## Gate 4 on a Swift leg: a stable absence can be a counting artefact
 
@@ -261,24 +309,36 @@ line — so a bisected line removes the test from the log entirely. It is invisi
 count **and** to a unique-name count, which is why two independent counts can agree with each
 other and both be short by the same one.
 
-**The victim is not arbitrary, and the invariant is the SUITE — not the test, and not where it
-sits.** Across three logs the cut line was `SearchSettingsTests.testEveryListedSettings…`, at
-lines 12934, 12953 and 12865, with both the truncation point and the interleaved junk varying.
-Line numbers differing by up to 88 rule out run position. Two more logs (runs 42286751308 and
-42286753339, the green legs of #2881 and #2883) cut
-`SearchSettingsTests.testExactKeywordPutsSettingsFirstAndNamesTheKeyword` instead, at lines 12941
-and 13039 — **same suite, different test**.
+### There is no hint. Do not look for the victim by name.
 
-Three readings of this have now been wrong, and all three are recorded here so none is
-reinvented: "a different victim each time", then "it correlates with position in the run", then
-"the invariant is the test". Each was true of every log available when it was written. The
-pattern across the corrections is the lesson: each reading generalised from the logs in hand to a
-narrower invariant than the evidence licensed, and the next log broke it. The honest statement is
-that the cut lands somewhere in `SearchSettingsTests` and nothing yet explains why that suite.
+This section used to end with a named test to check first. **It no longer does, deliberately.**
 
-This is also why the hint below must never be load-bearing. The refusal mechanism — decline to
-count while any line is unreadable — held across all five logs without knowing the victim's name.
-The hint did not.
+Three readings of which test gets cut have been recorded here, and each was wrong on the next
+log: "a different victim each time", then "it correlates with position in the run", then "the
+invariant is the test, `SearchSettingsTests.testEveryListedSettings…`". Every one was true of
+every log available when it was written.
+
+Over the same five logs the **mechanism** — refuse to count while any line mentioning a test case
+is unreadable — was right every time, and it needed none of those specifics to work.
+
+That asymmetry is the finding, and it is worth more than any victim name: **when a mechanism that
+needs no specifics has held every time and the specifics have been revised every time, the
+specifics are history, not a hint.** A named victim is actively harmful here, because it invites
+the next worker to shortcut the mechanism and grep only that suite — which is exactly the move
+that would have missed the fifth log.
+
+**So: the mechanism must never come to depend on the observations below.** They are recorded as
+dated observations, for anyone investigating *why* the truncation happens. They are not a
+shortcut for detecting *that* it happened, and no gate may be run off them.
+
+| Date | Logs | Observed cut |
+| --- | --- | --- |
+| up to 2026-11-06 | three logs, lines 12934 / 12953 / 12865 | `SearchSettingsTests.testEveryListedSettings…` |
+| 2026-11-06 | runs 42286751308, 42286753339 (#2881, #2883 green legs), lines 12941 / 13039 | `SearchSettingsTests.testExactKeywordPutsSettingsFirstAndNamesTheKeyword` |
+
+Line offsets span 174 lines, which rules out run position. Both tests sit in `SearchSettingsTests`
+and nothing yet explains why that suite — treat even *that* as an open observation, not a rule,
+since it is the same kind of generalisation the three wrong readings were.
 
 That is what makes it dangerous here rather than merely annoying:
 
@@ -299,10 +359,8 @@ who it will usually be.
 
 A one-name discrepancy on a Swift leg is more likely to be this than a genuine drop.
 
-**Where to look first, as a hint and not as the mechanism.** Check **`SearchSettingsTests`** —
-the suite, not a test inside it. Key the hint on identity, never on a line offset: the offsets
-moved by 174 lines across five logs. It is **not** a substitute for the general refusal — a named
-site goes stale the moment the suite changes, and the named *test* already did.
+**There is no "where to look first".** See the subsection above: the refusal is the whole
+procedure. Running it costs one command and holds for a victim nobody has seen yet.
 
 The overwriting text varies and carries no diagnosis: the end-of-testing status write in one log,
 an `iOSSimulator: … Failed to launch app with identifier` in another. Do not read the junk as the
