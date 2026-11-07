@@ -121,41 +121,103 @@ final class SearchSettingsTests: XCTestCase {
             }
     }
 
-    /// The assertion that would have caught Relay, which shipped with a page, a
-    /// `navigationDestination` and a deep link but no route, so search could not
-    /// find it.
-    ///
-    /// `testEveryListedSettingsPageIsIndexedWithARoute` below cannot catch that:
-    /// it iterates `SettingsView.listedPages`, a hand-maintained list, so a page
-    /// that never reached the list is never checked. Its population is the list,
-    /// not the screen. This reads the screen.
-    func testEverySettingsPageOnTheScreenHasARoute() throws {
-        // apps/ios/Arbos/ArbosTests/ThisFile.swift → apps/ios/Arbos/Arbos
-        let source = try String(
+    /// `apps/ios/Arbos/Arbos/<path>`, from this test file's own location.
+    private func appSource(_ path: String) throws -> String {
+        try String(
             contentsOf: URL(fileURLWithPath: #filePath)
                 .deletingLastPathComponent()
                 .deletingLastPathComponent()
-                .appendingPathComponent("Arbos/UI/SettingsView.swift"),
+                .appendingPathComponent("Arbos/" + path),
             encoding: .utf8
         )
+    }
 
-        let pages = try matches(#"navigationDestination\(isPresented: \$show(\w+)Page\)"#, in: source)
-            .map { $0[1] }
-        // The floor is load-bearing: without it this absence assertion passes
-        // just as happily when the read returns something with no pages in it.
-        // Measured at 11 when written.
-        XCTAssertGreaterThan(pages.count, 8, "found \(pages.count) settings pages — this is reading the wrong thing")
+    /// The body of `SettingsView.pageDestination`, which is the whole set of pages
+    /// the Settings sheet can push.
+    private func pageDestinationBody() throws -> String {
+        let source = try appSource("UI/SettingsView.swift")
+        guard let start = source.range(of: "private func pageDestination("),
+              let end = source.range(of: "\n    }", range: start.upperBound ..< source.endIndex)
+        else {
+            XCTFail("pageDestination not found in SettingsView.swift — this test is reading the wrong thing")
+            return ""
+        }
+        return String(source[start.lowerBound ..< end.upperBound])
+    }
 
-        let routes = Set(GlobalSearch.SettingsPageRoute.allCases.map { $0.rawValue })
-        for page in pages {
-            // A page is routed under its own name, or under the landing string
-            // its state is initialised from (`connectors` opens showConnectorsPage).
-            let inits = try matches("_show" + page + "Page = State\\(initialValue: ([^\n]*)\\)", in: source)
-            let landings = try inits.flatMap { try matches(#"landing == "([^"]+)""#, in: $0[1]).map { $0[1] } }
-            let keys = [page.lowercased()] + landings
-            XCTAssertTrue(
-                keys.contains { routes.contains($0) },
-                "the \(page) page has no SettingsPageRoute, so Settings search cannot find it (tried \(keys))"
+    /// Relay shipped with a page, a destination and a deep link but no route, so
+    /// search could not find it. That correspondence is now the compiler's job:
+    /// `pageDestination` switches over `SettingsPageRoute` exhaustively, so a route
+    /// without a page does not build and a page is opened only by naming its route.
+    ///
+    /// This guards the guarantee rather than the case. A `default` arm would make
+    /// the switch compile again with a route that draws nothing — the exact trade
+    /// the exhaustive-switch rule exists to refuse — and no compiler would object.
+    func testThePageDestinationSwitchCannotFallThrough() throws {
+        let body = try pageDestinationBody()
+
+        // The floor: without it this passes just as happily when the read returns
+        // something with no arms in it. Measured at 12 when written — the pattern
+        // names one route per `case` line, and the vault's line lists three.
+        let arms = try matches(#"case \.(\w+)"#, in: body).map { $0[1] }
+        XCTAssertGreaterThan(arms.count, 8, "found \(arms.count) destination arms — this is reading the wrong thing")
+
+        XCTAssertFalse(
+            body.contains("default:"),
+            "pageDestination has a default arm, so a new SettingsPageRoute would silently draw nothing"
+        )
+        XCTAssertNil(
+            try matches(#"case +_"#, in: body).first,
+            "pageDestination has a wildcard arm, so a new SettingsPageRoute would silently draw nothing"
+        )
+    }
+
+    /// A page can be compiled out of the shipping build while its index entry is
+    /// not. `RelayPage` and the Relay row are both inside `#if DEBUG`, so a Release
+    /// build has no page to land on, while the shared index carries the entry for
+    /// every build. Left alone, Release search offers a result that pushes nothing.
+    ///
+    /// **The Swift suite builds Debug, so no run of it can observe the Release
+    /// configuration.** This reads the source instead, which is the only instrument
+    /// here that sees both: a destination compiled out under `#if DEBUG` must have
+    /// its route compiled out with it, so the hit is dropped rather than dead.
+    ///
+    /// **It covers one gating mechanism: `#if DEBUG`.** A destination compiled out
+    /// by any other means — an availability or OS conditional, a feature flag, a
+    /// custom compilation condition — passes this check while leaving a live index
+    /// entry, which is the same defect in different clothes. Read its green as
+    /// "no `#if DEBUG` page is routable in Release", not as "no compiled-out page
+    /// is".
+    func testADebugOnlyPageIsNotRoutableInRelease() throws {
+        let body = try pageDestinationBody()
+        let route = try appSource("Model/GlobalSearch.swift")
+
+        // Arms whose page only exists in Debug: the `#if DEBUG` regions of the
+        // switch, attributed to the `case .x:` they sit under.
+        var debugOnly: [String] = []
+        var current: String?
+        var inDebug = false
+        for line in body.split(separator: "\n", omittingEmptySubsequences: false) {
+            let text = line.trimmingCharacters(in: .whitespaces)
+            if let name = try matches(#"^case \.(\w+)"#, in: text).first?[1] { current = name }
+            if text.hasPrefix("#if DEBUG") { inDebug = true }
+            if text.hasPrefix("#endif") { inDebug = false }
+            if inDebug, let current, !debugOnly.contains(current) { debugOnly.append(current) }
+        }
+
+        for page in debugOnly {
+            // `settingsRoute(for:)` must answer nil for this page outside Debug;
+            // `settingsEntries` already drops a hit whose route is nil.
+            let gated = try matches(
+                #"#if DEBUG\s*\n\s*case \.\#(page): return \.page\(\.\#(page)\)\s*\n\s*#else\s*\n\s*case \.\#(page): return nil"#,
+                in: route
+            )
+            XCTAssertFalse(
+                gated.isEmpty,
+                """
+                the \(page) page is Debug-only but settingsRoute(for: .\(page)) is not, \
+                so a Release build would offer a \(page) search result that pushes an empty view
+                """
             )
         }
     }
