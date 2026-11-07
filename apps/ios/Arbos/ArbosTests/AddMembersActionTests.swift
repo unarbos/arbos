@@ -178,7 +178,7 @@ final class LoopbackRelay {
 
     private let listener: NWListener
     private let queue = DispatchQueue(label: "loopback-relay")
-    private let lock = NSCondition()
+    private let lock = NSLock()
     private var _requests: [Request] = []
     private var _respond: (Request) -> (Int, Data) = { _ in (404, Data("{}".utf8)) }
     private var _live: [ObjectIdentifier: NWConnection] = [:]
@@ -234,6 +234,12 @@ final class LoopbackRelay {
     /// *delivered* would make the drain depend on a callback that nothing in this harness has
     /// ever exercised, and the cost of being wrong about it is the full bound on every
     /// teardown rather than a slow report.
+    ///
+    /// Reading the state off the connection's own queue is safe in one direction only, which
+    /// is the direction that matters: these transitions are monotonic toward terminal, so a
+    /// connection that has reached `.cancelled` or `.failed` never leaves it. A stale read can
+    /// therefore show not-yet-terminal but never falsely terminal, and the cost is one more
+    /// poll rather than a live connection pruned.
     private static func isDown(_ state: NWConnection.State) -> Bool {
         switch state {
         case .cancelled, .failed: return true
@@ -270,11 +276,17 @@ final class LoopbackRelay {
                 lock.lock()
                 continue
             }
-            // Unlike the listener wait in `init`, where the result was the only signal there
-            // was, nothing here needs to tell a broadcast from the poll interval expiring: the
-            // top of the loop re-reads every connection's state and the deadline itself.
-            _ = lock.wait(until: min(deadline, Date().addingTimeInterval(Self.drainPoll)))
+            yieldOnePollInterval()
         }
+    }
+
+    /// Lets the connections' own queue run for one poll interval, then takes the lock back.
+    /// Returns nothing because there is nothing to learn: the top of the drain loop re-reads
+    /// every connection's state and the deadline, so no result exists here to be discarded.
+    private func yieldOnePollInterval() {
+        lock.unlock()
+        Thread.sleep(forTimeInterval: Self.drainPoll)
+        lock.lock()
     }
 
     private func serve(_ conn: NWConnection) {
@@ -344,7 +356,6 @@ final class LoopbackRelay {
     private func forget(_ conn: NWConnection) {
         lock.lock()
         _live[ObjectIdentifier(conn)] = nil
-        lock.broadcast()
         lock.unlock()
     }
 
