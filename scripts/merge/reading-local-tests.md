@@ -288,6 +288,13 @@ in exactly the same way it would be if the tests had run and passed.
 
 So read the steps. Every time, including when the conclusion is `success`.
 
+And check the required checks are *present*, not just green. A gate that is absent because the
+head is stale and a gate that is absent because a path filter excludes it look identical from
+the outside: in both cases there is simply no run, and the remaining badges are green. The
+boring explanation is usually the true one, which is exactly why it should never be allowed to
+stand in for looking. Confirm the gate ran at the head you are merging — not at an earlier
+head, and not by inference from why it probably would.
+
 ### The consequence: never accept a refactor that collapses the steps gate 1 reads
 
 The gate's whole resolution is the step list, so anything that merges steps destroys evidence in
