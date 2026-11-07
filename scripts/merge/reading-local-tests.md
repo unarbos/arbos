@@ -1399,6 +1399,48 @@ and the third has been false every time it was checked.
 worth it** — but it is a setup step to take deliberately at the start, not a capability that is
 simply there. Take it before the first merge, not mid-sequence with a window open.
 
+## A hunk header is a window, not a change set
+
+Two hunks whose **ranges** overlap do not conflict. Two hunks whose **modified lines** are
+adjacent do. Reading headers instead of bodies manufactures conflicts that do not exist.
+
+Caught between two queued PRs touching one file: `@@ -70,7 @@` and `@@ -76,7 @@` meet at line
+76, which looks like a collision. The modified lines were the doc comments at 73 and 79 — six
+apart, five untouched lines between them — and git merges that without a murmur. The shared
+line 76 was context in both, belonging to neither.
+
+**Settle it with the merge algorithm's own answer, not with reasoning about proximity:**
+
+```sh
+git fetch -q origin pull/$A/head:tA pull/$B/head:tB
+git merge-tree --write-tree tA tB    # exit 0 and a tree = clean; no worktree touched
+```
+
+**And for a structured file, a clean merge is not the whole question.** Ask what the merge was
+*for*. A fix that is re-applied over a file someone else has grown can land cleanly and no
+longer cover what now exists — so follow the trial merge with a semantic check on the result:
+
+```sh
+git cat-file -p "$TREE:path/to/file" | <extract the invariant> | sort | uniq -d
+```
+
+That pair — does it merge, and does the merged artefact still hold the property — is what a
+rebase of a structural fix actually owes. Either half alone is an unfinished answer.
+
+## A split is wrong when the intermediate state asserts something untrue
+
+Not when the files fail to separate. Textual separability is cheap and almost always available;
+it is the wrong test.
+
+The case: a PR corrected a published rule's text *and* bumped the rule's version. Splitting
+them was clean on files and incoherent in meaning — the text-only half publishes "this rule did
+not change" beside a rule that changed, which is **the same defect as the bug being fixed**,
+and third parties polling the version are told something false for the width of the window.
+
+So the question for any split, stack or reorder is not "do these files separate" but **"is
+every intermediate state true?"** A queue is a sequence of published states, not just a path to
+a final one, and the ones in the middle are as visible as the last.
+
 ## An empty API answer to a sha you invented looks exactly like a finding
 
 Never expand an abbreviated sha by typing the rest of it. `git rev-parse` it.
