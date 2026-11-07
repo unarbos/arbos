@@ -53,6 +53,47 @@ what happened to a companion claim of "four stacks" in the same document: four w
 *different* population (PRs not based on `main`), and labelling one population's cardinality with
 another population's name leaves nothing to check it against.
 
+### More rows is not more evidence: count the sources, not the lines
+
+The rule above says the settling quantity must come from outside. Here is the form it takes most
+often in practice, because it is the one that looks like good news: **a list grows rows without
+gaining sources, and the extra rows read as extra assurance.** The defence is the same — the
+number that answers *how much independent evidence is there* has to come from somewhere other
+than the list of rows.
+
+**Worked case, a PR's check rollup.** #2899's rollup carried **ten** entries where the workflows
+define eight. `Layout`, `rust`, `harness` and `image` each appeared **twice**, because two CI runs
+sat on that head: one `pull_request` and one `push`. Both at the **same sha**, therefore the same
+content, therefore the duplicate pair corroborates nothing at all. Eight distinct checks had
+reported; the tenth row was the second run saying what the first had already said.
+
+Read the rollup by **run id**, not by row:
+
+```sh
+gh pr view "$PR" --json statusCheckRollup \
+  --jq '.statusCheckRollup[]|[(.name//.context),(.state//.conclusion),(.detailsUrl//"")]|@tsv'
+# then, for every distinct run id that appears:
+gh run view "$id" --json databaseId,name,event,headSha --jq '[.databaseId,.name,.event,.headSha[0:9]]|@tsv'
+```
+
+**Check the head shas before counting, not after.** If the two runs are at the same sha they are
+one measurement with two names and the count is eight. If they are at *different* shas it is
+worse than redundant: one of them is a verdict about content that is not what you are merging,
+and it is sitting in the rollup looking like a pass.
+
+**Second instance, same family: `head_sha` does not mean "triggered by".** Asking the API for
+runs at a commit returns every run whose head happened to be that commit, including ones the
+commit did not cause. Measured over the eight bump commits `v0.6.392`–`v0.6.399`: six have zero
+runs of any workflow, and the two apparent exceptions — `57be6c4c4` and `1e7ffd611` — each have
+exactly one, both `event: schedule`. Those are the `*/15` Release cron finding the bump at
+`main`'s head, not the bump starting anything. Had the `event` field gone unread, two rows would
+have falsified a true conclusion. **The discriminator is `event`, and it is one more field in a
+query you are already making.**
+
+The generalisation worth carrying: **whenever a count is about independence, the thing being
+counted must be the source, never the report.** Rows, badges, log lines and API records all
+multiply for reasons that have nothing to do with how much you know.
+
 ## Derive the value that must follow something else; assert the constraint that guards it
 
 "Derive, don't assert" is right about **values that have to track an external source**. A pinned
