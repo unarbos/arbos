@@ -20,10 +20,9 @@ final class AddMembersActionTests: XCTestCase {
         model.peopleChats = [Self.groupBeforeAdd]
     }
 
-    override func tearDown() {
-        server.stop()
-        server = nil
-        model = nil
+    override func tearDown() async throws {
+        defer { server = nil; model = nil }
+        try server?.stop()
     }
 
     static let chatId = "01M5XATTTX957RTR99XNE0W9BD"
@@ -118,6 +117,13 @@ final class AddMembersActionTests: XCTestCase {
 
 /// One-request-per-connection HTTP server on 127.0.0.1: reads a request, hands it to
 /// `respond`, writes `HTTP/1.1 <status>` with a JSON body and closes.
+///
+/// Every wait in here is bounded and every bound is answered. That is not decoration: the
+/// version of this harness before 2026-11-07 waited for the listener to become ready and
+/// then asserted that the port was non-zero, which is a different proposition — a listener
+/// that had failed reached the same guard. It also left its connections running on `queue`
+/// after the owning test was gone, and closed each response from inside `.contentProcessed`,
+/// which is the transport having accepted the bytes rather than the client having read them.
 final class LoopbackRelay {
     struct Request {
         var method: String
@@ -126,46 +132,149 @@ final class LoopbackRelay {
         var body: Data
     }
 
+    /// Why the listener never came up. A listener that failed says so, instead of arriving at
+    /// a port assertion that reports the wrong thing about the wrong object.
+    enum StartFailure: Error, CustomStringConvertible {
+        case listenerFailed(NWError?)
+        case neverSettled(TimeInterval)
+        case readyWithoutPort
+
+        var description: String {
+            switch self {
+            case .listenerFailed(let error):
+                return "loopback listener failed to start: \(error.map { "\($0)" } ?? "no reason given")"
+            case .neverSettled(let seconds):
+                return "loopback listener was neither ready nor failed after \(seconds)s"
+            case .readyWithoutPort:
+                return "loopback listener reported ready without a port"
+            }
+        }
+    }
+
+    /// Teardown could not account for every connection it opened. Worth failing the test over:
+    /// a connection still running on `queue` belongs to a relay whose test has ended.
+    struct StopFailure: Error, CustomStringConvertible {
+        let stranded: Int
+        let after: TimeInterval
+        var description: String { "\(stranded) loopback connection(s) still running \(after)s after cancel" }
+    }
+
+    /// Both ends of a half-sent request wait for each other — the relay for the rest of a body,
+    /// the client for a response — so the relay has to give up first to be the one that reports.
+    /// `RelayAPI` allows a request 30 s, so anything here must be well inside that.
+    private static let startDeadline: TimeInterval = 5
+    private static let connectionDeadline: TimeInterval = 5
+    private static let drainDeadline: TimeInterval = 5
+
     private let listener: NWListener
     private let queue = DispatchQueue(label: "loopback-relay")
-    private let lock = NSLock()
+    private let lock = NSCondition()
     private var _requests: [Request] = []
+    private var _respond: (Request) -> (Int, Data) = { _ in (404, Data("{}".utf8)) }
+    private var _live: [ObjectIdentifier: NWConnection] = [:]
+
     var requests: [Request] { lock.lock(); defer { lock.unlock() }; return _requests }
     /// The model also probes `/healthz` and the like on a fresh relay; only the chat calls matter here.
     var chatRequests: [Request] { requests.filter { $0.path.hasPrefix("/chats/") } }
-    var respond: (Request) -> (Int, Data) = { _ in (404, Data("{}".utf8)) }
+    /// Written by the test on the main actor, read on `queue` once per connection, so it takes
+    /// the same lock as the `_requests` beside it rather than being the one unguarded property.
+    var respond: (Request) -> (Int, Data) {
+        get { lock.lock(); defer { lock.unlock() }; return _respond }
+        set { lock.lock(); defer { lock.unlock() }; _respond = newValue }
+    }
     private(set) var port: UInt16 = 0
 
     init() throws {
         let params = NWParameters.tcp
         params.requiredLocalEndpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: .any)
         listener = try NWListener(using: params)
-        let ready = DispatchSemaphore(value: 0)
+
+        // Ready, failed and never-settled are three outcomes and get three answers. The
+        // semaphore only reports that the handler fired, so what it fired with is recorded
+        // alongside it.
+        let settled = DispatchSemaphore(value: 0)
+        let outcome = StartOutcome()
         listener.stateUpdateHandler = { state in
-            if case .ready = state { ready.signal() }
-            if case .failed = state { ready.signal() }
+            switch state {
+            case .ready: outcome.record(.ready); settled.signal()
+            case .failed(let error): outcome.record(.failed(error)); settled.signal()
+            case .cancelled: outcome.record(.failed(nil)); settled.signal()
+            default: break
+            }
         }
         listener.newConnectionHandler = { [weak self] conn in self?.serve(conn) }
         listener.start(queue: queue)
-        _ = ready.wait(timeout: .now() + 5)
-        guard let p = listener.port?.rawValue, p != 0 else { throw NSError(domain: "LoopbackRelay", code: 1) }
+
+        if settled.wait(timeout: .now() + Self.startDeadline) == .timedOut {
+            listener.cancel()
+            throw StartFailure.neverSettled(Self.startDeadline)
+        }
+        if case .failed(let error) = outcome.value {
+            listener.cancel()
+            throw StartFailure.listenerFailed(error)
+        }
+        guard let p = listener.port?.rawValue, p != 0 else {
+            listener.cancel()
+            throw StartFailure.readyWithoutPort
+        }
         port = p
     }
 
-    func stop() { listener.cancel() }
+    /// Cancels the listener *and* every connection it opened, and does not return until the
+    /// network stack has reported each one down. A connection that outlives its test keeps a
+    /// finished relay alive on a shared queue, and a callback delivered into that can take the
+    /// test host out without writing anything anybody can read afterwards.
+    func stop() throws {
+        listener.cancel()
+        let deadline = Date().addingTimeInterval(Self.drainDeadline)
+        lock.lock()
+        defer { lock.unlock() }
+        // Re-snapshot each time round: a connection accepted between the cancel and the wait
+        // would otherwise never be cancelled by anyone, and the drain would time out blaming it.
+        while !_live.isEmpty {
+            let live = Array(_live.values)
+            lock.unlock()
+            for conn in live { conn.cancel() }
+            lock.lock()
+            if _live.isEmpty { break }
+            if !lock.wait(until: deadline) {
+                throw StopFailure(stranded: _live.count, after: Self.drainDeadline)
+            }
+        }
+    }
 
     private func serve(_ conn: NWConnection) {
+        lock.lock(); _live[ObjectIdentifier(conn)] = conn; lock.unlock()
+        conn.stateUpdateHandler = { [weak self] state in
+            switch state {
+            case .cancelled, .failed: self?.forget(conn)
+            default: break
+            }
+        }
         conn.start(queue: queue)
+
+        let deadline = Date().addingTimeInterval(Self.connectionDeadline)
         var buffer = Data()
         func read() {
+            guard Date() < deadline else { conn.cancel(); return }
             conn.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, done, error in
-                guard let self, error == nil else { conn.cancel(); return }
+                guard let self else { conn.cancel(); return }
+                guard error == nil else { conn.cancel(); return }
                 if let data { buffer.append(data) }
                 if let req = Self.parse(buffer) {
                     self.lock.lock(); self._requests.append(req); self.lock.unlock()
-                    let (status, body) = self.respond(req)
+                    let responder = self.respond
+                    let (status, body) = responder(req)
                     let head = "HTTP/1.1 \(status) \(status == 200 ? "OK" : "Error")\r\nContent-Type: application/json\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n"
-                    conn.send(content: Data(head.utf8) + body, completion: .contentProcessed { _ in conn.cancel() })
+                    // `isComplete: true` is the default; it is spelled out because the FIN
+                    // ordering behind the bytes is load-bearing for `Connection: close`. What
+                    // changed is below it: wait for the client's own close instead of
+                    // cancelling from `.contentProcessed`, which reports that the transport
+                    // took the bytes and not that the client received them.
+                    conn.send(content: Data(head.utf8) + body, isComplete: true,
+                              completion: .contentProcessed { [weak self] _ in
+                                  self?.awaitClose(conn, by: deadline)
+                              })
                 } else if done {
                     conn.cancel()
                 } else {
@@ -174,6 +283,43 @@ final class LoopbackRelay {
             }
         }
         read()
+    }
+
+    /// Holds the connection open until the client closes it, so the response is never cut
+    /// short, and gives up at the same deadline as everything else here.
+    private func awaitClose(_ conn: NWConnection, by deadline: Date) {
+        guard Date() < deadline else { conn.cancel(); return }
+        conn.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] _, _, done, error in
+            guard let self, error == nil, !done else { conn.cancel(); return }
+            self.awaitClose(conn, by: deadline)
+        }
+    }
+
+    private func forget(_ conn: NWConnection) {
+        lock.lock()
+        _live[ObjectIdentifier(conn)] = nil
+        lock.broadcast()
+        lock.unlock()
+    }
+
+    /// The listener's terminal start state, written on `queue` and read by `init`.
+    private final class StartOutcome {
+        enum Value {
+            case pending
+            case ready
+            case failed(NWError?)
+        }
+
+        private let lock = NSLock()
+        private var stored: Value = .pending
+
+        var value: Value { lock.lock(); defer { lock.unlock() }; return stored }
+
+        func record(_ next: Value) {
+            lock.lock()
+            defer { lock.unlock() }
+            if case .pending = stored { stored = next }
+        }
     }
 
     /// nil until the head and the whole `Content-Length` body have arrived.
