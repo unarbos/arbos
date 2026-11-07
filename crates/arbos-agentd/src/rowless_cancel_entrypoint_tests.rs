@@ -415,6 +415,19 @@ async fn the_job_chip_stop_leaves_a_row_less_ask_alone() {
         .await
         .expect("the chip stop is handled");
 
+    // The baseline must be a real held set, or the comparison below is `[] == []`. Measured:
+    // with `test_held_asks` stubbed to report nothing held — which is what a regression in the
+    // hold itself looks like — this case passed green without the line below.
+    //
+    // [`an_accepted_ask_that_cannot_start`] returns the set without asserting it, and is right
+    // not to: demanding it there would turn a run against pre-#2857 code into a setup failure
+    // for the two cases above, which read `held` only as diagnostic text. This case is the one
+    // outside that reasoning's range, because the held set is its subject rather than its
+    // context, so the baseline is scored here instead.
+    assert!(
+        !held.is_empty(),
+        "the ask was never held, so there is no held set for the chip stop to leave alone"
+    );
     assert_eq!(
         agent.test_held_asks(CHAT).await,
         held,
