@@ -28,7 +28,7 @@
 //!
 //! Real processes, with real marks, read back out of `/proc`.
 //!
-//! ## Four ways these cases lied while they were being written
+//! ## Five ways these cases lied while they were being written
 //!
 //! Recorded because every one of them passed or failed convincingly, and because a file whose
 //! subject is "tell live work from dead" is the worst possible place to accept a measurement
@@ -50,6 +50,13 @@
 //!   output exactly like *the reaper killing the box's own agent* — the most dangerous false
 //!   signal this file can produce, because it is the thing we are watching for and it would
 //!   have been believed. Hence [`ONE_AT_A_TIME`].
+//! - **A count is not a shape.** The fifth arrived later and from outside: the sibling
+//!   `cancel_handles_tests` gated on the same `len() >= 2` and blocked a Mac release when a pid
+//!   captured mid-`exec` went missing from the next walk of `/proc`. Checked here, the same gate
+//!   had the same two holes — and the worse one is silent. Delete the word `setsid` from
+//!   [`worker_with_background_child`], so the backgrounded child stays in its parent's session,
+//!   and **every case in this file still passes**: the shape four of them rest on was never
+//!   asserted, only counted. [`settled`] is the premise they should always have had.
 //!
 //! One of the four was a real bug rather than a fixture bug, and it is worth separating:
 //! judging liveness by whether `/proc/<pid>` exists counts a SIGKILLed child as alive, because
@@ -120,15 +127,126 @@ fn worker_with_background_child(mark: &str) -> Reaped {
         });
     }
     let child = cmd.spawn().expect("the worker shell starts");
-    let mut mine = Vec::new();
-    wait_until(&format!("the `{mark}` tree is up"), || {
-        mine = pids_for(mark)
-            .into_iter()
-            .filter(|p| !before.contains(p))
+    let shape = settled(mark, &before, child.id());
+    Reaped {
+        pids: vec![shape.root, shape.escapee],
+        child,
+    }
+}
+
+/// A marked process as this fixture needs to see it: what it is running now, and which **kernel**
+/// session it is in.
+///
+/// Two unrelated things are called a session in this file, and keeping them apart matters here.
+/// [`session_of`] reads the id out of a *mark* (`pi:<ulid>` → `<ulid>`) and is what the
+/// classifier reasons about; this is the kernel's session, which is what a `setsid` descendant
+/// escapes into and what makes the planted tree AK's shape rather than an ordinary child.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Marked {
+    pid: u32,
+    kernel_session: u32,
+    comm: String,
+}
+
+/// Everything carrying `mark` that this fixture started, with the facts [`settled`] decides on.
+fn marked_now(mark: &str, before: &[u32]) -> Vec<Marked> {
+    let mut out: Vec<Marked> = pids_for(mark)
+        .into_iter()
+        .filter(|pid| !before.contains(pid))
+        .filter_map(|pid| {
+            Some(Marked {
+                pid,
+                kernel_session: kernel_session_of(pid)?,
+                comm: std::fs::read_to_string(format!("/proc/{pid}/comm"))
+                    .ok()?
+                    .trim()
+                    .to_owned(),
+            })
+        })
+        .collect();
+    out.sort_by_key(|m| m.pid);
+    out
+}
+
+/// The kernel session of `pid`, field 6 of `/proc/<pid>/stat`. Counted from after the last `)`
+/// because a process name may hold spaces and parentheses of its own.
+fn kernel_session_of(pid: u32) -> Option<u32> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let (_, after) = stat.rsplit_once(')')?;
+    after.split_whitespace().nth(3)?.parse().ok()
+}
+
+/// The two processes a planted tree is made of, pinned by pid.
+#[derive(Debug, Clone, Copy)]
+struct Planted {
+    /// The worker root, which leads the kernel session `pre_exec` gave it.
+    root: u32,
+    /// The child it backgrounded through `setsid`, which leads a kernel session of its own.
+    escapee: u32,
+}
+
+/// Block until the planted tree has stopped changing, and fail naming what it reached instead.
+///
+/// **This used to be `mine.len() >= 2`, and a count is not a shape.** Two faults came with it,
+/// and the second is the one that ends releases:
+///
+/// - *The subject was optional.* Measured by deleting the word `setsid` from the script above:
+///   with the backgrounded child left in its parent's session, every case in this file still
+///   passed. The module doc says that child "is a session of its own, so this is the case no
+///   handle but the mark reaches — exactly PID 23536's shape in r17status", and four cases rest
+///   on it, but nothing asserted it. A count cannot: the root and an ordinary child are two
+///   processes just as readily as the root and an escapee.
+/// - *The pids were captured mid-build.* `>= 2` is satisfied by the root and whatever is
+///   mid-`setsid`, and `/proc/<pid>/environ` is not readable atomically against `execve` — so a
+///   pid captured here can be legitimately absent from any later walk. Every case in this file
+///   then requires these pids to reappear in a second walk, one of them by exact equality
+///   (`"exactly this tree is released, no more and no less"`). That is the shape of the
+///   `cancel_handles_tests` failure that blocked a Mac release; the script here has one fewer
+///   `exec` than that one did, which makes the window narrower and not closed.
+///
+/// Waiting longer fixes neither. So the premise is a statement about the shape, and three facts
+/// carry it, none of them a count:
+///
+/// - **both members are a `sleep`**, so every `exec` has already happened and neither can drop
+///   out of a later walk for being mid-`exec`;
+/// - **the root is present and leads its own kernel session**, pinned by the pid this fixture
+///   spawned rather than inferred from the set;
+/// - **exactly one other member leads a kernel session of its own**, which is the escape these
+///   cases are about.
+///
+/// The last two are a pair on purpose. Without the first, "the child's session differs from the
+/// root's" is also true of a root that never led a session, so the escape would be read off a
+/// fixture that never built one.
+fn settled(mark: &str, before: &[u32], root: u32) -> Planted {
+    let started = Instant::now();
+    let mut last = Vec::new();
+    while started.elapsed() < Duration::from_secs(10) {
+        let marked = marked_now(mark, before);
+        let rooted = marked
+            .iter()
+            .any(|m| m.pid == root && m.kernel_session == root && m.comm == "sleep");
+        let escapees: Vec<u32> = marked
+            .iter()
+            .filter(|m| m.pid != root && m.kernel_session == m.pid && m.comm == "sleep")
+            .map(|m| m.pid)
             .collect();
-        mine.len() >= 2
-    });
-    Reaped { pids: mine, child }
+        if let (true, [escapee], 2) = (rooted, escapees.as_slice(), marked.len()) {
+            return Planted {
+                root,
+                escapee: *escapee,
+            };
+        }
+        last = marked;
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!(
+        "the `{mark}` tree never settled into the shape these cases are about: a sleeping root \
+         (pid {root}, leading its own kernel session) and exactly one sleeping descendant \
+         leading a kernel session of its own. What carried the mark after 10s: {last:?}. This \
+         is the fixture's premise and not the classifier under test — a descendant that never \
+         left its parent's session is reachable by handles the mark is here to stand in for, so \
+         a verdict about it would prove nothing about AK's orphan."
+    );
 }
 
 /// Kills the tree on the way out, including when a case panics part-way. Without this a failed
@@ -209,12 +327,9 @@ fn only_a_dead_workers_leftovers_are_collectable() {
     let dead_pids = dead.pids().to_vec();
     let main_pids = main_agent.pids().to_vec();
 
-    // The background child is a session of its own, so this is the case no handle but the mark
-    // reaches — exactly PID 23536's shape in r17status.
-    assert!(
-        dead_pids.len() >= 2,
-        "the fixture must have a backgrounded descendant, or it tests nothing: {dead_pids:?}"
-    );
+    // That each of these trees is AK's shape — a root and a backgrounded child in a kernel
+    // session of its own, which is the case no handle but the mark reaches — is `settled`'s
+    // premise, asserted there for every tree this file plants rather than counted here for one.
 
     // The only thing the box asserts is which session is over. It says nothing about `pi-main`,
     // which is the point: that tree survives because no evidence was offered for killing it,
