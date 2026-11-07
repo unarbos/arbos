@@ -122,6 +122,27 @@ leaves this lane able to write down *why* something is held without needing rati
 it. A missing reference set is a **setup gap** (exit 4), never a refusal, for the same reason
 everything else in the preflight is.
 
+### A refusal must name the action it refuses
+
+"Refused by name" is not a verdict on a branch; it is a verdict on *something you might do to*
+a branch. Written bare, it gets read as "untouchable" — and the safe-looking reading is the
+damaging one, because the branches this lane refuses are usually **negative controls**, which
+exist to be run.
+
+A negative control is evidence. **A rule that blocks the control blocks the proof.** The lane
+refuses `cursor/capture-rig-negative-control-66a0` from ever merging, and it must never acquire
+a pull request — but it also has to be *dispatched once*, with `ARBOS_SHOT_DIR` deliberately
+withheld, so the skip guard is observed firing instead of assumed to work. It is #2876's
+negative control, and #2876 fixes a capture rig that had run four times and captured nothing.
+A worker who declines to dispatch it, out of caution, withholds the one thing that can show the
+fix works — and blocks the pull request while appearing to protect it.
+
+So every refusal entry states **which actions are refused and which are required**, not just
+that something is refused. An unexplained refusal invites two opposite errors and makes them
+look equally responsible: somebody lifts it because no reason is given, or somebody
+over-applies it because none is given either. Over-application is the quieter of the two, which
+makes it the more likely to survive.
+
 ## Operationally, for this lane
 
 Run agentd suites from a checkout outside `/tmp`. That is a consequence of the rule, not the rule.
