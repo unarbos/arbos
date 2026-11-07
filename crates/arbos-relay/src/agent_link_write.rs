@@ -5,7 +5,7 @@
 //! | --- | --- |
 //! | `POST /agent-link/chats/{id}/messages` | one message, as the owner |
 //! | `POST /agent-link/chats/{id}/reactions` | one reaction, as the owner |
-//! | `POST /agent-link/chats/{id}/typing` | "…is typing", never stored |
+//! | `POST /agent-link/chats/{id}/typing` | "…is typing", nothing into the conversation |
 //!
 //! **It reads as the owner, because it is the owner speaking through a delegate.** The row's
 //! sender is `user:{user_id}` with the owner's handle, name and avatar. That is the feature, not
@@ -1058,10 +1058,17 @@ mod tests {
         assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
-    /// Typing reaches the room as the presence frame the apps already read, and leaves nothing
-    /// behind: no row, no document change, and nothing the stream could replay.
+    /// Typing reaches the room as the presence frame the apps already read and adds nothing to
+    /// the conversation — but the call is logged like every other call the link makes, with the
+    /// address and the user agent. The instruction sheet used to say "never stored anywhere",
+    /// which was false of the log and contradicted its own section 10.
+    ///
+    /// Both halves are counts rather than absences, because an absence is satisfied by a query
+    /// that found the wrong thing: "no conversation row" holds just as well for a chat that does
+    /// not exist. So the conversation is measured after a real message has arrived (exactly one
+    /// row, which is the message), and the log is measured as exactly one typing row.
     #[tokio::test]
-    async fn typing_is_broadcast_and_never_stored() {
+    async fn typing_is_broadcast_leaves_the_conversation_alone_and_is_logged() {
         let state = test_state(AuthMode::Github);
         let (alice, _) = person(&state, 9801);
         let (bob, _) = person(&state, 9802);
@@ -1073,12 +1080,16 @@ mod tests {
         let mut rx = room.tx.subscribe();
         let head_before = state.db.room_state(&room_name).unwrap().head;
 
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", "203.0.113.7, 10.0.0.1".parse().unwrap());
+        headers.insert(axum::http::header::USER_AGENT, "probe/1".parse().unwrap());
+
         let (status, body) = json_of(
             typing(
                 State(state.clone()),
                 who(&link),
                 Path(chat.clone()),
-                HeaderMap::new(),
+                headers.clone(),
                 Some(Json(TypingBody { on: true })),
             )
             .await,
@@ -1107,10 +1118,52 @@ mod tests {
             head_before,
             "typing wrote a row"
         );
+
+        // The log: exactly one row, carrying what section 10 promises the owner can read. The
+        // sheet's "never stored anywhere" was false of this row, not of the conversation.
+        let typed: Vec<Value> = audit(&state, &link)
+            .into_iter()
+            .filter(|r| r["action"] == "typing")
+            .collect();
+        assert_eq!(typed.len(), 1, "one typing call, one log row");
+        assert_eq!(typed[0]["chat_id"], chat.as_str());
+        assert_eq!(typed[0]["ip"], "203.0.113.7", "the first forwarded hop");
+        assert_eq!(typed[0]["user_agent"], "probe/1");
+        assert_eq!(typed[0]["detail"]["on"], true);
+
+        // The conversation, as a count rather than an absence. "No row from typing" is equally
+        // true of a chat that does not exist, so a real message is posted first: the room then
+        // holds exactly one row, and it is the message.
+        let (status, body) = json_of(
+            send(
+                State(state.clone()),
+                who(&link),
+                Path(chat.clone()),
+                headers,
+                Some(Json(SendBody {
+                    text: "on it".into(),
+                    reply_to: None,
+                })),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        let posted = body["message_id"].as_str().expect("an id").to_owned();
+        let rows = load_doc(&state, &chat, None)
+            .unwrap()
+            .expect("a doc")
+            .projected_rows();
+        assert_eq!(
+            rows.len(),
+            1,
+            "the message is the only row typing could have joined"
+        );
+        assert_eq!(rows[0]["id"], posted.as_str());
         assert_eq!(
             state.db.link_events_head(&alice).unwrap(),
-            0,
-            "typing reached the durable stream backlog"
+            1,
+            "the message is on the durable backlog and the typing is not"
         );
     }
 
