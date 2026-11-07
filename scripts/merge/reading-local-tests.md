@@ -170,6 +170,49 @@ and the error is silent, because a truncated list is a perfectly well-formed lis
 Between the three instruments: the first catches a number too big for the thing, the third
 catches a number shaped by the fetch, and the second catches the ones neither has a prior for.
 
+#### Why instruments at all: agreeing with the truth is what makes a method error invisible
+
+**A wrong method caught by its answer is self-limiting. A wrong method that happens to be right
+is only ever caught by auditing the method.** That is the whole justification for instruments
+that inspect the *measurement* rather than the *result* — by construction, the result looks fine
+in exactly the cases they exist for.
+
+Every instance in this section was found by audit, never by the answer looking wrong, and in
+several the answer was correct: a parked-file decision reached over the right population by
+accident of which command came to hand; a verification "confirmed" against a hand-picked subset
+that happened to contain the deciding PRs for the question asked. Checking the conclusion would
+have passed each of them.
+
+So the acceptance test for a count is not *is this plausible* but **what population is this
+over, and is the property a property of that set** — asked even when, especially when, the
+number looks right.
+
+#### And granularity cuts both ways: the same table under- and over-reports
+
+A collision table built per **file** over a **token set** is wrong in two directions at once,
+and it is worth stating both because they pull opposite ways:
+
+- **Too coarse a population under-reports claimants.** Scanning 24 ratified PRs instead of 301
+  open ones missed files claimed only by unratified PRs, and silence read as "uncontested".
+- **Too coarse a granularity over-reports hazards.** "PRs that touch this file" is the wrong
+  population for "will this conflict" whenever the file is large and the change is additive.
+  Measured: a test-helper addition inside a 4428-line file whose `mod tests` begins at line 911
+  shared `status.rs` with **twelve** other open PRs. A region heuristic (±25 lines) narrowed it
+  to four. **A trial merge against each narrowed it to one.**
+
+**Prefer the merge to the heuristic, which is the same rule as the hunk-window entry.** Region
+proximity is still reasoning about position; `git merge-tree --write-tree` is the algorithm that
+will actually do the work. Eleven of the twelve merged clean, including two that a file-level
+read had been used to justify an ordering constraint — which was withdrawn on this evidence.
+
+**And the one that stayed clean is the one that still needs ordering.** The PR whose constraint
+genuinely holds merges *cleanly* with the change: its hazard is that a restructure makes the
+other PR's hunks apply and stop doing what they did. `merge-tree` cannot see that, and said
+clean. The clean merge is the half that proves least — stated in the structured-file corollary
+with the merged artefact's invariant as the other half, and here with the test suite as the
+other half. Two instances with the roles swapped is what makes it a principle rather than an
+anecdote about one file format.
+
 And the practical lesson from the timing, since it is the only reason this one was caught: the
 rule had been written down five minutes earlier. **Write them down when they happen, not at the
 end** — the next instance tends to arrive immediately and does not announce itself.
