@@ -86,6 +86,19 @@ const HANG_BRIEF: &str = "hold-the-children-map-on-close";
 
 /// The live worker's detached work: a `setsid` writer and a nested child of it, each recording
 /// its own pid so the test watches them directly rather than through any handle the sweep uses.
+///
+/// **The `setsid` is incidental here and is deliberately not asserted.** Sibling files plant the
+/// same shape as their subject and now check they built it; this one must not, and the reason is
+/// the polarity. These cases assert the writers **survive** — bug AQ was a sweep collecting a
+/// live worker's tree — so an escape makes the case easier to pass, not harder. Deleting the
+/// `setsid` puts both writers back inside the worker's session, where a sweep that read a locked
+/// children map as proof of death can actually reach them, and all three cases stay green: the
+/// stricter configuration passes too, so the sparing is correct rather than merely unreachable.
+/// The handle that would reach them either way is the `ARBOS_WORKER` mark they inherit.
+///
+/// So asserting the session here would add a premise the cases do not rest on, and a premise
+/// kept for its own sake is the kind a later reader deletes as inexplicable. The shape is here
+/// because it is what a job's `bash` call really leaves behind, not because it is the subject.
 const WRITERS: &str = r#"#!/bin/bash
 echo $$ >> "@PIDS@"
 bash -c 'echo $$ >> "@PIDS@"; while true; do echo grand >> "@LOG@"; sleep 0.2; done' &
