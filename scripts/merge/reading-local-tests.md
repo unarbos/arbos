@@ -201,6 +201,103 @@ verdict line had been bisected. The arithmetic is in the gate 4 section below. T
 carry is the classification: a one-test gap between two counting methods is as likely to be a
 destroyed line as a dropped test, and the two are indistinguishable until the methods agree.
 
+## Only the UI bundle emits a rollup, so gate 4's unit arithmetic is circular
+
+`Test Suite 'ArbosUITests.xctest' … Executed 68 tests, with 13 skipped` is in the log. **`Test
+Suite 'ArbosTests.xctest'` appears zero times** — the unit bundle runs under the parallel-clone
+format and prints no total. Measured on run 42286751308: 0 occurrences against the UI bundle's 2.
+
+So for the bundle holding ~550 of the 618 cases, **there has never been a declared figure in the
+log at all.** Both sides of the unit arithmetic come from counting verdict lines in one stream,
+and **a gate cannot detect a loss in the stream it derives both sides from.** That is why the
+bisected line needed a cross-method reconciliation to find instead of falling out of the gate.
+A count of survivors is not a count of what should exist.
+
+### The remedy: an external denominator, with neither side treated as one
+
+`internal/2881-declared-swift-tests.py` in the project store parses `Class.testName` from the
+test sources and diffs that set against a log. It needs a test directory and a log, no repo
+state:
+
+```
+python3 2881-declared-swift-tests.py <ArbosTests dir> <ArbosUITests dir> --log <xcodebuild-test.log>
+```
+
+**Adopt it under this constraint, which matters more than the tool: neither side is a
+denominator.** The evidence is the *agreement* of the two, with **every disagreement classified
+into a closed set of causes**. The blindnesses are inverse — a log cannot see a destroyed line,
+and the source cannot see what the compiler and the bundle actually included — so a disagreement
+is discharged only once it is both named **and** assigned a cause. **An unclassified
+disagreement is exactly where a real drop hides.**
+
+In particular, "declared but not reported" has **two opposite causes that must never collapse
+into one bucket**:
+
+| | Cause | Verdict |
+| --- | --- | --- |
+| `LOST VERDICT` | the verdict line was destroyed mid-write | benign |
+| `NEVER BUNDLED` | the test never reached the bundle | the inert-test defect |
+
+Validated at `32fb53d11`, where it named both holes and nothing else:
+
+```
+declared 619   never bundled 1   runnable 618   observed 617
+  NEVER BUNDLED   TranscriptSpacingUITests.testTheAvatarLaneHoldsItsColumnWhateverTheKeyboardDoes
+  LOST VERDICT    SearchSettingsTests.testExactKeywordPutsSettingsFirstAndNamesTheKeyword
+```
+
+### Known limits of the declared set — check these before relying on it
+
+A **false positive in the declared set is more dangerous than a false negative**, because it
+manufactures the verdict the reconciliation exists to make trustworthy. The tool's own first
+parser counted `private func testingGroup() -> PeopleChat` as a test, read 620, and produced a
+phantom dropped test — the `AvatarPickerTabsTests` phantom from the opposite end. Its current
+`FUNC` regex excludes non-`Void` returns and no-argument-only methods, which fixes that one.
+
+Four more ways the source set can be wrong. **Checked against this tree at `9a09c8166` on
+2026-11-07; none applies today, and all four remain live hazards the moment the tree changes:**
+
+| Hazard | Effect | Status 2026-11-07 |
+| --- | --- | --- |
+| a test method inherited from a base class runs once per subclass, under a different name | declared once, reported N times | **absent** — all 111 test classes subclass `XCTestCase` directly; the only other class is `FakeSocket: RoomSocket`, a fake |
+| a method inside `#if`, or commented out, is declared and never compiled | declared, never reported | **absent** — zero `#if` and zero commented-out `func test` in either test dir |
+| a suite using Swift Testing's `@Test` instead of `func test` is invisible to the parser | whole suites missing | **absent** — zero `@Test`, zero `import Testing` |
+| a class declaration carrying an attribute (`@MainActor class FooTests: XCTestCase`) does not match the parser's `CLASS` regex, silently dropping that class's tests | whole classes missing from declared, surfacing as `NOT DECLARED` | **absent** — no attributed class declarations today |
+
+### The classifier's own blind spot: a single-test class
+
+The `LOST VERDICT` / `NEVER BUNDLED` split is decided by asking whether any **sibling** of the
+class reported. For a class with exactly one test that heuristic cannot separate the two causes
+at all — a lost verdict line looks identical to a class that never bundled, and the tool will
+call it `NEVER BUNDLED`, i.e. report a defect where there may be none.
+
+This is live in this tree. Single-test classes at `32fb53d11`:
+
+- **`ComposerDraftLifetimeTests`** — in the **unit** bundle, where **there is no rollup to
+  corroborate against**. This is the sharp case: nothing in the log can settle it.
+- `CaptureRigUITests` and `TranscriptSpacingUITests` — UI bundle, where the rollup can.
+
+That is why `TranscriptSpacingUITests`'s `NEVER BUNDLED` verdict is trustworthy and an
+equivalent unit verdict would not be: it is corroborated by the UI rollup (68 executed against
+69 declared) and by a separate audit of why it never compiled, not by the heuristic alone.
+
+**So treat a `NEVER BUNDLED` verdict on a single-test unit class as unclassified, not as a
+defect, until something outside the heuristic settles it.**
+
+## Never carry a total without its composition
+
+**There are two different 619s in this material, and a reader who matches them concludes the
+rebase changed nothing.**
+
+| | Composition |
+| --- | --- |
+| 619 at `32fb53d11` | **source-declared**, of which 1 never reaches the bundle → **618 runnable** |
+| 619 after rebasing onto `main` | **runnable**, after `main`'s `AvatarPickerTabsTests` rewrite |
+
+Same number, different quantities. So: **state declared, minus never-bundled, equals runnable,
+each named, every time.** A bare total invites exactly the false match above, and it is also how
+the next person avoids re-deriving all of this.
+
 ## The Swift per-case log is an artefact, not `gh run view --log`
 
 `gh run view --log` on a Mac leg returns a **truncated** archive. On runs 42286751308 and
