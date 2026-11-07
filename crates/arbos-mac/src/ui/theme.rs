@@ -205,13 +205,27 @@ pub const CONTROL_GLYPH_WIDE: f32 = 17.0;
 pub const CONTROL_GAP: f32 = 8.0;
 /// Bubble corners (Grok Mac, measured: 12 pt; the iPhone uses 20).
 pub const BUBBLE_RADIUS: f32 = 12.0;
-/// Chat bubbles: Grok Mac's body is 13.5 pt on a **22 pt** pitch with 15 pt
-/// horizontal and 6 pt vertical padding. The pitch is re-measured on Jacob's
-/// 2026-10-24 Grok Bot shots (44 px between the lines of a wrapped agent
-/// answer and of a wrapped user message at 2 px/pt; refs 57/58 had read 20)
-/// — [feedback bubble-markdown-2026-10-24]. The rest of the app keeps
-/// `TEXT_BODY`.
-pub const CHAT_BODY: f32 = 13.5;
+/// Chat bubbles: Grok Mac's body on a **22 pt** pitch with 15 pt horizontal
+/// and 6 pt vertical padding. The rest of the app keeps `TEXT_BODY`.
+///
+/// **14.25, up from 13.5** (`docs/mac-design-rules.md` § Chat typography).
+/// A point size cannot be read off a screenshot; an **x-height** can, and
+/// the size follows only through the typeface's x-height ratio. On the
+/// approved reference the body text's x-height clusters at 15.69 px over 17
+/// lines; ours clustered at 14.80 px, which on a known 13.5 pt body gives a
+/// ratio of 0.5481 against SF Pro's published 0.5459 — the method recovers a
+/// value we already knew to within 0.41 % (`chat_typography_tests` holds that
+/// control). 15.69 px then implies **14.31 pt**,
+/// and 14.25 is the representable value nearest it.
+///
+/// The **pitch is unchanged**: 43.99 px on the reference against our 43.89,
+/// both 22 pt. Only the size was ever wrong, so the ratio tightens from 1.63
+/// to 1.54 — the reference's own 22 / 14.31.
+pub const CHAT_BODY: f32 = 14.25;
+/// Re-measured on Jacob's 2026-10-24 Grok Bot shots (44 px between the lines
+/// of a wrapped agent answer and of a wrapped user message at 2 px/pt; refs
+/// 57/58 had read 20) — [feedback bubble-markdown-2026-10-24] — and
+/// confirmed again on the 2026-11-05 reference at 43.99 px.
 pub const CHAT_LINE_HEIGHT: f32 = 22.0;
 pub const BUBBLE_PAD_X: f32 = 15.0;
 pub const BUBBLE_PAD_Y: f32 = 6.0;
@@ -1829,5 +1843,98 @@ mod glass_opacity_tests {
             assert!((GLASS_OPACITY_MIN..=GLASS_OPACITY_MAX).contains(&d));
             assert_eq!(GlassOpacity::clamp(d), d);
         }
+    }
+}
+
+#[cfg(test)]
+mod chat_typography_tests {
+    //! Measured on `design/grok-parity-2026-11-05/grok-reference.png`, dark,
+    //! 2 px/pt, against `arbos-current.png` taken the same way.
+    //!
+    //! **A point size is not measurable from a raster.** What is measurable
+    //! is the x-height in pixels, taken where the ink profile crosses half
+    //! its peak, interpolated between scanlines. Size follows only through
+    //! the typeface's x-height ratio, so the ratio is never assumed: it is
+    //! derived from a frame whose size we already know, and the first test
+    //! here is the control that says so.
+    //!
+    //! Lines whose glyphs are mostly digits, capitals or brackets are
+    //! excluded — those sit at cap height, not x-height, and quietly inflate
+    //! the reading. The figures below are the tightest cluster over a sweep
+    //! of the whole transcript: 17 lines of 21 on the reference, 10 of 21 on
+    //! ours.
+
+    use super::{CHAT_BODY, CHAT_LINE_HEIGHT};
+
+    /// SF Pro's x-height as a fraction of the em (1118 / 2048), published by
+    /// the foundry. It lives here because its only job is to check a
+    /// measurement against something already known.
+    const SF_PRO_X_HEIGHT: f32 = 1118.0 / 2048.0;
+    const PX_PER_PT: f32 = 2.0;
+    /// What our own transcript measured at a **known** 13.5 pt body.
+    const OUR_OLD_BODY: f32 = 13.5;
+    const OUR_OLD_X_HEIGHT_PX: f32 = 14.80;
+    /// The approved reference, same method, same frame scale.
+    const REFERENCE_X_HEIGHT_PX: f32 = 15.69;
+    const REFERENCE_PITCH_PX: f32 = 43.99;
+
+    fn x_height_px(size_pt: f32) -> f32 {
+        size_pt * PX_PER_PT * SF_PRO_X_HEIGHT
+    }
+
+    /// **The control.** Before trusting the method on a frame whose type size
+    /// is unknown, it has to reproduce one that is known: our own 13.5 pt
+    /// body, measured at 14.80 px, against SF Pro's published ratio. If this
+    /// drifts, every number below it is suspect and the measurement should be
+    /// taken again rather than the constants nudged.
+    #[test]
+    fn the_method_recovers_a_size_we_already_knew() {
+        let predicted = x_height_px(OUR_OLD_BODY);
+        let error = (predicted - OUR_OLD_X_HEIGHT_PX).abs() / OUR_OLD_X_HEIGHT_PX;
+        assert!(
+            error < 0.01,
+            "predicted {predicted:.2} px for a known {OUR_OLD_BODY} pt body, \
+             measured {OUR_OLD_X_HEIGHT_PX:.2} px — {:.2}% out",
+            error * 100.0
+        );
+    }
+
+    /// With the method checked, the new size has to land the reference's
+    /// x-height. 14.31 pt is the exact implication; 14.25 is the nearest
+    /// value we can hold, and it reads 0.4 % under — well inside the
+    /// line-to-line spread of the measurement itself (15.21 to 15.88 px).
+    #[test]
+    fn the_body_lands_the_references_x_height() {
+        let got = x_height_px(CHAT_BODY);
+        let error = (got - REFERENCE_X_HEIGHT_PX).abs() / REFERENCE_X_HEIGHT_PX;
+        assert!(
+            error < 0.015,
+            "{CHAT_BODY} pt draws a {got:.2} px x-height, the reference is \
+             {REFERENCE_X_HEIGHT_PX:.2} px — {:.2}% out",
+            error * 100.0
+        );
+        let (now, before) = (CHAT_BODY, OUR_OLD_BODY);
+        assert!(
+            now > before,
+            "the brief and the reference both say larger: {now} against {before}"
+        );
+    }
+
+    /// The pitch was already right, and this is here so nobody "fixes" it
+    /// while changing the size beside it. 43.99 px on the reference, 43.89 on
+    /// ours: the same 22 pt. Only the size was ever wrong.
+    #[test]
+    fn the_line_pitch_was_already_the_references() {
+        let measured_pt = REFERENCE_PITCH_PX / PX_PER_PT;
+        assert!(
+            (CHAT_LINE_HEIGHT - measured_pt).abs() < 0.1,
+            "we hold {CHAT_LINE_HEIGHT} pt, the reference measures {measured_pt:.2}"
+        );
+        let ratio = CHAT_LINE_HEIGHT / CHAT_BODY;
+        let reference_ratio = (REFERENCE_PITCH_PX / PX_PER_PT) / 14.31;
+        assert!(
+            (ratio - reference_ratio).abs() < 0.03,
+            "pitch-to-size {ratio:.3} against the reference's {reference_ratio:.3}"
+        );
     }
 }

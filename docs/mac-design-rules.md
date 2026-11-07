@@ -636,6 +636,92 @@ Code: `transcript.rs` `hover_time()` (returns nothing at opacity 0), pinned by
 `layout_tests::the_time_is_hidden_at_rest_and_beside_the_bubble_on_hover`;
 iPhone `Transcript.swift` `RowView` + `SenderNameRowTests`.
 
+## Chat typography (Jacob 2026-11-06, approved reference `design/grok-parity-2026-11-05/grok-reference.png`)
+
+**The bubble body is 14.25 pt on a 22 pt pitch. The pitch was already right;
+only the size was wrong.**
+
+### What a raster can and cannot tell you
+
+**It cannot tell you a point size.** Nothing in a screenshot records one.
+
+**It can tell you an x-height**, to better than a tenth of a pixel: take the
+ink count per scanline, and read where the profile crosses half its peak,
+interpolating between scanlines. A row of lowercase bodies starts and stops
+almost together, so those two edges are the sharpest features in the profile.
+
+**It cannot tell you a weight.** Stem width moves with hinting, antialiasing
+and size, so a weight read off a raster is a guess wearing a number's
+clothes. No weight below is measured, and none is changed.
+
+Size follows from x-height **only** through the typeface's x-height ratio, so
+the ratio is never assumed.
+
+### The control
+
+Before using the method on a frame whose size is unknown, it has to reproduce
+one that is known.
+
+| | x-height | Known size | Implied ratio |
+|---|---|---|---|
+| Ours | **14.80 px** | 13.5 pt | 0.5481 |
+| SF Pro, published | — | — | 1118 / 2048 = **0.5459** |
+
+**0.41 % apart.** That agreement is what licenses the next line; without it
+the reading would be a fitted guess.
+
+### The reading
+
+| | Reference | Before | Now |
+|---|---|---|---|
+| Body x-height | **15.69 px** | 14.80 px | 15.56 px |
+| Body size | **14.31 pt** implied | 13.5 pt | **14.25 pt** |
+| Line pitch | **43.99 px = 22 pt** | 43.89 px = 22 pt | 22 pt, unchanged |
+| Pitch ÷ size | 1.54 | 1.63 | 1.54 |
+
+Figures are the tightest cluster over a sweep of the whole transcript — 17
+lines of 21 on the reference, 10 of 21 on ours. **Lines whose glyphs are
+mostly digits, capitals or brackets are excluded**: those sit at cap height,
+not x-height, and silently inflate the reading. An early sample that included
+them returned 17.7 px and a nonsense ratio of 0.656.
+
+14.25 is the representable value nearest the implied 14.31, and it reads
+0.4 % under the reference's x-height — inside the line-to-line spread of the
+measurement itself (15.21 to 15.88 px).
+
+**The 13.5 was never confirmed.** The note on `CHAT_BODY` recorded the 22 pt
+pitch as re-measured on Jacob's 2026-10-24 shots and gave 13.5 beside it with
+no method. The pitch holds under re-measurement; the size does not.
+
+### Only `CHAT_BODY` moves
+
+`CHAT_BODY` has **one production consumer**, `ui::transcript`, plus a test
+fixture in `ui::select` that mirrors the transcript's metrics on purpose so
+selection geometry is exercised at the real size. `CHAT_LINE_HEIGHT` is the
+same two. Nothing else in the app reads them.
+
+`TEXT_BODY` (86 sites), `TEXT_SMALL` (151) and `TEXT_TINY` (93) are the
+app-wide scale and are **not** touched. Several unrelated constants happen to
+also equal 13.5 — `palette::TITLE_FONT`, `widgets::ROW_TEXT` — and are not
+this token.
+
+### The iPhone has no chat-body token, and does not need one yet
+
+**The two clients are built differently here.** The Mac separated the chat
+body from the app body when `CHAT_BODY` was introduced; the iPhone never did.
+`Transcript.swift` sizes bubble prose from `Theme.body`, the **app-wide** 17 pt
+used in Settings, Secrets, profiles, sign-in and twenty more files. Changing
+it would resize the whole app.
+
+It does not need changing. `Theme.swift` records Grok's iPhone body as 17 pt
+on a 22 pt pitch, and `bodyLineSpacing` 1.7 is there precisely to lift
+SwiftUI's 20.3 pt line to that 22. **The iPhone already matches its own
+reference.**
+
+So this rule is Mac-only. Anyone who later does need iPhone chat type to
+differ from app type should expect to introduce the token first — that is the
+work, not the number.
+
 ## Row contents (Jacob 2026-11-06, approved reference `design/grok-parity-2026-11-05/grok-reference.png`)
 
 **A chat row carries a name and a preview. Nothing else.** The `@handle` and
