@@ -4347,47 +4347,7 @@ impl Shell {
                         .parts
                         .iter()
                         .chain(m.hidden_parts.iter())
-                        .filter_map(|p| match p {
-                            crate::model::Part::Approval {
-                                approval_id,
-                                title,
-                                risk,
-                                state,
-                                decided_by,
-                                decided_at,
-                                reason,
-                                ..
-                            } => {
-                                let mut detail = format!(
-                                    "approval_requested · {} · {} · {}",
-                                    risk.label(),
-                                    title,
-                                    approval_id
-                                );
-                                if *state != crate::model::ApprovalState::Pending {
-                                    detail.push_str(&format!(
-                                        "\napproval_decided · {}{}{}",
-                                        state.label().to_lowercase(),
-                                        decided_by
-                                            .as_deref()
-                                            .map(|d| format!(" · by {d}"))
-                                            .unwrap_or_default(),
-                                        reason
-                                            .as_deref()
-                                            .filter(|r| !r.trim().is_empty())
-                                            .map(|r| format!(" · {r}"))
-                                            .unwrap_or_default()
-                                    ));
-                                    if let Some(at) = decided_at {
-                                        let mins =
-                                            crate::model::now_ms().saturating_sub(*at) / 60_000;
-                                        detail.push_str(&format!(" · {mins} min ago"));
-                                    }
-                                }
-                                Some((state.label().to_string(), detail))
-                            }
-                            _ => None,
-                        })
+                        .filter_map(approval_audit_row)
                         .collect();
                     if !approvals.is_empty() {
                         sections.push(("Approvals · audit".into(), approvals));
@@ -5088,6 +5048,52 @@ impl Shell {
                 .child(column),
         )
     }
+}
+
+/// S18: one audit row per card, `approval_requested` and — only once the card is decided —
+/// `approval_decided`. The second line is gated on [`ApprovalState::decided`] rather than on
+/// "not pending", because a state this build cannot name was closed by something it cannot
+/// name either, and reporting it as decided would invent the outcome.
+fn approval_audit_row(p: &crate::model::Part) -> Option<(String, String)> {
+    let crate::model::Part::Approval {
+        approval_id,
+        title,
+        risk,
+        state,
+        decided_by,
+        decided_at,
+        reason,
+        ..
+    } = p
+    else {
+        return None;
+    };
+    let mut detail = format!(
+        "approval_requested · {} · {} · {}",
+        risk.label(),
+        title,
+        approval_id
+    );
+    if state.decided() {
+        detail.push_str(&format!(
+            "\napproval_decided · {}{}{}",
+            state.label().to_lowercase(),
+            decided_by
+                .as_deref()
+                .map(|d| format!(" · by {d}"))
+                .unwrap_or_default(),
+            reason
+                .as_deref()
+                .filter(|r| !r.trim().is_empty())
+                .map(|r| format!(" · {r}"))
+                .unwrap_or_default()
+        ));
+        if let Some(at) = decided_at {
+            let mins = crate::model::now_ms().saturating_sub(*at) / 60_000;
+            detail.push_str(&format!(" · {mins} min ago"));
+        }
+    }
+    Some((state.label().to_string(), detail))
 }
 
 /// Flatten a JSON object one level ("cost.total") for the drawer.
@@ -5902,5 +5908,70 @@ pub(crate) fn delivery_error(
             message: Some(why.sentence(silenced_until_ms)),
         },
         ..error
+    }
+}
+
+#[cfg(test)]
+mod approval_audit_tests {
+    use super::*;
+    use crate::model::{ApprovalRisk, ApprovalState, Part};
+
+    fn card(state: ApprovalState) -> Part {
+        Part::Approval {
+            id: "p1".into(),
+            approval_id: "apr_1".into(),
+            title: "Send the draft".into(),
+            summary: String::new(),
+            risk: ApprovalRisk::Send,
+            payload: serde_json::Value::Null,
+            state,
+            expires_at: None,
+            decided_at: Some(crate::model::now_ms()),
+            decided_by: Some("arbos:cancelled".into()),
+            reason: None,
+            grant: None,
+        }
+    }
+
+    /// The gate on the second audit line used to read `!= Pending`, which was only correct
+    /// while the set of states stayed closed. A state this build cannot name was closed by
+    /// something it cannot name either, so claiming it was decided would invent the outcome.
+    ///
+    /// This pins the predicate: without it, `decided()` can quietly regress to a negation.
+    #[test]
+    fn an_unknown_state_reports_no_decision() {
+        let (label, detail) = approval_audit_row(&card(ApprovalState::Unknown)).expect("a row");
+        assert!(
+            detail.contains("approval_requested"),
+            "the card should still be audited: {detail}"
+        );
+        assert!(
+            !detail.contains("approval_decided"),
+            "an unrecognised state was reported as decided: {detail}"
+        );
+        assert!(
+            !detail.contains("arbos:cancelled"),
+            "a decider was attributed to a state this build cannot name: {detail}"
+        );
+        assert_eq!(label, "Unrecognised");
+    }
+
+    /// The states that are decisions still report as decided, so the new predicate did not
+    /// silence the audit line it was written to protect.
+    #[test]
+    fn the_decided_states_still_report_their_decision() {
+        for state in [
+            ApprovalState::Approved,
+            ApprovalState::Rejected,
+            ApprovalState::Expired,
+        ] {
+            let (_, detail) = approval_audit_row(&card(state)).expect("a row");
+            assert!(
+                detail.contains("approval_decided"),
+                "{state:?} stopped reporting its decision: {detail}"
+            );
+        }
+        let (_, pending) = approval_audit_row(&card(ApprovalState::Pending)).expect("a row");
+        assert!(!pending.contains("approval_decided"));
     }
 }

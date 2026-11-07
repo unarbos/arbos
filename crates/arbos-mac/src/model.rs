@@ -1943,7 +1943,10 @@ impl ApprovalRisk {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+/// `Deserialize` is derived so an unrecognised wire state lands on `Unknown` instead of failing
+/// the field — a failed field discards the whole message row, card and prose together. `Serialize`
+/// is written by hand for the opposite reason: see the impl below.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalState {
     #[default]
@@ -1951,6 +1954,10 @@ pub enum ApprovalState {
     Approved,
     Rejected,
     Expired,
+    /// A state only a newer agentd knows, kept so the row survives. This client cannot say what
+    /// it means, so it renders inert and is never written back.
+    #[serde(other)]
+    Unknown,
 }
 
 impl ApprovalState {
@@ -1960,7 +1967,40 @@ impl ApprovalState {
             ApprovalState::Approved => "Approved",
             ApprovalState::Rejected => "Rejected",
             ApprovalState::Expired => "Expired",
+            ApprovalState::Unknown => "Unrecognised",
         }
+    }
+
+    /// Whether the card was closed with an outcome this client can name. `Unknown` is neither
+    /// pending nor decided: something closed the card, but reporting *what* would be a guess.
+    pub fn decided(self) -> bool {
+        match self {
+            ApprovalState::Approved | ApprovalState::Rejected | ApprovalState::Expired => true,
+            ApprovalState::Pending | ApprovalState::Unknown => false,
+        }
+    }
+}
+
+/// Hand-written so `Unknown` has no wire form at all.
+///
+/// A derived impl would emit `"unknown"` and overwrite the state it merely failed to parse,
+/// which is worse than dropping the row: the client would destroy a fact it did not understand.
+/// Returning an error instead makes that write unrepresentable rather than merely discouraged —
+/// every caller that serialises a part already declines to write when this fails.
+impl Serialize for ApprovalState {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let name = match self {
+            ApprovalState::Pending => "pending",
+            ApprovalState::Approved => "approved",
+            ApprovalState::Rejected => "rejected",
+            ApprovalState::Expired => "expired",
+            ApprovalState::Unknown => {
+                return Err(serde::ser::Error::custom(
+                    "an approval state this build does not know cannot be written back",
+                ))
+            }
+        };
+        s.serialize_str(name)
     }
 }
 
@@ -5061,5 +5101,145 @@ mod group_call_ring_tests {
         assert_eq!(expected.len(), 1);
         assert_eq!(expected[0].identity(), "a_proj_forest");
         assert_eq!(expected[0].handle, "forest");
+    }
+}
+
+#[cfg(test)]
+mod unknown_approval_state_tests {
+    //! A state only a newer agentd knows must never cost the user a message, and must never be
+    //! written back over the real value. `cancelled` is the live instance: #2890 makes it the
+    //! only way a card closes unanswered, and it reaches this client through the document.
+
+    use super::*;
+    use serde_json::json;
+
+    fn row(state: &str) -> serde_json::Value {
+        json!({
+            "id": "msg_1",
+            "role": "assistant",
+            "status": "done",
+            "parts": [
+                { "kind": "text", "id": "p0", "text": "I need your approval to send this." },
+                {
+                    "kind": "approval",
+                    "id": "p1",
+                    "approvalId": "apr_1",
+                    "title": "Send the draft",
+                    "risk": "send",
+                    "state": state,
+                    "decidedBy": "arbos:cancelled",
+                }
+            ],
+        })
+    }
+
+    fn card(m: &Message) -> ApprovalState {
+        m.parts
+            .iter()
+            .find_map(|p| match p {
+                Part::Approval { state, .. } => Some(*state),
+                _ => None,
+            })
+            .expect("the card survived")
+    }
+
+    /// The bug this exists to stop: a field this build cannot parse fails the whole row, and
+    /// `SyncDoc::read_message` discards it with `.ok()?` — so the user loses the assistant's
+    /// prose along with the card, on every read, for as long as the value stands.
+    #[test]
+    fn a_state_this_build_does_not_know_keeps_its_whole_row() {
+        for state in ["cancelled", "superseded", "something_from_2027"] {
+            let m: Message = serde_json::from_value(row(state))
+                .unwrap_or_else(|e| panic!("`{state}` cost the user the row: {e}"));
+            assert_eq!(m.parts.len(), 2, "`{state}` dropped a part");
+            assert!(
+                matches!(m.parts[0], Part::Text { .. }),
+                "`{state}` cost the user the prose"
+            );
+            assert_eq!(card(&m), ApprovalState::Unknown);
+        }
+    }
+
+    /// The known states still parse as themselves, so tolerance did not widen into vagueness.
+    #[test]
+    fn the_four_known_states_still_parse_as_themselves() {
+        for (wire, want) in [
+            ("pending", ApprovalState::Pending),
+            ("approved", ApprovalState::Approved),
+            ("rejected", ApprovalState::Rejected),
+            ("expired", ApprovalState::Expired),
+        ] {
+            let m: Message = serde_json::from_value(row(wire)).expect("known state");
+            assert_eq!(card(&m), want, "`{wire}` stopped parsing as itself");
+        }
+        // An absent state is still a pending card, as before.
+        let mut v = row("pending");
+        v["parts"][1].as_object_mut().unwrap().remove("state");
+        let m: Message = serde_json::from_value(v).expect("stateless card");
+        assert_eq!(card(&m), ApprovalState::Pending);
+    }
+
+    /// **The property that matters.** A state this client does not understand has no wire form
+    /// at all, so the client cannot overwrite a fact it merely failed to read.
+    ///
+    /// This fails if anyone maps `Unknown` onto a real variant, or re-derives `Serialize`:
+    /// either change makes these writes succeed, which is precisely the destruction being
+    /// prevented. It is an assertion about what this client is *unable* to say.
+    #[test]
+    fn an_unknown_state_can_never_be_written_back() {
+        assert!(
+            serde_json::to_value(ApprovalState::Unknown).is_err(),
+            "an unknown state gained a wire form, so it can now overwrite the real one"
+        );
+
+        let m: Message = serde_json::from_value(row("cancelled")).expect("row survives");
+        let unknown_card = m
+            .parts
+            .iter()
+            .find(|p| matches!(p, Part::Approval { .. }))
+            .expect("card");
+        assert!(
+            serde_json::to_value(unknown_card).is_err(),
+            "a card in an unknown state serialised, so writing it back would destroy the state"
+        );
+
+        // And the whole row cannot be written back either, so no caller can launder it.
+        assert!(serde_json::to_value(&m).is_err());
+    }
+
+    /// The hand-written `Serialize` must be byte-identical to the derive it replaced, for
+    /// states *and* risks, so neither this change nor the `ApprovalRisk` follow-up can move the
+    /// wire without a test saying so.
+    #[test]
+    fn the_known_states_and_risks_keep_their_exact_wire_names() {
+        for (state, wire) in [
+            (ApprovalState::Pending, "\"pending\""),
+            (ApprovalState::Approved, "\"approved\""),
+            (ApprovalState::Rejected, "\"rejected\""),
+            (ApprovalState::Expired, "\"expired\""),
+        ] {
+            assert_eq!(serde_json::to_string(&state).expect(wire), wire);
+            assert_eq!(
+                serde_json::from_str::<ApprovalState>(wire).expect(wire),
+                state,
+                "{wire} no longer round-trips"
+            );
+        }
+
+        for (risk, wire) in [
+            (ApprovalRisk::Send, "\"send\""),
+            (ApprovalRisk::Destructive, "\"destructive\""),
+            (ApprovalRisk::Money, "\"money\""),
+            (ApprovalRisk::Credential, "\"credential\""),
+            (ApprovalRisk::Computer, "\"computer\""),
+            (ApprovalRisk::Other, "\"other\""),
+        ] {
+            assert_eq!(serde_json::to_string(&risk).expect(wire), wire);
+            assert_eq!(
+                serde_json::from_str::<ApprovalRisk>(wire).expect(wire),
+                risk,
+                "{wire} no longer round-trips"
+            );
+        }
     }
 }
