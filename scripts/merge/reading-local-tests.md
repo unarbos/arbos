@@ -414,6 +414,39 @@ about old content, however correctly the gate decided it applied. That residue i
 and the rebase-then-rerun discipline cover. The two are complementary, not redundant, and a
 worker who reads the union as "the base question is handled" will skip the rebase.
 
+### "May this merge" and "where would it merge to" are independent questions
+
+Every hold, freeze and trigger-set classification in this lane answers the first one. **None of
+them answers the second**, and a PR can be unconditionally clear on every hold while its base ref
+points somewhere that is not the trunk. Classify a queue by what it touches and the base ref is
+never consulted, so a mistargeted PR lands in whichever group its paths put it — including the
+free group, where the next thing that happens is a merge.
+
+The variant to look for is the one that does not look like a stack. A base whose parent PR is
+**merged** is a *dead base*, not a stack: there is no parent to wait for, nothing is pending, and
+every stack-shaped heuristic passes it. Worse, merging a repository's branches does not
+necessarily delete them, so the branch is usually still there, still fast-forwardable, and still
+an ancestor of the trunk — which means merging into it **succeeds**. No error, no conflict, and
+the trunk never receives the change.
+
+`merge.sh` holds this line unconditionally and it is one of the cheapest guards in the kit:
+
+```sh
+base=$(gh pr view "$PR" -R $R --json baseRefName --jq .baseRefName)
+[ "$base" = main ] || { echo "REFUSED: #$PR targets '$base', not main ..."; exit 2; }
+```
+
+Two things follow. **Do not route around that refusal** — the fix is to retarget the PR, never to
+merge it where it points. And **do not rely on it to find the problem for you**: it fires at the
+merge call, after the gates have been run and the window spent. Enumerate base refs for the whole
+queue as a batch read while the window is shut; it costs one `gh pr view` per PR and turns a
+late refusal into an early one.
+
+The audit is a two-way check, not a `!= main` scan. For each PR, the base must be either `main`
+or **the live head branch of a parent you have independently confirmed is still open**, and that
+parent's head oid must equal the base branch's current oid — a stack whose base branch has moved
+past its parent's head is its own, separate problem.
+
 ## Equal name-set sizes prove nothing about meaning
 
 Gate 4 compares test **names**. A rename is therefore the cheapest thing in the world to get
@@ -695,6 +728,37 @@ boring explanation is usually the true one, which is exactly why it should never
 stand in for looking. Confirm the gate ran at the head you are merging — not at an earlier
 head, and not by inference from why it probably would.
 
+### The canonical illustration: fifteen green conclusions over one run of the job
+
+This is the worked example to reach for, because the two questions have different answers *on
+the same page* and the misleading one is the one that looks reassuring.
+
+The question asked was whether the Swift leg had run green on `main` recently. `swift-core-check`
+showed **fifteen consecutive `success` conclusions** on `main`. The honest answer is **once**, at
+`2890272b9`, five hours earlier. In the other fourteen, `swift-core-check.yml`'s applicability
+gate decided the push did not touch the Swift surface, so the real `build-xcframework + fastlane
+test` job was **skipped** — and a workflow whose only substantive job skipped concludes `success`,
+indistinguishably from one that built the xcframework and ran the suite.
+
+Note what each layer reports, because the deception is structural rather than a bug:
+
+| what you read | what it says | what it does not say |
+| --- | --- | --- |
+| the check rollup | `success` ×15 | whether any job did work |
+| the run's job list | the real job is `skipped` | — this is where the answer is |
+| the step list | the build/test steps never ran | — |
+
+So: **"is this gate green" and "did this gate run" are different questions, and the gate-presence
+rule exists because only the second one is load-bearing.** A skipped job is not a weaker pass; it
+is not a pass at all, and it is the *only* outcome that gets more reassuring the further you stand
+back from it. Red fails loudly, absent leaves a visible hole in the list — skipped-rendered-green
+is the one failure mode whose summary is actively wrong.
+
+Operationally: to answer "has this gate run recently", list runs and then **open them and read the
+job conclusions**, taking the most recent run in which the substantive job was neither `skipped`
+nor `cancelled`. Never answer it from `gh run list`'s conclusion column. The column cannot
+distinguish the two cases, so a count taken from it is a count of pushes, not of verdicts.
+
 ### The consequence: never accept a refactor that collapses the steps gate 1 reads
 
 The gate's whole resolution is the step list, so anything that merges steps destroys evidence in
@@ -786,6 +850,39 @@ Only ancestry separates all three:
 ```sh
 git fetch -q origin main && git merge-base --is-ancestor "$BUMP_SHA" origin/main
 ```
+
+### Why the chain terminates: the two pushes to `main` carry different credentials
+
+The release chain is only finite because of an asymmetry that is invisible in both the workflow
+file and the log, and it answers two questions at once.
+
+GitHub does not start workflow runs for events pushed with Actions' **default `GITHUB_TOKEN`**.
+That is a documented anti-recursion rule, not an accident of configuration. `release.yml`'s plan
+job checks out with `actions/checkout@v4` carrying no `token:` override and no
+`persist-credentials: false`, so the credential left in `.git/config` — the one `auto-stable.sh`'s
+push to `main` then uses — is that default token. Therefore:
+
+- **the bump push triggers nothing.** Zero runs. Not a filtered-out run, not a skipped job: no
+  run object is created at all. This is why the release does not loop, and it is the mechanism
+  behind the observation that a bump commit has no CI of its own.
+- **a merge push made with the kit's PAT triggers everything its paths match**, including the
+  Release run that then declines with `not a hotfix`.
+
+Two consequences for this lane, and they pull in opposite directions, which is why the mechanism
+is worth carrying rather than just the observation:
+
+1. **Never reason about a bump commit's CI.** There is none, and its absence is not a signal of
+   any kind. A bump that rewrites `Cargo.toml`/`Cargo.lock` version lines matches
+   `swift-core-check.yml`'s and `ios.yml`'s `paths:`, and still produces no run, so "those paths
+   match, therefore the leg will run" is false for this one commit specifically.
+2. **A merge push is not equivalent to a bump push, and the difference is the credential, not
+   the content.** Any cost model that reasons "the release just pushed to `main` and nothing
+   fired, so my push won't fire anything either" is comparing two pushes that differ in exactly
+   the way that decides the question.
+
+To check the mechanism rather than trusting this paragraph: take a bump commit's sha and ask for
+its runs. An empty list is the signature — distinguishable from a filtered run, which still
+appears with a `skipped` job.
 
 ## When the event you await can destroy the subscription that would report it
 
@@ -917,6 +1014,28 @@ Which creates a narrow window that must not be merged into: **between CI going g
 bump landing on `main`.** A push in that gap takes `auto-stable.sh`'s "main moved meanwhile"
 branch and leaves the release published under its tag and on no branch — spending the version
 for nothing. Sequence it as: bump lands, ancestry check discharges, then merge.
+
+### A premise check must not run through the code the test is about
+
+The rerun above is also a *premise check*: it asks whether `ecb04054b` is genuinely red, and the
+whole argument for merging #2897 rests on the answer. The discipline that makes such a check
+worth running is that **it must not be evaluated by executing the code under repair.**
+
+The failure is self-confirmation, and it is quiet. If the premise is "this test fails for reason
+R" and the check runs the same test through the same code path, a pass is equally well explained
+by the repair, by a flake, by a path-class difference in where it ran, or by the premise being
+wrong all along — and the four are indistinguishable from the result. The measurement shares a
+failure mode with the thing it is supposed to adjudicate, and two measurements with the same
+failure mode are one measurement.
+
+What a sound premise check looks like here: the record of the run that produced the verdict, the
+failing case's own log line, and the before/after counts closing exactly — all **artefacts of
+the original run**, none of them re-derived by re-executing the repaired code. Note this is the
+same shape as the external-denominator rule in gate 4: in both, the quantity that decides the
+question must come from somewhere the change cannot reach.
+
+The practical test before accepting any premise: **ask what a pass would rule out.** If the
+answer is "nothing I did not already believe", the check is decorative.
 
 ## "Did the release land?" is a question about ancestry
 
