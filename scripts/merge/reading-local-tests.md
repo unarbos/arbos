@@ -19,6 +19,40 @@ corroborating, both short by the same one, with no signal anywhere.
 Ask what the two methods share before you treat them as independent. If they read the same stream,
 parse the same shape, or trust the same absence, they are one measurement with two names.
 
+### The companion principle, and the one that says what to do about it
+
+**The quantity that settles a question must come from outside the thing being questioned.**
+
+The rule above tells you when two readings are secretly one. This one tells you where to get a
+reading that is genuinely separate: *not from the subject*. It has turned up on three unrelated
+surfaces in a single night, which is the only reason it is stated here as a general form rather
+than three times as three discoveries. The instances are worth knowing by name, because the next
+one will not look like any of them either:
+
+1. **Gate 4's denominator.** Counting a Swift log's results against a total the same log emits is
+   circular — both move together when the log is wrong. The remedy was an **external** denominator
+   with neither side treated as one. See *Only the UI bundle emits a rollup*.
+2. **The agentd premise check.** Establishing "this test fails for reason R" by running that test
+   through the code under repair cannot distinguish a repair from a flake from a false premise.
+   The remedy was artefacts of the **original** run. See *A premise check must not run through the
+   code the test is about*.
+3. **A count that disagrees with its own enumeration.** A document said "nine" over a list of ten.
+   Recounting either list settles nothing, because the dispute is *about* those lists. It was
+   settled by a third total neither list contains — ten free plus nine held equals nineteen, the
+   ratified token count — which is outside both and agrees with one.
+
+**The operational form is a question, not a procedure: *what would I accept as an answer that this
+thing cannot influence?*** If there is no such answer, say so rather than producing a number.
+
+And note the asymmetry in case 3, because it is the part that is easy to get wrong. When no
+external total exists, the rule does not license picking whichever figure you like. **The
+enumeration wins over the summary word** — a list is the primary record and a count of it is a
+derived claim — so the correction is to rewrite the word. If a count has no population behind it
+at all, it cannot be adjudicated in either direction and must simply be **withdrawn**. That is
+what happened to a companion claim of "four stacks" in the same document: four was the count of a
+*different* population (PRs not based on `main`), and labelling one population's cardinality with
+another population's name leaves nothing to check it against.
+
 ## Derive the value that must follow something else; assert the constraint that guards it
 
 "Derive, don't assert" is right about **values that have to track an external source**. A pinned
@@ -214,6 +248,9 @@ bisected line needed a cross-method reconciliation to find instead of falling ou
 A count of survivors is not a count of what should exist.
 
 ### The remedy: an external denominator, with neither side treated as one
+
+This is instance 1 of *the quantity that settles a question must come from outside the thing
+being questioned* — see the companion principle at the top of this document.
 
 `internal/2881-declared-swift-tests.py` in the project store parses `Class.testName` from the
 test sources and diffs that set against a log. It needs a test directory and a log, no repo
@@ -424,23 +461,56 @@ free group, where the next thing that happens is a merge.
 
 The variant to look for is the one that does not look like a stack. A base whose parent PR is
 **merged** is a *dead base*, not a stack: there is no parent to wait for, nothing is pending, and
-every stack-shaped heuristic passes it. Worse, merging a repository's branches does not
-necessarily delete them, so the branch is usually still there, still fast-forwardable, and still
-an ancestor of the trunk — which means merging into it **succeeds**. No error, no conflict, and
-the trunk never receives the change.
+every stack-shaped heuristic passes it.
 
-`merge.sh` holds this line unconditionally and it is one of the cheapest guards in the kit:
+#### The measurement, because it decides how serious this is
+
+Taken on #2875, 2026-11-07, whose base ref was `cursor/crash-loop-leftover-tests-stale-prose-2fe2`
+— the head branch of #2874, merged some eight hours earlier:
+
+- the branch **still exists** on the remote at `9c8ba357e`. Merging #2874 did not delete it;
+- `git merge-base --is-ancestor 9c8ba357e origin/main` → **true**;
+- `git log origin/main..9c8ba357e` → **empty**.
+
+So the branch is not stale, not diverged and not conflicted. It is strictly behind the trunk,
+which means the git operation underneath the merge is a **fast-forward that succeeds**. Exit
+zero. No error, no conflict, no warning, a green merge in the UI — and `main` never receives the
+commit. Every layer that reports anything reports success.
+
+#### Therefore `merge.sh`'s base refusal is load-bearing, and must not be relaxed
 
 ```sh
 base=$(gh pr view "$PR" -R $R --json baseRefName --jq .baseRefName)
 [ "$base" = main ] || { echo "REFUSED: #$PR targets '$base', not main ..."; exit 2; }
 ```
 
-Two things follow. **Do not route around that refusal** — the fix is to retarget the PR, never to
-merge it where it points. And **do not rely on it to find the problem for you**: it fires at the
+**Read that as the only thing standing between this lane and a merge that returns exit zero while
+the trunk never receives the commit.** It is not belt-and-braces over an operation that would
+otherwise fail loudly; the operation it prevents is a silent success. Nothing downstream would
+catch it, because there is nothing to catch — the gates all passed, the merge all passed, and the
+only evidence is a commit's continued absence from a branch nobody re-reads.
+
+**This line must not be made conditional, and the temptation to soften it is predictable.** A
+future reader meets an unconditional `[ "$base" = main ]`, notices it blocks legitimately stacked
+PRs, and relaxes it to something like "allow a base that is another open PR's head branch". That
+instinct is not wrong about stacks — but a relaxation phrased over the base's **name**, or over
+the mere existence of a PR pointing at it, readmits exactly the dead-base case, because a dead
+base *has* a plausible name and *had* a real PR. If the line is ever relaxed, the condition must
+be about the base's **liveness**, checked directly and at merge time:
+
+- the parent PR is **`OPEN`**, re-read now rather than remembered; and
+- the base branch's current oid **equals that parent's head oid**; and
+- the base is **not already an ancestor of the trunk** — the dead-base signature, and the one
+  check that stands on its own even if the first two are somehow satisfied.
+
+Until a relaxation carries all three, the unconditional form is the correct one. Retarget the PR
+instead; that is a one-field edit and it is always available.
+
+Two further things follow. **Do not route around the refusal** — the fix is to retarget, never to
+merge where it points. And **do not rely on it to find the problem for you**: it fires at the
 merge call, after the gates have been run and the window spent. Enumerate base refs for the whole
-queue as a batch read while the window is shut; it costs one `gh pr view` per PR and turns a
-late refusal into an early one.
+queue as a batch read while the window is shut; it costs one `gh pr view` per PR and turns a late
+refusal into an early one.
 
 The audit is a two-way check, not a `!= main` scan. For each PR, the base must be either `main`
 or **the live head branch of a parent you have independently confirmed is still open**, and that
@@ -869,19 +939,43 @@ Two consequences, and they point in opposite directions.
 cancelled while pending, or `main` moved during the bump, which is exactly outcome 2 above — the
 cron picks the green commit up within fifteen minutes and publishes anyway. So a bump that has
 not appeared is not yet evidence of anything until a cron tick has also passed. Do not conclude
-a release failed, and do not ask anyone to re-dispatch, inside that interval.
+a release failed inside that interval.
+
+**And withdraw the manual remedy, because a scheduled fallback makes it actively harmful.** This
+is the consequence that is easy to miss, and it generalises past this workflow. The standing
+instruction here was: *if no Release appears within five minutes of a green rerun, dispatch
+`gh workflow run release.yml` by hand.* That was correct before the cron was known about. It is
+now wrong — the hand dispatch cannot make the release happen sooner than the cron already will,
+and it **adds an in-flight `release.yml` run, which NO-GOs the merge window** for as long as it
+lasts. Pure cost.
+
+**The pattern, worth carrying to the next workflow that grows one: a scheduled fallback trigger
+does not merely make a lost event survivable — it makes the manual remedy for a lost event
+harmful.** Any runbook step of the form "if X has not happened by T, trigger it yourself" must be
+re-read the moment a fallback schedule is added, and in most cases deleted outright. The step
+stays plausible forever on its own terms, because the thing it does still works; what changed is
+that it is now redundant *and* has a side effect the author never priced in. Audit for those
+steps when you discover a cron, rather than only recording that the cron exists.
 
 **For merging:** `merge-window.sh` NO-GOs on *any* in-flight `release.yml` run, and the cron
-starts one regardless of what this lane does. A declining scheduled run is short — measured at
-**25s** (`42324383811`, 01:30:04Z → 01:30:29Z) and **20s** (`42299302848`) — because the plan
-job declines and every downstream job skips. So a NO-GO naming a Release run that started
-seconds ago, on a `schedule` event, is very likely a transient cron artefact rather than a
-release in progress.
+starts one regardless of what this lane does.
 
-**Do not treat it as an override.** Read the run's `event` and its age, wait, and re-run
-`merge-window.sh`; if the verdict is the same it was never the cron. The distinction is
-`event == "schedule"` plus all publish jobs `skipped`, which is readable in one call and is not
-a judgement.
+The arithmetic, so no operator is surprised by it. A declining scheduled run is short — measured
+at **25s** (`42324383811`, 01:30:04Z → 01:30:29Z) and **20s** (`42299302848`) — because the plan
+job declines and every downstream job skips. Firing every fifteen minutes, that is a closed hole
+of roughly twenty to twenty-five seconds in every nine hundred, about 2–3% of wall clock, placed
+where nobody chooses it. So:
+
+- a NO-GO naming a seconds-old Release run on a `schedule` event is the **expected case**, not a
+  surprise and not a fault;
+- the correct response is to **wait it out and re-run `merge-window.sh`** — a few tens of seconds;
+- if the verdict survives the wait, it was never the cron, and it is a real release.
+
+**Never reach past it.** The cheapness of the obstacle is exactly what makes overriding it
+tempting and exactly why overriding is unnecessary: a wait that costs under a minute does not
+need a waiver, and a waiver built for this case would be available in the case that matters. The
+distinction is `event == "schedule"` plus all publish jobs `skipped`, readable in one call, and
+it is an observation rather than a judgement.
 
 ### Why the chain terminates: the two pushes to `main` carry different credentials
 
@@ -1062,9 +1156,11 @@ failure mode are one measurement.
 
 What a sound premise check looks like here: the record of the run that produced the verdict, the
 failing case's own log line, and the before/after counts closing exactly — all **artefacts of
-the original run**, none of them re-derived by re-executing the repaired code. Note this is the
-same shape as the external-denominator rule in gate 4: in both, the quantity that decides the
-question must come from somewhere the change cannot reach.
+the original run**, none of them re-derived by re-executing the repaired code.
+
+This is instance 2 of *the quantity that settles a question must come from outside the thing
+being questioned* — see the companion principle at the top of this document, where the other two
+instances and the general form are recorded.
 
 The practical test before accepting any premise: **ask what a pass would rule out.** If the
 answer is "nothing I did not already believe", the check is decorative.
