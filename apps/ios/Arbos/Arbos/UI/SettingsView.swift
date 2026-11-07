@@ -39,17 +39,11 @@ struct SettingsView: View {
     /// (appearance · textsize · connectors · machine | machine-expanded · credits · notifications ·
     /// privacy · about · devices · relay · secrets | vault | connect | new-secret | secret:<ENV>).
     private let landing: String?
-    @State private var showAppearancePage: Bool
-    @State private var showTextSizePage: Bool
-    @State private var showConnectorsPage: Bool
-    @State private var showMachinePage: Bool
-    @State private var showCreditsPage: Bool
-    @State private var showNotificationsPage: Bool
-    @State private var showPrivacyPage: Bool
-    @State private var showAboutPage: Bool
-    @State private var showDevicesPage: Bool
-    @State private var showRelayPage: Bool
-    @State private var showSecretsPage: Bool
+    /// The page pushed over the list, keyed by its route. One optional rather than
+    /// a flag per page: the route is what opens a page, so a page the enum cannot
+    /// name cannot be opened, and a route the enum does name must be given a
+    /// destination or `pageDestination` stops compiling.
+    @State private var openPage: GlobalSearch.SettingsPageRoute?
 
     /// The pages the Settings list shows (`settingsSections`), as search routes;
     /// the structure test checks the shared index finds each of them. Relay is
@@ -68,17 +62,28 @@ struct SettingsView: View {
     init(landing: String? = DebugHooks.settingsPage) {
         self.landing = landing
         _tab = State(initialValue: landing == "profile" ? "Profile" : "Settings")
-        _showAppearancePage = State(initialValue: landing == "appearance")
-        _showTextSizePage = State(initialValue: landing == "textsize")
-        _showConnectorsPage = State(initialValue: landing == "connectors")
-        _showMachinePage = State(initialValue: landing == "machine" || landing == "machine-expanded")
-        _showCreditsPage = State(initialValue: landing == "credits")
-        _showNotificationsPage = State(initialValue: landing == "notifications")
-        _showPrivacyPage = State(initialValue: landing == "privacy")
-        _showAboutPage = State(initialValue: landing == "about")
-        _showDevicesPage = State(initialValue: landing == "devices")
-        _showRelayPage = State(initialValue: landing == "relay")
-        _showSecretsPage = State(initialValue: ["secrets", "vault", "connect", "new-secret"].contains(landing ?? "") || landing?.hasPrefix("secret:") == true)
+        _openPage = State(initialValue: Self.initialPage(landing))
+    }
+
+    /// Which page a landing word opens.
+    ///
+    /// A search result sends a `SettingsPageRoute` rawValue, so that case is a
+    /// parse rather than a comparison — the enum is the vocabulary instead of a
+    /// second hand-typed copy of it. The rig's `ARBOS_SETTINGS_PAGE` also carries
+    /// words that are **not** routes and cannot become routes: `secret:<ENV>` is a
+    /// prefix rather than a value, and `machine-expanded` and `vault` name a state
+    /// within a page rather than a page. Those keep an explicit arm here, and the
+    /// page they open still receives the raw word so the sub-page can read it.
+    ///
+    /// `root` is the list itself, so it opens nothing.
+    private static func initialPage(_ landing: String?) -> GlobalSearch.SettingsPageRoute? {
+        guard let landing else { return nil }
+        if let route = GlobalSearch.SettingsPageRoute(rawValue: landing), route != .root { return route }
+        switch landing {
+        case "machine-expanded": return .machine
+        case "vault": return .secrets
+        default: return landing.hasPrefix("secret:") ? .secrets : nil
+        }
     }
 
     var body: some View {
@@ -149,24 +154,7 @@ struct SettingsView: View {
             .sheet(item: $showAvatarPicker) { initial in
                 AvatarPickerSheet(target: .me, initialTab: initial).environmentObject(model).environment(\.theme, theme)
             }
-            .navigationDestination(isPresented: $showAppearancePage) { AppearancePage() }
-            .navigationDestination(isPresented: $showTextSizePage) { TextSizePage() }
-            .navigationDestination(isPresented: $showConnectorsPage) { ConnectorsPage(connectorError: $connectorError) }
-            .navigationDestination(isPresented: $showMachinePage) { MachinePage(openAgent: openAgentFromSettings) }
-            .navigationDestination(isPresented: $showCreditsPage) { CreditsPage() }
-            .navigationDestination(isPresented: $showNotificationsPage) { NotificationsPage() }
-            .navigationDestination(isPresented: $showPrivacyPage) { PrivacyPage() }
-            .navigationDestination(isPresented: $showAboutPage) { AboutPage() }
-            .navigationDestination(isPresented: $showDevicesPage) { DevicesPage() }
-            .navigationDestination(isPresented: $showRelayPage) {
-                // RelayPage only exists in Debug; the Release (TestFlight) build has no such type.
-                #if DEBUG
-                RelayPage()
-                #else
-                EmptyView()
-                #endif
-            }
-            .navigationDestination(isPresented: $showSecretsPage) { SecretsPage(landing: landing) }
+            .navigationDestination(item: $openPage) { pageDestination($0) }
             .sheet(isPresented: $showProfileEdit) {
                 NavigationStack {
                     ProfileEditView()
@@ -182,6 +170,35 @@ struct SettingsView: View {
         .tint(theme.text)
         .preferredColorScheme(theme.isDark ? .dark : .light)
         .presentationBackground(theme.bg)
+    }
+
+    /// The page behind a route. Exhaustive and without a `default`: a route added
+    /// to `SettingsPageRoute` does not compile until it is given a page here, which
+    /// is the point of keying the destination by the route rather than by a flag.
+    @ViewBuilder
+    private func pageDestination(_ page: GlobalSearch.SettingsPageRoute) -> some View {
+        switch page {
+        case .appearance: AppearancePage()
+        case .textSize: TextSizePage()
+        case .connectedApps: ConnectorsPage(connectorError: $connectorError)
+        case .machine: MachinePage(openAgent: openAgentFromSettings)
+        case .credits: CreditsPage()
+        case .notifications: NotificationsPage()
+        case .privacy: PrivacyPage()
+        case .about: AboutPage()
+        case .devices: DevicesPage()
+        // The vault and its two sub-landings are one page; `landing` carries which.
+        case .secrets, .newSecret, .connectOnePassword: SecretsPage(landing: landing)
+        case .relay:
+            // RelayPage only exists in Debug; the Release (TestFlight) build has no such type.
+            #if DEBUG
+            RelayPage()
+            #else
+            EmptyView()
+            #endif
+        // The Settings list itself — there is nothing to push over it.
+        case .root: EmptyView()
+        }
     }
 
     /// "@login", or where we are pointed when not signed in.
