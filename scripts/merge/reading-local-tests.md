@@ -107,6 +107,47 @@ The generalisation worth carrying: **whenever a count is about independence, the
 counted must be the source, never the report.** Rows, badges, log lines and API records all
 multiply for reasons that have nothing to do with how much you know.
 
+### Every verdict carries a base, and its value decays with that base
+
+**"Green" is never a complete answer. The complete answer is "green at `<sha>`."** A verdict is a
+statement about the content it ran against, and the moment the trunk moves it becomes a
+statement about the past. This subsumes the content-staleness note under
+`swift-gate-applies.sh` below rather than sitting beside it: that note is this rule applied to
+one gate, and gate 3's rebase is this rule applied to one diff.
+
+The failure mode is that a stale verdict **looks exactly like a fresh one**. There is no decay
+indicator on a green badge, nothing in a rollup records how far back its base sits, and the
+check list renders identically whether the run happened a minute ago or last week. So the base
+has to be fetched deliberately; it will never be volunteered.
+
+```sh
+git merge-base <head> origin/main                 # the base the verdict is about
+git rev-list --count $(git merge-base <head> origin/main)..origin/main   # how far it has decayed
+```
+
+**Worked case, and it is the one that shows why the decay is not uniform.** A UI suite reported
+`passed (27.039 s)` at a PR's exact pinned head — an unimpeachable verdict line, read from the
+artefact rather than the rollup, with declared-versus-reported checked against the source. It was
+also **ninety-one commits** behind `origin/main`, and the intervening work had replaced
+`LeafAvatar.swift` with `DiscAvatar.swift`, deleted `avatar/leaf.rs` at −937 lines and removed
+the Lottie dependency outright. The test was
+`testTheAvatarLaneHoldsItsColumnWhateverTheKeyboardDoes`.
+
+**So decay is not a function of elapsed time or commit count — it is a function of overlap
+between what moved and what the test asserts.** Ninety-one commits touching nothing the test
+reads would leave the verdict nearly as good as fresh; ninety-one commits that rewrote the view
+under test leave it worth very little. Judge the number by the overlap, never by its size:
+
+```sh
+git diff --stat $(git merge-base <head> origin/main)..origin/main -- <paths the test exercises>
+```
+
+**The corollary that saves work:** the rebase a merge already owes regenerates the verdict for
+free, because pushing the rebased head triggers the gate again. So the answer to a stale verdict
+is almost never "go and get a special measurement" — it is "do the rebase you were going to do
+and read what comes back". Prefer a precondition the lane satisfies on its own turn over one
+that waits on another branch's run.
+
 ## Derive the value that must follow something else; assert the constraint that guards it
 
 "Derive, don't assert" is right about **values that have to track an external source**. A pinned
@@ -504,6 +545,10 @@ defend against **content staleness**: a leg that ran green at an old base is sti
 about old content, however correctly the gate decided it applied. That residue is what gate 3
 and the rebase-then-rerun discipline cover. The two are complementary, not redundant, and a
 worker who reads the union as "the base question is handled" will skip the rebase.
+
+Content staleness is the general rule *every verdict carries a base, and its value decays with
+that base* applied to one gate — see that section near the top, which carries the worked case
+and the way to judge how far a given verdict has decayed.
 
 ### "May this merge" and "where would it merge to" are independent questions
 
