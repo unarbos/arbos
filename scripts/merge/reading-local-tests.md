@@ -86,9 +86,22 @@ runs at a commit returns every run whose head happened to be that commit, includ
 commit did not cause. Measured over the eight bump commits `v0.6.392`–`v0.6.399`: six have zero
 runs of any workflow, and the two apparent exceptions — `57be6c4c4` and `1e7ffd611` — each have
 exactly one, both `event: schedule`. Those are the `*/15` Release cron finding the bump at
-`main`'s head, not the bump starting anything. Had the `event` field gone unread, two rows would
-have falsified a true conclusion. **The discriminator is `event`, and it is one more field in a
-query you are already making.**
+`main`'s head, not the bump starting anything. **The discriminator is `event`, and it is one more
+field in a query you are already making.**
+
+**Why this one is worth more than the mistake it prevents.** Note the shape: counting rows by
+`head_sha` gives the *right* answer on six of the eight, and a confident wrong answer on the
+other two. **A method that agrees with the truth most of the time is the hardest kind of wrong
+method to notice**, because every check you are likely to run on it comes back clean and the
+disagreement looks like the exception rather than the diagnosis. Sampling will not find it;
+"I spot-checked a few and they were fine" is exactly the evidence it produces.
+
+What finds it is asking **what the method is actually measuring** rather than whether its outputs
+look right — here, "runs whose head is this commit" versus "runs this commit started", two
+questions that coincide for most commits and come apart for precisely the ones under
+investigation. So when a method's answers are mostly right, do not treat the majority as
+validation. **Validate the method against its definition, and reserve your attention for the
+cases where the two questions could diverge.**
 
 The generalisation worth carrying: **whenever a count is about independence, the thing being
 counted must be the source, never the report.** Rows, badges, log lines and API records all
