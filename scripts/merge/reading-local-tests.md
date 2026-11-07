@@ -248,11 +248,25 @@ declared 619   never bundled 1   runnable 618   observed 617
 
 ### Known limits of the declared set — check these before relying on it
 
-A **false positive in the declared set is more dangerous than a false negative**, because it
-manufactures the verdict the reconciliation exists to make trustworthy. The tool's own first
-parser counted `private func testingGroup() -> PeopleChat` as a test, read 620, and produced a
-phantom dropped test — the `AvatarPickerTabsTests` phantom from the opposite end. Its current
-`FUNC` regex excludes non-`Void` returns and no-argument-only methods, which fixes that one.
+**Every regex in that parser is a place the declared set can go wrong, and it can go wrong in
+two directions that break the verdict in opposite ways. Only one of them is loud.**
+
+| Direction | What it does | How it reads |
+| --- | --- | --- |
+| **over-match** — something counted that is not a test | **manufactures** a drop | loud: a name you can chase, and chasing it disproves it |
+| **under-match** — a test silently omitted from the declared set | **hides** a drop | silent: the gap simply never appears, and the gate reports clean |
+
+The first is the one people guard against, and it did happen: the tool's first parser counted
+`private func testingGroup() -> PeopleChat` as a test, read 620, and manufactured a phantom
+dropped test — the `AvatarPickerTabsTests` phantom from the opposite end. Its current `FUNC`
+regex excludes non-`Void` returns and anything taking arguments, which fixes that one.
+
+**The second is the more dangerous one, because a shrunken declared set makes the reconciliation
+agree.** Fewer declared names means fewer disagreements means a clean report. The gate's output
+in that case is indistinguishable from a correct one.
+
+So when auditing this parser, **do not only ask what it might wrongly include. Ask what it
+cannot see at all** — the table below is that list, and it is a list of silent failures.
 
 Four more ways the source set can be wrong. **Checked against this tree at `9a09c8166` on
 2026-11-07; none applies today, and all four remain live hazards the moment the tree changes:**
@@ -283,6 +297,45 @@ equivalent unit verdict would not be: it is corroborated by the UI rollup (68 ex
 
 **So treat a `NEVER BUNDLED` verdict on a single-test unit class as unclassified, not as a
 defect, until something outside the heuristic settles it.**
+
+#### How to close it properly: ask the bundle, which is the thing that knows
+
+The bucket stays unclassified only because **both current sources are indirect about bundling**
+— the source tree says what was *written*, the log says what *spoke*, and neither is the bundle.
+The built `.xctest` knows exactly what it contains, and that is precisely the tie this turns on:
+**present in the bundle with no verdict line is a lost verdict; absent from the bundle is never
+bundled.** No heuristic, no siblings, and it works for a one-test class as well as a forty-test
+one.
+
+Candidate: `xcodebuild test-without-building -enumerate-tests -test-enumeration-format json`,
+with `nm` over the built binary as the cruder fallback.
+
+**Status 2026-11-07: NOT VERIFIED, and deliberately not attempted. Do not wire it in on this
+description.** What is known:
+
+- The command family **is** already used in this repo on the EC2 Mac —
+  `scripts/feedback/ios-gate.sh:60` runs `xcodebuild test-without-building -xctestrun …`, and
+  the `.xctestrun` plumbing exists (`scripts/ci/xctestrun-env.py`). So the approach is
+  plausible and the inputs it needs are already produced.
+- Whether `-enumerate-tests -test-enumeration-format json` is available and well-formed on the
+  hosted image is **unknown**, and nothing in the repo or in any captured log exercises it.
+
+Why it was not tested: verifying it needs a macOS runner. `swift-core-check.yml` runs on
+`macos-15`, GitHub's **shared hosted pool** — note the contention is the pool, not the
+concurrency group, which is per-ref. `ios.yml` carries a documented incident from 2026-10-23
+where six branch runs queued ahead of `main` and no TestFlight build processed for 90 minutes.
+Spending pool capacity on a **latent** hazard, while client legs and a release path need it, is
+the wrong trade.
+
+**The acceptance test, for whoever does run it — and it is not optional.** An enumeration that
+silently omits a class would be a *fourth indirect source pretending to be a direct one*, which
+is strictly worse than the honest gap above, because it would resolve ties confidently and
+wrongly. So it must be validated against a known population before it is trusted, exactly as any
+other filter must: run it at a commit whose answer is already established — `32fb53d11`, where
+`TranscriptSpacingUITests` is known never-bundled and the other 618 are known present — and
+require it to reproduce **that exact split and nothing else**. If it does, wire it as the
+tie-breaker and the causes table loses its unclassified bucket. If it does not, leave the verdict
+unclassified and record why.
 
 ## Never carry a total without its composition
 
