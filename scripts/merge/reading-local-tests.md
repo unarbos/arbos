@@ -815,6 +815,87 @@ consequence is large: a Mac-only change triggers no TestFlight build.
 A false confirmation is worse than no answer, because nobody re-checks a question they believe is
 settled. Read the block.
 
+### Answer a runner question from the `runs-on` expression, never from the note explaining it
+
+Same rule, one field over, and it bites harder because the misleading text is *more* convincing
+than a stray grep hit: it is a prose comment written by someone who knew what they were doing.
+
+`ios.yml` carries a detailed note about the night of 2026-10-23, when six branch runs queued
+ahead of `main` on GitHub's hosted `macos-15` pool and no TestFlight build processed for 90
+minutes. Read as current, it says the TestFlight build and every branch Mac run compete for one
+shared pool. **It is not current.** `14e84cff4` was the response to that incident, when `ios.yml`
+did run on the hosted pool; `53a9ef257` later moved it to the self-hosted EC2 Mac. The comment
+survived both commits. The line itself says:
+
+```yaml
+runs-on: ${{ inputs.runner || 'arbos-mac' }}
+```
+
+**A comment citing an incident is evidence about the past. The `runs-on` line is the fact.**
+
+The practical shape of the answer, when it was finally taken from the expressions:
+
+| Workflow | `runs-on` | Resource |
+| --- | --- | --- |
+| `ios.yml` — produces the TestFlight build | `${{ inputs.runner \|\| 'arbos-mac' }}` | self-hosted EC2 Mac |
+| `swift-core-check.yml` — the Swift leg on PRs | `macos-15` | GitHub hosted pool |
+| `release.yml` Mac job | `${{ inputs.runner \|\| vars.ARBOS_MAC_RUNNER \|\| 'macos-15' }}` | resolves to `arbos-mac` in practice |
+| `ios-capture.yml` | `${{ inputs.runner \|\| 'macos-15' }}` | hosted pool |
+
+Note the third row: an expression can depend on a **repository variable**, which is not in the
+tree and which a read-only token cannot fetch (`gh api …/actions/variables` returns 403). When
+that happens, say the expression is unresolved and find an observation of what it resolved to —
+`ios-capture.yml` records that `release.yml`'s Mac job "resolved to the `arbos-mac` label on each
+of its four most recent runs". **Do not quietly take the literal default as the answer**; it is
+the last branch of the expression, not the value.
+
+This is the same class as the truncation hint and as authorization-by-comment: explanatory prose
+ages independently of the thing it explains, and nothing fails when it goes stale.
+
+## A gate on a recorded verdict is not satisfied by fixing the thing that produced the verdict
+
+The merge window asks: **what is the recorded CI verdict of the commit already on `main`?** It
+does not ask what will be green next. Those are different objects, and substituting one for the
+other produces an argument that is entirely sound and still does not open the window.
+
+Worked instance, 2026-11-07. `main` was red at `ecb04054b` on exactly one failing test. #2897
+repaired that very test — verified: the failing case reads `ok` at its head, no `FAILED` line
+anywhere, and agentd goes `525 passed; 1 failed; 2 ignored` to `526 passed; 0 failed; 2 ignored`,
+so the counts close and the green is the repair rather than a population change. The reasoning
+was that merging the fix removes the cause and therefore beats re-running. It does remove the
+cause. The window still refused:
+
+```
+VERDICT: NO-GO — ecb04054b JUDGED AND FAILED CI since v0.6.399
+NOT MERGED: verdict is not GO
+```
+
+Only a fresh green run **on `ecb04054b` itself** changes that record. The fix cannot retroactively
+alter the verdict of a commit that already landed.
+
+**So the rerun was not avoidable, and skipping it did not save a step — it blocked the fix.** The
+tell to learn: when a refusal names a **commit** and a **recorded result**, no change to any
+*other* commit will clear it. Ask what would rewrite that record, and the answer is almost always
+"re-run the thing that wrote it".
+
+**And check no override exists before assuming one does.** `accept-red` looks like it fits and
+does not: it is consumed *after* the verdict, against the pull request's own rollup only, and
+`merge.sh` says so outright — "it cannot waive a required gate: that refusal already happened,
+above, and took no arguments". `merge-window.sh` has no override flags of any kind. That is
+deliberate, and the one recorded attempt to route around a refusal — reading it as waivable and
+falling back to `gh pr merge` on 2026-11-05 — landed a merge inside a closed release window.
+
+### The corollary that is easy to miss: the rerun is also sufficient
+
+A green run on the red commit does two things at once. It opens the window, **and** it lets the
+`workflow_run` Release fire at that commit, so the version bump comes out of the rerun itself.
+The fix is then a follow-on, not a precondition, and nothing about the release waits on it.
+
+Which creates a narrow window that must not be merged into: **between CI going green and the
+bump landing on `main`.** A push in that gap takes `auto-stable.sh`'s "main moved meanwhile"
+branch and leaves the release published under its tag and on no branch — spending the version
+for nothing. Sequence it as: bump lands, ancestry check discharges, then merge.
+
 ## "Did the release land?" is a question about ancestry
 
 When the lane is frozen waiting for a release to reach `main`, test it with ancestry and nothing
