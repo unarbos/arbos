@@ -112,6 +112,30 @@ cannot tell what it is about; a reader given three and told which one the gate r
 misled. Here: 105 findings, all of severity `note`, **zero** at `warning` or above — and only
 the last is what CI reads.
 
+**Instrument 3 — a suspiciously round total is a cap, not a count. Also free, and it is the
+magnitude tell running backwards.** Instrument 1 fires on *larger than the thing can hold*; this
+one fires on *exactly as large as the instrument allows*. 100 from `-L 100`, 50 from a default
+page size, 1000 from an API ceiling: the number did not come from the population, it came from
+the fetch.
+
+Caught the same night: `gh pr list --state open -L 100` returned **exactly 100** open PRs, which
+became "the repository has 100 open PRs" for about a minute. The real figure is **301**.
+
+**The check is to move the limit and see whether the number moves**, and to confirm with a route
+that does not page at all:
+
+```sh
+gh pr list --state open -L 500 --json number --jq 'length'          # 301
+gh api 'search/issues?q=repo:OWNER/REPO+is:pr+is:open' --jq '.total_count'   # 301 — no paging
+```
+
+Two routes agreeing, one of which never paged, is what makes 301 a count rather than another
+cap. **Any total that equals a limit you typed is a cap until a second route says otherwise** —
+and the error is silent, because a truncated list is a perfectly well-formed list.
+
+Between the three instruments: the first catches a number too big for the thing, the third
+catches a number shaped by the fetch, and the second catches the ones neither has a prior for.
+
 And the practical lesson from the timing, since it is the only reason this one was caught: the
 rule had been written down five minutes earlier. **Write them down when they happen, not at the
 end** — the next instance tends to arrive immediately and does not announce itself.
