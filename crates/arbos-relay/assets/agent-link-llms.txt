@@ -293,7 +293,10 @@ Show that you are working on a longer answer:
   {"on":true}
 
 The indicator lasts about six seconds. Refresh it while you work, and send
-`{"on":false}` or just post when you are done. It is never stored anywhere.
+`{"on":false}` or just post when you are done. Nothing is added to the
+conversation. The call itself is logged like every other call this link makes
+(section 10): one row with the time, your address and your user agent, which
+the person who made the link can read.
 
 Before you write anything, read this and keep it:
 
