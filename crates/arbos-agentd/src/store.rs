@@ -288,6 +288,9 @@ pub fn redact_live_value(value: &str) {
 /// A shorter value still gets swept from the two text columns that carry prose, where the worst
 /// a collision does is redact a word. It is not swept from the structural columns, where the
 /// worst it does is change a row's meaning.
+///
+/// `no_status_literal_reaches_the_sweep_floor` reads those literals back off the source and fails
+/// if a new one reaches this number, so the clearance is checked rather than remembered.
 const GENERIC_SWEEP_MIN: usize = 12;
 
 pub fn redact(text: &str) -> String {
@@ -1821,6 +1824,77 @@ fn fts_query(q: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The floor only guards while it clears every literal these columns are read back against.
+    ///
+    /// [`GENERIC_SWEEP_MIN`] is a number tuned to the literals that exist today. A
+    /// twelve-character state added next month would make it stop guarding with nothing failing:
+    /// the two-sided test below pins the behaviour at today's literals and would pass unchanged.
+    /// So the link is made here rather than remembered — walk the crate for equality comparisons
+    /// on a `state` or `status` column, and for the schema's own defaults, and fail if any
+    /// literal reaches the floor.
+    ///
+    /// Scoped to comparisons on purpose: widening it to every line mentioning a state also
+    /// collects JSON field names like `recent_messages`, which no column is compared to. A state
+    /// only ever written and never compared would slip past, which is the known limit of reading
+    /// this off the source instead of off a type the compiler owns.
+    #[test]
+    fn no_status_literal_reaches_the_sweep_floor() {
+        fn has_word(line: &str, w: &str) -> bool {
+            let edge = |c: Option<char>| !c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+            line.match_indices(w).any(|(i, _)| {
+                edge(line[..i].chars().next_back()) && edge(line[i + w.len()..].chars().next())
+            })
+        }
+        fn plain(tok: &str) -> bool {
+            tok.starts_with(|c: char| c.is_ascii_lowercase())
+                && tok
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        }
+
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut found: Vec<String> = Vec::new();
+        for entry in std::fs::read_dir(&src).expect("src dir").flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|x| x.to_str()) != Some("rs") {
+                continue;
+            }
+            for line in std::fs::read_to_string(&path).unwrap_or_default().lines() {
+                if (has_word(line, "state") || has_word(line, "status"))
+                    && (line.contains("==") || line.contains("matches!"))
+                {
+                    found.extend(
+                        line.split('"')
+                            .skip(1)
+                            .step_by(2)
+                            .filter(|t| plain(t))
+                            .map(str::to_owned),
+                    );
+                }
+                if let Some(lit) = line
+                    .split("DEFAULT '")
+                    .nth(1)
+                    .and_then(|r| r.split('\'').next())
+                    .filter(|t| plain(t))
+                {
+                    found.push(lit.to_owned());
+                }
+            }
+        }
+
+        // A walk that finds nothing would pass this test without checking anything.
+        assert!(found.len() >= 20, "source walk found too little: {found:?}");
+        let over: Vec<&String> = found
+            .iter()
+            .filter(|l| l.len() >= GENERIC_SWEEP_MIN)
+            .collect();
+        assert!(
+            over.is_empty(),
+            "these are compared by equality and are at or above GENERIC_SWEEP_MIN ({GENERIC_SWEEP_MIN}), \
+             so a vaulted value matching one would rewrite it: {over:?}. Raise the floor or shorten the state."
+        );
+    }
 
     /// A value short enough to be a status literal is left to the two text passes.
     ///
