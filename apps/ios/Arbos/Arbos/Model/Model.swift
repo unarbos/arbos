@@ -1235,6 +1235,10 @@ struct Message: Identifiable, Equatable {
     /// Bubble menu → Forward: the original sender's name; the bubble draws
     /// "Forwarded from <name>" above the text (`forwardedFrom` on the row).
     var forwardedFrom: String? = nil
+    /// The name of the routine that injected this prompt (`routineName` on the row,
+    /// written by the relay beside `sender: "routine:<id>"`). Only a routine's own
+    /// prompt carries it.
+    var routineName: String? = nil
     /// Bubble menu → Reply in DM: the quoted message in another chat with its snapshot
     /// (`replyRef` on the row, crdt-sync §6.2); the bubble draws the quote header plus
     /// "Replying to <who> in <chat>".
@@ -1334,6 +1338,19 @@ struct Message: Identifiable, Equatable {
             case .tool, .attachment, .error, .question, .chart, .linkPreview, .secretRedacted: return false
             }
         }
+    }
+
+    /// "Routine · Morning stand-up" when a routine injected this prompt, nil otherwise.
+    ///
+    /// A routine's prompt reaches the chat as a **user-role** message whose sender is
+    /// `routine:<id>`, which is why it used to draw as a user bubble: nothing about it
+    /// said "machine". This is the one label that stands in for it — on its own row and
+    /// in the quote header of whatever answered it.
+    var routinePromptLabel: String? {
+        guard sender.hasPrefix("routine:") else { return nil }
+        let id = String(sender.dropFirst("routine:".count))
+        let name = routineName?.trimmingCharacters(in: .whitespaces)
+        return "Routine · \(name.flatMap { $0.isEmpty ? nil : $0 } ?? id)"
     }
 
     var textLength: Int {
@@ -1490,6 +1507,7 @@ enum DocJSON {
             mentions: (m["mentions"] as? [Any])?.compactMap { $0 as? String } ?? [],
             replyTo: str(m["replyTo"]),
             forwardedFrom: str(m["forwardedFrom"]).flatMap { $0.isEmpty ? nil : $0 },
+            routineName: str(m["routineName"]).flatMap { $0.isEmpty ? nil : $0 },
             replyRef: ReplyRef(row: m["replyRef"]),
             activity: str(m["activity"]).flatMap { $0.isEmpty ? nil : $0 },
             voice: bool(m["voice"]) || str(m["source"]) == "voice",
