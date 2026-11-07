@@ -508,9 +508,35 @@ instead; that is a one-field edit and it is always available.
 
 Two further things follow. **Do not route around the refusal** — the fix is to retarget, never to
 merge where it points. And **do not rely on it to find the problem for you**: it fires at the
-merge call, after the gates have been run and the window spent. Enumerate base refs for the whole
-queue as a batch read while the window is shut; it costs one `gh pr view` per PR and turns a late
-refusal into an early one.
+merge call, after the gates have been run and the window spent.
+
+#### Therefore: the base-ref audit is a standing step, not a reaction
+
+**Enumerate the base ref of every PR in the queue whenever the queue changes or the window is
+shut.** One `gh pr view --json baseRefName,headRefName,headRefOid` per PR, a few seconds for a
+queue of twenty, and it can be run at the one time when nothing else can be: while merging is
+blocked. It is the cheapest read in the lane and the only one that answers *where would this go*.
+
+Run it as the two-way check, because `!= main` alone is vacuous on a stack. For each PR the base
+must be **either `main`, or the head branch of a parent you have independently confirmed `OPEN`
+right now** — and in the second case the base branch's current oid must **equal** that parent's
+head oid. A base branch that has moved past its parent's head is its own separate problem and
+this is the only step that would see it.
+
+**The argument for making it standing is not the dead base itself — it is what the audit joined
+up.** The mis-based PR sat in this lane's free group, apparently ready. Its dead base was *also*
+the last blocker on a second piece of work in another worker's lane, whose follow-up was waiting
+on it and believed the dependency sat with the coordinator. Neither side could see the join:
+this lane had a PR it thought was ready, the other had a block it thought was someone else's,
+and both beliefs were locally consistent. **A cross-owner dependency is invisible from inside
+either owner's view by construction** — each sees one end — so no amount of care on either side
+surfaces it. Only a read across the whole queue does.
+
+Generalise past base refs: **a cheap read over the entire queue finds couplings that no
+per-PR check can, because the coupling is not a property of any single PR.** Prefer one such
+sweep, run at a time when it costs nothing, over per-item diligence that is individually
+thorough and structurally blind. When the window is shut and there is time to fill, that sweep is
+the highest-value thing available.
 
 The audit is a two-way check, not a `!= main` scan. For each PR, the base must be either `main`
 or **the live head branch of a parent you have independently confirmed is still open**, and that
