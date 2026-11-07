@@ -1280,13 +1280,16 @@ struct ChatSession: View {
                 .transition(.opacity.combined(with: .scale(scale: 0.92)))
             }
         }
-        // Trailing-only overlay so the hit target is just the disc (not a full-width
-        // bar). UIKit tap inside the disc still works while the transcript decelerates.
-        .overlay(alignment: .bottomTrailing) {
+        // Centred over the composer, like the reference build and like `newMessagesPill` above,
+        // which takes the same slot when there is something below to count. Pinned to the
+        // trailing edge it sat over the newest bubble instead of over the gap between them.
+        // The overlay is still sized to the disc — `ChatBarHeightReader` passes its content
+        // straight through — so the hit target is the disc and not a full-width bar, and a
+        // UIKit tap inside it still works while the transcript decelerates.
+        .overlay(alignment: .bottom) {
             if newBelowCount == 0, awayFromBottom {
                 ChatBarHeightReader(bar: chatBarHeight) { bar in
                     scrollToBottomButton
-                        .padding(.trailing, composerSideInset)
                         .padding(.bottom, bar + 10)
                 }
                 .transition(.opacity.combined(with: .scale(scale: 0.8)))
