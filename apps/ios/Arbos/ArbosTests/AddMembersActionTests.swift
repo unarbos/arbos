@@ -172,6 +172,9 @@ final class LoopbackRelay {
     private static let startDeadline: TimeInterval = 10
     private static let connectionDeadline: TimeInterval = 20
     private static let drainDeadline: TimeInterval = 20
+    /// How often the drain re-reads connection state, so it never depends on a state callback
+    /// arriving to notice that a connection has already gone down.
+    private static let drainPoll: TimeInterval = 0.05
 
     private let listener: NWListener
     private let queue = DispatchQueue(label: "loopback-relay")
@@ -227,26 +230,50 @@ final class LoopbackRelay {
         port = p
     }
 
-    /// Cancels the listener *and* every connection it opened, and does not return until the
-    /// network stack has reported each one down. A connection that outlives its test keeps a
-    /// finished relay alive on a shared queue, and a callback delivered into that can take the
-    /// test host out without writing anything anybody can read afterwards.
+    /// Any terminal state counts as down. Waiting specifically for `.cancelled` to be
+    /// *delivered* would make the drain depend on a callback that nothing in this harness has
+    /// ever exercised, and the cost of being wrong about it is the full bound on every
+    /// teardown rather than a slow report.
+    private static func isDown(_ state: NWConnection.State) -> Bool {
+        switch state {
+        case .cancelled, .failed: return true
+        default: return false
+        }
+    }
+
+    /// Cancels the listener *and* every connection it opened, and does not return until each
+    /// one is down. A connection that outlives its test keeps a finished relay alive on a
+    /// shared queue, and a callback delivered into that can take the test host out without
+    /// writing anything anybody can read afterwards.
+    ///
+    /// Because the connections the harness itself finished have already left `_live`, and
+    /// because anything already terminal is pruned by state below, this only ever blocks on a
+    /// connection that is genuinely still live.
     func stop() throws {
         listener.cancel()
         let deadline = Date().addingTimeInterval(Self.drainDeadline)
+        var cancelled: Set<ObjectIdentifier> = []
         lock.lock()
         defer { lock.unlock() }
-        // Re-snapshot each time round: a connection accepted between the cancel and the wait
-        // would otherwise never be cancelled by anyone, and the drain would time out blaming it.
-        while !_live.isEmpty {
-            let live = Array(_live.values)
-            lock.unlock()
-            for conn in live { conn.cancel() }
-            lock.lock()
-            if _live.isEmpty { break }
-            if !lock.wait(until: deadline) {
-                throw StopFailure(stranded: _live.count, after: Self.drainDeadline)
+        while true {
+            for (id, conn) in _live where Self.isDown(conn.state) { _live[id] = nil }
+            if _live.isEmpty { return }
+            if Date() >= deadline { throw StopFailure(stranded: _live.count, after: Self.drainDeadline) }
+
+            // Re-checked each pass: a connection accepted after the previous one would
+            // otherwise never be cancelled by anyone, and the drain would time out blaming it.
+            let pending = _live.filter { !cancelled.contains($0.key) }
+            if !pending.isEmpty {
+                cancelled.formUnion(pending.keys)
+                lock.unlock()
+                for conn in pending.values { conn.cancel() }
+                lock.lock()
+                continue
             }
+            // Unlike the listener wait in `init`, where the result was the only signal there
+            // was, nothing here needs to tell a broadcast from the poll interval expiring: the
+            // top of the loop re-reads every connection's state and the deadline itself.
+            _ = lock.wait(until: min(deadline, Date().addingTimeInterval(Self.drainPoll)))
         }
     }
 
@@ -263,10 +290,13 @@ final class LoopbackRelay {
         let deadline = Date().addingTimeInterval(Self.connectionDeadline)
         var buffer = Data()
         func read() {
+            // Deliberately not `finish` here: that would capture `self` into this local
+            // function and retain-cycle it through the connection. The drain prunes by state,
+            // so a connection cancelled on this path still leaves `_live` promptly.
             guard Date() < deadline else { conn.cancel(); return }
             conn.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, done, error in
                 guard let self else { conn.cancel(); return }
-                guard error == nil else { conn.cancel(); return }
+                guard error == nil else { self.finish(conn); return }
                 if let data { buffer.append(data) }
                 if let req = Self.parse(buffer) {
                     self.lock.lock(); self._requests.append(req); self.lock.unlock()
@@ -283,7 +313,7 @@ final class LoopbackRelay {
                                   self?.awaitClose(conn, by: deadline)
                               })
                 } else if done {
-                    conn.cancel()
+                    self.finish(conn)
                 } else {
                     read()
                 }
@@ -295,11 +325,20 @@ final class LoopbackRelay {
     /// Holds the connection open until the client closes it, so the response is never cut
     /// short, and gives up at the same deadline as everything else here.
     private func awaitClose(_ conn: NWConnection, by deadline: Date) {
-        guard Date() < deadline else { conn.cancel(); return }
+        guard Date() < deadline else { finish(conn); return }
         conn.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] _, _, done, error in
-            guard let self, error == nil, !done else { conn.cancel(); return }
+            guard let self else { conn.cancel(); return }
+            guard error == nil, !done else { self.finish(conn); return }
             self.awaitClose(conn, by: deadline)
         }
+    }
+
+    /// The harness is done with this connection: cancel it and stop counting it, rather than
+    /// cancelling and then waiting to be told. Every path the harness drives goes through
+    /// here, which is what leaves the drain with only genuinely live connections to block on.
+    private func finish(_ conn: NWConnection) {
+        conn.cancel()
+        forget(conn)
     }
 
     private func forget(_ conn: NWConnection) {
