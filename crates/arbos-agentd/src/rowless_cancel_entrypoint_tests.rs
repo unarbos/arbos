@@ -84,6 +84,9 @@ use crate::sync::SharedHost;
 
 const CHAT: &str = "01TESTCHATROWLESSENTRY0001";
 
+/// A chat no case acts on, used only to hold the control row that proves the job query reads.
+const CONTROL_CHAT: &str = "01TESTCHATROWLESSCONTROL01";
+
 /// A plain ask. Deliberately **not** phrased as a background job: `forced_job::forces_a_job`
 /// reads that wording as forcing a row, and an ask with a row is a different path entirely
 /// (#2850) that `stop_jobs` can already see.
@@ -248,6 +251,29 @@ async fn an_accepted_ask_that_cannot_start(
 
     // The remaining part of the precondition, scored rather than assumed — this is a part the
     // canary did establish, and it must still be true here or the case is testing #2850's path.
+    //
+    // Scored against a control, because `is_empty()` on its own is also the answer a query that
+    // can see nothing would give. A row is planted on an unrelated chat and read back through
+    // the same call in the same breath, which separates "this chat owns no job" from "this query
+    // answers empty for everyone" — and pins the keying besides, since a read blind to `chat_id`
+    // would hand the planted row back under `CHAT`.
+    let control = ulid();
+    agent
+        .store
+        .insert_job(&control, CONTROL_CHAT, &ulid(), "control", "ask", "", &[])
+        .expect("the control row is written");
+    // Cancelled on the spot: an open row on an unrelated chat is something a runner or a sweep
+    // could take an interest in, and this one exists only to be read back.
+    agent
+        .store
+        .set_job_state(&control, "cancelled", None)
+        .expect("the control row is closed");
+    assert_eq!(
+        agent.store.jobs_for_chat(CONTROL_CHAT).unwrap().len(),
+        1,
+        "control: the job query must be able to see a row at all, or the next assertion holds \
+         for a reason that has nothing to do with this ask"
+    );
     assert!(
         agent.store.jobs_for_chat(CHAT).unwrap().is_empty(),
         "the ask must own no job row, or `stop_jobs` could see it and the race is a different one"
@@ -415,6 +441,19 @@ async fn the_job_chip_stop_leaves_a_row_less_ask_alone() {
         .await
         .expect("the chip stop is handled");
 
+    // The baseline must be a real held set, or the comparison below is `[] == []`. Measured:
+    // with `test_held_asks` stubbed to report nothing held — which is what a regression in the
+    // hold itself looks like — this case passed green without the line below.
+    //
+    // [`an_accepted_ask_that_cannot_start`] returns the set without asserting it, and is right
+    // not to: demanding it there would turn a run against pre-#2857 code into a setup failure
+    // for the two cases above, which read `held` only as diagnostic text. This case is the one
+    // outside that reasoning's range, because the held set is its subject rather than its
+    // context, so the baseline is scored here instead.
+    assert!(
+        !held.is_empty(),
+        "the ask was never held, so there is no held set for the chip stop to leave alone"
+    );
     assert_eq!(
         agent.test_held_asks(CHAT).await,
         held,
