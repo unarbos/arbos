@@ -74,6 +74,17 @@ impl Shell {
         } else {
             String::new()
         };
+        let connectors_connected = state
+            .connectors
+            .items
+            .iter()
+            .filter(|c| c.status == crate::model::ConnectorStatus::Connected)
+            .count();
+        let connectors_summary = if connectors_connected == 0 {
+            None
+        } else {
+            Some(format!("{connectors_connected} connected"))
+        };
         let devices_view = state.devices.clone();
         let devices_summary = match devices::live(&state.devices.items).count() {
             0 => String::new(),
@@ -1739,9 +1750,18 @@ impl Shell {
                 )
                 .into_any_element(),
             ]));
-            // Secrets · Devices · Agent access link (Credits · Connected apps
-            // hidden until implemented).
+            // Connected apps · Secrets · Devices · Agent access link
+            // (Credits still hidden until it ships again).
             body.push(Section::Card(vec![
+                page_row(
+                    "settings-connectors",
+                    "link",
+                    SettingsPage::Connectors,
+                    connectors_summary,
+                    &theme,
+                    cx,
+                )
+                .into_any_element(),
                 page_row(
                     "settings-secrets",
                     "key",

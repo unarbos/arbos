@@ -151,9 +151,10 @@ impl SettingsPage {
     /// its order); the search index must find each of them
     /// ([feedback search-settings-mac-2026-10-26], `palette::tests`).
     #[cfg(test)]
-    pub(crate) const LISTED: [SettingsPage; 9] = [
+    pub(crate) const LISTED: [SettingsPage; 10] = [
         SettingsPage::Appearance,
         SettingsPage::Notifications,
+        SettingsPage::Connectors,
         SettingsPage::Secrets,
         SettingsPage::Devices,
         SettingsPage::AgentLinks,

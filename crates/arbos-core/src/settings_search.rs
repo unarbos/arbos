@@ -18,14 +18,13 @@
 //!
 //! Not indexed on purpose (Jacob, 14:18 CR): Sign out and Pause all secrets
 //! (a search result must never act), the pages a platform hides (the Mac's
-//! Credits / Connected apps until they return), and a server's or group's own
-//! Settings tab (its chat row already finds it).
+//! Credits until it returns), and a server's or group's own Settings tab
+//! (its chat row already finds it).
 
 use crate::search::{match_text, MatchKind};
 
 /// Which app is asking: the index differs a little per platform (the Mac has
-/// Updates and On this Mac, the iPhone has Privacy, Text Size, Credits and
-/// Connected apps).
+/// Updates and On this Mac, the iPhone has Privacy, Text Size and Credits).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Platform {
     Mac,
@@ -309,7 +308,7 @@ pub const INDEX: &[SettingsEntry] = &[
             "oauth",
             "connectors"
         ],
-        IPHONE
+        BOTH
     ),
     entry!(
         Profile,

@@ -223,7 +223,7 @@ pub struct AgentRow {
 }
 
 /// Which of the Mac's pages a shared index item is; `None` for the items the
-/// Mac does not list (the iPhone's Privacy, Text Size, Credits, Connected apps).
+/// Mac does not list (the iPhone's Privacy, Text Size, Credits).
 pub fn setting_target(item: SettingsItem) -> Option<SettingTarget> {
     Some(match item {
         SettingsItem::Appearance | SettingsItem::AppearanceOpacity => {
@@ -240,10 +240,8 @@ pub fn setting_target(item: SettingsItem) -> Option<SettingTarget> {
         SettingsItem::SendFeedback => SettingTarget::Feedback,
         SettingsItem::About => SettingTarget::Page(SettingsPage::About),
         SettingsItem::Profile => SettingTarget::Profile,
-        SettingsItem::Privacy
-        | SettingsItem::TextSize
-        | SettingsItem::Credits
-        | SettingsItem::ConnectedApps => return None,
+        SettingsItem::ConnectedApps => SettingTarget::Page(SettingsPage::Connectors),
+        SettingsItem::Privacy | SettingsItem::TextSize | SettingsItem::Credits => return None,
         // Per-agent rows are built by `settings_entries` with the agent id.
         SettingsItem::AgentModel | SettingsItem::AgentReasoning | SettingsItem::AgentVoice => {
             return None
@@ -1160,7 +1158,6 @@ mod tests {
             SettingsItem::Privacy,
             SettingsItem::TextSize,
             SettingsItem::Credits,
-            SettingsItem::ConnectedApps,
         ] {
             assert!(setting_target(item).is_none());
             assert!(settings_search::index(Platform::Mac).all(|e| e.item != item));
