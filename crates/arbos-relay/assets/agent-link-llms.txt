@@ -279,7 +279,7 @@ owner's log and it spends your request budget.
        "via":"link:01M6A…"}
 
 `reply_to` is optional and takes a message id from section 3. Text is trimmed
-and must be under 20,000 characters.
+and must be 20,000 characters or fewer.
 
   POST /agent-link/chats/{id}/reactions
   {"message":"01M6C…","emoji":"👍","on":true}
@@ -318,9 +318,11 @@ Before you write anything, read this and keep it:
 - **When you are unsure whether to send something, do not send it.** Tell the
   person instead.
 
-Your messages carry a "via agent link" marker in the conversation, so the
-people in the room can tell. Everything you write is recorded against this
-link with the time, the chat and the message, and the owner reads all of it.
+Everything you write is recorded against this link with the time, the chat and
+the message, and the person who made it reads all of it. The row also carries
+a `link:<id>` marker, but that is a label any device can write: the record is
+what identifies your messages, and only the person who made the link can read
+it.
 
 ## 8. Limits, and what to do when you hit one
 

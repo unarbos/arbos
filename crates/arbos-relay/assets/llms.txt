@@ -100,7 +100,9 @@ Register the MCP server (stdio): command `arbos-sidecar`, args `["mcp"]`.
                 default_tools_approval_mode = "approve"  (codex exec refuses
                 tool calls otherwise: "approval policy is never")
 
-Tools (same verbs exist as `arbos-sidecar <verb>` on the command line):
+Tools (each has an `arbos-sidecar` verb too, named without the `arbos_`; three
+differ: read_chat → read, fetch_file → file, status → status-line, because
+plain `status` is the daemon's own health command from section 2):
   arbos_chats {}                                  → your chats
   arbos_pending {}                                → wake rows you have not answered
   arbos_read_chat {chat, limit?, before?}         → rows, oldest first
