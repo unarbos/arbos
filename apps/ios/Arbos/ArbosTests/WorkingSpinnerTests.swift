@@ -145,12 +145,16 @@ final class WorkingSpinnerTests: XCTestCase {
     }
 
     func testTheSpinnerWinsAPeopleRowsSlotAndNoPillCompetesForIt() throws {
-        // This used to read the other way round — the count pill beat the
-        // spinner, on "information over animation". The pill is gone from a
-        // home row (Jacob 2026-11-05, `UnreadDot`), so there is no count in
-        // the slot to prefer: the spinner says something is happening *now*
-        // and the dot says only "unread", which keeps. Pinned on the source's
-        // branch order, because the row is a view, not a pure function.
+        // A convergence, not a reversal (`docs/mac-design-rules.md` § Which
+        // mark wins when a row is both working and unread). `RowStatus.of`
+        // has always tested `streaming` first, and `AgentRow` has always
+        // followed it. `PeopleRow` was the one place that did not use
+        // `RowStatus` at all: it ran its own chain with the count pill ahead
+        // of the spinner, on "information over animation". The pill is gone
+        // from a home row (Jacob 2026-11-05, `UnreadDot`), so the information
+        // that argument rested on is gone with it, and this row now follows
+        // the shared rule. Pinned on the source's branch order, because the
+        // row is a view, not a pure function.
         let path = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("Arbos/UI/HomeView.swift").path
