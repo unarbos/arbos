@@ -174,6 +174,82 @@ log, and a status write that lands *within* a reporter line bisects it. Learn th
 a reader who knows only that counts can be short will still believe the order, and a reader who
 knows only that the order lies will still trust a count.
 
+## The Swift per-case log is an artefact, not `gh run view --log`
+
+`gh run view --log` on a Mac leg returns a **truncated** archive. On runs 42286751308 and
+42286753339 it came back as 453 KB ending mid-teardown, with **zero** `Test case` lines in it.
+Every per-case extraction over it returns 0, and 0 is indistinguishable from "the suite did not
+run" — a vacuous count that looks like a catastrophic one.
+
+The real output is an upload: `gh run download <run-id>` gives
+`swift-core-check-logs-<sha>/xcodebuild-test.log`, ~1.39 MB, with every verdict line in it. Check
+`gh api repos/<owner>/<repo>/actions/runs/<id>/artifacts` for expiry first.
+
+So: **a Swift count of zero is a tooling result, not a measurement.** Before reporting any Swift
+number, confirm the log you read actually contains verdict lines at all. This is the vacuity rule
+applied to the source rather than the filter, and it is the cheapest of the lot to check.
+
+## Gate 3 and gate 4 must compare against the base that will actually land
+
+A PR's diff is only meaningful against the commit it will be merged into. Two ways this goes
+wrong, with the same root cause:
+
+**1. A PR based on another PR's branch.** When head's base ref is not the trunk, comparing it to
+the trunk measures the parent PR's work as though it were this PR's. Treat the pair as a stack:
+merge the parent first, then retarget and rebase the child, and take the pre-rebase pin against
+the **parent's head** and the post-rebase pin against the trunk only once the parent is in it.
+Never pass a PR whose base is another PR's branch through gate 3 against the trunk.
+
+**2. A trunk that moved after the branch forked.** This one is subtler because nothing in the
+PR's metadata looks unusual. Worked example: #2881 at `32fb53d11` diffed against live `main`
+showed `AvatarPickerTabsTests` losing three names and gaining two — a net dropped test, exactly
+the signature the dropped-test rule exists to catch. Diffed against its **merge-base**
+`4cb9567db`, that file is byte-identical and the PR never touched it. Two commits (`45ae4846b`,
+`0a59a2f30`) had landed on `main` after the fork and rewritten those tests. The "drop" was `main`
+moving forward, read backwards as the branch moving back.
+
+**So derive the base, never assume it:** `git merge-base origin/main <head>`, and if it is not
+`origin/main`, every name that differs is suspect until you have checked whether the trunk or the
+branch changed it. `git log <merge-base>..origin/main -- <path>` answers that in one command.
+
+The general form: **a difference has two ends, and a gate that names only one of them is
+guessing.** Before adjudicating any dropped name, establish which side actually moved.
+
+## Equal name-set sizes prove nothing about meaning
+
+Gate 4 compares test **names**. A rename is therefore the cheapest thing in the world to get
+wrong: one name out, one name in, counts unchanged, "nothing dropped" — and the behaviour under
+test can have been reversed.
+
+**The cheapest tell of an inversion is a name whose subject and object have swapped places.**
+Worked example, from #2881:
+
+| | |
+| --- | --- |
+| before | `testAPeopleRowsCountPillWinsTheSlotOverTheSpinner` |
+| after | `testTheSpinnerWinsAPeopleRowsSlotAndNoPillCompetesForIt` |
+
+The pill won; now the spinner wins. The same two nouns, the same verb, the roles exchanged. A
+name-set diff reports this as "one renamed, nothing dropped", which is **true and still hiding a
+behavioural reversal**. A size comparison cannot see it at all, because the sizes are equal by
+construction.
+
+Score such a pair as **neither a drop nor a clean rename**. Hold it as unresolved and require
+three things from whoever owns it:
+
+1. the new behaviour stated **positively** — what is now true, not merely that the old assertion
+   is gone;
+2. evidence the inversion was **intended**, pointing at the production change that motivates it;
+3. the citation clause discharged — nothing left in the tree asserting or citing the old
+   behaviour.
+
+#2881 discharged all three in the test itself: the comment names the production change and its
+date, the body asserts the new order positively, and it adds `XCTAssertNil(body.range(of:
+"UnreadMark("))` so the absence of the pill is asserted rather than merely no longer checked. The
+production code moved in the same commit, from `if count > 0 { … } else if streaming {` to `if
+streaming { … } else if unread || count > 0 {`. That is what a legitimate inversion looks like —
+and the point of the rule is that it looks *identical to an illegitimate one* in a name diff.
+
 ## Gate 4 on a Swift leg: a stable absence can be a counting artefact
 
 Gate 4 compares test **names** across a rebase and adjudicates anything missing as a dropped test.
@@ -185,12 +261,24 @@ line — so a bisected line removes the test from the log entirely. It is invisi
 count **and** to a unique-name count, which is why two independent counts can agree with each
 other and both be short by the same one.
 
-**The victim is not arbitrary, and the invariant is the test — not where it sits.** Across three
-logs the cut line was always
-`SearchSettingsTests.testEveryListedSettings…`, at lines 12934, 12953 and 12865, with both the
-truncation point and the interleaved junk varying. Line numbers differing by up to 88 rule out
-run position. Two earlier readings of this — "a different victim each time", then "it correlates
-with position in the run" — were both wrong, and are recorded here so neither is reinvented.
+**The victim is not arbitrary, and the invariant is the SUITE — not the test, and not where it
+sits.** Across three logs the cut line was `SearchSettingsTests.testEveryListedSettings…`, at
+lines 12934, 12953 and 12865, with both the truncation point and the interleaved junk varying.
+Line numbers differing by up to 88 rule out run position. Two more logs (runs 42286751308 and
+42286753339, the green legs of #2881 and #2883) cut
+`SearchSettingsTests.testExactKeywordPutsSettingsFirstAndNamesTheKeyword` instead, at lines 12941
+and 13039 — **same suite, different test**.
+
+Three readings of this have now been wrong, and all three are recorded here so none is
+reinvented: "a different victim each time", then "it correlates with position in the run", then
+"the invariant is the test". Each was true of every log available when it was written. The
+pattern across the corrections is the lesson: each reading generalised from the logs in hand to a
+narrower invariant than the evidence licensed, and the next log broke it. The honest statement is
+that the cut lands somewhere in `SearchSettingsTests` and nothing yet explains why that suite.
+
+This is also why the hint below must never be load-bearing. The refusal mechanism — decline to
+count while any line is unreadable — held across all five logs without knowing the victim's name.
+The hint did not.
 
 That is what makes it dangerous here rather than merely annoying:
 
@@ -211,11 +299,10 @@ who it will usually be.
 
 A one-name discrepancy on a Swift leg is more likely to be this than a genuine drop.
 
-**Where to look first, as a hint and not as the mechanism.** Check
-`SearchSettingsTests.testEveryListedSettings…` by name. Key the hint on the **test identity**,
-never on a line offset: the offsets moved by 88 lines across three logs while the test did not.
-It is **not** a substitute for the general refusal — a named site goes stale the moment the suite
-changes, while refusing any unreadable line holds for the next victim, whoever it is.
+**Where to look first, as a hint and not as the mechanism.** Check **`SearchSettingsTests`** —
+the suite, not a test inside it. Key the hint on identity, never on a line offset: the offsets
+moved by 174 lines across five logs. It is **not** a substitute for the general refusal — a named
+site goes stale the moment the suite changes, and the named *test* already did.
 
 The overwriting text varies and carries no diagnosis: the end-of-testing status write in one log,
 an `iOSSimulator: … Failed to launch app with identifier` in another. Do not read the junk as the
@@ -250,6 +337,46 @@ itemised difference exposes by name.
 Checked against the source on 2026-11-06: `ArbosTests` declares **551** test cases (552 matches
 for `func test…(` less `AddMembersPlanTests.testingGroup`, a private helper returning a value that
 XCTest does not discover), and **551 executed**.
+
+### Two counting methods that differ by one: the worked reconciliation
+
+Two workers counted the same green legs (#2881 at `32fb53d11`, #2883 at `4a101489f`) and got
+**618** and **617**. A difference of one between a declaration census and a verdict count is
+indistinguishable from a dropped test until the methods are reconciled, so neither number may be
+adjudicated on. Resolved as follows, identically on both legs:
+
+| | #2881 | #2883 |
+| --- | --- | --- |
+| `ArbosTests` regex matches | 552 | 552 |
+| less `AddMembersPlanTests.testingGroup` (private, returns `PeopleChat`) | −1 | −1 |
+| **discoverable unit cases** | **550** | **550** |
+| `ArbosUITests` regex matches | 69 | 69 |
+| less `TranscriptSpacingUITests` (never compiled) | −1 | −1 |
+| **UI cases** (confirmed by the bundle's own `Executed 68 tests, with 13 tests skipped`) | **68** | **68** |
+| **declared total** | **618** | **618** |
+| unit clean verdict lines in the log | 549 | 549 |
+| unit verdict lines truncated | 1 | 1 |
+| UI passed / skipped | 55 / 13 | 55 / 13 |
+| **observed total** | **618** | **618** |
+
+**618 is right, and the two methods agree exactly once the truncated line is restored.** The
+missing name is
+`SearchSettingsTests.testExactKeywordPutsSettingsFirstAndNamesTheKeyword`, bisected at line 12941
+of #2881's log by an `xcodebuild[17898:53966] [MT] IDETestOperations` write and at line 13039 of
+#2883's by an `iOSSimulator: 📱<DVT` write. It is **a real case that ran and passed** — not a
+duplicate, not a parameterised expansion, and not a drop.
+
+The classification worth remembering is the fourth one: it is an **artefact of where each method
+reads**. Verdict counting cannot see a case whose only line was destroyed, and nothing in the
+total says so; declaration counting can only see what a regex believes XCTest will discover. The
+two fail in opposite directions, which is exactly why agreeing them is informative and why either
+alone is not.
+
+Note also that the 619 recorded above for run 42277644010 is **not** wrong — that tree declared
+551 discoverable unit cases (552 matches less `testingGroup`) against these two legs' 550, and
+551 + 68 = 619 just as 550 + 68 = 618. Each figure is correct for its own tree. **Never carry a
+Swift total between commits; re-derive it.** A stale total is the most expensive kind of
+phantom drop, because it arrives already believed.
 
 ### Does a green Swift leg ever cover tests that did not run? Measured: no, in three logs
 
