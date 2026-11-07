@@ -161,10 +161,17 @@ final class LoopbackRelay {
 
     /// Both ends of a half-sent request wait for each other — the relay for the rest of a body,
     /// the client for a response — so the relay has to give up first to be the one that reports.
-    /// `RelayAPI` allows a request 30 s, so anything here must be well inside that.
-    private static let startDeadline: TimeInterval = 5
-    private static let connectionDeadline: TimeInterval = 5
-    private static let drainDeadline: TimeInterval = 5
+    ///
+    /// Sized against measurement, because a bound close to the healthy tail is itself a flake
+    /// source. Across twenty green CI runs these three tests have a median of 0.030–0.118 s
+    /// but a tail that reaches **4.344 s** while still passing, so a five-second bound would
+    /// have sat 0.7 s above the worst healthy run observed. `connectionDeadline` must also stay
+    /// under `RelayAPI`'s own 30 s request timeout: inside that band the client was going to
+    /// fail the call anyway, so this bound changes which side reports a stall, never whether
+    /// one is reported.
+    private static let startDeadline: TimeInterval = 10
+    private static let connectionDeadline: TimeInterval = 20
+    private static let drainDeadline: TimeInterval = 20
 
     private let listener: NWListener
     private let queue = DispatchQueue(label: "loopback-relay")
