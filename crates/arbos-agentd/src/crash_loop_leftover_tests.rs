@@ -43,12 +43,18 @@
 //! ## What is not measured here
 //!
 //! Cgroups are not available in this environment, so none of this reproduces round 16's kill or
-//! proves the fix against a real cgroup. The temp directory handed to `test_agent_in_cgroup`
-//! declares what the workspace holds — `isolation::cgroup_procs` reads `cgroup.procs` as a plain
-//! text file and recurses the directory below it, so a plain directory can stand in for the
-//! kernel's. **The present sweep does not read it.** Selection now comes from the marks in
-//! `/proc`, and that is the half these cases measure; the cgroup fixture is left standing rather
-//! than relied on. Nothing in this file is evidence about bug AJ's root cause.
+//! proves the fix against a real cgroup. **Nor do these two cases declare one any more.** They
+//! once handed the agent a temp directory standing in for the workspace's, which read as
+//! coverage of a cgroup-driven sweep; the sweep they drive selects from the marks in `/proc` and
+//! never looked at it. A declaration nothing reads is worse than none, so it is gone, and what
+//! these cases measure is the mark walk and the evidence it yields. Nothing in this file is
+//! evidence about bug AJ's root cause.
+//!
+//! **`test_agent_in_cgroup` itself stays**, and is not to be read as dead because these two
+//! stopped calling it. `worker_retention_tests` declares a cgroup and then reads `memory.max`
+//! out of it through `workspace_mem_max`, which is a real dependency on the declaration. The
+//! difference is the whole point: a fixture is worth having where something reads it, and these
+//! cases were not that place.
 //!
 //! Real processes with real marks, read back out of `/proc`, for the same reason
 //! `job_orphan_tests` uses them: nothing else tells a kill that worked from one that was only
@@ -63,7 +69,7 @@ use std::time::{Duration, Instant};
 use arbos_core::ids::ulid;
 
 use crate::isolation::{marked_procs_all, Evidence, WORKER_MARK_ENV};
-use crate::status::tests::test_agent_in_cgroup;
+use crate::status::tests::test_agent;
 
 const CHAT: &str = "01TESTCHATCRASHLOOPLEFT001";
 
@@ -188,25 +194,9 @@ fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
     panic!("{what} did not happen within 10s");
 }
 
-/// A workspace cgroup holding each tree in a leaf of its own, which is where bug Z puts them and
-/// the reason the old sweep read the directory recursively. The workspace's own `cgroup.procs`
-/// is written empty for the same reason: on a real box it holds nothing.
-fn workspace_cgroup(trees: &[&Tree]) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("arbos-workspace-cgroup-{}", ulid()));
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("cgroup.procs"), "").unwrap();
-    for (n, tree) in trees.iter().enumerate() {
-        let leaf = dir.join(format!("worker-{n}"));
-        std::fs::create_dir_all(&leaf).unwrap();
-        let listed: Vec<String> = tree.pids().iter().map(u32::to_string).collect();
-        std::fs::write(leaf.join("cgroup.procs"), listed.join("\n")).unwrap();
-    }
-    dir
-}
-
-/// The measurement. Four processes stand in the workspace cgroup, none of them a session child
-/// an adapter holds a handle for, and the escalation's sweep must take exactly the one the box
-/// can prove is abandoned.
+/// The measurement. Four processes stand on the box, none of them a session child an adapter
+/// holds a handle for, and the escalation's sweep must take exactly the one the box can prove
+/// is abandoned. The sweep finds them the way it finds anything: by walking `/proc` for marks.
 ///
 /// The three survivors are each a different way of having no evidence against you, and the old
 /// sweep killed all three:
@@ -215,9 +205,9 @@ fn workspace_cgroup(trees: &[&Tree]) -> std::path::PathBuf {
 ///    a worker's, so nothing says its work is over;
 /// 2. a mark naming no session at all, which is the shape `pi-main` has: the box's own agent and
 ///    every bash call it makes carry one of these;
-/// 3. no mark at all, which is the case this fix knowingly gives up on. The cgroup was the only
-///    thing still holding such a process, and it is kept because nothing names it abandoned. A
-///    kept leftover costs one more OOM kill; a killed tool call costs the job.
+/// 3. no mark at all, which is the case this fix knowingly gives up on. An unmarked process is
+///    invisible to a mark walk, so nothing here names it abandoned and it is kept. A kept
+///    leftover costs one more OOM kill; a killed tool call costs the job.
 #[tokio::test]
 async fn the_escalation_collects_only_what_the_box_can_prove_is_abandoned() {
     let abandoned_session = ulid();
@@ -248,8 +238,7 @@ async fn the_escalation_collects_only_what_the_box_can_prove_is_abandoned() {
         "the fixture must have a backgrounded descendant, or it measures nothing: {doomed:?}"
     );
 
-    let cgroup = workspace_cgroup(&[&abandoned, &unattested, &no_session, &unmarked]);
-    let (agent, _root) = test_agent_in_cgroup(&cgroup).await;
+    let (agent, _root) = test_agent().await;
     // The only evidence offered about any of these processes: this one session really was a
     // worker's, and the box holds no child for it.
     agent
@@ -293,13 +282,11 @@ async fn the_escalation_collects_only_what_the_box_can_prove_is_abandoned() {
     wait_until("the abandoned worker's tree is gone", || {
         doomed.iter().all(|p| !is_running(*p))
     });
-
-    let _ = std::fs::remove_dir_all(&cgroup);
 }
 
-/// The same rule where it is most dangerous to get wrong: a workspace whose cgroup holds nothing
-/// but live work. The sweep runs with no job row to reach any of it by, and must take none of it
-/// — and must say so rather than report a kill it did not make.
+/// The same rule where it is most dangerous to get wrong: a box holding nothing but live work.
+/// The sweep runs with no job row to reach any of it by, and must take none of it — and must say
+/// so rather than report a kill it did not make.
 #[tokio::test]
 async fn a_workspace_of_live_work_loses_nothing_to_the_escalation() {
     let no_session_mark = format!("fake-pi-{}", ulid());
@@ -312,8 +299,7 @@ async fn a_workspace_of_live_work_loses_nothing_to_the_escalation() {
         .copied()
         .collect();
 
-    let cgroup = workspace_cgroup(&[&live, &tool_call]);
-    let (agent, _root) = test_agent_in_cgroup(&cgroup).await;
+    let (agent, _root) = test_agent().await;
 
     let sweep = agent.kill_workspace_leftovers().await;
 
@@ -337,6 +323,4 @@ async fn a_workspace_of_live_work_loses_nothing_to_the_escalation() {
         "no evidence was offered about anything, so nothing is a candidate"
     );
     assert_eq!(sweep.killed, 0, "and nothing is killed");
-
-    let _ = std::fs::remove_dir_all(&cgroup);
 }
