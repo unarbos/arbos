@@ -1661,6 +1661,48 @@ gh run list -b main -L 20 --json headSha # a route that does not use the identif
 
 Confirm the identifier resolves **before** reading the emptiness as a result.
 
+## The field labelled "author" is not the author: trusting a schema's naming over its content
+
+A commit appeared on #2882's branch adding a test guard to a file #2902 owned. Two readers
+concluded, independently and wrongly, that a second engineer had found the same defect from a
+different direction. **It was #2902's own author, pushing to the wrong branch.**
+
+The identifier everyone reached for was the commit's author field. On this repository it is
+`Cursor Agent <cursoragent@cursor.com>` on **every commit ever made**. It is a field named
+"author" that carries no authorship — uniform noise with an authoritative label.
+
+The identifier that was actually available sits in the branch name. Branches here are
+`cursor/<description>-<4 hex>`, and that suffix is **the last four characters of the authoring
+agent's id**:
+
+```sh
+# confirm the convention against an agent whose id you already know
+gh pr view "$PR" -R "$R" --json headRefName --jq .headRefName
+#   cursor/merge-kit-tool-preflight-220d   <-  bc-de694101-f72b-5a3e-8677-365b2c5d220d
+```
+
+Both pull requests were `-2fe2`. Same author, visible in PR metadata the entire time, in a
+field nobody thought to read because it looks like a naming convention rather than an identity.
+
+**The general failure is not "association is not identity" — it is reaching for the field with
+the right label instead of the field with the right content.** A schema's naming is a claim
+about intent, and intent is not a measurement: `author` was named by whoever designed the commit
+format, for a world where humans commit. The suffix was named by nobody and carries the fact.
+
+The repair is the same as everywhere else in this file: before trusting a field to distinguish
+two things, **check that it distinguishes anything** — read it across several rows and confirm it
+varies. A field that is constant over your whole population cannot separate members of it, and
+will instead return the same confident answer for every question you ask it.
+
+```sh
+# does this field discriminate at all, or is it constant?
+for p in $PRS; do gh pr view $p -R $R --json headRefName --jq .headRefName; done \
+  | sed 's/.*-//' | sort | uniq -c | sort -rn
+```
+
+That is the non-vacuity check again, aimed at a field rather than a set: *one distinct value
+across the whole population means the field is noise, however it is labelled.*
+
 ## `image.yml`: the step that always fails is load-bearing
 
 `Register the Daytona snapshot` in `image.yml` has failed on **every** image run since 0.1.183 —
