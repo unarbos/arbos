@@ -57,6 +57,10 @@ pub enum SettingsItem {
     TextSize,
     Credits,
     ConnectedApps,
+    /// The iPhone's Relay page (which relay this device talks to). On the Mac
+    /// the relay is a value row inside On this Mac, not a page of its own, so
+    /// the Mac maps this to `None`.
+    Relay,
     /// My Profile tab (name, handle, picture).
     Profile,
     /// An agent's Model row — one result per owned agent.
@@ -312,6 +316,20 @@ pub const INDEX: &[SettingsEntry] = &[
         IPHONE
     ),
     entry!(
+        Relay,
+        "Relay",
+        "Settings",
+        [
+            "relay",
+            "server",
+            "host",
+            "endpoint",
+            "backend",
+            "connection"
+        ],
+        IPHONE
+    ),
+    entry!(
         Profile,
         "Profile",
         "Settings",
@@ -453,6 +471,24 @@ mod tests {
             .into_iter()
             .map(|h| (h.entry.title_for(platform), h.entry.item))
             .collect()
+    }
+
+    /// The iPhone's Relay page was reachable by row and by deep link but was in
+    /// no index, so searching for it found nothing. It is iPhone-only: the Mac's
+    /// relay is a value row inside On this Mac, not a page.
+    #[test]
+    fn the_iphone_finds_its_relay_page_and_the_mac_has_none() {
+        assert_eq!(
+            search("relay", Platform::Iphone)[0].entry.item,
+            SettingsItem::Relay
+        );
+        assert_eq!(titles("rel", Platform::Iphone)[0].1, SettingsItem::Relay);
+        assert!(
+            !INDEX
+                .iter()
+                .any(|e| e.item == SettingsItem::Relay && e.on(Platform::Mac)),
+            "the Mac has no Relay page to land on"
+        );
     }
 
     #[test]

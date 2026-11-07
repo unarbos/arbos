@@ -55,6 +55,7 @@ struct SettingsView: View {
     /// the structure test checks the shared index finds each of them.
     static let listedPages: [GlobalSearch.SettingsPageRoute] = [
         .credits, .connectedApps, .secrets, .devices, .machine, .notifications, .privacy, .appearance, .textSize, .about,
+        .relay,
     ]
 
     init(landing: String? = DebugHooks.settingsPage) {

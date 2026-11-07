@@ -147,6 +147,7 @@ enum GlobalSearch {
         case connectOnePassword = "connect"
         case textSize = "textsize"
         case connectedApps = "connectors"
+        case relay
         /// The Settings list itself (On this iPhone has no page of its own).
         case root = "settings"
     }
@@ -192,6 +193,7 @@ enum GlobalSearch {
         case .textSize: return .page(.textSize)
         case .credits: return .page(.credits)
         case .connectedApps: return .page(.connectedApps)
+        case .relay: return .page(.relay)
         case .profile: return .profile
         case .agentModel, .agentReasoning, .agentVoice: return nil
         }
@@ -212,6 +214,7 @@ enum GlobalSearch {
             case .credits: return "creditcard.fill"
             case .textSize: return "textformat.size"
             case .connectedApps: return "link"
+            case .relay: return "network"
             case .root: return "iphone"
             }
         case .feedback: return "exclamationmark.bubble.fill"
