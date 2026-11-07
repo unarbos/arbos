@@ -231,6 +231,69 @@ is interleaved with the test reporter's, so `** TEST SUCCEEDED **` appears in th
 suite's verdicts and the last unit verdict sits ~150 lines after it. Judge sequence by timestamps,
 never by position.
 
+## A gate that cannot move is not a gate: vacuity, in gate 3 and gate 4
+
+Two different ways a gate reports PASS while measuring nothing. Both have bitten, both were
+caught by asking "could this number have come out differently?" rather than by reading it.
+
+**Gate 3 over an empty comparison.** Gate 3 compares the cumulative diff across a rebase. When
+the pinned head already sits on live `main`, there is no rebase and nothing to compare, and the
+`cmp` will of course be clean. Do not report that as PASS. Report that **gate 3 did not run,
+because there was no rebase to compare across** — and then re-read gate 2 immediately before the
+merge call anyway, because if `main` moved in the meantime the rebase is real and gate 3 becomes
+live. A gate reporting PASS over an empty comparison is worse than one reporting it did not
+apply: the first is a claim, the second is an accurate absence of one.
+
+**Gate 4 over a suite the extractor cannot see.** `0 before, 0 after, 0 dropped` is not a pass.
+Neither is any unchanged count, until you have shown the extractor can see the suite at all. On
+#2894 the TypeScript enumeration came back 0 → 0 — which looks exactly like "this PR touches no
+TypeScript", and was in fact the wrong directory (the tests are under `harness/arbos-pi-ext/`,
+not `packages/`). Redone against the right path it was 14 → 14, which is the same verdict backed
+by a number that could have moved.
+
+So the non-vacuity check has two halves, and the first is the one that gets skipped: **show a
+non-zero population before you report a zero delta.** Say the population out loud in the report
+(`Rust 2296 → 2304`, `Swift 621 → 621`, `TypeScript 14 → 14`) so a zero that means "nothing
+changed" is distinguishable on the page from a zero that means "nothing was looked at".
+
+A cheap way to close the loop on the Rust half: a static extractor's declared count and the live
+run's `passed + ignored` should agree exactly. On #2894 both were 2304, which makes each a check
+on the other rather than two readings of the same thing.
+
+## Reading a Release run: no line in the log is load-bearing
+
+Three outcomes have to be distinguished after a merge, and the log distinguishes none of them.
+
+1. **Not yet attempted.** The Release run fired by the *merge push* does not release. It logs
+   `no release: push <sha> to main is not a hotfix; it ships through the CI-green path` and
+   concludes **success**. The bump comes from the later `workflow_run` Release run, which fires
+   only once CI on `main` is green. So "the Release workflow ran and succeeded after my merge" is
+   not evidence that anything was published, and a missing bump shortly after a merge is not
+   evidence that the release failed.
+2. **Tag-only.** `auto-stable.sh` pushes the tag unconditionally, then attempts an unforced
+   push to `main` inside an `if`. If `main` moved during the debounce the bump stays under its
+   tag, on no branch — and the failure branch's log line *also* leads with the word *released*.
+3. **Fast-forwarded**, the one you are waiting for.
+
+Only ancestry separates all three:
+
+```sh
+git fetch -q origin main && git merge-base --is-ancestor "$BUMP_SHA" origin/main
+```
+
+## When the event you await can destroy the subscription that would report it
+
+A CI subscription keyed to a commit drops its result if that commit is no longer the head of
+`main` when delivery is attempted. The release bump **is** a push to `main` — so the very event
+being waited for is capable of silently swallowing the wake-up about it. The same applies to a
+subscription on a PR head any time `main` can move underneath it.
+
+The general rule: **when the thing you are waiting for can invalidate the subscription that would
+tell you about it, a subscription is not a wait.** Arm a timer backstop, and have the backstop
+**re-derive the fact** — here, ancestry of the bump — rather than re-ask for the event. Re-asking
+for the event inherits the same failure mode, and two measurements with the same failure mode are
+one measurement.
+
 ## What no gate reads: a new value in a shared document
 
 All five gates read **one repository at one commit**. A change can therefore be green on every one
