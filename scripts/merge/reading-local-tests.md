@@ -73,16 +73,48 @@ Three instances in one night, which looked unrelated until they were lined up:
 
 Each is an accurate count. Each answers a question nobody asked.
 
-**The tell is the same every time: the result disagrees with something you already know about
-the thing.** A file believed to hold two duplicate definitions reported ten. Eight defined
-workflows produced ten rows. A queue known to hold two stacks produced four. The number arriving
-larger than the thing can hold is the cheapest available alarm, and it fires before any of the
-reasoning does — so treat *"that is more than there should be"* as a stop, not as a discovery.
-
 **The repair is never to recount.** Recounting the wrong population more carefully produces the
-same wrong answer with more confidence. Re-derive what the set should be, then count that:
-definitions rather than occurrences, sources rather than rows, base-chains rather than non-`main`
-bases.
+same wrong answer with more confidence — and that is what makes this class expensive rather than
+merely wrong: *a careless count invites doubt, a careful count of the wrong set invites trust.*
+Re-deriving what the set should be is a **different action** from counting again, and they are
+worth naming as different actions, because the reach for the second when the first is needed is
+the whole failure. Definitions rather than occurrences, sources rather than rows, base-chains
+rather than non-`main` bases.
+
+#### Two instruments, and they cover different cases
+
+**Instrument 1 — the magnitude tell. Free, but only where a magnitude is already known.** The
+result disagrees with something you already know about the thing: a file believed to hold two
+duplicate definitions reports ten, eight defined workflows produce ten rows, a queue known to
+hold two stacks produces four. Treat *"that is more than there should be"* as a stop rather than
+a discovery. It fires before any of the reasoning does, which is why it is worth having first.
+
+**Instrument 2 — ask the same question three ways and watch for divergence. Costs two extra
+commands, and is the only one available for a quantity you are meeting for the first time.**
+
+The tell has a range, and outside it there is no alarm at all. Worked case, from the moment
+this rule was being written: a PR body claimed "`shellcheck` clean … 74 info/style notes". Asked
+three ways the same question gave three answers —
+
+```sh
+shellcheck        $FILES | grep -c '^In .* line'   # 56  — location blocks
+shellcheck -f gcc $FILES | wc -l                   # 105 — findings
+shellcheck -S warning $FILES; echo $?              # 0   — what CI actually gates on
+```
+
+**Instrument 1 was silent here and could not have fired.** Nobody has a prior expectation of how
+many style notes a shell script emits; 56 and 105 are both entirely plausible and neither looks
+too large for anything. Only the divergence gave it away. The first instinct was
+`grep -c '^In .* line'`, which would have published 56.
+
+**So state which number answers which question, not just the number.** A reader given one figure
+cannot tell what it is about; a reader given three and told which one the gate reads cannot be
+misled. Here: 105 findings, all of severity `note`, **zero** at `warning` or above — and only
+the last is what CI reads.
+
+And the practical lesson from the timing, since it is the only reason this one was caught: the
+rule had been written down five minutes earlier. **Write them down when they happen, not at the
+end** — the next instance tends to arrive immediately and does not announce itself.
 
 ### More rows is not more evidence: count the sources, not the lines
 
