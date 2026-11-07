@@ -53,6 +53,37 @@ what happened to a companion claim of "four stacks" in the same document: four w
 *different* population (PRs not based on `main`), and labelling one population's cardinality with
 another population's name leaves nothing to check it against.
 
+### The inverse failure: a correct count of the wrong population
+
+The rule above is about needing a quantity from **outside**. This one is about taking a quantity
+from the **wrong inside**, and it is harder to see because nothing about the measurement is
+sloppy — the counting is exact, the tool behaves, the number is real. It is simply a number about
+a different set than the one the property lives on.
+
+**Before trusting a count, say out loud what is being counted, and check that the property is
+actually a property of *that* set.**
+
+Three instances in one night, which looked unrelated until they were lined up:
+
+| claim | counted | the property lives on |
+| --- | --- | --- |
+| "four stacks" | PRs whose base is not `main` | chains of PR-on-PR — a *dead* base is neither |
+| "ten duplicate IDs" in a pbxproj | every **occurrence** of each object ID | **definitions** — lists repeat IDs legitimately |
+| "ten checks reported" | rollup **rows** | distinct **sources**; two runs at one sha are one |
+
+Each is an accurate count. Each answers a question nobody asked.
+
+**The tell is the same every time: the result disagrees with something you already know about
+the thing.** A file believed to hold two duplicate definitions reported ten. Eight defined
+workflows produced ten rows. A queue known to hold two stacks produced four. The number arriving
+larger than the thing can hold is the cheapest available alarm, and it fires before any of the
+reasoning does — so treat *"that is more than there should be"* as a stop, not as a discovery.
+
+**The repair is never to recount.** Recounting the wrong population more carefully produces the
+same wrong answer with more confidence. Re-derive what the set should be, then count that:
+definitions rather than occurrences, sources rather than rows, base-chains rather than non-`main`
+bases.
+
 ### More rows is not more evidence: count the sources, not the lines
 
 The rule above says the settling quantity must come from outside. Here is the form it takes most
