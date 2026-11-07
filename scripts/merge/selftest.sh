@@ -780,6 +780,10 @@ WITHOP_PATH=$sandbox/bin:$sandbox/fake   # op present
 FAKE_TOKEN=placeholder-not-a-real-token
 SHA40=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef
 printf '9999 1234  # the coordinator cleared these\n' > "$sandbox/kit/merge-allow"
+# A sandbox kit needs its own ratified reference beside its allow-list, or merge.sh stops in the
+# setup preflight and the policy cases below would never be reached. That is the correct
+# behaviour — it is asserted on its own further down — but it is not what these cases are about.
+printf '# STATUS: RATIFIED sandbox\n9999  sandbox\n1234  sandbox\n' > "$sandbox/kit/merge-ratified"
 
 MRC=0; MOUT=""
 mrun() {  # <path> <merge-kit> <pr> — runs merge.sh with nothing from this shell, sets MRC and MOUT
@@ -1154,6 +1158,81 @@ SCCUT
   got=$(bash "$sc" recover "$scd/cut.log" "$scd/two.list" 2>&1); rc=$?
   if [ "$rc" -ne 0 ]; then ok "a fragment that fits two declared names is an error, not a pick"
   else bad "an ambiguous fragment was resolved anyway, which invents a gate-4 verdict: $got"; fi
+fi
+
+# --- allow-audit.sh: the allow-list is a cache of authorizations, never a source of them -------
+# The live allow-list sits in a store other agents can write to, so the gate that matters is not
+# "are the bytes unchanged" but "is every token one the coordinator actually named". The two
+# directions are deliberately unequal and each is asserted here, because getting the asymmetry
+# backwards is the failure that would matter: a lane that halts on a missing token is merely
+# annoying, while a lane that shrugs at an extra one merges something nobody authorised.
+aa="$D/allow-audit.sh"
+if [ ! -r "$aa" ]; then
+  bad "allow-audit.sh is missing, so merge.sh's audit call cannot work"
+else
+  aad=$(mktemp -d)
+  printf '# prose\n2848 2873\n' > "$aad/allow"
+  printf '# STATUS: RATIFIED 2026-11-07\n2848  named in a message\n2873  named in a message\n' > "$aad/rat"
+
+  out=$(bash "$aa" "$aad/allow" "$aad/rat" 2>&1); rc=$?
+  if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q "all ratified"; then
+    ok "a token set matching the ratified set passes"
+  else bad "a clean token set did not pass (rc=$rc): $out"; fi
+
+  # Extra token: halts the LANE, not just the asked-for merge.
+  printf '# prose\n2848 2873 9999\n' > "$aad/allow-extra"
+  out=$(bash "$aa" "$aad/allow-extra" "$aad/rat" 2>&1); rc=$?
+  if [ "$rc" -eq 3 ] && printf '%s' "$out" | grep -q "9999"; then
+    ok "an unratified token halts the audit and names the token"
+  else bad "an unratified token did not halt the audit (rc=$rc): $out"; fi
+  if printf '%s' "$out" | grep -qi "not any other\|merge NOTHING"; then
+    ok "the halt says the whole lane stops, not only this pull request"
+  else bad "the halt reads as a refusal of one merge, so the lane would carry on: $out"; fi
+
+  # Missing token: reports, does NOT block. The fail-safe direction.
+  printf '# prose\n2848\n' > "$aad/allow-missing"
+  out=$(bash "$aa" "$aad/allow-missing" "$aad/rat" 2>&1); rc=$?
+  if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q "2873"; then
+    ok "a ratified token missing from the list is reported but does not block"
+  else bad "a missing token blocked, or went unreported (rc=$rc): $out"; fi
+
+  # Commentary must be free to change. This is why the gate is a set and not a digest: the
+  # worker has to be able to write down WHY a thing is held without asking to be ratified.
+  printf '# a long new hold block\n# mentioning words and dates 2026-11-07\n2848 2873\n' > "$aad/allow-prose"
+  out=$(bash "$aa" "$aad/allow-prose" "$aad/rat" 2>&1); rc=$?
+  if [ "$rc" -eq 0 ]; then ok "editing prose and hold blocks does not move the gate"
+  else bad "a comment-only edit tripped the audit, so holds could not be documented: $out"; fi
+
+  # PROVISIONAL refuses rather than auditing against a set nobody has checked.
+  printf '# STATUS: PROVISIONAL\n2848  carried over\n2873  carried over\n' > "$aad/rat-prov"
+  out=$(bash "$aa" "$aad/allow" "$aad/rat-prov" 2>&1); rc=$?
+  if [ "$rc" -eq 3 ] && printf '%s' "$out" | grep -qi "provisional"; then
+    ok "a provisional reference set refuses instead of passing"
+  else bad "a provisional reference set was treated as authority (rc=$rc): $out"; fi
+
+  # A missing reference set must not read as a clean audit — and must not read as a refusal
+  # either. Nothing was compared, so no token was found good or bad. Exit 4 keeps it in the
+  # setup family, which is the kit's oldest rule applied to the newest gate.
+  out=$(bash "$aa" "$aad/allow" "$aad/nope" 2>&1); rc=$?
+  if [ "$rc" -eq 4 ] && printf '%s' "$out" | grep -q "^SETUP:"; then
+    ok "an absent ratified list is a SETUP gap, not a pass and not a refusal"
+  else bad "an absent ratified list was not reported as a setup gap (rc=$rc): $out"; fi
+  if printf '%s' "$out" | grep -qi "REFUSED\|tampering"; then
+    bad "the missing-reference message reads as a policy answer: $out"
+  else ok "the missing-reference message cannot be mistaken for a policy answer"; fi
+
+  # And merge.sh must catch it in the preflight, before any pull request is judged.
+  mkdir -p "$aad/kit"; cp "$aad/allow" "$aad/kit/merge-allow"
+  out=$(env -i PATH="$PATH" HOME=/tmp MERGE_KIT="$aad/kit" OP_SERVICE_ACCOUNT_TOKEN=x \
+          bash "$D/merge.sh" 2848 "$SHA40" 2>&1); rc=$?
+  if printf '%s' "$out" | grep -q "no readable ratified-token list"; then
+    ok "merge.sh stops in the setup preflight when the ratified list is absent"
+  else bad "merge.sh did not name the missing ratified list (rc=$rc): $out"; fi
+  if printf '%s' "$out" | grep -q "not in the coordinator's merge list"; then
+    bad "a setup gap was reported as a policy refusal, which the kit forbids: $out"
+  else ok "the setup gap did not masquerade as a policy refusal"; fi
+
+  rm -rf "$aad"
 fi
 
 echo

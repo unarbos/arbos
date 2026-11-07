@@ -96,6 +96,32 @@ once, and nothing fails to announce it.
 That is why this is written down rather than left to the suite. A safety a sensible refactor
 silently removes is worth more as a warning than as a passing test.
 
+## The allow-list is a cache of authorizations, never a source of them
+
+A token entitles a merge only because the coordinator named that pull request in a message. The
+allow-list exists so the queue need not be re-derived from the transcript before every call. It
+follows that a token written there by anybody else authorises nothing: it is not in the only
+place authority lives, and a sibling agent cannot forge a coordinator's message.
+
+That sentence is what makes it safe to keep the live allow-list somewhere durable and shared.
+Durability and authority are separate problems; keeping a digest of the file bytes only moves
+the second one, because on a fresh VM there is no trustworthy local digest to compare a restore
+against. The anchor has to be outside the file either way.
+
+`allow-audit.sh` runs before any pull request is judged and compares the **token set** against a
+ratified reference, asymmetrically:
+
+- **a token nobody ratified** halts the entire lane, not just the merge that was asked for — an
+  unexplained token is a tampering signal, not a queue entry;
+- **a ratified token that has gone missing** is reported but does not block, because an absent
+  token is already unauthorized and that direction is fail-safe.
+
+Set and not bytes, deliberately: prose, headers and the hold and freeze blocks are commentary,
+not authority. They can be rewritten freely and must not move the gate — which is exactly what
+leaves this lane able to write down *why* something is held without needing ratification to do
+it. A missing reference set is a **setup gap** (exit 4), never a refusal, for the same reason
+everything else in the preflight is.
+
 ## Operationally, for this lane
 
 Run agentd suites from a checkout outside `/tmp`. That is a consequence of the rule, not the rule.
@@ -230,6 +256,32 @@ Note while reading these logs that **textual order is not chronological**: xcode
 is interleaved with the test reporter's, so `** TEST SUCCEEDED **` appears in the middle of a
 suite's verdicts and the last unit verdict sits ~150 lines after it. Judge sequence by timestamps,
 never by position.
+
+## Gate 1 reads the step list, not the rollup — so protect the step list
+
+A check's conclusion is a rollup. It says a job succeeded; it does not say which commands ran
+inside it. Gate 1 asks the narrower question — *did `cargo test --workspace --locked` actually
+execute?* — and the only thing in CI that answers it is the per-step list. A job can be green
+because its test step was skipped, conditioned out, or never reached, and the rollup is green
+in exactly the same way it would be if the tests had run and passed.
+
+So read the steps. Every time, including when the conclusion is `success`.
+
+### The consequence: never accept a refactor that collapses the steps gate 1 reads
+
+The gate's whole resolution is the step list, so anything that merges steps destroys evidence in
+proportion to how much it tidies. This is not hypothetical — it is the first thing that went
+wrong when costing AF-1349. Replacing CI's inline toolchain install with a call to the shared
+provisioner invites using the script's `--ci` mode, which runs `fmt`, `clippy` and `test`
+itself. That turns three named, separately-timed, separately-red steps into one opaque
+`workspace-test-deps.sh --ci`, and gate 1 can no longer tell a run where the tests passed from
+a run where the step list simply stopped saying.
+
+The fix there was to keep the three steps and have the provisioner write `CC`/`CXX` to
+`$GITHUB_ENV` instead — four lines, and the evidence survives. Generalise it: **a convenience
+that merges steps eats the proof that the tests ran.** When a refactor would collapse a step a
+gate reads, the question is not whether the refactor is tidier; it is what the gate can still
+see afterwards. If the answer is "less", the refactor needs a different shape, not a waiver.
 
 ## A gate that cannot move is not a gate: vacuity, in gate 3 and gate 4
 
