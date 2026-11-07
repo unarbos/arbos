@@ -281,6 +281,15 @@ pub fn redact_live_value(value: &str) {
 
 /// Write-time redaction before T3 append (D19): tokens, keys, Authorization headers, `.env`-style
 /// values, plus every live vault value registered with `redact_live_value`.
+/// Shortest value [`Store::scrub_all_text`] will look for across the whole schema.
+///
+/// One above `interrupted`, the longest status literal any column of this schema is read back
+/// by; `cancelled` and `delivered` are nine, `approved` eight, `running` and `pending` seven.
+/// A shorter value still gets swept from the two text columns that carry prose, where the worst
+/// a collision does is redact a word. It is not swept from the structural columns, where the
+/// worst it does is change a row's meaning.
+const GENERIC_SWEEP_MIN: usize = 12;
+
 pub fn redact(text: &str) -> String {
     let mut out = text.to_owned();
     {
@@ -1214,11 +1223,19 @@ impl Store {
     /// Primary keys are skipped: an id is never a pasted secret, and rewriting one would break
     /// every row that refers to it. Only columns the schema declares `TEXT` are touched, so a
     /// Loro snapshot stored as a BLOB is left alone.
+    ///
+    /// The length floor is higher here than the six the two passes above use, because these
+    /// columns differ in kind. A scrub value is not always a long random token — a `login`
+    /// secret's password is one too, and a person chose it — and matching is a literal substring
+    /// replacement. Over most of the schema a collision costs one word of a user's history, but
+    /// `jobs.state`, `approvals.state` and their neighbours are read back by equality, so a
+    /// vaulted password of `running` or `pending` would rewrite a state machine's value instead
+    /// of redacting prose. [`GENERIC_SWEEP_MIN`] clears the longest of those literals.
     pub fn scrub_all_text(&self, values: &[String]) -> Result<usize> {
         let needles: Vec<&str> = values
             .iter()
             .map(String::as_str)
-            .filter(|v| v.len() >= 6)
+            .filter(|v| v.len() >= GENERIC_SWEEP_MIN)
             .collect();
         if needles.is_empty() {
             return Ok(0);
@@ -1804,6 +1821,34 @@ fn fts_query(q: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A value short enough to be a status literal is left to the two text passes.
+    ///
+    /// `running` is a plausible password, a password is a scrub value, and `jobs.state` is read
+    /// back by equality — so sweeping it across the whole schema would change what a row means
+    /// rather than redact what it says.
+    #[test]
+    fn a_value_short_enough_to_be_a_status_is_left_to_the_text_passes() {
+        let store = job_store();
+        store
+            .insert_job(
+                "j1",
+                "c1",
+                "a1",
+                "T",
+                "ops",
+                "the worker is running now",
+                &[],
+            )
+            .unwrap();
+        assert_eq!(store.scrub_all_text(&["running".to_owned()]).unwrap(), 0);
+        assert!(store.job("j1").unwrap().unwrap().brief.contains("running"));
+
+        // A value long enough to be a key still sweeps the same columns.
+        const V: &str = "Zq7Z4x9W2m5K8n1P6r3T0v";
+        store.scratch_set("c1", "n", Some(V)).unwrap();
+        assert_eq!(store.scrub_all_text(&[V.to_owned()]).unwrap(), 1);
+    }
 
     /// A vaulted value must not survive in any TEXT column the schema has.
     ///
