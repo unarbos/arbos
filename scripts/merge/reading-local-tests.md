@@ -1399,6 +1399,40 @@ and the third has been false every time it was checked.
 worth it** — but it is a setup step to take deliberately at the start, not a capability that is
 simply there. Take it before the first merge, not mid-sequence with a window open.
 
+## An empty API answer to a sha you invented looks exactly like a finding
+
+Never expand an abbreviated sha by typing the rest of it. `git rev-parse` it.
+
+This nearly produced a false report. Querying `actions/runs?head_sha=…` for `main`'s head, the
+40-char sha was *constructed* from the 9-char prefix seen in earlier output rather than read
+from git. The API answered `total_count: 0` — a clean, confident, entirely meaningless zero,
+because no such commit exists. `gh run list --commit <short-sha>` returns empty for the same
+reason, so a second route reproduced the same wrong answer and made it look corroborated.
+
+Read against the real sha the same query returned **five** runs. The zero was about the typo.
+
+**The tell is that an absence was the interesting part of the answer.** "No runs at this
+commit" was about to become evidence for a claim about trigger behaviour, which is the shape
+where a bad identifier is most dangerous: a wrong sha cannot produce a false *row*, but it
+produces a false *emptiness* every time, and emptiness is what absence-claims feed on.
+
+**What caught it was a fact from outside the query** — the lane already knew a CI run existed
+at that head, from a `-b main` listing. The contradiction was visible only because the two
+answers came from different routes. Same principle as everywhere else in this file: the
+quantity that settles a question has to come from outside the thing being questioned. Here the
+question was "did this commit trigger anything", and the only safe denominator was a run list
+built by branch rather than by the identifier under suspicion.
+
+So, when a query keyed on an identifier returns nothing:
+
+```sh
+git rev-parse "$REF"                     # the identifier, read rather than assembled
+git cat-file -e "$SHA^{commit}"          # it exists at all
+gh run list -b main -L 20 --json headSha # a route that does not use the identifier
+```
+
+Confirm the identifier resolves **before** reading the emptiness as a result.
+
 ## `image.yml`: the step that always fails is load-bearing
 
 `Register the Daytona snapshot` in `image.yml` has failed on **every** image run since 0.1.183 —
