@@ -851,6 +851,38 @@ Only ancestry separates all three:
 git fetch -q origin main && git merge-base --is-ancestor "$BUMP_SHA" origin/main
 ```
 
+### Release also runs on a `*/15` cron, so a NO-GO on "Release in progress" may be 25 seconds old
+
+`release.yml`'s triggers are not only `workflow_run`, `push` and `workflow_dispatch`. There is
+also:
+
+```yaml
+  schedule:
+    # Backstop for continuous delivery: a green commit whose Release run was lost
+    # (cancelled while pending, main moved during the bump) ships within 15 min.
+    - cron: "*/15 * * * *"
+```
+
+Two consequences, and they point in opposite directions.
+
+**For waiting:** this is a *second* path to the bump. If the `workflow_run` Release is lost —
+cancelled while pending, or `main` moved during the bump, which is exactly outcome 2 above — the
+cron picks the green commit up within fifteen minutes and publishes anyway. So a bump that has
+not appeared is not yet evidence of anything until a cron tick has also passed. Do not conclude
+a release failed, and do not ask anyone to re-dispatch, inside that interval.
+
+**For merging:** `merge-window.sh` NO-GOs on *any* in-flight `release.yml` run, and the cron
+starts one regardless of what this lane does. A declining scheduled run is short — measured at
+**25s** (`42324383811`, 01:30:04Z → 01:30:29Z) and **20s** (`42299302848`) — because the plan
+job declines and every downstream job skips. So a NO-GO naming a Release run that started
+seconds ago, on a `schedule` event, is very likely a transient cron artefact rather than a
+release in progress.
+
+**Do not treat it as an override.** Read the run's `event` and its age, wait, and re-run
+`merge-window.sh`; if the verdict is the same it was never the cron. The distinction is
+`event == "schedule"` plus all publish jobs `skipped`, which is readable in one call and is not
+a judgement.
+
 ### Why the chain terminates: the two pushes to `main` carry different credentials
 
 The release chain is only finite because of an asymmetry that is invisible in both the workflow
