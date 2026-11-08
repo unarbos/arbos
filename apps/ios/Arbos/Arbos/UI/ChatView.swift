@@ -3645,10 +3645,21 @@ struct ChatSession: View {
     }
 
     /// The "+" before the field: photos and files. Channels send text only (C1), so none there.
+    ///
+    /// Grok's is a soft grey disc. `ControlSurface` would give it the field's own
+    /// near-black `#181818`, four steps over the `#141414` page, under the three white
+    /// `composerRimLayers` strokes — so the rim carries the shape and the control reads as
+    /// an outlined ring rather than a disc. The Mac draws the same `+` as a grey disc with
+    /// no rim (`composer.rs`, `theme.surface_2`), and `bubbleAssistant` is this palette's
+    /// member of that grey. On Glass the material *is* the disc, so that path is unchanged.
     private var attachButton: some View {
         Button { showAttach = true } label: {
             ZStack {
-                ControlSurface(shape: Circle())
+                if theme.isGlass {
+                    PillSurface(shape: Circle())
+                } else {
+                    Circle().fill(theme.bubbleAssistant)
+                }
                 Image(systemName: "plus")
                     .font(theme.font(Theme.plusGlyph, weight: .regular)) // control-size: exception plusGlyph
                     .foregroundStyle(theme.text)

@@ -163,6 +163,15 @@ struct Theme: Equatable {
     static let composerTextPadY: CGFloat = (composerHeight - 22) / 2
     /// The white action is a 120 × 96 px capsule (was a 36 pt circle), 24 px from the
     /// field's top and bottom and 26 px from its right edge.
+    ///
+    /// **A capsule, deliberately, and re-checked on 2026-11-04 — do not "fix" it to a circle
+    /// from a Mac reference.** Grok's *Mac* send control is a 28 pt circle, and so is ours
+    /// (`SEND_BUTTON`); Jacob's 2026-11-04 crops were measured and both are circles 56 px
+    /// across at 2 px/pt. That says nothing about the phone. The only measurement anyone has
+    /// taken of Grok's *iPhone* send control is the 120 × 96 px above, off the 2026-10-25
+    /// iPhone Air shot at 3 px/pt, and it says capsule. The two platforms differing is not a
+    /// contradiction — ours differ for exactly this reason. A circle here needs an iPhone crop
+    /// of Grok, not a Mac one.
     static let actionPillWidth: CGFloat = 40
     static let actionPillHeight: CGFloat = 32
     static let actionPillTrailing: CGFloat = 26 / 3

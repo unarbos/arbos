@@ -45,8 +45,12 @@ final class ComposerMetricsTests: XCTestCase {
 
     func testActionIsAWhitePillNotACircle() {
         // 120 × 96 px capsule, 24 px from the field's top and bottom, 26 px from its right edge.
+        // Wider than it is tall on purpose: see the note on `actionPillWidth`. Grok's Mac send
+        // control is a circle and so is ours, but the only measurement of Grok's *phone* is the
+        // capsule above, so a Mac reference is not grounds to make this square.
         XCTAssertEqual(Theme.actionPillWidth, 40)
         XCTAssertEqual(Theme.actionPillHeight, 32)
+        XCTAssertGreaterThan(Theme.actionPillWidth, Theme.actionPillHeight)
         XCTAssertEqual((Theme.composerHeight - Theme.actionPillHeight) / 2, 8)
         XCTAssertEqual(Theme.actionPillTrailing * 3, 26, accuracy: 0.001)
         assertOnPixel(Theme.actionPillTrailing, "actionPillTrailing")
