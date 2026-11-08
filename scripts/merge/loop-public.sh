@@ -42,6 +42,9 @@ gatedre='^(Cargo\.toml|Cargo\.lock|crates/|apps/ios/|packages/ArbosFFI/|\.github
 for r in $(git for-each-ref --format='%(refname)' refs/remotes/fb/); do
   [ "$(git rev-list --count origin/main.."$r")" -gt 0 ] || continue
   fid=${r#refs/remotes/fb/}; h8=$(git rev-parse --short=8 "$r")
+  # --name-only is right HERE (which paths does this branch touch) and is never gate 3. A file list
+  # is stable across a rebase and blind to content, so it passes exactly the case gate 3 catches.
+  # Gate 3 is rebase-preserved.sh, which compares `git patch-id --stable`.
   files=$(git diff --name-only origin/main..."$r")
   if echo "$files" | grep -qE "$gatedre"; then [ -n "$V" ] && echo "  feedback/$fid@$h8: gated path (lands only via gate/*)"; continue; fi
   hit=$(echo "$files" | grep -E "$risky" | head -3 | tr '\n' ' ')

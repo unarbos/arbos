@@ -93,6 +93,11 @@ jobs:
           ./scripts/glass-lint.sh
           # Which verdicts refuse a merge. No network, no credentials, ~0.1s.
           ./scripts/merge/selftest.sh
+          # Gate 3: did a rebase preserve the patch. A separate harness because it performs real
+          # rebases in a scratch repository, which selftest.sh's "no git" contract forbids. It
+          # gates every rebase in a merge drain, so its own verdict must not rest on one machine.
+          # No network, no credentials, ~2s.
+          ./scripts/merge/rebase-preserved-selftest.sh
           # The deploy worker's pure helpers, including the agentd roll hold: it lifts by hand only, and a
           # commit subject never opens the lane. install-deploy-hook.sh runs the same selftest before it
           # installs, but that is on the deploy host, after the merge — this runs it on the pull request.

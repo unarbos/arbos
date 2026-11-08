@@ -170,6 +170,8 @@ verdict() {
       local ign files left
       ign=$(git show "$sha:.github/workflows/ci.yml" 2>/dev/null | sed -n '/^  push:/,/^  [a-z_]*:$/p' \
         | sed -n 's/^ *paths-ignore: *\[\(.*\)\].*/\1/p' | tr -d '"'"'"' ' | tr ',' '\n' | grep -E '^[^*]+/\*\*$' | sed 's/\*\*$//')
+      # --name-only is right HERE (which paths did this commit touch) and is never gate 3. A file
+      # list is stable across a rebase and blind to content. Gate 3 is rebase-preserved.sh.
       files=$(git diff --name-only "$sha^1" "$sha" 2>/dev/null)
       if [ -n "$ign" ] && [ -n "$files" ]; then
         left=$(printf '%s\n' "$files" | while IFS= read -r f; do m=0; while IFS= read -r g; do case "$f" in "$g"*) m=1;; esac; done <<< "$ign"; [ $m = 1 ] || echo "$f"; done)
