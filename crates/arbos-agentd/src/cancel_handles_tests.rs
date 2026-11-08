@@ -26,6 +26,15 @@
 //!
 //! So these cases go through `Agent::worker_tree` by session id — the way a cancel reaches a
 //! worker — and never through `RpcChild::tree()`.
+//!
+//! ## And why the first of them counted nothing
+//!
+//! The same lesson arrived a second time, from the fixture rather than the object. The
+//! behavioural case below waited for `marked_pids(&mark).len() >= 2` and took that for "the
+//! worker and its `setsid` descendant are up". A count is not a shape: **the case passed green
+//! against a planted tree with no `setsid` in it at all**, measured by deleting the word. What
+//! it is about was optional, and a weak premise let a real race through on top — see
+//! [`planted_shape`], which is the premise it should always have had.
 
 use std::os::unix::process::CommandExt;
 use std::process::Command;
@@ -40,14 +49,13 @@ use crate::status::tests::test_agent;
 /// inherit. The root backgrounds a `setsid` child which in turn starts the writer, so the
 /// writer is a **grandchild in a session of its own** — `g` and `e`'s shapes from `r17status`,
 /// and the one shape no recorded pgid or sid can reach.
-fn worker_with_setsid_grandchild(mark: &str, flag: &std::path::Path) -> std::process::Child {
-    let script = format!(
-        "setsid bash -c 'exec sleep 300' & exec sleep 300; : {}",
-        flag.display()
-    );
+///
+/// Both processes end as a plain `sleep` and fork nothing further, which is what lets
+/// [`planted_shape`] recognise the finished tree rather than count members of a half-built one.
+fn worker_with_setsid_grandchild(mark: &str) -> std::process::Child {
     let mut cmd = Command::new("bash");
     cmd.arg("-c")
-        .arg(script)
+        .arg("setsid bash -c 'exec sleep 300' & exec sleep 300")
         .env(WORKER_MARK_ENV, mark)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -61,25 +69,133 @@ fn worker_with_setsid_grandchild(mark: &str, flag: &std::path::Path) -> std::pro
     cmd.spawn().expect("the worker shell starts")
 }
 
-fn marked_pids(mark: &str) -> Vec<u32> {
-    ProcessTree {
-        pgid: None,
-        sid: None,
-        cgroup: None,
-        mark: Some(mark.to_owned()),
-    }
-    .members()
+/// A marked process as the fixture needs to see it: what it is running now, and whose session
+/// it is in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Marked {
+    pid: u32,
+    session: u32,
+    comm: String,
 }
 
-fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
-    let started = Instant::now();
-    while started.elapsed() < Duration::from_secs(10) {
-        if ready() {
-            return;
+/// Every process carrying `mark`, read straight from `/proc`.
+///
+/// Deliberately not [`ProcessTree::members`]. That is the call under test, and a premise
+/// established with it would be no premise at all: a discovery that found nothing would report
+/// an unplanted fixture instead of a broken discovery, which is the one confusion this file
+/// cannot afford.
+fn marked_now(mark: &str) -> Vec<Marked> {
+    let needle = format!("{WORKER_MARK_ENV}={mark}");
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        let Ok(environ) = std::fs::read(entry.path().join("environ")) else {
+            continue;
+        };
+        if !environ.split(|b| *b == 0).any(|v| v == needle.as_bytes()) {
+            continue;
         }
-        std::thread::sleep(Duration::from_millis(50));
+        let (Some(session), Ok(comm)) = (
+            session_of(pid),
+            std::fs::read_to_string(entry.path().join("comm")),
+        ) else {
+            continue;
+        };
+        out.push(Marked {
+            pid,
+            session,
+            comm: comm.trim().to_owned(),
+        });
     }
-    panic!("{what} did not happen within 10s");
+    out.sort_by_key(|m| m.pid);
+    out
+}
+
+/// The session of `pid`, field 6 of `/proc/<pid>/stat`. Counted from after the last `)` because
+/// a process name may hold spaces and parentheses of its own.
+fn session_of(pid: u32) -> Option<u32> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let (_, after) = stat.rsplit_once(')')?;
+    after.split_whitespace().nth(3)?.parse().ok()
+}
+
+/// The two processes this case is about, pinned by pid.
+#[derive(Debug, Clone, Copy)]
+struct Planted {
+    /// The worker root, which leads the session it was spawned into.
+    root: u32,
+    /// Its descendant, which called `setsid` and so leads a session of its own — the one shape
+    /// no recorded pgid or session of the worker can reach.
+    escapee: u32,
+}
+
+/// The planted tree once it has stopped changing, or everything carrying the mark instead.
+///
+/// **A count cannot tell the finished shape from a half-built one, and that is what failed on
+/// `ecb04054b`.** The old premise was `marked_pids(&mark).len() >= 2`, which the root plus
+/// whatever is mid-`setsid` satisfies exactly as well as the root plus the descendant. The
+/// case then compared two separate walks of `/proc` and required the first to be a subset of
+/// the second — and `/proc/<pid>/environ` is not readable atomically against `execve`, so a pid
+/// counted into the premise can be legitimately missing from any later read. The run that
+/// blocked the Mac release asserted `4177 missing from [4178]` for exactly that reason.
+///
+/// No wait makes that invariant true; a longer one only makes it rare, which is worse, because
+/// it comes back on someone else's release. So the premise is a statement about the **shape**,
+/// and three facts carry it, none of them a count:
+///
+/// - **every marked process is a `sleep`**, so every `exec` in the planted tree has already
+///   happened and no member can drop out of a later read for being mid-`exec`;
+/// - **the root is present and leads its own session**, pinned by the pid the fixture spawned
+///   rather than inferred from the set;
+/// - **exactly one other member leads a session of its own**, which is the escape this case
+///   exists to measure and the thing `>= 2` never asked about.
+///
+/// Once all three hold nothing moves until `reap`: a `sleep 300` neither execs nor exits inside
+/// a case that finishes in milliseconds, so the pids pinned here are the pids read back below.
+fn planted_shape(mark: &str, root: u32) -> Result<Planted, Vec<Marked>> {
+    let marked = marked_now(mark);
+    let rooted = marked
+        .iter()
+        .any(|m| m.pid == root && m.session == root && m.comm == "sleep");
+    let escapees: Vec<u32> = marked
+        .iter()
+        .filter(|m| m.pid != root && m.session == m.pid && m.comm == "sleep")
+        .map(|m| m.pid)
+        .collect();
+    match (rooted, escapees.as_slice(), marked.len()) {
+        (true, [escapee], 2) => Ok(Planted {
+            root,
+            escapee: *escapee,
+        }),
+        _ => Err(marked),
+    }
+}
+
+/// Block until the planted tree reaches [`planted_shape`], and fail naming what it reached
+/// instead.
+///
+/// The panic is the point of this helper, not a formality. A fixture whose processes never
+/// arrive must say so in the words of the thing it failed to build, because the alternative is
+/// a case that runs against a shape which cannot prove what its name claims and passes.
+fn planted(mark: &str, root: u32) -> Planted {
+    let started = Instant::now();
+    let mut last = Vec::new();
+    while started.elapsed() < Duration::from_secs(10) {
+        match planted_shape(mark, root) {
+            Ok(shape) => return shape,
+            Err(seen) => last = seen,
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!(
+        "the worker never settled into the shape this case is about: a sleeping root (pid \
+         {root}, leading its own session) and exactly one sleeping descendant leading a session \
+         of its own. What carried the mark after 10s: {last:?}. This is the fixture's premise \
+         and not the discovery under test — with no escaped descendant there is nothing here \
+         for a recorded pgid or session to miss, so finding it would prove nothing."
+    );
 }
 
 fn reap(pids: &[u32]) {
@@ -113,29 +229,55 @@ async fn the_cancel_finds_a_workers_setsid_descendant_by_session_id() {
 
     // Exactly what `RpcChild::spawn` would have put in the environment for this session.
     let mark = crate::harness::worker_name("prime", &sid);
-    let flag = std::env::temp_dir().join(format!("ai-{sid}"));
-    let mut root = worker_with_setsid_grandchild(&mark, &flag);
-    wait_until("the worker and its setsid descendant are up", || {
-        marked_pids(&mark).len() >= 2
-    });
-    let planted = marked_pids(&mark);
+    let mut root = worker_with_setsid_grandchild(&mark);
+    let shape = planted(&mark, root.id());
 
+    // The escape is real, asserted rather than assumed. A worker's recorded session and group
+    // are the handles a cancel holds without the mark, so reconstructing them here says in one
+    // place that they reach the worker and **not** its descendant. Both halves earn their
+    // keep: the first stops the second from being the vacuous kind of negative that also
+    // passes when the enumeration is broken and finds nothing at all.
+    let by_recorded_ids = ProcessTree {
+        pgid: Some(shape.root),
+        sid: Some(shape.root),
+        cgroup: None,
+        mark: None,
+    }
+    .members();
+    assert!(
+        by_recorded_ids.contains(&shape.root),
+        "premise: the worker's recorded session must reach the worker itself, or the assertion \
+         below says nothing: {by_recorded_ids:?}"
+    );
+    assert!(
+        !by_recorded_ids.contains(&shape.escapee),
+        "premise: pid {} called setsid, so the worker's recorded session and group must not \
+         reach it — if they do, this case is measuring a descendant that never escaped: \
+         {by_recorded_ids:?}",
+        shape.escapee
+    );
+
+    // And now the discovery under test, resolved from the session id alone — the way a cancel
+    // reaches a worker it holds nothing but a row for.
     let tree = agent.worker_tree(&sid).await;
     let found = tree.members();
+    assert!(
+        found.contains(&shape.escapee),
+        "the cancel must reach the descendant that called setsid: {} missing from {found:?} \
+         (tree mark {:?})",
+        shape.escapee,
+        tree.mark
+    );
+    assert!(
+        found.contains(&shape.root),
+        "and the worker itself: {} missing from {found:?} (tree mark {:?})",
+        shape.root,
+        tree.mark
+    );
 
-    for pid in &planted {
-        assert!(
-            found.contains(pid),
-            "the cancel must reach everything the worker left, including the descendant that \
-             called setsid: {pid} missing from {found:?} (tree mark {:?})",
-            tree.mark
-        );
-    }
-
-    reap(&planted);
+    reap(&[shape.root, shape.escapee]);
     let _ = root.kill();
     let _ = root.wait();
-    let _ = std::fs::remove_file(&flag);
 }
 
 /// The mark is built from the name the worker was spawned under, not from its session id. This
