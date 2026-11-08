@@ -3597,16 +3597,9 @@ struct ChatSession: View {
                             .background(Capsule().fill(theme.bubbleAssistant))
                         }
                     }
-                    .padding(.leading, Theme.plusButton + Theme.plusFieldGap)
                 }
             }
-            // Bottom-align the "+" with a multi-line field so growth expands upward.
-            HStack(alignment: .bottom, spacing: Theme.plusFieldGap) {
-                if !isChannel {
-                    attachButton
-                }
-                textField
-            }
+            textField
         }
         // The mention list floats 8 pt above the composer, over the transcript. As a row of
         // the stack it grew the bar's safe-area inset by its height and every bubble slid up
@@ -3647,16 +3640,16 @@ struct ChatSession: View {
         return Array(list.dropLast())
     }
 
-    /// The "+" before the field: photos and files. Channels send text only (C1), so none there.
+    /// The "+" inside the field: photos and files. Channels send text only (C1), so none there.
     private var attachButton: some View {
         Button { showAttach = true } label: {
             ZStack {
                 ControlSurface(shape: Circle())
                 Image(systemName: "plus")
-                    .font(theme.font(Theme.plusGlyph, weight: .regular)) // control-size: exception plusGlyph
+                    .font(theme.font(Theme.composerPlusGlyph, weight: .regular)) // control-size: exception plusGlyph
                     .foregroundStyle(theme.text)
             }
-            .frame(width: Theme.plusButton, height: Theme.plusButton)
+            .frame(width: Theme.composerPlusDisc, height: Theme.composerPlusDisc)
             .contentShape(Circle())
             .accessibilityIdentifier("composer-plus")
         }
@@ -3835,6 +3828,16 @@ struct ChatSession: View {
                 // ([feedback copy-image-messages-ios-2026-10-27]).
                 pending.append(contentsOf: media)
                 composerFocused = true
+            },
+            // Channels send text only (C1), so they pass nothing and the field's leading
+            // edge closes up. The inset and the height frame live here rather than in the
+            // slot so that "nothing" really does occupy no width.
+            leading: {
+                if !isChannel {
+                    attachButton
+                        .frame(height: Theme.composerHeight)
+                        .padding(.leading, Theme.composerPlusLeading)
+                }
             }
         )
         // Hold released before permission returned: finish once recording starts.
@@ -4795,7 +4798,7 @@ enum ComposerTrailing {
 
 /// The field, mic and send / call button. Owns nothing: every action calls back
 /// into the chat screen, whose memo and send logic is unchanged.
-private struct ComposerField: View {
+private struct ComposerField<Leading: View>: View {
     @Environment(\.theme) private var theme
     /// Settings → Accessibility → Motion → Reduce Motion. The swap below then
     /// lands on the frame the character does, with no scale and no fade.
@@ -4824,6 +4827,10 @@ private struct ComposerField: View {
     let onPrimary: () -> Void
     /// Pictures / files pasted into the field ([feedback copy-image-messages-ios-2026-10-27]).
     var onPasteMedia: (([AppModel.PendingAttachment]) -> Void)? = nil
+    /// The `+`, drawn inside the pill at the leading end rather than as a separate disc
+    /// beside it. A slot rather than a fixed view because the button owns the attachment
+    /// sheets, which belong to the chat screen; channels send text only (C1) and pass none.
+    @ViewBuilder var leading: () -> Leading
 
     private var canSend: Bool {
         !draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || hasPending
@@ -4923,6 +4930,10 @@ private struct ComposerField: View {
 
     var body: some View {
         HStack(spacing: 8) {
+            // The `+`, inside the pill and opposite the action capsule. Bare on purpose: a
+            // channel passes no button, and an `EmptyView` carrying this slot's inset and
+            // frame would still hold its place in the stack. The caller styles it instead.
+            leading()
             if recorder.recording {
                 // Visible discard control (tap) — also used after a short tap that
                 // left recording on; hold-to-talk can slide left instead.
