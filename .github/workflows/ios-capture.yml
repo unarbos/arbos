@@ -57,6 +57,12 @@ name: iPhone capture
 #    is advisory for exactly that reason. And pin the Xcode: the image's own default is 27.1, which
 #    is not what testers install, and a wrong pin is invisible in the picture.
 #
+#    `xcode:` now pins the simulator runtime too, not just the toolchain. The image carries iOS
+#    27.0 and 27.1, and it offers `iPhone 17` only on 27.0, so the old "newest runtime" rule both
+#    failed outright and, on any device where it had not, would have shot an OS no tester runs.
+#    The runtime matching the pin is tried first, the rest in descending order after it, and a
+#    shoot that lands on anything other than the pin says so in the log and the summary.
+#
 # 2. ANYTHING MEASURED IN TIME. A hosted runner is a shared three-core machine. The split is sharp,
 #    and worth getting right: a still is a still, so the pixel-band brightness measurement in
 #    `internal/ios-fade-measurement-rig.md` transfers to this job's output exactly as written. What
@@ -371,15 +377,47 @@ jobs:
         env:
           DEVICE: ${{ inputs.device }}
           APPEARANCE: ${{ inputs.appearance }}
+          WANT_XCODE: ${{ inputs.xcode }}
         run: |
           set -euo pipefail
-          runtime="$(xcrun simctl list runtimes --json \
-            | python3 -c 'import json,sys; rs=[r for r in json.load(sys.stdin)["runtimes"] if r["isAvailable"] and r["identifier"].startswith("com.apple.CoreSimulator.SimRuntime.iOS")]; print(sorted(rs, key=lambda r: [int(p) for p in r["version"].split(".")])[-1]["identifier"] if rs else "")')"
-          if [[ -z "$runtime" ]]; then
+          # Newest first, except that a pinned Xcode puts its own iOS version at the head of
+          # the list, because pinning the toolchain does not pin the simulator. The `xcode-27`
+          # image carries iOS 27.0 *and* 27.1 and offers `iPhone 17` only on 27.0, so taking
+          # the newest ran `simctl create … 27.1` and died with "Incompatible device" — both
+          # legs of run 42524660246, before a single frame. Had the device existed on 27.1 the
+          # quiet outcome would have been worse than the loud one: a shoot on a runtime no
+          # tester has, which the header warns is invisible in the picture.
+          # `mapfile` is bash 4; this runner's /bin/bash is 3.2.
+          runtimes=()
+          while IFS= read -r line; do
+            [[ -n "$line" ]] && runtimes+=("$line")
+          done < <(xcrun simctl list runtimes --json | WANT="$WANT_XCODE" python3 -c 'import json,os,sys; rs=[r for r in json.load(sys.stdin)["runtimes"] if r["isAvailable"] and r["identifier"].startswith("com.apple.CoreSimulator.SimRuntime.iOS")]; rs.sort(key=lambda r: [int(p) for p in r["version"].split(".")], reverse=True); want=os.environ.get("WANT","").strip(); rs.sort(key=lambda r: r["version"] != want) if want else None; [print(r["identifier"] + " " + r["version"]) for r in rs]')
+          if [[ "${#runtimes[@]}" -eq 0 ]]; then
             echo "::error title=No iOS runtime::this runner has no available iOS simulator runtime"
             exit 1
           fi
-          udid="$(xcrun simctl create "$SIM_NAME" "$DEVICE" "$runtime")"
+          # Ask each runtime in turn rather than consult a compatibility table: `simctl create`
+          # is the only authority on whether this runtime carries this device.
+          udid=""; runtime=""; version=""
+          for entry in "${runtimes[@]}"; do
+            candidate="${entry%% *}"; candidate_version="${entry##* }"
+            if udid="$(xcrun simctl create "$SIM_NAME" "$DEVICE" "$candidate" 2>/dev/null)"; then
+              runtime="$candidate"; version="$candidate_version"
+              break
+            fi
+            echo "$DEVICE is not available on $candidate; trying the next runtime"
+            udid=""
+          done
+          if [[ -z "$udid" ]]; then
+            echo "::error title=No runtime carries $DEVICE::tried ${runtimes[*]}. Ask for a device this image has."
+            exit 1
+          fi
+          # Say it rather than let it pass: a shoot on a runtime other than the pinned one is
+          # still a shoot, and nothing in the resulting picture shows which one took it.
+          if [[ -n "$WANT_XCODE" && "$version" != "$WANT_XCODE" ]]; then
+            echo "::warning title=Simulator runtime is not the pinned Xcode::asked for $WANT_XCODE, shot on iOS $version"
+            echo "- \`${{ matrix.leg }}\`: **shot on iOS $version, not the pinned $WANT_XCODE**" >> "$GITHUB_STEP_SUMMARY"
+          fi
           echo "udid=$udid" >> "$GITHUB_OUTPUT"
           xcrun simctl boot "$udid"
           xcrun simctl bootstatus "$udid" -b
