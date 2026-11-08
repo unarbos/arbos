@@ -29,9 +29,10 @@ enum Appearance: String, CaseIterable, Identifiable {
 enum Surface: String, CaseIterable, Identifiable {
     case matte, glass
     var id: String { rawValue }
-    /// What an unset preference means: Matte (D90; Glass under the D10 Q3
-    /// amendment before it).
-    static let `default`: Surface = .matte
+    /// What an unset preference means: Glass, to match the reference build, which reverses D90
+    /// (Matte) and restores the D10 Q3 amendment's answer. A preference already written to
+    /// `UserDefaults` still wins, so this moves no one who has chosen Matte.
+    static let `default`: Surface = .glass
     var label: String {
         switch self {
         case .matte: return "Matte"
