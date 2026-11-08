@@ -213,7 +213,10 @@ async fn answers(host: &SharedHost, user_msg: &str) -> Vec<(String, String)> {
                 .filter(|p| p.get("kind").and_then(Value::as_str) == Some("error"))
                 .filter_map(|p| p.get("message").and_then(Value::as_str))
                 .collect();
-            (m.status.clone(), format!("{} {}", m.text(), errors.join(" ")))
+            (
+                m.status.clone(),
+                format!("{} {}", m.text(), errors.join(" ")),
+            )
         })
         .collect()
 }
@@ -250,7 +253,8 @@ async fn a_refused_first_message_does_not_refuse_the_rest_of_the_chat() {
         let msg = ask(&agent, &host, ask_text).await;
         let rows = answers(&host, &msg).await;
         assert!(
-            rows.iter().any(|(status, text)| status != "error" && text.contains(answer)),
+            rows.iter()
+                .any(|(status, text)| status != "error" && text.contains(answer)),
             "{ask_text:?} has nothing to do with the refused message and must be answered: \
              {rows:?} / pi: {:?}",
             pi_log(&log)

@@ -3718,7 +3718,7 @@ impl Agent {
         self.switch_session_to(chat_id, &path).await?;
         // A fresh window holds none of the chat: every earlier turn is now the tree's to offer (D91).
         let _ = self.tree.note_session_cut(chat_id, 0);
-        tracing::warn!(chat_id, reason, previous = %previous, fresh = %path.display(), "fresh pi session after empty turn");
+        tracing::warn!(chat_id, reason, previous = %previous, fresh = %path.display(), "fresh pi session");
         self.append_audit(
             "session_rotated",
             json!({ "chat_id": chat_id, "reason": reason, "previous": previous, "fresh": path.display().to_string() }),
@@ -8122,13 +8122,26 @@ impl Agent {
         // messages are one unsafe part next to several ordinary ones. One narrower attempt, on
         // the fallback talking model because it is a different provider lane, asks for the parts
         // it can do and for a sentence naming the part it is leaving out — the user reads an
-        // answer plus a named gap instead of "I couldn't answer that" (fix F). The session is
-        // deliberately left alone; see `empty_turn_retry_reason_for`.
+        // answer plus a named gap instead of "I couldn't answer that" (fix F).
         if result.is_ok() {
             if let Some(m) = self.refusal_to_retry().await {
-                tracing::warn!(chat_id, detail = %m.detail, "provider refusal; one retry on the fallback model for the parts it can do");
+                tracing::warn!(chat_id, detail = %m.detail, "provider refusal; one retry on the fallback model, in a window the refused turn is not in");
+                // The retry starts from a window the refused turn is not in. #2750 retried in
+                // the same window, which is where this lane was still losing whole chats: the
+                // refused turn stays in the window, pi replays the window on every later turn
+                // of the chat, and the provider declines the same content again. Jacob, Test5
+                // round 22 on 0.1.200: a fresh chat whose first message was refused answered
+                // none of the three unrelated asks that followed it — four error rows out of
+                // four. The conversation is not lost with the window: the recap below and the
+                // rolling summary carry it, exactly as the empty-turn rotation does.
+                self.drop_refused_turn_from_window(chat_id, "refusal_retry")
+                    .await;
                 let on_fallback = self.switch_talking_model(true).await;
                 let retry_prompt = {
+                    let recap = {
+                        let h = host.lock().await;
+                        chat_recap(&h.doc.messages(), user_msg_id, &self.name(), chat_id)
+                    };
                     let mut tl = self.turn.lock().await;
                     match tl.as_mut() {
                         Some(t) if !t.stopped => {
@@ -8137,7 +8150,7 @@ impl Agent {
                             t.route = None;
                             t.route_attempts = 0;
                             t.metrics.route_missing = false;
-                            Some(refusal_retry_prompt(prompt_text))
+                            Some(with_chat_recap(&refusal_retry_prompt(prompt_text), &recap))
                         }
                         _ => None,
                     }
@@ -8149,6 +8162,14 @@ impl Agent {
                     self.switch_talking_model(false).await;
                 }
             }
+        }
+        // The retry ran in a window without the refused turn and was refused again, so it is
+        // this message's own content the provider is declining. Carrying it into the chat's next
+        // turn would refuse that turn too, so it is dropped here instead of replayed: the turn
+        // ends with the refusal line below, and the question after it starts from a clean window.
+        if self.refused_turn_to_drop().await {
+            self.drop_refused_turn_from_window(chat_id, "refusal_dropped")
+                .await;
         }
         // An empty turn is usually the model window, not the question: a provider refusal on a
         // bloated session (Lium, 2026-10-21: six turns, 208–242k tokens, zero output) or a settle
@@ -11385,6 +11406,36 @@ impl Agent {
         refusal_retry_error(tl.as_ref()?)
     }
 
+    /// Does the refused turn have to leave the chat's window before the next turn runs?
+    async fn refused_turn_to_drop(&self) -> bool {
+        let tl = self.turn.lock().await;
+        tl.as_ref().is_some_and(refused_turn_to_drop)
+    }
+
+    /// Put the chat on a window the refused turn is not in, and record on the turn that its
+    /// window went.
+    ///
+    /// A refused turn is the one thing a window cannot keep: pi replays the window on every
+    /// later turn of the chat, so a turn the provider declined is sent again with the next
+    /// question, and with the one after that. Replacing the window is agentd's only lever on it
+    /// — pi owns the session file and there is no way to take one turn out of it.
+    ///
+    /// The flag means at most one more rotation can follow in the same turn, which is what keeps
+    /// this to "retry in a clean window, then drop": `empty_turn_retry_reason_for` leaves a turn
+    /// whose window has already been rebuilt alone.
+    async fn drop_refused_turn_from_window(self: &Arc<Self>, chat_id: &str, reason: &str) {
+        match self.rotate_chat_session(chat_id, reason).await {
+            Ok(()) => {
+                if let Some(t) = self.turn.lock().await.as_mut() {
+                    t.session_rotated = true;
+                }
+            }
+            Err(e) => {
+                tracing::warn!(chat_id, reason, error = %e, "the window holding a refused turn could not be replaced; the next turn in this chat may be refused too")
+            }
+        }
+    }
+
     /// `/hook/turn-without-route`: the main run settled without calling `route`. When pi could
     /// not continue (`corrected=false`), record the turn as `reply` so any prose already
     /// streamed is a normal answer (arbos-pi-ext route guard). An empty miss is retried once
@@ -14565,11 +14616,12 @@ pub(crate) fn empty_turn_retry_reason_for(t: &TurnState) -> Option<&'static str>
     if !t.streamed_text.trim().is_empty() || !t.ack_text.trim().is_empty() {
         return None;
     }
-    // A refusal is the provider declining this request, not a bloated window: a fresh session
-    // is refused the same way and costs the user the conversation they are mid-way through
-    // (fix F). The refusal route retries once on the fallback model instead — see
-    // `refusal_retry_error` — and that holds even when the refused turn also missed its
-    // `route` call, so the rotation below is not reached through that door either.
+    // A refusal is the provider declining this request, not a bloated window: rebuilding the
+    // window and sending the same request again is refused the same way (fix F). The refusal
+    // route owns its own window handling instead — `refusal_retry_error` retries on the
+    // fallback model in a clean window and `refused_turn_to_drop` drops the refused turn when
+    // even that is refused — and that holds even when the refused turn also missed its `route`
+    // call, so the rotation below is not reached through that door either.
     if t.model_error.as_ref().is_some_and(|m| m.refusal) {
         return None;
     }
@@ -14603,6 +14655,35 @@ pub(crate) fn refusal_retry_error(t: &TurnState) -> Option<ModelError> {
         return None;
     }
     Some(m)
+}
+
+/// Must the window this turn ran in be replaced before the chat's next turn?
+///
+/// True for the one shape that poisons a whole chat: a content refusal that the retry in a clean
+/// window could not get past, with nothing delivered to the user. The provider is declining this
+/// message's own content, so every later turn that replays it is declined as well — Jacob, Test5
+/// round 22 on 0.1.200, where a fresh chat whose first message was refused answered none of the
+/// three unrelated asks that followed.
+///
+/// The retry (`refusal_retry_error`) must have run, because it is what tells the two cases apart:
+/// a window the provider will not read is salvaged by the clean retry, and only content it will
+/// not read in any window reaches here. A turn that delivered prose keeps its window: the
+/// provider took most of that message, and a rotation would cost the user the conversation for a
+/// part that was answered anyway. The walls below are not content at all — a budget block, a
+/// context or rate limit, a full disk, an abort of agentd's own — and a fresh window buys none of
+/// them anything.
+pub(crate) fn refused_turn_to_drop(t: &TurnState) -> bool {
+    let Some(m) = t.model_error.as_ref() else {
+        return false;
+    };
+    m.refusal
+        && t.refusal_retried
+        && !t.stopped
+        && t.streamed_text.trim().is_empty()
+        && !is_abort_text(&m.detail)
+        && crate::budget::Refusal::classify(&m.detail).is_none()
+        && classify_hard_limit(&m.detail).is_none()
+        && !crate::disk::is_enospc(&m.detail)
 }
 
 /// The prompt of that one retry. The provider judged the message as a whole, so the retry must
