@@ -161,10 +161,12 @@ struct Theme: Equatable {
     static let composerTextInset: CGFloat = Controls.textInset
     /// One 22 pt body line centred in the 48 pt field.
     static let composerTextPadY: CGFloat = (composerHeight - 22) / 2
-    /// The white action is a 120 × 96 px capsule (was a 36 pt circle), 24 px from the
-    /// field's top and bottom and 26 px from its right edge.
-    static let actionPillWidth: CGFloat = 40
+    /// The white action is a 96 × 96 px circle, 24 px from the field's top and bottom and
+    /// 26 px from its right edge. Measured off the reference crops at 3 px/pt, where it
+    /// draws 96 × 96 against the 120 × 96 this build drew. Width is defined as the height
+    /// so the circle cannot drift back into a capsule one constant at a time.
     static let actionPillHeight: CGFloat = 32
+    static let actionPillWidth: CGFloat = actionPillHeight
     static let actionPillTrailing: CGFloat = 26 / 3
     /// The `+` inside the field, mirroring the action pill at the other end: a 96 px disc
     /// inset 26 px from the leading edge, the same height as the white capsule opposite it.

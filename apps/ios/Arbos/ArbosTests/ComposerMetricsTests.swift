@@ -48,10 +48,12 @@ final class ComposerMetricsTests: XCTestCase {
         XCTAssertEqual(MentionTextView.insets.top + 22 + MentionTextView.insets.bottom, Theme.composerHeight)
     }
 
-    func testActionIsAWhitePillNotACircle() {
-        // 120 × 96 px capsule, 24 px from the field's top and bottom, 26 px from its right edge.
-        XCTAssertEqual(Theme.actionPillWidth, 40)
+    func testActionIsAWhiteCircleNotACapsule() {
+        // 96 × 96 px, 24 px from the field's top and bottom, 26 px from its right edge.
+        // Measured off the reference at 3 px/pt: 96 × 96 there against 120 × 96 here.
+        XCTAssertEqual(Theme.actionPillWidth, 32)
         XCTAssertEqual(Theme.actionPillHeight, 32)
+        XCTAssertEqual(Theme.actionPillWidth, Theme.actionPillHeight, "round, not a capsule")
         XCTAssertEqual((Theme.composerHeight - Theme.actionPillHeight) / 2, 8)
         XCTAssertEqual(Theme.actionPillTrailing * 3, 26, accuracy: 0.001)
         assertOnPixel(Theme.actionPillTrailing, "actionPillTrailing")
@@ -63,7 +65,7 @@ final class ComposerMetricsTests: XCTestCase {
         XCTAssertEqual(VoiceWaveGlyph.pitch, 3.25)
         XCTAssertEqual(VoiceWaveGlyph.heights, [6.5, 14.5, 8.5, 14.5, 6.5])
         XCTAssertEqual(VoiceWaveGlyph.heights, Array(VoiceWaveGlyph.heights.reversed()))
-        // The five bars span 15 pt and 14.5 pt — inside the 40 × 32 pill with room to spare.
+        // The five bars span 15 pt and 14.5 pt — inside the 32 pt circle with room to spare.
         let span = VoiceWaveGlyph.pitch * 4 + VoiceWaveGlyph.barWidth
         XCTAssertEqual(span, 15)
         XCTAssertLessThan(span, Theme.actionPillWidth)
@@ -86,8 +88,9 @@ final class ComposerMetricsTests: XCTestCase {
     /// landed. The mic keeps its frame now, so the trailing cluster is one
     /// width whatever the field holds.
     func testTheTrailingControlsTakeOneWidthWhateverTheFieldHolds() {
-        // 132 + 6 + 120 + 26 px: the mic's hit frame, the gap, the pill, the inset.
-        XCTAssertEqual(Theme.composerTrailingWidth * 3, 284, accuracy: 0.001)
+        // 132 + 6 + 96 + 26 px: the mic's hit frame, the gap, the circle, the inset.
+        // 284 until the action went round and took 24 px off the cluster.
+        XCTAssertEqual(Theme.composerTrailingWidth * 3, 260, accuracy: 0.001)
         XCTAssertEqual(
             Theme.composerTrailingWidth,
             Theme.micHitWidth + Theme.micPillGap + Theme.actionPillWidth + Theme.actionPillTrailing)
