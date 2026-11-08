@@ -83,8 +83,9 @@ final class ComposerMetricsTests: XCTestCase {
     /// landed. The mic keeps its frame now, so the trailing cluster is one
     /// width whatever the field holds.
     func testTheTrailingControlsTakeOneWidthWhateverTheFieldHolds() {
-        // 132 + 6 + 120 + 26 px: the mic's hit frame, the gap, the pill, the inset.
-        XCTAssertEqual(Theme.composerTrailingWidth * 3, 284, accuracy: 0.001)
+        // 132 + 6 + 96 + 26 px: the mic's hit frame, the gap, the circle, the inset.
+        // 284 until the action went round and took 24 px off the cluster.
+        XCTAssertEqual(Theme.composerTrailingWidth * 3, 260, accuracy: 0.001)
         XCTAssertEqual(
             Theme.composerTrailingWidth,
             Theme.micHitWidth + Theme.micPillGap + Theme.actionPillWidth + Theme.actionPillTrailing)
