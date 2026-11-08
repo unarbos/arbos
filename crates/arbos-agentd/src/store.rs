@@ -281,6 +281,18 @@ pub fn redact_live_value(value: &str) {
 
 /// Write-time redaction before T3 append (D19): tokens, keys, Authorization headers, `.env`-style
 /// values, plus every live vault value registered with `redact_live_value`.
+/// Shortest value [`Store::scrub_all_text`] will look for across the whole schema.
+///
+/// One above `interrupted`, the longest status literal any column of this schema is read back
+/// by; `cancelled` and `delivered` are nine, `approved` eight, `running` and `pending` seven.
+/// A shorter value still gets swept from the two text columns that carry prose, where the worst
+/// a collision does is redact a word. It is not swept from the structural columns, where the
+/// worst it does is change a row's meaning.
+///
+/// `no_status_literal_reaches_the_sweep_floor` reads those literals back off the source and fails
+/// if a new one reaches this number, so the clearance is checked rather than remembered.
+const GENERIC_SWEEP_MIN: usize = 12;
+
 pub fn redact(text: &str) -> String {
     let mut out = text.to_owned();
     {
@@ -1198,6 +1210,92 @@ impl Store {
         })
     }
 
+    /// Every other TEXT column the schema has, found by walking the schema rather than by naming
+    /// the stores.
+    ///
+    /// A job's brief, a drafted message body, a scratch value, an ask, an approval payload and a
+    /// handle's note all carried pasted text that the two passes above never reached, because
+    /// those passes name their tables and nothing obliged the names to keep up with the schema.
+    /// Walking `sqlite_master` means a table added later is swept the day it exists.
+    ///
+    /// Run it after [`Store::t3_scrub`] and [`Store::memory_scrub`], which own the `text` column
+    /// of the two indexed tables and the size that describes it. This pass reaches everything
+    /// those two leave behind, including their own `source` columns, and rebuilds a table's
+    /// full-text index when it rewrote any of its rows.
+    ///
+    /// Primary keys are skipped: an id is never a pasted secret, and rewriting one would break
+    /// every row that refers to it. Only columns the schema declares `TEXT` are touched, so a
+    /// Loro snapshot stored as a BLOB is left alone.
+    ///
+    /// The length floor is higher here than the six the two passes above use, because these
+    /// columns differ in kind. A scrub value is not always a long random token — a `login`
+    /// secret's password is one too, and a person chose it — and matching is a literal substring
+    /// replacement. Over most of the schema a collision costs one word of a user's history, but
+    /// `jobs.state`, `approvals.state` and their neighbours are read back by equality, so a
+    /// vaulted password of `running` or `pending` would rewrite a state machine's value instead
+    /// of redacting prose. [`GENERIC_SWEEP_MIN`] clears the longest of those literals.
+    pub fn scrub_all_text(&self, values: &[String]) -> Result<usize> {
+        let needles: Vec<&str> = values
+            .iter()
+            .map(String::as_str)
+            .filter(|v| v.len() >= GENERIC_SWEEP_MIN)
+            .collect();
+        if needles.is_empty() {
+            return Ok(0);
+        }
+        self.with(|c| {
+            let tables: Vec<String> = c
+                .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")?
+                .query_map([], |r| r.get(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut n = 0;
+            for t in &tables {
+                if t.contains("_fts") {
+                    continue;
+                }
+                let cols: Vec<String> = c
+                    .prepare(&format!("PRAGMA table_info({t})"))?
+                    .query_map([], |r| {
+                        Ok((
+                            r.get::<_, String>(1)?,
+                            r.get::<_, String>(2)?,
+                            r.get::<_, i64>(5)?,
+                        ))
+                    })?
+                    .filter_map(Result::ok)
+                    .filter(|(_, ty, pk)| ty.eq_ignore_ascii_case("TEXT") && *pk == 0)
+                    .map(|(name, _, _)| name)
+                    .collect();
+                let mut hit = 0;
+                for col in cols {
+                    for v in &needles {
+                        hit += c.execute(
+                            &format!(
+                                "UPDATE {t} SET {col} = replace({col}, ?1, ?2) WHERE {col} LIKE '%' || ?1 || '%'"
+                            ),
+                            params![v, "[REDACTED:vault]"],
+                        )?;
+                    }
+                }
+                n += hit;
+                let fts = format!("{t}_fts");
+                if hit > 0 && tables.contains(&fts) {
+                    let mirrored: Vec<String> = c
+                        .prepare(&format!("PRAGMA table_info({fts})"))?
+                        .query_map([], |r| r.get::<_, String>(1))?
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let list = mirrored.join(",");
+                    c.execute(&format!("DELETE FROM {fts}"), [])?;
+                    c.execute(
+                        &format!("INSERT INTO {fts}({list}) SELECT {list} FROM {t}"),
+                        [],
+                    )?;
+                }
+            }
+            Ok(n)
+        })
+    }
+
     // ---- memory -------------------------------------------------------------------------------
 
     #[allow(clippy::too_many_arguments)]
@@ -1726,6 +1824,191 @@ fn fts_query(q: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The floor only guards while it clears every literal these columns are read back against.
+    ///
+    /// [`GENERIC_SWEEP_MIN`] is a number tuned to the literals that exist today. A
+    /// twelve-character state added next month would make it stop guarding with nothing failing:
+    /// the two-sided test below pins the behaviour at today's literals and would pass unchanged.
+    /// So the link is made here rather than remembered — walk the crate for equality comparisons
+    /// on a `state` or `status` column, and for the schema's own defaults, and fail if any
+    /// literal reaches the floor.
+    ///
+    /// Scoped to comparisons on purpose: widening it to every line mentioning a state also
+    /// collects JSON field names like `recent_messages`, which no column is compared to. A state
+    /// only ever written and never compared would slip past, which is the known limit of reading
+    /// this off the source instead of off a type the compiler owns.
+    #[test]
+    fn no_status_literal_reaches_the_sweep_floor() {
+        fn has_word(line: &str, w: &str) -> bool {
+            let edge = |c: Option<char>| !c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+            line.match_indices(w).any(|(i, _)| {
+                edge(line[..i].chars().next_back()) && edge(line[i + w.len()..].chars().next())
+            })
+        }
+        fn plain(tok: &str) -> bool {
+            tok.starts_with(|c: char| c.is_ascii_lowercase())
+                && tok
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        }
+
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut found: Vec<String> = Vec::new();
+        for entry in std::fs::read_dir(&src).expect("src dir").flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|x| x.to_str()) != Some("rs") {
+                continue;
+            }
+            for line in std::fs::read_to_string(&path).unwrap_or_default().lines() {
+                if (has_word(line, "state") || has_word(line, "status"))
+                    && (line.contains("==") || line.contains("matches!"))
+                {
+                    found.extend(
+                        line.split('"')
+                            .skip(1)
+                            .step_by(2)
+                            .filter(|t| plain(t))
+                            .map(str::to_owned),
+                    );
+                }
+                if let Some(lit) = line
+                    .split("DEFAULT '")
+                    .nth(1)
+                    .and_then(|r| r.split('\'').next())
+                    .filter(|t| plain(t))
+                {
+                    found.push(lit.to_owned());
+                }
+            }
+        }
+
+        // A walk that finds nothing would pass this test without checking anything.
+        assert!(found.len() >= 20, "source walk found too little: {found:?}");
+        let over: Vec<&String> = found
+            .iter()
+            .filter(|l| l.len() >= GENERIC_SWEEP_MIN)
+            .collect();
+        assert!(
+            over.is_empty(),
+            "these are compared by equality and are at or above GENERIC_SWEEP_MIN ({GENERIC_SWEEP_MIN}), \
+             so a vaulted value matching one would rewrite it: {over:?}. Raise the floor or shorten the state."
+        );
+    }
+
+    /// A value short enough to be a status literal is left to the two text passes.
+    ///
+    /// `running` is a plausible password, a password is a scrub value, and `jobs.state` is read
+    /// back by equality — so sweeping it across the whole schema would change what a row means
+    /// rather than redact what it says.
+    #[test]
+    fn a_value_short_enough_to_be_a_status_is_left_to_the_text_passes() {
+        let store = job_store();
+        store
+            .insert_job(
+                "j1",
+                "c1",
+                "a1",
+                "T",
+                "ops",
+                "the worker is running now",
+                &[],
+            )
+            .unwrap();
+        assert_eq!(store.scrub_all_text(&["running".to_owned()]).unwrap(), 0);
+        assert!(store.job("j1").unwrap().unwrap().brief.contains("running"));
+
+        // A value long enough to be a key still sweeps the same columns.
+        const V: &str = "Zq7Z4x9W2m5K8n1P6r3T0v";
+        store.scratch_set("c1", "n", Some(V)).unwrap();
+        assert_eq!(store.scrub_all_text(&[V.to_owned()]).unwrap(), 1);
+    }
+
+    /// A vaulted value must not survive in any TEXT column the schema has.
+    ///
+    /// The cases are read off the live schema rather than listed, so a table or column added
+    /// later is covered the day it exists or this fails. Before `scrub_all_text`, six columns
+    /// kept the value: `jobs.brief`, `outbox.body`, `scratch.value`, `asks.question`,
+    /// `approvals.payload` and `handles.note`.
+    ///
+    /// The value has no recognisable key shape on purpose: no pattern can match it, so this
+    /// measures the sweep and nothing else.
+    #[test]
+    fn no_text_column_keeps_a_vaulted_value() {
+        const V: &str = "Zq7Z4x9W2m5K8n1P6r3T0v";
+        let store = job_store();
+        let mut planted: Vec<(String, String)> = Vec::new();
+
+        store
+            .with(|c| {
+                let tables: Vec<String> = c
+                    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")?
+                    .query_map([], |r| r.get(0))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                for (i, t) in tables.iter().filter(|t| !t.contains("_fts")).enumerate() {
+                    let cols: Vec<(String, String, i64)> = c
+                        .prepare(&format!("PRAGMA table_info({t})"))?
+                        .query_map([], |r| Ok((r.get(1)?, r.get(2)?, r.get(5)?)))?
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let names: Vec<String> = cols.iter().map(|(n, _, _)| n.clone()).collect();
+                    let vals: Vec<String> = cols
+                        .iter()
+                        .enumerate()
+                        .map(|(j, (n, ty, pk))| {
+                            if !ty.eq_ignore_ascii_case("TEXT") {
+                                "0".to_owned()
+                            } else if *pk != 0 {
+                                format!("'id-{i}-{j}'")
+                            } else {
+                                planted.push((t.clone(), n.clone()));
+                                format!("'{n} holds {V} here'")
+                            }
+                        })
+                        .collect();
+                    c.execute(
+                        &format!(
+                            "INSERT INTO {t}({}) VALUES ({})",
+                            names.join(","),
+                            vals.join(",")
+                        ),
+                        [],
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap();
+
+        assert!(
+            planted.len() >= 20,
+            "schema walk found too little: {planted:?}"
+        );
+
+        let vals = [V.to_owned()];
+        store.t3_scrub(&vals).unwrap();
+        store.memory_scrub(&vals).unwrap();
+        store.scrub_all_text(&vals).unwrap();
+
+        let survivors: Vec<String> = planted
+            .iter()
+            .filter(|(t, col)| {
+                store
+                    .with(|c| {
+                        c.query_row(
+                            &format!("SELECT count(*) FROM {t} WHERE {col} LIKE '%' || ?1 || '%'"),
+                            params![V],
+                            |r| r.get::<_, i64>(0),
+                        )
+                    })
+                    .unwrap_or(0)
+                    > 0
+            })
+            .map(|(t, col)| format!("{t}.{col}"))
+            .collect();
+        assert!(
+            survivors.is_empty(),
+            "kept the vaulted value: {survivors:?}"
+        );
+    }
 
     /// D19 redaction is applied before anything lands in T3.
     #[test]

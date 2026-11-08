@@ -877,7 +877,7 @@ pub(crate) async fn scrub_now(agent: &Arc<Agent>, secret_id: &str) {
             agent.append_audit(
                 "secret_scrub",
                 json!({ "secret_id": secret_id, "chats": stats.chats, "sessions": stats.sessions,
-                    "t3": stats.t3, "memory": stats.memory, "files": stats.files, "path": "handoff" }),
+                    "t3": stats.t3, "memory": stats.memory, "files": stats.files, "rows": stats.rows, "path": "handoff" }),
             );
         }
         Err(e) => tracing::warn!(error = %e, secret_id, "secret scrub failed (hand-off)"),
@@ -890,8 +890,11 @@ struct ScrubStats {
     t3: usize,
     memory: usize,
     /// Other on-disk text the value could have reached: harness logs, subagent packs, tool
-    /// output blobs, the system prompt, the workspace's `.arbos` scratch files.
+    /// output blobs, the system prompt.
     files: usize,
+    /// Rows rewritten in every other TEXT column of the schema: job briefs, drafted message
+    /// bodies, scratch values, asks, approval payloads, handle notes.
+    rows: usize,
 }
 
 /// Pull the scrub values from the relay and redact them from every local context store.
@@ -913,6 +916,7 @@ async fn scrub_secret(agent: &Arc<Agent>, secret_id: &str) -> Result<ScrubStats,
             t3: 0,
             memory: 0,
             files: 0,
+            rows: 0,
         });
     }
     for val in &values {
@@ -961,6 +965,7 @@ async fn scrub_secret(agent: &Arc<Agent>, secret_id: &str) -> Result<ScrubStats,
     let sessions = scrub_session_files(&agent.cfg, &values);
     let t3 = agent.store.t3_scrub(&values).unwrap_or(0);
     let memory = agent.store.memory_scrub(&values).unwrap_or(0);
+    let rows = agent.store.scrub_all_text(&values).unwrap_or(0);
     let files = scrub_other_files(&agent.cfg, &values);
     let _ = agent.store.flush_after_scrub();
     Ok(ScrubStats {
@@ -969,6 +974,7 @@ async fn scrub_secret(agent: &Arc<Agent>, secret_id: &str) -> Result<ScrubStats,
         t3,
         memory,
         files,
+        rows,
     })
 }
 
