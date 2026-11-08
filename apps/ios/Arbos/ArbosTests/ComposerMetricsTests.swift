@@ -15,24 +15,29 @@ final class ComposerMetricsTests: XCTestCase {
     }
 
     func testDiscFieldAndInsetsAreGroksKeyboardUp() {
-        // `+` disc 144 px at 54 px from the edge; field 144 px tall; 30 px between them;
-        // the field ends 54 px from the right edge. 420 − 18 − 48 − 10 − 18 = 326 pt field.
-        XCTAssertEqual(Theme.plusButton, 48)
+        // One pill, not a disc beside a field: the `+` is inside the field now, so the
+        // field runs the whole width between the insets — 420 − 18 − 18 = 384 pt — and
+        // there is no disc width and no gap to subtract.
         XCTAssertEqual(Theme.composerHeight, 48)
-        XCTAssertEqual(Theme.plusFieldGap, 10)
         XCTAssertEqual(Theme.composerInsetKeyboard, 18)
         XCTAssertEqual(Theme.composerInset, 31, "keyboard down keeps the 2026-10-15 reading")
-        let fieldWidth = 420 - Theme.composerInsetKeyboard * 2 - Theme.plusButton - Theme.plusFieldGap
-        XCTAssertEqual(fieldWidth, 326)
+        let fieldWidth = 420 - Theme.composerInsetKeyboard * 2
+        XCTAssertEqual(fieldWidth, 384)
+        // Both ends of the pill match: a 96 px disc and a 96 px-tall capsule, each inset
+        // 26 px from its own edge.
+        XCTAssertEqual(Theme.composerPlusDisc, Theme.actionPillHeight)
+        XCTAssertEqual(Theme.composerPlusLeading, Theme.actionPillTrailing)
+        assertOnPixel(Theme.composerPlusLeading, "composerPlusLeading")
         // Since [feedback iphone-header-composer-sizing-2026-10-26] every other field, pill
         // and disc is the composer's size (`Controls`, `ControlMetricsTests`).
         XCTAssertEqual(Theme.fieldHeight, Theme.composerHeight)
     }
 
     func testPlusGlyphIsGroksSize() {
-        // SF `plus`, regular: 54 px arms (22 pt draws 53, 22.5 draws 54), 5 px strokes
-        // like Grok's — medium would draw 8.
-        XCTAssertEqual(Theme.plusGlyph, 22.5)
+        // Measured off the reference at 3 px/pt: its `+` draws 38 px arms where this
+        // build drew 54, so the glyph comes down with the disc it sits in. SF `plus`,
+        // regular: 16 pt draws 38.
+        XCTAssertEqual(Theme.composerPlusGlyph, 16)
     }
 
     func testFieldTextStartsAtGroksCaret() {
