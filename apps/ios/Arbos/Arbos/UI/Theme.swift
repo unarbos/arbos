@@ -166,6 +166,13 @@ struct Theme: Equatable {
     static let actionPillWidth: CGFloat = 40
     static let actionPillHeight: CGFloat = 32
     static let actionPillTrailing: CGFloat = 26 / 3
+    /// The `+` inside the field, mirroring the action pill at the other end: a 96 px disc
+    /// inset 26 px from the leading edge, the same height as the white capsule opposite it.
+    /// The reference draws 38 px `+` arms against this build's 54, so the glyph comes down
+    /// from `plusGlyph` to 16 (16 pt regular draws 38).
+    static let composerPlusDisc: CGFloat = actionPillHeight
+    static let composerPlusGlyph: CGFloat = 16
+    static let composerPlusLeading: CGFloat = actionPillTrailing
     /// Mic glyph centre → action pill: 72 px (the glyph sits in a 44 pt hit frame, so
     /// 22 + `micPillGap`).
     static let micHitWidth: CGFloat = 44
@@ -787,7 +794,8 @@ enum Controls {
     enum Exception: String, CaseIterable {
         /// The composer's side inset follows the keyboard (31 down / 18 up, Grok's).
         case composerSideInset
-        /// The composer `+` glyph is Grok's 22.5 pt plus; the family glyph is 19.
+        /// The composer `+` glyph: 16 pt now that the disc sits inside the field
+        /// (`composerPlusGlyph`); the family glyph is 19.
         case plusGlyph
         /// Call screen: 64 pt action discs, 108 pt avatar disc, 150 pt ring (Grok call UI).
         case callControls
