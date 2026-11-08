@@ -180,6 +180,15 @@ def main():
     (out_dir / "report.md").write_text("\n".join(lines) + "\n")
     print("\n".join(lines))
 
+    # A pair job that reads green having produced no pair is the failure mode this rig hides best:
+    # the artifact is published either way, so somebody reads "success" beside an empty download
+    # and believes a shoot happened. The report and the upload are both `if: always()` steps, so
+    # refusing here costs none of the evidence and only sets the verdict. No pair, no proof.
+    if not rows:
+        print("::error title=No pair::no shot name is present in both legs, so this run produced no before/after evidence")
+        return 1
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main() or 0)
