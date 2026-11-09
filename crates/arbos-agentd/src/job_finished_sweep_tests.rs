@@ -101,6 +101,10 @@ impl DetachedWriter {
 /// else: no mark is planted, and if production ever stops marking its children these cases go
 /// red rather than passing on a mark the test wrote.
 async fn worker_that_detaches_and_exits(dir: &std::path::Path, session_id: &str) -> DetachedWriter {
+    assert!(
+        std::path::Path::new("/usr/bin/setsid").exists(),
+        "setsid (util-linux) is missing, so the detachment these cases measure cannot be built"
+    );
     let log = dir.join(format!("writer-{}.log", ulid()));
     let pidfile = dir.join(format!("writer-{}.pid", ulid()));
     let script = format!(
@@ -137,6 +141,21 @@ async fn worker_that_detaches_and_exits(dir: &std::path::Path, session_id: &str)
     }
     let pid = pid.expect("the detached writer records its pid");
 
+    // The `setsid` happened. Without it the writer is an ordinary background child, which
+    // outlives its worker just as well — an orphan is reparented to PID 1 either way — so every
+    // case in this file stayed green with the word deleted from the script. What `setsid` buys
+    // is that the writer outlives it *unreachably*, outside the session the worker was spawned
+    // into, and that is the half the opening paragraph claims and nothing checked.
+    //
+    // Read from `/proc` rather than through `isolation::session_of`: the classifier answers
+    // which marked session a process belongs to, and the question here is what the kernel did.
+    assert_eq!(
+        kernel_session_of(pid),
+        Some(pid),
+        "the detached writer {pid} does not lead a session of its own, so it escaped nothing \
+         and a sweep that reached it would prove nothing about a setsid descendant"
+    );
+
     // And the worker itself is gone, which is what puts the job row in `done` honestly.
     for _ in 0..100 {
         if !child.is_alive() {
@@ -144,7 +163,19 @@ async fn worker_that_detaches_and_exits(dir: &std::path::Path, session_id: &str)
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    assert!(
+        !child.is_alive(),
+        "the worker is still running, so the job row is not `done` for the reason these cases \
+         need and the sweep below would be reaping a live worker's children instead"
+    );
     DetachedWriter { pid, log }
+}
+
+/// The kernel's session id for a pid, from field 6 of `/proc/<pid>/stat`.
+fn kernel_session_of(pid: u32) -> Option<u32> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let after = stat.rsplit_once(')').map(|(_, rest)| rest)?;
+    after.split_whitespace().nth(3)?.parse().ok()
 }
 
 /// Set a chat up with one job whose worker has finished and whose detached writer is still

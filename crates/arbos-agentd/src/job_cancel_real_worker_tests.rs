@@ -29,7 +29,9 @@ const ASK: &str = "01TESTASKCANCELREALPATH001";
 /// session cannot reach: a writer that calls `setsid` and so leads a session of its own, and a
 /// writer nested one level below it.
 ///
-/// Each records its own pid, so the test can watch them without reading the mark or the cgroup.
+/// Each records its own pid, so the test can watch them without reading the mark or the cgroup,
+/// and [`the_writers_escaped`] checks the kernel really put them in that shape before any case
+/// reads anything else.
 const WRITERS: &str = r#"#!/bin/bash
 echo $$ >> "@PIDS@"
 bash -c 'echo $$ >> "@PIDS@"; while true; do echo grand >> "@LOG@"; sleep 0.2; done' &
@@ -95,6 +97,10 @@ impl Fixture {
     /// `die`: does the first worker close after detaching the writers (and so get a fresh worker
     /// for the same job), or stay open?
     fn new(die: bool) -> Self {
+        assert!(
+            std::path::Path::new("/usr/bin/setsid").exists(),
+            "setsid (util-linux) is missing, so the escape these cases measure cannot be built"
+        );
         let root = std::env::temp_dir().join(format!("arbos-cancel-real-{}", ulid()));
         std::fs::create_dir_all(&root).unwrap();
         let pids = root.join("writer.pids");
@@ -158,6 +164,71 @@ impl Drop for Fixture {
         }
         let _ = std::fs::remove_dir_all(&self.root);
     }
+}
+
+/// The kernel's session id for a pid, from field 6 of `/proc/<pid>/stat`.
+///
+/// Named for the kernel and not for the mark. [`crate::isolation::session_of`] answers a
+/// different question — which marked session a process belongs to — and the fixture has to
+/// reason about the session it planted rather than about the classifier the cancel uses. One
+/// word for both is how a reader comes to believe a test checks the thing it plants.
+fn kernel_session_of(pid: u32) -> Option<u32> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let after = stat.rsplit_once(')').map(|(_, rest)| rest)?;
+    after.split_whitespace().nth(3)?.parse().ok()
+}
+
+/// Wait for the worker's detached writers and pin the two shapes the cases are named for: the
+/// one that called `setsid` and leads a session of its own, and the one nested inside it.
+///
+/// This replaced `fx.alive().len() >= 2`, which a pair of writers sitting in the pi child's own
+/// session satisfies exactly as well as an escape does. Deleting `setsid` from the launch left
+/// every case in this file green — the shapes were planted and never checked, so the coverage
+/// was real but unguarded and would have gone on passing after a change stopped building it.
+///
+/// The wait is on the pids, which is a set the fixture was **told**: each writer appends its own
+/// pid exactly once, so two lines means both have reported and neither identity is in doubt.
+/// The shape is then read from `/proc` in one pass and asserted, so a fixture that failed to
+/// build it says so in a second with the kernel's own answer rather than running a wait out.
+///
+/// "Exactly one of the two leads its own session, and the other is inside that session" is a
+/// complete description of the planted shape for a pair, which is why the count below is a
+/// shape and not a gate.
+async fn the_writers_escaped(fx: &Fixture) -> (u32, u32) {
+    wait_for(
+        "both of the worker's detached writers record their pids",
+        || fx.writer_pids().len() == 2,
+    )
+    .await;
+    let pids = fx.writer_pids();
+    let sessions: Vec<(u32, Option<u32>)> =
+        pids.iter().map(|p| (*p, kernel_session_of(*p))).collect();
+    let leaders: Vec<u32> = sessions
+        .iter()
+        .filter(|(p, sid)| *sid == Some(*p))
+        .map(|(p, _)| *p)
+        .collect();
+    assert_eq!(
+        leaders.len(),
+        1,
+        "exactly one writer must lead a session of its own — that `setsid` is what the recorded \
+         process group and session cannot reach, and it is what these cases are about. The \
+         kernel has (pid, session) {sessions:?}"
+    );
+    let escapee = leaders[0];
+    let nested = pids
+        .iter()
+        .copied()
+        .find(|p| *p != escapee)
+        .expect("two pids were recorded and one of them is not the leader");
+    assert_eq!(
+        kernel_session_of(nested),
+        Some(escapee),
+        "writer {nested} is not inside the escaped session {escapee}, so the second shape — a \
+         writer nested below the one that left — was never built. The kernel has (pid, session) \
+         {sessions:?}"
+    );
+    (escapee, nested)
 }
 
 async fn wait_for(what: &str, mut ready: impl FnMut() -> bool) {
@@ -226,7 +297,12 @@ async fn a_job(
 /// alone proves nothing. These assertions rest on the pids the writers wrote down being gone from
 /// `/proc` and on their log having stopped growing; the sweep is only read afterwards, to require
 /// that it found work to do rather than reporting an empty success.
-async fn the_writers_are_gone(fx: &Fixture, stopped: &[crate::agent::StoppedJob]) {
+async fn the_writers_are_gone(
+    fx: &Fixture,
+    escape: (u32, u32),
+    stopped: &[crate::agent::StoppedJob],
+) {
+    let (escapee, nested) = escape;
     assert_eq!(stopped.len(), 1, "the open job is cancelled: {stopped:?}");
     assert_eq!(
         stopped[0].state, "cancelled",
@@ -236,8 +312,7 @@ async fn the_writers_are_gone(fx: &Fixture, stopped: &[crate::agent::StoppedJob]
         fx.alive(),
         Vec::<u32>::new(),
         "a writer of the cancelled job outlived it: the cancel reached neither the setsid writer \
-         nor its nested child (pids {:?}, sweep {:?})",
-        fx.writer_pids(),
+         {escapee}, which led a session of its own, nor its nested child {nested} (sweep {:?})",
         stopped[0].sweep
     );
     let at_cancel = fx.log_len();
@@ -275,15 +350,12 @@ async fn a_cancel_kills_the_writers_its_only_worker_left_behind() {
     let (agent, host) = a_box(&fx).await;
     let job = a_job(&agent, &host).await;
 
-    wait_for("the worker's detached writers start", || {
-        fx.alive().len() >= 2
-    })
-    .await;
+    let escape = the_writers_escaped(&fx).await;
     let before = fx.log_len();
     wait_for("the writers are writing", || fx.log_len() > before).await;
 
     let stopped = agent.stop_jobs(CHAT, Some(&job)).await;
-    the_writers_are_gone(&fx, &stopped).await;
+    the_writers_are_gone(&fx, escape, &stopped).await;
 }
 
 /// The same cancel as above, through the hook the agent actually calls, asserting on what the
@@ -305,10 +377,7 @@ async fn a_real_cancel_that_killed_what_it_found_says_so_through_the_hook() {
     let (agent, host) = a_box(&fx).await;
     let job = a_job(&agent, &host).await;
 
-    wait_for("the worker's detached writers start", || {
-        fx.alive().len() >= 2
-    })
-    .await;
+    let (escapee, nested) = the_writers_escaped(&fx).await;
     let before = fx.log_len();
     wait_for("the writers are writing", || fx.log_len() > before).await;
 
@@ -322,8 +391,8 @@ async fn a_real_cancel_that_killed_what_it_found_says_so_through_the_hook() {
     assert_eq!(
         fx.alive(),
         Vec::<u32>::new(),
-        "a writer outlived the cancel (pids {:?}): {answer}",
-        fx.writer_pids()
+        "a writer outlived the cancel: the setsid writer {escapee} or its nested child \
+         {nested}: {answer}"
     );
     let at_cancel = fx.log_len();
     tokio::time::sleep(Duration::from_secs(1)).await;
@@ -408,10 +477,7 @@ async fn a_cancel_kills_the_writers_a_replaced_worker_left_behind() {
     let (agent, host) = a_box(&fx).await;
     let job = a_job(&agent, &host).await;
 
-    wait_for("the first worker's detached writers start", || {
-        fx.alive().len() >= 2
-    })
-    .await;
+    let escape = the_writers_escaped(&fx).await;
     // The first worker is gone and the job row names its replacement, which is the state the
     // cancel below has to resolve. Two subagent rows for one job is the whole precondition.
     {
@@ -439,5 +505,5 @@ async fn a_cancel_kills_the_writers_a_replaced_worker_left_behind() {
     .await;
 
     let stopped = agent.stop_jobs(CHAT, Some(&job)).await;
-    the_writers_are_gone(&fx, &stopped).await;
+    the_writers_are_gone(&fx, escape, &stopped).await;
 }
