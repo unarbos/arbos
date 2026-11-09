@@ -16,6 +16,9 @@ impl From<arbos_wallet::Error> for WalletError {
     fn from(e: arbos_wallet::Error) -> Self {
         match e {
             arbos_wallet::Error::Chain(_) => Self::Chain(e.to_string()),
+            // A bounce reason is already a sentence for the person ("the payer's balance is
+            // too low"); no "cheque:" prefix in front of it.
+            arbos_wallet::Error::Cheque(why) => Self::Invalid(why),
             _ => Self::Invalid(e.to_string()),
         }
     }
