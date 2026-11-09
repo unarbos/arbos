@@ -1979,9 +1979,18 @@ impl ApprovalState {
 
     /// Whether the card was closed with an outcome this client can name. `Unknown` is neither
     /// pending nor decided: something closed the card, but reporting *what* would be a guess.
+    ///
+    /// `Cancelled` is decided for the same reason `Expired` is, and not because this predicate
+    /// is only about whether the user is still being asked: `shell.rs`'s audit row is gated on
+    /// it precisely so an unnameable close cannot invent an outcome. A cancelled card names its
+    /// own — `cancelled`, with `decided_by` `arbos:cancelled` — so the row it writes invents
+    /// nothing. That is the line this predicate draws: nameable, not merely closed.
     pub fn decided(self) -> bool {
         match self {
-            ApprovalState::Approved | ApprovalState::Rejected | ApprovalState::Expired => true,
+            ApprovalState::Approved
+            | ApprovalState::Rejected
+            | ApprovalState::Expired
+            | ApprovalState::Cancelled => true,
             ApprovalState::Pending | ApprovalState::Unknown => false,
         }
     }
@@ -2000,6 +2009,7 @@ impl Serialize for ApprovalState {
             ApprovalState::Approved => "approved",
             ApprovalState::Rejected => "rejected",
             ApprovalState::Expired => "expired",
+            ApprovalState::Cancelled => "cancelled",
             ApprovalState::Unknown => {
                 return Err(serde::ser::Error::custom(
                     "an approval state this build does not know cannot be written back",
@@ -5152,9 +5162,14 @@ mod unknown_approval_state_tests {
     /// The bug this exists to stop: a field this build cannot parse fails the whole row, and
     /// `SyncDoc::read_message` discards it with `.ok()?` — so the user loses the assistant's
     /// prose along with the card, on every read, for as long as the value stands.
+    ///
+    /// `cancelled` left this list in #2890, which made it a known state: a product word here
+    /// becomes a real variant later and silently shrinks the population while the test stays
+    /// green. Replacements are synthetic for that reason. `superseded` is the next one to go
+    /// the same way — approval supersession is live work — and it is still here.
     #[test]
     fn a_state_this_build_does_not_know_keeps_its_whole_row() {
-        for state in ["cancelled", "superseded", "something_from_2027"] {
+        for state in ["something_from_2029", "superseded", "something_from_2027"] {
             let m: Message = serde_json::from_value(row(state))
                 .unwrap_or_else(|e| panic!("`{state}` cost the user the row: {e}"));
             assert_eq!(m.parts.len(), 2, "`{state}` dropped a part");
@@ -5191,6 +5206,13 @@ mod unknown_approval_state_tests {
     /// This fails if anyone maps `Unknown` onto a real variant, or re-derives `Serialize`:
     /// either change makes these writes succeed, which is precisely the destruction being
     /// prevented. It is an assertion about what this client is *unable* to say.
+    ///
+    /// It did exactly that in #2890, which gave `Serialize` a `Cancelled => "cancelled"` arm
+    /// and turned the card below into a writable one. The invariant is unchanged — a state
+    /// this build cannot name still has no wire form — so the literal moved to a synthetic
+    /// value rather than the assertion being weakened. A product word here becomes a real
+    /// variant later; `model.rs`'s sibling list still carries `superseded`, and approval
+    /// supersession is live work, so that one is next.
     #[test]
     fn an_unknown_state_can_never_be_written_back() {
         assert!(
@@ -5198,7 +5220,7 @@ mod unknown_approval_state_tests {
             "an unknown state gained a wire form, so it can now overwrite the real one"
         );
 
-        let m: Message = serde_json::from_value(row("cancelled")).expect("row survives");
+        let m: Message = serde_json::from_value(row("something_from_2030")).expect("row survives");
         let unknown_card = m
             .parts
             .iter()
