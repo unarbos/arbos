@@ -124,8 +124,10 @@ jobs:
       # Taking a guard off is a decision about whether Jacob still gets what he asked for.
       # This one compares the branch with its base and wants that decision written down. Only
       # on a pull request, which is the only place both a base and a description exist.
+      # Runs even when the step above failed: "an ask has no guard" and "this branch removes a
+      # guard" are different questions, and the first must not hide the second.
       - name: No guard comes off without saying why
-        if: github.event_name == 'pull_request'
+        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
           PR_BODY: ${{ github.event.pull_request.body }}
