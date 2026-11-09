@@ -258,6 +258,27 @@ pub fn job_max_per_agent() -> usize {
         .unwrap_or(6)
 }
 
+/// Jobs waiting for capacity in one chat (`ARBOS_JOB_WAIT_MAX_PER_CHAT`, default 12).
+///
+/// The bound on the waiting tier, which is what a job over [`job_max_per_chat`] joins instead of
+/// being refused (bug AL). It bounds *waiting* jobs only: how many run at once is
+/// [`crate::agent::SUBAGENT_MAX_CONCURRENT`] and is not affected by this.
+pub fn job_wait_max_per_chat() -> usize {
+    std::env::var("ARBOS_JOB_WAIT_MAX_PER_CHAT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(12)
+}
+
+/// Jobs waiting for capacity across an agent's chats (`ARBOS_JOB_WAIT_MAX_PER_AGENT`, default
+/// 24). The per-agent half of [`job_wait_max_per_chat`]; whichever is reached first applies.
+pub fn job_wait_max_per_agent() -> usize {
+    std::env::var("ARBOS_JOB_WAIT_MAX_PER_AGENT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(24)
+}
+
 /// How the main agent's words reach the chat (duplex design §2.1, `docs/duplex-agent-design.md`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SendTool {
