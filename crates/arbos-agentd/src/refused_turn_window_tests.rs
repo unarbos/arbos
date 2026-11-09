@@ -244,7 +244,7 @@ async fn a_refused_first_message_does_not_refuse_the_rest_of_the_chat() {
     assert!(
         refused_rows
             .iter()
-            .any(|(status, text)| status == "error" && text.contains("declined part of the request")),
+            .any(|(status, text)| status == "error" && text.contains("declined the request")),
         "the refused message is answered with the refusal line, as #2750 settled: {refused_rows:?} \
          / pi: {:?}",
         pi_log(&log)

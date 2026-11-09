@@ -87,6 +87,8 @@ mod people;
 #[cfg(test)]
 mod pi_crash_loop_tests;
 #[cfg(test)]
+mod refusal_line_and_window_notice_tests;
+#[cfg(test)]
 mod refused_turn_window_tests;
 mod relay_error;
 mod reply;
