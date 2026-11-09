@@ -43,8 +43,37 @@ final class PresenceAnchorUITests: XCTestCase {
         add(a)
     }
 
+    /// `BackSwipeUITests`' idiom: an element that has to leave needs a predicate wait, since
+    /// `exists` on its own only says what was true when it was read.
+    private func assertGone(_ element: XCUIElement, _ message: String,
+                            file: StaticString = #filePath, line: UInt = #line) {
+        let gone = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: element)
+        XCTAssertEqual(XCTWaiter().wait(for: [gone], timeout: 15), .completed, message, file: file, line: line)
+    }
+
     private func presence(_ app: XCUIApplication) -> XCUIElement {
         app.descendants(matching: .any)["presence-row"].firstMatch
+    }
+
+    /// One deliberate drag rather than a flick.
+    ///
+    /// `swipeDown()` throws the transcript and leaves where it comes to rest to the
+    /// deceleration. On a six-message fixture that is a short run-up, and on a busy runner
+    /// the resting place stops being the app's answer and becomes the machine's — run
+    /// 42540143057 failed `testTheRowScrollsAwayWithTheEndAndComesBack` on exactly that,
+    /// while the photographs of the same behaviour passed. `thenHoldForDuration` stops the
+    /// finger before it lifts, so the release carries no momentum (the idiom
+    /// `ChatSwipeTrackingUITests` already uses) and the transcript rests where the drag
+    /// put it.
+    ///
+    /// It starts below the header, and `end` says where it finishes as a fraction of the
+    /// window. The keyboard case has to finish inside the keyboard's own band or there is
+    /// nothing for `.scrollDismissesKeyboard(.interactively)` to dismiss; the keyboard-down
+    /// case has to stop short of the composer or the drag never reaches the transcript.
+    private func dragIntoHistory(_ app: XCUIApplication, endingAt end: CGFloat) {
+        let from = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.25))
+        let to = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: end))
+        from.press(forDuration: 0.05, thenDragTo: to, withVelocity: .slow, thenHoldForDuration: 0.4)
     }
 
     private func composerTop(_ app: XCUIApplication) -> CGFloat {
@@ -70,8 +99,8 @@ final class PresenceAnchorUITests: XCTestCase {
         let row = presence(app)
         XCTAssertTrue(row.waitForExistence(timeout: appear), "the agent is working, so the row shows")
 
-        let transcript = app.scrollViews.firstMatch
-        for _ in 0..<4 { transcript.swipeDown() }
+        // Stops short of the composer, which would otherwise take the drag.
+        dragIntoHistory(app, endingAt: 0.80)
         // The jump-to-latest disc only shows when the reader is away from the end, so it is
         // the app's own word for "this test actually scrolled up".
         let jump = app.descendants(matching: .any)["chat-jump-to-latest"].firstMatch
@@ -115,8 +144,13 @@ final class PresenceAnchorUITests: XCTestCase {
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 15), "the keyboard is up")
         shot(app, "keyboard-up-at-the-live-bottom")
 
-        let transcript = app.scrollViews.firstMatch
-        for _ in 0..<4 { transcript.swipeDown() }
+        // Ends deep in the keyboard's band so the one gesture both carries the reader into
+        // history and dismisses the keyboard, which is the pairing under test. It crosses
+        // ~320 pt of transcript before it reaches the keyboard at all, so the reader is
+        // well past the 120 pt the app calls "away" before the dismissal even starts.
+        dragIntoHistory(app, endingAt: 0.95)
+        assertGone(app.keyboards.firstMatch,
+                   "the drag dismissed the keyboard, so this is the gesture under test")
 
         let jump = app.descendants(matching: .any)["chat-jump-to-latest"].firstMatch
         XCTAssertTrue(jump.waitForExistence(timeout: 15),
