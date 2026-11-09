@@ -119,7 +119,39 @@ final class ComposerParityUITests: XCTestCase {
         XCTAssertTrue(thumb.waitForNonExistence(timeout: 5), "the ✕ unstages the picture")
     }
 
-    func testTheBoxLightsUnderAHoldingFinger() {
+    /// The mean brightness of a rectangle of the screen, 0–255.
+    ///
+    /// The screenshot is in pixels and an element's frame is in points, so the frame is scaled
+    /// by the ratio between the two rather than by an assumed device scale.
+    private func brightness(_ app: XCUIApplication, of rect: CGRect) -> Double {
+        guard let shot = app.screenshot().image.cgImage else { return 0 }
+        let scale = CGFloat(shot.width) / app.windows.firstMatch.frame.width
+        let box = CGRect(x: rect.minX * scale, y: rect.minY * scale,
+                         width: rect.width * scale, height: rect.height * scale)
+        guard let piece = shot.cropping(to: box) else { return 0 }
+        let width = piece.width, height = piece.height
+        guard width > 0, height > 0 else { return 0 }
+        var grey = [UInt8](repeating: 0, count: width * height)
+        guard let canvas = CGContext(data: &grey, width: width, height: height,
+                                     bitsPerComponent: 8, bytesPerRow: width,
+                                     space: CGColorSpaceCreateDeviceGray(),
+                                     bitmapInfo: CGImageAlphaInfo.none.rawValue) else { return 0 }
+        canvas.draw(piece, in: CGRect(x: 0, y: 0, width: width, height: height))
+        return grey.reduce(0.0) { $0 + Double($1) } / Double(width * height)
+    }
+
+    /// The light has to be *seen*, not merely drawn.
+    ///
+    /// The first cut of this test asked whether the lit overlay existed, and it passed while
+    /// Jacob measured the actual change in the pill at a mean of about +2.7 out of 255 — a
+    /// highlight that is present in the view tree and invisible in a still. So this measures
+    /// the pill itself, before and during, and holds the light to a delta a person can see.
+    ///
+    /// Magnitude rather than sign: the wash is drawn in the theme's text colour, so it
+    /// brightens a dark pill and deepens a light one. A white wash on a pale pill cannot be
+    /// seen, so "brighter" is not the invariant — "clearly different under the finger" is, and
+    /// that holds whichever appearance the simulator happens to be in.
+    func testTheBoxVisiblyLightsUnderAHoldingFinger() {
         let app = openChat()
         let box = field(app)
         XCTAssertTrue(box.waitForExistence(timeout: appear), "the composer is on screen")
@@ -127,10 +159,26 @@ final class ComposerParityUITests: XCTestCase {
         let lit = app.descendants(matching: .any)["input-hold-highlight"].firstMatch
         XCTAssertFalse(lit.exists, "nothing is lit before a finger is anywhere near it")
 
+        // Focus first, and only then measure. A press on an unfocused field raises the
+        // keyboard, which lifts the composer by the keyboard's height — the two samples would
+        // then cover different parts of the screen and the delta would mean nothing.
+        box.tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 10), "the keyboard is up")
+        Thread.sleep(forTimeInterval: 1)
+        let pill = box.frame
+        let resting = brightness(app, of: pill)
         // Held well past the arming delay, and the press is what raises the system's own
-        // Paste / AutoFill menu too — the highlight must not take that touch away.
+        // Paste / AutoFill menu too — the highlight must not take that touch away. The light
+        // outlasts the lift on purpose, which is what makes it measurable from a still at all.
         box.press(forDuration: 1.2)
         XCTAssertTrue(lit.waitForExistence(timeout: 5),
                       "touch-and-hold lights the box the way Grok's does")
+
+        let held = brightness(app, of: pill)
+        let delta = abs(held - resting)
+        XCTAssertGreaterThan(delta, 12,
+                             "the light is too faint to see: the pill read \(resting) at rest "
+                             + "and \(held) under the finger, a delta of \(delta). Jacob "
+                             + "measured the cut that failed review at about 2.7.")
     }
 }

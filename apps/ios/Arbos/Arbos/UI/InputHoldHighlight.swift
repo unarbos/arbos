@@ -56,17 +56,28 @@ enum HoldHighlight {
         return hold
     }
 
-    /// The brightening reaches a little past the box's shorter side, so on a one-line pill it
+    /// The brightening reaches well past the box's shorter side, so on a one-line pill it
     /// washes the whole height and falls off along the length rather than ending in a visible
     /// disc. Grok's reads as a soft wash under the finger, not as a spotlight.
     static func radius(of size: CGSize) -> CGFloat {
-        max(24, min(size.width, size.height) * 1.6)
+        max(24, min(size.width, size.height) * 2.4)
     }
 
-    /// How strongly the box shifts at the centre of the wash. Drawn in the theme's text
-    /// colour, so on dark glass it brightens the way Grok's does and on light glass it
-    /// deepens — on a pale surface a white wash would be invisible.
-    static let peak: Double = 0.16
+    /// Jacob measured the first cut at a mean brightness delta of about +2.7 over the pill —
+    /// arithmetically present and invisible in a still. The reason was the shape of it rather
+    /// than the strength: a radial gradient falling to nothing covers only the middle of a
+    /// long pill, so most of the pill was untouched and the mean barely moved.
+    ///
+    /// So the light now has two parts, which is also what Jacob described — "lights up the
+    /// glass pill" *and* "a soft radial brightening under the finger". `base` lifts the whole
+    /// pill, and `peak` adds the wash on top of it.
+    ///
+    /// Both are drawn in the theme's text colour, so on dark glass the pill brightens the way
+    /// Grok's does and on light glass it deepens. That is not a hedge: a white wash on a pale
+    /// pill cannot be seen at all, so on a light surface the only legible "under the finger"
+    /// mark is a darker one.
+    static let base: Double = 0.10
+    static let peak: Double = 0.26
 
     /// How long the box stays lit after the finger lifts.
     ///
@@ -86,14 +97,17 @@ private struct HoldHighlightWash<S: InsettableShape>: View {
     let size: CGSize
 
     var body: some View {
-        RadialGradient(
-            colors: [theme.text.opacity(HoldHighlight.peak), theme.text.opacity(0)],
-            center: UnitPoint(x: size.width > 0 ? at.x / size.width : 0.5,
-                              y: size.height > 0 ? at.y / size.height : 0.5),
-            startRadius: 0,
-            endRadius: HoldHighlight.radius(of: size)
-        )
-        .clipShape(shape)
+        ZStack {
+            shape.fill(theme.text.opacity(HoldHighlight.base))
+            RadialGradient(
+                colors: [theme.text.opacity(HoldHighlight.peak), theme.text.opacity(0)],
+                center: UnitPoint(x: size.width > 0 ? at.x / size.width : 0.5,
+                                  y: size.height > 0 ? at.y / size.height : 0.5),
+                startRadius: 0,
+                endRadius: HoldHighlight.radius(of: size)
+            )
+            .clipShape(shape)
+        }
         .allowsHitTesting(false)
         // A gradient is not an element on its own, and an identifier on a non-element is not
         // queryable — which is how a highlight could go missing without a test noticing.

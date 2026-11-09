@@ -882,7 +882,9 @@ struct ControlSurface<S: InsettableShape>: View {
     var body: some View {
         ZStack {
             if theme.isGlass {
-                PillSurface(shape: shape)
+                // Not `PillSurface`: that one is now the see-through field pill, and a button
+                // flattened to a 22 % fill would be a change nobody asked for.
+                SystemPillGlass(shape: shape)
             } else {
                 shape.fill(theme.field)
                 ComposerRim(shape: shape)
@@ -917,27 +919,54 @@ struct ComposerDisc: View {
     }
 }
 
-/// The pill's surface on Glass: the real material and nothing of ours on it — clear Liquid
-/// Glass on iOS 26, plain frost before — so the content reads through the pill like Grok's
-/// ([feedback iphone-composer-glass-2026-10-28]; the 0.55 `field` tint of the first see-through
-/// cut read as a near-opaque dark fill on the phone). On Matte: the field colour.
-/// Rig (`ARBOS_PILL_STYLE=translucent`, Debug): the no-blur alternative for Jacob's eye — the
-/// field colour at `translucentAlpha`, the rim, no material — if the system glass still smears
-/// the text on the phone.
+/// The system's own clear material in the pill's shape, with no tint of ours on it. What the
+/// composer pill used until Jacob's 2026-11-09 comparison, and still what the family's buttons
+/// use — a button has nothing behind it to read through, so the blur costs it nothing.
+struct SystemPillGlass<S: InsettableShape>: View {
+    let shape: S
+
+    var body: some View {
+        let glass = ChatHeaderGlass.pillGlass(surface: .glass)
+        HeaderGlassBackground(shape: shape, material: glass.material,
+                              tinted: glass.tinted, clear: glass.clear)
+    }
+}
+
+/// The pill's surface on Glass. On Matte: the field colour.
+///
+/// Three cuts, and the third is here because the first two each answered a question the next
+/// one asked. [feedback iphone-composer-glass-2026-10-28] started from a `0.55` `field` tint,
+/// which read as a near-opaque dark fill on the phone, and replaced it with the system's own
+/// clear material and nothing of ours on it — clear Liquid Glass on iOS 26, plain frost
+/// before. Jacob's Grok comparison on 2026-11-09 says that is still not it: Grok's composer
+/// shows chat text through the pill and ours does not.
+///
+/// There is nothing left to turn down on the system path. `Glass.clear` is already the most
+/// transparent variant the API offers and we add no tint to it, so what remains between the
+/// transcript and the eye is the system's blur, which `Glass` does not expose. Reading text
+/// through a blur is the one thing a blur prevents.
+///
+/// So the default is now the no-blur alternative this file has carried as a rig since October
+/// for exactly this doubt — "if the system glass still smears the text on the phone": the
+/// field colour at `translucentAlpha`, the family's rim for the glass edge, and no material at
+/// all. The transcript reads through because nothing is standing in front of it. The system
+/// path has not been deleted; it is now the rig (`ARBOS_PILL_STYLE=glass`, Debug), so the next
+/// capture can put the two side by side rather than argue about them.
 struct PillSurface<S: InsettableShape>: View {
     @Environment(\.theme) private var theme
     let shape: S
-    static var translucentAlpha: Double { 0.3 }
+    /// How much of `field` sits over the transcript. Lower than the `0.3` the rig used, because
+    /// the rig only had to be *legible* as an alternative and this has to let text through.
+    static var translucentAlpha: Double { 0.22 }
 
     var body: some View {
         if !theme.isGlass {
             shape.fill(theme.field)
-        } else if DebugHooks.pillStyle == "translucent" {
+        } else if DebugHooks.pillStyle == "glass" {
+            SystemPillGlass(shape: shape)
+        } else {
             shape.fill(theme.field.opacity(Self.translucentAlpha))
             ComposerRim(shape: shape)
-        } else {
-            let glass = ChatHeaderGlass.pillGlass(surface: .glass)
-            HeaderGlassBackground(shape: shape, material: glass.material, tinted: glass.tinted, clear: glass.clear)
         }
     }
 }

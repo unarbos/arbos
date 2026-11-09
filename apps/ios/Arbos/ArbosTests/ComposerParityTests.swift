@@ -85,4 +85,26 @@ final class ComposerParityTests: XCTestCase {
         let pill = CGSize(width: 320, height: Theme.composerHeight)
         XCTAssertGreaterThan(HoldHighlight.radius(of: pill), pill.height)
     }
+
+    func testTheLightLiftsTheWholePillAndNotOnlyItsMiddle() {
+        // Jacob measured the first cut at a mean delta of about +2.7 out of 255 over the pill.
+        // The strength was not the problem; the shape was. A radial gradient that falls to
+        // nothing touches only the middle of a long pill, so the mean barely moved however
+        // bright the centre was. `base` is the part that lifts all of it.
+        XCTAssertGreaterThan(HoldHighlight.base, 0,
+                             "without a base the ends of a long pill never change at all")
+        XCTAssertGreaterThan(HoldHighlight.peak, HoldHighlight.base,
+                             "and the wash under the finger still has to be the brightest part")
+    }
+
+    func testTheFieldPillLetsTheTranscriptThrough() {
+        // Jacob, 2026-11-09: Grok shows chat text through the composer and ours did not.
+        // There was nothing left to turn down on the system path — `Glass.clear` is already
+        // the clearest variant and we add no tint — so what remained was its blur, and a blur
+        // is the one thing that stops text being read through. Hence a plain low fill.
+        XCTAssertLessThan(PillSurface<Capsule>.translucentAlpha, 0.3,
+                          "lighter than the rig that only had to be legible as an alternative")
+        XCTAssertGreaterThan(PillSurface<Capsule>.translucentAlpha, 0,
+                             "and still a pill rather than nothing at all")
+    }
 }
