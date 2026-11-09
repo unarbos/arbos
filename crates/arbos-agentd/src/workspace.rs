@@ -83,6 +83,74 @@ where
     refresh.await;
 }
 
+/// How far the box is through its own boot, in atomics and nothing else (2026-11-09).
+///
+/// The box's health and status surfaces are read exactly while the box is starting — the
+/// relay's stale-box detector, the deploy worker's readback, a person waiting on a box that
+/// has just woken — and that is the one moment when every workspace is loading its chat
+/// documents and every lock in the supervisor is contended. So what those surfaces answer
+/// comes from here: three loads, no `.await`, no lock, no wait on anything a booting
+/// workspace holds.
+///
+/// It says what the box is *doing*, not whether it is well. `ready` means the first listing
+/// from the relay has been applied, so the workspace set is the one the relay named; until
+/// then the honest answer is `initializing` with the counts so far. A surface that cannot say
+/// "not finished yet" has to either lie or hang, and hanging is what this replaces.
+#[derive(Default)]
+pub struct BootProgress {
+    ready: std::sync::atomic::AtomicBool,
+    /// Workspaces the relay's latest listing named.
+    expected: std::sync::atomic::AtomicUsize,
+    /// Workspaces running right now.
+    started: std::sync::atomic::AtomicUsize,
+}
+
+impl BootProgress {
+    fn listing(&self, workspaces: usize) {
+        self.expected
+            .store(workspaces, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn listing_applied(&self) {
+        self.ready.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn workspace_started(&self) {
+        self.started
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Called once per workspace that [`Self::workspace_started`] counted: `remove_workspace`
+    /// returns early when the registry held nothing for that project, so the two always pair.
+    fn workspace_stopped(&self) {
+        self.started
+            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn ready(&self) -> bool {
+        self.ready.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// `initializing` until the first listing is applied, `ready` after it.
+    pub fn state(&self) -> &'static str {
+        if self.ready() {
+            "ready"
+        } else {
+            "initializing"
+        }
+    }
+
+    /// The boot fields every status surface carries, so a reader meets one shape.
+    pub fn json(&self) -> Value {
+        json!({
+            "state": self.state(),
+            "ready": self.ready(),
+            "workspaces_expected": self.expected.load(std::sync::atomic::Ordering::Relaxed),
+            "workspaces_started": self.started.load(std::sync::atomic::Ordering::Relaxed),
+        })
+    }
+}
+
 pub struct Supervisor {
     pub cfg: BoxConfig,
     pub workspaces: RwLock<HashMap<String, Arc<Workspace>>>,
@@ -91,9 +159,17 @@ pub struct Supervisor {
     pub box_slots: Arc<Semaphore>,
     pub booted_at: i64,
     pub isolation: Isolation,
+    /// What `/healthz` and `/box/state` answer while the workspaces are still starting.
+    pub boot: BootProgress,
     /// Result of the cross-workspace read check (`None` until two workspaces exist).
     pub cross_read_blocked: RwLock<Option<bool>>,
     http: reqwest::Client,
+    /// At most one listing is applied at a time. The first listing (`/box/hello`) now runs on
+    /// its own task so boot does not wait for every workspace to start, which puts it beside
+    /// the 3 s registry poll for as long as it takes; two passes starting the same project
+    /// would race for that workspace's loopback ports. A pass that finds one running leaves
+    /// the listing to it — the next poll, 3 s later, brings the list again.
+    listing_lock: tokio::sync::Mutex<()>,
     /// Next loopback port block; ports of removed workspaces are not reused within one boot.
     next_index: std::sync::atomic::AtomicU16,
 }
@@ -109,7 +185,9 @@ impl Supervisor {
             held: RwLock::new(std::collections::HashSet::new()),
             box_slots: Arc::new(Semaphore::new(BOX_MAX_SUBAGENTS)),
             booted_at: arbos_core::ids::now_ms(),
+            boot: BootProgress::default(),
             http: reqwest::Client::new(),
+            listing_lock: tokio::sync::Mutex::new(()),
             next_index: std::sync::atomic::AtomicU16::new(0),
         })
     }
@@ -302,11 +380,31 @@ impl Supervisor {
             .first()
             .map(|c| c.id.clone())
             .unwrap_or_else(|| "default".to_owned());
+        // The project doc carries this workspace's status and settings, and `write_status`
+        // below needs it, so it opens here.
         sync.open_room(PROJECT_DOC_CHAT_ID).await?;
-        for id in boot_rooms(&known) {
-            if let Err(e) = sync.open_room(&id).await {
-                tracing::warn!(error = %e, chat = %id, "boot: open room");
-            }
+        // The chat rooms do not (2026-11-09). Opening one reads that chat's document out of SQLite
+        // and decodes the Loro snapshot, which is where a loaded box's boot time goes: up to
+        // `max_open_rooms` of them per workspace, and the workspaces start one after another,
+        // so on a box with many projects this is minutes of solid CPU with the whole box's
+        // boot queued behind it. None of it is needed for the workspace to be running, and a
+        // row waiting in a room that is not open yet is not lost — the relay queues a
+        // `chat_open` push for it, as it already does for every chat past the boot budget.
+        {
+            let sync2 = sync.clone();
+            let rooms = boot_rooms(&known);
+            let project = project_id.clone();
+            tasks.push(tokio::spawn(async move {
+                let t = Instant::now();
+                let n = rooms.len();
+                for id in rooms {
+                    if let Err(e) = sync2.open_room(&id).await {
+                        tracing::warn!(error = %e, chat = %id, "boot: open room");
+                    }
+                }
+                let ms = t.elapsed().as_millis() as i64;
+                tracing::info!(project = %project, rooms = n, ms, "boot rooms open");
+            }));
         }
         // Skills index (F5) before the first turn; refreshed every 60 s, when `skills_rev` moves,
         // and on the `skills_changed` push.
@@ -441,6 +539,7 @@ impl Supervisor {
             .write()
             .await
             .insert(project_id.clone(), ws.clone());
+        self.boot.workspace_started();
         tracing::info!(project = %project_id, ms = t0.elapsed().as_millis() as i64, "workspace running");
         self.check_isolation().await;
         Ok(ws)
@@ -486,6 +585,7 @@ impl Supervisor {
         let Some(w) = self.workspaces.write().await.remove(project_id) else {
             return;
         };
+        self.boot.workspace_stopped();
         tracing::info!(project = %project_id, "stopping workspace");
         w.sync
             .write_status(&[(
@@ -505,11 +605,16 @@ impl Supervisor {
     /// Apply one `/box/hello` or `/box/projects` answer: start new workspaces, refresh the rest,
     /// drop the ones the relay no longer lists.
     pub async fn apply_listing(self: &Arc<Self>, listing: &Value) {
+        let Ok(_pass) = self.listing_lock.try_lock() else {
+            tracing::debug!("a listing is already being applied; leaving this one to it");
+            return;
+        };
         let entries = listing
             .get("workspaces")
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
+        self.boot.listing(entries.len());
         let mut seen = Vec::new();
         let held = self.held.read().await.clone();
         for e in &entries {
@@ -598,6 +703,7 @@ impl Supervisor {
         for id in gone {
             self.remove_workspace(&id).await;
         }
+        self.boot.listing_applied();
     }
 
     /// Migration support: stop a workspace and keep it stopped while the relay replaces its files.
@@ -1231,11 +1337,79 @@ fn retire_seeded_agents_md_against(work_dir: &std::path::Path, known: &[&str]) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use super::{bounded, bounded_by, registry_pass, REGISTRY_CALL_TIMEOUT};
+    use super::{bounded, bounded_by, registry_pass, Supervisor, REGISTRY_CALL_TIMEOUT};
+
+    /// A supervisor with no workspaces, on a scratch work root. Everything the boot-state and
+    /// box-HTTP tests need: no relay is dialled until a listing names a project.
+    pub(crate) fn test_supervisor(work_root: &std::path::Path) -> Arc<Supervisor> {
+        std::fs::create_dir_all(work_root).expect("work root");
+        Supervisor::new(crate::config::BoxConfig {
+            user_id: Some("u-test".into()),
+            relay_url: "http://127.0.0.1:1".into(),
+            box_token: "test-token".into(),
+            mcp_token: "test-mcp".into(),
+            work_root: work_root.to_path_buf(),
+            bind: "127.0.0.1".into(),
+            port: 0,
+            local_box: true,
+            pi_bin: "/nonexistent/pi".into(),
+            prime_bin: "/nonexistent/prime-agent".into(),
+            claude_bin: "/nonexistent/claude".into(),
+            pi_ext_override: None,
+            device_id: "box:test".into(),
+            default_talking_model: "mock-talking".into(),
+            default_subagent_model: "mock-sub".into(),
+            legacy_project_id: None,
+        })
+    }
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("arbos-{tag}-{}", arbos_core::ids::ulid()))
+    }
+
+    /// 2026-11-09: a box that has not finished starting its workspaces says so, rather than
+    /// answering as though the listing it has is the whole one.
+    #[tokio::test]
+    async fn the_box_says_initializing_until_the_first_listing_is_applied() {
+        let root = scratch("boot-state");
+        let sup = test_supervisor(&root);
+        assert_eq!(sup.boot.state(), "initializing");
+        assert!(!sup.boot.ready());
+        assert_eq!(sup.boot.json()["workspaces_expected"], serde_json::json!(0));
+
+        sup.apply_listing(&serde_json::json!({ "workspaces": [] }))
+            .await;
+        assert_eq!(sup.boot.state(), "ready");
+        assert!(sup.boot.ready());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The first listing now runs on its own task beside the 3 s registry poll (2026-11-09), so two
+    /// passes can be asked for at once. They must not both start the same project: each start
+    /// binds that workspace's loopback ports, and the second would fail on them. A pass that
+    /// finds one in flight leaves the listing to it — and says nothing about readiness, which
+    /// is the pass in flight's to report.
+    #[tokio::test]
+    async fn only_one_listing_is_applied_at_a_time() {
+        let root = scratch("one-listing");
+        let sup = test_supervisor(&root);
+        let in_flight = sup.listing_lock.lock().await;
+        sup.apply_listing(&serde_json::json!({ "workspaces": [] }))
+            .await;
+        assert!(
+            !sup.boot.ready(),
+            "the second pass returned without applying anything"
+        );
+        drop(in_flight);
+        sup.apply_listing(&serde_json::json!({ "workspaces": [] }))
+            .await;
+        assert!(sup.boot.ready());
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     /// #2127: a refresh that stalls does not delay opening a new chat's room beyond one poll
     /// interval — the rooms open on their own task, the refresh is bounded.

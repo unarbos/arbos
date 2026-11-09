@@ -475,12 +475,11 @@ async fn boot() -> Result<()> {
     let sup = Supervisor::new(cfg.clone());
 
     // Box HTTP (health, per-workspace history/metrics, browser stream) first: the relay's preview
-    // URL and the stale-box detector look here.
-    let main_l = tokio::net::TcpListener::bind(format!("{}:{}", cfg.bind, cfg.port))
-        .await
+    // URL and the stale-box detector look here. It runs on a runtime of its own, so a boot that
+    // holds this runtime for minutes cannot keep the health surface from answering (2026-11-09).
+    let main_l = std::net::TcpListener::bind(format!("{}:{}", cfg.bind, cfg.port))
         .context("bind main port")?;
-    let main_app = http::box_router(sup.clone());
-    tokio::spawn(async move { axum::serve(main_l, main_app).await.ok() });
+    http::serve_box(main_l, sup.clone()).context("serve box http")?;
 
     // Hello: one box per user; the answer lists every project as a workspace.
     let http_client = reqwest::Client::new();
@@ -524,21 +523,33 @@ async fn boot() -> Result<()> {
         .and_then(Value::as_str)
         .unwrap_or("u_default")
         .to_owned();
-    sup.apply_listing(&listing).await;
     // Calls Phase 2: the relay's voice link (tool calls and transcript rows from the voice worker).
     voice::spawn_voice_link(sup.clone());
-    let n = sup.list().await.len();
-    tracing::info!(
-        user = %user_id,
-        workspaces = n,
-        ms = t_boot.elapsed().as_millis() as i64,
-        "arbos-agentd booted"
-    );
-    if let Some(w) = sup.list().await.first() {
-        let _ = w
-            .agent
-            .post_timing("agentd_boot_ms", t_boot.elapsed().as_millis() as i64, None)
-            .await;
+    // The first listing starts every workspace the relay named, and on a box with many projects
+    // that is minutes of work (2026-11-09). Nothing below needs it to have finished — the
+    // registry poll, the room ceiling and the keep-alive all read the workspace set as it
+    // stands — so it runs on its own task and the box says `initializing` until it lands.
+    // `apply_listing` takes at most one pass at a time, so the 3 s poll beside it leaves this
+    // one alone.
+    {
+        let sup = sup.clone();
+        let listing = listing.clone();
+        tokio::spawn(async move {
+            sup.apply_listing(&listing).await;
+            let n = sup.list().await.len();
+            tracing::info!(
+                user = %user_id,
+                workspaces = n,
+                ms = t_boot.elapsed().as_millis() as i64,
+                "arbos-agentd booted"
+            );
+            if let Some(w) = sup.list().await.first() {
+                let _ = w
+                    .agent
+                    .post_timing("agentd_boot_ms", t_boot.elapsed().as_millis() as i64, None)
+                    .await;
+            }
+        });
     }
     // The read-only copy of Arbos's own source (/opt/arbos/src) follows main: refreshed now, in
     // the background, and every few hours after.
