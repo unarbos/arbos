@@ -208,23 +208,41 @@ final class ComposerMetricsTests: XCTestCase {
         XCTAssertLessThanOrEqual(PresenceRow.chipHeight, PresenceRow.height)
     }
 
-    /// [feedback status-row-gap-ios-2026-10-26]: the row rises into the transcript's tail
-    /// so the picture sits Grok's 42 px under the last bubble (the same 2026-10-25 shot:
-    /// bubble bottom → picture 42 px, picture → composer 68 px, bubble → composer 187 px),
-    /// instead of starting under the tail and the bar's pad (36 pt, 109 px).
-    func testStatusRowRisesIntoTheTranscriptTail() {
+    /// [feedback status-row-gap-ios-2026-10-26]: the picture sits Grok's 42 px under the
+    /// last bubble (the same 2026-10-25 shot: bubble bottom → picture 42 px, picture →
+    /// composer 68 px, bubble → composer 187 px).
+    ///
+    /// [feedback typing-anchor-2026-11-08] moved the row out of the bar and into the
+    /// transcript, so it settles *into* the tail rather than rising out of it. The two
+    /// offsets are mirror images — `presenceTopGap` against `presenceBottomGap` — and
+    /// every distance a reader can see is unchanged.
+    func testStatusRowSettlesIntoTheTranscriptTail() {
         XCTAssertEqual(Theme.presenceTopGap * 3, 42, accuracy: 0.001)
         XCTAssertEqual(Theme.transcriptTail, 28)
         XCTAssertEqual(Theme.chatBarTopPad, 8)
-        // Last bubble → picture top = tail + pad − lift.
-        XCTAssertEqual(Theme.transcriptTail + Theme.chatBarTopPad - Theme.presenceLift, Theme.presenceTopGap, accuracy: 0.001)
-        // The row never rises past the tail into the last bubble, and never sinks below the pad.
-        XCTAssertLessThanOrEqual(Theme.presenceLift, Theme.transcriptTail)
-        XCTAssertGreaterThanOrEqual(Theme.presenceLift, 0)
+        // Picture bottom → composer top = tail + pad − settle, Grok's 68 px.
+        XCTAssertEqual(Theme.transcriptTail + Theme.chatBarTopPad - Theme.presenceSettle,
+                       Theme.presenceBottomGap, accuracy: 0.001)
+        // The row settles no further than the tail reserves, and never lifts off it.
+        XCTAssertLessThanOrEqual(Theme.presenceSettle, Theme.transcriptTail)
+        XCTAssertGreaterThanOrEqual(Theme.presenceSettle, 0)
         // Bubble → composer with the row showing: Grok's 187 px (icon crop ± 2 px).
         XCTAssertEqual((Theme.presenceTopGap + Theme.presenceAvatar + Theme.presenceBottomGap) * 3, 187, accuracy: 3)
-        // The bar grows by the row's height less the lift when the row appears.
-        XCTAssertEqual(Theme.presenceAvatar + Theme.presenceBottomGap - Theme.presenceLift, 26, accuracy: 0.001)
+    }
+
+    /// The row left the bar for the transcript, and the reader must not be able to tell
+    /// from anything but where it stops scrolling: the transcript's content is the same
+    /// height either way, so a turn starting while someone is up in history cannot move
+    /// the rows they are reading.
+    func testMovingTheRowIntoTheTranscriptKeptEveryHeight() {
+        // What the row used to add to the bar, and so to the tail that follows the bar.
+        let addedToTheBarBefore = Theme.presenceAvatar + Theme.presenceBottomGap
+            - (Theme.transcriptTail + Theme.chatBarTopPad - Theme.presenceTopGap)
+        // What it adds to the transcript now: its own box, less the settle into the tail.
+        let addedToTheTranscriptNow = Theme.presenceTopGap + Theme.presenceAvatar - Theme.presenceSettle
+        XCTAssertEqual(addedToTheBarBefore, 26, accuracy: 0.001)
+        XCTAssertEqual(addedToTheTranscriptNow, addedToTheBarBefore, accuracy: 0.001,
+                       "the row appearing must change the scroll extent by what it always did")
     }
 
     func testEveryMetricLandsOnAPixel() {
@@ -239,7 +257,7 @@ final class ComposerMetricsTests: XCTestCase {
             ("micGlyphHeight", Theme.micGlyphHeight), ("composerBottomKeyboard", Theme.composerBottomKeyboard),
             ("presenceAvatar", Theme.presenceAvatar), ("presenceAvatarOffset", Theme.presenceAvatarOffset),
             ("presenceGap", Theme.presenceGap), ("presenceBottomGap", Theme.presenceBottomGap),
-            ("presenceTopGap", Theme.presenceTopGap), ("presenceLift", Theme.presenceLift),
+            ("presenceTopGap", Theme.presenceTopGap), ("presenceSettle", Theme.presenceSettle),
         ] {
             assertOnPixel(value, name)
         }

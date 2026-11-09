@@ -1317,9 +1317,6 @@ struct ChatSession: View {
                         .padding(.horizontal, composerSideInset)
                         .padding(.bottom, 10)
                 }
-                presenceRow
-                    .environment(\.composerInset, composerSideInset)
-                    .animation(.easeOut(duration: 0.25), value: composerFocused)
                 Group {
                     if isChannel, !model.channelCanPost(chatId) {
                         // Rule 9: a restricted channel I cannot post in — one quiet line, no composer.
@@ -2430,12 +2427,19 @@ struct ChatSession: View {
                     // Keystrokes do not reach this body (the composer is isolated); the other
                     // publishes re-diff the ids and let each realized `RowView` skip by `==`.
                     transcriptRows(shown: shown, mentions: mentions, width: width)
-                    // Who is working is the presence row over the composer
-                    // (`PresenceRow`), not a transcript row.
-                    // Clears the chat bar and the `Theme.composerFade` above it, so the
-                    // last row at rest is never under the fade; the status row rises into
-                    // that clearance (`Theme.presenceLift`) and is clear of the ramp too,
-                    // which now ends at the composer's top edge.
+                    // Who is working belongs to the end of the transcript, not to the bar
+                    // over it ([feedback typing-anchor-2026-11-08]). Pinned to the bar it
+                    // stayed on screen while the reader scrolled up, and since it draws no
+                    // background of its own it landed as a second line of text across
+                    // whichever old bubble happened to be under it. As the transcript's own
+                    // last child it scrolls away with the end it describes and comes back
+                    // when the reader does.
+                    presenceRow
+                        .environment(\.composerInset, composerSideInset)
+                        .animation(.easeOut(duration: 0.25), value: composerFocused)
+                    // Clears the chat bar and the `Theme.composerFade` above it, so the last
+                    // row at rest is never under the fade; the presence row settles back
+                    // into that clearance itself, so the tail is the same either way.
                     TranscriptTail(bar: chatBarHeight).id("bottom")
                 }
                 .padding(.horizontal, 16)
@@ -3406,9 +3410,14 @@ struct ChatSession: View {
         .frame(height: 36)
     }
 
-    /// The presence row over the composer: ticks once a second so time-capped
+    /// The presence row at the transcript's end: ticks once a second so time-capped
     /// states (stale stream, hand-off grace, awaiting-reply cheat, a typing
-    /// mark's 6 s) expire without a stuck line. Left edge = the bubbles' 16 pt.
+    /// mark's 6 s) expire without a stuck line. Left edge = the bubbles' 16 pt,
+    /// which it inherits from the transcript's stack rather than padding itself.
+    ///
+    /// Its appearing and disappearing changes the transcript's height by the same
+    /// 26 pt it used to add to the bar, and at the end rather than in the reader's
+    /// view, so a turn starting while the reader is up in history moves nothing.
     @ViewBuilder
     private var presenceRow: some View {
         TimelineView(.periodic(from: .now, by: 1)) { _ in
@@ -3428,13 +3437,14 @@ struct ChatSession: View {
                             onWords: openNewest,
                             onPicture: { model.toggleProfile($0) },
                             pictureShowing: { model.profileShows($0) })
-                    .padding(.horizontal, 16)
-                    // Grok: 68 px from the picture's bottom to the composer's top.
-                    .padding(.bottom, Theme.presenceBottomGap)
-                    // Grok: 42 px from the last bubble to the picture's top — the row
-                    // rises into the transcript's tail instead of stacking under it
-                    // ([feedback status-row-gap-ios-2026-10-26]).
-                    .padding(.top, -Theme.presenceLift)
+                    // Grok: 42 px from the last bubble to the picture's top ([feedback
+                    // status-row-gap-ios-2026-10-26]). The transcript's stack already
+                    // carries the bubbles' 16 pt side inset.
+                    .padding(.top, Theme.presenceTopGap)
+                    // Grok: 68 px from the picture's bottom to the composer's top. The row
+                    // is the transcript's last child, so it settles down into the tail the
+                    // tail already reserves rather than stacking on top of it.
+                    .padding(.bottom, -Theme.presenceSettle)
             }
         }
     }

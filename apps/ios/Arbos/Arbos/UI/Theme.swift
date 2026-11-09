@@ -257,15 +257,19 @@ struct Theme: Equatable {
     /// own top padding — the fade's start, so the last bubble at rest sits fully above
     /// the fade (`BottomBarFadeTests`).
     static let transcriptTail: CGFloat = composerFade
-    /// The chat bar's padding over its first view (the status row or the composer).
+    /// The chat bar's padding over its first view (a send error's note, or the composer).
     static let chatBarTopPad: CGFloat = 8
     /// Last bubble → the status picture's top: 42 px in the same Grok shot ([feedback
-    /// status-row-gap-ios-2026-10-26]). The row used to start under the tail and the
-    /// bar's pad (36 pt); it now rises `presenceLift` into the tail, so the bubble →
-    /// composer distance with the row showing is Grok's 62⅓ (14 + 25⅓ + 22⅔) and the
-    /// bar grows by 26 pt instead of 48 when the row appears.
+    /// status-row-gap-ios-2026-10-26]). The bubble → composer distance with the row
+    /// showing is Grok's 62 (14 + 25⅓ + 22⅔).
     static let presenceTopGap: CGFloat = 42 / 3
-    static var presenceLift: CGFloat { transcriptTail + chatBarTopPad - presenceTopGap }
+    /// The presence row is the transcript's own last child ([feedback
+    /// typing-anchor-2026-11-08]), so it sits *in* the tail rather than on top of it:
+    /// it gives back the fade's clear lead and the bar's top pad, which leaves Grok's
+    /// `presenceBottomGap` between its picture and the composer's top edge. The tail is
+    /// then the same height whether the row shows or not, and the transcript's total
+    /// content height is what it was when the row rode on the bar.
+    static var presenceSettle: CGFloat { transcriptTail + chatBarTopPad - presenceBottomGap }
     /// Transcript edge → the status row's picture, for the composer's current side inset.
     static func presenceInset(composerInset: CGFloat) -> CGFloat {
         composerInset + presenceAvatarOffset - 16
