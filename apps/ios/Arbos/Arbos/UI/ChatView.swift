@@ -276,6 +276,9 @@ struct ChatSession: View {
     @State private var pinnedToBottom = true
     /// When this chat screen appeared (the history window does not grow in its first second).
     @State private var appearedAt = Date()
+    /// The transcript has been put on its newest row once. A page pushed over the chat (a
+    /// sender's profile) re-runs `onAppear` on the way back, and that must keep the reader's place.
+    @State private var settledOnOpen = false
     /// `chat-first-row` has been marked for this open (lazy rows re-appear when scrolled back to).
     @State private var firstRowMarked = false
     /// When the history window last grew (the near-top reporter fires per scroll sample).
@@ -2529,7 +2532,11 @@ struct ChatSession: View {
             // Top fade is `headerBlur` over the transcript — a ScrollView `.mask`
             // forced an offscreen pass of every row on each scroll frame and made
             // long / group chats feel sticky (feedback app-01M5MQ2GFB1681YXNJMZV4EK7J).
-            .onAppear { settleToBottom(proxy) }
+            .onAppear {
+                guard !settledOnOpen else { return }
+                settledOnOpen = true
+                settleToBottom(proxy)
+            }
             // `rows.last` (not only its id): a streaming reply keeps the same id while its
             // text grows; pinning must follow that growth too (#1444 / lazy window #1399).
             .onChange(of: rows.last) { old, new in
