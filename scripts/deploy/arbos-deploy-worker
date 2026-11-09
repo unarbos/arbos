@@ -483,6 +483,14 @@ relay_db() { sudo -u arbos sqlite3 /var/lib/arbos-relay/relay.db "$@"; }
 
 DAYTONA_API=https://app.daytona.io/api
 DAYTONA_ORG=${DAYTONA_ORG:-72b8ee38-8559-48e8-9535-f40fab6e68cd}
+# Resources pinned on every snapshot the roll registers. Daytona defaults a snapshot's memory to 1 GiB
+# when it is not set, and a box created from the snapshot inherits that 1 GiB (it sends no resources of
+# its own) — so memory is pinned here, explicitly, and register-snapshot.sh refuses a blank value. Daytona
+# caps memory per sandbox (8 GB in the arbos org; a larger value is rejected with HTTP 400 and fails the
+# roll), so AGENTD_SNAPSHOT_MEM_GB must stay within the org cap. Override in deploy.env if the cap changes.
+AGENTD_SNAPSHOT_CPU="${AGENTD_SNAPSHOT_CPU:-4}"
+AGENTD_SNAPSHOT_MEM_GB="${AGENTD_SNAPSHOT_MEM_GB:-8}"
+AGENTD_SNAPSHOT_DISK_GB="${AGENTD_SNAPSHOT_DISK_GB:-10}"
 QUOTA_MIN_FREE_GIB=${QUOTA_MIN_FREE_GIB:-100}     # a box upgrade creates one 10 GiB sandbox before the old one is stopped
 QUOTA_KEEP_RETAINED=${QUOTA_KEEP_RETAINED:-2}     # retained (stopped) old sandboxes kept per user as rollback fallback
 
@@ -1072,7 +1080,7 @@ roll_image() {
   prune_snapshots "$version"
   git -C "$REPO" checkout -q --detach "$sha"
   DAYTONA_API_KEY="$(secret_from "$RELAY_ENV" DAYTONA_API_KEY)" \
-    bash "$REPO/image/register-snapshot.sh" "$snapshot" "$image" 4 8 10 > "$STATE/runs/agentd-$version-register.log" 2>&1 \
+    bash "$REPO/image/register-snapshot.sh" "$snapshot" "$image" "$AGENTD_SNAPSHOT_CPU" "$AGENTD_SNAPSHOT_MEM_GB" "$AGENTD_SNAPSHOT_DISK_GB" > "$STATE/runs/agentd-$version-register.log" 2>&1 \
     || { record_failure agentd "$sha" "snapshot registration failed: $(tail -2 "$STATE/runs/agentd-$version-register.log" | tr '\n' ' ')"; exit 1; }
   log "agentd: snapshot $snapshot active"
   # Busy-reply gate on the canary box first (scripts/deploy/agentd-canary-smoke.sh, from the
@@ -1633,6 +1641,7 @@ selftest() {
   [[ -z "$(pending_boxes new all)" ]] || { echo "selftest: a box on the target must not be pending" >&2; return 1; }
   hold_cases "$h"
   image_tag_prune_cases "$h/prune"
+  register_snapshot_cases "$h/regsnap"
   echo "selftest ok"
 }
 
@@ -1676,6 +1685,74 @@ STUB
 }
 # grep -c prints 0 and exits 1 when it matches nothing, so the count needs the `|| true` to survive set -e.
 rmi_calls() { grep -c '^rmi ' "$1" 2>/dev/null || true; }
+
+# register-snapshot.sh must pin an explicit, positive memory on every snapshot. Daytona defaults an
+# unpinned snapshot to 1 GiB and every box created from it inherits that 1 GiB (the box sends no
+# resources of its own), which is how the whole fleet rolled at 1 GiB. These cases run the REAL
+# image/register-snapshot.sh against a `curl` stub on PATH that records each call and its POST body;
+# nothing here needs root, the network, or Daytona. The roll's own call site is pinned to the
+# AGENTD_SNAPSHOT_* knobs, which is asserted too so the two cannot drift apart.
+register_snapshot_cases() {
+  local d="$1"
+  local calls="$d/curl-calls" post="$d/last-post" script
+  script="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../image" 2>/dev/null && pwd)/register-snapshot.sh"
+  [[ -f "$script" ]] || { echo "selftest: cannot find register-snapshot.sh at $script" >&2; return 1; }
+  mkdir -p "$d/bin"
+  cat > "$d/bin/curl" <<'STUB'
+#!/usr/bin/env bash
+method=GET data= url=
+while (( $# )); do
+  case "$1" in
+    -X) method="$2"; shift 2 ;;
+    -d) data="$2"; shift 2 ;;
+    -H) shift 2 ;;
+    http://*|https://*) url="$1"; shift ;;
+    *) shift ;;
+  esac
+done
+printf '%s %s\n' "$method" "$url" >> "$CURL_CALLS"
+case "$method $url" in
+  "POST "*/snapshots) printf '%s' "$data" > "$LAST_POST"; echo '{"id":"sid1","state":"active"}' ;;
+  "GET "*/snapshots/sid1) echo '{"id":"sid1","state":"active","size":1}' ;;
+  "GET "*/snapshots/*) printf '%s' "${STUB_EXISTING:-}" ;;
+  "DELETE "*) echo '{}' ;;
+  *) echo '' ;;
+esac
+exit 0
+STUB
+  chmod +x "$d/bin/curl"
+  run_reg() { # run_reg <existing-json> <args…>
+    local ex="$1"; shift
+    : > "$calls"; : > "$post"
+    STUB_EXISTING="$ex" CURL_CALLS="$calls" LAST_POST="$post" PATH="$d/bin:$PATH" DAYTONA_API_KEY=k \
+      bash "$script" "$@" >/dev/null 2>&1
+  }
+  # 1. An empty memory is refused before any snapshot is created — never a silent 1 GiB fallback.
+  run_reg "" arbos-agent-x img:x 4 "" 10 && { echo "selftest: register-snapshot accepted an empty memory" >&2; return 1; }
+  ! grep -q '^POST ' "$calls" || { echo "selftest: register-snapshot created a snapshot with an empty memory" >&2; return 1; }
+  # 2. A zero memory is refused the same way (0 GiB is not a pin).
+  run_reg "" arbos-agent-x img:x 4 0 10 && { echo "selftest: register-snapshot accepted a zero memory" >&2; return 1; }
+  # 3. A valid memory is pinned: the create body carries it under the key Daytona reads (`memory`),
+  #    as a positive integer, so the snapshot is not left to default to 1 GiB.
+  run_reg "" arbos-agent-x img:x 4 8 10 || { echo "selftest: register-snapshot rejected a valid memory" >&2; return 1; }
+  grep -Eq '"memory":[[:space:]]*8' "$post" || { echo "selftest: the create body does not pin memory=8: $(cat "$post")" >&2; return 1; }
+  # 4. A snapshot that drifted to mem=1 for the right image is re-registered, not skipped as
+  #    'already active' — the exact hole that kept the fleet on 1 GiB.
+  run_reg '{"id":"old1","state":"active","imageName":"img:x","cpu":4,"mem":1,"disk":10}' arbos-agent-x img:x 4 8 10 \
+    || { echo "selftest: register-snapshot errored re-registering a drifted snapshot" >&2; return 1; }
+  grep -q '^DELETE ' "$calls" || { echo "selftest: a snapshot stuck at mem=1 was not deleted for re-registration" >&2; return 1; }
+  grep -q '^POST ' "$calls" || { echo "selftest: a snapshot stuck at mem=1 was not re-created at the pinned memory" >&2; return 1; }
+  # 5. A snapshot already at the pinned resources is left alone (no needless churn / client drop).
+  run_reg '{"id":"ok1","state":"active","imageName":"img:x","cpu":4,"mem":8,"disk":10}' arbos-agent-x img:x 4 8 10 \
+    || { echo "selftest: register-snapshot errored on an already-correct snapshot" >&2; return 1; }
+  ! grep -Eq '^(DELETE|POST) ' "$calls" || { echo "selftest: a correct snapshot was needlessly re-registered" >&2; return 1; }
+  # 6. The image roll pins an explicit positive memory at the call site, and it is the same knob — so a
+  #    future edit cannot leave the roll passing a blank or a stale literal.
+  [[ "${AGENTD_SNAPSHOT_MEM_GB:-}" =~ ^[0-9]+$ ]] && (( ${AGENTD_SNAPSHOT_MEM_GB:-0} > 0 )) \
+    || { echo "selftest: AGENTD_SNAPSHOT_MEM_GB is not a positive integer" >&2; return 1; }
+  grep -Eq 'register-snapshot\.sh" "\$snapshot" "\$image" "\$AGENTD_SNAPSHOT_CPU".*"\$AGENTD_SNAPSHOT_MEM_GB".*"\$AGENTD_SNAPSHOT_DISK_GB"' "${BASH_SOURCE[0]}" \
+    || { echo "selftest: roll_image does not pass the pinned snapshot resources to register-snapshot.sh" >&2; return 1; }
+}
 
 # The agentd hold lifts by hand only. Every case runs the REAL gate — the top of `roll_image` — against a
 # scratch repo and a scratch state directory, with `resolve` standing in for the first step after the gate:

@@ -3,6 +3,11 @@
 #
 #   image/register-snapshot.sh <snapshot-name> <image-ref> [cpu] [memory-gb] [disk-gb]
 #
+# cpu/memory/disk default to 4/8/10 and must each be a positive integer; an empty value is refused
+# (never silently registered). Memory is pinned so a box created from the snapshot does not fall back to
+# Daytona's 1 GiB default. Daytona also caps memory per sandbox (8 GB in the arbos org — a larger value
+# is rejected with HTTP 400), so memory-gb must not exceed that cap.
+#
 # Env: DAYTONA_API_KEY (required), DAYTONA_API_URL (default https://app.daytona.io/api).
 # For a private GHCR image also set GHCR_USER + GHCR_READ_TOKEN: the script registers GHCR as a Daytona
 # registry once (name "ghcr") so runners can pull.
@@ -13,14 +18,25 @@
 #     "$DAYTONA_API_URL/docker-registry/registry-push-access?snapshotName=<name>")   # username, secret, registryUrl, project
 #   docker login cr.app.daytona.io -u <username> -p <secret>
 #   docker tag arbos-agent:<v> cr.app.daytona.io/<project>/arbos-agent:<v> && docker push cr.app.daytona.io/<project>/arbos-agent:<v>
-#   image/register-snapshot.sh arbos-agent-<v> cr.app.daytona.io/<project>/arbos-agent:<v>
+#   image/register-snapshot.sh arbos-agent-<v> cr.app.daytona.io/<project>/arbos-agent:<v> 4 8 10
 set -euo pipefail
 
 NAME=${1:?snapshot name}
 IMAGE=${2:?image ref}
-CPU=${3:-2}
-MEM=${4:-4}
-DISK=${5:-10}
+# `${N-default}` (not `${N:-default}`): an omitted resource takes the default, but an explicitly empty
+# one stays empty and fails the check below — a caller that passes a blank memory must not silently get
+# a snapshot. Daytona keys snapshot memory as `memory` (GB) on create and returns it as `mem`; when it
+# is not pinned Daytona defaults the snapshot to 1 GiB, and every box created from the snapshot inherits
+# that 1 GiB (boxes create from the snapshot and send no resources of their own). That is how the fleet
+# rolled at 1 GiB. Pin an explicit, positive memory here, always.
+CPU=${3-4}
+MEM=${4-8}
+DISK=${5-10}
+for pair in "cpu:$CPU" "memory:$MEM" "disk:$DISK"; do
+  k=${pair%%:*}; v=${pair#*:}
+  [[ "$v" =~ ^[0-9]+$ ]] && (( v > 0 )) \
+    || { echo "register-snapshot: $k must be a positive integer (got '${v:-<empty>}'); refusing to register $NAME with an unpinned resource" >&2; exit 2; }
+done
 API=${DAYTONA_API_URL:-https://app.daytona.io/api}
 : "${DAYTONA_API_KEY:?DAYTONA_API_KEY is required}"
 auth=(-H "Authorization: Bearer $DAYTONA_API_KEY" -H "content-type: application/json")
@@ -34,8 +50,17 @@ if [[ "$IMAGE" == ghcr.io/* && -n "${GHCR_READ_TOKEN:-}" ]]; then
 fi
 
 existing=$(curl -fsS "${auth[@]}" "$API/snapshots/$NAME" 2>/dev/null || true)
-if [ -n "$existing" ] && [ "$(echo "$existing" | jq -r .state)" = "active" ] && [ "$(echo "$existing" | jq -r .imageName)" = "$IMAGE" ]; then
-  echo "snapshot $NAME already active for $IMAGE"; exit 0
+# Re-register unless the existing snapshot matches on image AND resources. The resource match is what
+# makes a drifted snapshot self-heal: a snapshot left at mem=1 (Daytona's default) for the right image
+# used to count as "already active" and was skipped on every later roll, so the fleet never left 1 GiB.
+# The response returns memory under `mem` (create takes it under `memory`).
+if [ -n "$existing" ] \
+  && [ "$(echo "$existing" | jq -r .state)" = "active" ] \
+  && [ "$(echo "$existing" | jq -r .imageName)" = "$IMAGE" ] \
+  && [ "$(echo "$existing" | jq -r '.cpu // empty')" = "$CPU" ] \
+  && [ "$(echo "$existing" | jq -r '.mem // empty')" = "$MEM" ] \
+  && [ "$(echo "$existing" | jq -r '.disk // empty')" = "$DISK" ]; then
+  echo "snapshot $NAME already active for $IMAGE (cpu $CPU, mem ${MEM}G, disk ${DISK}G)"; exit 0
 fi
 if [ -n "$existing" ]; then
   id=$(echo "$existing" | jq -r .id)

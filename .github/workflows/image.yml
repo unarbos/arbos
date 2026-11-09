@@ -102,4 +102,6 @@ jobs:
           DAYTONA_API_KEY: ${{ secrets.DAYTONA_API_KEY }}
           GHCR_READ_TOKEN: ${{ secrets.GHCR_READ_TOKEN }}
           GHCR_USER: ${{ github.actor }}
-        run: image/register-snapshot.sh "arbos-agent-${{ steps.v.outputs.version }}" "${{ env.IMAGE }}:${{ steps.v.outputs.version }}"
+        # Pin cpu/memory/disk explicitly: an unpinned snapshot takes Daytona's 1 GiB memory default and
+        # every box created from it inherits it. Keep memory within Daytona's per-sandbox cap (8 GB).
+        run: image/register-snapshot.sh "arbos-agent-${{ steps.v.outputs.version }}" "${{ env.IMAGE }}:${{ steps.v.outputs.version }}" 4 8 10
