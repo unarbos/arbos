@@ -1,6 +1,6 @@
 //! Credits and metering for self-serve Arbos. Every user has one ledger (`credit_ledger`):
-//! grants in, debits out for inference (what the upstream charged us) and machine time (our
-//! Daytona cost, zero margin). Every spend source lands in it — main model calls, decision
+//! grants in, debits out for inference (what the upstream charged us) and machine time (our own
+//! cost, zero margin). Every spend source lands in it — main model calls, decision
 //! calls, memory write passes, the tree builder, subagents, images and voice — each row tagged
 //! with its `kind`, so the account has one limit and still shows what spent it.
 //!
@@ -328,9 +328,15 @@ pub fn charge_call(
     }
 }
 
-/// Machine metering: once a minute each user box is charged for the time since its last tick —
-/// the running rate while awake or waking, the stopped-disk rate otherwise (Daytona only; local
-/// process/docker boxes cost nothing). A box whose user ran out of credits is stopped.
+/// Machine metering: once a minute each metered user box is charged for the time since its last
+/// tick — the running rate while awake or waking, the stopped-disk rate otherwise. A box whose
+/// user ran out of credits is stopped.
+///
+/// Only the retired Daytona provider was ever metered: its sandboxes were billed per sandbox and
+/// per hour. A local process or Docker box costs nothing, and a gVisor box runs on the relay's own
+/// host, whose cost is flat and not per box, so none of them is charged here. The loop stays as it
+/// is (rates, alert, ledger kind) and matches nothing while every box is on the host; pricing host
+/// boxes is a separate decision with its own rate.
 pub async fn spawn_meter(state: AppState) {
     if !metered(&state) {
         return;
@@ -354,7 +360,7 @@ async fn meter_once(state: &AppState) {
     };
     let now = now_ms();
     for sb in boxes {
-        if sb.provider != "daytona" {
+        if sb.provider != crate::boxes::RETIRED_PROVIDER {
             continue;
         }
         let (bs, _) = state.box_state(&sb.user_id).await;
@@ -427,14 +433,15 @@ fn machine_alert(state: &AppState) {
     }
 }
 
-/// Expected always-on machine cost per day at the current box count.
+/// Expected always-on machine cost per day at the current count of metered boxes (see
+/// [`spawn_meter`]: only the retired provider's sandboxes are priced per box).
 pub fn machine_baseline_usd_per_day(state: &AppState) -> (usize, f64) {
     let boxes = state
         .db
         .list_boxes()
         .unwrap_or_default()
         .into_iter()
-        .filter(|b| b.provider == "daytona")
+        .filter(|b| b.provider == crate::boxes::RETIRED_PROVIDER)
         .count();
     (boxes, boxes as f64 * 24.0 * state.cfg.machine_usd_per_hour)
 }
@@ -630,7 +637,7 @@ mod tests {
         assert_eq!(user, same_user, "the same GitHub account is the same user");
         let make = |sandbox: &str| Sandbox {
             user_id: user.clone(),
-            provider: "daytona".into(),
+            provider: "gvisor".into(),
             sandbox_id: Some(sandbox.to_owned()),
             daytona_state: None,
             device_id: format!("box:{sandbox}"),

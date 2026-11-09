@@ -1,5 +1,9 @@
-//! Box lifecycle: providers (Daytona, local process, local Docker, gVisor sandboxes on the relay
-//! host — D89, `fleet.rs`), wake jobs, keep-alive, liveness (design §4.5 Flow 5, §4.6; crdt-sync §8).
+//! Box lifecycle: providers (gVisor sandboxes on the relay host — D89, `fleet.rs` — local process,
+//! local Docker), wake jobs, keep-alive, liveness (design §4.5 Flow 5, §4.6; crdt-sync §8).
+//!
+//! Daytona is retired (Jacob, 2026-11-09): no box is created, started, stopped or rolled on it any
+//! more, and the relay holds no Daytona credentials. [`RETIRED_PROVIDER`] names it so a `boxes` row
+//! left on it is reported plainly instead of being mistaken for a local box.
 
 use std::collections::BTreeMap;
 use std::process::Stdio;
@@ -14,13 +18,15 @@ use arbos_core::auth::{hash, mint, TokenKind};
 use arbos_core::ids::now_ms;
 use arbos_core::wire::BoxState;
 
-use crate::daytona::{CreateSandbox, SandboxState};
 use crate::db::Sandbox;
 use crate::state::{AppState, CreatingGuard};
 
+/// The provider name no box may be created, started or rolled on any more. Stored rows and
+/// `box_history` entries keep the name, so a leftover row is recognised and reported.
+pub const RETIRED_PROVIDER: &str = "daytona";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Provider {
-    Daytona,
     Process,
     Docker,
     /// A gVisor (`runsc`) container on the relay host with a per-user `/work` image (D89).
@@ -28,9 +34,12 @@ pub enum Provider {
 }
 
 impl Provider {
+    /// Every provider a box may be created on, for the messages that list the choices.
+    pub const NAMES: &'static str = "process|docker|gvisor";
+    /// `None` for anything this relay cannot run, including [`RETIRED_PROVIDER`]. A caller holding
+    /// a stored row uses [`provider_of`] instead, so the retirement shows up in the message.
     pub fn parse(s: &str) -> Option<Self> {
         match s {
-            "daytona" => Some(Provider::Daytona),
             "process" => Some(Provider::Process),
             "docker" => Some(Provider::Docker),
             "gvisor" => Some(Provider::Gvisor),
@@ -39,7 +48,6 @@ impl Provider {
     }
     pub fn as_str(self) -> &'static str {
         match self {
-            Provider::Daytona => "daytona",
             Provider::Process => "process",
             Provider::Docker => "docker",
             Provider::Gvisor => "gvisor",
@@ -47,24 +55,40 @@ impl Provider {
     }
 }
 
+/// The provider of a stored box row. A row still on the retired provider says so rather than
+/// failing as an unknown name: it is the one case an operator meets while old rows exist.
+pub fn provider_of(sb: &Sandbox) -> Result<Provider> {
+    Provider::parse(&sb.provider).ok_or_else(|| {
+        if sb.provider == RETIRED_PROVIDER {
+            anyhow!(
+                "box {} is on the retired {RETIRED_PROVIDER} provider; this relay does not start, stop or roll it",
+                sb.user_id
+            )
+        } else {
+            anyhow!("bad provider {}", sb.provider)
+        }
+    })
+}
+
 /// Where a user without a box gets one: `ARBOS_DEFAULT_PROVIDER` when set (D89: `gvisor` on the
-/// arbos.life host), else Daytona when it is configured, else a local process.
+/// arbos.life host), else a local process. The retired provider is never the answer, whatever the
+/// environment names.
 pub fn default_provider(state: &AppState) -> Provider {
-    match state
-        .cfg
-        .default_provider
-        .as_deref()
-        .and_then(Provider::parse)
-    {
-        Some(p) => p,
-        None if state.daytona.is_some() => Provider::Daytona,
+    match state.cfg.default_provider.as_deref() {
+        Some(p) => Provider::parse(p).unwrap_or_else(|| {
+            tracing::warn!(
+                provider = p,
+                "ARBOS_DEFAULT_PROVIDER names no provider this relay runs; new boxes go to a local process"
+            );
+            Provider::Process
+        }),
         None => Provider::Process,
     }
 }
 
 /// Where THIS user's next box goes: the admin override (`users.box_provider`) when set, else
-/// [`default_provider`]. The override exists so a scratch user can get a Daytona box on a host
-/// whose default is gVisor (the carry e2e of ARB-339); it never moves an existing box.
+/// [`default_provider`]. The override exists so a scratch user can get a local box on a host whose
+/// default is gVisor; it never moves an existing box, and it cannot name the retired provider.
 pub fn provider_for_user(state: &AppState, user_id: &str) -> Provider {
     state
         .db
@@ -118,25 +142,15 @@ pub(crate) fn box_env(
     env
 }
 
-/// Create the user's box (one Daytona computer per user; created with the user's first project,
-/// D32). `snapshot` overrides the relay default (per-user class).
+/// Create the user's box (one computer per user; created with the user's first project, D32).
+/// `snapshot` overrides the relay default (per-user class).
 pub async fn create_box(
     state: &AppState,
     user_id: &str,
     provider: Provider,
     snapshot: Option<&str>,
 ) -> Result<Sandbox> {
-    create_box_row(state, user_id, provider, snapshot, true).await
-}
-
-/// A Daytona sandbox for the user whose row is NOT written: the upgrade carries `/work` onto it
-/// while the row stays on the source, and writes the returned row itself once the carry is in.
-pub async fn create_staged_box(
-    state: &AppState,
-    user_id: &str,
-    snapshot: Option<&str>,
-) -> Result<Sandbox> {
-    create_box_row(state, user_id, Provider::Daytona, snapshot, false).await
+    create_box_row(state, user_id, provider, snapshot).await
 }
 
 async fn create_box_row(
@@ -144,11 +158,7 @@ async fn create_box_row(
     user_id: &str,
     provider: Provider,
     snapshot: Option<&str>,
-    write_row: bool,
 ) -> Result<Sandbox> {
-    if !write_row && provider != Provider::Daytona {
-        return Err(anyhow!("only a Daytona box can be created staged"));
-    }
     let snapshot_name = snapshot
         .map(str::to_owned)
         .unwrap_or_else(|| state.default_snapshot());
@@ -174,125 +184,82 @@ async fn create_box_row(
         migrated_from: Vec::new(),
     };
     // A first box gets its row (and token hash) now, so the box can dial in at once. A row that
-    // already names a sandbox (upgrade, repair) is left alone until the new sandbox id is known
-    // and the whole new row is written in one go: a restart in between leaves the user on the
-    // box they had, never on a row without a sandbox (#2262). The new box's early hellos are
-    // refused until then and agentd retries every 3 s.
-    if replacing.is_none() && write_row {
+    // already names a sandbox (a recreate) is left alone until the new sandbox id is known and the
+    // whole new row is written in one go: a restart in between leaves the user on the box they
+    // had, never on a row without a sandbox (#2262). The new box's early hellos are refused until
+    // then and agentd retries every 3 s.
+    if replacing.is_none() {
         state.db.upsert_box(&sb)?;
     }
     state
         .set_box_state(user_id, BoxState::Waking, Some("creating"))
         .await;
+    // The create ledger (#2262): the sandbox this is about to make is named in the database before
+    // the provider is asked for it, so a relay killed mid-create leaves a row an operator can
+    // read. It used to cover Daytona creates only; every provider writes it now.
+    let sandbox_name = match provider {
+        Provider::Process => format!("local-{user_id}"),
+        Provider::Docker => format!("arbos-box-{}", user_id.to_ascii_lowercase()),
+        Provider::Gvisor => crate::fleet::container_name(user_id),
+    };
+    state.db.begin_box_create(
+        user_id,
+        &sandbox_name,
+        provider.as_str(),
+        Some(&snapshot_name),
+        replacing.as_deref(),
+    )?;
+    tracing::info!(user = %user_id, sandbox_name, replacing = ?replacing, snapshot = %snapshot_name, provider = provider.as_str(), "creating box");
     let t0 = Instant::now();
+    let made = create_on_provider(
+        state,
+        user_id,
+        provider,
+        &mut sb,
+        &snapshot_name,
+        &box_token,
+        &mcp_token,
+        replacing.as_deref(),
+        t0,
+    )
+    .await;
+    let _ = state.db.end_box_create(user_id);
+    made?;
+    state
+        .wake_started
+        .lock()
+        .await
+        .insert(user_id.to_owned(), now_ms());
+    Ok(sb)
+}
+
+/// Make the sandbox itself. Split out of [`create_box_row`] so the create ledger is cleared on
+/// every exit, including a provider that fails.
+///
+/// Every arm holds #2262's rule: on a recreate (`replacing` is set) the row is written only once
+/// the new sandbox is up, so a create that fails or is cut short leaves the user on the box they
+/// have. Each provider's start step writes the finished row.
+#[allow(clippy::too_many_arguments)]
+async fn create_on_provider(
+    state: &AppState,
+    user_id: &str,
+    provider: Provider,
+    sb: &mut Sandbox,
+    snapshot_name: &str,
+    box_token: &str,
+    mcp_token: &str,
+    replacing: Option<&str>,
+    t0: Instant,
+) -> Result<()> {
     match provider {
-        Provider::Daytona => {
-            let dt = state
-                .daytona
-                .as_ref()
-                .ok_or_else(|| anyhow!("DAYTONA_API_KEY not configured"))?;
-            let relay_url = state.cfg.public_url.clone();
-            let env = box_env(state, user_id, &box_token, &mcp_token, &relay_url);
-            let snapshot_ok = dt.get_snapshot(&snapshot_name).await.is_ok();
-            let inline = match (&state.cfg.daytona_dockerfile, snapshot_ok) {
-                (Some(p), false) => Some(
-                    std::fs::read_to_string(p).with_context(|| format!("read {}", p.display()))?,
-                ),
-                _ => None,
-            };
-            // Unique per sandbox: a retained old sandbox (upgrade fallback) keeps its name, and
-            // Daytona refuses a duplicate with 409.
-            let suffix = arbos_core::ids::ulid().to_ascii_lowercase();
-            let sandbox_name = format!(
-                "arbos-{}-{}",
-                user_id
-                    .to_ascii_lowercase()
-                    .replace(|c: char| !c.is_ascii_alphanumeric(), "-"),
-                &suffix[suffix.len().saturating_sub(6)..]
-            );
-            let mut body = CreateSandbox {
-                name: Some(sandbox_name.clone()),
-                snapshot: if inline.is_none() {
-                    Some(snapshot_name.clone())
-                } else {
-                    None
-                },
-                cpu: inline.as_ref().map(|_| 4),
-                memory: inline.as_ref().map(|_| 8),
-                disk: inline.as_ref().map(|_| 40),
-                build_info: inline.map(|d| json!({ "dockerfileContent": d })),
-                // Always-on (default in GitHub mode): Daytona never stops the box by itself.
-                auto_stop_interval: Some(if state.cfg.always_on { 0 } else { 30 }),
-                auto_archive_interval: Some(7 * 24 * 60),
-                auto_delete_interval: Some(-1),
-                ttl_minutes: Some(0),
-                ..Default::default()
-            };
-            for (k, v) in env {
-                body.env.insert(k, Value::String(v));
-            }
-            body.labels
-                .insert("arbos.user".into(), Value::String(user_id.to_owned()));
-            state.db.begin_box_create(
-                user_id,
-                &sandbox_name,
-                provider.as_str(),
-                Some(&snapshot_name),
-                replacing.as_deref(),
-            )?;
-            tracing::info!(user = %user_id, sandbox_name, replacing = ?replacing, snapshot = %snapshot_name, "creating box sandbox");
-            let created = match dt.create(&body).await {
-                Ok(c) => c,
-                Err(e) => {
-                    let _ = state.db.end_box_create(user_id);
-                    return Err(e);
-                }
-            };
-            sb.sandbox_id = Some(created.id.clone());
-            sb.device_id = format!("box:{}", created.id);
-            sb.snapshot = Some(snapshot_name.clone());
-            sb.daytona_state = Some(format!("{:?}", created.state).to_ascii_lowercase());
-            if write_row {
-                state.db.upsert_box(&sb)?;
-            }
-            let _ = state.db.end_box_create(user_id);
-            let started = match dt
-                .wait_for(&created.id, Duration::from_secs(180), |s| {
-                    s.state == SandboxState::Started
-                })
-                .await
-            {
-                Ok(s) => s,
-                Err(e) => {
-                    if !write_row {
-                        discard_empty_staged(state, dt, &sb).await;
-                    }
-                    return Err(e);
-                }
-            };
-            sb.daytona_state = Some(format!("{:?}", started.state).to_ascii_lowercase());
-            sb.last_started_at = Some(now_ms());
-            if let Ok(p) = dt.preview_url(&created.id, 7788).await {
-                sb.box_url = Some(p.url);
-                sb.preview_token = Some(p.token);
-            }
-            if write_row {
-                state.db.upsert_box(&sb)?;
-            }
-            push_relay_url(state, dt, &created.id).await;
-            state.db.record_timing(
-                &timing_key(user_id),
-                "daytona_create_to_started_ms",
-                t0.elapsed().as_millis() as i64,
-                created.runner_id.as_deref(),
-            )?;
-        }
         Provider::Process => {
             sb.sandbox_id = Some(format!("local-{user_id}"));
             sb.device_id = format!("box:local-{user_id}");
-            state.db.upsert_box(&sb)?;
-            save_local_tokens(state, user_id, &box_token, &mcp_token)?;
-            start_process(state, user_id, &mut sb, &box_token, &mcp_token).await?;
+            if replacing.is_none() {
+                state.db.upsert_box(sb)?;
+            }
+            save_local_tokens(state, user_id, box_token, mcp_token)?;
+            start_process(state, user_id, sb, box_token, mcp_token).await?;
             state.db.record_timing(
                 &timing_key(user_id),
                 "local_create_ms",
@@ -304,9 +271,11 @@ async fn create_box_row(
             let name = format!("arbos-box-{}", user_id.to_ascii_lowercase());
             sb.sandbox_id = Some(name.clone());
             sb.device_id = format!("box:{name}");
-            state.db.upsert_box(&sb)?;
-            save_local_tokens(state, user_id, &box_token, &mcp_token)?;
-            start_docker(state, user_id, &mut sb, &box_token, &mcp_token, true).await?;
+            if replacing.is_none() {
+                state.db.upsert_box(sb)?;
+            }
+            save_local_tokens(state, user_id, box_token, mcp_token)?;
+            start_docker(state, user_id, sb, box_token, mcp_token, true).await?;
             state.db.record_timing(
                 &timing_key(user_id),
                 "docker_create_ms",
@@ -315,8 +284,11 @@ async fn create_box_row(
             )?;
         }
         Provider::Gvisor => {
-            if let Err(e) =
-                crate::fleet::create_box(state, user_id, &mut sb, &box_token, &mcp_token).await
+            // The per-user box class (`users.box_snapshot`, set by `PUT /admin/users/{id}/box`)
+            // reaches the sandbox through the row: `fleet::create_box` keeps a snapshot the row
+            // already names and falls back to the relay default only without one.
+            sb.snapshot = Some(snapshot_name.to_owned());
+            if let Err(e) = crate::fleet::create_box(state, user_id, sb, box_token, mcp_token).await
             {
                 // A half-made sandbox must not count as a resident: the next attempt starts clean.
                 if replacing.is_none() {
@@ -332,35 +304,7 @@ async fn create_box_row(
             )?;
         }
     }
-    state
-        .wake_started
-        .lock()
-        .await
-        .insert(user_id.to_owned(), now_ms());
-    Ok(sb)
-}
-
-/// Delete a staged sandbox that never became the user's box and holds no user data. When Daytona
-/// refuses (a 502, a state in transition) it is recorded in `box_history`, due now, so the hourly
-/// sweeper retries the delete instead of leaving it running with no record.
-pub async fn discard_empty_staged(
-    state: &AppState,
-    dt: &crate::daytona::Daytona,
-    staged: &Sandbox,
-) {
-    let Some(id) = staged.sandbox_id.as_deref() else {
-        return;
-    };
-    let _ = dt.stop(id, true).await;
-    match dt.delete(id).await {
-        Ok(_) => tracing::info!(user = %staged.user_id, sandbox = %id, "empty staged box deleted"),
-        Err(e) => {
-            tracing::warn!(user = %staged.user_id, sandbox = %id, error = %e, "empty staged box delete failed; the history sweeper retries it");
-            if let Err(e) = state.db.insert_partial_box_history(staged, now_ms()) {
-                tracing::error!(user = %staged.user_id, sandbox = %id, error = %e, "could not record the staged box for the sweeper");
-            }
-        }
-    }
+    Ok(())
 }
 
 /// Box-level timings are recorded under the user key (`GET /projects/{id}/timings` merges them in).
@@ -416,7 +360,7 @@ async fn start_process(
     let env = box_env(state, user_id, box_token, mcp_token, &state.cfg.public_url);
     let mut cmd = tokio::process::Command::new(&state.cfg.agentd_bin);
     // D2 also holds for a local box: start from an empty environment and pass an allow-list, so the
-    // relay's provider and Daytona keys never reach agentd or its children.
+    // relay's own keys never reach agentd or its children.
     cmd.env_clear();
     for (k, v) in std::env::vars() {
         let pass = matches!(
@@ -453,7 +397,7 @@ async fn start_process(
     sb.box_url = Some(format!("http://127.0.0.1:{port}"));
     sb.last_started_at = Some(now_ms());
     state.db.upsert_box(sb)?;
-    // The relay URL file for a local box: same contract as Daytona, written straight to disk.
+    // The relay URL file a box reads at boot, written straight to disk for a local box.
     let _ = std::fs::create_dir_all(work.join(".arbos"));
     let _ = std::fs::write(
         work.join(".arbos").join("relay-url"),
@@ -570,7 +514,7 @@ pub async fn start_box(state: &AppState, user_id: &str) -> Result<()> {
             return Ok(());
         }
     };
-    let provider = Provider::parse(&sb.provider).ok_or_else(|| anyhow!("bad provider"))?;
+    let provider = provider_of(&sb)?;
     state
         .wake_started
         .lock()
@@ -579,66 +523,10 @@ pub async fn start_box(state: &AppState, user_id: &str) -> Result<()> {
     state
         .set_box_state(user_id, BoxState::Waking, Some("starting"))
         .await;
-    // The box token is minted once per box (Daytona env is fixed at create). Local providers re-inject it
-    // from tokens.json; the relay DB holds only the hash.
+    // The box token is minted once per box. Local providers re-inject it from tokens.json; the
+    // relay DB holds only the hash.
     let tokens = load_local_tokens(state, user_id)?;
     match provider {
-        Provider::Daytona => {
-            let dt = state
-                .daytona
-                .as_ref()
-                .ok_or_else(|| anyhow!("DAYTONA_API_KEY not configured"))?;
-            let id = sb
-                .sandbox_id
-                .clone()
-                .ok_or_else(|| anyhow!("no sandbox id"))?;
-            let t0 = Instant::now();
-            let cur = dt.get(&id).await?;
-            let from = cur.state;
-            if cur.state == SandboxState::Started {
-                // The sandbox runs but agentd is gone (Daytona's daemon does not restart a dead
-                // entrypoint): bounce it so the entrypoint session starts again.
-                tracing::warn!(%user_id, "sandbox is started but the box is silent; restarting it");
-                dt.stop(&id, true).await?;
-                dt.wait_for(&id, Duration::from_secs(120), |s| {
-                    s.state == SandboxState::Stopped
-                })
-                .await?;
-            }
-            dt.start(&id).await?;
-            let s = dt
-                .wait_for(&id, Duration::from_secs(180), |s| {
-                    s.state == SandboxState::Started
-                })
-                .await?;
-            sb.daytona_state = Some(format!("{:?}", s.state).to_ascii_lowercase());
-            if let Ok(p) = dt.preview_url(&id, 7788).await {
-                sb.box_url = Some(p.url);
-                sb.preview_token = Some(p.token);
-            }
-            sb.last_started_at = Some(now_ms());
-            if !state.db.write_back_box(&sb, Some(&id))? {
-                // The row moved on while this start ran (an upgrade swapped or rolled back): the
-                // sandbox just started is not the user's box, so it goes back to sleep.
-                tracing::warn!(%user_id, sandbox = %id, "box row moved to another sandbox while this start ran; not writing it back");
-                let _ = dt.stop(&id, false).await;
-                return Err(anyhow!(
-                    "the box row moved to another sandbox while {id} was starting"
-                ));
-            }
-            state.fresh_preview_tokens.lock().await.remove(&id);
-            if state.cfg.always_on {
-                // Boxes created before always-on still carry a 30-minute autostop.
-                let _ = dt.set_autostop(&id, 0).await;
-            }
-            state.db.record_timing(
-                &timing_key(user_id),
-                &format!("daytona_start_from_{:?}_ms", from).to_ascii_lowercase(),
-                t0.elapsed().as_millis() as i64,
-                None,
-            )?;
-            push_relay_url(state, dt, &id).await;
-        }
         Provider::Process => {
             let (box_token, mcp_token) = tokens.ok_or_else(|| anyhow!("local tokens missing"))?;
             start_process(state, user_id, &mut sb, &box_token, &mcp_token).await?;
@@ -667,45 +555,8 @@ pub async fn stop_box(state: &AppState, user_id: &str, force: bool) -> Result<()
         .db
         .user_box(user_id)?
         .ok_or_else(|| anyhow!("no box for user {user_id}"))?;
-    let provider = Provider::parse(&sb.provider).ok_or_else(|| anyhow!("bad provider"))?;
+    let provider = provider_of(&sb)?;
     match provider {
-        Provider::Daytona => {
-            let dt = state
-                .daytona
-                .as_ref()
-                .ok_or_else(|| anyhow!("DAYTONA_API_KEY not configured"))?;
-            let id = sb
-                .sandbox_id
-                .clone()
-                .ok_or_else(|| anyhow!("no sandbox id"))?;
-            let t0 = Instant::now();
-            dt.stop(&id, force).await?;
-            if force {
-                let _ = dt.update_secrets(&id, vec![]).await;
-            }
-            let mut s = dt
-                .wait_for(&id, Duration::from_secs(120), |s| {
-                    matches!(s.state, SandboxState::Stopped | SandboxState::Archived)
-                })
-                .await?;
-            if user_id.starts_with("test_") && matches!(s.state, SandboxState::Stopped) {
-                // Test users' boxes (rigs, evals, demo accounts) do not need a warm restart: archive
-                // them off the disk quota as soon as they stop; `start` restores an archived sandbox.
-                match dt.archive(&id).await {
-                    Ok(a) => s = a,
-                    Err(e) => {
-                        tracing::warn!(user = %user_id, sandbox = %id, error = %e, "archive of a stopped test box")
-                    }
-                }
-            }
-            sb.daytona_state = Some(format!("{:?}", s.state).to_ascii_lowercase());
-            state.db.record_timing(
-                &timing_key(user_id),
-                "daytona_stop_ms",
-                t0.elapsed().as_millis() as i64,
-                None,
-            )?;
-        }
         Provider::Process => {
             if let Some(mut child) = state.local_children.lock().await.remove(user_id) {
                 if let Some(pid) = child.id() {
@@ -794,47 +645,6 @@ pub fn load_local_tokens(state: &AppState, user_id: &str) -> Result<Option<(Stri
             .unwrap_or_default()
             .to_owned(),
     )))
-}
-
-/// A client needs the box: queue a wake obligation unless it is already awake or waking.
-/// The sandbox env bakes `ARBOS_RELAY_URL` at create time; the relay's public URL can change
-/// (quick tunnels do on every restart). After every start the current URL goes into the box as
-/// `/home/daytona/.arbos/relay-url` (and the legacy `/work/.arbos/relay-url` when that directory
-/// exists), which agentd prefers over its env at boot. Written with `sudo` through the toolbox
-/// shell: the plain toolbox upload runs as the sandbox user and failed with "permission denied"
-/// both under the root-owned `/work` (D70) and against a root-written file in a sticky directory.
-pub const RELAY_URL_FILE: &str = "/home/daytona/.arbos/relay-url";
-
-async fn push_relay_url(state: &AppState, dt: &crate::daytona::Daytona, sandbox_id: &str) {
-    let url = state.cfg.public_url.trim_end_matches('/').to_owned();
-    // Written through a root shell rather than the toolbox upload: the upload runs as the
-    // sandbox user and cannot replace a file agentd (root) wrote. The file ends up owned by the
-    // sandbox user, world-readable, in a non-sticky directory, so either side can rewrite it.
-    let dir = std::path::Path::new(RELAY_URL_FILE)
-        .parent()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|| "/home/daytona/.arbos".to_owned());
-    let legacy_dir = "/work/.arbos";
-    let cmd = format!(
-        "sudo -n sh -c 'mkdir -p {dir} && printf \"%s\\n\" \"{url}\" > {file} && chown daytona:daytona {dir} {file} 2>/dev/null; chmod 0777 {dir}; chmod 0666 {file}; \
-         if [ -d {legacy_dir} ]; then printf \"%s\\n\" \"{url}\" > {legacy_dir}/relay-url 2>/dev/null && chmod 0666 {legacy_dir}/relay-url 2>/dev/null; fi; echo ok'",
-        file = RELAY_URL_FILE,
-    );
-    for attempt in 1..=4u32 {
-        match dt.toolbox_exec(sandbox_id, &cmd, 30).await {
-            Ok(out) if out.get("exitCode").and_then(Value::as_i64).unwrap_or(1) == 0 => {
-                tracing::info!(sandbox_id, %url, attempt, "relay url pushed into the box");
-                return;
-            }
-            Ok(out) => {
-                tracing::warn!(sandbox_id, attempt, result = ?out.get("result"), "relay url push failed");
-            }
-            Err(e) => {
-                tracing::warn!(sandbox_id, attempt, error = %e, "relay url push failed");
-            }
-        }
-        tokio::time::sleep(Duration::from_millis(1500 * attempt as u64)).await;
-    }
 }
 
 /// A started box must say hello within this long, or it is treated as unable to reach the relay.
@@ -1235,64 +1045,20 @@ fn safe_work_id(id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
-/// The preview token to send to this box: one learned after a 401 wins over the row's.
-pub(crate) async fn preview_token_for(state: &AppState, sb: &Sandbox) -> Option<String> {
-    if let Some(id) = &sb.sandbox_id {
-        if let Some(t) = state.fresh_preview_tokens.lock().await.get(id) {
-            return Some(t.clone());
-        }
-    }
-    sb.preview_token.clone()
-}
-
-/// Daytona's current preview token for the box when it differs from `used`, remembered in memory.
-async fn fresh_preview_token(state: &AppState, sb: &Sandbox, used: Option<&str>) -> Option<String> {
-    if sb.provider != Provider::Daytona.as_str() {
-        return None;
-    }
-    let (dt, id) = (state.daytona.as_ref()?, sb.sandbox_id.as_ref()?);
-    let token = match dt.preview_url(id, 7788).await {
-        Ok(p) => p.token,
-        Err(e) => {
-            tracing::warn!(user = %sb.user_id, sandbox = %id, error = %e, "box answered 401; preview token lookup failed");
-            return None;
-        }
-    };
-    if used == Some(token.as_str()) {
-        return None;
-    }
-    tracing::warn!(user = %sb.user_id, sandbox = %id, "box answered 401 to a stale preview token; using Daytona's current one");
-    state
-        .fresh_preview_tokens
-        .lock()
-        .await
-        .insert(id.clone(), token.clone());
-    Some(token)
-}
-
-/// Send one request to the user's box URL. Daytona gives a sandbox a new preview token every time
-/// it stops and starts, and the row learns it only when a start run by the relay finishes. A start
-/// that timed out, or one Daytona completed later, leaves the row's token stale and the proxy
-/// answers 401 to every call while the box itself is fine (2026-10-29 16:05–16:45, four boxes).
-/// On a 401 the current token is read from Daytona and the request is sent once more.
+/// Send one request to the user's box URL.
+///
+/// Daytona's proxy needed a per-sandbox preview token that went stale on every stop and start, so
+/// this used to carry one and retry a 401 with a freshly read token. Every remaining provider is
+/// reached directly — a gVisor sandbox on this host, or a local port — and none mints a token, so
+/// the request goes as the caller built it. The `boxes.preview_token` column is kept for the rows
+/// that still hold one; nothing reads it.
 pub(crate) async fn send_to_box(
     state: &AppState,
     sb: &Sandbox,
     build: impl Fn() -> reqwest::RequestBuilder,
 ) -> reqwest::Result<reqwest::Response> {
-    let with = |t: Option<&str>| match t {
-        Some(t) => build().header("x-daytona-preview-token", t),
-        None => build(),
-    };
-    let used = preview_token_for(state, sb).await;
-    let r = with(used.as_deref()).send().await?;
-    if r.status() != reqwest::StatusCode::UNAUTHORIZED {
-        return Ok(r);
-    }
-    match fresh_preview_token(state, sb, used.as_deref()).await {
-        Some(fresh) => with(Some(&fresh)).send().await,
-        None => Ok(r),
-    }
+    let _ = (state, sb);
+    build().send().await
 }
 
 /// Ask agentd to stop (hold) or restart (release) one workspace on the user box.
@@ -1354,11 +1120,11 @@ pub async fn copy_workspace_for_fork(
     if source_project_id == dest_project_id {
         return;
     }
-    // Up to ~90s for a just-woken box to expose box_url / toolbox.
+    // Up to ~90s for a just-woken box to expose its url.
     let mut sb = None;
     for _ in 0..45 {
         match state.db.user_box(user_id) {
-            Ok(Some(s)) if s.box_url.is_some() || s.provider != "daytona" => {
+            Ok(Some(s)) if s.box_url.is_some() => {
                 sb = Some(s);
                 break;
             }
@@ -1371,51 +1137,8 @@ pub async fn copy_workspace_for_fork(
         tracing::info!(%user_id, "fork copy: no box yet; nothing to copy");
         return;
     };
-    match (
-        Provider::parse(&sb.provider),
-        &state.daytona,
-        &sb.sandbox_id,
-    ) {
-        (Some(Provider::Daytona), Some(dt), Some(id)) => {
-            // Hold both so agentd does not seed an empty dest while we copy, and so the
-            // source SQLite is quiet enough for a consistent folder copy.
-            let _ = hold_workspace(state, &sb, dest_project_id, true).await;
-            let _ = hold_workspace(state, &sb, source_project_id, true).await;
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            let cmd = format!(
-                "sudo -n sh -c 'if [ ! -d /work/{src} ]; then echo missing; exit 0; fi; \
-                 for i in 1 2 3 4 5; do sudo -n rm -rf /work/{dst} && break; sleep 1; done; \
-                 sudo -n cp -a /work/{src} /work/{dst} && \
-                 sudo -n rm -rf /work/{dst}/.arbos/pi/sessions /work/{dst}/.arbos/prime/sessions \
-                   /work/{dst}/.arbos/claude/sessions 2>/dev/null; \
-                 sudo -n mkdir -p /work/{dst}/.arbos/pi/sessions; \
-                 sudo -n rm -f /work/{dst}/.arbos/.owner; echo ok'",
-                src = source_project_id,
-                dst = dest_project_id
-            );
-            let result = dt.toolbox_exec(id, &cmd, 600).await;
-            let _ = hold_workspace(state, &sb, source_project_id, false).await;
-            let _ = hold_workspace(state, &sb, dest_project_id, false).await;
-            match result {
-                Ok(v) => {
-                    let text = v
-                        .get("result")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .trim()
-                        .to_owned();
-                    if text.contains("missing") {
-                        tracing::info!(%user_id, source_project_id, "fork copy: source workspace empty");
-                    } else if v.get("exitCode").and_then(Value::as_i64).unwrap_or(1) != 0 {
-                        tracing::warn!(%user_id, source_project_id, dest_project_id, %text, "fork copy failed");
-                    } else {
-                        tracing::info!(%user_id, source_project_id, dest_project_id, "fork copy done");
-                    }
-                }
-                Err(e) => tracing::warn!(%user_id, error = %e, "fork copy"),
-            }
-        }
-        (Some(Provider::Gvisor), _, Some(name)) => {
+    match (Provider::parse(&sb.provider), &sb.sandbox_id) {
+        (Some(Provider::Gvisor), Some(name)) => {
             let _ = hold_workspace(state, &sb, dest_project_id, true).await;
             let _ = hold_workspace(state, &sb, source_project_id, true).await;
             tokio::time::sleep(Duration::from_secs(1)).await;
@@ -1440,7 +1163,7 @@ pub async fn copy_workspace_for_fork(
                 Err(e) => tracing::warn!(%user_id, error = %e, "fork copy"),
             }
         }
-        (Some(Provider::Process), _, _) | (Some(Provider::Docker), _, _) => {
+        (Some(Provider::Process), _) | (Some(Provider::Docker), _) => {
             let base = state.cfg.data_dir.join("boxes").join(user_id).join("work");
             let src = base.join(source_project_id);
             let dst = base.join(dest_project_id);
@@ -1471,33 +1194,15 @@ pub async fn copy_workspace_for_fork(
     }
 }
 
-/// Move a deleted project's `/work/<id>` to `/work/.archive/<id>` on the user's box (Daytona
-/// through the toolbox shell, local providers on disk). Best effort: the purge removes whatever
+/// Move a deleted project's `/work/<id>` to `/work/.archive/<id>` on the user's box (in the
+/// sandbox for gVisor, on disk for the local providers). Best effort: the purge removes whatever
 /// is left seven days later.
 pub async fn archive_workspace_dir(state: &AppState, user_id: &str, project_id: &str) {
     let Ok(Some(sb)) = state.db.user_box(user_id) else {
         return;
     };
-    match (
-        Provider::parse(&sb.provider),
-        &state.daytona,
-        &sb.sandbox_id,
-    ) {
-        (Some(Provider::Daytona), Some(dt), Some(id)) => {
-            // Give the box's poll a moment to stop the workspace first.
-            tokio::time::sleep(Duration::from_secs(20)).await;
-            let cmd = format!(
-                "sudo -n sh -c 'mkdir -p /work/.archive && if [ -d /work/{p} ]; then mv /work/{p} /work/.archive/{p}; fi; echo ok'",
-                p = project_id
-            );
-            match dt.toolbox_exec(id, &cmd, 120).await {
-                Ok(_) => {
-                    tracing::info!(%user_id, project_id, "workspace folder archived on the box")
-                }
-                Err(e) => tracing::warn!(%user_id, project_id, error = %e, "workspace archive"),
-            }
-        }
-        (Some(Provider::Gvisor), _, Some(name)) => {
+    match (Provider::parse(&sb.provider), &sb.sandbox_id) {
+        (Some(Provider::Gvisor), Some(name)) => {
             tokio::time::sleep(Duration::from_secs(20)).await;
             let cmd = format!(
                 "mkdir -p /work/.archive && if [ -d /work/{p} ]; then mv /work/{p} /work/.archive/{p}; fi; echo ok",
@@ -1510,7 +1215,7 @@ pub async fn archive_workspace_dir(state: &AppState, user_id: &str, project_id: 
                 Err(e) => tracing::warn!(%user_id, project_id, error = %e, "workspace archive"),
             }
         }
-        (Some(Provider::Process), _, _) | (Some(Provider::Docker), _, _) => {
+        (Some(Provider::Process), _) | (Some(Provider::Docker), _) => {
             let base = state.cfg.data_dir.join("boxes").join(user_id).join("work");
             let src = base.join(project_id);
             if src.exists() {
@@ -1543,16 +1248,6 @@ pub async fn spawn_project_purge(state: AppState) {
                                 Duration::from_secs(120),
                             )
                             .await;
-                        }
-                    } else if let (Some(dt), Some(id)) = (&state.daytona, &sb.sandbox_id) {
-                        if sb.provider == "daytona" {
-                            let _ = dt
-                                .toolbox_exec(
-                                    id,
-                                    &format!("sudo -n rm -rf /work/.archive/{project_id}; echo ok"),
-                                    120,
-                                )
-                                .await;
                         }
                     } else {
                         let _ = std::fs::remove_dir_all(
@@ -1750,21 +1445,12 @@ pub async fn keepalive(state: &AppState, user_id: &str, turn_running: bool) -> R
             t.remove(user_id);
         }
     }
-    let sb = state
+    // No provider is told about the turn any more: Daytona's autostop timer was the only thing
+    // that needed refreshing, and every remaining box runs until the relay stops it.
+    state
         .db
         .user_box(user_id)?
         .ok_or_else(|| anyhow!("no box for user {user_id}"))?;
-    if sb.provider == "daytona" {
-        if let (Some(dt), Some(id)) = (&state.daytona, &sb.sandbox_id) {
-            dt.refresh_activity(id).await?;
-            let minutes = if state.cfg.always_on || turn_running {
-                0
-            } else {
-                30
-            };
-            let _ = dt.set_autostop(id, minutes).await;
-        }
-    }
     state.db.touch_box(user_id)?;
     Ok(())
 }
@@ -1775,22 +1461,11 @@ pub async fn provider_status(state: &AppState, user_id: &str) -> Value {
         Ok(Some(s)) => s,
         _ => return json!({ "provider": null }),
     };
-    let mut v = json!({
+    json!({
         "provider": sb.provider, "sandbox_id": sb.sandbox_id, "box_url": sb.box_url, "user_id": sb.user_id,
         "migrated_from": sb.migrated_from,
         "last_started_at": sb.last_started_at, "last_stopped_at": sb.last_stopped_at, "last_seen_at": sb.last_seen_at,
-    });
-    if sb.provider == "daytona" {
-        if let (Some(dt), Some(id)) = (&state.daytona, &sb.sandbox_id) {
-            if let Ok(s) = dt.get(id).await {
-                v["daytona_state"] = json!(s.state);
-                v["daytona_arbos_state"] = json!(s.state.arbos_state());
-                v["auto_stop_interval"] = json!(s.auto_stop_interval);
-                v["last_activity_at"] = json!(s.last_activity_at);
-            }
-        }
-    }
-    v
+    })
 }
 
 #[cfg(test)]
