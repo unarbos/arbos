@@ -168,8 +168,8 @@ struct Theme: Equatable {
     static let actionPillHeight: CGFloat = 32
     static let actionPillWidth: CGFloat = actionPillHeight
     static let actionPillTrailing: CGFloat = 26 / 3
-    /// The `+` inside the field, mirroring the action pill at the other end: a 96 px disc
-    /// inset 26 px from the leading edge, the same height as the white capsule opposite it.
+    /// The `+` inside the field, mirroring the white action at the other end: a 96 px disc
+    /// inset 26 px from the leading edge, the same 96 × 96 as the circle opposite it.
     /// The reference draws 38 px `+` arms against this build's 54, so the glyph comes down
     /// from `plusGlyph` to 16 (16 pt regular draws 38).
     static let composerPlusDisc: CGFloat = actionPillHeight
