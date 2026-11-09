@@ -13562,7 +13562,7 @@ impl Agent {
                 .set_message_fields(&msg_id, &[("handoffMessages", json!(2))]);
         }
         let result_text = match &contract {
-            Some(c) => format!("{text}\n\nParsed return contract:\n{c}"),
+            Some(c) => format!("{text}{PARSED_CONTRACT_NOTE}{c}"),
             None => text.clone(),
         };
         // The worker's answer in its own words, for the notice agentd writes when the model
@@ -13828,15 +13828,42 @@ impl Agent {
         let llm = self.llm.with_purpose("job-result");
         // What is posted when the model writes nothing, or nothing that survives the strip below:
         // the worker's own words for finished work, a plain line otherwise.
+        //
+        // The worker's own words stand in for the answer here — but only its words. Bug AC: this
+        // posted `raw_trim`, which is the worker's final text with its return contract still on
+        // the end and agentd's parsed copy of it appended, cut to the 7,000 chars a *prompt* gets
+        // with a marker naming a `history_search` call. The user read all of it. Cut for a chat
+        // row instead, the way the notice agentd writes itself is (`job_notice_line`).
+        //
+        // Round 13 showed the second half of the same failure, in the same bubble: it opened
+        // "It's listed. Step 1." `ProseFilter::clean_prose` is written for the talking model's own
+        // drafts, and a worker's report is not one — "The user asked whether the note is in the
+        // list." reads as thought-aloud to the thought-prefix stripper and "Checking the two
+        // remaining notes is still open." reads as tool narration to the trailing stripper, so a
+        // report in a worker's register loses both ends. Nothing here filters the worker's words
+        // any more: the contract comes off, the text is cut for a row, and `normalize_tables`
+        // makes a table render (it rewrites table and link syntax only, never a sentence). That is
+        // what `job_notice_line` has always done with the same text.
         let fallback = || {
-            if status == "done" && !raw_trim.trim().is_empty() {
-                return ProseFilter::clean_prose(raw_trim.trim());
+            let prose = worker_prose(raw);
+            if status == "done" && !prose.trim().is_empty() {
+                return crate::markdown_tables::normalize_tables(
+                    crate::truncate::clip_for_chat(
+                        prose.trim(),
+                        crate::truncate::CHAT_NOTICE_CHARS,
+                    )
+                    .trim(),
+                );
             }
             // "Ask me again in a moment" is the wrong instruction for a failure that will not
             // clear: a refused request is refused again, a context limit is still over it, a
             // spend cap is still reached. Bug AR ended here with the generic line while what had
             // actually happened — the provider declined the brief — was in `error` all along.
             // `ModelError`'s own lines say which of the two it was and what gets through.
+            //
+            // Independent of the arm above, and a rebase that collapses the two loses #2921: the
+            // contract strip belongs to the finished-work arm, this line to the failure arm.
+            // `a_permanent_model_failure_still_names_itself_on_the_fallback_path` is the guard.
             match error.filter(|e| model_error_is_permanent(&e.detail, e.refusal)) {
                 // A worker has no window of this chat's to replace: its brief is built fresh for
                 // every attempt, so the re-send line would promise something nothing did.
@@ -13858,7 +13885,19 @@ impl Agent {
         {
             Ok(Ok(c)) if !c.text.trim().is_empty() => {
                 tracing::info!(chat_id, name, ms = c.latency_ms, "job result written");
-                ProseFilter::clean_prose(c.text.trim())
+                // No prose filter on a job's result, on either branch. `ProseFilter` is for a
+                // streamed turn, and round 14's r14notes is what it does to this one: the draft
+                // opened "The user asked for the six steps with their values." with its table on
+                // the next line, and `strip_leading_thought_paragraphs` drops a whole blank-line
+                // paragraph when any sentence in it is thought-shaped — so the table went with the
+                // opener and the chat final was the closing line alone, "It ran as a real
+                // background job, not inline.". The same draft keeps its table when it streams,
+                // because `take_line` judges one line at a time. `normalize_tables` stays because
+                // `clean_prose` ended with it and the apps draw nothing else as a table; it
+                // rewrites table and link syntax only, never a sentence. The paragraph stripper is
+                // a defect in its own right, with `hook_send_message` and `post_to_job_chat`
+                // behind it, and is not this change.
+                crate::markdown_tables::normalize_tables(c.text.trim())
             }
             // Named, because the three ways to get here want three different repairs and the old
             // line could not tell them apart.
@@ -13900,7 +13939,9 @@ impl Agent {
             }
             kept => kept,
         };
-        let text = crate::store::redact(&text);
+        // Whichever branch wrote it: the summariser is given the worker's notes, contract and
+        // all, so a model that echoes the block is the same leak by another route.
+        let text = crate::store::redact(&crate::llm::strip_return_contract(&text));
         // The answer is written; where it lands in the chat is the chat's send order to decide
         // (bug O). A job that overtook an older message waits here, after its own model call, so
         // the hold costs nothing once the older answer is posted. A job whose ask is not queued
@@ -15906,6 +15947,28 @@ pub(crate) fn relay_turn_tool_allowed(tool_name: &str) -> bool {
     )
 }
 
+/// How `run_subagent` marks the contract it parsed when it hands a worker's output to a prompt.
+/// Prompt material only: [`worker_prose`] cuts it and everything after it.
+pub(crate) const PARSED_CONTRACT_NOTE: &str = "\n\nParsed return contract:\n";
+
+/// The half of a worker's final text a person may read: its return contract and agentd's own
+/// parsed-contract note removed.
+///
+/// Bug AC (Jacob, Test5 round 12, job 01M6PJABNVZ84YXHHFY9HV3FAK). A worker's final text ends
+/// with the fenced ```json block its prompt asks for, and the text agentd carries around has the
+/// parsed contract appended to it. Both are machinery for the model that writes the answer, and
+/// every path that posts a worker's text instead of a model's prose used to post them whole.
+///
+/// Only the contract is removed, never JSON a worker wrote because the user asked for it —
+/// [`crate::llm::strip_return_contract`] says what that means and how narrow it is.
+pub(crate) fn worker_prose(raw: &str) -> String {
+    let text = match raw.find(PARSED_CONTRACT_NOTE) {
+        Some(i) => &raw[..i],
+        None => raw,
+    };
+    crate::llm::strip_return_contract(text)
+}
+
 /// The plain line agentd writes for a relay turn the model did not finish.
 pub(crate) fn relay_fallback_line(kind: &TurnKind) -> String {
     match kind {
@@ -15936,7 +15999,11 @@ pub(crate) fn relay_fallback_line(kind: &TurnKind) -> String {
 /// plainly which parts it could not reach (Jacob, Test5, 2026-11-04: a research job whose CSV
 /// was written and whose 45-row table was ready read as "did not finish" because six sites
 /// answered 403).
+///
+/// `result` is the worker's own words: the contract's `summary` when it wrote one, else its final
+/// text — which carries the contract itself, so it goes through [`worker_prose`] first (bug AC).
 pub(crate) fn job_notice_line(title: &str, status: &str, result: &str) -> String {
+    let result = &worker_prose(result);
     let what = match title.trim() {
         "" => "The background work I started".to_owned(),
         t => format!("“{t}”"),
