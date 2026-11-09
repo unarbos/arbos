@@ -2533,8 +2533,9 @@ struct ChatSession: View {
             // long / group chats feel sticky (feedback app-01M5MQ2GFB1681YXNJMZV4EK7J).
             .onAppear {
                 settleToBottom(proxy)
-                if DebugHooks.fixtureComposerAttachment, pending.isEmpty {
-                    pending = [Self.riggedAttachment()]
+                let rigged = DebugHooks.fixtureComposerAttachments
+                if rigged > 0, pending.isEmpty {
+                    pending = (0..<rigged).map { Self.riggedAttachment(seed: $0) }
                 }
             }
             // `rows.last` (not only its id): a streaming reply keeps the same id while its
@@ -3673,17 +3674,20 @@ struct ChatSession: View {
     /// A drawn picture for `ARBOS_FIXTURE_COMPOSER_ATTACHMENT`. Drawn rather than bundled so
     /// the rig carries no asset, and recognisable rather than flat so a capture shows the
     /// thumbnail really is the picture and not a placeholder.
-    private static func riggedAttachment() -> AppModel.PendingAttachment {
+    /// `seed` shifts the hue so a row of several is visibly several pictures rather than one
+    /// picture repeated, which is the whole point of the multiple-attachment shot.
+    private static func riggedAttachment(seed: Int) -> AppModel.PendingAttachment {
         let side = CGSize(width: 640, height: 640)
+        let hue = CGFloat(seed % 5) / 5
         let image = UIGraphicsImageRenderer(size: side).image { ctx in
-            UIColor(red: 0.16, green: 0.22, blue: 0.42, alpha: 1).setFill()
+            UIColor(hue: hue, saturation: 0.55, brightness: 0.42, alpha: 1).setFill()
             ctx.fill(CGRect(origin: .zero, size: side))
-            UIColor(red: 0.95, green: 0.62, blue: 0.24, alpha: 1).setFill()
+            UIColor(hue: hue, saturation: 0.70, brightness: 0.95, alpha: 1).setFill()
             ctx.cgContext.fillEllipse(in: CGRect(x: 150, y: 110, width: 340, height: 340))
-            UIColor(red: 0.30, green: 0.62, blue: 0.45, alpha: 1).setFill()
+            UIColor(hue: hue, saturation: 0.45, brightness: 0.62, alpha: 1).setFill()
             ctx.fill(CGRect(x: 0, y: 440, width: side.width, height: 200))
         }
-        return AppModel.PendingAttachment(name: "sunset.png", mime: "image/png",
+        return AppModel.PendingAttachment(name: "photo-\(seed + 1).png", mime: "image/png",
                                           data: image.pngData() ?? Data())
     }
 
