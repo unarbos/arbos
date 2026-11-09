@@ -138,13 +138,30 @@ final class TranscriptEndAnchorUITests: XCTestCase {
         // is chrome with nothing tappable in it — no bubble, no avatar, no link. A fixed
         // normalized coordinate would be a guess about which row the fixture put at that
         // height, and would start tapping bubbles the moment the fixture changed.
+        //
+        // The row is not unconditional, so the derivation is checked rather than assumed:
+        // `presenceRow` draws only while `presenceParticipants` is non-empty, which for an
+        // agent chat means `AppModel.isStreaming`, which caps at 15 minutes from
+        // `liveStreamAt`. `fx-comms-main` stages its stream about 11.9 minutes before launch,
+        // so the row is there with roughly three minutes to spare and the clock restarts every
+        // launch. That is a guarantee with a margin, not a standing one: if someone moves the
+        // fixture's timestamps the row goes, and these two assertions are what makes that a
+        // loud failure here instead of a tap into empty space that quietly stops dismissing
+        // the keyboard. A guard that can go green without dismissing is no guard.
         let row = app.descendants(matching: .any)["presence-row"].firstMatch
-        XCTAssertTrue(row.waitForExistence(timeout: appear), "the agent is working, so the row shows")
+        XCTAssertTrue(row.waitForExistence(timeout: appear),
+                      "the tap point is derived from the presence row, so the row has to be here")
+        let anchor = row.frame
+        XCTAssertGreaterThan(anchor.height, 0,
+                             "the presence row has a real frame to derive the tap point from — got \(anchor)")
+
         let window = app.windows.firstMatch
         let chrome = window.coordinate(withNormalizedOffset: .zero)
-            .withOffset(CGVector(dx: window.frame.maxX - 6, dy: row.frame.midY))
+            .withOffset(CGVector(dx: window.frame.maxX - 6, dy: anchor.midY))
         chrome.tap()
 
+        // The dismissal is asserted, not assumed: without this the case could pass by never
+        // resizing the container at all, which is the one thing it exists to exercise.
         let gone = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"),
                                              object: app.keyboards.firstMatch)
         XCTAssertEqual(XCTWaiter().wait(for: [gone], timeout: 15), .completed,
