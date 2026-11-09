@@ -90,6 +90,8 @@ mod routines;
 #[cfg(test)]
 mod rowless_cancel_entrypoint_tests;
 #[cfg(test)]
+mod rowless_cancel_evidence_tests;
+#[cfg(test)]
 mod rowless_cancel_tests;
 mod rpc_child;
 mod selfref;
