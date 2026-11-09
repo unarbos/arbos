@@ -11901,7 +11901,17 @@ impl Agent {
         if remembered {
             match self.store.t3_mark_refused(chat_id, user_msg_id) {
                 Ok(n) => {
-                    tracing::info!(chat_id, message = %user_msg_id, rows = n, "the refused turn is out of this chat's memory as well as its window")
+                    tracing::info!(chat_id, message = %user_msg_id, rows = n, "the refused turn is out of this chat's memory as well as its window");
+                    // A card written before the mark still carries the declined turn's words and
+                    // would offer them back through the memory walk in this or any other chat.
+                    // Clear and rebuild those cards without the declined leaf.
+                    if n > 0 {
+                        if let Ok(Some(row_id)) =
+                            self.store.t3_refused_row_id(chat_id, user_msg_id)
+                        {
+                            self.tree.invalidate_refused_leaf(&row_id);
+                        }
+                    }
                 }
                 Err(e) => {
                     tracing::warn!(chat_id, message = %user_msg_id, error = %e, "the refused turn could not be marked; the memory walk may offer it back")

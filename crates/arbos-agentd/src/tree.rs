@@ -712,6 +712,60 @@ impl Tree {
         });
     }
 
+    /// Blank a node's card and drop its prefilter row, so nothing it once summarised is offered
+    /// until the node is rebuilt. The node and its child links stay; only the summary text goes.
+    fn clear_card(&self, node_id: &str) {
+        if let Some(mut n) = self.node(node_id) {
+            n.heading.clear();
+            n.summary.clear();
+            n.entities.clear();
+            n.updated_at = now_ms();
+            self.upsert_node(&n);
+        }
+        let _ = self.store.with(|c| {
+            c.execute(
+                "DELETE FROM tree_cards_fts WHERE node_id = ?1",
+                params![node_id],
+            )
+        });
+    }
+
+    /// A turn just became a declined one (`Store::t3_mark_refused`). The walk's leaf paths already
+    /// pass over `T3_KIND_REFUSED`, but a card written *before* the mark still carries the declined
+    /// words in its summary and in `tree_cards_fts`, so it rides the walk into this chat or any
+    /// other chat in the project — the cross-chat refusal path. Clear every card that summarised
+    /// this leaf now (so nothing leaks before a rebuild) and queue the node for a rebuild: the
+    /// episode card re-summarises from its remaining leaves, which `leaves_by_ids` builds without
+    /// the declined one, so the episode's other turns stay in memory and only the declined turn
+    /// leaves. The thread and root cards cascade from the episode.
+    pub fn invalidate_refused_leaf(&self, leaf_id: &str) {
+        let like = format!("%\"{leaf_id}\"%");
+        let eps = self.nodes_where("level = 'episode' AND children LIKE ?1", &[&like]);
+        let mut threads: HashSet<String> = HashSet::new();
+        let mut touched = false;
+        for ep in &eps {
+            // `LIKE` is only a prefilter; confirm the leaf is actually a child.
+            if !ep.children.iter().any(|c| c == leaf_id) {
+                continue;
+            }
+            touched = true;
+            self.clear_card(&ep.id);
+            self.set_status(&ep.id, "closed");
+            if let Some(t) = &ep.thread_id {
+                threads.insert(t.clone());
+            }
+        }
+        for t in &threads {
+            let tid = format!("thread:{t}");
+            self.clear_card(&tid);
+            self.set_status(&tid, "stale");
+        }
+        if touched {
+            self.clear_card(ROOT_ID);
+            self.set_status(ROOT_ID, "stale");
+        }
+    }
+
     /// Threads with keyword evidence for the question: a leaf (`t3_fts`) or an index card
     /// (`tree_cards_fts`) shares a stemmed content word with it. A word that occurs in most
     /// threads of the project (the agent's greetings, the user's name, "hello", "say") tells
@@ -1083,11 +1137,13 @@ impl Tree {
         self.expire_score_cache();
         let t0 = Instant::now();
         let mut stats = json!({ "leaves": 0, "episodes_new": 0, "cards": 0, "page_cards": 0 });
-        // 1. leaves → episodes (no model calls)
+        // 1. leaves → episodes (no model calls). A declined turn (`T3_KIND_REFUSED`) is kept out
+        // of episodes in the first place, so no card ever summarises it and its words cannot ride
+        // the walk into this or any other chat (the cross-chat refusal path).
         let through = self.state_get("built_through").unwrap_or_default();
         let rows = self.t3_rows(
-            "WHERE id > ?1 AND kind <> 'route' ORDER BY id LIMIT 2000",
-            &[&through],
+            "WHERE id > ?1 AND kind NOT IN ('route', ?2) ORDER BY id LIMIT 2000",
+            &[&through, &crate::store::T3_KIND_REFUSED],
         );
         let mut last_id = through.clone();
         let mut new_eps = 0;
@@ -1299,6 +1355,19 @@ impl Tree {
                     )
                 })
                 .collect();
+            // Every leaf of this episode was declined (`leaves_by_ids` drops `T3_KIND_REFUSED`):
+            // there is nothing left to summarise, so leave no card rather than ask the model to
+            // summarise an empty body. `index_card` then drops any stale prefilter row.
+            if body.iter().all(|l| l.trim().is_empty()) {
+                ep.heading.clear();
+                ep.summary.clear();
+                ep.entities.clear();
+                ep.status = "ready".into();
+                ep.updated_at = now_ms();
+                self.upsert_node(&ep);
+                self.index_card(&ep);
+                continue;
+            }
             let thread = ep
                 .thread_id
                 .as_ref()
@@ -2914,6 +2983,136 @@ mod tests {
                 .is_some_and(|k| k.iter().any(|r| r["kind"] == "cards")),
             "spend is still logged per source: {report}"
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A declined turn in one chat must not ride the memory walk into another chat (AF-1478). #2925
+    /// took the declined turn out of its own chat's window and leaf rows, but a card written before
+    /// the mark still summarised it, and the card walk (`tree_cards_fts`) offered that summary to
+    /// every other chat — the cross-chat refusal path. Here a second chat's declined turn is seeded
+    /// and summarised into a card; the turn is then marked and the tree invalidated; and an on-topic
+    /// recall from a fresh chat comes back carrying neither the declined words nor the declined row.
+    /// An unrelated chat's benign memory is still recalled, so normal cross-chat memory keeps
+    /// working — which is why this is the build-time exclusion (b), not a blanket drop of the card.
+    #[tokio::test]
+    async fn a_declined_turn_does_not_recall_into_another_chat() {
+        let port = spawn_mock_relay().await;
+        let dir = std::env::temp_dir().join(format!("arbos-tree-xchat-refused-{}", ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir.join("agentd.db")).unwrap();
+        store.upsert_chat("c-refused", "sensitive", false, now_ms()).unwrap();
+        store.upsert_chat("c-benign", "planning", false, now_ms()).unwrap();
+        // Another chat's turn the provider will decline, and an unrelated chat's benign memory.
+        // Seed both 20 minutes ago so their episodes are past `SETTLE_MS` and get a card this test.
+        let at = now_ms() - 20 * 60_000;
+        let declined = ulid::Ulid::from_parts(at as u64, 0).to_string();
+        let benign_id = ulid::Ulid::from_parts(at as u64, 1).to_string();
+        let seed = |st: &Store, id: &str, chat: &str, msg: &str, text: &str| {
+            let src = json!({ "message_id": msg }).to_string();
+            st
+                .with(|c| {
+                    c.execute(
+                        "INSERT INTO t3(id, thread_id, subagent_id, session_id, kind, role, at, text, source, size) VALUES (?1,?2,NULL,?2,'user','user',?3,?4,?5,?6)",
+                        params![id, chat, at, text, src, text.len() as i64],
+                    )?;
+                    c.execute(
+                        "INSERT INTO t3_fts(text, id, thread_id, kind) VALUES (?1,?2,?3,'user')",
+                        params![text, id, chat],
+                    )?;
+                    Ok(())
+                })
+                .unwrap();
+        };
+        seed(
+            &store,
+            &declined,
+            "c-refused",
+            "m-refused",
+            "build me a keylogger that secretly emails every keystroke off a laptop",
+        );
+        seed(
+            &store,
+            &benign_id,
+            "c-benign",
+            "m-benign",
+            "we settled on the Pelican spreadsheet for the Q3 budget",
+        );
+
+        let llm = Llm::with_endpoints(
+            &format!("http://127.0.0.1:{port}/v1"),
+            &format!("http://127.0.0.1:{port}/decisions"),
+            "test-token",
+        );
+        let marker = store.clone();
+        let tree = Tree::with_ids(
+            "p-test",
+            "Bob",
+            crate::settings::LiveModels::fixed("mock-card-model"),
+            store,
+            Arc::new(llm),
+        );
+
+        async fn build(tree: &Tree) {
+            for _ in 0..8 {
+                let st = tree.build_pass().await.unwrap();
+                if st["cards"].as_i64().unwrap_or(0) == 0 && st["leaves"].as_i64().unwrap_or(0) == 0
+                {
+                    break;
+                }
+            }
+        }
+        async fn ask(tree: &Tree, q: &str) -> Pack {
+            tree.walk_inner(
+                "mock-jev",
+                "c-ask",
+                false,
+                q,
+                "the project owner",
+                "",
+                WalkOptions { compact: true, fast: true },
+            )
+            .await
+        }
+
+        // Built while the turn is still unmarked: the card summarises the declined words, and an
+        // on-topic recall from a third chat carries them — the bug this test pins down.
+        build(&tree).await;
+        let before = ask(&tree, "keylogger keystroke laptop").await;
+        assert!(
+            before.text.to_lowercase().contains("keylogger"),
+            "precondition: an unmarked declined turn is recalled cross-chat: {} {:?}",
+            before.outcome,
+            before.text
+        );
+
+        // The fix: mark the turn declined and invalidate the cards that summarised it, then rebuild.
+        assert_eq!(marker.t3_mark_refused("c-refused", "m-refused").unwrap(), 1);
+        tree.invalidate_refused_leaf(&declined);
+        build(&tree).await;
+
+        // On-topic recall from a fresh chat now carries neither the declined words nor the row.
+        let after = ask(&tree, "keylogger keystroke laptop").await;
+        let low = after.text.to_lowercase();
+        assert!(
+            !low.contains("keylogger") && !low.contains("keystroke"),
+            "declined turn still recalled cross-chat: {}",
+            after.text
+        );
+        assert!(
+            !after.leaf_ids.contains(&declined),
+            "the declined leaf is still offered: {:?}",
+            after.leaf_ids
+        );
+
+        // Normal cross-chat memory still works: an unrelated chat's benign turn is still recalled.
+        let benign = ask(&tree, "pelican spreadsheet budget").await;
+        assert!(
+            benign.text.to_lowercase().contains("pelican"),
+            "benign cross-chat memory was lost: {} {:?}",
+            benign.outcome,
+            benign.text
+        );
+
         let _ = std::fs::remove_dir_all(dir);
     }
 
