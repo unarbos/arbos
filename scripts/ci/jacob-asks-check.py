@@ -50,10 +50,12 @@ def check(root: Path) -> list[str]:
                 f"{ask}: `{guard}` exists but does not name this ask. "
                 f"Put `[feedback {ask}]` in its doc comment (or its suite's) so the pairing holds."
             )
-        if live := [c for c in found if not c.skipped]:
-            found = live
-        else:
-            problems.append(f"{ask}: `{guard}` always skips, so nothing guards this ask.")
+        for case in found:
+            if case.skipped:
+                problems.append(
+                    f"{ask}: `{case.qualified}` always skips, so it guards nothing. "
+                    f"A conditional XCTSkipIf is fine; an unconditional skip is not."
+                )
 
     return problems
 

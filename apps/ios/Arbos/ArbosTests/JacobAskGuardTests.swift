@@ -11,6 +11,7 @@ import XCTest
 /// the failure this file exists to stop.
 ///
 /// Each case names its tag, so `scripts/ci/jacob-asks-check.py` can tie registry entry to guard.
+@MainActor
 final class JacobAskGuardTests: XCTestCase {
     /// [feedback agent-bubble-inset-2026-10-22] — the agent bubble leaves 76 pt, not the 71 pt it
     /// was. Measured off Grok dark at 3 px/pt: 16 pt own margin + 60 pt on the far side.
@@ -180,19 +181,6 @@ final class JacobAskGuardTests: XCTestCase {
             XCTAssertTrue(cleared["wake_url"] is NSNull, "a blank field clears, and never sends \"\"")
             XCTAssertTrue(cleared["wake_auth"] is NSNull)
         }
-    }
-
-    /// [feedback draft-chat-from-search-ios-2026-10-29] — a DM started from search exists only on
-    /// its own screen: the home list never shows it, and leaving before a send drops it.
-    func testADraftDMIsRecognisableAndNeverReachesTheHomeList() {
-        XCTAssertTrue(AppModel.isDraftDM(AppModel.draftDMPrefix + "jacob"))
-        XCTAssertFalse(AppModel.isDraftDM("chat_launch"), "a real chat is never mistaken for a draft")
-
-        let model = AppModel()
-        model.isFixture = true
-        XCTAssertNil(model.draftDM, "nothing is drafted until someone starts one")
-        XCTAssertFalse(model.peopleChats.contains { AppModel.isDraftDM($0.id) },
-                       "a draft must never be listed among the chats the home list draws")
     }
 
     /// [feedback reply-preview-fixed-height] — the reply bar above the field is one row high

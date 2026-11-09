@@ -50,8 +50,9 @@ def guard_state(root: Path) -> tuple[dict[str, str], dict[str, bool]]:
     """What the register promises, and whether each named guard is live."""
     guarded, _, _ = read_registry(root)
     cases = test_cases(root)
+    # Every case a guard names is part of it, so one switched-off case is one hole.
     live = {
-        ask: any(not c.skipped for c in find_guard(guard, cases))
+        ask: (found := find_guard(guard, cases)) and not any(c.skipped for c in found)
         for ask, guard in guarded.items()
     }
     return guarded, live
