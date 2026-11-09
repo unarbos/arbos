@@ -136,8 +136,14 @@ fn a_refusal_is_permanent_a_five_hundred_is_not() {
         "and so is the prose on its own (\"flagged\"), so a build that loses the flag still \
          reads this right"
     );
-    assert!(model_error_is_permanent("prompt is too long: 214000 tokens", false));
-    assert!(model_error_is_permanent("No space left on device (os error 28)", false));
+    assert!(model_error_is_permanent(
+        "prompt is too long: 214000 tokens",
+        false
+    ));
+    assert!(model_error_is_permanent(
+        "No space left on device (os error 28)",
+        false
+    ));
 
     assert!(
         !model_error_is_permanent("529 overloaded_error", false),
@@ -272,7 +278,10 @@ async fn boot() -> Fixture {
 async fn a_refused_worker_fails_with_the_providers_reason_and_is_not_retried() {
     let f = boot().await;
     let agent = f.agent.clone();
-    agent.start_pi(CHAT).await.expect("the main pi child starts");
+    agent
+        .start_pi(CHAT)
+        .await
+        .expect("the main pi child starts");
     let host = agent.sync.open_room(CHAT).await.unwrap();
     {
         let h = host.lock().await;
@@ -288,7 +297,15 @@ async fn a_refused_worker_fails_with_the_providers_reason_and_is_not_retried() {
     let brief = "Build four independent 6-process trees, tick22a to tick22d, with setsid and nohup launches.";
     agent
         .store
-        .insert_job(JOB, CHAT, ASK, "Building the tick22 trees", "code", brief, &[])
+        .insert_job(
+            JOB,
+            CHAT,
+            ASK,
+            "Building the tick22 trees",
+            "code",
+            brief,
+            &[],
+        )
         .unwrap();
 
     // The fallback turn that now follows is not what this case is about, and it needs the turn
