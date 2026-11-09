@@ -55,6 +55,8 @@ mod job_note_tests;
 #[cfg(test)]
 mod job_notice_tests;
 #[cfg(test)]
+mod job_one_file_per_ask_tests;
+#[cfg(test)]
 mod job_orphan_tests;
 #[cfg(test)]
 mod job_queued_cancel_tests;

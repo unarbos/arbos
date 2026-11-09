@@ -1532,6 +1532,9 @@ struct JobFile {
     job_id: String,
     /// Content hash of the bytes, not the path (`media::blob_key`).
     key: String,
+    /// The file's own name, as the user reads it on the card. What decides whether a later
+    /// delivery is a new revision of this deliverable or a different one (bug AG).
+    name: String,
     msg_id: String,
     at_ms: i64,
 }
@@ -5710,6 +5713,92 @@ impl Agent {
             "the file this job already posted is superseded by the user's correction"
         );
         Some(card_id)
+    }
+
+    /// A job is about to put `name` in the chat, and the work it is doing already answered once:
+    /// mark that earlier card superseded, so the chat holds one answer to one ask rather than two
+    /// with nothing to say which is live. The superseded card's id, when there was one.
+    ///
+    /// **Bug AG, Test5 round 22 `r22steer`.** One ask asking for "exactly ONE CSV" ended with
+    /// four CSVs in the chat. "One ask, one file" was already the rule, and three paths kept it —
+    /// the steer gate for a correction that beats the card,
+    /// [`Self::supersede_posted_file_of_running_job`] for a running job the correction reached,
+    /// [`Self::replace_just_posted_job`] for one that had just finished. Every one of them hangs
+    /// off the *steer* arriving and is keyed on a single job id, and round 22 went round all
+    /// three in the shape the report names: the steers stacked up, the first job finished before
+    /// the late ones landed, and a recount was started. A recount is a second job, and its
+    /// delivery asked nothing about the card the work it took over had already posted.
+    ///
+    /// So the question is asked here instead, where a *delivery* is the event rather than a
+    /// correction, which is the one place that catches a replacement however the work got handed
+    /// on — a second job, a fresh worker, or the same worker posting a better file.
+    ///
+    /// # What counts as the same deliverable
+    ///
+    /// The same **file name**, from a job of this chat that is open or ended inside
+    /// [`crate::config::STEER_INHERIT_WINDOW_MS`] — the existing bound whose own documentation
+    /// defines it as the jobs this chat is still on, and the same one `steers_to_inherit` uses to
+    /// decide which corrections a follow-up job inherits. The corrections inherited across the
+    /// job boundary already; this is the answer inheriting the same way.
+    ///
+    /// Keyed on the name and not on the kind, deliberately, and the asymmetry is the reason: a
+    /// card superseded wrongly is a deliverable the user loses, while one missed leaves them
+    /// where they already were. A job told to produce a table and a chart posts two names and
+    /// both stand. A revision the worker renames — `steer22.csv` then `steer22_v2.csv` — is
+    /// missed, and that is the price of not collapsing two files the user asked for separately.
+    pub(crate) async fn supersede_earlier_answer_of_this_work(
+        &self,
+        chat_id: &str,
+        name: &str,
+        new_card: &str,
+    ) -> Option<String> {
+        let earlier: Vec<(String, String)> = {
+            let files = self.job_files.lock().await;
+            files
+                .iter()
+                .rev()
+                .filter(|f| f.name == name && f.msg_id != new_card)
+                .map(|f| (f.job_id.clone(), f.msg_id.clone()))
+                .collect()
+        };
+        let host = self.sync.host(chat_id).await?;
+        for (job_id, card_id) in earlier {
+            // The work has to be work this chat is still on. Without this an unrelated
+            // `report.csv` from an hour ago would be replaced by today's.
+            let still_on = self
+                .store
+                .job(&job_id)
+                .ok()
+                .flatten()
+                .filter(|row| row.chat_id == chat_id)
+                .is_some_and(|row| row.is_open() || Self::ended_inside_inherit_window(&row));
+            if !still_on {
+                continue;
+            }
+            {
+                let h = host.lock().await;
+                // Still standing, and not already replaced: a row that went is a new delivery,
+                // and a card marked once does not need marking again.
+                let Some(m) = h.doc.message(&card_id) else {
+                    continue;
+                };
+                if m.rest.get("superseded").and_then(Value::as_bool) == Some(true) {
+                    continue;
+                }
+                h.doc
+                    .set_message_fields(&card_id, &[("superseded", json!(true))]);
+            }
+            tracing::info!(
+                chat_id,
+                job = %job_id,
+                card = %card_id,
+                replaced_by = %new_card,
+                %name,
+                "this work had already answered; the earlier card is superseded by the new one"
+            );
+            return Some(card_id);
+        }
+        None
     }
 
     /// Did this job finish recently enough for a correction to replace its file?
@@ -10884,11 +10973,12 @@ impl Agent {
 
     /// Record a file `job_id` delivered (called by `media::deliver` after the row was read back,
     /// never before).
-    pub(crate) async fn note_job_file(&self, job_id: &str, key: &str, msg_id: &str) {
+    pub(crate) async fn note_job_file(&self, job_id: &str, key: &str, name: &str, msg_id: &str) {
         let mut l = self.job_files.lock().await;
         l.push(JobFile {
             job_id: job_id.to_owned(),
             key: key.to_owned(),
+            name: name.to_owned(),
             msg_id: msg_id.to_owned(),
             at_ms: arbos_core::ids::now_ms(),
         });

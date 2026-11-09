@@ -365,6 +365,10 @@ pub struct Posted {
     /// These bytes were already delivered earlier in the same job, so `message_id` is that
     /// earlier row and nothing new was written.
     pub duplicate: bool,
+    /// The card this delivery replaced, when the work had already answered once (bug AG). Still
+    /// in the chat and still readable — marked, not removed — so the earlier answer survives a
+    /// correction that turns out to have been wrong.
+    pub superseded: Option<String>,
 }
 
 /// Source of a delivery: a file on the box, or bytes fetched from a URL.
@@ -503,6 +507,7 @@ pub async fn deliver(
                     message_id,
                     attachment,
                     duplicate: true,
+                    superseded: None,
                 });
             }
         }
@@ -576,9 +581,22 @@ pub async fn deliver(
         }
     }
     a.note_posted(&target.chat_id, &msg_id).await;
-    if let Some(job_id) = target.job_id.as_deref() {
-        a.note_job_file(job_id, &key, &msg_id).await;
-    }
+    // Bug AG: one ask, one file. A delivery that answers work this chat has already answered
+    // replaces that card instead of standing beside it — see
+    // `Agent::supersede_earlier_answer_of_this_work` for which earlier card counts and why the
+    // key is the file's name. Asked on every job delivery, because the handover that produced
+    // round 22's duplicates was a *second job* and no correction arrived to ask on its behalf.
+    //
+    // After the row is written and read back, never before: the card that takes an earlier one's
+    // place has to exist first, or a failed delivery would leave the user with neither.
+    let superseded = match target.job_id.as_deref() {
+        Some(job_id) => {
+            a.note_job_file(job_id, &key, &name, &msg_id).await;
+            a.supersede_earlier_answer_of_this_work(&target.chat_id, &name, &msg_id)
+                .await
+        }
+        None => None,
+    };
     if target.main_turn {
         if let Some(t) = a.turn.lock().await.as_mut() {
             t.attachments_posted.push(msg_id.clone());
@@ -603,6 +621,7 @@ pub async fn deliver(
         message_id: msg_id,
         attachment,
         duplicate: false,
+        superseded,
     })
 }
 
@@ -627,6 +646,21 @@ fn posted_result(p: &Posted, extra: Value) -> Value {
         if let Some(o) = v.as_object_mut() {
             o.insert("already_posted".to_owned(), json!(true));
         }
+    }
+    // Bug AG: the model has to know this card replaced an earlier one, or it describes both as
+    // current and the user is back to choosing between two answers in prose instead of in cards.
+    if let (Some(o), Some(card)) = (v.as_object_mut(), p.superseded.as_deref()) {
+        o.insert("superseded_message_id".to_owned(), json!(card));
+        o.insert(
+            "note".to_owned(),
+            json!(
+                "This file replaces the one this work put in the chat earlier: that card is \
+                 marked superseded and this one is the live answer. Say in one line what this \
+                 file contains and what changed. Do not describe the earlier file as current, \
+                 and do not post it again — it stays in the chat so the user can still see what \
+                 the first answer was."
+            ),
+        );
     }
     if let (Some(o), Some(e)) = (v.as_object_mut(), extra.as_object()) {
         for (k, val) in e {
