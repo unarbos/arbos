@@ -1,8 +1,9 @@
+import UIKit
 import XCTest
 
 /// Grok parity for the composer, on the screen rather than in the arithmetic
-/// (Jacob, 2026-11-09). The pure rules are in `ComposerParityTests`; these are the three
-/// claims that only the laid-out box can answer, plus the one Jacob has now asked for twice.
+/// (Jacob, 2026-11-09). The pure rules are in `ComposerParityTests`; these are the claims that
+/// only the laid-out box can answer, including the one Jacob has now asked for twice.
 ///
 /// `testTheBoxLightsUnderAHoldingFinger` is the regression guard for the touch-and-hold
 /// highlight ([feedback attachment-in-composer-2026-11-09] is the staged picture; the
