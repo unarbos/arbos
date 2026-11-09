@@ -28,15 +28,24 @@ refer to gates, files or tests as identified; these units are not interchangeabl
 | `scripts/avatar-lint.sh` | pass | unchanged | 0.084 s | 1 gate passed |
 | `scripts/glass-lint.sh` | pass | unchanged | 2.590 s | 1 gate passed; 76 existing unjudged sites |
 | `apps/ios/scripts/control-size-lint.sh` | pass | unchanged | 0.065 s | 1 gate passed |
-| `pnpm -r typecheck` in `harness` | prerequisite failure | unchanged | 2.038 s | `tsc` absent |
-| `pnpm -r build` in `harness` | prerequisite failure | unchanged | 0.311 s | `tsc` absent |
-| `pnpm -r test` in `harness` | prerequisite failure | unchanged | 2.745 s | 0 passed, 2 failed files, 0 skipped; `typebox` absent |
+| `pnpm -r typecheck` in `harness` | pass after dependency setup | unchanged | 4.548 s | 1 gate passed |
+| `pnpm -r build` in `harness` | pass after dependency setup | unchanged | 3.718 s | 1 gate passed |
+| `pnpm -r test` in `harness` | pass after dependency setup | unchanged | 2.797 s | 14 passed, 0 failed, 0 skipped |
 | Voice pytest collection | prerequisite failure | unchanged | 6.386 s | 0 tests run, 2 collection errors; missing `pytest_asyncio` and `aiohttp` |
 | Python syntax inspection | pass | unchanged | 0.126 s | 78 files passed, 0 failed, 0 skipped |
 | Standalone JavaScript syntax inspection | pass | unchanged | 0.067 s | 3 files passed, 0 failed, 0 skipped |
 | Swift source parsing | pass | unchanged | 3.092 s | 192 app files parsed; not a typecheck or build |
 | iOS typecheck, tests and build | blocked | blocked | not run | generated FFI artifacts absent; native build space unavailable |
 | shellcheck / actionlint | missing tools | unchanged | not run | unmeasured; no installer executed |
+| `scripts/merge/selftest.sh` | existing macOS Bash parse failure | unchanged | 34.659 s | 57 pass markers before exit 2 at line 350 |
+| Busy-reply fake-relay unittest | pass | unchanged | 46.103 s | 2 passed, 0 failed, 0 skipped |
+
+The initial harness invocations failed because dependencies were absent (typecheck
+2.038 s, build 0.311 s, tests 0/2 files in 2.745 s). An inspected, frozen-lockfile
+install with lifecycle scripts disabled made all three gates runnable. This is
+environment preparation, with no source or lockfile change. Initial failure logs
+and successful reruns are retained locally. Voice collection still lacks its
+documented Python dependencies; they include the heavier LiveKit runtime.
 
 The host had 2.84 GiB free. CI documents a roughly 19 GiB Rust clippy/test peak
 and a 25 GiB free-space floor (`.github/workflows/ci.yml`). A fresh isolated native
