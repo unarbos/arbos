@@ -3000,8 +3000,12 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("arbos-tree-xchat-refused-{}", ulid()));
         std::fs::create_dir_all(&dir).unwrap();
         let store = Store::open(&dir.join("agentd.db")).unwrap();
-        store.upsert_chat("c-refused", "sensitive", false, now_ms()).unwrap();
-        store.upsert_chat("c-benign", "planning", false, now_ms()).unwrap();
+        store
+            .upsert_chat("c-refused", "sensitive", false, now_ms())
+            .unwrap();
+        store
+            .upsert_chat("c-benign", "planning", false, now_ms())
+            .unwrap();
         // Another chat's turn the provider will decline, and an unrelated chat's benign memory.
         // Seed both 20 minutes ago so their episodes are past `SETTLE_MS` and get a card this test.
         let at = now_ms() - 20 * 60_000;
@@ -3069,7 +3073,10 @@ mod tests {
                 q,
                 "the project owner",
                 "",
-                WalkOptions { compact: true, fast: true },
+                WalkOptions {
+                    compact: true,
+                    fast: true,
+                },
             )
             .await
         }

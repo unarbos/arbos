@@ -11906,8 +11906,7 @@ impl Agent {
                     // would offer them back through the memory walk in this or any other chat.
                     // Clear and rebuild those cards without the declined leaf.
                     if n > 0 {
-                        if let Ok(Some(row_id)) =
-                            self.store.t3_refused_row_id(chat_id, user_msg_id)
+                        if let Ok(Some(row_id)) = self.store.t3_refused_row_id(chat_id, user_msg_id)
                         {
                             self.tree.invalidate_refused_leaf(&row_id);
                         }
