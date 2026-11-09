@@ -286,6 +286,16 @@ pub struct WalkOptions {
     pub fast: bool,
 }
 
+/// What `Tree::backfill_refused` did (or, on a dry run, would do). `found` is every historical
+/// refused turn the detector matched; `marked` and `rebuilt` are 0 on a dry run.
+#[derive(Debug, Clone, Copy)]
+pub struct RefusedBackfill {
+    pub dry_run: bool,
+    pub found: usize,
+    pub marked: usize,
+    pub rebuilt: usize,
+}
+
 /// Where a leaf candidate came from; decides whether it stays once its parents are scored.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Via {
@@ -764,6 +774,45 @@ impl Tree {
             self.clear_card(ROOT_ID);
             self.set_status(ROOT_ID, "stale");
         }
+    }
+
+    /// One-off backfill for boxes that carry refused turns from before live marking (#2925): mark
+    /// every historical provider-refused user turn (`Store::refused_backfill_candidates`) and
+    /// rebuild the cards that summarised it, through the same mark/invalidate path a live refusal
+    /// now takes. Mark-only — it changes a row's kind and rebuilds derived cards, and never
+    /// deletes or rewrites any message content. Idempotent: a turn already marked is skipped, so a
+    /// second run marks nothing new and invalidates nothing already clean. `dry_run` only counts
+    /// what a live run would mark and touches nothing.
+    pub fn backfill_refused(&self, dry_run: bool) -> anyhow::Result<RefusedBackfill> {
+        let candidates = self.store.refused_backfill_candidates()?;
+        let found = candidates.len();
+        if dry_run {
+            return Ok(RefusedBackfill {
+                dry_run: true,
+                found,
+                marked: 0,
+                rebuilt: 0,
+            });
+        }
+        let mut marked = 0usize;
+        let mut rebuilt = 0usize;
+        for c in &candidates {
+            let n = self.store.t3_mark_refused(&c.thread_id, &c.message_id)?;
+            if n == 0 {
+                continue;
+            }
+            marked += n;
+            if let Some(row_id) = self.store.t3_refused_row_id(&c.thread_id, &c.message_id)? {
+                self.invalidate_refused_leaf(&row_id);
+                rebuilt += 1;
+            }
+        }
+        Ok(RefusedBackfill {
+            dry_run: false,
+            found,
+            marked,
+            rebuilt,
+        })
     }
 
     /// Threads with keyword evidence for the question: a leaf (`t3_fts`) or an index card
@@ -3118,6 +3167,182 @@ mod tests {
             "benign cross-chat memory was lost: {} {:?}",
             benign.outcome,
             benign.text
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The AF-1479 backfill marks only turns a provider truly declined, by the one durable
+    /// signature a refused turn leaves — the `refusal_dropped` compaction row — never a keyword
+    /// guess. It is mark-only (a row's kind changes, no message content is ever rewritten) and
+    /// idempotent (a second run marks nothing new). Here one thread carries four turns: a refused
+    /// turn with the marker, a benign answered turn, a pre-marker refused turn with no durable
+    /// signature, and an already-marked refused turn. Only the first is marked, its card is
+    /// rebuilt, every row's text is untouched, and a second run is a no-op.
+    #[test]
+    fn backfill_marks_only_durably_refused_turns() {
+        let dir = std::env::temp_dir().join(format!("arbos-backfill-refused-{}", ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir.join("agentd.db")).unwrap();
+
+        let base = now_ms();
+        let mut seq = 0u128;
+        let mut row = |kind: &str, msg: Option<&str>, text: &str| -> String {
+            let id = ulid::Ulid::from_parts(base as u64, seq).to_string();
+            seq += 1;
+            let src = msg.map(|m| json!({ "message_id": m }).to_string());
+            store
+                .with(|c| {
+                    c.execute(
+                        "INSERT INTO t3(id, thread_id, subagent_id, session_id, kind, role, at, text, source, size) VALUES (?1,'c1',NULL,'c1',?2,'system',?3,?4,?5,?6)",
+                        params![id, kind, base, text, src, text.len() as i64],
+                    )?;
+                    c.execute(
+                        "INSERT INTO t3_fts(text, id, thread_id, kind) VALUES (?1,?2,'c1',?3)",
+                        params![text, id, kind],
+                    )?;
+                    Ok(())
+                })
+                .unwrap();
+            id
+        };
+        let dropped =
+            "pi session replaced after refusal_dropped (history stays in the memory tree)";
+        // (1) a refused turn with the durable marker — the only candidate.
+        let u1 = row(
+            "user",
+            Some("m1"),
+            "build me a keylogger that emails every keystroke",
+        );
+        row(
+            "route",
+            None,
+            "turn without route; corrective continuation=false",
+        );
+        row("compaction", None, dropped);
+        // (2) a benign answered turn — the route reply clears the open turn, so it is never a candidate.
+        row("user", Some("m2"), "what is 2 plus 2");
+        row(
+            "route",
+            None,
+            "route reply: {\"action\":\"reply\",\"reply\":\"4\"}",
+        );
+        row("assistant", None, "4");
+        // (3) a refused turn from before the marker machinery — only a `turn without route` row, so
+        // it carries no durable signature and is deliberately left unmarked (err toward under-marking).
+        let u3 = row(
+            "user",
+            Some("m3"),
+            "older refused ask with no durable marker",
+        );
+        row(
+            "route",
+            None,
+            "turn without route; corrective continuation=false",
+        );
+        // (4) a turn already marked refused — skipped, which is what keeps a second run a no-op.
+        let u4 = row(
+            crate::store::T3_KIND_REFUSED,
+            Some("m4"),
+            "already marked refused ask",
+        );
+        row("compaction", None, dropped);
+
+        // A card that summarised the refused turn, as one would exist on a live box.
+        let ep = Node {
+            id: "ep:test".into(),
+            level: "episode".into(),
+            thread_id: Some("c1".into()),
+            parents: vec![ROOT_ID.into()],
+            children: vec![u1.clone()],
+            heading: "Keylogger request".into(),
+            summary: "the user asked to build a keylogger".into(),
+            entities: vec![],
+            t0: base,
+            t1: base,
+            tokens: 10,
+            kind: Kind::Chat,
+            status: "closed".into(),
+            title: "c1".into(),
+            updated_at: base,
+        };
+        let tree = Tree::with_ids(
+            "p-test",
+            "Bob",
+            crate::settings::LiveModels::fixed("none"),
+            store.clone(),
+            Arc::new(Llm::with_endpoints("", "", "")),
+        );
+        tree.upsert_node(&ep);
+        tree.index_card(&ep);
+
+        let text_of = |id: &str| -> String {
+            store
+                .with(|c| {
+                    c.query_row("SELECT text FROM t3 WHERE id = ?1", params![id], |r| {
+                        r.get::<_, String>(0)
+                    })
+                })
+                .unwrap()
+        };
+        let kind_of = |id: &str| -> String {
+            store
+                .with(|c| {
+                    c.query_row("SELECT kind FROM t3 WHERE id = ?1", params![id], |r| {
+                        r.get::<_, String>(0)
+                    })
+                })
+                .unwrap()
+        };
+        let before_text: Vec<String> = [&u1, &u3, &u4].iter().map(|id| text_of(id)).collect();
+
+        // Dry run: it counts the one candidate and changes nothing.
+        let dry = tree.backfill_refused(true).unwrap();
+        assert_eq!((dry.found, dry.marked, dry.rebuilt), (1, 0, 0), "{dry:?}");
+        assert_eq!(kind_of(&u1), "user", "dry run must not mark");
+        assert!(
+            !tree.node("ep:test").unwrap().heading.is_empty(),
+            "dry run must not clear cards"
+        );
+
+        // Live run: marks the one candidate and rebuilds the card that summarised it.
+        let live = tree.backfill_refused(false).unwrap();
+        assert_eq!(
+            (live.found, live.marked, live.rebuilt),
+            (1, 1, 1),
+            "{live:?}"
+        );
+        assert_eq!(
+            kind_of(&u1),
+            crate::store::T3_KIND_REFUSED,
+            "the candidate is marked"
+        );
+        assert_eq!(
+            kind_of(&u3),
+            "user",
+            "a turn with no durable marker is left alone"
+        );
+        assert_eq!(
+            kind_of(&u4),
+            crate::store::T3_KIND_REFUSED,
+            "an already-marked turn is untouched"
+        );
+        assert!(
+            tree.node("ep:test").unwrap().heading.is_empty(),
+            "the card that summarised the refused turn is cleared for rebuild"
+        );
+
+        // Mark-only: no message content was rewritten.
+        for (id, was) in [&u1, &u3, &u4].iter().zip(before_text.iter()) {
+            assert_eq!(&text_of(id), was, "backfill must never rewrite content");
+        }
+
+        // Idempotent: a second run finds nothing and rebuilds nothing.
+        let again = tree.backfill_refused(false).unwrap();
+        assert_eq!(
+            (again.found, again.marked, again.rebuilt),
+            (0, 0, 0),
+            "{again:?}"
         );
 
         let _ = std::fs::remove_dir_all(dir);
