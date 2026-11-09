@@ -61,4 +61,53 @@ final class TranscriptScrollLatchTests: XCTestCase {
         XCTAssertFalse(TranscriptScrollLatch.away(distance: 120))
         XCTAssertTrue(TranscriptScrollLatch.away(distance: 120.5))
     }
+
+    // MARK: After the gesture
+
+    /// The hole the latch left behind, and the reason the chevron was not evidence.
+    ///
+    /// The gesture ends with the finger; the keyboard's retraction does not. The last of it
+    /// lands as a container resize with no content growth, and the reporter used to look only
+    /// at content — so `away` kept whatever the gesture set and described a state that had
+    /// since moved. Run 42558663139 is what that cost: the transcript was back at the live
+    /// bottom and the chevron was still up, so a test asking "is the chevron there" passed
+    /// over the bug it was written to catch.
+    ///
+    /// The proposition is that a container-only change is read again, not that some gate
+    /// changed shape: `.hold` here is the old behaviour and is what must not come back.
+    func testAContainerGrowthWithNoContentGrowthReadsWhereTheReaderIsAgain() {
+        let withKeyboard: CGFloat = 874 - 336
+
+        // The keyboard finishes leaving and the end comes back to the reader: say so.
+        XCTAssertEqual(TranscriptScrollLatch.settled(grew: false, oldContainer: withKeyboard,
+                                                     newContainer: 874, distance: 0, pinned: false),
+                       .reread(away: false),
+                       "the reader is at the end again and `away` has to stop saying otherwise")
+
+        // The same resize with the reader genuinely still up in history: unchanged answer,
+        // reached by reading rather than by keeping.
+        XCTAssertEqual(TranscriptScrollLatch.settled(grew: false, oldContainer: withKeyboard,
+                                                     newContainer: 874, distance: 400, pinned: false),
+                       .reread(away: true),
+                       "400 pt of transcript below them is still history")
+    }
+
+    /// A sample where nothing moved must not disturb the latch — the reporter fires on every
+    /// scroll sample, so "read it again" has to mean "when something moved it".
+    func testASampleWithNothingMovingLeavesTheAnswerAlone() {
+        XCTAssertEqual(TranscriptScrollLatch.settled(grew: false, oldContainer: 874,
+                                                     newContainer: 874, distance: 400, pinned: false),
+                       .hold)
+    }
+
+    /// Content growth keeps the behaviour it had: follow the end for a reader held at it,
+    /// and leave a reader in history where they are.
+    func testContentGrowthStillSticksForAReaderAtTheEndAndNotForOneInHistory() {
+        XCTAssertEqual(TranscriptScrollLatch.settled(grew: true, oldContainer: 874, newContainer: 874,
+                                                     distance: 0, pinned: true),
+                       .stick)
+        XCTAssertEqual(TranscriptScrollLatch.settled(grew: true, oldContainer: 874, newContainer: 874,
+                                                     distance: 400, pinned: false),
+                       .reread(away: true))
+    }
 }

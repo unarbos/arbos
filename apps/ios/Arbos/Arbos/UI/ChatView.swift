@@ -4721,6 +4721,32 @@ enum TranscriptScrollLatch {
     }
 
     static func away(distance: CGFloat) -> Bool { distance > awayThreshold }
+
+    /// What a sample the reader did not cause means for the latch.
+    enum Settled: Equatable {
+        /// Content grew under a reader held at the end: follow it down.
+        case stick
+        /// Something moved the end relative to the reader: read where they are again.
+        case reread(away: Bool)
+        /// Nothing moved that changes the answer.
+        case hold
+    }
+
+    /// Outside the reader's own gesture, two different things can move the end.
+    ///
+    /// Content growth is the one this has always handled: a new or streaming row, which
+    /// re-sticks for a reader at the end and leaves a reader in history alone. The container
+    /// is the one it did not. The keyboard finishing its retraction after the finger lifts
+    /// resizes the container by its whole height without a row changing, which moves the end
+    /// past the reader while `away` keeps whatever the gesture last set — so the chevron
+    /// outlives the state it describes, and anything that reads `away` after a resize reads a
+    /// value from before it.
+    static func settled(grew: Bool, oldContainer: CGFloat, newContainer: CGFloat,
+                        distance: CGFloat, pinned: Bool) -> Settled {
+        if grew { return pinned ? .stick : .reread(away: true) }
+        if abs(newContainer - oldContainer) > 0.5 { return .reread(away: away(distance: distance)) }
+        return .hold
+    }
 }
 
 private struct AwayFromBottomReporter: ViewModifier {
@@ -4788,14 +4814,19 @@ private struct AwayFromBottomReporter: ViewModifier {
                     }
                     gestureContainer = nil
                     // Content or layout moved, not the reader: a growth while pinned (a new or
-                    // streaming row) re-sticks to the end; while away it stays put.
-                    if grew {
-                        if pinned {
-                            away = false
-                            onStick()
-                        } else {
-                            away = true
-                        }
+                    // streaming row) re-sticks to the end; while away it stays put. A container
+                    // resize moves the end too, and has to be read again rather than ignored.
+                    switch TranscriptScrollLatch.settled(grew: grew, oldContainer: old.container,
+                                                         newContainer: new.container,
+                                                         distance: new.distance, pinned: pinned) {
+                    case .stick:
+                        away = false
+                        onStick()
+                    case .reread(let isAway):
+                        away = isAway
+                        pinned = !isAway
+                    case .hold:
+                        break
                     }
                 }
         } else {
