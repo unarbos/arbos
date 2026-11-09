@@ -94,7 +94,7 @@ async fn four_forced_job_asks_two_seconds_apart_give_four_jobs() {
     // The only words in the chat are the four receipts, one per ask, each naming its own job
     // (bug AA; `forced_job_burst_tests.rs` is where the receipt itself is pinned). No ask was
     // answered inline, which is what this burst asked four times not to happen: a receipt says
-    // the work is running, and nothing about the work.
+    // where the work stands and promises its result, and nothing about the work.
     let spoken: Vec<String> = {
         let h = host.try_lock().expect("host free");
         h.doc
@@ -114,10 +114,32 @@ async fn four_forced_job_asks_two_seconds_apart_give_four_jobs() {
         assert_eq!(
             spoken
                 .iter()
-                .filter(|t| t.contains(*pkg) && t.contains("background"))
+                .filter(|t| t.contains(*pkg) && t.contains("I'll post the result here"))
                 .count(),
             1,
-            "one receipt names the {pkg} job and says it is running: {spoken:?}"
+            "one receipt names the {pkg} job and promises its result: {spoken:?}"
+        );
+    }
+    // Bug AL: the fourth of the four is over the per-chat cap, so it waits — and its receipt is
+    // the one that has to say so. This burst is where the two bugs meet: bug AA is that every ask
+    // gets its receipt at once, and AL is that the fourth receipt cannot claim work has started
+    // when the cap is holding it back. Both hold here, which is why the wording is pinned.
+    let last = spoken
+        .iter()
+        .find(|t| t.contains(BURST[3]))
+        .expect("the fourth ask has its receipt");
+    assert!(
+        last.contains("is queued") && !last.contains("running in the background now"),
+        "the fourth ask is over the cap, so its receipt must not say the work has begun: {last}"
+    );
+    for pkg in &BURST[..3] {
+        let early = spoken
+            .iter()
+            .find(|t| t.contains(*pkg))
+            .expect("each of the first three has its receipt");
+        assert!(
+            early.contains("running in the background now"),
+            "the three within the cap did start, and say so: {early}"
         );
     }
     let _ = std::fs::remove_dir_all(&root);
@@ -356,10 +378,24 @@ fn visible_replies_to(host: &SharedHost, msg_id: &str) -> Vec<String> {
         .collect()
 }
 
-/// The per-chat cap (three) is what would have refused the fourth ask. A job the user asked for
-/// in words passes it; a job the model starts off its own judgement still meets it.
+/// Past the per-chat cap the model's fourth job **waits**, and the user's forced job starts; what
+/// neither of them does is get refused.
+///
+/// This case used to assert that the fourth job the model chose was refused, which is what bug U
+/// left standing: the cap bounded work the model started off its own judgement, and a job the
+/// user asked for in words went past it so that a person's fourth explicit request was never
+/// turned down.
+///
+/// Bug AL is what that refusal cost. In Test5 round 22 the agent met it four times and did the
+/// capped work by other means — three times as inline `bash`, once as a once-routine — and the
+/// inline work was unstoppable because nothing named it. So over the cap a job now joins the
+/// waiting tier instead, and the asymmetry this case was built around is gone: `forced` no longer
+/// decides admission, only whether the ask gets its own receipt.
+///
+/// What bug U protected is not weakened by that. It was "do not refuse the user's fourth
+/// request", and now nothing is refused until the waiting tier is full, twelve jobs later.
 #[tokio::test]
-async fn the_per_chat_cap_refuses_the_models_fourth_job_and_not_the_users() {
+async fn the_models_fourth_job_waits_past_the_cap_and_the_users_still_starts() {
     let (agent, root) = test_agent().await;
     let chat = "01TESTCHATFORCEDJOB000003";
     let host = agent.sync.open_room(chat).await.unwrap();
@@ -375,11 +411,14 @@ async fn the_per_chat_cap_refuses_the_models_fourth_job_and_not_the_users() {
             .await
             .expect("within the cap");
     }
-    let err = agent
+    let fourth = agent
         .hook_start_job("A fourth one", brief, "research", vec![])
         .await
-        .expect_err("the cap holds for a job the model chose");
-    assert!(err.contains("cap"), "{err}");
+        .expect("past the cap a job waits rather than being refused");
+    assert_eq!(
+        fourth["state"], "queued",
+        "and it must be reported as waiting, not as started: {fourth}"
+    );
     let (msg_id, cmd) = send_cmd(
         &host,
         "Install more-itertools and report its version, as a background job (not inline).",
@@ -392,7 +431,11 @@ async fn the_per_chat_cap_refuses_the_models_fourth_job_and_not_the_users() {
         "the user asked for this one in words"
     );
     let jobs = agent.store.jobs_for_chat(chat).unwrap();
-    assert_eq!(jobs.len(), 4);
+    assert_eq!(
+        jobs.len(),
+        5,
+        "three within the cap, the model's fourth waiting, and the user's: nothing was dropped"
+    );
     assert!(jobs.iter().any(|j| j.ask_message_id == msg_id));
     let _ = std::fs::remove_dir_all(&root);
 }

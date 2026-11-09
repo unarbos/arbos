@@ -891,6 +891,34 @@ impl Store {
         })
     }
 
+    /// A job already open for this ask under this title, if there is one.
+    ///
+    /// What makes an enqueue idempotent (bug AL): the same ask enqueued twice — a retried tool
+    /// call, a duplicated one — is one job, and the second call is told about the first instead
+    /// of taking a second place in the queue. Keyed on the ask as well as the title because one
+    /// ask may legitimately open several jobs, and on the title as well as the ask because a
+    /// retry repeats both.
+    ///
+    /// The oldest match, so a caller that races itself converges on one row rather than on
+    /// whichever insert happened to land last.
+    pub fn open_job_for_ask(
+        &self,
+        chat_id: &str,
+        ask_message_id: &str,
+        title: &str,
+    ) -> Result<Option<JobRow>> {
+        self.with(|c| {
+            let mut st = c.prepare(&format!(
+                "SELECT {} FROM jobs WHERE chat_id = ?1 AND ask_message_id = ?2 AND title = ?3 \
+                 AND state IN ('queued','running') ORDER BY created_at ASC, rowid ASC LIMIT 1",
+                Self::JOB_COLS
+            ))?;
+            let mut rows =
+                st.query_map(params![chat_id, ask_message_id, title], Self::row_to_job)?;
+            rows.next().transpose()
+        })
+    }
+
     /// Every job still `queued` or `running`, oldest first.
     pub fn open_jobs(&self) -> Result<Vec<JobRow>> {
         self.with(|c| {

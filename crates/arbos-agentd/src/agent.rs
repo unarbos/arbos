@@ -6481,6 +6481,86 @@ impl Agent {
         }
     }
 
+    /// Wait until the caps have room for this job, then let it start.
+    ///
+    /// **Bug AL.** Over the caps `start_job` used to refuse, and the capped work was then done
+    /// by means no row named. A job admitted over the cap waits here instead: its row exists and
+    /// says `queued`, so `list_jobs` names it and `stop_jobs` can take it, and the work is
+    /// managed from the moment it was asked for rather than from the moment a slot happens to
+    /// be free.
+    ///
+    /// How many run at once is unchanged by this — that is the point of waiting here rather than
+    /// letting the job through. The waiting tier bounds how many jobs may be in this state at
+    /// all, and `start_job` is where that bound is enforced.
+    ///
+    /// The wait is on the jobs *ahead* of this one rather than on the running count, so the order
+    /// jobs were asked in is the order they start in. Counting only running jobs would let a job
+    /// that arrived last start while two that arrived before it were still waiting.
+    ///
+    /// A job that is already running is ahead of this one whatever the clock says, because it has
+    /// started and is holding capacity now. Only waiting jobs are ordered, and `created_at` ties
+    /// among them break on the id — a total order, which is all this needs, since every waiting
+    /// job reads the same one and they cannot each conclude they are first.
+    pub(crate) async fn await_job_capacity(&self, chat_id: &str, job_id: &str) {
+        let cap_chat = crate::config::job_max_per_chat();
+        let cap_agent = crate::config::job_max_per_agent();
+        let Ok(Some(mine)) = self.store.job(job_id) else {
+            return;
+        };
+        let mut told = false;
+        loop {
+            // A stop that lands in this wait is honoured by the caller's own check, which runs
+            // as soon as this returns. Returning early rather than waiting for capacity it will
+            // never use is all this needs to do about it.
+            if self.job_was_cancelled(job_id) {
+                return;
+            }
+            // A job parked on an approval card is not ahead of anything. It reads as `queued`,
+            // so without this it would hold a place in the launch order on the strength of an
+            // early `created_at` while holding no worker and no permit — delaying work that
+            // would use both, until a person answers a card. `running` needs no such test: the
+            // park path writes `queued`, so a parked job never reaches that arm.
+            let ahead = |js: Vec<crate::store::JobRow>| {
+                js.into_iter()
+                    .filter(|j| {
+                        j.id != mine.id
+                            && match j.state.as_str() {
+                                "running" => true,
+                                "queued" => {
+                                    (j.created_at, &j.id) < (mine.created_at, &mine.id)
+                                        && self
+                                            .store
+                                            .pending_approval_for_job(&j.id)
+                                            .unwrap_or_default()
+                                            .is_none()
+                                }
+                                _ => false,
+                            }
+                    })
+                    .count()
+            };
+            let here = ahead(self.store.jobs_for_chat(chat_id).unwrap_or_default());
+            let all = ahead(self.store.open_jobs().unwrap_or_default());
+            if here < cap_chat && all < cap_agent {
+                if told {
+                    tracing::info!(job = %job_id, here, all, "capacity freed; the job starts now");
+                }
+                return;
+            }
+            if !told {
+                told = true;
+                let _ = self.store.set_job_step(job_id, "Waiting for capacity");
+                tracing::info!(
+                    job = %job_id, here, all, cap_chat, cap_agent,
+                    "the job waits for capacity before it starts"
+                );
+            }
+            // Polled rather than notified: a dozen paths end a job, and the row every one of
+            // them writes is the single signal they all already send.
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
+
     pub(crate) async fn release_job_locks(&self, job_id: &str) {
         let mut locks = self.job_locks.lock().await;
         let before = locks.len();
@@ -10457,79 +10537,131 @@ impl Agent {
         ticket: &mut Option<crate::send_order::SendTicket>,
     ) -> Result<Value, String> {
         let title = title.to_owned();
-        let open_here = self
+        // Before anything is counted, and long before anything is written: the same ask enqueued
+        // twice is one job (bug AL's idempotency half). A second call is told about the first.
+        //
+        // The ticket is deliberately left with the caller here, as it is on a refusal: no new job
+        // was started, so no task has been spawned that could owe this ask its answer, and the
+        // job that is already open owns that debt.
+        if let Ok(Some(open)) = self.store.open_job_for_ask(chat_id, user_msg_id, &title) {
+            tracing::info!(
+                chat_id, job = %open.id, %title,
+                "this ask already has an open job; the enqueue is the same one"
+            );
+            return Ok(json!({
+                "job_id": open.id,
+                "title": open.title,
+                "state": open.state,
+                "already_open": true,
+                "note": "this ask already has this job: the enqueue was the same one, so nothing new was started and nothing was lost. Do not start it again by other means, and tell the user only what the existing job's state says.",
+            }));
+        }
+        // A job parked on an approval card is left out of every count here, and out of the
+        // ordering in [`Agent::await_job_capacity`]. It holds no worker, no `subagent_slots`
+        // permit, no `box_slots` permit, no memory and not even the file locks it claimed — the
+        // park path releases them — so it is not capacity; and it is waiting on a person rather
+        // than on a slot, so it is not the waiting tier either.
+        //
+        // #2890 counted them against the per-chat cap and named the cards in the refusal that
+        // produced. That refusal is gone (bug AL: a refusal is what drove round 22's capped work
+        // into unmanaged inline `bash`), and the counting without the saying would be the worst
+        // of both — work delayed by cards, with nothing left that says so. So the counting goes
+        // and the saying stays: the cards are named on the receipt below, and again on a genuine
+        // capacity wait, which is the one sentence that used to be false.
+        let parked = |j: &crate::store::JobRow| {
+            self.store
+                .pending_approval_for_job(&j.id)
+                .unwrap_or_default()
+                .is_some()
+        };
+        let here = self.store.jobs_for_chat(chat_id).unwrap_or_default();
+        let open_here = here.iter().filter(|j| j.is_open() && !parked(j)).count();
+        let waiting_here = here
+            .iter()
+            .filter(|j| j.state == "queued" && !parked(j))
+            .count();
+        let open_rows = self.store.open_jobs().unwrap_or_default();
+        let waiting_all = open_rows
+            .iter()
+            .filter(|j| j.state == "queued" && !parked(j))
+            .count();
+        let open_all = open_rows.iter().filter(|j| !parked(j)).count();
+        // The cards themselves, which are not capacity but are the thing a receipt that goes
+        // past them has to mention: the person who can clear them is reading this chat.
+        let cards_here = self
             .store
-            .jobs_for_chat(chat_id)
+            .pending_approvals()
             .unwrap_or_default()
             .into_iter()
-            .filter(|j| j.is_open())
+            .filter(|r| r.chat_id == chat_id)
             .count();
-        // Capacity, so parked jobs are left out: a job waiting on an approval card holds no
-        // worker, no `subagent_slots` permit, no `box_slots` permit and no memory, and this cap
-        // is a statement about what the box can run at once. It is also the hard one — there is
-        // no `forced` bypass below — so counting parked jobs here would let a few unanswered
-        // cards stop the agent starting any work at all, which is the stall this change removes
-        // arriving by another route.
-        let open_all = self
-            .store
-            .open_jobs()
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|j| {
-                self.store
-                    .pending_approval_for_job(&j.id)
-                    .unwrap_or_default()
-                    .is_none()
-            })
-            .count();
+        let cards_line = match cards_here {
+            0 => None,
+            1 => Some("One approval card is still waiting for your answer here.".to_owned()),
+            n => Some(format!(
+                "{n} approval cards are still waiting for your answer here."
+            )),
+        };
         let cap_chat = crate::config::job_max_per_chat();
         let cap_agent = crate::config::job_max_per_agent();
-        if open_here >= cap_chat && !forced {
-            // The per-chat cap **does** count a parked job, and says so: piling more work into
-            // the chat where the cards are is the wrong move, and the person who can clear them
-            // is reading that chat. "Wait for one to finish" would be false for work that is
-            // waiting on them, so the refusal names the cards instead.
-            let waiting = self
-                .store
-                .pending_approvals()
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|r| r.chat_id == chat_id)
-                .count();
-            return Err(match waiting {
-                0 => format!(
-                    "{open_here} jobs already run in this chat (cap {cap_chat}); fold this into one of them or wait for one to finish, and tell the user"
-                ),
-                1 => format!(
-                    "{open_here} jobs are open in this chat (cap {cap_chat}) and one of them is waiting for the user's approval; ask them to answer or cancel that card, and do not start more work until they have"
-                ),
-                n => format!(
-                    "{open_here} jobs are open in this chat (cap {cap_chat}) and {n} approval cards are waiting for the user; ask them to answer or cancel those cards, and do not start more work until they have"
-                ),
-            });
+        let wait_chat = crate::config::job_wait_max_per_chat();
+        let wait_agent = crate::config::job_wait_max_per_agent();
+        // **Bug AL.** Over the cap, a job now waits for capacity instead of being refused.
+        //
+        // Test5 round 22, `r22status`: four `start_job` calls were refused with `6 jobs already
+        // run in this chat (cap 3)`, and the agent did the capped work anyway by other means —
+        // three of them as inline `bash` (PIDs 1855/1875/1893/1909), one as a once-routine. The
+        // inline processes were never jobs, so no row named them and no handle a cancel resolves
+        // could reach them: the user's stop took the four real jobs and left `h`, `i` and `j`
+        // growing their files, and the agent said so honestly because it was true.
+        //
+        // The refusal was the cause. Its text already said "fold this into one of them or wait
+        // for one to finish, and tell the user", and that was ignored twice in one round in two
+        // different ways, so the fix cannot be better words — it has to be that there is nothing
+        // to route around. An over-cap job gets a row, and a row is visible, cancellable, and
+        // started in order when capacity frees.
+        //
+        // The waiting tier is bounded, or this would just move the problem: at its limit there
+        // is a refusal again, and it is the one place where refusing is the honest answer
+        // because no amount of waiting will help. **Nothing about how many run at once changes.**
+        // That is [`SUBAGENT_MAX_CONCURRENT`], which this does not touch; the caps above decide
+        // when a job waits, not how many may run.
+        if waiting_here >= wait_chat || waiting_all >= wait_agent {
+            let (n, limit, scope) = match waiting_here >= wait_chat {
+                true => (waiting_here, wait_chat, "in this chat"),
+                false => (waiting_all, wait_agent, "across your chats"),
+            };
+            tracing::info!(
+                chat_id, %title, waiting_here, waiting_all, wait_chat, wait_agent,
+                "the waiting tier is full; the job was not enqueued"
+            );
+            return Err(format!(
+                "not started: {n} jobs are already waiting for capacity {scope} (limit {limit}). \
+                 Nothing was started, nothing was lost, and this is a capacity limit rather than \
+                 a problem with the request. Tell the user the queue is full and that you will \
+                 start this when one of the waiting jobs finishes. Do not run the work yourself \
+                 instead, and do not schedule anything to retry it."
+            ));
         }
-        if open_here >= cap_chat {
+        // Whether this job starts now or waits, decided once and reported in the reply below:
+        // the row is inserted `queued` either way, and [`Agent::await_job_capacity`] counts the
+        // same open jobs this does, so the two cannot disagree about which it is.
+        let waits_for_capacity = open_here >= cap_chat || open_all >= cap_agent;
+        if waits_for_capacity {
             tracing::info!(
                 chat_id,
                 open_here,
                 cap_chat,
-                "the user asked for this job in words; it passes the per-chat cap"
+                open_all,
+                cap_agent,
+                forced,
+                "no capacity for this job yet; it joins the waiting tier"
             );
-        }
-        if open_all >= cap_agent {
-            return Err(format!(
-                "{open_all} jobs already run across your chats (cap {cap_agent}); wait for one to finish, and tell the user"
-            ));
         }
         // Not a cap: the number is unbounded by design and this is the line that makes it
         // visible, so a box quietly accumulating questions nobody answers shows up in the logs
         // rather than only in a user's patience.
-        let parked_jobs = self
-            .store
-            .open_jobs()
-            .unwrap_or_default()
-            .len()
-            .saturating_sub(open_all);
+        let parked_jobs = open_rows.len().saturating_sub(open_all);
         if parked_jobs > 0 {
             tracing::info!(
                 chat_id,
@@ -10589,11 +10721,24 @@ impl Agent {
         // What the job waits for as of now, named before the worker task is spawned so the
         // reply cannot report this job's own locks.
         let blocked_by = self.job_lock_blocker(&spec).await;
-        let queued_line = blocked_by.as_ref().map(|(_, blocker_title)| {
-            format!(
+        let queued_line = match (&blocked_by, waits_for_capacity) {
+            (Some((_, blocker_title)), _) => Some(format!(
                 "\"{title}\" is queued behind \"{blocker_title}\" — it starts when that one frees what they both need."
-            )
-        });
+            )),
+            // Parked jobs are out of the counts above, so reaching here means real work fills
+            // the cap and "when one of the jobs already running finishes" is true. Cards may
+            // still be waiting alongside it, and then both are named: the wait is on a running
+            // job, the cards are on the user, and reporting one as the other is what was wrong.
+            (None, true) => Some(match &cards_line {
+                Some(cards) => format!(
+                    "\"{title}\" is queued — it starts when one of the jobs already running finishes. {cards}"
+                ),
+                None => format!(
+                    "\"{title}\" is queued — it starts when one of the jobs already running finishes."
+                ),
+            }),
+            (None, false) => None,
+        };
         // A job the user asked for in words answers its ask here, with a receipt, and then lets
         // the rest of the chat move.
         //
@@ -10624,9 +10769,16 @@ impl Agent {
         };
         let told_queued = ack.is_some() && queued_line.is_some();
         if let Some(ack) = ack {
-            let line = match &queued_line {
-                Some(q) => format!("{q} I'll post the result here when it lands."),
-                None => format!(
+            let line = match (&queued_line, &cards_line) {
+                (Some(q), _) => format!("{q} I'll post the result here when it lands."),
+                // The start receipt. This job is not waiting on the cards — nothing here does
+                // any more — but it is starting in a chat whose cards nobody has answered, and
+                // this row is the one the user reads. Only when there are any: an ordinary
+                // receipt says nothing about approvals.
+                (None, Some(cards)) => format!(
+                    "\"{title}\" is running in the background now — I'll post the result here when it lands. {cards}"
+                ),
+                (None, None) => format!(
                     "\"{title}\" is running in the background now — I'll post the result here when it lands."
                 ),
             };
@@ -10674,7 +10826,7 @@ impl Agent {
         let mut out = json!({
             "job_id": job_id,
             "title": title,
-            "state": if no_slot || blocked_by.is_some() { "queued" } else { "running" },
+            "state": if no_slot || waits_for_capacity || blocked_by.is_some() { "queued" } else { "running" },
         });
         // A queued job has not started, and the chat is told here rather than through the model.
         // By now the acknowledgement row ("I'll start with a blobless clone") is closed and
@@ -10697,10 +10849,44 @@ impl Agent {
             out["note"] = json!(format!(
                 "queued behind \"{blocker_title}\": this job starts when that one frees what they both need. The chat has been told already — do not repeat it, and do not say this work has started."
             ));
+        } else if waits_for_capacity {
+            // Bug AL: the one thing this reply has to achieve is that the model does not go and
+            // do the work itself. It is not a refusal — the job exists, it is in the list, and a
+            // cancel reaches it — so the note says what has happened and what not to do about it.
+            if !told_queued {
+                if let Some(line) = queued_line.as_deref() {
+                    self.post_chat_line(
+                        host,
+                        chat_id,
+                        user_msg_id,
+                        &format!("job:{job_id}:queued"),
+                        line,
+                    )
+                    .await;
+                }
+            }
+            out["note"] = json!(format!(
+                "queued for capacity: the cap on jobs running at once is full, so this one is waiting and starts on its own when a running job finishes. It is a real job — it is in list_jobs and a stop will take it — so nothing needs starting again. Tell the user it is queued, do not say this work has started, do not do the work yourself instead, and do not schedule anything to start it.{}",
+                match &cards_line {
+                    Some(cards) => format!(" Separately, {} Say so, and do not describe this job as waiting on them — it is waiting on a running job.", cards.to_lowercase()),
+                    None => String::new(),
+                }
+            ));
         } else if no_slot {
             out["note"] = json!(
                 "queued for a free worker: it starts when one frees up. Tell the user it is queued, not that this work has started."
             );
+        }
+        // The cards are reported whatever this job is doing, because they outlive it and the
+        // person who can clear them is reading this chat. They never make a job wait.
+        if cards_here > 0 {
+            out["cards_waiting"] = json!(cards_here);
+            if out.get("note").is_none() {
+                out["note"] = json!(format!(
+                    "this job has started normally. Separately, {} Tell the user, and do not say this job is waiting on them.",
+                    cards_line.clone().unwrap_or_default().to_lowercase()
+                ));
+            }
         }
         Ok(out)
     }
@@ -12555,11 +12741,14 @@ impl Agent {
         }
         self.write_threads_index().await;
         if let Some(j) = &job {
+            // Before the locks, because capacity is the coarser gate: a job with no capacity
+            // should not be holding keys its siblings need while it waits for one of them.
+            self.await_job_capacity(chat_id, &j.id).await;
             let keys = self.acquire_job_locks(j).await;
             if !keys.is_empty() {
                 tracing::info!(job = %j.id, ?keys, "job holds its resource locks");
             }
-            // A stop that landed while this job waited for a lock ends it here.
+            // A stop that landed while this job waited for capacity or a lock ends it here.
             if self.job_was_cancelled(&j.id) {
                 self.stop_before_starting(&j.id, host, &msg_id).await;
                 return Ok(());
@@ -13114,11 +13303,17 @@ impl Agent {
         let mut job_retry: Option<JobWorkerFailed> = None;
         let mut job_fallback: Option<String> = None;
         if let (Some(j), Some(card)) = (&job, &parked_on_card) {
-            // Still open, so still in `list_jobs`, still cancellable with `stop_job`, and still
-            // counted by the per-chat cap. `queued` is an existing transition — the retry branch
-            // below writes the same thing — and it is true: no worker is running this, and it is
-            // waiting to be picked up. By an answer rather than by a free slot, which is what
-            // the step beside it says.
+            // Still open, so still in `list_jobs` and still cancellable with `stop_job`. It is
+            // **not** counted by either job cap, and not by the waiting tier or the launch order
+            // either: `start_job` and `await_job_capacity` both leave parked jobs out, because
+            // what is released below is everything this job was holding.
+            //
+            // `queued` is an existing transition — the retry branch below writes the same thing
+            // — and it is true: no worker is running this, and it is waiting to be picked up. By
+            // an answer rather than by a free slot, which is what the step beside it says. Both
+            // of those exclusions are written against this line, so a second park path that left
+            // the state alone would put a job holding nothing back into the arithmetic;
+            // `a_parked_job_is_queued_not_running` pins it.
             let _ = self.store.set_job_state(&j.id, "queued", None);
             let _ = self.store.set_job_step(&j.id, "Waiting for approval");
             // Nothing is touching the files this job claimed while it waits, and the user may

@@ -43,6 +43,8 @@ mod job_cancel_tests;
 #[cfg(test)]
 mod job_cancel_unconfirmed_tests;
 #[cfg(test)]
+mod job_cancel_window_tests;
+#[cfg(test)]
 mod job_correction_routing_tests;
 #[cfg(test)]
 mod job_finished_sweep_tests;
@@ -70,6 +72,8 @@ mod job_result_budget_tests;
 mod job_steer_inherit_tests;
 #[cfg(test)]
 mod job_steer_race_tests;
+#[cfg(test)]
+mod job_wait_tier_tests;
 mod jobs_view;
 mod llm;
 mod local;

@@ -2019,14 +2019,17 @@ pub(crate) mod tests {
             t0.elapsed() < Duration::from_secs(2),
             "start_job must not wait for the worker"
         );
-        let err = agent
+        // Past the cap the job waits instead of being refused (bug AL): the refusal is what the
+        // agent routed around in Test5 round 22, by doing the capped work as inline `bash` that
+        // no stop could reach. A waiting job has a row, and a row can be stopped.
+        let fourth = agent
             .hook_start_job("A fourth one", brief, "research", vec![])
             .await
-            .unwrap_err();
-        assert!(err.contains("cap"), "{err}");
+            .expect("past the cap a job waits rather than being refused");
+        assert_eq!(fourth["state"], "queued", "{fourth}");
         let listed = agent.hook_list_jobs().await.unwrap();
         let jobs = listed["jobs"].as_array().unwrap();
-        assert_eq!(jobs.len(), 3);
+        assert_eq!(jobs.len(), 4);
         assert!(jobs
             .iter()
             .all(|j| j["state"] == "queued" || j["state"] == "running" || j["state"] == "failed"));
@@ -2037,9 +2040,19 @@ pub(crate) mod tests {
             let ws = agent.working_set_text(chat);
             assert!(ws.contains("Jobs running in this chat"), "{ws}");
         }
-        assert_eq!(row.len(), 3);
+        assert_eq!(row.len(), 4);
         assert_eq!(row[0].kind, "research");
         assert_eq!(row[0].ask_message_id, "m-busy");
+        // Four jobs, one ask, four titles. The enqueue is idempotent on the ask *and* the title
+        // for exactly this reason: one turn may legitimately open several jobs, and keying the
+        // dedupe on the ask alone would have silently merged these four into one.
+        assert_eq!(
+            row.iter()
+                .map(|j| j.title.clone())
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            4
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2970,9 +2983,40 @@ pub(crate) mod tests {
             jobs[0].brief
         );
         assert_eq!(jobs[0].title, "Searching for surf schools santa teresa");
-        // #1776 invariant: when the job cannot start (cap 0), the prose the model had written
-        // posts as the answer instead of vanishing.
-        std::env::set_var("ARBOS_JOB_MAX_PER_CHAT", "0");
+        // #1776 invariant: when the job cannot start, the prose the model had written posts as
+        // the answer instead of vanishing.
+        //
+        // The state that makes a job unstartable moved with bug AL. The per-chat cap no longer
+        // refuses — over it a job waits — so a full *waiting tier* is now the only state in
+        // which there is nothing to start, and that is what is set up here. The invariant is
+        // unchanged.
+        //
+        // It is set up by filling the tier rather than by shrinking it with an environment
+        // variable, because the variable is process-global and these tests share a process: a
+        // bound set to zero here is a bound set to zero for every case running beside this one.
+        //
+        // The first job is closed first because the enqueue is idempotent: the same ask under
+        // the same title is the same job, so a second conversion would be answered with the
+        // first one's row and never reach the capacity check at all.
+        agent
+            .store
+            .set_job_state(&jobs[0].id, "done", None)
+            .unwrap();
+        for i in 0..crate::config::job_wait_max_per_chat() {
+            let id = arbos_core::ids::ulid();
+            agent
+                .store
+                .insert_job(
+                    &id,
+                    chat,
+                    &format!("m-filler-{i}"),
+                    &format!("Filler job {i}"),
+                    "ops",
+                    "hold a place in the waiting tier",
+                    &[],
+                )
+                .unwrap();
+        }
         agent
             .convert_act_turn_to_job(
                 chat,
@@ -2983,7 +3027,6 @@ pub(crate) mod tests {
                 &turn,
             )
             .await;
-        std::env::remove_var("ARBOS_JOB_MAX_PER_CHAT");
         let rows = reply_rows(&host, "m-busy");
         assert!(
             rows.iter()
