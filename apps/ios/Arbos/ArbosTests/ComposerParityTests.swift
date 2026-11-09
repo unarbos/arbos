@@ -1,3 +1,4 @@
+import UIKit
 import XCTest
 @testable import Arbos
 
@@ -63,6 +64,19 @@ final class ComposerParityTests: XCTestCase {
                       "a rest at the threshold lights")
         XCTAssertFalse(HoldHighlight.lights(held: 1, drift: HoldHighlight.drift + 1),
                        "a finger that wandered is scrolling or selecting, not holding")
+    }
+
+    func testTheWatcherTakesNoPartInTheTouchItWatches() {
+        // The first cut used a SwiftUI `simultaneousGesture`, which won the touch ahead of the
+        // text view and stopped the composer raising the keyboard at all. These four are what
+        // make the UIKit one passive, and the two durations are the arming rule itself rather
+        // than a copy of it.
+        let hold = HoldHighlight.recognizer(target: nil, action: #selector(getter: UIView.tag))
+        XCTAssertFalse(hold.cancelsTouchesInView, "every touch still reaches the field")
+        XCTAssertFalse(hold.delaysTouchesBegan)
+        XCTAssertFalse(hold.delaysTouchesEnded)
+        XCTAssertEqual(hold.minimumPressDuration, HoldHighlight.delay)
+        XCTAssertEqual(hold.allowableMovement, HoldHighlight.drift)
     }
 
     func testTheWashCoversAOneLinePillsHeight() {

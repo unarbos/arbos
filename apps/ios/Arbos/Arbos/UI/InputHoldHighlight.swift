@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// Grok's touch-and-hold tell: resting a finger on a text box brightens the box under the
 /// finger while the system's Paste / AutoFill menu comes up (Jacob, 2026-11-09, shot 5 in
@@ -10,7 +11,7 @@ import SwiftUI
 ///
 /// So the rule lives here, applied by the shared field helpers rather than by each screen, and
 /// the lit overlay carries an accessibility identifier — `HoldHighlight.identifier` — which is
-/// what `InputHoldHighlightUITests` holds onto. A highlight that stops being driven stops
+/// what `ComposerParityUITests` holds onto. A highlight that stops being driven stops
 /// publishing that element, and the test fails; a highlight that is merely *drawable* no longer
 /// passes for one that works.
 enum HoldHighlight {
@@ -25,9 +26,34 @@ enum HoldHighlight {
     /// selection drag, and neither should light anything.
     static let drift: CGFloat = 10
 
-    /// The box lights when the finger has rested long enough without wandering.
+    /// The rule, as a rule: the box lights when the finger has rested long enough without
+    /// wandering. `recognizer()` is configured from the same two numbers, so this states what
+    /// the recogniser is set to do rather than duplicating a second implementation of it.
     static func lights(held: TimeInterval, drift distance: CGFloat) -> Bool {
         held >= delay && distance <= drift
+    }
+
+    /// The watcher.
+    ///
+    /// It must observe the touch without taking any part of it. The first cut used a SwiftUI
+    /// `DragGesture(minimumDistance: 0)` as a `simultaneousGesture`, which looked passive and
+    /// was not: it won the touch ahead of the `UITextView` underneath, so tapping the composer
+    /// stopped raising the keyboard at all. That took out the keyboard in `BackSwipeUITests`
+    /// and `MentionListOverlayUITests` as well as the composer's own test — a useful failure,
+    /// because "simultaneous" in SwiftUI does not mean "does not interfere".
+    ///
+    /// UIKit can say the thing SwiftUI could not: `cancelsTouchesInView = false` leaves every
+    /// touch with the view it was going to, the delay and the allowed movement *are* the
+    /// arming rule, and the delegate stands aside for every other recogniser — including the
+    /// system's own, which is what raises the Paste / AutoFill menu this highlight accompanies.
+    static func recognizer(target: Any?, action: Selector) -> UILongPressGestureRecognizer {
+        let hold = UILongPressGestureRecognizer(target: target, action: action)
+        hold.minimumPressDuration = delay
+        hold.allowableMovement = drift
+        hold.cancelsTouchesInView = false
+        hold.delaysTouchesBegan = false
+        hold.delaysTouchesEnded = false
+        return hold
     }
 
     /// The brightening reaches a little past the box's shorter side, so on a one-line pill it
@@ -76,21 +102,84 @@ private struct HoldHighlightWash<S: InsettableShape>: View {
     }
 }
 
-/// Watches for a resting finger without taking the touch away from the field underneath — the
-/// Paste / AutoFill menu is the system's and has to come up exactly as it did. The gesture is
-/// simultaneous and observes only; it never calls an action.
+/// Sits behind the box at the box's own size, and watches the window for a resting finger.
+///
+/// It takes no touches of its own: `hitTest` returns nothing, so it is invisible to the touch
+/// system, and the recogniser lives on the window rather than on the box, where it can see a
+/// hold anywhere and report only the ones that land inside this box's bounds.
+private final class HoldProbeView: UIView {
+    /// The point inside this view, or `nil` once the finger has gone.
+    var report: ((CGPoint?) -> Void)?
+    private var hold: UILongPressGestureRecognizer?
+
+    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? { nil }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        guard let window else {
+            if let hold { hold.view?.removeGestureRecognizer(hold) }
+            hold = nil
+            return
+        }
+        guard hold == nil else { return }
+        let watcher = HoldHighlight.recognizer(target: self, action: #selector(held))
+        watcher.delegate = self
+        window.addGestureRecognizer(watcher)
+        hold = watcher
+    }
+
+    @objc private func held(_ sender: UILongPressGestureRecognizer) {
+        switch sender.state {
+        case .began, .changed:
+            let point = sender.location(in: self)
+            // A hold on some other part of the screen is not this box's business.
+            report?(bounds.contains(point) ? point : nil)
+        default:
+            report?(nil)
+        }
+    }
+}
+
+extension HoldProbeView: UIGestureRecognizerDelegate {
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                           shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+        true
+    }
+}
+
+private struct HoldProbe: UIViewRepresentable {
+    let report: (CGPoint?) -> Void
+
+    func makeUIView(context: Context) -> HoldProbeView {
+        let view = HoldProbeView()
+        view.backgroundColor = .clear
+        view.report = report
+        return view
+    }
+
+    func updateUIView(_ view: HoldProbeView, context: Context) {
+        view.report = report
+    }
+}
+
 private struct InputHoldHighlightModifier<S: InsettableShape>: ViewModifier {
     let shape: S
     @State private var at: CGPoint?
-    @State private var start: CGPoint?
-    @State private var began: Date?
     @State private var lit = false
-    /// Identifies the pending fade so a fresh hold's timer cannot be put out by the last
-    /// hold's.
+    /// Identifies the pending fade so a fresh hold cannot be put out by the last hold's timer.
     @State private var fade: UUID?
 
     func body(content: Content) -> some View {
         content
+            .background(HoldProbe { point in
+                if let point {
+                    fade = nil
+                    at = point
+                    lit = true
+                } else if lit {
+                    startFade()
+                }
+            })
             .overlay {
                 GeometryReader { geo in
                     ZStack {
@@ -99,64 +188,22 @@ private struct InputHoldHighlightModifier<S: InsettableShape>: ViewModifier {
                                 .transition(.opacity)
                         }
                     }
+                    .allowsHitTesting(false)
                 }
                 .allowsHitTesting(false)
             }
             .animation(.easeOut(duration: 0.18), value: lit)
-            .simultaneousGesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { value in
-                        fade = nil
-                        at = value.location
-                        let from = start ?? value.location
-                        start = from
-                        let since = began ?? Date()
-                        began = since
-                        let drift = hypot(value.location.x - from.x, value.location.y - from.y)
-                        if drift > HoldHighlight.drift {
-                            lit = false
-                            // A finger that has wandered is doing something else, and must not
-                            // light the box later by coming to rest somewhere new.
-                            began = .distantFuture
-                            return
-                        }
-                        lit = HoldHighlight.lights(held: Date().timeIntervalSince(since), drift: drift)
-                    }
-                    .onEnded { _ in
-                        start = nil
-                        began = nil
-                        guard lit else { at = nil; return }
-                        // Lit boxes keep their light for the menu that is about to appear.
-                        let token = UUID()
-                        fade = token
-                        DispatchQueue.main.asyncAfter(deadline: .now() + HoldHighlight.tail) {
-                            guard fade == token else { return }
-                            fade = nil
-                            lit = false
-                            at = nil
-                        }
-                    }
-            )
-            // A resting finger sends no further events, so the hold has to be noticed on a clock
-            // rather than on the next change. Cheap: it only runs while a finger is down.
-            .modifier(HoldTick(active: began != nil && !lit) {
-                guard let since = began, let from = start, let now = at else { return }
-                let drift = hypot(now.x - from.x, now.y - from.y)
-                lit = HoldHighlight.lights(held: Date().timeIntervalSince(since), drift: drift)
-            })
     }
-}
 
-/// A timer that exists only while a finger is down.
-private struct HoldTick: ViewModifier {
-    let active: Bool
-    let tick: () -> Void
-
-    func body(content: Content) -> some View {
-        if active {
-            content.onReceive(Timer.publish(every: 0.05, on: .main, in: .common).autoconnect()) { _ in tick() }
-        } else {
-            content
+    /// Lit boxes keep their light for the menu that is about to appear.
+    private func startFade() {
+        let token = UUID()
+        fade = token
+        DispatchQueue.main.asyncAfter(deadline: .now() + HoldHighlight.tail) {
+            guard fade == token else { return }
+            fade = nil
+            lit = false
+            at = nil
         }
     }
 }
