@@ -26,8 +26,8 @@ final class ComposerMetricsTests: XCTestCase {
         // Both ends of the pill are now the same 96 × 96 disc, each inset 26 px from its
         // own edge — the white action went round in the same change, so this reads as a
         // pair rather than as a disc facing a capsule.
-        XCTAssertEqual(Theme.composerPlusDisc, Theme.actionPillHeight)
-        XCTAssertEqual(Theme.composerPlusDisc, Theme.actionPillWidth)
+        XCTAssertEqual(Theme.composerDisc, Theme.actionPillHeight)
+        XCTAssertEqual(Theme.composerDisc, Theme.actionPillWidth)
         XCTAssertEqual(Theme.composerPlusLeading, Theme.actionPillTrailing)
         assertOnPixel(Theme.composerPlusLeading, "composerPlusLeading")
         // Since [feedback iphone-header-composer-sizing-2026-10-26] every other field, pill

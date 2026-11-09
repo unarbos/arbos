@@ -172,7 +172,13 @@ struct Theme: Equatable {
     /// inset 26 px from the leading edge, the same 96 × 96 as the circle opposite it.
     /// The reference draws 38 px `+` arms against this build's 54, so the glyph comes down
     /// from `plusGlyph` to 16 (16 pt regular draws 38).
-    static let composerPlusDisc: CGFloat = actionPillHeight
+    /// Shared with the mic, which sits on the same disc at the other end of the field
+    /// (Jacob, 2026-11-09: Grok shades behind both, ours shaded behind neither on Matte and
+    /// behind only the `+` on Glass).
+    static let composerDisc: CGFloat = actionPillHeight
+    /// Between the text and the control row once the composer has stacked them
+    /// (Grok's wrapped composer, Jacob 2026-11-09).
+    static let composerStackGap: CGFloat = 8
     static let composerPlusGlyph: CGFloat = 16
     static let composerPlusLeading: CGFloat = actionPillTrailing
     /// Mic glyph centre → action pill: 72 px (the glyph sits in a 44 pt hit frame, so
@@ -920,6 +926,7 @@ extension View {
             .frame(height: Controls.height)
             .background(ControlSurface(shape: Capsule()))
             .contentShape(Capsule())
+            .inputHoldHighlight(Capsule())
     }
 
     /// A text area of the family that grows from one line: the composer's rule, the
@@ -930,6 +937,7 @@ extension View {
             .padding(.vertical, (Controls.height - 22) / 2)
             .frame(minHeight: Controls.height, alignment: .topLeading)
             .background(ControlSurface(shape: RoundedRectangle(cornerRadius: Controls.radius, style: .circular)))
+            .inputHoldHighlight(RoundedRectangle(cornerRadius: Controls.radius, style: .circular))
     }
 
     /// A text pill button of the family (Message, Add, Done): `Controls.height` tall.

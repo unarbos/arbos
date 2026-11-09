@@ -60,6 +60,13 @@ enum DebugHooks {
     /// Secret hand-off rig: the Comms chat ends with the request card (`offer` / `saved`), the
     /// "save this" ghost row (`ghost`) or the offer card for a pasted key (`detect`).
     static var fixtureSecretHandoff: String? { value("ARBOS_FIXTURE_SECRET_HANDOFF") }
+    /// `ARBOS_FIXTURE_COMPOSER_ATTACHMENT=1`: open with one picture already staged in the
+    /// composer. The real route to a staged picture is the system photo picker, which a UI
+    /// test cannot drive and a capture cannot reproduce twice the same way
+    /// ([feedback attachment-in-composer-2026-11-09]).
+    static var fixtureComposerAttachment: Bool {
+        value("ARBOS_FIXTURE_COMPOSER_ATTACHMENT") == "1"
+    }
     /// With `ARBOS_OPEN_CHAT`: that chat ends with a several-block agent reply (#1389 rigs).
     static var fixtureLongReply: Bool { value("ARBOS_FIXTURE_LONG_REPLY") == "1" }
     /// Presence-row rig (typing-indicator-left-2026-10-23): n agents working in the fixture group.
