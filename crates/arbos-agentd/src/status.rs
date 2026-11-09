@@ -1270,6 +1270,24 @@ pub(crate) mod tests {
         test_agent_with(axum::Router::new()).await
     }
 
+    /// A test agent whose workspace is **not** inside a scratch root.
+    ///
+    /// `std::env::temp_dir()` is `/tmp`, which the deletion rule counts as scratch
+    /// (`SCRATCH_ROOTS`), so an ordinary test box's whole workspace reads as scratch. A test
+    /// about where the workspace boundary falls cannot use that box: every path in it would
+    /// pass for the wrong reason, and would keep passing with the boundary removed. The build's
+    /// own `target/` is writable wherever `cargo test` runs and is not scratch.
+    pub(crate) async fn test_agent_outside_scratch() -> (Arc<Agent>, std::path::PathBuf) {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("the crate sits two levels under the workspace root")
+            .join("target")
+            .join("approval-boxes")
+            .join(ulid());
+        test_agent_full_in(axum::Router::new(), "/nonexistent/pi", None, root).await
+    }
+
     /// A test's own `tracing` output, kept so what the box logged can be read back as evidence
     /// instead of taken on trust.
     ///
@@ -1360,13 +1378,24 @@ pub(crate) mod tests {
     /// Same, pointed at a relay the caller serves itself. The model-stub tests count the TCP
     /// connections the box opens, which `axum::serve` cannot report.
     pub(crate) async fn test_agent_on_relay(relay_url: &str) -> (Arc<Agent>, std::path::PathBuf) {
-        test_agent_on(relay_url.to_owned(), "/nonexistent/pi", None).await
+        let root = std::env::temp_dir().join(format!("arbos-quick-{}", ulid()));
+        test_agent_on_relay_in(relay_url, root).await
     }
 
     async fn test_agent_full(
         extra: axum::Router,
         pi_bin: &str,
         cgroup: Option<std::path::PathBuf>,
+    ) -> (Arc<Agent>, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!("arbos-quick-{}", ulid()));
+        test_agent_full_in(extra, pi_bin, cgroup, root).await
+    }
+
+    async fn test_agent_full_in(
+        extra: axum::Router,
+        pi_bin: &str,
+        cgroup: Option<std::path::PathBuf>,
+        root: std::path::PathBuf,
     ) -> (Arc<Agent>, std::path::PathBuf) {
         let app = axum::Router::new()
             .merge(extra)
@@ -1388,15 +1417,22 @@ pub(crate) mod tests {
         tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
-        test_agent_on(format!("http://127.0.0.1:{port}"), pi_bin, cgroup).await
+        test_agent_on(format!("http://127.0.0.1:{port}"), pi_bin, cgroup, root).await
+    }
+
+    pub(crate) async fn test_agent_on_relay_in(
+        relay_url: &str,
+        root: std::path::PathBuf,
+    ) -> (Arc<Agent>, std::path::PathBuf) {
+        test_agent_on(relay_url.to_owned(), "/nonexistent/pi", None, root).await
     }
 
     async fn test_agent_on(
         relay_url: String,
         pi_bin: &str,
         cgroup: Option<std::path::PathBuf>,
+        root: std::path::PathBuf,
     ) -> (Arc<Agent>, std::path::PathBuf) {
-        let root = std::env::temp_dir().join(format!("arbos-quick-{}", ulid()));
         std::fs::create_dir_all(&root).unwrap();
         let bx = crate::config::BoxConfig {
             user_id: Some("u-test".into()),

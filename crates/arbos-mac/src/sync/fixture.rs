@@ -6554,11 +6554,11 @@ fn seed_chat_docs() -> Vec<ChatDoc> {
         drafts
             .core
             .set_message_fields(&pending, &[("waitingApproval", json!(true))]);
-        // #1544 rig (`ARBOS_FIXTURE_SHELL_CARD=1`): a destructive-shell card with its four
-        // standing rows, as agentd posts it for `rm -rf` outside scratch.
+        // #1544 rig (`ARBOS_FIXTURE_SHELL_CARD=1`): a destructive-shell card with its standing
+        // rows, as agentd posts it for an `rm -rf` outside the agent's own workspace.
         if std::env::var("ARBOS_FIXTURE_SHELL_CARD").as_deref() == Ok("1") {
             s.user("clone arbos into /tmp and list the top level");
-            let command = "cd /work/app && rm -rf node_modules && git clone --depth 1 https://github.com/unarbos/arbos arbos-src";
+            let command = "cd /opt/vendor && rm -rf node_modules && git clone --depth 1 https://github.com/unarbos/arbos arbos-src";
             let shell = s.assistant(
                 TurnKind::Act,
                 MessageStatus::Done,
@@ -6571,11 +6571,10 @@ fn seed_chat_docs() -> Vec<ChatDoc> {
                         summary: command.into(),
                         risk: ApprovalRisk::Destructive,
                         payload: json!({
-                            "kind": "tool_call", "tool": "bash", "class": "file-delete", "path_class": "workspace",
-                            "why": "deletes files outside /work/tmp",
+                            "kind": "tool_call", "tool": "bash", "class": "file-delete", "path_class": "anywhere",
+                            "why": "deletes files outside the agent's own workspace",
                             "input": { "command": command },
                             "grant_options": [
-                                { "path_class": "workspace", "label": "its workspace", "detail": "the agent's own /work folder, including scratch" },
                                 { "path_class": "anywhere", "label": "anywhere", "detail": "any folder of its box" }
                             ]
                         }),
