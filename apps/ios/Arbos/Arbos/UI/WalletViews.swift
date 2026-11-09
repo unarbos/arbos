@@ -3,6 +3,7 @@
 
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 import ArbosFFI
 
 // MARK: Settings → Wallet
@@ -95,25 +96,58 @@ struct WalletPage: View {
     }
 }
 
-/// Twelve numbered words, two columns: easy to copy onto paper, never selectable as one string.
+/// Twelve numbered words, two columns, easy to copy onto paper, and one Copy button underneath.
 struct PhraseGrid: View {
     @Environment(\.theme) private var theme
     let phrase: String
+    @State private var copied = false
+
+    /// The phrase stays on this phone (no Universal Clipboard to a nearby Mac) and leaves the
+    /// pasteboard after a minute, long enough to paste into a password manager.
+    static func copyToPasteboard(_ phrase: String) {
+        UIPasteboard.general.setItems([[UTType.utf8PlainText.identifier: phrase]],
+                                      options: [.localOnly: true, .expirationDate: Date.now.addingTimeInterval(60)])
+    }
 
     var body: some View {
         let words = phrase.split(separator: " ").map(String.init)
-        LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], alignment: .leading, spacing: 10) {
-            ForEach(Array(words.enumerated()), id: \.offset) { i, word in
-                HStack(spacing: 8) {
-                    Text("\(i + 1)").font(theme.font(Theme.small)).foregroundStyle(theme.muted).frame(width: 20, alignment: .trailing)
-                    Text(word).font(.system(.body, design: .monospaced)).foregroundStyle(theme.text)
+        VStack(spacing: 14) {
+            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], alignment: .leading, spacing: 10) {
+                ForEach(Array(words.enumerated()), id: \.offset) { i, word in
+                    HStack(spacing: 8) {
+                        Text("\(i + 1)").font(theme.font(Theme.small)).foregroundStyle(theme.muted).frame(width: 20, alignment: .trailing)
+                        Text(word).font(.system(.body, design: .monospaced)).foregroundStyle(theme.text)
+                    }
                 }
             }
+            Button(action: copy) {
+                Label(copied ? "Copied" : "Copy", systemImage: copied ? "checkmark" : "doc.on.doc")
+                    .font(theme.font(Theme.small, weight: .medium))
+                    .contentTransition(.symbolEffect(.replace))
+                    .foregroundStyle(copied ? theme.online : theme.muted)
+                    .padding(.horizontal, 14)
+                    .frame(height: 32)
+                    .background(Capsule().fill(theme.bg.opacity(0.6)))
+                    .overlay(Capsule().strokeBorder(theme.separator, lineWidth: 0.5))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(copied ? "Copied" : "Copy recovery phrase")
+            .accessibilityIdentifier("wallet-phrase-copy")
         }
         .padding(16)
         .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(theme.card))
         .privacySensitive()
         .accessibilityIdentifier("wallet-phrase")
+    }
+
+    private func copy() {
+        Self.copyToPasteboard(phrase)
+        Haptics.pick()
+        withAnimation(.snappy) { copied = true }
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(1.5))
+            withAnimation(.snappy) { copied = false }
+        }
     }
 }
 
