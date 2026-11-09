@@ -8,6 +8,9 @@ members = [
     # Shared Matrix client (D88 C1): servers and channels for the device apps. Like
     # arbos-client, only arbos-mac and arbos-ffi may depend on it.
     "crates/arbos-matrix",
+    # Every user's wallet (one phrase: TAO account, chat key backup, offline cheques). Like
+    # arbos-matrix, only arbos-mac and arbos-ffi may depend on it.
+    "crates/arbos-wallet",
     # UniFFI / Swift bindings over arbos-client + core. The only crate that
     # names Swift or uniffi.
     "crates/arbos-ffi",
@@ -34,6 +37,7 @@ rust-version = "1.85"
 arbos-core = { path = "crates/arbos-core" }
 arbos-client = { path = "crates/arbos-client" }
 arbos-matrix = { path = "crates/arbos-matrix" }
+arbos-wallet = { path = "crates/arbos-wallet" }
 arbos-ffi = { path = "crates/arbos-ffi" }
 arbos-update = { path = "crates/arbos-update" }
 # Exact pin: arbos-core, the relay box and the Swift client (through ArbosFFI) must agree on the Loro encoding.
