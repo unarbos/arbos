@@ -78,6 +78,9 @@ struct MediaItem: Identifiable, Equatable {
     /// A picker sticker: fixed square, no bubble.
     var sticker: Bool = false
 
+    /// The message it came in (the part of `id` before `#`): pictures sent together.
+    var messageId: Substring { id.prefix { $0 != "#" } }
+
     /// What the decoded picture is cached under: the blob ref, or `url:<url>` for a GIF.
     var cacheKey: String? { blobRef ?? remoteURL.map { "url:" + $0 } }
 
@@ -338,17 +341,20 @@ struct MediaViewer: View {
                     .padding(.bottom, 10)
                     .transition(.opacity)
             }
-            if album.count > 1 {
+            // iMessage's dots: the pictures sent together with this one, while paging still
+            // runs through the whole chat. One dot per picture of the chat was a row of
+            // hundreds running off both edges under "349 of 349".
+            if let dots = Self.dots(album, at: index) {
                 HStack(spacing: 4) {
-                    ForEach(album.indices, id: \.self) { i in
-                        Circle().fill(Color.white.opacity(i == index ? 1 : 0.35)).frame(width: 6, height: 6)
+                    ForEach(0..<dots.count, id: \.self) { i in
+                        Circle().fill(Color.white.opacity(i == dots.current ? 1 : 0.35)).frame(width: 6, height: 6)
                     }
                 }
                 .modifier(ViewerTextShadow())
                 .padding(.bottom, 12)
                 .accessibilityHidden(true)
             }
-            HStack(spacing: 12) {
+            HStack(spacing: 0) {
                 // Close beside Download / Forward — same as Mac; always exits even
                 // when swipe-down or the top × lose the gesture race with zoom/paging.
                 pill("Close", system: "xmark") { close() }
@@ -367,23 +373,45 @@ struct MediaViewer: View {
                         .opacity(canAct ? 1 : 0.5)
                 }
             }
+            .padding(.horizontal, 12)
             .padding(.bottom, 14)
         }
         .animation(.easeOut(duration: 0.2), value: toast)
     }
 
+    static let maxDots = 10
+
+    /// The run of `album` that came in the same message as `album[index]`: how many dots,
+    /// and which one is lit. Nil for a lone picture, or a run too long for dots to read.
+    static func dots(_ album: [MediaItem], at index: Int) -> (count: Int, current: Int)? {
+        guard album.indices.contains(index) else { return nil }
+        let message = album[index].messageId
+        let start = album[..<index].lastIndex { $0.messageId != message }.map { $0 + 1 } ?? 0
+        let end = album[index...].firstIndex { $0.messageId != message } ?? album.endIndex
+        let count = end - start
+        return (2...maxDots).contains(count) ? (count, index - start) : nil
+    }
+
+    /// A round glass button over its one-line label, one equal column each: four side-by-side
+    /// text pills were wider than a phone and wrapped mid-word ("Clos / e").
     private func pill(_ label: String, system: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            HStack(spacing: 8) {
-                Image(systemName: system).font(.system(size: 14, weight: .semibold))
-                Text(label).font(theme.font(15, weight: .medium))
+            VStack(spacing: 6) {
+                Image(systemName: system)
+                    .font(.system(size: 17, weight: .semibold))
+                    .frame(width: 48, height: 48)
+                    .background(ViewerChromeBackground(shape: Circle(), interactive: true))
+                Text(label)
+                    .font(theme.font(12, weight: .medium))
+                    .lineLimit(1)
+                    .modifier(ViewerTextShadow())
             }
             .foregroundStyle(.white)
-            .padding(.horizontal, 16)
-            .frame(height: 38)
-            .background(ViewerChromeBackground(shape: Capsule(), interactive: true))
+            .frame(maxWidth: .infinity)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(label)
     }
 
     private func flash(_ text: String) {

@@ -3331,6 +3331,7 @@ struct ImageBubble: View {
 
     /// Open the full-screen viewer for this picture.
     private func openViewer() {
+        guard !ChatGestures.tapEndsHold() else { return }
         viewer = MediaOpen.state(for: item, chatId: chatId, model: model)
     }
 
@@ -3725,6 +3726,7 @@ struct FileCard: View {
                     .padding(.top, Theme.bubbleVPad)
             }
             Button {
+                guard !ChatGestures.tapEndsHold() else { return }
                 viewer = MediaOpen.state(for: item, chatId: chatId, model: model)
             } label: {
                 // Grok's file card (web-08, measured): 61 pt tall, 20×27 icon at 15 pt,
