@@ -5917,12 +5917,16 @@ mod approval_audit_tests {
     use crate::model::{ApprovalRisk, ApprovalState, Part};
 
     fn card(state: ApprovalState) -> Part {
+        card_with(state, ApprovalRisk::Send)
+    }
+
+    fn card_with(state: ApprovalState, risk: ApprovalRisk) -> Part {
         Part::Approval {
             id: "p1".into(),
             approval_id: "apr_1".into(),
             title: "Send the draft".into(),
             summary: String::new(),
-            risk: ApprovalRisk::Send,
+            risk,
             payload: serde_json::Value::Null,
             state,
             expires_at: None,
@@ -5973,5 +5977,28 @@ mod approval_audit_tests {
         }
         let (_, pending) = approval_audit_row(&card(ApprovalState::Pending)).expect("a row");
         assert!(!pending.contains("approval_decided"));
+    }
+
+    /// The only place a shipped build reads a risk: this line. A category it cannot name is
+    /// reported as unrecognised rather than promoted to the gravest one it knows, because the
+    /// audit line's whole value is that it says what the producer said — writing `destructive`
+    /// for a card whose producer said something else records a category nobody sent.
+    #[test]
+    fn an_unrecognised_risk_is_audited_as_itself() {
+        let (_, detail) = approval_audit_row(&card_with(
+            ApprovalState::Pending,
+            ApprovalRisk::Unrecognised,
+        ))
+        .expect("a row");
+        assert!(
+            detail.contains("approval_requested · unrecognised ·"),
+            "the audit line should name the risk as unrecognised: {detail}"
+        );
+        for named in ["destructive", "credential", "money"] {
+            assert!(
+                !detail.contains(named),
+                "a risk category the producer never sent was recorded: {detail}"
+            );
+        }
     }
 }
