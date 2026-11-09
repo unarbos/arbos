@@ -110,35 +110,31 @@ final class ComposerMetricsTests: XCTestCase {
     }
 
     /// Typing fast, deleting fast or clearing the field mid-swap must never
-    /// leave the trailing slot without a control that answers a tap. The pill
-    /// is mounted in every state — the swap only trades the mark inside it —
-    /// so `sendShown` says which mark, and the property that can break is the
-    /// mic's: it may only leave once the mark has become the arrow. Both marks
-    /// show at once in two states, and neither is a glitch: a recording, which
-    /// wants the mic to finish it and the arrow to send it, and an empty draft
-    /// in a server channel, which has no call to offer (C1) so the arrow is
-    /// already there, dimmed.
-    func testTheMicOnlyLeavesOnceThePillHasBecomeSend() {
+    /// leave the trailing slot without a control that answers a tap.
+    ///
+    /// This used to say something narrower: that the mic may leave, but only
+    /// once the mark beside it had become the send arrow. Jacob's comparison
+    /// against Grok on 2026-11-09 retired that rule — the mic now never leaves
+    /// at all, so the slot's safety no longer depends on the handover being
+    /// ordered correctly. What is left to check is that the arrow still shows
+    /// exactly when it should, and that the mic is beside it in every state.
+    func testTheMicIsBesideTheArrowInEveryState() {
         for draftEmpty in [true, false] {
             for recording in [true, false] {
                 for isChannel in [true, false] {
+                    let state = "empty \(draftEmpty) recording \(recording) channel \(isChannel)"
+                    XCTAssertTrue(ComposerTrailing.micShown(), "the mic left: \(state)")
                     // An empty draft cannot send; a non-empty one always can.
-                    let mic = ComposerTrailing.micShown(draftEmpty: draftEmpty, recording: recording)
                     let send = ComposerTrailing.sendShown(
                         canSend: !draftEmpty, recording: recording, isChannel: isChannel)
-                    let state = "empty \(draftEmpty) recording \(recording) channel \(isChannel)"
-                    if !mic {
-                        XCTAssertTrue(send, "the mic left before the arrow arrived: \(state)")
-                    }
-                    XCTAssertEqual(mic && send, recording || (draftEmpty && isChannel),
-                                   "both marks at once: \(state)")
+                    // The arrow is there for anything sendable, while a recording is being
+                    // finished, and in a server channel, which has no call to offer (C1) and
+                    // so shows it dimmed rather than showing nothing.
+                    XCTAssertEqual(send, !draftEmpty || recording || isChannel,
+                                   "the arrow is in the wrong state: \(state)")
                 }
             }
         }
-        // Pending attachments on an empty draft: the mic is still there, and
-        // the pill sends them.
-        XCTAssertTrue(ComposerTrailing.micShown(draftEmpty: true, recording: false))
-        XCTAssertTrue(ComposerTrailing.sendShown(canSend: true, recording: false, isChannel: false))
     }
 
     func testMicGlyphIsGroksFilledMicWithoutABase() {
