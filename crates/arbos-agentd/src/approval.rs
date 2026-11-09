@@ -2429,9 +2429,35 @@ mod job_approval_tests {
 #[cfg(test)]
 mod parked_job_tests {
     use super::*;
-    use crate::status::tests::test_agent;
+    use crate::status::tests::{test_agent, test_agent_with_pi};
 
     const CHAT: &str = "01TESTCHATPARKEDJOB0000000";
+
+    /// A worker that starts, answers the handshake and settles having done nothing. Enough to
+    /// reach `run_subagent`'s settle, which is where the park decision is made — and a run that
+    /// produced nothing is the right shape for it, because the settle reads the card rather than
+    /// anything the model returned.
+    const SETTLING_PI: &str = r#"#!/usr/bin/env python3
+import json, sys
+
+def reply(cmd, cid, data=None):
+    sys.stdout.write(json.dumps({"type": "response", "id": cid, "command": cmd, "success": True, "data": data}) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    c = json.loads(line)
+    kind, cid = c.get("type"), c.get("id")
+    if kind == "get_state":
+        reply(kind, cid, {"isStreaming": False})
+        continue
+    reply(kind, cid)
+    if kind == "prompt":
+        sys.stdout.write(json.dumps({"type": "agent_settled", "aborted": False}) + "\n")
+        sys.stdout.flush()
+"#;
 
     /// A parked job and its card, as a park leaves them: job open at `queued` with no worker
     /// running, card `pending` naming both the worker and the job.
@@ -2531,16 +2557,11 @@ mod parked_job_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// The two job caps read a parked job differently, and the difference is deliberate.
-    ///
-    /// Per agent is capacity — a parked job consumes no permit, no worker and no memory — so
-    /// counting them would let a few unanswered cards stop the box starting any work at all,
-    /// which is the original stall by another route. Per chat still counts them, because piling
-    /// more work into the chat where the cards are is the wrong move and the person who can
-    /// clear them is reading it; what changes there is that the refusal names the cards instead
-    /// of saying "wait for one to finish", which is false for work waiting on the user.
+    /// Capacity: a parked job consumes no permit, no worker and no memory, so counting them
+    /// would let a few unanswered cards stop the box starting any work at all, which is the
+    /// original stall by another route.
     #[tokio::test]
-    async fn parked_jobs_leave_the_capacity_cap_alone_and_the_per_chat_refusal_names_them() {
+    async fn parked_jobs_leave_the_capacity_cap_alone() {
         let (agent, root) = test_agent().await;
         agent.store.upsert_chat(CHAT, "Main", true, 0).unwrap();
         let host = agent.sync.open_room(CHAT).await.unwrap();
@@ -2554,32 +2575,6 @@ mod parked_job_tests {
         );
 
         let mut ticket = None;
-        let refusal = agent
-            .start_job(
-                CHAT,
-                &host,
-                "01TESTPARKEDASK00000000000",
-                "New work",
-                "Do something else.",
-                "code",
-                Vec::new(),
-                // Not forced, so the per-chat cap answers first — which is where the parked
-                // jobs are counted and where the wording matters.
-                false,
-                &mut ticket,
-            )
-            .await
-            .expect_err("the per-chat cap refuses this");
-        assert!(
-            refusal.contains("waiting for the user") || refusal.contains("approval cards"),
-            "the refusal must name the cards rather than say to wait for work to finish: {refusal}"
-        );
-        assert!(
-            !refusal.contains("wait for one to finish"),
-            "that sentence is false for work that is waiting on the user: {refusal}"
-        );
-        // Forced past the soft per-chat cap, the hard capacity cap does not refuse either,
-        // because none of those jobs is using any capacity.
         let started = agent
             .start_job(
                 CHAT,
@@ -2597,6 +2592,320 @@ mod parked_job_tests {
             started.is_ok(),
             "parked jobs must not wedge the box: {started:?}"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The other half of what used to be one test, and it changed shape with bug AL.
+    ///
+    /// #2890 refused this call and named the cards in the refusal, because piling more work into
+    /// the chat where the cards are is the wrong move. #2924 deletes the refusal — a refusal is
+    /// exactly what drove round 22's capped work into unmanaged inline `bash` — and parked jobs
+    /// leave the arithmetic entirely, so the work *starts*.
+    ///
+    /// What survives is the saying rather than the counting. The receipt the user reads names
+    /// the cards nobody has answered, with their count, because the person who can clear them is
+    /// reading this chat; and it does not describe this job as waiting on them, because it is
+    /// not. An ordinary receipt in a chat with no cards says nothing about approvals at all.
+    #[tokio::test]
+    async fn the_start_receipt_names_the_cards_nobody_has_answered() {
+        let (agent, root) = test_agent().await;
+        agent.store.upsert_chat(CHAT, "Main", true, 0).unwrap();
+        let host = agent.sync.open_room(CHAT).await.unwrap();
+
+        // A chat with no cards first, while nothing has started: an ordinary receipt must not
+        // grow an approvals line, or every receipt on the box pays for this one.
+        const QUIET: &str = "01TESTCHATPARKEDQUIET00000";
+        agent.store.upsert_chat(QUIET, "Quiet", true, 0).unwrap();
+        let quiet_host = agent.sync.open_room(QUIET).await.unwrap();
+        let mut quiet_ticket = None;
+        let plain = agent
+            .start_job(
+                QUIET,
+                &quiet_host,
+                "01TESTQUIETASK000000000000",
+                "Plain work",
+                "Look something up.",
+                "research",
+                Vec::new(),
+                false,
+                &mut quiet_ticket,
+            )
+            .await
+            .expect("a chat with no cards starts work the usual way");
+        assert!(
+            plain.get("cards_waiting").is_none(),
+            "a chat with no cards must not report any: {plain}"
+        );
+        assert!(
+            !plain["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("approval"),
+            "nor say anything about approvals: {plain}"
+        );
+
+        let cards = 3;
+        for n in 0..cards {
+            a_parked_job(&agent, n).await;
+        }
+        let mut ticket = None;
+        let started = agent
+            .start_job(
+                CHAT,
+                &host,
+                "01TESTPARKEDASK00000000000",
+                "New work",
+                "Look something else up.",
+                "research",
+                Vec::new(),
+                // Not forced: this is the path that used to refuse.
+                false,
+                &mut ticket,
+            )
+            .await
+            .expect("nothing refuses now — parked jobs are not capacity");
+        assert_eq!(
+            started["state"], "running",
+            "the work starts rather than waiting on an answer nobody has given: {started}"
+        );
+        assert_eq!(
+            started["cards_waiting"],
+            json!(cards),
+            "the receipt reports the cards it started alongside, and how many: {started}"
+        );
+        let note = started["note"].as_str().unwrap_or_default();
+        assert!(
+            note.contains(&format!("{cards} approval cards")),
+            "the receipt must name the cards and their count: {note}"
+        );
+        assert!(
+            !note.contains("queued"),
+            "this job is not queued and the receipt must not say it is: {note}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The launch order, which is the repair with no visible symptom.
+    ///
+    /// A parked job reads as `queued`, so `await_job_capacity` counted it as being *ahead* of a
+    /// job created later — holding a place in the launch order on the strength of an early
+    /// `created_at` while holding no worker and no permit. Nothing in any row says this is
+    /// happening: the later job simply never starts, until a person answers a card.
+    ///
+    /// Measured rather than inspected. With the repair the wait returns on its first pass with
+    /// no sleep; without it, it sleeps a second and loops forever, so a sub-second deadline
+    /// separates the two without waiting on either.
+    #[tokio::test]
+    async fn a_parked_job_does_not_delay_a_job_queued_after_it() {
+        let (agent, root) = test_agent().await;
+        agent.store.upsert_chat(CHAT, "Main", true, 0).unwrap();
+        // Enough to fill both caps, every one of them parked and created before the job below.
+        for n in 0..crate::config::job_max_per_agent() + 2 {
+            a_parked_job(&agent, n).await;
+        }
+        // The id sorts after every parked id, so this job loses the `(created_at, id)` tiebreak
+        // as well as the clock — the parked rows are unambiguously "ahead" of it.
+        const LATER: &str = "01TESTZLATEJOB000000000000";
+        agent
+            .store
+            .insert_job(
+                LATER,
+                CHAT,
+                "01TESTPARKEDASK00000000000",
+                "Later work",
+                "research",
+                "Look something up.",
+                &[],
+            )
+            .unwrap();
+        agent.store.set_job_state(LATER, "queued", None).unwrap();
+
+        let waited = tokio::time::timeout(
+            std::time::Duration::from_millis(300),
+            agent.await_job_capacity(CHAT, LATER),
+        )
+        .await;
+        assert!(
+            waited.is_ok(),
+            "a parked job holds no worker and no permit, so it must hold no place in the launch \
+             order either — this job was still waiting for capacity after 300ms"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The queued path survives for genuine capacity waits, and this is the sentence that was
+    /// false before.
+    ///
+    /// Real running work fills the cap, so "it starts when one of the jobs already running
+    /// finishes" is true — and cards are waiting in the same chat. Both are named, and neither
+    /// is reported as the other: the wait is on a running job, the cards are on the user. Saying
+    /// the job waits on running work when it waits on an answer is round 22's lie; saying
+    /// nothing about the cards is #2890's stall. Nothing may collapse the two.
+    #[tokio::test]
+    async fn a_genuine_capacity_wait_names_the_running_work_and_the_cards_apart() {
+        let (agent, root) = test_agent().await;
+        agent.store.upsert_chat(CHAT, "Main", true, 0).unwrap();
+        let host = agent.sync.open_room(CHAT).await.unwrap();
+        // Real work, holding real workers, enough of it to fill the per-chat cap on its own.
+        for n in 0..crate::config::job_max_per_chat() {
+            let job = format!("01TESTRUNNINGJOB0000000{n:03}");
+            agent
+                .store
+                .insert_job(
+                    &job,
+                    CHAT,
+                    "01TESTPARKEDASK00000000000",
+                    "Running work",
+                    "research",
+                    "Already going.",
+                    &[],
+                )
+                .unwrap();
+            agent.store.set_job_state(&job, "running", None).unwrap();
+        }
+        // And one card nobody has answered, on a job that is holding nothing.
+        a_parked_job(&agent, 0).await;
+
+        let mut ticket = None;
+        let queued = agent
+            .start_job(
+                CHAT,
+                &host,
+                "01TESTPARKEDASK00000000000",
+                "New work",
+                "Look something else up.",
+                "research",
+                Vec::new(),
+                false,
+                &mut ticket,
+            )
+            .await
+            .expect("over the cap it queues rather than refusing");
+        assert_eq!(
+            queued["state"], "queued",
+            "real running work fills the cap, so this one genuinely waits: {queued}"
+        );
+        let note = queued["note"].as_str().unwrap_or_default();
+        assert!(
+            note.contains("when a running job finishes"),
+            "the wait is on a running job, which is now true rather than a guess: {note}"
+        );
+        assert!(
+            note.contains("approval card"),
+            "and the card waiting alongside it is named rather than left out: {note}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **The premise the other four rest on.** Every exclusion above reads a parked job as
+    /// `queued`, and that is true today only because `run_subagent` writes it at the one place
+    /// that parks. Nothing in the tree enforces it.
+    ///
+    /// So this drives the real park path rather than `a_parked_job`, whose whole job is to
+    /// hand-write the state the other cases need. A test built on that helper would assert the
+    /// helper's own `set_job_state(&job, "queued", None)` and would pass happily against a tree
+    /// where the park path had stopped writing it — which is the one failure this exists to
+    /// catch. A second park path that left a `running` row alone would put a job holding nothing
+    /// back into the caps and the launch order, and every other case here would stay green.
+    #[tokio::test]
+    async fn a_parked_job_is_queued_not_running() {
+        use std::os::unix::fs::PermissionsExt;
+        let script_root = std::env::temp_dir().join(format!("arbos-park-path-{}", ulid()));
+        std::fs::create_dir_all(&script_root).unwrap();
+        let pi_bin = script_root.join("settling-pi.py");
+        std::fs::write(&pi_bin, SETTLING_PI).unwrap();
+        std::fs::set_permissions(&pi_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let (agent, root) = test_agent_with_pi(&pi_bin.display().to_string()).await;
+        agent.store.upsert_chat(CHAT, "Main", true, 0).unwrap();
+        let host = agent.sync.open_room(CHAT).await.unwrap();
+        const JOB: &str = "01TESTPARKPATHJOB000000000";
+        const WORKER: &str = "01TESTPARKPATHWORKER000000";
+        const CARD: &str = "01TESTPARKPATHCARD00000000";
+        agent
+            .store
+            .insert_subagent(WORKER, "park-path", "work", "pi", CHAT)
+            .unwrap();
+        agent
+            .store
+            .insert_job(
+                JOB,
+                CHAT,
+                "01TESTPARKEDASK00000000000",
+                "Clearing the old exports",
+                "code",
+                "Delete last month's export files.",
+                &[],
+            )
+            .unwrap();
+        agent.store.set_job_subagent(JOB, WORKER).unwrap();
+        agent.store.set_job_state(JOB, "running", None).unwrap();
+        // The card this worker's session raised, as agentd writes it when the worker asks. What
+        // is under test is what the settle does with it, which is not something set up here.
+        agent
+            .store
+            .insert_approval(
+                CARD,
+                CHAT,
+                "01TESTPARKPATHMESSAGE00000",
+                "Run a destructive command (file-delete)",
+                "destructive",
+                &json!({ "kind": "tool_call", "tool": "bash",
+                    "input": { "command": "rm -rf /opt/x" },
+                    "session_id": WORKER, "job_id": JOB }),
+            )
+            .unwrap();
+
+        // However this worker's run ends, the settle reads the card rather than the model's
+        // return contract, so a run that produced nothing still parks.
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            agent.run_subagent(
+                CHAT,
+                &host,
+                "01TESTPARKEDASK00000000000",
+                Some(WORKER.to_owned()),
+                "park-path",
+                "clear the old exports",
+                "Delete last month's export files.",
+                Some(arbos_core::route::Harness::Pi),
+                false,
+                false,
+                Some(crate::agent::JobSpec {
+                    id: JOB.to_owned(),
+                    title: "Clearing the old exports".to_owned(),
+                    kind: "code".to_owned(),
+                    brief: "Delete last month's export files.".to_owned(),
+                    touches: vec![],
+                    attempt: 0,
+                }),
+            ),
+        )
+        .await;
+
+        let row = agent.store.job(JOB).unwrap().unwrap();
+        assert_eq!(
+            row.state, "queued",
+            "the park path must write `queued`: every capacity and ordering exclusion reads a \
+             parked job by that state, and a parked `running` row would be counted as live work"
+        );
+        // `queued` on its own would not prove this came from the park path: the retry branch a
+        // few lines below writes the same state for a worker that produced nothing, which is
+        // exactly what this worker did. These three separate them — a requeue carries the
+        // worker's failure reason and spends a restart, and only a park writes this step.
+        assert_eq!(
+            row.last_step, "Waiting for approval",
+            "and must say what it is waiting for, which is the card rather than a free slot"
+        );
+        assert_eq!(
+            row.error, None,
+            "a park is not a failure, so it carries no reason: {:?}",
+            row.error
+        );
+        assert_eq!(
+            row.restarts, 0,
+            "nor does it spend a crash-budget attempt the way a requeue does"
+        );
+        let _ = std::fs::remove_dir_all(&script_root);
         let _ = std::fs::remove_dir_all(&root);
     }
 
