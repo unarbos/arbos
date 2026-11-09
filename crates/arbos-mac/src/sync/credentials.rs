@@ -112,6 +112,49 @@ pub fn store(creds: &DeviceCredentials) -> Result<()> {
     Ok(())
 }
 
+/// The key that encrypts this Matrix device's local store (its room keys), kept in the login
+/// keychain and made on first use. `None` off macOS or without a keychain: the store is then
+/// protected by the config directory's file permissions only.
+pub fn matrix_store_key(device_id: &str) -> Option<String> {
+    const SERVICE: &str = "sh.arbos.mac.matrix-store";
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let found = Command::new("security")
+        .args([
+            "find-generic-password",
+            "-s",
+            SERVICE,
+            "-a",
+            device_id,
+            "-w",
+        ])
+        .output()
+        .ok()?;
+    if found.status.success() {
+        return String::from_utf8(found.stdout)
+            .ok()
+            .map(|k| k.trim().to_owned());
+    }
+    let mut bytes = [0u8; 32];
+    std::io::Read::read_exact(&mut std::fs::File::open("/dev/urandom").ok()?, &mut bytes).ok()?;
+    use base64::Engine as _;
+    let key = base64::engine::general_purpose::STANDARD_NO_PAD.encode(bytes);
+    let added = Command::new("security")
+        .args([
+            "add-generic-password",
+            "-s",
+            SERVICE,
+            "-a",
+            device_id,
+            "-w",
+            &key,
+        ])
+        .status()
+        .ok()?;
+    added.success().then_some(key)
+}
+
 /// Sign-out: forget the tokens everywhere they could be.
 pub fn clear(relay_url: &str) {
     if cfg!(target_os = "macos") {

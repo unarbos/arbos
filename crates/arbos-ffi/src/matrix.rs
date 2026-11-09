@@ -18,6 +18,8 @@ pub enum MatrixError {
     Homeserver(String),
     #[error("{0}")]
     NoRoom(String),
+    #[error("{0}")]
+    Keys(String),
     #[error("stopped")]
     Stopped,
 }
@@ -28,6 +30,7 @@ impl From<arbos_matrix::Error> for MatrixError {
             arbos_matrix::Error::Session(s) => Self::Session(s),
             arbos_matrix::Error::Homeserver(s) => Self::Homeserver(s),
             arbos_matrix::Error::NoRoom(s) => Self::NoRoom(s),
+            arbos_matrix::Error::Keys(s) => Self::Keys(s),
             arbos_matrix::Error::Stopped => Self::Stopped,
         }
     }
@@ -172,11 +175,21 @@ pub struct MatrixClient {
     inner: Arc<CoreClient>,
 }
 
+/// Where this device keeps its encryption keys (see `arbos_matrix::Crypto`).
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct MatrixCrypto {
+    /// App-private directory, one per Matrix device id.
+    pub store_dir: String,
+    /// Keychain-held key that encrypts the store at rest.
+    pub store_key: Option<String>,
+}
+
 /// Start syncing for this device. Returns once the client exists; the first snapshot comes
 /// through the listener.
 #[uniffi::export(async_runtime = "tokio")]
 pub async fn matrix_start(
     session: MatrixSession,
+    crypto: MatrixCrypto,
     listener: Arc<dyn MatrixListener>,
 ) -> Result<Arc<MatrixClient>, MatrixError> {
     let inner = CoreClient::start(
@@ -185,6 +198,10 @@ pub async fn matrix_start(
             user_id: session.user_id,
             access_token: session.access_token,
             device_id: session.device_id,
+        },
+        arbos_matrix::Crypto {
+            store_dir: crypto.store_dir.into(),
+            store_key: crypto.store_key,
         },
         Arc::new(Bridge(listener)),
     )
@@ -240,6 +257,40 @@ impl MatrixClient {
         local_id: String,
     ) -> Result<String, MatrixError> {
         Ok(self.inner.send_text(&room_id, &text, &local_id).await?)
+    }
+
+    /// [`Self::send_text`] plus transcript parts, each a JSON object (e.g. a cheque part).
+    pub async fn send_parts(
+        &self,
+        room_id: String,
+        text: String,
+        parts_json: Vec<String>,
+        local_id: String,
+    ) -> Result<String, MatrixError> {
+        let parts = parts_json
+            .iter()
+            .map(|p| serde_json::from_str(p))
+            .collect::<Result<Vec<serde_json::Value>, _>>()
+            .map_err(|e| MatrixError::Homeserver(format!("bad part: {e}")))?;
+        Ok(self.inner.send(&room_id, &text, parts, &local_id).await?)
+    }
+
+    /// The account's key backup once the first sync answered: `on` (this device has the keys),
+    /// `off` (never set up: make the phrase, then `recover`), `locked` (set up elsewhere: needs
+    /// the person's phrase).
+    pub async fn backup(&self) -> String {
+        match self.inner.backup().await {
+            arbos_matrix::Backup::On => "on",
+            arbos_matrix::Backup::Off => "off",
+            arbos_matrix::Backup::Locked => "locked",
+        }
+        .to_owned()
+    }
+
+    /// Set up (first device) or open (later devices) the key backup with
+    /// `wallet_recovery_passphrase(phrase)`.
+    pub async fn recover(&self, passphrase: String) -> Result<(), MatrixError> {
+        Ok(self.inner.recover(&passphrase).await?)
     }
 
     pub async fn mark_read(&self, room_id: String) -> Result<(), MatrixError> {
