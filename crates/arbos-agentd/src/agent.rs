@@ -13848,8 +13848,11 @@ impl Agent {
             let prose = worker_prose(raw);
             if status == "done" && !prose.trim().is_empty() {
                 return crate::markdown_tables::normalize_tables(
-                    crate::truncate::clip_for_chat(prose.trim(), crate::truncate::CHAT_NOTICE_CHARS)
-                        .trim(),
+                    crate::truncate::clip_for_chat(
+                        prose.trim(),
+                        crate::truncate::CHAT_NOTICE_CHARS,
+                    )
+                    .trim(),
                 );
             }
             // "Ask me again in a moment" is the wrong instruction for a failure that will not

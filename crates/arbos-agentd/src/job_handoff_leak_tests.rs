@@ -39,7 +39,7 @@ use arbos_core::doc::{MessageView, UserMessageOpts};
 use arbos_core::ids::ulid;
 use serde_json::Value;
 
-use crate::agent::{relay_fallback_line, TurnKind};
+use crate::agent::{relay_fallback_line, ModelError, TurnKind};
 use crate::llm::{extract_return_contract, strip_return_contract};
 use crate::status::tests::{test_agent, Journal, EMPTY_JOB_RESULT_ASK, GLUED_TABLE_JOB_RESULT_ASK};
 use crate::sync::SharedHost;
@@ -104,6 +104,18 @@ async fn posted_on_the_empty_summary_path(chat: &str, raw: &str) -> (String, Str
 /// What the chat got for `ask`, with the box's own warnings. The ask text is what the model stub
 /// answers from, so it chooses which branch of `write_job_result` the case drives.
 async fn posted_for_ask(chat: &str, ask_text: &str, raw: &str) -> (String, String) {
+    posted_for_job(chat, ask_text, "done", raw, None).await
+}
+
+/// As [`posted_for_ask`], for a job that did not finish: `status` and the `error` that says why
+/// are the two things the failure arm of the fallback reads.
+async fn posted_for_job(
+    chat: &str,
+    ask_text: &str,
+    status: &str,
+    raw: &str,
+    error: Option<&ModelError>,
+) -> (String, String) {
     let (agent, root) = test_agent().await;
     let host = agent.sync.open_room(chat).await.unwrap();
     let ask = ulid();
@@ -115,10 +127,15 @@ async fn posted_for_ask(chat: &str, ask_text: &str, raw: &str) -> (String, Strin
     let journal = Journal::default();
     {
         let _capture = journal.capture();
-        agent
-            .write_job_result(chat, &host, &ask, "job-round-12-ab12", "done", raw, None)
-            .await
-            .expect("the result is written");
+        let wrote = agent
+            .write_job_result(chat, &host, &ask, "job-round-12-ab12", status, raw, error)
+            .await;
+        // A job that ended with an error posts its row and *then* returns `Err`, so the caller
+        // can log the failure. The row is what these cases read, so only an unexpected `Err` —
+        // one with no `error` behind it — is a failure here.
+        if error.is_none() {
+            wrote.expect("the result is written");
+        }
     }
     let rows = visible_replies(&host, &ask);
     assert_eq!(
@@ -250,6 +267,75 @@ async fn a_fenced_json_answer_the_user_asked_for_is_not_stripped() {
         posted.contains("```json") && posted.contains("\"data\""),
         "a JSON answer the user asked for must survive the fallback: {posted}"
     );
+}
+
+/// **The guard on this rebase, and the reason it exists.** The fallback has two arms, and only
+/// the finished-work one belongs to bug AC. The failure arm belongs to
+/// [#2921](https://github.com/unarbos/arbos/pull/2921): a model failure that will not clear —
+/// a provider refusal, a spend or context limit, a full disk — says so in its own words, because
+/// bug AR ended here with "ask me again in a moment" while what had actually happened was in
+/// `error` all along.
+///
+/// This branch sat unrebased from 2026-11-06 to 2026-11-09 while #2921 landed underneath it, and
+/// in the conflict the two arms appear as the two sides of one hunk. **Accepting this branch's
+/// side wholesale compiles, passes every other case in this file, and silently puts AR back**,
+/// because this branch predates `model_error_is_permanent` and its version of the arm is the bare
+/// generic line. Hence a case rather than a comment: the next rebase that collapses the arms gets
+/// a red test instead of a regression no reviewer can see in the diff.
+#[tokio::test]
+async fn a_permanent_model_failure_still_names_itself_on_the_fallback_path() {
+    // Anthropic's own wording for the refusal in Test5 — `detail_is_refusal` reads `violative`,
+    // and `refusal` is what pi's `rawStopReason` carries.
+    let err = ModelError {
+        detail: "violative cyber content".to_owned(),
+        refusal: true,
+    };
+    // The worker's text goes in too, so this case also says the contract strip does not reach
+    // across into the failure arm and post a dead job's notes.
+    let (_, raw) = worker_final_text();
+    let (posted, logged) = posted_for_job(
+        "01TESTCHATHANDOFFLEAK00005",
+        EMPTY_JOB_RESULT_ASK,
+        "failed",
+        &raw,
+        Some(&err),
+    )
+    .await;
+
+    assert!(
+        logged.contains("job result call gave nothing"),
+        "this case has to go through the fallback path, not the model one: {logged}"
+    );
+    // The shape, not the absence of a substring: the whole bubble is the error's own line. A fix
+    // that merely moved the generic line elsewhere, or appended the real reason to it, fails here.
+    // Compared against `chat_line_for` rather than a copied literal, because what this pins is
+    // the routing — that this arm asks the `ModelError` — and a refusal's line ignores `owner`.
+    //
+    // `false` is what the failure arm passes (#2925): a worker has no window of this chat's to
+    // replace, since its brief is built fresh for every attempt, so the re-send line would
+    // promise something nothing did. Passing `true` here would compare against the replaced-window
+    // wording instead, which the assertion below rules out on its own.
+    assert_eq!(
+        posted.trim(),
+        err.chat_line_for("", false),
+        "the failure arm stopped asking the ModelError what happened (bug AR, #2921)"
+    );
+    // And the regression's own signature, named so a reader of the failure knows what they broke.
+    assert!(
+        !posted.contains("I couldn't finish that one"),
+        "AR is back: a refusal was reported as a transient failure: {posted}"
+    );
+    assert!(
+        posted.contains("the model provider declined part of the request"),
+        "the user is not told the one thing that gets through: {posted}"
+    );
+    // The two arms are independent, so neither may post the other's content.
+    for machinery in ["```json", "\"acceptance\"", "Parsed return contract"] {
+        assert!(
+            !posted.contains(machinery),
+            "a failed job's bubble carried the job's machinery ({machinery}): {posted}"
+        );
+    }
 }
 
 /// The other path that posts a worker's final text verbatim: the notice agentd writes when the
