@@ -892,6 +892,31 @@ struct ControlSurface<S: InsettableShape>: View {
     }
 }
 
+/// The soft filled disc behind the composer's + and mic (Jacob, 2026-11-09, against Grok's
+/// shot 2).
+///
+/// It cannot be another `ControlSurface`, which is what the + had and which is why Jacob saw
+/// no disc at all there: on Glass a `ControlSurface` is the pill's own clear glass, and clear
+/// glass drawn over clear glass is still clear glass. The disc was being drawn the whole time
+/// and had nothing to say. Grok's discs are a fill one step up from the pill they sit on, so
+/// this is a fill — in the theme's text colour, which lifts on dark glass and deepens on light,
+/// the way the rest of the family's contrast works.
+struct ComposerDisc: View {
+    @Environment(\.theme) private var theme
+    /// Enough to read as a disc against clear glass without becoming a button-shaped slab.
+    static let fill: Double = 0.12
+
+    var body: some View {
+        if theme.isGlass {
+            Circle().fill(theme.text.opacity(Self.fill))
+        } else {
+            // On Matte the pill is a solid `field`, so the family's own control surface
+            // already reads against it.
+            ControlSurface(shape: Circle())
+        }
+    }
+}
+
 /// The pill's surface on Glass: the real material and nothing of ours on it — clear Liquid
 /// Glass on iOS 26, plain frost before — so the content reads through the pill like Grok's
 /// ([feedback iphone-composer-glass-2026-10-28]; the 0.55 `field` tint of the first see-through

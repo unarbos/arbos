@@ -3599,7 +3599,7 @@ struct ChatSession: View {
     private var attachButton: some View {
         Button { showAttach = true } label: {
             ZStack {
-                ControlSurface(shape: Circle())
+                ComposerDisc()
                 Image(systemName: "plus")
                     .font(theme.font(Theme.composerPlusGlyph, weight: .regular)) // control-size: exception plusGlyph
                     .foregroundStyle(theme.text)
@@ -4918,7 +4918,7 @@ private struct ComposerField<Leading: View>: View {
             // The same disc the `+` sits on at the other end of the field. Grok shades behind
             // both; ours had the mic as a bare glyph, which read as unfinished next to a `+`
             // that already had one (Jacob, 2026-11-09).
-            ControlSurface(shape: Circle())
+            ComposerDisc()
                 .frame(width: Theme.composerDisc, height: Theme.composerDisc)
             micGlyph
                 .foregroundStyle(recorder.recording ? theme.danger : theme.icon)

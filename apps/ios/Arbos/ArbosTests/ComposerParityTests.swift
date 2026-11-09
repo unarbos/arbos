@@ -43,6 +43,12 @@ final class ComposerParityTests: XCTestCase {
         XCTAssertEqual(Theme.composerDisc, Theme.actionPillHeight)
     }
 
+    func testTheDiscIsAFillRatherThanMoreOfThePillsGlass() {
+        // The + already drew a `ControlSurface`, which on Glass *is* the pill's clear glass —
+        // so it drew a disc nobody could see. A fill is the whole point.
+        XCTAssertGreaterThan(ComposerDisc.fill, 0)
+    }
+
     func testAWrappedCountComesFromTheHeightTheTextWants() {
         let insets = UIEdgeInsets(top: 10, left: 0, bottom: 10, right: 0)
         XCTAssertEqual(MentionTextView.lines(fit: 42, line: 22, insets: insets), 1)
