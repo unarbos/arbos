@@ -94,7 +94,7 @@ async fn four_forced_job_asks_two_seconds_apart_give_four_jobs() {
     // The only words in the chat are the four receipts, one per ask, each naming its own job
     // (bug AA; `forced_job_burst_tests.rs` is where the receipt itself is pinned). No ask was
     // answered inline, which is what this burst asked four times not to happen: a receipt says
-    // the work is running, and nothing about the work.
+    // where the work stands and promises its result, and nothing about the work.
     let spoken: Vec<String> = {
         let h = host.try_lock().expect("host free");
         h.doc
@@ -114,10 +114,32 @@ async fn four_forced_job_asks_two_seconds_apart_give_four_jobs() {
         assert_eq!(
             spoken
                 .iter()
-                .filter(|t| t.contains(*pkg) && t.contains("background"))
+                .filter(|t| t.contains(*pkg) && t.contains("I'll post the result here"))
                 .count(),
             1,
-            "one receipt names the {pkg} job and says it is running: {spoken:?}"
+            "one receipt names the {pkg} job and promises its result: {spoken:?}"
+        );
+    }
+    // Bug AL: the fourth of the four is over the per-chat cap, so it waits — and its receipt is
+    // the one that has to say so. This burst is where the two bugs meet: bug AA is that every ask
+    // gets its receipt at once, and AL is that the fourth receipt cannot claim work has started
+    // when the cap is holding it back. Both hold here, which is why the wording is pinned.
+    let last = spoken
+        .iter()
+        .find(|t| t.contains(BURST[3]))
+        .expect("the fourth ask has its receipt");
+    assert!(
+        last.contains("is queued") && !last.contains("running in the background now"),
+        "the fourth ask is over the cap, so its receipt must not say the work has begun: {last}"
+    );
+    for pkg in &BURST[..3] {
+        let early = spoken
+            .iter()
+            .find(|t| t.contains(*pkg))
+            .expect("each of the first three has its receipt");
+        assert!(
+            early.contains("running in the background now"),
+            "the three within the cap did start, and say so: {early}"
         );
     }
     let _ = std::fs::remove_dir_all(&root);
