@@ -39,7 +39,7 @@ use arbos_core::doc::{CommandView, UserMessageOpts};
 use arbos_core::ids::{now_ms, ulid};
 use serde_json::{json, Value};
 
-use crate::agent::Agent;
+use crate::agent::{refused_turn_to_drop, Agent, ModelError, TurnState};
 use crate::rpc_child::RpcChild;
 use crate::status::tests::test_agent;
 use crate::sync::SharedHost;
@@ -57,8 +57,10 @@ const ARITHMETIC_ANSWER: &str = "391";
 const FUNCTION: &str = "write me an is_palindrome function";
 const FUNCTION_ANSWER: &str = "def is_palindrome(s): return s == s[::-1]";
 
-/// Anthropic's own wording, as round 2 and round 22 both recorded it.
-const REFUSAL_DETAIL: &str = "the model provider declined this request: violative cyber content";
+/// The provider's own wording, as the AR lane read it out of round 22's pi session file. The stub
+/// sends it with `rawStopReason: "refusal"`, which is the signal agentd decides on; this text is
+/// here so the case runs on what the field really sends, not so anything matches it.
+const REFUSAL_DETAIL: &str = "Cyber safeguards flagged this message. If this is legitimate security work, you can apply for the Cyber Verification Program: https://example.invalid/cyber-verification";
 
 /// How long one send is given. A turn that cannot finish is a failure of this case, not something
 /// to wait out: the refused turn's own path makes three model calls at most (the turn, the
@@ -291,4 +293,88 @@ async fn a_refused_first_message_does_not_refuse_the_rest_of_the_chat() {
         "the transcript records that the refused turn was dropped rather than carried: {replaced:?}"
     );
     pi.shutdown().await;
+}
+
+/// The window is dropped on `rawStopReason: "refusal"`, not on the provider's wording.
+///
+/// Round 22's text happens to carry "flagged", so `detail_is_refusal` catches it — but that is
+/// the net for prose agentd cannot predict, and a filter whose wording changes next month would
+/// walk straight through it. The signal pi actually gives is `rawStopReason`, so that is what
+/// this pins: a refusal whose text no classifier in the box recognises still costs the window.
+///
+/// The walls read the text on purpose, and they are exclusions rather than the signal: a budget
+/// block, a context limit, a full disk and an abort of agentd's own are not content, and a fresh
+/// window buys none of them anything.
+#[test]
+fn the_window_is_dropped_on_the_stop_reason_not_on_the_provider_wording() {
+    let refused_turn = |m: ModelError| {
+        let mut t = TurnState::claim(CHAT, "user-msg", false);
+        t.refusal_retried = true;
+        t.model_error = Some(m);
+        t
+    };
+
+    // Wording no classifier in the box knows, carried on the one signal that is reliable.
+    const UNKNOWN_WORDING: &str = "Safety systems stopped this message.";
+    assert!(
+        !ModelError::detail_is_refusal(UNKNOWN_WORDING),
+        "the point of this case is a wording the text net does not catch"
+    );
+    let from_pi = ModelError::from_message(&json!({
+        "role": "assistant", "stopReason": "error",
+        "rawStopReason": "refusal", "errorMessage": UNKNOWN_WORDING,
+    }))
+    .expect("a refused message");
+    assert!(from_pi.refusal, "`rawStopReason` is the signal");
+    assert!(
+        refused_turn_to_drop(&refused_turn(from_pi)),
+        "a refusal pi named as one must not be left in the window because its prose is unfamiliar"
+    );
+    // And round 22's own text, which is what the field sends.
+    assert!(refused_turn_to_drop(&refused_turn(
+        ModelError::from_message(&json!({
+            "role": "assistant", "stopReason": "error",
+            "rawStopReason": "refusal", "errorMessage": REFUSAL_DETAIL,
+        }))
+        .expect("a refused message")
+    )));
+
+    let refusal = |detail: &str| ModelError {
+        detail: detail.to_owned(),
+        refusal: true,
+    };
+    for detail in [
+        "This operation was aborted",
+        "credits_exhausted: this workspace's credits are used up",
+        "the prompt is too long for this model's context window",
+        "No space left on device",
+    ] {
+        assert!(
+            !refused_turn_to_drop(&refused_turn(refusal(detail))),
+            "not content, so the chat keeps its window: {detail}"
+        );
+    }
+
+    // A transient failure is the other path's business, and it keeps its window too.
+    assert!(!refused_turn_to_drop(&refused_turn(ModelError {
+        detail: "529 overloaded_error".to_owned(),
+        refusal: false,
+    })));
+
+    // The provider took most of the message and the user has the answer: dropping the window
+    // would cost the conversation for a part that was answered anyway.
+    let mut answered = refused_turn(refusal(REFUSAL_DETAIL));
+    answered.streamed_text = "Here are the three of them.".to_owned();
+    assert!(!refused_turn_to_drop(&answered));
+
+    // Before the retry has run there is nothing to conclude: a window the provider will not read
+    // is what the clean retry is for, and only content it will not read in any window is dropped.
+    let mut unretried = refused_turn(refusal(REFUSAL_DETAIL));
+    unretried.refusal_retried = false;
+    assert!(!refused_turn_to_drop(&unretried));
+
+    // Agentd's own interruption owns the turn from here.
+    let mut stopped = refused_turn(refusal(REFUSAL_DETAIL));
+    stopped.stopped = true;
+    assert!(!refused_turn_to_drop(&stopped));
 }
