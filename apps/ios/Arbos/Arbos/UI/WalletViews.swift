@@ -111,33 +111,50 @@ struct PhraseGrid: View {
 
     var body: some View {
         let words = phrase.split(separator: " ").map(String.init)
-        VStack(spacing: 14) {
-            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], alignment: .leading, spacing: 10) {
-                ForEach(Array(words.enumerated()), id: \.offset) { i, word in
-                    HStack(spacing: 8) {
-                        Text("\(i + 1)").font(theme.font(Theme.small)).foregroundStyle(theme.muted).frame(width: 20, alignment: .trailing)
-                        Text(word).font(.system(.body, design: .monospaced)).foregroundStyle(theme.text)
+        VStack(spacing: 20) {
+            // Sized to the words and centred, so the block and the Copy pill share one axis.
+            Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 12) {
+                ForEach(0..<(words.count + 1) / 2, id: \.self) { row in
+                    GridRow {
+                        word(row * 2, words, gap: 28)
+                        word(row * 2 + 1, words, gap: 0)
                     }
                 }
             }
+            .frame(maxWidth: .infinity)
             Button(action: copy) {
-                Label(copied ? "Copied" : "Copy", systemImage: copied ? "checkmark" : "doc.on.doc")
-                    .font(theme.font(Theme.small, weight: .medium))
-                    .contentTransition(.symbolEffect(.replace))
-                    .foregroundStyle(copied ? theme.online : theme.muted)
-                    .padding(.horizontal, 14)
-                    .frame(height: 32)
-                    .background(Capsule().fill(theme.bg.opacity(0.6)))
-                    .overlay(Capsule().strokeBorder(theme.separator, lineWidth: 0.5))
+                HStack(spacing: 6) {
+                    Image(systemName: copied ? "checkmark" : "square.on.square")
+                        .font(.system(size: 13, weight: .medium))
+                        .contentTransition(.symbolEffect(.replace))
+                    Text(copied ? "Copied" : "Copy")
+                }
+                .font(theme.font(Theme.small, weight: .medium))
+                .foregroundStyle(copied ? theme.online : theme.muted)
+                .frame(width: 112, height: 34)
+                .background(Capsule().fill(theme.bg.opacity(0.6)))
+                .overlay(Capsule().strokeBorder(theme.separator, lineWidth: 0.5))
+                .contentShape(Capsule())
             }
             .buttonStyle(.plain)
             .accessibilityLabel(copied ? "Copied" : "Copy recovery phrase")
             .accessibilityIdentifier("wallet-phrase-copy")
         }
-        .padding(16)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 22)
         .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(theme.card))
         .privacySensitive()
         .accessibilityIdentifier("wallet-phrase")
+    }
+
+    /// One numbered word as two grid cells: the number right-aligned in its own column.
+    @ViewBuilder private func word(_ i: Int, _ words: [String], gap: CGFloat) -> some View {
+        if i < words.count {
+            Text("\(i + 1)").font(theme.font(Theme.small).monospacedDigit()).foregroundStyle(theme.muted)
+                .gridColumnAlignment(.trailing)
+            Text(words[i]).font(.system(.body, design: .monospaced)).foregroundStyle(theme.text)
+                .padding(.trailing, gap)
+        }
     }
 
     private func copy() {
