@@ -21,40 +21,6 @@ final class PresenceAnchorUITests: XCTestCase {
         continueAfterFailure = false
     }
 
-    /// The drag case asks whether a reader keeps their place in history after the keyboard goes
-    /// away. That is only a question the transcript can answer if, once the keyboard is down,
-    /// there is somewhere to stand: dismissing it hands the viewport the keyboard's whole height
-    /// back, and `fx-comms-main` is six messages. If the settled transcript cannot hold a
-    /// position further from the end than the app's own `awayThreshold`, the drag case is
-    /// unsatisfiable by construction and its failure says nothing about any anchor.
-    ///
-    /// Measured here rather than argued about, because the two readings of a failing drag case —
-    /// "it was pulled back" and "there was nowhere left to stand" — produce the same single
-    /// number and legs are an hour each.
-    func testTheFixtureIsDeepEnoughForTheDragCaseToMeanAnything() {
-        let app = openWorkingChat()
-        XCTAssertTrue(presence(app).waitForExistence(timeout: appear), "the fixture chat is up")
-        record(app, "at rest at the live bottom, keyboard down")
-
-        // No keyboard anywhere in this case: this is the state the reader is left in once their
-        // drag has dismissed it, and the question is only how much transcript it leaves behind.
-        for _ in 0..<3 { dragIntoHistory(app, endingAt: 0.80) }
-        // Long enough for any rubber-band to spring back, so what is measured is a position the
-        // transcript will actually hold rather than the far end of an overscroll.
-        Thread.sleep(forTimeInterval: 2)
-        record(app, "settled as far back as it goes, keyboard down")
-
-        let top = composerTop(app)
-        guard let newest = bubbles(app).max(by: { $0.frame.maxY < $1.frame.maxY }) else {
-            return XCTFail("the transcript has rows")
-        }
-        XCTAssertGreaterThan(newest.frame.maxY, top + 120,
-                             "with the keyboard down the transcript must be able to settle more "
-                             + "than the 120 pt `awayThreshold` from its end, or no reader can be "
-                             + "in history here at all — newest \(newest.id) \(newest.frame), "
-                             + "composer top \(top)")
-    }
-
     private func openWorkingChat() -> XCUIApplication {
         let app = XCUIApplication()
         app.launchEnvironment = [
@@ -178,6 +144,12 @@ final class PresenceAnchorUITests: XCTestCase {
         let app = openWorkingChat()
         XCTAssertTrue(presence(app).waitForExistence(timeout: appear), "the agent is working")
 
+        // Where the newest row sits when the transcript is at its end, measured in this run
+        // rather than assumed: it is the thing every assertion below is measured against, and
+        // it moves with the fixture, the device and the row's own height.
+        record(app, "at rest at the live bottom, keyboard down")
+        let liveBottom = newestBottom(app)
+
         // Focused the way a reader focuses it. The launch-time draft hook sets `composerFocused`
         // during setup, which is not the same path and does not raise the keyboard the same way.
         let placeholder = app.descendants(matching: .any)
@@ -203,7 +175,7 @@ final class PresenceAnchorUITests: XCTestCase {
         let jump = awayMarker(app)
         XCTAssertTrue(jump.waitForExistence(timeout: 15),
                       "the drag registered as a departure from the end")
-        assertInHistory(app, "straight after the drag")
+        assertNotAtTheLiveBottom(app, "straight after the drag", liveBottom: liveBottom)
 
         // The yank does not arrive with the drag, it arrives with the next growth of the
         // transcript — which is why a screenshot taken straight after the drag can miss it.
@@ -213,16 +185,24 @@ final class PresenceAnchorUITests: XCTestCase {
         shot(app, "history-after-the-keyboard-went-down")
 
         // The transcript's own position, not the chevron's existence.
-        assertInHistory(app, "after the transcript grew under them")
+        assertNotAtTheLiveBottom(app, "after the transcript grew under them", liveBottom: liveBottom)
         if let landmark, let now = bubble(app, landmark.id) {
             XCTAssertEqual(now.minY, landmark.frame.minY, accuracy: 2,
                            "\(landmark.id) is where the reader left it — was \(landmark.frame), now \(now)")
         }
 
-        let top = composerTop(app)
+        // Jacob's complaint in his own terms — the row "covers up the chat bubbles as you scroll
+        // up". Overlap is that claim exactly, and unlike a comparison against the composer's top
+        // edge it has no knife edge: the row travels with the content now, so at this point it
+        // clears that edge by about a point (measured 799 against 798 on leg 42627628875) and a
+        // test written against it would be a coin toss rather than a check.
         let row = presence(app)
-        XCTAssertTrue(!row.exists || row.frame.minY >= top,
-                      "and the row stays gone while they are up here: frame \(row.frame), composer top \(top)")
+        if row.exists {
+            let covered = bubbles(app).filter { $0.frame.intersects(row.frame) }
+            XCTAssertTrue(covered.isEmpty,
+                          "the row must not be drawn over the bubbles the reader is reading — "
+                          + "row \(row.frame), over \(covered.map(\.id))")
+        }
     }
 
     private func bubbles(_ app: XCUIApplication) -> [(id: String, frame: CGRect)] {
@@ -240,12 +220,12 @@ final class PresenceAnchorUITests: XCTestCase {
     /// Every rendered row, the composer, the keyboard and the window on one line, recorded as an
     /// activity so it reaches `xcodebuild-test.log` whether the case passes or fails.
     ///
-    /// A failure in `assertInHistory` is one number, and one number cannot distinguish the two
-    /// things that produce it: a transcript that was yanked back to the end, and a transcript
-    /// with too little history to be anywhere else. `fx-comms-main` is six messages, and the
-    /// viewport grows by the keyboard's whole height when the keyboard goes away — so "there was
-    /// nowhere left to stand" is a real candidate and has to be ruled in or out by measurement
-    /// rather than argued about.
+    /// A position assertion is one number, and one number cannot distinguish the two things that
+    /// produce a failing one: a transcript yanked back to its end, and a transcript with too
+    /// little room to be anywhere else once the keyboard hands the viewport its height back.
+    /// Telling those apart took a leg of its own (42627628875); recording the rows, the composer
+    /// and the keyboard on every assertion means the next question of that shape is answered by
+    /// the log that is already being kept.
     private func record(_ app: XCUIApplication, _ state: String) {
         let rows = bubbles(app).sorted { $0.frame.minY < $1.frame.minY }
         let listed = rows.map { "\($0.id) \(Int($0.frame.minY))…\(Int($0.frame.maxY))" }
@@ -279,17 +259,33 @@ final class PresenceAnchorUITests: XCTestCase {
     ///
     /// This is the complement of `testTheRowRestsOverTheComposerAtTheLiveBottom`'s assertion,
     /// and it is deliberately about the transcript rather than about any indicator over it.
-    private func assertInHistory(_ app: XCUIApplication, _ state: String,
-                                 file: StaticString = #filePath, line: UInt = #line) {
+    private func newestBottom(_ app: XCUIApplication) -> CGFloat {
+        bubbles(app).map(\.frame.maxY).max() ?? 0
+    }
+
+    /// The claim is that the reader's own drag does not put the transcript back at its end, so
+    /// the end is what to measure against — captured from the same run rather than assumed.
+    ///
+    /// An earlier version asked for the newest row to be pushed below the composer, and that bar
+    /// cannot be met here by one drag. It is geometry, not a defect. Dismissing the keyboard
+    /// hands the viewport the keyboard's whole height back, so ~317 pt more transcript comes into
+    /// view, and a reader who travelled ~373 pt ends ~56 pt from an end that has itself moved
+    /// 317 pt closer. Those are measured numbers, from leg 42627628875: the transcript holds the
+    /// offset the gesture left it at, which is the thing the fix promises, while the *distance to
+    /// the end* shrinks no matter what any anchor does. The two legs either side of the fix make
+    /// the difference plain — without it the newest row landed at 727.67 against a live bottom of
+    /// 728, which is the end exactly; with it, 785.
+    private func assertNotAtTheLiveBottom(_ app: XCUIApplication, _ state: String,
+                                          liveBottom: CGFloat,
+                                          file: StaticString = #filePath, line: UInt = #line) {
         record(app, state)
-        let top = composerTop(app)
         let frames = bubbles(app)
         XCTAssertFalse(frames.isEmpty, "\(state): the transcript has rows", file: file, line: line)
         guard let newest = frames.max(by: { $0.frame.maxY < $1.frame.maxY }) else { return }
-        XCTAssertGreaterThan(newest.frame.maxY, top + 1,
-                             "\(state): the reader is up in history, so the newest row is below "
-                             + "the fold rather than resting above the composer — newest "
-                             + "\(newest.id) \(newest.frame), composer top \(top)",
+        XCTAssertGreaterThan(newest.frame.maxY, liveBottom + 25,
+                             "\(state): the transcript is back at its end — newest \(newest.id) "
+                             + "is at \(Int(newest.frame.maxY)), and it rests at \(Int(liveBottom)) "
+                             + "when the transcript is at the live bottom",
                              file: file, line: line)
     }
 }
