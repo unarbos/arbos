@@ -3303,7 +3303,8 @@ struct ChatSession: View {
                 }
             }()
             HStack(spacing: 6) {
-                if let mark { StatusMarkView(mark: mark, size: 9) }
+                // Floats over the transcript, so it keeps turning while the reader scrolls.
+                if let mark { StatusMarkView(mark: mark, size: 9, whileScrolling: true) }
                 Text(label)
                     .font(theme.font(Theme.tiny, weight: .medium))
                     .foregroundStyle(theme.muted)
