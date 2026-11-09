@@ -80,6 +80,21 @@ enum WalletVault {
     }
 }
 
+extension WalletError {
+    /// The words for the person. UniFFI's own description is a debug dump
+    /// (`ArbosFFI.WalletError.Invalid("…")`).
+    var words: String {
+        switch self {
+        case .Invalid(let words), .Chain(let words): return words
+        }
+    }
+}
+
+/// What to show for a wallet failure.
+func walletWords(_ error: Error) -> String {
+    (error as? WalletError)?.words ?? error.localizedDescription
+}
+
 extension RelayAPI {
     /// `PUT /me/wallet`: people can pay this account by handle.
     func linkWallet(address: String, proof: String) async throws {
@@ -201,7 +216,7 @@ extension AppModel {
         do {
             cheque = try walletSignCheque(phrase: phrase, snapshotJson: snapshot, to: to, amount: amount, nonce: nonce)
         } catch {
-            return error.localizedDescription
+            return walletWords(error)
         }
         UserDefaults.standard.set(nonce + 1, forKey: key)
         let id = newId()
@@ -219,7 +234,7 @@ extension AppModel {
             UserDefaults.standard.set(Array(cashed), forKey: "cashedCheques")
             return nil
         } catch {
-            return error.localizedDescription
+            return walletWords(error)
         }
     }
 
