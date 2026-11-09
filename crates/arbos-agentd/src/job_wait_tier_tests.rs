@@ -272,6 +272,111 @@ async fn waiting_jobs_are_released_oldest_first() {
     );
 }
 
+/// A job whose worker failed and was sent back to `queued` re-enters the gate and keeps its own
+/// place, behind a job that has been waiting longer. **A retry does not outrank a longer wait.**
+///
+/// Ruled in by the coordinator as a decision rather than left as something the code happens to
+/// do. The retry path hands the fresh worker the *same job row* with `attempt + 1`, so that
+/// worker runs [`Agent::run_subagent`] again and meets the capacity gate again — and the row it
+/// carries still holds its original `created_at`, because `set_job_state` does not touch that
+/// column. The place a requeued job takes is therefore the place it was asked for, not the place
+/// it was retried in. Nothing here is a special case for retries; the gate reads the row, and the
+/// row does not record why it went back.
+///
+/// # On the refusal wording
+///
+/// This is deliberately *not* a model refusal, because after #2921 a refusal does not requeue at
+/// all: `run_subagent` marks a permanently-failed worker's job `failed` and sends the work to the
+/// inline fallback, since the same bytes would be declined again. `#2921`'s own
+/// `a_refused_worker_fails_with_the_providers_reason_and_is_not_retried` pins that, asserting
+/// `failed` and `restarts == 0`. What does come back to `queued` is a *retryable* failure — a
+/// failed start, a crashed worker, a transient model error on an empty run — and that is what is
+/// driven here, through the real path, by a worker that cannot spawn.
+///
+/// # Why this is not flaky
+///
+/// The worker fails at its spawn, which is certain: the test agent's pi path does not exist. The
+/// requeue is written immediately after that failure, and only *then* does the retry branch wait
+/// up to `Agent::PI_RESPAWN_WAIT` — 45 seconds — for a live main pi child that never arrives.
+/// Every assertion below happens inside that wait, in well under a second, so the fresh worker
+/// has not reached the gate and cannot move the row under the case.
+#[tokio::test]
+async fn a_requeued_job_does_not_outrank_a_job_that_waited_longer() {
+    let (agent, _root) = test_agent().await;
+    let host = agent.sync.open_room(CHAT).await.unwrap();
+    let cap = crate::config::job_max_per_chat();
+    assert!(cap >= 2, "this case needs room for one of the two waiters");
+
+    // The longer wait: a queued row, asked for first, which no worker is started for.
+    let waited_longer = ulid();
+    agent
+        .store
+        .insert_job(
+            &waited_longer,
+            CHAT,
+            &format!("{ASK}older"),
+            "Counting the test files",
+            "ops",
+            "count the test files",
+            &[],
+        )
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(3)).await;
+
+    // The retried job, asked for second. There is capacity for it, so its first worker is
+    // released by the gate at once — and then fails to spawn, which is what sends it back.
+    let retried = enqueue(&agent, &host, "Counting the licence lines")
+        .await
+        .expect("there is capacity for this one")["job_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let mut row = agent.store.job(&retried).unwrap().unwrap();
+    for _ in 0..200 {
+        if row.state == "queued" && row.restarts >= 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        row = agent.store.job(&retried).unwrap().unwrap();
+    }
+    assert!(
+        row.state == "queued" && row.restarts >= 1,
+        "the retry path never sent this job back, so there is nothing to check a place for \
+         (state {:?}, restarts {}, error {:?})",
+        row.state,
+        row.restarts,
+        row.error
+    );
+    let older = agent.store.job(&waited_longer).unwrap().unwrap();
+    assert!(
+        older.created_at < row.created_at,
+        "the longer-waiting job must be the older one, or this case proves nothing"
+    );
+
+    // One place, two waiters.
+    plant_open_jobs(&agent, CHAT, cap - 1, "running");
+    let released = |job: String| {
+        let agent = agent.clone();
+        async move {
+            tokio::time::timeout(
+                std::time::Duration::from_millis(2_500),
+                agent.await_job_capacity(CHAT, &job),
+            )
+            .await
+            .is_ok()
+        }
+    };
+    assert!(
+        released(waited_longer.clone()).await,
+        "the job that has waited longer takes the free place"
+    );
+    assert!(
+        !released(retried.clone()).await,
+        "and the retried job waits its turn rather than taking the place with its second worker"
+    );
+}
+
 /// The per-agent half of the same thing, which is a separate branch and had a separate refusal.
 #[tokio::test]
 async fn a_job_over_the_agent_cap_waits_instead_of_being_refused() {
