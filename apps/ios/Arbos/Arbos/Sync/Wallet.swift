@@ -162,7 +162,15 @@ extension AppModel {
     func refreshChequeSnapshot() async -> Bool {
         guard let address = walletAddressValue,
               let snap = try? await walletSnapshot(address: address) else { return false }
-        try? Data(snap.json.utf8).write(to: Self.snapshotFile, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+        // Application Support does not exist on a fresh install until something makes it.
+        do {
+            try FileManager.default.createDirectory(at: Self.snapshotFile.deletingLastPathComponent(),
+                                                    withIntermediateDirectories: true)
+            try Data(snap.json.utf8).write(to: Self.snapshotFile,
+                                           options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+        } catch {
+            return false
+        }
         let key = "walletNextNonce"
         UserDefaults.standard.set(max(UInt64(UserDefaults.standard.integer(forKey: key)), snap.nonce), forKey: key)
         return true
