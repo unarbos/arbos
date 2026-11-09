@@ -43,6 +43,8 @@ mod job_cancel_tests;
 #[cfg(test)]
 mod job_cancel_unconfirmed_tests;
 #[cfg(test)]
+mod job_cancel_window_tests;
+#[cfg(test)]
 mod job_correction_routing_tests;
 #[cfg(test)]
 mod job_finished_sweep_tests;
