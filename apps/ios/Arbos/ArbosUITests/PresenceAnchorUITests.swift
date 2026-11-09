@@ -90,4 +90,49 @@ final class PresenceAnchorUITests: XCTestCase {
                                  "and it rests over the composer again")
         shot(app, "presence-back-at-the-live-bottom")
     }
+
+    /// Scrolling up with the keyboard open, which is one gesture and not two: the drag
+    /// dismisses the keyboard (`.scrollDismissesKeyboard(.interactively)`) *and* carries the
+    /// reader into history, so the container grows by the keyboard's height while they are
+    /// leaving the end.
+    ///
+    /// The reader has to keep the place they dragged to. Measured from the live container,
+    /// that one gesture reads as an arrival at the end rather than a departure from it, which
+    /// latches `pinned`; and once the presence row lives in the transcript, the next time it
+    /// changes size the transcript re-sticks to the end and the reader is back at the bottom
+    /// without having asked. Runs 42545157179 / 42545159346 caught exactly that, as a history
+    /// pair whose two legs came to rest in different places off the same drag.
+    func testTheReaderKeepsTheirPlaceWhenTheirOwnDragDismissesTheKeyboard() {
+        let app = openWorkingChat()
+        XCTAssertTrue(presence(app).waitForExistence(timeout: appear), "the agent is working")
+
+        // Focused the way a reader focuses it. The launch-time draft hook sets `composerFocused`
+        // during setup, which is not the same path and does not raise the keyboard the same way.
+        let placeholder = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label CONTAINS %@", "Ask Comms")).firstMatch
+        XCTAssertTrue(placeholder.waitForExistence(timeout: appear), "the composer is on screen")
+        placeholder.tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 15), "the keyboard is up")
+        shot(app, "keyboard-up-at-the-live-bottom")
+
+        let transcript = app.scrollViews.firstMatch
+        for _ in 0..<4 { transcript.swipeDown() }
+
+        let jump = app.descendants(matching: .any)["chat-jump-to-latest"].firstMatch
+        XCTAssertTrue(jump.waitForExistence(timeout: 15),
+                      "the drag took the reader into history, keyboard or no keyboard")
+
+        // The yank does not arrive with the drag, it arrives with the next growth of the
+        // transcript — which is why a screenshot taken straight after the drag can miss it.
+        // The working row changes size on its own, so waiting is all this needs.
+        Thread.sleep(forTimeInterval: 4)
+        shot(app, "history-after-the-keyboard-went-down")
+        XCTAssertTrue(jump.exists,
+                      "the transcript must not re-stick to the end under a reader who left it")
+
+        let top = composerTop(app)
+        let row = presence(app)
+        XCTAssertTrue(!row.exists || row.frame.minY >= top,
+                      "and the row stays gone while they are up here: frame \(row.frame), composer top \(top)")
+    }
 }

@@ -4692,15 +4692,50 @@ private struct ChatBarIndicatorMargin: ViewModifier {
     }
 }
 
+/// Where one scroll-geometry sample leaves the reader, in the face of a container that can
+/// resize mid-gesture.
+///
+/// The transcript measures "how far from the end" from the container's bottom edge, so
+/// anything that resizes the container moves that number without a row having moved. The
+/// keyboard is the case that bites: `.scrollDismissesKeyboard(.interactively)` retracts it
+/// under the finger, and the only drag that retracts it is a drag away from the end. So at
+/// the exact moment the reader leaves the live bottom, the container grows by the keyboard's
+/// height and the raw sample says they are a keyboard's worth *nearer* the end than they are.
+///
+/// Latching on that is what loses the reader's place: `pinned` goes true, and the next growth
+/// re-sticks the transcript to the end under them. Holding the gesture's own container makes
+/// the reading about the content again — a gesture with no keyboard in it corrects by zero and
+/// reads exactly as it did before.
+enum TranscriptScrollLatch {
+    /// Past this the reader is reading history rather than following the end.
+    static let awayThreshold: CGFloat = 120
+
+    /// `sampled` re-measured against the container the gesture started with.
+    static func distance(sampled: CGFloat, container: CGFloat, gestureStart: CGFloat) -> CGFloat {
+        sampled + (container - gestureStart)
+    }
+
+    static func away(distance: CGFloat) -> Bool { distance > awayThreshold }
+}
+
 private struct AwayFromBottomReporter: ViewModifier {
     @Binding var away: Bool
     @Binding var pinned: Bool
     var onStick: () -> Void
     /// The finger (or its deceleration) is moving the scroll view right now.
     @State private var userDriven = false
+    /// The container the gesture in flight began with, held for as long as it runs.
+    /// `distance` is measured from the container's bottom edge, and
+    /// `.scrollDismissesKeyboard(.interactively)` retracts the keyboard under the finger —
+    /// so the container grows mid-drag by the keyboard's whole height, and the drag that
+    /// grows it is a drag *into history*. Measured against the live container, a reader
+    /// leaving the end reads as a reader arriving at it, which latches `pinned` and lets
+    /// the next growth stick the transcript back to the bottom underneath them.
+    @State private var gestureContainer: CGFloat?
 
     private struct Sample: Equatable {
         var height: CGFloat
+        var container: CGFloat
         var distance: CGFloat
     }
 
@@ -4722,6 +4757,7 @@ private struct AwayFromBottomReporter: ViewModifier {
                 .onScrollGeometryChange(for: Sample.self) { g in
                     Sample(
                         height: g.contentSize.height,
+                        container: g.containerSize.height,
                         distance: g.contentSize.height - g.contentOffset.y - g.containerSize.height
                     )
                 } action: { old, new in
@@ -4735,11 +4771,17 @@ private struct AwayFromBottomReporter: ViewModifier {
                     }
                     #endif
                     if userDriven {
-                        let isAway = new.distance > 120
+                        let start = gestureContainer ?? old.container
+                        gestureContainer = start
+                        let isAway = TranscriptScrollLatch.away(
+                            distance: TranscriptScrollLatch.distance(sampled: new.distance,
+                                                                     container: new.container,
+                                                                     gestureStart: start))
                         away = isAway
                         pinned = !isAway
                         return
                     }
+                    gestureContainer = nil
                     // Content or layout moved, not the reader: a growth while pinned (a new or
                     // streaming row) re-sticks to the end; while away it stays put.
                     if grew {
