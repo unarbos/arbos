@@ -1013,6 +1013,19 @@ impl Store {
         })
     }
 
+    /// The t3 row id of a message now marked `T3_KIND_REFUSED`, so the memory tree can invalidate
+    /// any card that summarised it (`Tree::invalidate_refused_leaf`). `None` when no such row.
+    pub fn t3_refused_row_id(&self, thread_id: &str, message_id: &str) -> Result<Option<String>> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT id FROM t3 WHERE thread_id = ?1 AND kind = ?3 AND json_extract(source, '$.message_id') = ?2",
+                params![thread_id, message_id, T3_KIND_REFUSED],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+        })
+    }
+
     pub fn t3_search(
         &self,
         query: &str,
