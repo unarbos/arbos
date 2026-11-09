@@ -212,6 +212,66 @@ async fn an_admitted_job_does_not_run_while_the_cap_is_full() {
     );
 }
 
+/// Waiting jobs are released in the order they were asked for, one per freed place.
+///
+/// The gate is asked directly here rather than through a worker, because what is being checked is
+/// which job it lets go and which it holds — and a worker would add a pi spawn, a retry and a
+/// race to a question that has an exact answer.
+///
+/// Two places are taken by running jobs and the cap is three, so there is room for exactly one of
+/// the two waiting jobs. The older one goes. The younger one is held even though a place is free,
+/// which is the whole of "in order": a job that arrived second does not overtake the one that
+/// arrived first just because the clock reached it at the right moment.
+#[tokio::test]
+async fn waiting_jobs_are_released_oldest_first() {
+    let (agent, _root) = test_agent().await;
+    let cap = crate::config::job_max_per_chat();
+    assert!(cap >= 2, "this case needs room for one of the two waiters");
+    plant_open_jobs(&agent, CHAT, cap - 1, "running");
+
+    let mut waiting = Vec::new();
+    for i in 0..2 {
+        let id = ulid();
+        agent
+            .store
+            .insert_job(
+                &id,
+                CHAT,
+                &format!("{ASK}w{i}"),
+                &format!("Waiting job {i}"),
+                "ops",
+                "count the licence lines",
+                &[],
+            )
+            .unwrap();
+        waiting.push(id);
+        // Distinct milliseconds, so the order is the one the asks arrived in and not the id
+        // tie-break. The tie-break is only there so two jobs of the same millisecond still get
+        // some order; it is not what this case is about.
+        tokio::time::sleep(std::time::Duration::from_millis(3)).await;
+    }
+
+    let released = |job: String| {
+        let agent = agent.clone();
+        async move {
+            tokio::time::timeout(
+                std::time::Duration::from_millis(2_500),
+                agent.await_job_capacity(CHAT, &job),
+            )
+            .await
+            .is_ok()
+        }
+    };
+    assert!(
+        released(waiting[0].clone()).await,
+        "the older waiting job takes the one free place"
+    );
+    assert!(
+        !released(waiting[1].clone()).await,
+        "and the younger one waits, rather than overtaking it into the same place"
+    );
+}
+
 /// The per-agent half of the same thing, which is a separate branch and had a separate refusal.
 #[tokio::test]
 async fn a_job_over_the_agent_cap_waits_instead_of_being_refused() {
