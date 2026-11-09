@@ -181,7 +181,9 @@ fn a_refusal_pi_named_counts_even_when_its_prose_gives_nothing_away() {
         detail: bland.to_owned(),
         refusal: true,
     }
-    .chat_line_for("Your");
+    // `false`: a worker's brief is rebuilt for every attempt, so there is no window of this
+    // chat's that a retry could have replaced.
+    .chat_line_for("Your", false);
     assert!(line.contains("declined"), "{line}");
     assert!(
         line.contains("split it up"),

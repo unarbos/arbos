@@ -1859,13 +1859,29 @@ impl ModelError {
     }
 
     /// One short line for the chat, first person like the limit announcements (#1037).
+    ///
     /// `owner` names whose budget ran out for budget refusals ("Jacob's daily Arbos budget…").
-    pub fn chat_line_for(&self, owner: &str) -> String {
+    /// `context_replaced` says this chat's model window was rebuilt during the turn, which
+    /// changes what the user should do next — see the refusal branch.
+    pub fn chat_line_for(&self, owner: &str, context_replaced: bool) -> String {
         // A refusal is about the request, not about agentd or the moment: it does not clear on
         // its own, so the line names what happened and the one thing that gets through
         // (Jacob, Test5 round 2, fix F — "ask me again in a moment" sent users back into the
         // same refusal and lost the turn).
         if self.refusal {
+            // Unless the window the request went into has just been replaced (#2919). Then
+            // "don't send the same message again" is advice against the one thing that is
+            // likely to work: the turns the provider may have been declining are out of the
+            // window, and the declined turn is out of this chat's memory too, so the same
+            // words are a different request this time.
+            //
+            // What it must not say is that the message was fine, or that the re-send will
+            // work. The rest of the chat's history and other chats' records still ride in
+            // front of the next turn in the memory block, so a declined message and a
+            // declined history are both still live explanations of what happened.
+            if context_replaced {
+                return "I couldn't do all of that: the model provider declined the request. I've reset this chat's working context and left that message out of what I carry forward, so it is worth sending again.".to_owned();
+            }
             return "I couldn't do all of that: the model provider declined part of the request. Asking for the part you most want on its own is the way through — split it up rather than sending the same message again.".to_owned();
         }
         if let Some(b) = crate::budget::Refusal::classify(&self.detail) {
@@ -1883,13 +1899,13 @@ impl ModelError {
 
     /// The line when the user already read an acknowledgement bubble: it joins that bubble as
     /// one message, so it says the started work did not finish rather than "I couldn't answer".
-    pub fn chat_line_after_ack(&self, owner: &str) -> String {
+    pub fn chat_line_after_ack(&self, owner: &str, context_replaced: bool) -> String {
         if self.refusal
             || crate::budget::Refusal::classify(&self.detail).is_some()
             || classify_hard_limit(&self.detail).is_some()
             || crate::disk::is_enospc(&self.detail)
         {
-            return self.chat_line_for(owner);
+            return self.chat_line_for(owner, context_replaced);
         }
         "I couldn't finish that: the model call failed, even after retrying. Ask me again in a moment.".to_owned()
     }
@@ -1897,7 +1913,7 @@ impl ModelError {
     /// Error-part code the clients key on.
     pub fn code(&self) -> &'static str {
         if self.refusal {
-            "model_refused"
+            REFUSED_CODE
         } else if crate::disk::is_enospc(&self.detail) {
             "disk_full"
         } else {
@@ -8379,7 +8395,7 @@ impl Agent {
                 // none of the three unrelated asks that followed it — four error rows out of
                 // four. The conversation is not lost with the window: the recap below and the
                 // rolling summary carry it, exactly as the empty-turn rotation does.
-                self.drop_refused_turn_from_window(chat_id, "refusal_retry")
+                self.drop_refused_turn_from_window(chat_id, user_msg_id, false, "refusal_retry")
                     .await;
                 let on_fallback = self.switch_talking_model(true).await;
                 let retry_prompt = {
@@ -8413,7 +8429,12 @@ impl Agent {
         // turn would refuse that turn too, so it is dropped here instead of replayed: the turn
         // ends with the refusal line below, and the question after it starts from a clean window.
         if self.refused_turn_to_drop().await {
-            self.drop_refused_turn_from_window(chat_id, "refusal_dropped")
+            // Marked only on a turn the user's own words opened. On a result or fallback turn
+            // `user_msg_id` is the ask that started the work, and what the provider declined was
+            // the brief or the result — so marking it would take an innocent message out of this
+            // chat's memory for good.
+            let theirs = matches!(kind, TurnKind::User);
+            self.drop_refused_turn_from_window(chat_id, user_msg_id, theirs, "refusal_dropped")
                 .await;
         }
         // An empty turn is usually the model window, not the question: a provider refusal on a
@@ -8461,6 +8482,10 @@ impl Agent {
                 self.flush_staged_text(host, t).await;
                 self.write_route_reply_if_missing(host, t).await;
                 self.post_fallback_if_silent(host, t).await;
+                // Last of the four: with the send tool on, the turn's prose is still held at
+                // this point and `post_fallback_if_silent` is what puts it in the chat, so
+                // "did this turn answer" is only a settled question once it has run.
+                self.note_window_replaced(host, t).await;
             }
         }
         let turn = self.turn.lock().await.take();
@@ -8631,7 +8656,7 @@ impl Agent {
                     // ("Searching the web for X now." + the line), and the wordless result
                     // row goes, so the user never reads ack + failure as two bubbles.
                     Some(ack_row) if turn.progress_texts.iter().all(|p| p.trim().is_empty()) => {
-                        let line = m.chat_line_after_ack(&owner_label);
+                        let line = m.chat_line_after_ack(&owner_label, turn.session_rotated);
                         if let Some(part) = h.doc.add_text_part(ack_row, "text") {
                             h.doc.append_text(ack_row, &part, &format!("\n\n{line}"));
                         }
@@ -8648,7 +8673,7 @@ impl Agent {
                         h.doc.add_error_part(
                             &assistant_msg_id,
                             m.code(),
-                            &m.chat_line_for(&owner_label),
+                            &m.chat_line_for(&owner_label, turn.session_rotated),
                         );
                         h.doc.add_hidden_part(
                             &assistant_msg_id,
@@ -9644,6 +9669,26 @@ impl Agent {
             "\n\n"
         };
         self.write_text(host, t, &format!("{sep}{line}")).await;
+    }
+
+    /// Tell the user their working context went, on a turn that answered after its window was
+    /// replaced.
+    ///
+    /// Replacing the window is how a chat recovers from a refusal it cannot get past (#2919) and
+    /// from a window that settles with no route, and both paths then answer as if nothing had
+    /// happened. The answer is the right outcome; being silent about where it came from is not.
+    /// The user is left believing the agent still holds the conversation it was just reading,
+    /// and the next "what was that number?" is answered out of the memory tree or not at all.
+    ///
+    /// Only on a turn that produced a real answer. A turn that ended on the refusal line says
+    /// the same thing in that line (`chat_line_for`), and one that ended silent has
+    /// `post_fallback_if_silent` to speak for it — a notice above either would be a second
+    /// voice on one row.
+    async fn note_window_replaced(&self, host: &SharedHost, t: &mut TurnState) {
+        if !t.session_rotated || t.stopped || t.model_error.is_some() || !answer_delivered(t) {
+            return;
+        }
+        self.write_notice(host, t, WINDOW_REPLACED_NOTICE).await;
     }
 
     /// Fold one pi event into the chat doc and the turn state. Returns true when the turn settled.
@@ -11826,7 +11871,23 @@ impl Agent {
     /// The flag means at most one more rotation can follow in the same turn, which is what keeps
     /// this to "retry in a clean window, then drop": `empty_turn_retry_reason_for` leaves a turn
     /// whose window has already been rebuilt alone.
-    async fn drop_refused_turn_from_window(self: &Arc<Self>, chat_id: &str, reason: &str) {
+    ///
+    /// The window is not the only way a turn comes back. Every turn rebuilds a memory block from
+    /// this chat's `t3` rows and puts it in front of the message, and replacing the window is
+    /// itself what opens this chat's own rows to that walk (`Tree::note_session_cut`, read by
+    /// `Scope::leaf_ok`). The user row of a declined turn is written before the model is called
+    /// (`handle_send`), so a rotation alone leaves it there for the walk to offer back. With
+    /// `remembered` the row is marked instead, and the walk passes over it.
+    ///
+    /// Marked only on the final drop, never on the retry rotation: a turn the retry recovered was
+    /// read by the provider in the end, so it stays ordinary memory.
+    async fn drop_refused_turn_from_window(
+        self: &Arc<Self>,
+        chat_id: &str,
+        user_msg_id: &str,
+        remembered: bool,
+        reason: &str,
+    ) {
         match self.rotate_chat_session(chat_id, reason).await {
             Ok(()) => {
                 if let Some(t) = self.turn.lock().await.as_mut() {
@@ -11835,6 +11896,16 @@ impl Agent {
             }
             Err(e) => {
                 tracing::warn!(chat_id, reason, error = %e, "the window holding a refused turn could not be replaced; the next turn in this chat may be refused too")
+            }
+        }
+        if remembered {
+            match self.store.t3_mark_refused(chat_id, user_msg_id) {
+                Ok(n) => {
+                    tracing::info!(chat_id, message = %user_msg_id, rows = n, "the refused turn is out of this chat's memory as well as its window")
+                }
+                Err(e) => {
+                    tracing::warn!(chat_id, message = %user_msg_id, error = %e, "the refused turn could not be marked; the memory walk may offer it back")
+                }
             }
         }
     }
@@ -13767,7 +13838,9 @@ impl Agent {
             // actually happened — the provider declined the brief — was in `error` all along.
             // `ModelError`'s own lines say which of the two it was and what gets through.
             match error.filter(|e| model_error_is_permanent(&e.detail, e.refusal)) {
-                Some(e) => e.chat_line_for(&owner_label),
+                // A worker has no window of this chat's to replace: its brief is built fresh for
+                // every attempt, so the re-send line would promise something nothing did.
+                Some(e) => e.chat_line_for(&owner_label, false),
                 None => "I couldn't finish that one. Ask me again in a moment.".to_owned(),
             }
         };
@@ -14211,6 +14284,14 @@ pub(crate) fn quiet_in_shared_chat(
         && (t.metrics.tool_calls == 0 || t.silence_dropped)
 }
 
+/// Written under an answer whose turn replaced this chat's window ([`Agent::note_window_replaced`]).
+///
+/// It says the two things the user cannot otherwise know: that this answer did not come from the
+/// conversation they have been having, and that the earlier turns are still reachable if they ask
+/// for them. `RECAP_ROWS` below is why the second half is true in the window as well — the retry
+/// carries the most recent rows — but the notice promises only what the history tools can do.
+const WINDOW_REPLACED_NOTICE: &str = "That answer came from a fresh working context: this chat's earlier turns are out of my window now. Ask about any of them and I will read them back out of this Project's history.";
+
 /// How many of this chat's recent rows the fresh-session retry carries, and how much of each.
 const RECAP_ROWS: usize = 8;
 const RECAP_ROW_CHARS: usize = 500;
@@ -14402,6 +14483,50 @@ pub(crate) fn answer_delivered(t: &TurnState) -> bool {
         || t.progress_texts.iter().any(|p| !p.trim().is_empty())
 }
 
+/// The error code a declined turn's row carries, in its error part or in `modelFailedAfterAck`.
+pub(crate) const REFUSED_CODE: &str = "model_refused";
+
+/// The user rows of this chat whose turn the provider declined — the words it would be declining
+/// again. The reply rows are left in: what was declined was the user's message, and a reply that
+/// got prose out before the refusal is an ordinary answer worth recapping. A reply that got
+/// nothing out carries its line as an error part, so `text()` is empty and the recap skips it on
+/// its own.
+///
+/// **Why this is not `Store::t3_mark_refused`'s marker, which is the other half of the same
+/// concept.** The contract between them is a containment, not an equality: **a marked turn is
+/// always excluded here, and not the reverse.** The marker is the stronger claim, because it
+/// changes for good what the memory walk may offer, so it is only written when a retry on a
+/// window holding none of this chat was declined as well, and only on a turn the user's own words
+/// opened (`refused_turn_to_drop`, and the `TurnKind::User` gate at its call site). This is a
+/// per-prompt judgement with nothing durable behind it, so it covers every turn that ended on a
+/// refusal line — including a refusal that never earned a retry, and a result turn's refusal,
+/// where the row it excludes is the ask that started the work.
+///
+/// Neither touches a turn that delivered prose: the provider took most of that message, the user
+/// has an answer, and `model_failed` writes no refusal line for it.
+/// `the_two_readings_of_a_refused_turn_agree_where_they_overlap` drives all three shapes against
+/// a live session and will fail if either side drifts.
+///
+/// It reads the transcript rather than the database because the recap is built under the host
+/// lock in the turn's hot path, and the turn it is judging is usually long finished.
+pub(crate) fn refused_user_rows(rows: &[arbos_core::doc::MessageView]) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for m in rows {
+        let declined = m
+            .parts
+            .iter()
+            .any(|p| p.get("code").and_then(Value::as_str) == Some(REFUSED_CODE))
+            || m.rest.get("modelFailedAfterAck").and_then(Value::as_str) == Some(REFUSED_CODE);
+        if !declined {
+            continue;
+        }
+        if let Some(asked) = m.rest.get("inReplyTo").and_then(Value::as_str) {
+            out.insert(asked.to_owned());
+        }
+    }
+    out
+}
+
 pub(crate) fn chat_recap(
     rows: &[arbos_core::doc::MessageView],
     current_user_msg_id: &str,
@@ -14412,10 +14537,14 @@ pub(crate) fn chat_recap(
         .iter()
         .position(|m| m.id == current_user_msg_id)
         .unwrap_or(rows.len());
+    let refused = refused_user_rows(&rows[..end]);
     let mut lines: Vec<String> = Vec::new();
     for m in rows[..end].iter().rev() {
         if lines.len() >= RECAP_ROWS {
             break;
+        }
+        if refused.contains(&m.id) {
+            continue;
         }
         let text: String = m.text().split_whitespace().collect::<Vec<_>>().join(" ");
         if text.trim().is_empty() {
@@ -15193,8 +15322,15 @@ pub(crate) fn refusal_retry_error(t: &TurnState) -> Option<ModelError> {
 /// three unrelated asks that followed.
 ///
 /// The retry (`refusal_retry_error`) must have run, because it is what tells the two cases apart:
-/// a window the provider will not read is salvaged by the clean retry, and only content it will
-/// not read in any window reaches here. A turn that delivered prose keeps its window: the
+/// a window the provider will not read is salvaged by the clean retry, and what reaches here was
+/// declined again on a window holding none of this chat's turns.
+///
+/// "Declined again" is not the same as "it is this message's own content", and the line the user
+/// reads must not say that it is (#2885's author, on `faae21a14`): the retry runs on a clean
+/// window but still carries the memory block and the chat recap, so a record the provider objects
+/// to can be what was declined both times. What is certain is that the words the user sent last
+/// are now out of the window and out of this chat's memory, which is why the same message is
+/// worth sending again. A turn that delivered prose keeps its window: the
 /// provider took most of that message, and a rotation would cost the user the conversation for a
 /// part that was answered anyway. The walls below are not content at all — a budget block, a
 /// context or rate limit, a full disk, an abort of agentd's own — and a fresh window buys none of
@@ -15206,7 +15342,14 @@ pub(crate) fn refused_turn_to_drop(t: &TurnState) -> bool {
     m.refusal
         && t.refusal_retried
         && !t.stopped
-        && t.streamed_text.trim().is_empty()
+        // Prose the filter is still holding counts as delivered. With the send tool on, a turn's
+        // words sit in `act_buffer`/`unposted_text` until `post_fallback_if_silent` puts them in
+        // the chat at the very end, so `streamed_text` alone reads an answered turn as a silent
+        // one here — and then drops the window of a turn the user did get an answer out of, and
+        // (since this fix) marks their message as declined for good. The paragraph above says
+        // such a turn keeps its window; this is what makes that true in both send-tool modes.
+        && !t.has_prose()
+        && t.unposted_text.trim().is_empty()
         && !is_abort_text(&m.detail)
         && crate::budget::Refusal::classify(&m.detail).is_none()
         && classify_hard_limit(&m.detail).is_none()
@@ -15218,7 +15361,7 @@ pub(crate) fn refused_turn_to_drop(t: &TurnState) -> bool {
 /// what is left out, which is the only place the declined part can actually be named.
 pub(crate) fn refusal_retry_prompt(prompt_text: &str) -> String {
     format!(
-        "[Arbos] The model provider declined the message below as a whole. Do not attempt it as a whole again. Do the parts of it you can do, and deliver those now. Then, in one plain sentence, name the part you are leaving out and say that asking for it on its own is likely to work. Do not apologise at length, do not lecture the user, and do not refuse the whole message because one part of it was declined.]\n\n{prompt_text}"
+        "[Arbos] The model provider declined the message below as a whole. Do not attempt it as a whole again. Do the parts of it you can do, and deliver those now. If you are leaving a part out, name it in one plain sentence and say that asking for it on its own is likely to work; if you can do all of it, simply answer and claim nothing was left out. Do not apologise at length, do not lecture the user, and do not refuse the whole message because one part of it was declined.]\n\n{prompt_text}"
     )
 }
 
@@ -16310,17 +16453,17 @@ mod tests {
         let m = ModelError::from_message(&real).unwrap();
         assert!(!m.refusal);
         assert_eq!(
-            m.chat_line_for("Jacob"),
+            m.chat_line_for("Jacob", false),
             "I couldn't answer that: the model call failed. Ask me again in a moment."
         );
         assert_eq!(
-            m.chat_line_after_ack("Jacob"),
+            m.chat_line_after_ack("Jacob", false),
             "I couldn't finish that: the model call failed, even after retrying. Ask me again in a moment."
         );
         let refused = json!({ "role": "assistant", "stopReason": "error", "rawStopReason": "refusal", "errorMessage": "refused" });
         let r = ModelError::from_message(&refused).unwrap();
         assert!(r.refusal);
-        assert!(r.chat_line_after_ack("Jacob").contains("declined"));
+        assert!(r.chat_line_after_ack("Jacob", false).contains("declined"));
     }
 
     /// #2025 (chart proof, 0.1.159): after a gated post_chart timed out the agent wrote
@@ -16456,9 +16599,11 @@ mod tests {
         let m = ModelError::from_message(&refused).unwrap();
         assert!(m.refusal);
 
-        // What the user reads: the part that was declined, and the way out of it. Never an
-        // invitation to send the same request again, which is refused again.
-        let line = m.chat_line_for("Jacob");
+        // What the user reads when the window was left alone: the part that was declined, and
+        // the way out of it. Never an invitation to send the same request again, which is
+        // refused again. (A turn that replaced the window says the opposite, on purpose —
+        // `refusal_line_and_window_notice_tests`.)
+        let line = m.chat_line_for("Jacob", false);
         assert!(
             line.contains("declined"),
             "the refusal line must say the request was declined: {line}"
@@ -16476,7 +16621,7 @@ mod tests {
             "a refusal does not clear by itself; resending it as is refuses again: {line}"
         );
         // The same line serves the ack path, so an ack bubble reads as one message with it.
-        assert_eq!(m.chat_line_after_ack("Jacob"), line);
+        assert_eq!(m.chat_line_after_ack("Jacob", false), line);
 
         // The turn is mid-conversation and the provider declined this request: rotating the pi
         // session would throw that conversation away and change nothing about the refusal.
@@ -16512,7 +16657,10 @@ mod tests {
         let p = refusal_retry_prompt("Summarise this thread and draft the reply");
         assert!(p.contains("declined the message below as a whole"));
         assert!(p.contains("the parts of it you can do"));
-        assert!(p.contains("name the part you are leaving out"));
+        // A turn that can do all of it must not invent a gap: the retry often runs on a window
+        // the declined content has left, so "what I left out" is frequently nothing.
+        assert!(p.contains("If you are leaving a part out, name it"));
+        assert!(p.contains("claim nothing was left out"));
         assert!(p.ends_with("Summarise this thread and draft the reply"));
     }
 

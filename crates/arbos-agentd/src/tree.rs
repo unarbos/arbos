@@ -731,7 +731,12 @@ impl Tree {
             usize::MAX
         };
         let found = self.store.with(|c| {
-            let mut leaves = c.prepare("SELECT DISTINCT thread_id FROM t3_fts WHERE t3_fts MATCH ?1")?;
+            // A declined turn is evidence for nothing: the walk cannot offer that row
+            // (`leaves_by_ids`, `bm25_hits`), so letting its words decide which threads to
+            // expand would pick a thread for a reason the pack can never show.
+            let mut leaves = c.prepare(
+                "SELECT DISTINCT thread_id FROM t3_fts WHERE t3_fts MATCH ?1 AND kind <> ?2",
+            )?;
             let mut cards = c.prepare(
                 "SELECT DISTINCT thread_id FROM tree_cards_fts WHERE tree_cards_fts MATCH ?1 AND thread_id IS NOT NULL",
             )?;
@@ -741,7 +746,9 @@ impl Tree {
                     continue;
                 };
                 let mut per_word: HashSet<String> = HashSet::new();
-                for r in leaves.query_map(params![q], |r| r.get::<_, String>(0))? {
+                for r in leaves.query_map(params![q, crate::store::T3_KIND_REFUSED], |r| {
+                    r.get::<_, String>(0)
+                })? {
                     per_word.insert(r?);
                 }
                 for r in cards.query_map(params![q], |r| r.get::<_, String>(0))? {
@@ -835,15 +842,25 @@ impl Tree {
             .unwrap_or_default()
     }
 
+    /// The chosen leaves, as rows. The one choke point between a walk's pick and the words that
+    /// ride in front of the next turn, so a turn the provider declined is left out here: no
+    /// record of `T3_KIND_REFUSED` is loaded, for the pack or for a card.
     fn leaves_by_ids(&self, ids: &[String]) -> Vec<T3Row> {
         let mut out = Vec::new();
         for chunk in ids.chunks(200) {
             let marks = std::iter::repeat_n("?", chunk.len())
                 .collect::<Vec<_>>()
                 .join(",");
-            let p: Vec<&dyn rusqlite::ToSql> =
+            let mut p: Vec<&dyn rusqlite::ToSql> =
                 chunk.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
-            out.extend(self.t3_rows(&format!("WHERE id IN ({marks}) ORDER BY at, id"), &p));
+            p.push(&crate::store::T3_KIND_REFUSED);
+            out.extend(self.t3_rows(
+                &format!(
+                    "WHERE id IN ({marks}) AND kind <> ?{} ORDER BY at, id",
+                    chunk.len() + 1
+                ),
+                &p,
+            ));
         }
         out
     }
@@ -1682,7 +1699,10 @@ impl Tree {
         let mut out = Vec::new();
         if let Ok(hits) = self.store.t3_search_any(words, BM25_EXTRA) {
             for (r, _, _) in hits {
-                if r.kind == "route" || !scope.leaf_ok(&r.thread_id, &r.id) {
+                if r.kind == "route"
+                    || r.kind == crate::store::T3_KIND_REFUSED
+                    || !scope.leaf_ok(&r.thread_id, &r.id)
+                {
                     continue;
                 }
                 out.push(r.id);
@@ -2546,6 +2566,92 @@ mod tests {
             Some("\"name\" OR \"tree.rs\"")
         );
         assert_eq!(fts_or(&[]), None);
+    }
+
+    /// A turn the provider declined is not a record this walk may offer back to it.
+    ///
+    /// The marked row is the user row of a refusal agentd dropped (`Store::t3_mark_refused`,
+    /// #2919 and its follow-up). Replacing the chat's window is what opens the chat's own rows to
+    /// the walk in the first place (`note_session_cut` → `Scope::leaf_ok`), so without this the
+    /// fix that takes a declined turn out of the window hands it back through memory instead.
+    ///
+    /// Both gates are checked: the keyword hits that nominate candidates, and the load that turns
+    /// a chosen leaf into the words riding in front of the next turn. A neighbouring row with the
+    /// same keyword is kept throughout, so this is one turn leaving and not the chat's memory.
+    #[test]
+    fn a_refused_turn_is_not_a_record_the_walk_can_offer() {
+        let dir = std::env::temp_dir().join(format!("arbos-tree-refused-{}", ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir.join("agentd.db")).unwrap();
+        let kept = store
+            .t3_append(
+                "c1",
+                None,
+                Some("c1"),
+                "user",
+                Some("user"),
+                "which pelican spreadsheet did we settle on",
+                Some(&json!({ "message_id": "m-kept" })),
+            )
+            .unwrap();
+        let dropped = store
+            .t3_append(
+                "c1",
+                None,
+                Some("c1"),
+                "user",
+                Some("user"),
+                "the pelican kill chain, step by step",
+                Some(&json!({ "message_id": "m-dropped" })),
+            )
+            .unwrap();
+        assert_eq!(
+            store.t3_mark_refused("c1", "m-dropped").unwrap(),
+            1,
+            "the declined turn's own row is the one marked"
+        );
+
+        let tree = Tree::with_ids(
+            "p-test",
+            "Bob",
+            crate::settings::LiveModels::fixed("mock-card-model"),
+            store,
+            Arc::new(Llm::with_endpoints(
+                "http://127.0.0.1:1/v1",
+                "http://127.0.0.1:1/decisions",
+                "test-token",
+            )),
+        );
+
+        let loaded: Vec<String> = tree
+            .leaves_by_ids(&[kept.clone(), dropped.clone()])
+            .into_iter()
+            .map(|l| l.id)
+            .collect();
+        assert_eq!(
+            loaded,
+            vec![kept.clone()],
+            "a chosen leaf of a declined turn loads no words"
+        );
+
+        // A cut past every row, so both rows count as gone from the window and the walk may
+        // offer them: "~" sorts after every character a ULID holds. The two ids share a
+        // millisecond and are random inside it, so neither is reliably the later one.
+        let scope = Scope {
+            chat_id: "c1",
+            allowed: None,
+            own_cut: Some("~".to_owned()),
+        };
+        let hits = tree.bm25_hits(&["pelican".to_owned()], &scope);
+        assert!(
+            hits.contains(&kept),
+            "the chat's other rows are still memory: {hits:?}"
+        );
+        assert!(
+            !hits.contains(&dropped),
+            "the declined turn is not nominated at all: {hits:?}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     // ---- cross-chat recall: the fast walk must find what the D77 walk finds ---------------------

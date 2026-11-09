@@ -121,6 +121,14 @@ CREATE TABLE IF NOT EXISTS job_workers (
 CREATE INDEX IF NOT EXISTS job_workers_job ON job_workers(job_id, at);
 "#;
 
+/// The `t3` kind a user row takes once the provider declined the turn it opened.
+///
+/// A kind rather than a deletion: the words are the user's own, so the row keeps its place in the
+/// thread for the transcript, for `t3_thread` and for a deliberate history read. Only the memory
+/// walk treats the kind as "not mine to offer", which is what stops a declined turn coming back
+/// as remembered context on a later turn (see `Store::t3_mark_refused`).
+pub const T3_KIND_REFUSED: &str = "user_refused";
+
 /// The step of a job the user stopped, in the same plain words as every other step the working
 /// row and `list_jobs` show.
 pub const CANCELLED_STEP: &str = "Cancelled";
@@ -979,6 +987,32 @@ impl Store {
         Ok(id)
     }
 
+    /// Mark the row of one user message as a turn the provider declined, by its `message_id`.
+    ///
+    /// The row stays where it is: the transcript, `t3_thread` and a deliberate history read all
+    /// still have it. What changes is its kind, and the memory walk offers no row of this kind
+    /// (`tree::leaves_by_ids`), so a declined turn is never handed back to the provider that
+    /// declined it as remembered context.
+    pub fn t3_mark_refused(&self, thread_id: &str, message_id: &str) -> Result<usize> {
+        self.with(|c| {
+            let n = c.execute(
+                "UPDATE t3 SET kind = ?3 WHERE thread_id = ?1 AND kind = 'user' AND json_extract(source, '$.message_id') = ?2",
+                params![thread_id, message_id, T3_KIND_REFUSED],
+            )?;
+            if n > 0 {
+                c.execute(
+                    "DELETE FROM t3_fts WHERE id IN (SELECT id FROM t3 WHERE thread_id = ?1 AND kind = ?3 AND json_extract(source, '$.message_id') = ?2)",
+                    params![thread_id, message_id, T3_KIND_REFUSED],
+                )?;
+                c.execute(
+                    "INSERT INTO t3_fts(text, id, thread_id, kind) SELECT text, id, thread_id, kind FROM t3 WHERE thread_id = ?1 AND kind = ?3 AND json_extract(source, '$.message_id') = ?2",
+                    params![thread_id, message_id, T3_KIND_REFUSED],
+                )?;
+            }
+            Ok(n)
+        })
+    }
+
     pub fn t3_search(
         &self,
         query: &str,
@@ -1003,6 +1037,11 @@ impl Store {
         self.t3_search_fts(&terms.join(" OR "), None, None, limit, 0)
     }
 
+    /// `kind = "user"` also finds `T3_KIND_REFUSED`, because that marker is a user row with a
+    /// flag on it and not a kind of its own. A search is a deliberate read — `history_search`,
+    /// the secret sweep, the inspect endpoint — and none of those should lose a message because
+    /// the provider declined the turn it opened. Only the memory walk passes over the marker, in
+    /// `tree.rs`, where it is read off `T3Row::kind` rather than filtered for here.
     fn t3_search_fts(
         &self,
         q: &str,
@@ -1016,10 +1055,13 @@ impl Store {
                 "SELECT t.id, t.thread_id, t.subagent_id, t.session_id, t.kind, t.role, t.at, t.text, t.size, bm25(t3_fts) AS score,
                         snippet(t3_fts, 0, '[', ']', '…', 24)
                  FROM t3_fts JOIN t3 t ON t.id = t3_fts.id
-                 WHERE t3_fts MATCH ?1 AND (?2 IS NULL OR t.thread_id = ?2) AND (?3 IS NULL OR t.kind = ?3)
+                 WHERE t3_fts MATCH ?1 AND (?2 IS NULL OR t.thread_id = ?2)
+                   AND (?3 IS NULL OR t.kind = ?3 OR (?3 = 'user' AND t.kind = ?6))
                  ORDER BY score LIMIT ?4 OFFSET ?5",
             )?;
-            let rows = st.query_map(params![q, thread_id, kind, limit, offset], |r| {
+            let rows = st.query_map(
+                params![q, thread_id, kind, limit, offset, T3_KIND_REFUSED],
+                |r| {
                 Ok((
                     T3Row {
                         id: r.get(0)?,
@@ -1035,7 +1077,8 @@ impl Store {
                     r.get::<_, f64>(9)?,
                     r.get::<_, String>(10)?,
                 ))
-            })?;
+                },
+            )?;
             rows.collect()
         })
     }
