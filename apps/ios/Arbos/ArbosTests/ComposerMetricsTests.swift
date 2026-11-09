@@ -15,24 +15,31 @@ final class ComposerMetricsTests: XCTestCase {
     }
 
     func testDiscFieldAndInsetsAreGroksKeyboardUp() {
-        // `+` disc 144 px at 54 px from the edge; field 144 px tall; 30 px between them;
-        // the field ends 54 px from the right edge. 420 − 18 − 48 − 10 − 18 = 326 pt field.
-        XCTAssertEqual(Theme.plusButton, 48)
+        // One pill, not a disc beside a field: the `+` is inside the field now, so the
+        // field runs the whole width between the insets — 420 − 18 − 18 = 384 pt — and
+        // there is no disc width and no gap to subtract.
         XCTAssertEqual(Theme.composerHeight, 48)
-        XCTAssertEqual(Theme.plusFieldGap, 10)
         XCTAssertEqual(Theme.composerInsetKeyboard, 18)
         XCTAssertEqual(Theme.composerInset, 31, "keyboard down keeps the 2026-10-15 reading")
-        let fieldWidth = 420 - Theme.composerInsetKeyboard * 2 - Theme.plusButton - Theme.plusFieldGap
-        XCTAssertEqual(fieldWidth, 326)
+        let fieldWidth = 420 - Theme.composerInsetKeyboard * 2
+        XCTAssertEqual(fieldWidth, 384)
+        // Both ends of the pill are now the same 96 × 96 disc, each inset 26 px from its
+        // own edge — the white action went round in the same change, so this reads as a
+        // pair rather than as a disc facing a capsule.
+        XCTAssertEqual(Theme.composerPlusDisc, Theme.actionPillHeight)
+        XCTAssertEqual(Theme.composerPlusDisc, Theme.actionPillWidth)
+        XCTAssertEqual(Theme.composerPlusLeading, Theme.actionPillTrailing)
+        assertOnPixel(Theme.composerPlusLeading, "composerPlusLeading")
         // Since [feedback iphone-header-composer-sizing-2026-10-26] every other field, pill
         // and disc is the composer's size (`Controls`, `ControlMetricsTests`).
         XCTAssertEqual(Theme.fieldHeight, Theme.composerHeight)
     }
 
     func testPlusGlyphIsGroksSize() {
-        // SF `plus`, regular: 54 px arms (22 pt draws 53, 22.5 draws 54), 5 px strokes
-        // like Grok's — medium would draw 8.
-        XCTAssertEqual(Theme.plusGlyph, 22.5)
+        // Measured off the reference at 3 px/pt: its `+` draws 38 px arms where this
+        // build drew 54, so the glyph comes down with the disc it sits in. SF `plus`,
+        // regular: 16 pt draws 38.
+        XCTAssertEqual(Theme.composerPlusGlyph, 16)
     }
 
     func testFieldTextStartsAtGroksCaret() {
@@ -43,10 +50,12 @@ final class ComposerMetricsTests: XCTestCase {
         XCTAssertEqual(MentionTextView.insets.top + 22 + MentionTextView.insets.bottom, Theme.composerHeight)
     }
 
-    func testActionIsAWhitePillNotACircle() {
-        // 120 × 96 px capsule, 24 px from the field's top and bottom, 26 px from its right edge.
-        XCTAssertEqual(Theme.actionPillWidth, 40)
+    func testActionIsAWhiteCircleNotACapsule() {
+        // 96 × 96 px, 24 px from the field's top and bottom, 26 px from its right edge.
+        // Measured off the reference at 3 px/pt: 96 × 96 there against 120 × 96 here.
+        XCTAssertEqual(Theme.actionPillWidth, 32)
         XCTAssertEqual(Theme.actionPillHeight, 32)
+        XCTAssertEqual(Theme.actionPillWidth, Theme.actionPillHeight, "round, not a capsule")
         XCTAssertEqual((Theme.composerHeight - Theme.actionPillHeight) / 2, 8)
         XCTAssertEqual(Theme.actionPillTrailing * 3, 26, accuracy: 0.001)
         assertOnPixel(Theme.actionPillTrailing, "actionPillTrailing")
@@ -58,7 +67,7 @@ final class ComposerMetricsTests: XCTestCase {
         XCTAssertEqual(VoiceWaveGlyph.pitch, 3.25)
         XCTAssertEqual(VoiceWaveGlyph.heights, [6.5, 14.5, 8.5, 14.5, 6.5])
         XCTAssertEqual(VoiceWaveGlyph.heights, Array(VoiceWaveGlyph.heights.reversed()))
-        // The five bars span 15 pt and 14.5 pt — inside the 40 × 32 pill with room to spare.
+        // The five bars span 15 pt and 14.5 pt — inside the 32 pt circle with room to spare.
         let span = VoiceWaveGlyph.pitch * 4 + VoiceWaveGlyph.barWidth
         XCTAssertEqual(span, 15)
         XCTAssertLessThan(span, Theme.actionPillWidth)
@@ -81,8 +90,9 @@ final class ComposerMetricsTests: XCTestCase {
     /// landed. The mic keeps its frame now, so the trailing cluster is one
     /// width whatever the field holds.
     func testTheTrailingControlsTakeOneWidthWhateverTheFieldHolds() {
-        // 132 + 6 + 120 + 26 px: the mic's hit frame, the gap, the pill, the inset.
-        XCTAssertEqual(Theme.composerTrailingWidth * 3, 284, accuracy: 0.001)
+        // 132 + 6 + 96 + 26 px: the mic's hit frame, the gap, the circle, the inset.
+        // 284 until the action went round and took 24 px off the cluster.
+        XCTAssertEqual(Theme.composerTrailingWidth * 3, 260, accuracy: 0.001)
         XCTAssertEqual(
             Theme.composerTrailingWidth,
             Theme.micHitWidth + Theme.micPillGap + Theme.actionPillWidth + Theme.actionPillTrailing)
