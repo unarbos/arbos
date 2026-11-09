@@ -61,6 +61,8 @@ mod job_queued_cancel_tests;
 #[cfg(test)]
 mod job_reparent_tests;
 #[cfg(test)]
+mod job_requeue_order_tests;
+#[cfg(test)]
 mod job_result_budget_tests;
 #[cfg(test)]
 mod job_steer_inherit_tests;
