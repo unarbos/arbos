@@ -100,6 +100,38 @@ final class TranscriptScrollLatchTests: XCTestCase {
                        .hold)
     }
 
+    // MARK: Who owns the offset during a resize
+
+    /// The line that lets the fix be narrow: a container resize is only put back when the
+    /// reader's own finger is on the scroll view.
+    ///
+    /// Leg 42604426988 is why this does not ask `away` instead. The keyboard starts retracting
+    /// as soon as the finger moves, when the reader is a few points in and under the 120 pt
+    /// threshold, so a condition on `away` reads `false` at exactly the instant that matters
+    /// and the resize goes unhandled — which is how the conditional size-change anchor failed.
+    /// Who is dragging is knowable then; how far they have got is not yet.
+    func testOnlyAResizeUnderTheReadersOwnFingerIsPutBack() {
+        let withKeyboard: CGFloat = 874 - 336
+
+        XCTAssertTrue(TranscriptScrollLatch.resizedUnderTheFinger(userDriven: true,
+                                                                  oldContainer: withKeyboard,
+                                                                  newContainer: 874),
+                      "the keyboard retracting out of the reader's own drag moves content they hold")
+
+        // The guards depend on this one. The keyboard rising or falling at the live bottom is
+        // a tap, not a drag, so the bottom anchor keeps doing its job and a chat still opens
+        // and stays on its newest row.
+        XCTAssertFalse(TranscriptScrollLatch.resizedUnderTheFinger(userDriven: false,
+                                                                   oldContainer: withKeyboard,
+                                                                   newContainer: 874),
+                       "the same resize with nobody dragging is the anchor's to handle")
+
+        XCTAssertFalse(TranscriptScrollLatch.resizedUnderTheFinger(userDriven: true,
+                                                                   oldContainer: 874,
+                                                                   newContainer: 874),
+                       "a drag with no resize in it needs nothing put back")
+    }
+
     /// Content growth keeps the behaviour it had: follow the end for a reader held at it,
     /// and leave a reader in history where they are.
     func testContentGrowthStillSticksForAReaderAtTheEndAndNotForOneInHistory() {

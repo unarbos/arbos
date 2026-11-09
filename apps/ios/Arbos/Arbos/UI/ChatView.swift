@@ -4768,6 +4768,22 @@ enum TranscriptScrollLatch {
     /// past the reader while `away` keeps whatever the gesture last set — so the chevron
     /// outlives the state it describes, and anything that reads `away` after a resize reads a
     /// value from before it.
+    /// The container moved while the reader's own finger was on the scroll view.
+    ///
+    /// The one case that needs the offset put back, and the line between it and every other
+    /// resize. The keyboard rising or falling at the live bottom is not this — nothing is
+    /// being dragged, so the bottom anchor is free to do its job and a chat still opens and
+    /// stays on its newest row. A drag that retracts the keyboard is, and there the anchor
+    /// moves content the reader is holding.
+    ///
+    /// Not a question about `away`: at the instant the retraction starts the reader is a few
+    /// points into the drag and under the 120 pt threshold, so asking how far they have got
+    /// answers `false` and the resize goes unhandled. Asking who is dragging answers now.
+    static func resizedUnderTheFinger(userDriven: Bool,
+                                      oldContainer: CGFloat, newContainer: CGFloat) -> Bool {
+        userDriven && abs(newContainer - oldContainer) > 0.5
+    }
+
     static func settled(grew: Bool, oldContainer: CGFloat, newContainer: CGFloat,
                         distance: CGFloat, pinned: Bool) -> Settled {
         if grew { return pinned ? .stick : .reread(away: true) }
@@ -4790,10 +4806,13 @@ private struct AwayFromBottomReporter: ViewModifier {
     /// leaving the end reads as a reader arriving at it, which latches `pinned` and lets
     /// the next growth stick the transcript back to the bottom underneath them.
     @State private var gestureContainer: CGFloat?
+    /// Set so the offset can be put back when the container moves under the reader's finger.
+    @State private var position = ScrollPosition()
 
     private struct Sample: Equatable {
         var height: CGFloat
         var container: CGFloat
+        var offset: CGFloat
         var distance: CGFloat
     }
 
@@ -4812,10 +4831,12 @@ private struct AwayFromBottomReporter: ViewModifier {
                     @unknown default: userDriven = false
                     }
                 }
+                .scrollPosition($position)
                 .onScrollGeometryChange(for: Sample.self) { g in
                     Sample(
                         height: g.contentSize.height,
                         container: g.containerSize.height,
+                        offset: g.contentOffset.y,
                         distance: g.contentSize.height - g.contentOffset.y - g.containerSize.height
                     )
                 } action: { old, new in
@@ -4829,6 +4850,26 @@ private struct AwayFromBottomReporter: ViewModifier {
                     }
                     #endif
                     if userDriven {
+                        // The finger owns the offset while it is down. A container resize
+                        // under it is the keyboard retracting out of the reader's own drag,
+                        // and `.defaultScrollAnchor(.bottom)` answers that by holding the
+                        // *end* against the container — which moves the content the reader is
+                        // holding. Put the offset back.
+                        //
+                        // Deliberately not conditioned on `away`: the reader has travelled only
+                        // a few points when the retraction starts, so the 120 pt threshold has
+                        // not been crossed yet and anything reading it here reads `false` (leg
+                        // 42604426988, where the conditional size-change anchor was chosen as
+                        // `.bottom` for exactly that reason). Who is dragging is knowable at
+                        // that instant; how far they have got is not yet meaningful.
+                        //
+                        // Outside a gesture this does not run at all, which is what keeps the
+                        // keyboard rising and falling at the live bottom anchored as before.
+                        if TranscriptScrollLatch.resizedUnderTheFinger(
+                            userDriven: true, oldContainer: old.container,
+                            newContainer: new.container) {
+                            position.scrollTo(y: old.offset)
+                        }
                         let start = gestureContainer ?? old.container
                         gestureContainer = start
                         let isAway = TranscriptScrollLatch.away(
