@@ -8429,7 +8429,12 @@ impl Agent {
         // turn would refuse that turn too, so it is dropped here instead of replayed: the turn
         // ends with the refusal line below, and the question after it starts from a clean window.
         if self.refused_turn_to_drop().await {
-            self.drop_refused_turn_from_window(chat_id, user_msg_id, true, "refusal_dropped")
+            // Marked only on a turn the user's own words opened. On a result or fallback turn
+            // `user_msg_id` is the ask that started the work, and what the provider declined was
+            // the brief or the result — so marking it would take an innocent message out of this
+            // chat's memory for good.
+            let theirs = matches!(kind, TurnKind::User);
+            self.drop_refused_turn_from_window(chat_id, user_msg_id, theirs, "refusal_dropped")
                 .await;
         }
         // An empty turn is usually the model window, not the question: a provider refusal on a
@@ -14481,14 +14486,30 @@ pub(crate) fn answer_delivered(t: &TurnState) -> bool {
 /// The error code a declined turn's row carries, in its error part or in `modelFailedAfterAck`.
 pub(crate) const REFUSED_CODE: &str = "model_refused";
 
-/// The user rows of this chat whose turn the provider declined.
+/// The user rows of this chat whose turn the provider declined — the words it would be declining
+/// again. The reply rows are left in: what was declined was the user's message, and a reply that
+/// got prose out before the refusal is an ordinary answer worth recapping. A reply that got
+/// nothing out carries its line as an error part, so `text()` is empty and the recap skips it on
+/// its own.
 ///
-/// Read off the transcript rather than off a turn: the recap is built from rows, and the turn the
-/// refusal belongs to is usually long finished. A declined turn's own reply row carries no words
-/// — its line is an error part, so `text()` is empty and the recap skips it anyway — but the
-/// message that opened it is ordinary text, and sending that back is sending the provider the
-/// content it declined.
-fn refused_user_rows(rows: &[arbos_core::doc::MessageView]) -> HashSet<String> {
+/// **Why this is not `Store::t3_mark_refused`'s marker, which is the other half of the same
+/// concept.** The contract between them is a containment, not an equality: **a marked turn is
+/// always excluded here, and not the reverse.** The marker is the stronger claim, because it
+/// changes for good what the memory walk may offer, so it is only written when a retry on a
+/// window holding none of this chat was declined as well, and only on a turn the user's own words
+/// opened (`refused_turn_to_drop`, and the `TurnKind::User` gate at its call site). This is a
+/// per-prompt judgement with nothing durable behind it, so it covers every turn that ended on a
+/// refusal line — including a refusal that never earned a retry, and a result turn's refusal,
+/// where the row it excludes is the ask that started the work.
+///
+/// Neither touches a turn that delivered prose: the provider took most of that message, the user
+/// has an answer, and `model_failed` writes no refusal line for it.
+/// `the_two_readings_of_a_refused_turn_agree_where_they_overlap` drives all three shapes against
+/// a live session and will fail if either side drifts.
+///
+/// It reads the transcript rather than the database because the recap is built under the host
+/// lock in the turn's hot path, and the turn it is judging is usually long finished.
+pub(crate) fn refused_user_rows(rows: &[arbos_core::doc::MessageView]) -> HashSet<String> {
     let mut out = HashSet::new();
     for m in rows {
         let declined = m
@@ -14499,7 +14520,6 @@ fn refused_user_rows(rows: &[arbos_core::doc::MessageView]) -> HashSet<String> {
         if !declined {
             continue;
         }
-        out.insert(m.id.clone());
         if let Some(asked) = m.rest.get("inReplyTo").and_then(Value::as_str) {
             out.insert(asked.to_owned());
         }
@@ -15322,7 +15342,14 @@ pub(crate) fn refused_turn_to_drop(t: &TurnState) -> bool {
     m.refusal
         && t.refusal_retried
         && !t.stopped
-        && t.streamed_text.trim().is_empty()
+        // Prose the filter is still holding counts as delivered. With the send tool on, a turn's
+        // words sit in `act_buffer`/`unposted_text` until `post_fallback_if_silent` puts them in
+        // the chat at the very end, so `streamed_text` alone reads an answered turn as a silent
+        // one here — and then drops the window of a turn the user did get an answer out of, and
+        // (since this fix) marks their message as declined for good. The paragraph above says
+        // such a turn keeps its window; this is what makes that true in both send-tool modes.
+        && !t.has_prose()
+        && t.unposted_text.trim().is_empty()
         && !is_abort_text(&m.detail)
         && crate::budget::Refusal::classify(&m.detail).is_none()
         && classify_hard_limit(&m.detail).is_none()

@@ -731,7 +731,12 @@ impl Tree {
             usize::MAX
         };
         let found = self.store.with(|c| {
-            let mut leaves = c.prepare("SELECT DISTINCT thread_id FROM t3_fts WHERE t3_fts MATCH ?1")?;
+            // A declined turn is evidence for nothing: the walk cannot offer that row
+            // (`leaves_by_ids`, `bm25_hits`), so letting its words decide which threads to
+            // expand would pick a thread for a reason the pack can never show.
+            let mut leaves = c.prepare(
+                "SELECT DISTINCT thread_id FROM t3_fts WHERE t3_fts MATCH ?1 AND kind <> ?2",
+            )?;
             let mut cards = c.prepare(
                 "SELECT DISTINCT thread_id FROM tree_cards_fts WHERE tree_cards_fts MATCH ?1 AND thread_id IS NOT NULL",
             )?;
@@ -741,7 +746,9 @@ impl Tree {
                     continue;
                 };
                 let mut per_word: HashSet<String> = HashSet::new();
-                for r in leaves.query_map(params![q], |r| r.get::<_, String>(0))? {
+                for r in leaves.query_map(params![q, crate::store::T3_KIND_REFUSED], |r| {
+                    r.get::<_, String>(0)
+                })? {
                     per_word.insert(r?);
                 }
                 for r in cards.query_map(params![q], |r| r.get::<_, String>(0))? {

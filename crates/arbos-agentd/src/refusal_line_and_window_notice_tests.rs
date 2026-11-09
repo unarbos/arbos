@@ -65,6 +65,11 @@ const FETCH_ANSWER: &str = "Summary: the page is a changelog for build 412.";
 const ARITHMETIC: &str = "17×23?";
 const ARITHMETIC_ANSWER: &str = "391";
 
+/// An ask the provider starts answering and then declines. No retry runs (the user has prose) and
+/// so no drop and no marker, which is the one place the two readings of "declined" differ.
+const PARTIAL_ASK: &str = "list the three files and then do the risky part";
+const PARTIAL_ANSWER: &str = "The three files are a.rs, b.rs and c.rs.";
+
 /// The provider's wording, as the AR lane read it out of round 22's pi session file.
 const REFUSAL_DETAIL: &str = "Cyber safeguards flagged this message. If this is legitimate security work, you can apply for the Cyber Verification Program: https://example.invalid/cyber-verification";
 
@@ -82,6 +87,7 @@ log = open(sys.argv[1], "a")
 flagged, refusal = sys.argv[2], sys.argv[3]
 fetch_ask, fetch_answer = sys.argv[4], sys.argv[5]
 ask, answer = sys.argv[6], sys.argv[7]
+partial_ask, partial_answer = sys.argv[8], sys.argv[9]
 
 windows = {}
 current = "initial"
@@ -97,9 +103,20 @@ def out(o):
     sys.stdout.flush()
 
 
-def say(text):
+def stream(text):
     out({"type": "message_update", "assistantMessageEvent": {
         "type": "text_delta", "contentIndex": 0, "delta": text}})
+
+
+def decline():
+    out({"type": "message_end", "message": {
+        "role": "assistant", "stopReason": "error",
+        "rawStopReason": "refusal", "errorMessage": refusal}})
+    out({"type": "agent_settled", "aborted": False})
+
+
+def say(text):
+    stream(text)
     out({"type": "agent_settled", "aborted": False})
 
 
@@ -129,10 +146,13 @@ for line in sys.stdin:
     out({"type": "agent_start"})
     if any(flagged in sent for sent in window):
         note("refused", "window=%s prompts=%d" % (current, len(window)))
-        out({"type": "message_end", "message": {
-            "role": "assistant", "stopReason": "error",
-            "rawStopReason": "refusal", "errorMessage": refusal}})
-        out({"type": "agent_settled", "aborted": False})
+        decline()
+        continue
+    if partial_ask in asked:
+        # Part of the answer, then the refusal: the user keeps prose, so agentd runs no retry.
+        note("refused_after_prose", "window=%s" % current)
+        stream(partial_answer)
+        decline()
         continue
     if fetch_ask in asked:
         # The page body lands in the window as a tool result. No chat row carries it.
@@ -160,6 +180,8 @@ async fn context_pi(root: &std::path::Path) -> (Arc<RpcChild>, std::path::PathBu
             FETCH_ANSWER.to_owned(),
             ARITHMETIC.to_owned(),
             ARITHMETIC_ANSWER.to_owned(),
+            PARTIAL_ASK.to_owned(),
+            PARTIAL_ANSWER.to_owned(),
         ],
         &[],
         root,
@@ -414,6 +436,157 @@ async fn a_dropped_refusal_leaves_this_chats_memory_as_well_as_its_window() {
         "including by way of its row id: {recap}"
     );
     pi.shutdown().await;
+}
+
+/// The message ids t3 holds as declined turns — the marker's reading of "this turn was refused".
+fn marked_in_store(agent: &Arc<Agent>) -> Vec<String> {
+    agent
+        .store
+        .with(|c| {
+            let mut st = c.prepare(
+                "SELECT json_extract(source, '$.message_id') FROM t3
+                 WHERE thread_id = ?1 AND kind = ?2 ORDER BY id",
+            )?;
+            let rows = st.query_map(
+                rusqlite::params![CHAT, crate::store::T3_KIND_REFUSED],
+                |r| r.get::<_, Option<String>>(0),
+            )?;
+            Ok(rows.filter_map(Result::ok).flatten().collect::<Vec<_>>())
+        })
+        .unwrap()
+}
+
+/// Two mechanisms carry one concept, and this is the test that fails when they drift apart.
+///
+/// The memory walk goes by the t3 row's kind (`Store::t3_mark_refused`); the recap goes by the
+/// transcript's `model_refused` code (`refused_user_rows`). They cannot be one mechanism — the
+/// marker is permanent, so it is only earned by a refusal that survived a clean-window retry on a
+/// turn the user's own words opened, while the recap has to skip refusals that never earn a
+/// retry. So the contract is a containment: **a marked turn is always recap-excluded, never the
+/// reverse**, and neither touches a turn that delivered prose.
+///
+/// Both shapes are driven here against a live session rather than asserted over a `TurnState`,
+/// because what broke the second one was neither mechanism but the order of the turn's own
+/// writers: with the send tool on, the prose was still held when the drop was decided, so an
+/// answered turn looked silent and was marked.
+#[tokio::test]
+async fn the_two_readings_of_a_refused_turn_agree_where_they_overlap() {
+    let (agent, root) = test_agent().await;
+    agent
+        .store
+        .upsert_chat(CHAT, "stress", false, now_ms())
+        .unwrap();
+    let host = agent.sync.open_room(CHAT).await.unwrap();
+    let (pi, log) = context_pi(&root).await;
+    agent.test_set_pi(Some(pi.clone()), CHAT).await;
+
+    // Refused in every window and nothing delivered: dropped, so both readings have it.
+    let dropped = ask_for(&agent, &host, FLAGGED).await;
+    // Refused after prose: no retry, so no drop and no marker — the recap still has to skip it,
+    // because the user's words are what the provider declined either way.
+    let partial = ask_for(&agent, &host, PARTIAL_ASK).await;
+    let partial_rows = answers(&host, &partial).await;
+    assert!(
+        said(&partial_rows).contains(PARTIAL_ANSWER),
+        "the partial turn keeps the prose it got out, which is why neither mechanism takes it: \
+         {} / pi: {:?}",
+        said(&partial_rows),
+        pi_log(&log)
+    );
+
+    let marked = marked_in_store(&agent);
+    assert_eq!(
+        marked,
+        vec![dropped.clone()],
+        "the marker is earned by the dropped turn alone: {marked:?}"
+    );
+
+    let rows = { host.lock().await.doc.messages() };
+    let skipped = crate::agent::refused_user_rows(&rows);
+    for id in &marked {
+        assert!(
+            skipped.contains(id),
+            "a turn the walk will not offer must not ride the recap either: {id} missing from \
+             {skipped:?}"
+        );
+    }
+    assert!(
+        !skipped.contains(&partial),
+        "a turn that answered is not a declined turn to either of them: {skipped:?}"
+    );
+    // And the recap is built from that reading, so the two carriers agree in the output too.
+    let next = ulid();
+    {
+        let h = host.lock().await;
+        h.doc
+            .append_user_message(&next, ARITHMETIC, "dev-mac", &UserMessageOpts::default())
+            .expect("user message");
+    }
+    let recap = {
+        let h = host.lock().await;
+        crate::agent::chat_recap(&h.doc.messages(), &next, "Arbos", CHAT)
+    };
+    assert!(
+        !recap.contains(FLAGGED),
+        "the marked turn is out of the recap as well: {recap}"
+    );
+    assert!(
+        recap.contains(PARTIAL_ANSWER),
+        "the answered turn is still this chat's history: {recap}"
+    );
+    pi.shutdown().await;
+}
+
+/// The marker hides the row from the memory walk and from nothing else.
+///
+/// The failure this guards against is silent: a reader that filters `kind = 'user'` does not
+/// error when a row changes kind, it just stops seeing it. The readers that must keep seeing it
+/// are the deliberate ones — `history_search` with `kind: "user"` (the only caller that passes a
+/// kind at all), the secret sweep, the inspect window, `history_read` — so `t3_search_fts` treats
+/// the marker as a user row, and nothing filtered on kind stands between `t3_thread` and its
+/// caller.
+#[test]
+fn a_marked_turn_is_still_there_for_every_deliberate_reader() {
+    let dir = std::env::temp_dir().join(format!("arbos-marked-reads-{}", ulid()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let store = crate::store::Store::open(&dir.join("agentd.db")).unwrap();
+    let row = store
+        .t3_append(
+            CHAT,
+            None,
+            Some(CHAT),
+            "user",
+            Some("user"),
+            "the osprey nesting platform plans",
+            Some(&json!({ "message_id": "m-1" })),
+        )
+        .unwrap();
+    assert_eq!(store.t3_mark_refused(CHAT, "m-1").unwrap(), 1);
+
+    let thread = store.t3_thread(CHAT, None, None, 10).unwrap();
+    assert!(
+        thread.iter().any(|r| r.id == row),
+        "history_read's reader keeps the row: {thread:?}"
+    );
+
+    for kind in [None, Some("user"), Some(crate::store::T3_KIND_REFUSED)] {
+        let hits = store
+            .t3_search("osprey", Some(CHAT), kind, 10, 0)
+            .unwrap_or_default();
+        assert!(
+            hits.iter().any(|(r, _, _)| r.id == row),
+            "a search for {kind:?} still finds a declined turn: {hits:?}"
+        );
+    }
+    // And the one reader that must not: the walk's keyword nomination.
+    let any = store
+        .t3_search_any(&["osprey".to_owned()], 10)
+        .unwrap_or_default();
+    assert!(
+        any.iter().any(|(r, _, _)| r.id == row),
+        "the search itself is kind-blind; the walk filters on the row's kind instead: {any:?}"
+    );
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 /// The two forms of the line, and the one input that chooses between them.

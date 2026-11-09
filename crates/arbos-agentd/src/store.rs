@@ -1037,6 +1037,11 @@ impl Store {
         self.t3_search_fts(&terms.join(" OR "), None, None, limit, 0)
     }
 
+    /// `kind = "user"` also finds `T3_KIND_REFUSED`, because that marker is a user row with a
+    /// flag on it and not a kind of its own. A search is a deliberate read — `history_search`,
+    /// the secret sweep, the inspect endpoint — and none of those should lose a message because
+    /// the provider declined the turn it opened. Only the memory walk passes over the marker, in
+    /// `tree.rs`, where it is read off `T3Row::kind` rather than filtered for here.
     fn t3_search_fts(
         &self,
         q: &str,
@@ -1050,10 +1055,13 @@ impl Store {
                 "SELECT t.id, t.thread_id, t.subagent_id, t.session_id, t.kind, t.role, t.at, t.text, t.size, bm25(t3_fts) AS score,
                         snippet(t3_fts, 0, '[', ']', '…', 24)
                  FROM t3_fts JOIN t3 t ON t.id = t3_fts.id
-                 WHERE t3_fts MATCH ?1 AND (?2 IS NULL OR t.thread_id = ?2) AND (?3 IS NULL OR t.kind = ?3)
+                 WHERE t3_fts MATCH ?1 AND (?2 IS NULL OR t.thread_id = ?2)
+                   AND (?3 IS NULL OR t.kind = ?3 OR (?3 = 'user' AND t.kind = ?6))
                  ORDER BY score LIMIT ?4 OFFSET ?5",
             )?;
-            let rows = st.query_map(params![q, thread_id, kind, limit, offset], |r| {
+            let rows = st.query_map(
+                params![q, thread_id, kind, limit, offset, T3_KIND_REFUSED],
+                |r| {
                 Ok((
                     T3Row {
                         id: r.get(0)?,
@@ -1069,7 +1077,8 @@ impl Store {
                     r.get::<_, f64>(9)?,
                     r.get::<_, String>(10)?,
                 ))
-            })?;
+                },
+            )?;
             rows.collect()
         })
     }
