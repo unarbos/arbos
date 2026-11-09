@@ -2295,6 +2295,11 @@ struct ChatSession: View {
         .contentShape(Circle().inset(by: -(44 - Theme.voiceButton) / 2))
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(jumpBackTo == nil ? "Scroll to bottom" : "Back to reply")
+        // `newMessagesPill` below has carried `chat-jump-to-latest` since it was written and
+        // this one carried nothing, so a test reaching for "the reader is away from the end"
+        // could only name the case where rows had also landed below them. The bare chevron is
+        // the other half of the same state and needs its own name.
+        .accessibilityIdentifier("chat-scroll-to-bottom")
         .accessibilityAddTraits(.isButton)
         .accessibilityAction { jumpBackOrLatest() }
     }

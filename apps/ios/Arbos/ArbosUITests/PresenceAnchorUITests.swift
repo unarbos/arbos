@@ -55,6 +55,17 @@ final class PresenceAnchorUITests: XCTestCase {
         app.descendants(matching: .any)["presence-row"].firstMatch
     }
 
+    /// The app's own word for "the reader is away from the end".
+    ///
+    /// Two affordances share that slot and they are mutually exclusive: `newMessagesPill`
+    /// when rows have landed below, and the bare chevron when they have not. This fixture
+    /// is the second case — the streaming row keeps its id while it works, so nothing counts
+    /// as new below and the pill never comes. `chat-jump-to-latest` names the pill only, so
+    /// waiting on it here waits for something this chat cannot show.
+    private func awayMarker(_ app: XCUIApplication) -> XCUIElement {
+        app.descendants(matching: .any)["chat-scroll-to-bottom"].firstMatch
+    }
+
     /// One deliberate drag rather than a flick.
     ///
     /// `swipeDown()` throws the transcript and leaves where it comes to rest to the
@@ -101,9 +112,7 @@ final class PresenceAnchorUITests: XCTestCase {
 
         // Stops short of the composer, which would otherwise take the drag.
         dragIntoHistory(app, endingAt: 0.80)
-        // The jump-to-latest disc only shows when the reader is away from the end, so it is
-        // the app's own word for "this test actually scrolled up".
-        let jump = app.descendants(matching: .any)["chat-jump-to-latest"].firstMatch
+        let jump = awayMarker(app)
         XCTAssertTrue(jump.waitForExistence(timeout: 15), "the reader is up in history")
         shot(app, "presence-scrolled-up-in-history")
 
@@ -152,7 +161,7 @@ final class PresenceAnchorUITests: XCTestCase {
         assertGone(app.keyboards.firstMatch,
                    "the drag dismissed the keyboard, so this is the gesture under test")
 
-        let jump = app.descendants(matching: .any)["chat-jump-to-latest"].firstMatch
+        let jump = awayMarker(app)
         XCTAssertTrue(jump.waitForExistence(timeout: 15),
                       "the drag took the reader into history, keyboard or no keyboard")
 
