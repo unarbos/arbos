@@ -93,6 +93,16 @@ struct RootView: View {
                 .interactiveDismissDisabled(true)
                 .preferredColorScheme(theme.isDark ? .dark : .light)
         }
+        // The wallet's once-only steps (Sync/Wallet.swift) wait for profile setup and the
+        // first-login screen, like the primer.
+        .sheet(item: Binding(get: { model.needsProfileSetup || model.firstLogin != nil ? nil : model.walletPrompt },
+                             set: { model.walletPrompt = $0 })) { prompt in
+            WalletPromptSheet(prompt: prompt)
+                .environmentObject(model)
+                .environment(\.theme, theme)
+                .presentationDetents([.large])
+                .presentationBackground(theme.bg)
+        }
         .sheet(isPresented: $showPrimer) {
             NotificationsPrimerView().environment(\.theme, theme)
         }
@@ -200,7 +210,8 @@ struct RootView: View {
               model.firstLogin == nil else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
             // Never on top of another sheet (feedback, settings, profile setup…) or the first-login screen.
-            if push.shouldShowPrimer, model.isPaired, !feedback.isPresented, !model.needsProfileSetup, model.firstLogin == nil { showPrimer = true }
+            if push.shouldShowPrimer, model.isPaired, !feedback.isPresented, !model.needsProfileSetup, model.firstLogin == nil,
+               model.walletPrompt == nil { showPrimer = true }
         }
     }
 

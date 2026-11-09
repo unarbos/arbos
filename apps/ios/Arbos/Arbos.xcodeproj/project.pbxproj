@@ -34,6 +34,7 @@
 		A10B17B543EDC6C9BAAEDF33 /* PushManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15D0D4E1ADC058D632D0769 /* PushManager.swift */; };
 		A1C76C55AC33FA79D6C27FAA /* Auth.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B646F374BD7AE1F3BE7A4B /* Auth.swift */; };
 		A14BB8E6904C5D3D5CFFCA56 /* Keychain.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A8BC5FCD045299B0D7D13D /* Keychain.swift */; };
+		A1E7A11E7000000000000002 /* Wallet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1E7A11E7000000000000001 /* Wallet.swift */; };
 		A156C11ABF2E8C649148533D /* RelayAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1E592B43CC1234959AF2E63 /* RelayAPI.swift */; };
 		A15C00000000000000000009 /* SessionRoom.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15C00000000000000000008 /* SessionRoom.swift */; };
 		A15C0000000000000000000D /* CoreChatDoc.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15C0000000000000000000C /* CoreChatDoc.swift */; };
@@ -120,6 +121,7 @@
 		A1F10000000000000000000A /* MathText.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F100000000000000000009 /* MathText.swift */; };
 		A1F10000000000000000000E /* CodeHighlight.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F10000000000000000000D /* CodeHighlight.swift */; };
 		A1C4A2700000000000000002 /* ChartCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C4A2700000000000000001 /* ChartCard.swift */; };
+		A1E7A11E7000000000000004 /* WalletViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1E7A11E7000000000000003 /* WalletViews.swift */; };
 		A1C4A2700000000000000012 /* LinkPreviewCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C4A2700000000000000011 /* LinkPreviewCard.swift */; };
 		A1C4A2700000000000000014 /* LinkPreviewCardTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C4A2700000000000000013 /* LinkPreviewCardTests.swift */; };
 		A1DE700000000000000000C2 /* MentionComposer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1DE700000000000000000C1 /* MentionComposer.swift */; };
@@ -291,6 +293,7 @@
 		A15D0D4E1ADC058D632D0769 /* PushManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PushManager.swift; sourceTree = "<group>"; };
 		A1B646F374BD7AE1F3BE7A4B /* Auth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Auth.swift; sourceTree = "<group>"; };
 		A1A8BC5FCD045299B0D7D13D /* Keychain.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Keychain.swift; sourceTree = "<group>"; };
+		A1E7A11E7000000000000001 /* Wallet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Wallet.swift; sourceTree = "<group>"; };
 		A1E592B43CC1234959AF2E63 /* RelayAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RelayAPI.swift; sourceTree = "<group>"; };
 		A15C00000000000000000008 /* SessionRoom.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionRoom.swift; sourceTree = "<group>"; };
 		A15C0000000000000000000C /* CoreChatDoc.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoreChatDoc.swift; sourceTree = "<group>"; };
@@ -377,6 +380,7 @@
 		A1F100000000000000000009 /* MathText.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MathText.swift; sourceTree = "<group>"; };
 		A1F10000000000000000000D /* CodeHighlight.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeHighlight.swift; sourceTree = "<group>"; };
 		A1C4A2700000000000000001 /* ChartCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChartCard.swift; sourceTree = "<group>"; };
+		A1E7A11E7000000000000003 /* WalletViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WalletViews.swift; sourceTree = "<group>"; };
 		A1C4A2700000000000000011 /* LinkPreviewCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinkPreviewCard.swift; sourceTree = "<group>"; };
 		A1C4A2700000000000000013 /* LinkPreviewCardTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinkPreviewCardTests.swift; sourceTree = "<group>"; };
 		A1DE700000000000000000C1 /* MentionComposer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MentionComposer.swift; sourceTree = "<group>"; };
@@ -621,6 +625,7 @@
 				A1EE00000000000000000001 /* UserError.swift */,
 				A1B646F374BD7AE1F3BE7A4B,
 				A1A8BC5FCD045299B0D7D13D,
+				A1E7A11E7000000000000001 /* Wallet.swift */,
 				A1E592B43CC1234959AF2E63,
 				A1112911C0D615A9C335C0EF,
 				A15C00000000000000000008,
@@ -675,6 +680,7 @@
 				A1F100000000000000000009 /* MathText.swift */,
 				A1F10000000000000000000D /* CodeHighlight.swift */,
 				A1C4A2700000000000000001 /* ChartCard.swift */,
+				A1E7A11E7000000000000003 /* WalletViews.swift */,
 				A1C4A2700000000000000011 /* LinkPreviewCard.swift */,
 				A1DE700000000000000000C1 /* MentionComposer.swift */,
 				A11B0000000000000000A001 /* LibraryList.swift */,
@@ -1020,6 +1026,7 @@
 				A1F10000000000000000000A /* MathText.swift in Sources */,
 				A1F10000000000000000000E /* CodeHighlight.swift in Sources */,
 				A1C4A2700000000000000002 /* ChartCard.swift in Sources */,
+				A1E7A11E7000000000000004 /* WalletViews.swift in Sources */,
 				A1C4A2700000000000000012 /* LinkPreviewCard.swift in Sources */,
 				A1DE700000000000000000C2 /* MentionComposer.swift in Sources */,
 				A1D8800000000000000000D2 /* DiscAvatar.swift in Sources */,
@@ -1038,6 +1045,7 @@
 				A10B17B543EDC6C9BAAEDF33 /* PushManager.swift in Sources */,
 				A1C76C55AC33FA79D6C27FAA /* Auth.swift in Sources */,
 				A14BB8E6904C5D3D5CFFCA56 /* Keychain.swift in Sources */,
+				A1E7A11E7000000000000002 /* Wallet.swift in Sources */,
 				A156C11ABF2E8C649148533D /* RelayAPI.swift in Sources */,
 				A115819FE05076AF542EABF0 /* SecretsAPI.swift in Sources */,
 				A15C00000000000000000009 /* SessionRoom.swift in Sources */,

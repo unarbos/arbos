@@ -688,6 +688,9 @@ enum Part: Equatable {
     /// Secret hand-off: the message's value moved into the vault; the row is the ghost
     /// "Secret saved as NAME". Names only — there is no value field.
     case secretRedacted(id: Id, name: String, savedBy: String, agent: String?)
+    /// A TAO cheque (Sync/Wallet.swift): the signed transfer as 0x-hex. What it pays is read
+    /// from these bytes, never from the message text.
+    case cheque(id: Id, bytes: String)
     case unknown(id: Id)
 
     var id: Id {
@@ -695,7 +698,7 @@ enum Part: Equatable {
         case .text(let id, _), .reasoning(let id), .tool(let id, _, _), .attachment(let id, _),
              .error(let id, _, _), .status(let id, _, _), .question(let id, _), .subagentResult(let id),
              .chart(let id, _, _, _, _), .linkPreview(let id, _), .secretRedacted(let id, _, _, _),
-             .unknown(let id):
+             .cheque(let id, _), .unknown(let id):
             return id
         }
     }
@@ -703,6 +706,11 @@ enum Part: Equatable {
     /// The vault name when this is a `secret_redacted` ghost part.
     var secretRedactedName: String? {
         if case .secretRedacted(_, let name, _, _) = self { return name }
+        return nil
+    }
+
+    var chequeBytes: String? {
+        if case .cheque(_, let bytes) = self { return bytes }
         return nil
     }
 
@@ -1331,7 +1339,7 @@ struct Message: Identifiable, Equatable {
             switch part {
             case .text(_, let t): return t.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             case .reasoning, .status, .subagentResult, .unknown: return true
-            case .tool, .attachment, .error, .question, .chart, .linkPreview, .secretRedacted: return false
+            case .tool, .attachment, .error, .question, .chart, .linkPreview, .secretRedacted, .cheque: return false
             }
         }
     }
@@ -1601,6 +1609,9 @@ enum DocJSON {
             return .question(id: id, question: approval(pm))
         case "subagent_result":
             return .subagentResult(id: id)
+        case "cheque":
+            guard let bytes = str(pm["cheque"]), bytes.count <= 4096 else { return .unknown(id: id) }
+            return .cheque(id: id, bytes: bytes)
         case "secret_redacted":
             let name = str(pm["name"]).flatMap { $0.isEmpty ? nil : $0 } ?? str(pm["env"]) ?? ""
             return .secretRedacted(id: id, name: name, savedBy: str(pm["savedBy"]) ?? "", agent: str(pm["agent"]))

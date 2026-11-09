@@ -487,6 +487,8 @@ final class AppModel: ObservableObject {
     var serverRostersRequested: Set<Id> = []
     /// `matrixStart` in flight (one at a time).
     var matrixStarting = false
+    /// The wallet step on screen: show a new phrase once, or ask for it (Sync/Wallet.swift).
+    @Published var walletPrompt: WalletPrompt?
 
     /// Who the call screen shows before anyone joins: the DM peer, or (for a
     /// people group) every other human plus the agents in that chat; for a
