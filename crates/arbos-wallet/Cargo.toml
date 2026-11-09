@@ -1,0 +1,32 @@
+[package]
+name = "arbos-wallet"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+description = "Every user's Bittensor wallet: one phrase for the TAO account, the chat key backup and offline cheques"
+
+[dependencies]
+# Signing and SS58 straight from Parity's crates, without jsonrpsee: chain RPC is plain HTTPS
+# below. `native` + `runtime` give the online client on tokio.
+subxt = { version = "0.51", default-features = false, features = ["native", "runtime"] }
+subxt-signer = { version = "0.51", default-features = false, features = ["sr25519", "subxt", "std"] }
+tokio = { workspace = true, features = ["sync", "time"] }
+futures.workspace = true
+serde.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
+thiserror.workspace = true
+hex.workspace = true
+rand.workspace = true
+sha2.workspace = true
+hmac = "0.12"
+
+# Same HTTP line and TLS split as arbos-matrix: the system stack on Apple, rustls elsewhere.
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+reqwest13 = { package = "reqwest", version = "0.13", default-features = false, features = ["native-tls"] }
+[target.'cfg(not(any(target_os = "macos", target_os = "ios")))'.dependencies]
+reqwest13 = { package = "reqwest", version = "0.13", default-features = false, features = ["rustls"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

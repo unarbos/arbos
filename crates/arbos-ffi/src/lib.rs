@@ -24,6 +24,7 @@ pub mod matrix;
 pub mod search;
 pub mod settings_search;
 pub mod transcript;
+pub mod wallet;
 
 /// Frame decode, doc import, or writer failure. Sans-IO session has no transport errors.
 #[derive(Debug, Clone, thiserror::Error, uniffi::Error)]
