@@ -55,6 +55,22 @@ impl Provider {
     }
 }
 
+/// Is this row one the relay only reads? The sandboxes left on the retired provider belong to an
+/// operator step outside the relay, so nothing here starts, stops, rolls or replaces them — and
+/// nothing deletes the row either, because the row is what names the sandbox to delete.
+///
+/// Reading them is normal: `GET /machine`, the project status, the admin listings and the fleet
+/// views all show such a box as it is. Only the paths that would drive it are closed.
+pub fn read_only_row(sb: &Sandbox) -> bool {
+    sb.provider == RETIRED_PROVIDER
+}
+
+/// The same question when only the user id is at hand. A row that cannot be read answers `false`:
+/// the caller then meets the real error on its own path rather than being silently skipped here.
+fn read_only_box(state: &AppState, user_id: &str) -> bool {
+    matches!(state.db.user_box(user_id), Ok(Some(sb)) if read_only_row(&sb))
+}
+
 /// The provider of a stored box row. A row still on the retired provider says so rather than
 /// failing as an unknown name: it is the one case an operator meets while old rows exist.
 pub fn provider_of(sb: &Sandbox) -> Result<Provider> {
@@ -789,6 +805,15 @@ pub async fn ensure_user_box(
 }
 
 pub async fn ensure_awake(state: &AppState, user_id: &str, reason: &str) {
+    // A box on the retired provider is read-only (see `read_only_row`): the relay cannot start it
+    // and must not make a replacement, so the wake stops here instead of queueing a job that can
+    // only fail. The box's state is left as it stands — whether that sandbox is running is no
+    // longer something this relay can say. Always-on asks for every user every minute, so this is
+    // also what keeps those rows out of the wake log.
+    if read_only_box(state, user_id) {
+        tracing::debug!(%user_id, reason, "wake skipped: this box is on the retired provider");
+        return;
+    }
     let (st, since) = state.box_state(user_id).await;
     if st == BoxState::Awake {
         // Nothing to wake; a timer left from an earlier attempt would only mislabel the next
@@ -1392,46 +1417,58 @@ pub async fn spawn_wake_runner(state: AppState) {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_millis(750)).await;
-            let jobs = match state.db.due_wake_jobs() {
-                Ok(j) => j,
-                Err(_) => continue,
-            };
-            for (user_id, reason, attempts) in jobs {
-                let (st, _) = state.box_state(&user_id).await;
-                if st == BoxState::Awake || st == BoxState::Error {
-                    // Awake: the dial finished it. Error: the stale-box detector gave up; only an
-                    // explicit wake/start re-arms it.
+            run_wake_jobs(&state).await;
+        }
+    });
+}
+
+/// One pass over the wake jobs that are due.
+pub(crate) async fn run_wake_jobs(state: &AppState) {
+    let jobs = match state.db.due_wake_jobs() {
+        Ok(j) => j,
+        Err(_) => return,
+    };
+    for (user_id, reason, attempts) in jobs {
+        let (st, _) = state.box_state(&user_id).await;
+        if st == BoxState::Awake || st == BoxState::Error {
+            // Awake: the dial finished it. Error: the stale-box detector gave up; only an
+            // explicit wake/start re-arms it.
+            let _ = state.db.finish_wake_job(&user_id);
+            continue;
+        }
+        if read_only_box(state, &user_id) {
+            // A job queued before the provider was retired. It can only fail three times and end
+            // as `error`, which says nothing true about that box, so it ends here and the state is
+            // left as it stands.
+            let _ = state.db.finish_wake_job(&user_id);
+            continue;
+        }
+        if state.upgrading.lock().await.contains_key(&user_id) {
+            // The upgrade starts the box it ends on. A start from here would bounce a box mid-roll
+            // and write back a row read before the new sandbox landed in it (#2262); the job waits
+            // for the upgrade.
+            continue;
+        }
+        // Mark the job as in flight by pushing its due time out; the box dial finishes it.
+        let _ = state.db.retry_wake_job(&user_id, 120_000, "in flight");
+        tracing::info!(%user_id, %reason, attempts, "waking box");
+        match start_box(state, &user_id).await {
+            Ok(()) => {}
+            Err(e) => {
+                tracing::warn!(%user_id, error = %e, "wake failed");
+                let n = state
+                    .db
+                    .retry_wake_job(&user_id, 5_000 * (attempts + 1), &e.to_string())
+                    .unwrap_or(99);
+                if n >= 3 {
                     let _ = state.db.finish_wake_job(&user_id);
-                    continue;
-                }
-                if state.upgrading.lock().await.contains_key(&user_id) {
-                    // The upgrade starts the box it ends on (or the old one on rollback). A start
-                    // from here would bounce a box mid-carry and write back a row read before
-                    // the new box landed in it (#2262); the job waits for the upgrade.
-                    continue;
-                }
-                // Mark the job as in flight by pushing its due time out; the box dial finishes it.
-                let _ = state.db.retry_wake_job(&user_id, 120_000, "in flight");
-                tracing::info!(%user_id, %reason, attempts, "waking box");
-                match start_box(&state, &user_id).await {
-                    Ok(()) => {}
-                    Err(e) => {
-                        tracing::warn!(%user_id, error = %e, "wake failed");
-                        let n = state
-                            .db
-                            .retry_wake_job(&user_id, 5_000 * (attempts + 1), &e.to_string())
-                            .unwrap_or(99);
-                        if n >= 3 {
-                            let _ = state.db.finish_wake_job(&user_id);
-                            state
-                                .set_box_state(&user_id, BoxState::Error, Some(&e.to_string()))
-                                .await;
-                        }
-                    }
+                    state
+                        .set_box_state(&user_id, BoxState::Error, Some(&e.to_string()))
+                        .await;
                 }
             }
         }
-    });
+    }
 }
 
 /// Keep-alive from the box while a turn runs (design §4.6): forward as "update last activity".

@@ -505,6 +505,13 @@ for u in json.load(sys.stdin):
     if tier == "test" and not is_test: continue
     if not m.get("sandbox_id"):
         continue
+    # Only a gVisor box is rolled (upgrade.rs refuses every other provider, the retired daytona
+    # one included). Such a box is NOT pending: asking would be refused on every pass, which
+    # would stop the roll on ROLL_MAX_CONSECUTIVE_FAILURES and leave a real user looking like a
+    # roll failure. `unrollable_boxes` names them instead. A relay too old to report the provider
+    # says nothing, and then the box is judged on its snapshot as before.
+    if (m.get("provider") or "gvisor") != "gvisor":
+        continue
     if is_test and m.get("state") == "error":
         continue
     if m.get("pinned_snapshot") and m.get("snapshot") == m.get("pinned_snapshot"):
@@ -555,6 +562,19 @@ for u in json.load(sys.stdin):
         print(u["id"], pin)'
 }
 
+unrollable_boxes() {
+  # Boxes left out of the roll because the relay does not roll their provider — `<uid> <provider>`.
+  # Today that is the sandboxes still on the retired daytona provider: read-only rows an operator
+  # deletes by hand. Printed by the roll and by `status` so they are accounted for, not missing.
+  admin_users | python3 -c '
+import sys, json
+for u in json.load(sys.stdin):
+    m = u.get("machine") or {}
+    p = m.get("provider")
+    if m.get("sandbox_id") and p and p != "gvisor":
+        print(u["id"], p)'
+}
+
 real_min_sha() {
   # real_min_sha [skipped uids] — the relay's real_min_sha (the sha of the earliest-reporting awake real
   # box), recomputed here from the same box list so that skipped boxes and LIMBO boxes do not count.
@@ -562,8 +582,10 @@ real_min_sha() {
   # hello from 01:03 and a ticking meter, and held the 0.1.183 roll at "not done" although every real box
   # ran the image. A box whose row has no sandbox/snapshot, or whose last hello predates the row's
   # last_started_at while naming another image than the row's snapshot, is logged (so it stays visible) and left out.
+  # So is a box on a provider the relay does not roll (the retired daytona one): its agentd never moves
+  # again, so counting it would hold every deploy from here on at "not done yet".
   local rows out
-  rows="$(relay_db -separator $'\t' "select user_id, coalesce(sandbox_id,''), coalesce(snapshot,''), coalesce(last_started_at,0) from boxes" 2>/dev/null || true)"
+  rows="$(relay_db -separator $'\t' "select user_id, coalesce(sandbox_id,''), coalesce(snapshot,''), coalesce(last_started_at,0), provider from boxes" 2>/dev/null || true)"
   out="$(curl -fsS --max-time 30 -H "Authorization: Bearer $(secret_from "$RELAY_ENV" ARBOS_RELAY_ADMIN_TOKEN)" "$RELAY_URL/admin/calls" \
     | ROWS="$rows" python3 -c '
 import sys, json, os
@@ -572,8 +594,8 @@ skipped = set(sys.argv[1].split()) if len(sys.argv) > 1 else set()
 rows = {}
 for line in (os.environ.get("ROWS") or "").splitlines():
     f = line.split("\t")
-    if len(f) == 4:
-        rows[f[0]] = (f[1], f[2], int(f[3] or 0))
+    if len(f) == 5:
+        rows[f[0]] = (f[1], f[2], int(f[3] or 0), f[4])
 real, ignored = [], []
 for b in a.get("boxes") or []:
     uid = b.get("user_id") or ""
@@ -582,8 +604,12 @@ for b in a.get("boxes") or []:
     row = rows.get(uid)
     why = None
     if row is not None:
-        sandbox, snapshot, started = row
-        if not sandbox or not snapshot:
+        sandbox, snapshot, started, provider = row
+        if provider and provider != "gvisor":
+            # The relay does not roll this box, so its agentd stays on an older commit for good
+            # and would hold every later deploy at "not done yet". It is out of the reading.
+            why = f"on the {provider} provider, which the relay does not roll"
+        elif not sandbox or not snapshot:
             why = "no sandbox/snapshot on its row"
         elif started and (b.get("reported_at") or 0) < started and not snapshot.endswith("-" + str(b.get("image") or "?")):
             # a stale hello from before the row was (re)started AND for another image than the row says:
@@ -796,11 +822,13 @@ roll_boxes() {
   # roll_boxes <target> — passes every 2 min for up to ROLL_WAIT_S; 0 when no box is pending.
   local target="$1" t0
   t0=$(date +%s)
-  local errored pinned
+  local errored pinned legacy
   errored="$(errored_test_boxes | tr '\n' ' ')"
   [[ -n "$errored" ]] && log "agentd: skipping errored test boxes (needs their owner, not the roll): $errored"
   pinned="$(pinned_boxes | sed 's/ /=/' | tr '\n' ' ')"
   [[ -n "$pinned" ]] && log "agentd: skipping boxes already on their users.snapshot pin (deliberate, not a failure): $pinned"
+  legacy="$(unrollable_boxes | sed 's/ /=/' | tr '\n' ' ')"
+  [[ -n "$legacy" ]] && log "agentd: skipping boxes on a provider the relay does not roll (read-only rows; an operator retires the sandbox): $legacy"
   while (( $(date +%s) - t0 < ROLL_WAIT_S )); do
     if [[ -z "$(pending_boxes "$target" all || true)" ]]; then
       log "agentd: every box (real and test) is on $target"
@@ -1414,11 +1442,16 @@ status() {
     echo "skipped boxes (left on their image; 'unskip <uid>' after the fix):"
     while IFS='|' read -r u r w; do echo "  $u since $w: $r"; done < "$STATE/agentd.skip"
   fi
-  local pinned
+  local pinned legacy
   pinned="$(pinned_boxes 2>/dev/null || true)"
   if [[ -n "$pinned" ]]; then
     echo "pinned boxes (on their users.snapshot pin, deliberately not rolling; clear the pin to roll them):"
     while read -r u p; do [[ -n "$u" ]] && echo "  $u → $p"; done <<< "$pinned"
+  fi
+  legacy="$(unrollable_boxes 2>/dev/null || true)"
+  if [[ -n "$legacy" ]]; then
+    echo "boxes on a provider the relay does not roll (read-only rows; the sandbox is retired by hand):"
+    while read -r u p; do [[ -n "$u" ]] && echo "  $u on $p"; done <<< "$legacy"
   fi
   echo "agentd roll unit: $(systemctl show -p ActiveState --value arbos-deploy-agentd.service 2>/dev/null || true)"
   [[ -f "$STATE/agentd.rolling" ]] && echo "agentd roll pending: $(tr '\n' ' ' < "$STATE/agentd.rolling")"
@@ -1490,6 +1523,20 @@ selftest() {
   # A box on the roll target is not pending whether or not the pin names that same snapshot.
   users='[{"id":"gh_8","machine":{"state":"awake","sandbox_id":"s4","snapshot":"new","pinned_snapshot":"new","upgrade":{"in_progress":false}}}]'
   [[ -z "$(pending_boxes new all)" ]] || { echo "selftest: a box on the target must not be pending" >&2; return 1; }
+  # A box on a provider the relay does not roll (the retired daytona one) is left out of the roll, and
+  # `unrollable_boxes` names it. Asking for its upgrade is refused every pass, so counting it as pending
+  # would stop the roll on ROLL_MAX_CONSECUTIVE_FAILURES and read as a real user's box failing.
+  users='[{"id":"gh_carro","machine":{"state":"awake","sandbox_id":"old-sb","provider":"daytona","snapshot":"old","upgrade":{"in_progress":false}}},
+          {"id":"gh_host","machine":{"state":"awake","sandbox_id":"s5","provider":"gvisor","snapshot":"old","upgrade":{"in_progress":false}}}]'
+  [[ "$(pending_boxes new all | tr '\n' ' ')" == "gh_host " ]] \
+    || { echo "selftest: pending_boxes must leave out a box the relay does not roll ($(pending_boxes new all | tr '\n' ' '))" >&2; return 1; }
+  [[ "$(unrollable_boxes | tr '\n' ' ')" == "gh_carro daytona " ]] \
+    || { echo "selftest: unrollable_boxes ($(unrollable_boxes | tr '\n' ' '))" >&2; return 1; }
+  # A relay too old to report the provider leaves the judgement to the snapshot, as before.
+  users='[{"id":"gh_host","machine":{"state":"awake","sandbox_id":"s5","snapshot":"old","upgrade":{"in_progress":false}}}]'
+  [[ "$(pending_boxes new all | tr '\n' ' ')" == "gh_host " ]] \
+    || { echo "selftest: pending_boxes without a provider field ($(pending_boxes new all | tr '\n' ' '))" >&2; return 1; }
+  [[ -z "$(unrollable_boxes)" ]] || { echo "selftest: unrollable_boxes without a provider field" >&2; return 1; }
   hold_cases "$h"
   image_tag_prune_cases "$h/prune"
   echo "selftest ok"

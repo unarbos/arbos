@@ -391,18 +391,10 @@ async fn meter_once(state: &AppState) {
         {
             tracing::warn!(error = %e, user = %sb.user_id, "machine cost");
         }
-        // Only the kill switch stops a running machine (always-on): machine time never gates.
-        if running {
-            if let Err(r) = check_read_only(state) {
-                tracing::warn!(user = %sb.user_id, %r, "stopping the box: relay is read-only");
-                if let Err(e) = crate::boxes::stop_box(state, &sb.user_id, false).await {
-                    tracing::warn!(error = %e, user = %sb.user_id, "meter stop");
-                }
-                state
-                    .set_box_state(&sb.user_id, BoxState::Asleep, Some(&r.to_string()))
-                    .await;
-            }
-        }
+        // The kill switch used to stop a metered box from here. Every row this loop sees is on the
+        // retired provider, and the relay neither starts nor stops those: the sandbox is left as
+        // it is for the operator step that deletes it, and claiming it asleep would be a guess.
+        // `check_read_only` still refuses every wake, every turn and every create.
     }
     machine_alert(state);
 }

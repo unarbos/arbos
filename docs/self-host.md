@@ -114,6 +114,7 @@ Each user's `/work` and `$HOME` live on a per-user sparse ext4 image that stays 
 
 - One machine per user; every project is a workspace `/work/<project>` owned by its own Unix user at mode 700, with its own pi session, subagents, SQLite memory/history, blob dir, browser profile and cgroup slice. One `arbos-agentd` per machine supervises them; up to 4 subagents per workspace and 8 per machine run at once.
 - `GET /machine` shows state, spec, spend and workspace states; `POST /machine/start|stop` drives it; `arbosctl machine status|start|stop` from a terminal. Per-user snapshot override: `PUT /admin/users/{id}/box {"snapshot": "…"}` before the machine exists.
+- A box row left on the retired Daytona provider is read-only. Every listing and status route shows it as it is, and nothing starts, stops, rolls or replaces it — including the always-on sweep and the deploy worker's roll, which leaves it out and names it in `status`. Deleting those sandboxes is an operator step outside the relay; the row is what names the sandbox to delete, so it stays until then.
 
 ## 6. The machine image
 
