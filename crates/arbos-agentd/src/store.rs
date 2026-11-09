@@ -238,6 +238,14 @@ pub struct T3Row {
     pub size: i64,
 }
 
+/// One historical refused user turn the backfill would mark (`refused_backfill_candidates`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefusedBackfillCandidate {
+    pub thread_id: String,
+    pub message_id: String,
+    pub row_id: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryRow {
     pub id: String,
@@ -1023,6 +1031,79 @@ impl Store {
                 |r| r.get::<_, String>(0),
             )
             .optional()
+        })
+    }
+
+    /// Historical user turns the provider declined before live marking existed (#2925), found by
+    /// the one durable, non-heuristic signal a refused turn leaves in `t3`: the `compaction` row
+    /// `rotate_chat_session` writes when `refused_turn_to_drop` fires, whose text names
+    /// `refusal_dropped`. That row is written only for a real provider content-refusal (it rides
+    /// `ModelError::refusal`, never a keyword guess), so matching it never hides benign memory.
+    ///
+    /// The governing user turn of a `refusal_dropped` row is the most recent `user` row before it
+    /// in the same thread with no answer in between — an answer being an `assistant` row or a
+    /// `route` row whose text begins `route reply`/`route act`. A turn whose retry answered gets
+    /// no `refusal_dropped` row, and a refusal on a result/fallback turn has an answer between the
+    /// opening ask and the drop, so both fall out here: this errs toward under-marking.
+    ///
+    /// Only rows still `kind = 'user'` are returned; a turn already marked `T3_KIND_REFUSED` is
+    /// skipped, so a second run finds nothing new. Turns that predate the `refusal_dropped`
+    /// machinery itself (they left only `turn without route` rows) carry no durable signature and
+    /// are deliberately not matched.
+    pub fn refused_backfill_candidates(&self) -> Result<Vec<RefusedBackfillCandidate>> {
+        self.with(|c| {
+            let mut threads: Vec<String> = Vec::new();
+            {
+                let mut st = c.prepare(
+                    "SELECT DISTINCT thread_id FROM t3 \
+                     WHERE kind = 'compaction' AND text LIKE '%refusal_dropped%' \
+                     ORDER BY thread_id",
+                )?;
+                let rows = st.query_map([], |r| r.get::<_, String>(0))?;
+                for t in rows {
+                    threads.push(t?);
+                }
+            }
+            let mut out: Vec<RefusedBackfillCandidate> = Vec::new();
+            for tid in threads {
+                let mut st = c.prepare(
+                    "SELECT id, kind, text, json_extract(source, '$.message_id') \
+                     FROM t3 WHERE thread_id = ?1 ORDER BY id",
+                )?;
+                let rows: Vec<(String, String, String, Option<String>)> = st
+                    .query_map(params![tid], |r| {
+                        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+                    })?
+                    .collect::<rusqlite::Result<_>>()?;
+                let mut open: Option<usize> = None;
+                for (i, (_id, kind, text, _mid)) in rows.iter().enumerate() {
+                    match kind.as_str() {
+                        "user" | T3_KIND_REFUSED => open = Some(i),
+                        "assistant" => open = None,
+                        "route"
+                            if text.starts_with("route reply") || text.starts_with("route act") =>
+                        {
+                            open = None
+                        }
+                        "compaction" if text.contains("refusal_dropped") => {
+                            if let Some(ui) = open.take() {
+                                let (uid, ukind, _, umid) = &rows[ui];
+                                if ukind == "user" {
+                                    if let Some(mid) = umid.clone() {
+                                        out.push(RefusedBackfillCandidate {
+                                            thread_id: tid.clone(),
+                                            message_id: mid,
+                                            row_id: uid.clone(),
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Ok(out)
         })
     }
 

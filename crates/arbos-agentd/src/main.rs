@@ -210,6 +210,17 @@ enum Cmd {
         #[arg(long)]
         slow: bool,
     },
+    /// Mark historical provider-refused user turns that predate live marking (#2925) and rebuild
+    /// the memory cards that summarised them, through the live mark/invalidate path. Mark-only:
+    /// never deletes or rewrites message content. Idempotent. No model calls.
+    BackfillRefused {
+        /// Path to the workspace's `agentd.db`.
+        #[arg(long)]
+        db: String,
+        /// Count what a live run would mark and change nothing. Report this first.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[tokio::main]
@@ -270,7 +281,34 @@ async fn main() -> Result<()> {
             };
             eval_tree(db, query, chat, scorer, card_model, out, opts).await
         }
+        Cmd::BackfillRefused { db, dry_run } => backfill_refused(db, dry_run),
     }
+}
+
+/// Mark historical provider-refused turns and rebuild their cards (`Tree::backfill_refused`).
+/// Opens the store directly; no relay or model is needed, so the `Tree` carries a placeholder
+/// `Llm` the backfill never calls.
+fn backfill_refused(db: String, dry_run: bool) -> Result<()> {
+    let store = store::Store::open(std::path::Path::new(&db))?;
+    let llm = llm::Llm::with_endpoints("", "", "");
+    let tree = tree::Tree::with_ids(
+        "backfill",
+        "backfill",
+        settings::LiveModels::fixed("none"),
+        store,
+        std::sync::Arc::new(llm),
+    );
+    let r = tree.backfill_refused(dry_run)?;
+    println!(
+        "{}",
+        json!({
+            "dry_run": r.dry_run,
+            "found": r.found,
+            "marked": r.marked,
+            "rebuilt": r.rebuilt,
+        })
+    );
+    Ok(())
 }
 
 async fn eval_tree(
