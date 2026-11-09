@@ -4792,7 +4792,26 @@ enum TranscriptScrollLatch {
     }
 }
 
+/// Below iOS 18 the transcript keeps the behaviour it always had: `onScrollGeometryChange`,
+/// `onScrollPhaseChange` and `ScrollPosition` all arrive together in 18, and the whole reporter
+/// depends on them. The split is for the availability of the *stored properties* — an
+/// `if #available` inside `body` covers the view it returns and not a `@State` beside it.
 private struct AwayFromBottomReporter: ViewModifier {
+    @Binding var away: Bool
+    @Binding var pinned: Bool
+    var onStick: () -> Void
+
+    func body(content: Content) -> some View {
+        if #available(iOS 18, *) {
+            content.modifier(AwayFromBottomReporterModern(away: $away, pinned: $pinned, onStick: onStick))
+        } else {
+            content
+        }
+    }
+}
+
+@available(iOS 18, *)
+private struct AwayFromBottomReporterModern: ViewModifier {
     @Binding var away: Bool
     @Binding var pinned: Bool
     var onStick: () -> Void
@@ -4817,89 +4836,85 @@ private struct AwayFromBottomReporter: ViewModifier {
     }
 
     func body(content: Content) -> some View {
-        if #available(iOS 18, *) {
-            content
-                // Only the reader's own scrolling decides whether they are at the bottom. Lazy
-                // rows (#2149) change the content height as rows are measured — up and down,
-                // during a flick and after it as pictures arrive — and a geometry sample alone
-                // cannot tell that from a scroll (iphone-scroll-perf: a flick up from the bottom
-                // was pulled back down by the next growth, every time).
-                .onScrollPhaseChange { _, phase in
-                    switch phase {
-                    case .tracking, .interacting, .decelerating: userDriven = true
-                    case .idle, .animating: userDriven = false
-                    @unknown default: userDriven = false
-                    }
+        content
+            // Only the reader's own scrolling decides whether they are at the bottom. Lazy
+            // rows (#2149) change the content height as rows are measured — up and down,
+            // during a flick and after it as pictures arrive — and a geometry sample alone
+            // cannot tell that from a scroll (iphone-scroll-perf: a flick up from the bottom
+            // was pulled back down by the next growth, every time).
+            .onScrollPhaseChange { _, phase in
+                switch phase {
+                case .tracking, .interacting, .decelerating: userDriven = true
+                case .idle, .animating: userDriven = false
+                @unknown default: userDriven = false
                 }
-                .scrollPosition($position)
-                .onScrollGeometryChange(for: Sample.self) { g in
-                    Sample(
-                        height: g.contentSize.height,
-                        container: g.containerSize.height,
-                        offset: g.contentOffset.y,
-                        distance: g.contentSize.height - g.contentOffset.y - g.containerSize.height
-                    )
-                } action: { old, new in
-                    let grew = new.height > old.height + 0.5
-                    #if DEBUG
-                    PerfDriveProbe.lastScrollGeometry = Date()
-                    if SendTrace.recent {
-                        SendTrace.mark("scroll-geometry", detail: "grew=\(grew) distance=\(Int(new.distance)) pinned=\(pinned) user=\(userDriven)", once: false)
-                        // The "bottom" spacer and padding sit ~60 pt under the last bubble.
-                        if new.distance < 100 { SendTrace.mark("at-bottom", detail: "distance=\(Int(new.distance))") }
-                    }
-                    #endif
-                    if userDriven {
-                        // The finger owns the offset while it is down. A container resize
-                        // under it is the keyboard retracting out of the reader's own drag,
-                        // and `.defaultScrollAnchor(.bottom)` answers that by holding the
-                        // *end* against the container — which moves the content the reader is
-                        // holding. Put the offset back.
-                        //
-                        // Deliberately not conditioned on `away`: the reader has travelled only
-                        // a few points when the retraction starts, so the 120 pt threshold has
-                        // not been crossed yet and anything reading it here reads `false` (leg
-                        // 42604426988, where the conditional size-change anchor was chosen as
-                        // `.bottom` for exactly that reason). Who is dragging is knowable at
-                        // that instant; how far they have got is not yet meaningful.
-                        //
-                        // Outside a gesture this does not run at all, which is what keeps the
-                        // keyboard rising and falling at the live bottom anchored as before.
-                        if TranscriptScrollLatch.resizedUnderTheFinger(
-                            userDriven: true, oldContainer: old.container,
-                            newContainer: new.container) {
-                            position.scrollTo(y: old.offset)
-                        }
-                        let start = gestureContainer ?? old.container
-                        gestureContainer = start
-                        let isAway = TranscriptScrollLatch.away(
-                            distance: TranscriptScrollLatch.distance(sampled: new.distance,
-                                                                     container: new.container,
-                                                                     gestureStart: start))
-                        away = isAway
-                        pinned = !isAway
-                        return
-                    }
-                    gestureContainer = nil
-                    // Content or layout moved, not the reader: a growth while pinned (a new or
-                    // streaming row) re-sticks to the end; while away it stays put. A container
-                    // resize moves the end too, and has to be read again rather than ignored.
-                    switch TranscriptScrollLatch.settled(grew: grew, oldContainer: old.container,
-                                                         newContainer: new.container,
-                                                         distance: new.distance, pinned: pinned) {
-                    case .stick:
-                        away = false
-                        onStick()
-                    case .reread(let isAway):
-                        away = isAway
-                        pinned = !isAway
-                    case .hold:
-                        break
-                    }
+            }
+            .scrollPosition($position)
+            .onScrollGeometryChange(for: Sample.self) { g in
+                Sample(
+                    height: g.contentSize.height,
+                    container: g.containerSize.height,
+                    offset: g.contentOffset.y,
+                    distance: g.contentSize.height - g.contentOffset.y - g.containerSize.height
+                )
+            } action: { old, new in
+                let grew = new.height > old.height + 0.5
+                #if DEBUG
+                PerfDriveProbe.lastScrollGeometry = Date()
+                if SendTrace.recent {
+                    SendTrace.mark("scroll-geometry", detail: "grew=\(grew) distance=\(Int(new.distance)) pinned=\(pinned) user=\(userDriven)", once: false)
+                    // The "bottom" spacer and padding sit ~60 pt under the last bubble.
+                    if new.distance < 100 { SendTrace.mark("at-bottom", detail: "distance=\(Int(new.distance))") }
                 }
-        } else {
-            content
-        }
+                #endif
+                if userDriven {
+                    // The finger owns the offset while it is down. A container resize
+                    // under it is the keyboard retracting out of the reader's own drag,
+                    // and `.defaultScrollAnchor(.bottom)` answers that by holding the
+                    // *end* against the container — which moves the content the reader is
+                    // holding. Put the offset back.
+                    //
+                    // Deliberately not conditioned on `away`: the reader has travelled only
+                    // a few points when the retraction starts, so the 120 pt threshold has
+                    // not been crossed yet and anything reading it here reads `false` (leg
+                    // 42604426988, where the conditional size-change anchor was chosen as
+                    // `.bottom` for exactly that reason). Who is dragging is knowable at
+                    // that instant; how far they have got is not yet meaningful.
+                    //
+                    // Outside a gesture this does not run at all, which is what keeps the
+                    // keyboard rising and falling at the live bottom anchored as before.
+                    if TranscriptScrollLatch.resizedUnderTheFinger(
+                        userDriven: true, oldContainer: old.container,
+                        newContainer: new.container) {
+                        position.scrollTo(y: old.offset)
+                    }
+                    let start = gestureContainer ?? old.container
+                    gestureContainer = start
+                    let isAway = TranscriptScrollLatch.away(
+                        distance: TranscriptScrollLatch.distance(sampled: new.distance,
+                                                                 container: new.container,
+                                                                 gestureStart: start))
+                    away = isAway
+                    pinned = !isAway
+                    return
+                }
+                gestureContainer = nil
+                // Content or layout moved, not the reader: a growth while pinned (a new or
+                // streaming row) re-sticks to the end; while away it stays put. A container
+                // resize moves the end too, and has to be read again rather than ignored.
+                switch TranscriptScrollLatch.settled(grew: grew, oldContainer: old.container,
+                                                     newContainer: new.container,
+                                                     distance: new.distance, pinned: pinned) {
+                case .stick:
+                    away = false
+                    onStick()
+                case .reread(let isAway):
+                    away = isAway
+                    pinned = !isAway
+                case .hold:
+                    break
+                }
+            }
     }
 }
 
