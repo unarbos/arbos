@@ -1083,6 +1083,30 @@ pub struct JobSpec {
     pub attempt: u8,
 }
 
+/// The spec a job's worker is restarted on when an approval card it parked on is answered.
+///
+/// The `attempt` is read from the row's durable `restarts` rather than reset, because answering
+/// a card is evidence that a person approved an action — not evidence that whatever was crashing
+/// has stopped crashing. A reset would hand the job a fresh `JOB_WORKER_RETRIES` budget every
+/// time a card was answered, so a worker could crash through the budget, raise a card, be
+/// answered, and begin the budget again: bug AJ's crash loop bounded by the user's patience
+/// rather than by the box.
+///
+/// `restarts` is the right source and not merely the available one. It counts every fresh worker
+/// the job has already been given — crash retry, failed start, box restart — and it is the only
+/// count that survives the agentd restart a card is now allowed to outlive, since `attempt`
+/// lives on an in-memory [`JobSpec`] that a restart does not keep.
+pub(crate) fn resumed_job_spec(job: &crate::store::JobRow) -> JobSpec {
+    JobSpec {
+        id: job.id.clone(),
+        title: job.title.clone(),
+        kind: job.kind.clone(),
+        brief: job.brief.clone(),
+        touches: job.touches.clone(),
+        attempt: job.restarts.clamp(0, u8::MAX as i64) as u8,
+    }
+}
+
 /// One job [`Agent::stop_jobs`] ended, with the state read back out of the store afterwards.
 ///
 /// Every sentence that tells the user a job is cancelled is built from `state`. Jacob's Test5
@@ -1434,9 +1458,10 @@ impl std::error::Error for JobWorkerFailed {}
 /// A worker that settles with no words, no tool call and no error did no work at all (a crash
 /// before the first model call: the unwritable session dir of 2026-10-25); it is a failure, not
 /// an empty success. A cancel is not retried, nor is the 60-minute cap (the next run would hit
-/// it again), nor a card of this job that expired unanswered (a fresh worker would raise the
-/// same card for the same user to ignore); a `blocked` return contract is the worker's own
-/// answer and is delivered as is.
+/// it again); a `blocked` return contract is the worker's own answer and is delivered as is.
+///
+/// A worker parked on a card never reaches here as a failure: it ends its run cleanly, and the
+/// end-of-run path reads the open card and parks the job instead of settling it.
 pub(crate) fn worker_failure(
     done_err: Option<&str>,
     text: &str,
@@ -1446,9 +1471,6 @@ pub(crate) fn worker_failure(
     match done_err {
         Some(e) if e.contains("aborted") => Some((e.to_owned(), false)),
         Some(e) if e.contains("exceeded 60 minutes") => Some((e.to_owned(), false)),
-        Some(e) if e.contains(crate::approval::APPROVAL_EXPIRED_ERROR) => {
-            Some((e.to_owned(), false))
-        }
         Some(e) => Some((e.to_owned(), true)),
         None if text.trim().is_empty() && tool_calls == 0 => Some((
             "worker ended without output (no reply, no tool call)".to_owned(),
@@ -4783,6 +4805,11 @@ impl Agent {
             for sid in self.job_worker_ids(&j) {
                 sweep = sweep.and(self.end_cancelled_worker(&j.id, &sid).await);
             }
+            // An open card of this job has nothing left to approve, so it is closed as
+            // `cancelled` — not `rejected`, which would tell the agent the user refused the
+            // action when what they did was call off the work. Cards no longer expire, so
+            // without this a stopped job would leave a question in the chat for ever.
+            self.cancel_approvals_for_job(&j.id).await;
             self.release_job_locks(&j.id).await;
             self.retire_live_job_rows(chat_id, &j.id).await;
             let state = self
@@ -4964,7 +4991,10 @@ impl Agent {
     ///    cleared after the run.
     /// 2. Its store row reads `idle` or `waiting_user` — both meaning the run has ended.
     /// 3. No open job names it among [`Self::job_worker_ids`]. A job keeps one row across several
-    ///    workers (bug AO), so the current `subagent_id` alone is not the question.
+    ///    workers (bug AO), so the current `subagent_id` alone is not the question. One
+    ///    exception, and it is about the worker rather than the job: a worker waiting on its own
+    ///    approval card is not claimed, because its job stays open for as long as the user takes
+    ///    to answer and nothing is running meanwhile.
     /// 4. The child's **own** idle clock ([`crate::rpc_child::RpcChild::idle_ms`]) is old enough.
     ///    The store cannot answer this: a worker is prompted once and then streams for as long as
     ///    its job runs, so every store column reads a busy worker as long idle.
@@ -4996,6 +5026,21 @@ impl Agent {
             .unwrap_or_default()
             .iter()
             .flat_map(|j| self.job_worker_ids(j))
+            // A worker parked on its own approval card is **not** claimed by its job, even
+            // though that job is open. Its run has ended, it holds no permit and no work is
+            // moving until the user answers, so keeping it alive only burns a retained slot for
+            // however long they take — which is now unbounded, and is the whole reason this
+            // narrowing is needed.
+            //
+            // Asked about the **worker**, not the job. `job_worker_ids` is every worker a job
+            // has ever been given, so a job-shaped question here would release the whole lineage
+            // on one card instead of the one worker that is parked.
+            .filter(|session_id| {
+                self.store
+                    .pending_approval_for_session(session_id)
+                    .unwrap_or_default()
+                    .is_none()
+            })
             .collect();
         // Gates 1 to 3, which are the same whichever bound ends up asking for the eviction.
         let mut candidates: Vec<RetireCandidate> = held
@@ -5553,6 +5598,14 @@ impl Agent {
             // (r10steer's third change). Inside the window the correction replaces that file.
             if let Some(replaced) = self.replace_just_posted_job(chat_id, &job, text).await {
                 return Ok(replaced);
+            }
+            // A parked job reads as `queued`, which is true but would send the model to say it
+            // is "waiting to start" — it is waiting on the user, in a card they can answer now.
+            if let Ok(Some(card)) = self.store.pending_approval_for_job(&job.id) {
+                return Err(format!(
+                    "job {} ({}) is waiting for the user's approval of \"{}\" (card {}), so there is no worker to steer: ask them to answer or cancel that card",
+                    job.id, job.title, card.title, card.id
+                ));
             }
             return Err(format!(
                 "job {} ({}) is {}: steer a running job, or start a new one",
@@ -6284,11 +6337,22 @@ impl Agent {
                 _ => Err(format!("unknown job {id}; list_jobs shows the ids")),
             };
         }
-        self.store
-            .jobs_for_chat(chat_id)
-            .unwrap_or_default()
-            .into_iter()
-            .find(|j| j.state == "running")
+        let jobs = self.store.jobs_for_chat(chat_id).unwrap_or_default();
+        if let Some(j) = jobs.iter().find(|j| j.state == "running") {
+            return Ok(j.clone());
+        }
+        // Nothing is running, but a job parked on a card is the likely thing the user means and
+        // "no job is running" would read as "there is nothing", so it is returned and
+        // `steer_job` explains what it is waiting on.
+        jobs.into_iter()
+            .find(|j| {
+                j.is_open()
+                    && self
+                        .store
+                        .pending_approval_for_job(&j.id)
+                        .unwrap_or_default()
+                        .is_some()
+            })
             .ok_or_else(|| "no job is running in this chat".to_owned())
     }
 
@@ -7123,7 +7187,7 @@ impl Agent {
     /// started, and the receipt [`Agent::start_job`] writes for one the user asked for in words.
     /// A job used to carry the ticket until its result; bug AA is what that cost.
     #[allow(clippy::too_many_arguments)]
-    fn spawn_subagent_task(
+    pub(crate) fn spawn_subagent_task(
         self: &Arc<Self>,
         chat_id: &str,
         host: &SharedHost,
@@ -10400,13 +10464,49 @@ impl Agent {
             .into_iter()
             .filter(|j| j.is_open())
             .count();
-        let open_all = self.store.open_jobs().unwrap_or_default().len();
+        // Capacity, so parked jobs are left out: a job waiting on an approval card holds no
+        // worker, no `subagent_slots` permit, no `box_slots` permit and no memory, and this cap
+        // is a statement about what the box can run at once. It is also the hard one — there is
+        // no `forced` bypass below — so counting parked jobs here would let a few unanswered
+        // cards stop the agent starting any work at all, which is the stall this change removes
+        // arriving by another route.
+        let open_all = self
+            .store
+            .open_jobs()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|j| {
+                self.store
+                    .pending_approval_for_job(&j.id)
+                    .unwrap_or_default()
+                    .is_none()
+            })
+            .count();
         let cap_chat = crate::config::job_max_per_chat();
         let cap_agent = crate::config::job_max_per_agent();
         if open_here >= cap_chat && !forced {
-            return Err(format!(
-                "{open_here} jobs already run in this chat (cap {cap_chat}); fold this into one of them or wait for one to finish, and tell the user"
-            ));
+            // The per-chat cap **does** count a parked job, and says so: piling more work into
+            // the chat where the cards are is the wrong move, and the person who can clear them
+            // is reading that chat. "Wait for one to finish" would be false for work that is
+            // waiting on them, so the refusal names the cards instead.
+            let waiting = self
+                .store
+                .pending_approvals()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|r| r.chat_id == chat_id)
+                .count();
+            return Err(match waiting {
+                0 => format!(
+                    "{open_here} jobs already run in this chat (cap {cap_chat}); fold this into one of them or wait for one to finish, and tell the user"
+                ),
+                1 => format!(
+                    "{open_here} jobs are open in this chat (cap {cap_chat}) and one of them is waiting for the user's approval; ask them to answer or cancel that card, and do not start more work until they have"
+                ),
+                n => format!(
+                    "{open_here} jobs are open in this chat (cap {cap_chat}) and {n} approval cards are waiting for the user; ask them to answer or cancel those cards, and do not start more work until they have"
+                ),
+            });
         }
         if open_here >= cap_chat {
             tracing::info!(
@@ -10420,6 +10520,24 @@ impl Agent {
             return Err(format!(
                 "{open_all} jobs already run across your chats (cap {cap_agent}); wait for one to finish, and tell the user"
             ));
+        }
+        // Not a cap: the number is unbounded by design and this is the line that makes it
+        // visible, so a box quietly accumulating questions nobody answers shows up in the logs
+        // rather than only in a user's patience.
+        let parked_jobs = self
+            .store
+            .open_jobs()
+            .unwrap_or_default()
+            .len()
+            .saturating_sub(open_all);
+        if parked_jobs > 0 {
+            tracing::info!(
+                chat_id,
+                parked_jobs,
+                open_all,
+                cap_agent,
+                "jobs waiting on an approval card do not count against the box's capacity"
+            );
         }
         let job_id = ulid();
         // Bug AG: the corrections the user has already had accepted go into this job's **own
@@ -12867,16 +12985,6 @@ impl Agent {
             .and_then(|c| c.get("status"))
             .and_then(Value::as_str)
             .map(str::to_owned);
-        // A card of this job expired unanswered, so the job was stopped there. That reason
-        // outranks whatever the stopped worker reported: it is what the row, the job's state
-        // and the result turn say, and `worker_failure` never retries it.
-        if job
-            .as_ref()
-            .and_then(|j| self.store.job(&j.id).ok().flatten())
-            .is_some_and(|row| crate::approval::stopped_by_expired_approval(&row))
-        {
-            done_err = Some(crate::approval::APPROVAL_EXPIRED_ERROR.to_owned());
-        }
         // The worker wrote no answer and its model call had failed: that failure is the reason,
         // and it outranks anything `worker_failure` can infer from an empty run. Bug AR, Jacob's
         // Test5 round 22: the provider's cyber-safeguards filter refused `tick22`'s first model
@@ -12988,10 +13096,42 @@ impl Agent {
                 .await;
         }
         self.subagent_msgs.lock().await.remove(&subagent_id);
+        // This run ended on an open approval card: the gated call was parked, the model was told
+        // to end its turn, and it did. The run is over and the work is not, so none of the
+        // settling below applies — the job is not `done` (nothing finished), not `failed`
+        // (nothing went wrong) and not retried (a fresh worker would raise the same card for the
+        // same person to answer). It goes back to `queued` and waits for them.
+        //
+        // Read from the card rather than from anything the model returned, because the model's
+        // return contract is not evidence about a card: it may say `done` perfectly honestly,
+        // having said in one sentence that it needs approval, which is exactly what the park
+        // reason asks it to do.
+        let parked_on_card = self
+            .store
+            .pending_approval_for_session(&subagent_id)
+            .unwrap_or_default();
         let mut job_cancelled = false;
         let mut job_retry: Option<JobWorkerFailed> = None;
         let mut job_fallback: Option<String> = None;
-        if let Some(j) = &job {
+        if let (Some(j), Some(card)) = (&job, &parked_on_card) {
+            // Still open, so still in `list_jobs`, still cancellable with `stop_job`, and still
+            // counted by the per-chat cap. `queued` is an existing transition — the retry branch
+            // below writes the same thing — and it is true: no worker is running this, and it is
+            // waiting to be picked up. By an answer rather than by a free slot, which is what
+            // the step beside it says.
+            let _ = self.store.set_job_state(&j.id, "queued", None);
+            let _ = self.store.set_job_step(&j.id, "Waiting for approval");
+            // Nothing is touching the files this job claimed while it waits, and the user may
+            // take days. They are re-acquired when the answer resumes it.
+            self.release_job_locks(&j.id).await;
+            self.steer_gate.forget_job(&j.id);
+            {
+                let h = host.lock().await;
+                h.doc.set_activity(&msg_id, None);
+            }
+            self.refresh_job_activity(chat_id).await;
+            tracing::info!(job = %j.id, approval_id = %card.id, worker = %subagent_id, "a worker parked on its card; the job waits for the user and the worker is released");
+        } else if let Some(j) = &job {
             let already_cancelled = self
                 .store
                 .job(&j.id)
@@ -13069,6 +13209,12 @@ impl Agent {
             Some(&json!({ "chat_id": chat_id, "message_id": msg_id })),
         );
         let new_status = match status.as_str() {
+            // Parked on a card, whatever the model said about its own turn: it is waiting on a
+            // person. `waiting_user` rather than a status of its own, so the retained-worker
+            // bound's "has this child's run really ended" gate already accepts it and the
+            // orphan sweep already leaves it alone — a new status would have been declined
+            // silently by both.
+            _ if parked_on_card.is_some() => "waiting_user",
             "needs_input" => "waiting_user",
             _ => "idle",
         };
@@ -13135,6 +13281,14 @@ impl Agent {
         }
         drop(_box_slot);
         drop(_slot);
+        // Parked, so there is no result to deliver and nothing finished to narrate. The card in
+        // the owner's chat is what is waiting on them, and it says so; a "here is what I did"
+        // bubble for work that has not happened would be the lie this whole change is about.
+        // The permits are already dropped above, so from here the box is carrying nothing for
+        // this card beyond one row in `approvals`.
+        if parked_on_card.is_some() {
+            return Ok(());
+        }
         // The user hears about it from the main agent, in prose, in this chat.
         if job.is_none() {
             let h = host.lock().await;
@@ -13585,9 +13739,21 @@ impl Agent {
     /// Jobs left `queued` / `running` by a restart (duplex design §2.6, Jacob's rule 3): a
     /// `research` job with no declared resources restarts itself once with the same brief; any
     /// other job is marked interrupted and the chat gets one plain line asking for a go.
+    ///
+    /// A job parked on an open approval card is **left exactly as it is**. It was not cut off by
+    /// the restart — it was waiting for the user before it and is still waiting after, which is
+    /// the survive-a-restart property the card change exists for. Marking it interrupted would
+    /// break that twice over: a `restartable` one would start the work again from the brief
+    /// while the card still stood, so the user's answer would arrive for a job that had moved
+    /// on; and any other would post a line asking for a go-ahead beside a card already asking
+    /// for one.
     pub(crate) async fn reclaim_interrupted_jobs(self: &Arc<Self>) {
         let open = self.store.open_jobs().unwrap_or_default();
         for j in open {
+            if let Ok(Some(card)) = self.store.pending_approval_for_job(&j.id) {
+                tracing::info!(job = %j.id, approval_id = %card.id, "a parked job survives the restart; its card is still waiting");
+                continue;
+            }
             let _ = self
                 .store
                 .set_job_state(&j.id, "interrupted", Some("box restart"));

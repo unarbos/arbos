@@ -35,10 +35,10 @@ use crate::sync::SharedHost;
 /// Test5 rounds 4 and 5: the pi extension polls `/hook/approval-status` for fourteen minutes
 /// before it gives up, and the gated tool call is blocked for all of it.
 ///
-/// Only a floor for these tests. `Agent::request_approval` — the inline path a tool of the main
-/// session takes — waits `ARBOS_APPROVAL_TIMEOUT_SECS`, default the card's own 24-hour TTL, so
-/// the head of the queue can be held far longer than this. Each case below leaves the card
-/// undecided, which is the worst of the two.
+/// Only a floor for these tests, and a historical one: `Agent::request_approval` now waits the
+/// park grace and then lets go, leaving the card open. These cases keep the long wait as the
+/// scenario they were written against — the valve has to hold under a head-of-queue wait of any
+/// length, and a wait that ends on its own would make them pass for the wrong reason.
 const INLINE_APPROVAL_WAIT: Duration = Duration::from_secs(14 * 60);
 
 /// The measured burst, scaled so a test can run it: 30 sends arriving one after another, each
@@ -473,7 +473,7 @@ fn a_card() -> ApprovalRequest {
 async fn an_inline_approval_wait(
     agent: &Arc<crate::agent::Agent>,
     chat: &'static str,
-) -> tokio::task::JoinHandle<ApprovalOutcome> {
+) -> tokio::task::JoinHandle<Option<ApprovalOutcome>> {
     let card = {
         let agent = agent.clone();
         tokio::spawn(async move { agent.request_approval(chat, a_card()).await })
@@ -501,8 +501,9 @@ async fn an_inline_approval_wait(
 /// Three things are checked beyond the wait itself. The card is still pending when the answer
 /// goes out, or the release proved nothing. The crossing is in the log with a measured
 /// `waited_s`, which is how often this happens in production and how a regression in the
-/// ordering would show. And the held turn is released when the card is answered, so nothing in
-/// the pair deadlocks.
+/// ordering would show. And nothing in the pair deadlocks: the blocked call lets go of its own
+/// accord when the park grace passes, leaving the card open and answerable, which is how an
+/// unanswered card stopped being able to hold anything at all.
 #[tokio::test(start_paused = true)]
 async fn the_valve_releases_an_answer_held_by_an_inline_approval_wait() {
     let (agent, root) = test_agent().await;
@@ -580,8 +581,9 @@ async fn the_valve_releases_an_answer_held_by_an_inline_approval_wait() {
         );
     }
 
-    // Nothing is wedged: the card is answered, the blocked tool call continues, and the queue
-    // empties. A valve that released the answer by breaking the wait would fail here.
+    // Nothing is wedged, and the way it is not wedged has changed: the blocked tool call was
+    // released by its own park when the grace passed, without anybody deciding anything. A
+    // valve that released the answer by breaking the wait would still fail the assertions above.
     let id = agent
         .store
         .pending_approvals()
@@ -590,16 +592,24 @@ async fn the_valve_releases_an_answer_held_by_an_inline_approval_wait() {
         .find(|r| r.chat_id == chat)
         .expect("the card")
         .id;
-    agent
-        .decide_approval(&id, ApprovalOutcome::Approved, "dev-mac")
-        .await
-        .unwrap();
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(5), card)
             .await
             .expect("the blocked tool call was never released")
             .expect("the card task"),
-        ApprovalOutcome::Approved
+        None,
+        "the wait ends undecided: nothing was approved, so nothing may run"
+    );
+    // And the card it let go of is still there to be answered, which is the whole point of
+    // letting go rather than closing it.
+    assert_eq!(agent.store.approval(&id).unwrap().unwrap().state, "pending");
+    agent
+        .decide_approval(&id, ApprovalOutcome::Approved, "dev-mac")
+        .await
+        .unwrap();
+    assert_eq!(
+        agent.store.approval(&id).unwrap().unwrap().state,
+        "approved"
     );
     drop(behind);
     drop(holding);

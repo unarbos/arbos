@@ -261,9 +261,14 @@ mod core_writer_tests {
     /// value, so a bridge on the producer side cannot substitute for this fix. `Part` has no
     /// `deny_unknown_fields` (the workspace's only one is in `arbos-core/src/chart.rs`), so the
     /// extra key is ignored — and ignoring it is exactly why it cannot help.
+    ///
+    /// `cancelled` left this list in #2890, which made it a known state: a product word here
+    /// becomes a real variant later and silently halves the population while the test stays
+    /// green, so the values below are deliberately synthetic. `model.rs`'s own list still
+    /// carries `superseded`, and approval supersession is live work, so it will do this again.
     #[test]
     fn an_unknown_approval_state_does_not_cost_the_message_row() {
-        for state in ["cancelled", "a_state_from_a_newer_box"] {
+        for state in ["something_from_2028", "a_state_from_a_newer_box"] {
             let mac = ChatDoc::new("chat1", "proj1");
             let part = mac.core.start_assistant_message("m1", "m0", "dev:box");
             mac.core.append_text("m1", &part, "Stopping as you asked.");
@@ -277,7 +282,7 @@ mod core_writer_tests {
                         risk: arbos_core::approval::Risk::Destructive,
                         payload: serde_json::json!({ "command": "rm d*.html.bak" }),
                     },
-                    crate::model::now_ms() as i64 + 60_000,
+                    Some(crate::model::now_ms() as i64 + 60_000),
                 );
             });
             mac.core.transact(|d| {

@@ -208,7 +208,10 @@ impl ApprovalView {
                 Some(class) => format!("{ANSWER_GRANT_PREFIX}{class}"),
                 None => ANSWER_ONCE.to_string(),
             }),
-            ApprovalState::Pending | ApprovalState::Expired | ApprovalState::Unknown => None,
+            ApprovalState::Pending
+            | ApprovalState::Expired
+            | ApprovalState::Cancelled
+            | ApprovalState::Unknown => None,
         }
     }
 
@@ -226,7 +229,10 @@ impl ApprovalView {
                     "always"
                 })
             }
-            ApprovalState::Pending | ApprovalState::Expired | ApprovalState::Unknown => None,
+            ApprovalState::Pending
+            | ApprovalState::Expired
+            | ApprovalState::Cancelled
+            | ApprovalState::Unknown => None,
         }
     }
 }
@@ -332,7 +338,9 @@ pub fn approval_card(
             ApprovalState::Approved => (RowState::Chosen, RowState::Faded),
             ApprovalState::Rejected => (RowState::Faded, RowState::Chosen),
             // Nothing to claim either way: faded like a card nobody answered.
-            ApprovalState::Expired | ApprovalState::Unknown => (RowState::Faded, RowState::Faded),
+            ApprovalState::Expired | ApprovalState::Cancelled | ApprovalState::Unknown => {
+                (RowState::Faded, RowState::Faded)
+            }
         };
         let approve_row = option_row(
             format!("{row_id}-approve"),

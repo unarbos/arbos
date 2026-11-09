@@ -118,13 +118,7 @@ pub async fn request_secret(agent: &Arc<Agent>, args: &Value, chat_id: &str) -> 
             "answers": [] }),
     };
     let approval_id = match agent
-        .begin_approval(
-            chat_id,
-            req,
-            WaitMode::Inline,
-            Some(tx),
-            crate::approval::approval_ttl_ms(),
-        )
+        .begin_approval(chat_id, req, WaitMode::Inline, Some(tx))
         .await
     {
         Ok(id) => id,
@@ -139,22 +133,22 @@ pub async fn request_secret(agent: &Arc<Agent>, args: &Value, chat_id: &str) -> 
         &format!("request_secret {name}: {purpose}"),
         None,
     );
+    // The wait ends; the card does not. A secret the user saves ten minutes from now still
+    // reaches them through Settings → Secrets, and the card is the thing asking for it, so
+    // closing it here would take away the ask as well as the wait.
     let outcome = match tokio::time::timeout(wait_budget(), rx).await {
-        Ok(Ok(o)) => o,
-        Ok(Err(_)) => ApprovalOutcome::Expired,
+        Ok(Ok(o)) => Some(o),
+        Ok(Err(_)) => None,
         Err(_) => {
-            let _ = agent
-                .decide_approval(
-                    &approval_id,
-                    ApprovalOutcome::Expired,
-                    "arbos:handoff:timeout",
-                )
-                .await;
-            ApprovalOutcome::Expired
+            agent.park_approval(&approval_id).await;
+            None
         }
     };
     match outcome {
-        ApprovalOutcome::Approved => match take_card_answer(&approval_id) {
+        None => text_result(
+            json!({ "saved": false, "waiting": true, "reason": "the card is still open and waiting for the user; they can save it from the card or in Settings → Secrets. Do not ask again — carry on without the secret and say in one sentence that it is waiting on them" }).to_string(),
+        ),
+        Some(ApprovalOutcome::Approved) => match take_card_answer(&approval_id) {
             Some(saved) if saved["env"].as_str().is_some_and(|e| !e.is_empty()) => {
                 let env = saved["env"].as_str().unwrap_or("").to_owned();
                 let _ = crate::vault::refresh_all(agent).await;
@@ -168,11 +162,11 @@ pub async fn request_secret(agent: &Arc<Agent>, args: &Value, chat_id: &str) -> 
             _ => text_result(json!({ "saved": false,
                 "reason": "the card was acknowledged but no secret arrived — the user's app is too old to save from the card; ask them to add it in Settings → Secrets and give you access" }).to_string()),
         },
-        ApprovalOutcome::Rejected { .. } => text_result(
+        Some(ApprovalOutcome::Rejected { .. }) => text_result(
             json!({ "saved": false, "declined": true, "reason": "the user closed the card without saving; do not ask again unless they offer" }).to_string(),
         ),
-        ApprovalOutcome::Expired => text_result(
-            json!({ "saved": false, "expired": true, "reason": "no answer in time; the user can still add it in Settings → Secrets" }).to_string(),
+        Some(ApprovalOutcome::Cancelled) => text_result(
+            json!({ "saved": false, "cancelled": true, "reason": "the work was cancelled, so the card was closed; the user can still add it in Settings → Secrets" }).to_string(),
         ),
     }
 }
@@ -385,13 +379,7 @@ pub async fn on_user_message(
             ] }),
     };
     if let Err(e) = agent
-        .begin_approval(
-            chat_id,
-            req,
-            WaitMode::Deferred,
-            None,
-            crate::approval::approval_ttl_ms(),
-        )
+        .begin_approval(chat_id, req, WaitMode::Deferred, None)
         .await
     {
         tracing::warn!(error = %e, chat_id, "secret hand-off: offer card could not be posted");

@@ -1781,7 +1781,7 @@ impl ChatDoc {
         msg_id: &str,
         approval_id: &str,
         req: &ApprovalRequest,
-        expires_at: i64,
+        expires_at: Option<i64>,
     ) -> Option<String> {
         let m = self.find_message(msg_id)?;
         let parts = match m.get("parts")? {
@@ -1799,7 +1799,13 @@ impl ChatDoc {
         part.insert("payload", json_to_lv(&req.payload)).ok();
         part.insert("state", ApprovalState::Pending.as_str()).ok();
         part.insert("requestedAt", now_ms()).ok();
-        part.insert("expiresAt", expires_at).ok();
+        // Only a card that really has a deadline advertises one. A card raised on the box has
+        // none — it waits for the user however long that takes — and the field is absent rather
+        // than zero so no reader can compute "expired" from it. The relay's outside-agent
+        // window is the one caller that still passes a time.
+        if let Some(expires_at) = expires_at {
+            part.insert("expiresAt", expires_at).ok();
+        }
         self.commit_now();
         Some(part_id)
     }

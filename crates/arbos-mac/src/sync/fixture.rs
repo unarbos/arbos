@@ -10,9 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use arbos_core::approval::{
-    ApprovalRequest, ApprovalState as CoreApprovalState, Risk, APPROVAL_TTL_MS,
-};
+use arbos_core::approval::{ApprovalRequest, ApprovalState as CoreApprovalState, Risk};
 use arbos_core::doc::{
     ChatDoc as CoreDoc, MessageStatus as CoreStatus, UserAttachment, UserMessageOpts,
 };
@@ -4588,12 +4586,7 @@ async fn run_turn(
                 let request = draft_request(channel, to, subject, body);
                 with_doc(shared, chat_id, |doc| {
                     doc.core.transact(|d| {
-                        d.add_approval_part(
-                            &id,
-                            &new_id(),
-                            &request,
-                            now_ms() as i64 + APPROVAL_TTL_MS,
-                        );
+                        d.add_approval_part(&id, &new_id(), &request, None);
                         d.add_status_part(&id, "waiting_approval", &request.title);
                         d.set_message_fields(&id, &[("waitingApproval", json!(true))]);
                     });
@@ -4821,7 +4814,6 @@ fn approval_card(
     state: ApprovalState,
     decided_at: Option<u64>,
 ) -> Part {
-    let now = now_ms();
     let request = draft_request(channel, to, subject, body);
     Part::Approval {
         id: new_id(),
@@ -4831,7 +4823,8 @@ fn approval_card(
         risk: ApprovalRisk::Send,
         payload: request.payload,
         state,
-        expires_at: Some(decided_at.unwrap_or(now) + APPROVAL_TTL_MS as u64),
+        // No deadline: a card waits for the person, so the fixture must not draw one.
+        expires_at: None,
         decided_at,
         decided_by: decided_at.map(|_| DEVICE.to_string()),
         reason: None,
@@ -4851,7 +4844,11 @@ fn decide_approval(
     let (kind, core_state) = match state {
         ApprovalState::Approved => ("approve", CoreApprovalState::Approved),
         ApprovalState::Rejected => ("reject", CoreApprovalState::Rejected),
-        ApprovalState::Pending | ApprovalState::Expired | ApprovalState::Unknown => return,
+        // None of these is a decision: there is nothing to mirror or report.
+        ApprovalState::Pending
+        | ApprovalState::Expired
+        | ApprovalState::Cancelled
+        | ApprovalState::Unknown => return,
     };
     let reason = reason.filter(|r| !r.trim().is_empty());
     let found = with_doc(shared, &chat_id, |doc| {
@@ -4905,7 +4902,10 @@ fn decide_approval(
                 .map(|r| format!(" ({r})"))
                 .unwrap_or_default()
         )],
-        ApprovalState::Pending | ApprovalState::Expired | ApprovalState::Unknown => return,
+        ApprovalState::Pending
+        | ApprovalState::Expired
+        | ApprovalState::Cancelled
+        | ApprovalState::Unknown => return,
     };
     let project_id = project_of(shared, &chat_id);
     let shared = shared.clone();
@@ -6579,7 +6579,7 @@ fn seed_chat_docs() -> Vec<ChatDoc> {
                             ]
                         }),
                         state: ApprovalState::Pending,
-                        expires_at: Some(s.t + APPROVAL_TTL_MS as u64),
+                        expires_at: None,
                         decided_at: None,
                         decided_by: None,
                         reason: None,
@@ -9000,7 +9000,7 @@ mod seed_parity_tests {
                 &id,
                 &approval_id,
                 &draft_request("email", "a@b.c", "Hi", "Body"),
-                0,
+                None,
             );
             d.set_approval_state(
                 &approval_id,

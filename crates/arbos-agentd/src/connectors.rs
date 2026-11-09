@@ -39,25 +39,34 @@ pub struct ApprovalRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApprovalOutcome {
     Approved,
-    Rejected { reason: String },
-    Expired,
+    Rejected {
+        reason: String,
+    },
+    /// The card is still open and nothing was decided: this caller stopped waiting, which is
+    /// not an answer and must not be reported as a refusal.
+    Undecided,
+    Cancelled,
 }
 
-impl From<CoreOutcome> for ApprovalOutcome {
-    fn from(o: CoreOutcome) -> Self {
+impl From<Option<CoreOutcome>> for ApprovalOutcome {
+    fn from(o: Option<CoreOutcome>) -> Self {
         match o {
-            CoreOutcome::Approved => ApprovalOutcome::Approved,
-            CoreOutcome::Rejected { reason } => ApprovalOutcome::Rejected {
+            Some(CoreOutcome::Approved) => ApprovalOutcome::Approved,
+            Some(CoreOutcome::Rejected { reason }) => ApprovalOutcome::Rejected {
                 reason: reason.unwrap_or_default(),
             },
-            CoreOutcome::Expired => ApprovalOutcome::Expired,
+            Some(CoreOutcome::Cancelled) => ApprovalOutcome::Cancelled,
+            None => ApprovalOutcome::Undecided,
         }
     }
 }
 
-/// Post an approval card in `chat_id` and block until the user decides (or the 24 h /
-/// `ARBOS_APPROVAL_TIMEOUT_SECS` expiry). Audit entries and the card state are written by
-/// `Agent::request_approval`; a card that cannot be posted counts as rejected.
+/// Post an approval card in `chat_id` and wait a short while for the user's decision. Audit
+/// entries and the card state are written by `Agent::request_approval`; a card that cannot be
+/// posted counts as rejected.
+///
+/// The wait is bounded and the card is not: `Undecided` means the question is still in front of
+/// the user, so the call is refused for now and they can still answer it.
 pub async fn request_approval(
     agent: &Arc<Agent>,
     chat_id: &str,
@@ -227,9 +236,17 @@ pub async fn connector_call(agent: &Arc<Agent>, args: &Value, chat_id: &str) -> 
                         if reason.trim().is_empty() { String::new() } else { format!(" ({reason})") }
                     ));
                 }
-                ApprovalOutcome::Expired => {
+                ApprovalOutcome::Undecided => {
                     return err_result(format!(
-                        "{provider}.{action}: the approval expired before the user decided"
+                        "{provider}.{action} did not run: it needs the user's approval and the \
+                         card is still waiting for them. Do not retry it — say in one sentence \
+                         that it needs their approval, and Arbos runs it when they approve"
+                    ));
+                }
+                ApprovalOutcome::Cancelled => {
+                    return err_result(format!(
+                        "{provider}.{action} did not run: the work was cancelled, so its \
+                         approval card was closed"
                     ));
                 }
             }
