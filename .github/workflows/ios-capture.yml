@@ -422,6 +422,16 @@ jobs:
           xcrun simctl boot "$udid"
           xcrun simctl bootstatus "$udid" -b
           xcrun simctl ui "$udid" appearance "$APPEARANCE"
+          # A fresh simulator shows the swipe-to-type tutorial over the keyboard the first
+          # time one comes up, and it covers the keyboard completely. Any shot with the
+          # keyboard up is then a picture of an Apple panel, and worse, the tutorial is a
+          # first-run state no tester is in, so the shoot is not of the app testers use.
+          # Both keyboard-up legs of runs 42540405590 / 42540407282 landed on it.
+          # The keyboard is its own process, so the defaults go to the device, not the app.
+          for d in com.apple.keyboard com.apple.Preferences; do
+            xcrun simctl spawn "$udid" defaults write "$d" DidShowContinuousPathIntroduction -bool true || true
+          done
+          xcrun simctl spawn "$udid" defaults write com.apple.Preferences KeyboardContinuousPathEnabled -bool false || true
           echo "$DEVICE on $runtime ($udid), appearance $APPEARANCE"
           echo "- \`${{ matrix.leg }}\`: $DEVICE, \`$runtime\`, $APPEARANCE" >> "$GITHUB_STEP_SUMMARY"
       # Separate from the capture, so a compile failure reads as a compile failure in the log
