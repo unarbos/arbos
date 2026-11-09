@@ -57,6 +57,15 @@ pub enum AgentEvent {
         steering: usize,
         follow_up: usize,
     },
+    /// The model call behind this session failed, as the provider explained it: a refusal, a
+    /// context overflow, a 5xx. pi 1.2 reports all three on `message_end` only, and reports them
+    /// *without* ending the session, so this is not a `Done` — a session that recovers goes on
+    /// streaming after it. Its only use is to give a run that then settles with nothing a true
+    /// reason (bug AR).
+    ModelError {
+        detail: String,
+        refusal: bool,
+    },
     Done {
         aborted: bool,
         error: Option<String>,
@@ -320,12 +329,33 @@ pub fn translate_rpc_event(e: &Event) -> Vec<AgentEvent> {
             aborted: *aborted,
             error: None,
         }],
+        // The one place a worker can learn that its model call failed. `AssistantEvent::Error`
+        // above is the streamed form and pi 1.2 never sends it: a refusal, a context overflow or
+        // a provider 5xx arrives only here, as `stopReason: error` on the finished assistant
+        // message (`agent.rs`, where the main session has always read it).
+        //
+        // Bug AR, filed in Test5 round 21 and settled by round 22's session file: the arm this
+        // replaces discarded `message_end`, so a worker the provider had refused produced no
+        // text, no tool call and no error, and agentd reported the only thing left to say —
+        // "worker ended without output (no reply, no tool call)". The fresh worker got the same
+        // brief and was refused the same way four seconds later, and the job fell to the inline
+        // agent with its real reason recorded nowhere.
+        Event::MessageEnd { message } => {
+            match crate::agent::ModelError::from_message(message)
+                .filter(|_| message.get("role").and_then(Value::as_str) == Some("assistant"))
+            {
+                Some(m) => vec![AgentEvent::ModelError {
+                    detail: m.detail,
+                    refusal: m.refusal,
+                }],
+                None => vec![],
+            }
+        }
         Event::AgentStart
         | Event::AgentEnd { .. }
         | Event::TurnStart
         | Event::TurnEnd { .. }
         | Event::MessageStart { .. }
-        | Event::MessageEnd { .. }
         | Event::ToolExecutionUpdate { .. }
         | Event::EntryAppended { .. }
         | Event::ExtensionUiRequest { .. }

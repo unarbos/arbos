@@ -11336,11 +11336,8 @@ impl Agent {
         if t.stopped
             || t.act_to_job
             || t.model_retries >= MODEL_CALL_RETRIES
-            || m.refusal
             || is_abort_text(&m.detail)
-            || crate::budget::Refusal::classify(&m.detail).is_some()
-            || classify_hard_limit(&m.detail).is_some()
-            || crate::disk::is_enospc(&m.detail)
+            || model_error_is_permanent(&m.detail, m.refusal)
             || !t.streamed_text.trim().is_empty()
         {
             return None;
@@ -12578,6 +12575,8 @@ impl Agent {
         let mut usage_total = json!({});
         let mut first_delta: Option<i64> = None;
         let mut done_err: Option<String> = None;
+        // How the provider declined or failed this worker's last model call, if it did (bug AR).
+        let mut model_err: Option<ModelError> = None;
         let mut tool_calls: u32 = 0;
         let deadline = Instant::now() + Duration::from_secs(60 * 60);
         loop {
@@ -12709,6 +12708,14 @@ impl Agent {
                         }
                     }
                 }
+                // The provider declined or failed this worker's model call. Kept, not acted on:
+                // pi may still recover, and a worker that goes on to do its work is a success
+                // whatever happened on the way. It is read below, where a run that settled with
+                // nothing would otherwise be blamed on the worker (bug AR).
+                AgentEvent::ModelError { detail, refusal } => {
+                    tracing::warn!(subagent = %subagent_id, refusal, detail = %detail, "the worker's model call ended in error");
+                    model_err = Some(ModelError { detail, refusal });
+                }
                 AgentEvent::CompactionStarted => {}
                 AgentEvent::CompactionEnded { summary } => {
                     let n = self
@@ -12780,6 +12787,28 @@ impl Agent {
         {
             done_err = Some(crate::approval::APPROVAL_EXPIRED_ERROR.to_owned());
         }
+        // The worker wrote no answer and its model call had failed: that failure is the reason,
+        // and it outranks anything `worker_failure` can infer from an empty run. Bug AR, Jacob's
+        // Test5 round 22: the provider's cyber-safeguards filter refused `tick22`'s first model
+        // call outright, agentd saw the empty settle and blamed the worker — "worker ended
+        // without output (no reply, no tool call)" — so the one sentence that said what had
+        // happened was recorded nowhere and the user was told only "I couldn't finish that one".
+        //
+        // Tool calls do not excuse it. The second attempt ran one `bash` call and was refused on
+        // the next model call, which left a worker with no answer settling as a clean `done`.
+        let model_failure = model_err.filter(|_| text.trim().is_empty());
+        // Whether a second worker is worth buying, and whether the user should be told to ask
+        // again in a moment, are the same question: will this clear? Settled here, where pi's
+        // own `rawStopReason` is still in hand.
+        let permanent_model_failure = model_failure
+            .as_ref()
+            .is_some_and(|m| model_error_is_permanent(&m.detail, m.refusal));
+        if let Some(m) = &model_failure {
+            if done_err.is_none() {
+                tracing::warn!(subagent = %subagent_id, total_ms, refusal = m.refusal, permanent = permanent_model_failure, detail = %m.detail, "the worker wrote nothing after its model call failed");
+                done_err = Some(m.detail.clone());
+            }
+        }
         // A worker that settled with nothing — no words, no tool call, no error — did no work
         // (2026-10-25: pi died on its first session write and settled clean); that is a
         // failure to retry, never an empty "done" the main agent has to explain away.
@@ -12802,6 +12831,15 @@ impl Agent {
             }
         });
         let failed = done_err.is_some() || status == "blocked";
+        // The recorded sentence, carrying pi's refusal flag when that sentence is the provider's
+        // own — a job's failure line is chosen from the flag, not from the wording. Built after
+        // the last write to `done_err` above, so it cannot disagree with the row.
+        let job_error = done_err.as_deref().map(|detail| ModelError {
+            detail: detail.to_owned(),
+            refusal: model_failure
+                .as_ref()
+                .is_some_and(|m| m.refusal && m.detail == detail),
+        });
         let retired_wordless;
         {
             let h = host.lock().await;
@@ -12881,8 +12919,13 @@ impl Agent {
             // after that the main agent does the work inline. Either way the user hears of a
             // failure only once nothing else worked (Jacob, 2026-10-25).
             if let Some(e) = done_err.as_deref().filter(|_| !job_cancelled) {
+                // A refusal, a spend or context limit, a full disk: the provider's answer to
+                // these bytes, not to this moment. The fresh worker is handed the identical
+                // brief and declined identically — bug AR's two attempts four seconds apart —
+                // so the work goes straight to the main agent instead of buying a second one.
                 let retryable = worker_failure(Some(e), &text, tool_calls, &status)
-                    .is_some_and(|(_, retry)| retry);
+                    .is_some_and(|(_, retry)| retry)
+                    && !permanent_model_failure;
                 if retryable && j.attempt < JOB_WORKER_RETRIES {
                     job_retry = Some(JobWorkerFailed {
                         job_id: j.id.clone(),
@@ -13035,7 +13078,7 @@ impl Agent {
                     &sub_name,
                     &status,
                     &result_text,
-                    done_err.as_deref(),
+                    job_error.as_ref(),
                 )
                 .await;
         }
@@ -13089,7 +13132,7 @@ impl Agent {
                         &sub_name,
                         &status,
                         &result_text,
-                        done_err.as_deref(),
+                        job_error.as_ref(),
                     )
                     .await;
                 if r.is_ok() {
@@ -13229,7 +13272,10 @@ impl Agent {
         name: &str,
         status: &str,
         raw: &str,
-        error: Option<&str>,
+        // Why there is no answer, when there is none. A `ModelError` rather than a bare sentence
+        // so that the failure line below can rest on pi's own stop reason instead of on the
+        // provider's choice of words (bug AR).
+        error: Option<&ModelError>,
     ) -> Result<()> {
         let ask = {
             let h = host.lock().await;
@@ -13239,6 +13285,9 @@ impl Agent {
                 .unwrap_or_default()
         };
         let address = self.owner_address_note(chat_id, host, in_reply_to).await;
+        // Whose budget, for the one failure line that names one. Read here because the fallback
+        // below is a sync closure.
+        let owner_label = self.budget_owner_label(chat_id, host, in_reply_to).await;
         let (talking_model, _) = self.live_models().await;
         let system = format!(
             "{} You answer a message the user sent while you were busy with something else; the work for it is done (notes below). Write the answer the user should read, like a colleague in chat: what they asked for, what came out, what is open. First person; short when the answer is short; a plain GitHub-flavoured markdown table (header row, `| --- |` separator row, rows starting and ending with `|`, no code fence) with `[Name](https://…)` links when it compares several items, and then one line offering a concrete next step. Never mention a side task, helper, subagent, tool, command, model or that you were busy. An acceptance criterion in the notes is the worker's own self-check against its instructions, not a finding about the user's request: an unmet one is never restated to the user as a description of what happened. If the notes hold no answer, say plainly what you could not do.{}",
@@ -13259,7 +13308,7 @@ impl Agent {
         let user = format!(
             "The user's message: {}\n\nStatus of the work: {status}{}{}\n\nNotes from the work (for you only):\n<<<\n{}\n>>>",
             if ask.trim().is_empty() { "(see the notes)" } else { ask.trim() },
-            error.map(|e| format!("\nIt ended with an error: {e}")).unwrap_or_default(),
+            error.map(|e| format!("\nIt ended with an error: {}", e.detail)).unwrap_or_default(),
             // Read from the job row rather than left to be worked out from the notes (bug AD).
             self.job_backgrounding_note(chat_id, in_reply_to)
                 .map(|n| format!("\n\n{n}"))
@@ -13271,9 +13320,16 @@ impl Agent {
         // the worker's own words for finished work, a plain line otherwise.
         let fallback = || {
             if status == "done" && !raw_trim.trim().is_empty() {
-                ProseFilter::clean_prose(raw_trim.trim())
-            } else {
-                "I couldn't finish that one. Ask me again in a moment.".to_owned()
+                return ProseFilter::clean_prose(raw_trim.trim());
+            }
+            // "Ask me again in a moment" is the wrong instruction for a failure that will not
+            // clear: a refused request is refused again, a context limit is still over it, a
+            // spend cap is still reached. Bug AR ended here with the generic line while what had
+            // actually happened — the provider declined the brief — was in `error` all along.
+            // `ModelError`'s own lines say which of the two it was and what gets through.
+            match error.filter(|e| model_error_is_permanent(&e.detail, e.refusal)) {
+                Some(e) => e.chat_line_for(&owner_label),
+                None => "I couldn't finish that one. Ask me again in a moment.".to_owned(),
             }
         };
         // The whole budget has to go to the sentence the user reads. On an endpoint where
@@ -15209,11 +15265,19 @@ pub(crate) fn job_fallback_prompt(
     error: &str,
     partial: &str,
 ) -> String {
+    // How many workers it really got, not the cap. A permanent failure — a provider refusal, a
+    // context or spend limit — spends one worker and comes straight here, because the second
+    // would be handed the same bytes and declined the same way (bug AR), so the old constant
+    // told the main agent two had been tried when one had.
+    let workers = u32::from(job.attempt) + 1;
     let mut p = format!(
-        "[Arbos] Job \"{}\" ({}) could not be run: its worker failed {} times without a result (last error: {error}).\n\nThe user originally asked (message id {user_msg_id}): {}\n",
+        "[Arbos] Job \"{}\" ({}) could not be run: {} without a result (last error: {error}).\n\nThe user originally asked (message id {user_msg_id}): {}\n",
         job.title,
         job.id,
-        u32::from(JOB_WORKER_RETRIES) + 1,
+        match workers {
+            1 => "its worker failed".to_owned(),
+            n => format!("its workers failed {n} times"),
+        },
         if ask.trim().is_empty() { "(see the brief)" } else { ask.trim() },
     );
     if !brief.trim().is_empty() {
@@ -15373,6 +15437,28 @@ fn classify_hard_limit(err: &str) -> Option<(&'static str, bool)> {
         ));
     }
     None
+}
+
+/// Is this model failure a property of the request rather than of the moment?
+///
+/// A refusal, a spend or context limit and a full disk are all answers the provider will give
+/// again to the same bytes. A 5xx, a dropped connection or a timeout may not, so those stay
+/// retryable.
+///
+/// One classifier for both lanes that ask, which is why it is a function and not a condition
+/// written twice: the main session's in-turn retry ([`Agent::transient_model_error`]) and a
+/// job's fresh-worker retry (`run_subagent`). The worker lane had no such test at all — bug AR,
+/// Jacob's Test5 round 22, where a refused brief was handed to a second worker four seconds
+/// later and refused identically, both times recorded as the worker's own fault.
+///
+/// `refusal` is pi's `rawStopReason: refusal` — the provider saying so itself, rather than
+/// [`ModelError::detail_is_refusal`] reading its prose. Either is enough.
+pub(crate) fn model_error_is_permanent(detail: &str, refusal: bool) -> bool {
+    refusal
+        || ModelError::detail_is_refusal(detail)
+        || crate::budget::Refusal::classify(detail).is_some()
+        || classify_hard_limit(detail).is_some()
+        || crate::disk::is_enospc(detail)
 }
 
 /// Who the agent is and how it works, in Arbos's words (`prompts/core.md`): voice, when to

@@ -120,6 +120,8 @@ mod vault;
 mod voice;
 mod web;
 #[cfg(test)]
+mod worker_model_refusal_tests;
+#[cfg(test)]
 mod worker_retention_tests;
 mod workspace;
 
