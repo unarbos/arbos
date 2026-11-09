@@ -500,6 +500,30 @@ daytona_disk_free_gib() {
     | python3 -c 'import json,sys; r=json.load(sys.stdin)["regionUsage"][0]; print(int(r["totalDiskQuota"])-int(r["currentDiskUsage"]))' 2>/dev/null || true
 }
 
+daytona_snapshot_mem() {
+  # daytona_snapshot_mem <name> — the registered snapshot's memory in GB (the `mem` field Daytona
+  # returns; create takes it under `memory`), or empty when the snapshot endpoint does not answer.
+  curl -fsS --max-time 20 -H "Authorization: Bearer $(secret_from "$RELAY_ENV" DAYTONA_API_KEY)" "$DAYTONA_API/snapshots/$1" 2>/dev/null \
+    | python3 -c 'import json,sys; m=json.load(sys.stdin).get("mem"); print("" if m is None else int(float(m)))' 2>/dev/null || true
+}
+
+verify_snapshot_mem() {
+  # verify_snapshot_mem <snapshot> <want-gb> <sha> <version> — 0 when the registered snapshot carries
+  # want-gb of memory, else hold the lane and 1. register-snapshot.sh now re-registers a drifted
+  # snapshot, but it is not the only way a snapshot can reach the roll (a hand-registered one at
+  # Daytona's 1 GiB default rolled the whole fleet at 1 GiB on 2026-11-09): read the memory back and
+  # refuse to roll a box onto a snapshot that does not carry what was pinned.
+  local snapshot="$1" want="$2" sha="$3" version="$4" got
+  got="$(daytona_snapshot_mem "$snapshot")"
+  if [[ "$got" != "$want" ]]; then
+    record_failure agentd "$sha" "snapshot $snapshot registered with mem=${got:-?}G, want ${want}G; nothing rolled"
+    hold_agentd "$sha" "$version" "snapshot $snapshot memory is ${got:-?}G not ${want}G; re-register it at the pinned size before rolling"
+    return 1
+  fi
+  log "agentd: snapshot $snapshot verified at mem=${got}G"
+  return 0
+}
+
 daytona_archive_retained() {
   # Archive (never delete — an archived sandbox can be started again) the stopped sandboxes nobody needs
   # running: every stopped test_ sandbox, and a user's retained old sandboxes beyond the QUOTA_KEEP_RETAINED
@@ -1083,6 +1107,7 @@ roll_image() {
     bash "$REPO/image/register-snapshot.sh" "$snapshot" "$image" "$AGENTD_SNAPSHOT_CPU" "$AGENTD_SNAPSHOT_MEM_GB" "$AGENTD_SNAPSHOT_DISK_GB" > "$STATE/runs/agentd-$version-register.log" 2>&1 \
     || { record_failure agentd "$sha" "snapshot registration failed: $(tail -2 "$STATE/runs/agentd-$version-register.log" | tr '\n' ' ')"; exit 1; }
   log "agentd: snapshot $snapshot active"
+  verify_snapshot_mem "$snapshot" "$AGENTD_SNAPSHOT_MEM_GB" "$sha" "$version" || exit 1
   # Busy-reply gate on the canary box first (scripts/deploy/agentd-canary-smoke.sh, from the
   # rolled commit): a failed gate stops here — default unchanged, no real box moves.
   local smoke_rc=0
@@ -1642,6 +1667,7 @@ selftest() {
   hold_cases "$h"
   image_tag_prune_cases "$h/prune"
   register_snapshot_cases "$h/regsnap"
+  snapshot_verify_cases "$h/snapverify"
   echo "selftest ok"
 }
 
@@ -1752,6 +1778,35 @@ STUB
     || { echo "selftest: AGENTD_SNAPSHOT_MEM_GB is not a positive integer" >&2; return 1; }
   grep -Eq 'register-snapshot\.sh" "\$snapshot" "\$image" "\$AGENTD_SNAPSHOT_CPU".*"\$AGENTD_SNAPSHOT_MEM_GB".*"\$AGENTD_SNAPSHOT_DISK_GB"' "${BASH_SOURCE[0]}" \
     || { echo "selftest: roll_image does not pass the pinned snapshot resources to register-snapshot.sh" >&2; return 1; }
+}
+
+# The roll must read the registered snapshot's memory back and refuse to roll onto a wrong one, even
+# when register-snapshot.sh thinks it did its job (a hand-registered snapshot at Daytona's 1 GiB default
+# is how the fleet rolled at 1 GiB). `curl` is a stub on PATH returning a controllable snapshot JSON;
+# record_failure/hold_agentd/log write into the scratch state only. Nothing here needs root or network.
+snapshot_verify_cases() {
+  local d="$1"
+  mkdir -p "$d/bin" "$d/failed"
+  cat > "$d/bin/curl" <<'STUB'
+#!/usr/bin/env bash
+if [ -n "${STUB_SNAP_JSON:-}" ]; then echo "$STUB_SNAP_JSON"; else echo '{}'; fi
+exit 0
+STUB
+  chmod +x "$d/bin/curl"
+  STATE="$d"; LOG="$d/log"; EVENTS="$d/events.jsonl"; RELAY_ENV="$d/relay.env"; DAYTONA_API="http://stub"
+  : > "$RELAY_ENV"
+  # 1. The pinned memory is present: verify passes and the lane stays open ($d is a fresh scratch dir,
+  #    so no hold file pre-exists — nothing to clear, which also keeps the single-delete-site invariant).
+  STUB_SNAP_JSON='{"mem":8}' PATH="$d/bin:$PATH" verify_snapshot_mem arbos-agent-x 8 deadbeef 0.1.x >/dev/null 2>&1 \
+    || { echo "selftest: verify_snapshot_mem rejected a correctly-pinned snapshot" >&2; return 1; }
+  [[ ! -f "$(agentd_hold_file)" ]] || { echo "selftest: verify_snapshot_mem held the lane for a correct snapshot" >&2; return 1; }
+  # 2. The snapshot came back at Daytona's 1 GiB default: verify fails and holds the lane so no box rolls.
+  STUB_SNAP_JSON='{"mem":1}' PATH="$d/bin:$PATH" verify_snapshot_mem arbos-agent-x 8 deadbeef 0.1.x >/dev/null 2>&1 \
+    && { echo "selftest: verify_snapshot_mem accepted a snapshot stuck at mem=1" >&2; return 1; }
+  [[ -f "$(agentd_hold_file)" ]] || { echo "selftest: verify_snapshot_mem did not hold the lane for a wrong-memory snapshot" >&2; return 1; }
+  # 3. The roll actually calls the verification after registering the snapshot.
+  grep -Eq 'verify_snapshot_mem "\$snapshot" "\$AGENTD_SNAPSHOT_MEM_GB"' "${BASH_SOURCE[0]}" \
+    || { echo "selftest: roll_image does not verify the registered snapshot memory" >&2; return 1; }
 }
 
 # The agentd hold lifts by hand only. Every case runs the REAL gate — the top of `roll_image` — against a
