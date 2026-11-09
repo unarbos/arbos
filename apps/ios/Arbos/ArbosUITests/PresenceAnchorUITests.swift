@@ -161,21 +161,72 @@ final class PresenceAnchorUITests: XCTestCase {
         assertGone(app.keyboards.firstMatch,
                    "the drag dismissed the keyboard, so this is the gesture under test")
 
+        // Corroboration, not proof. The chevron is driven by `awayFromBottom`, so it says
+        // what the app believes rather than where the transcript is — and run 42558663139
+        // had it up while the transcript was back at the live bottom. Everything that
+        // decides this case is measured below; this only says the drag registered at all.
         let jump = awayMarker(app)
         XCTAssertTrue(jump.waitForExistence(timeout: 15),
-                      "the drag took the reader into history, keyboard or no keyboard")
+                      "the drag registered as a departure from the end")
+        assertInHistory(app, "straight after the drag")
 
         // The yank does not arrive with the drag, it arrives with the next growth of the
         // transcript — which is why a screenshot taken straight after the drag can miss it.
         // The working row changes size on its own, so waiting is all this needs.
+        let landmark = topBubble(app)
         Thread.sleep(forTimeInterval: 4)
         shot(app, "history-after-the-keyboard-went-down")
-        XCTAssertTrue(jump.exists,
-                      "the transcript must not re-stick to the end under a reader who left it")
+
+        // The transcript's own position, not the chevron's existence.
+        assertInHistory(app, "after the transcript grew under them")
+        if let landmark, let now = bubble(app, landmark.id) {
+            XCTAssertEqual(now.minY, landmark.frame.minY, accuracy: 2,
+                           "\(landmark.id) is where the reader left it — was \(landmark.frame), now \(now)")
+        }
 
         let top = composerTop(app)
         let row = presence(app)
         XCTAssertTrue(!row.exists || row.frame.minY >= top,
                       "and the row stays gone while they are up here: frame \(row.frame), composer top \(top)")
+    }
+
+    private func bubbles(_ app: XCUIApplication) -> [(id: String, frame: CGRect)] {
+        app.descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier BEGINSWITH %@", "bubble:"))
+            .allElementsBoundByIndex
+            .map { (id: $0.identifier, frame: $0.frame) }
+            .filter { $0.frame.height > 0 }
+    }
+
+    private func bubble(_ app: XCUIApplication, _ id: String) -> CGRect? {
+        bubbles(app).first { $0.id == id }?.frame
+    }
+
+    /// The highest bubble on screen, kept with its identifier so the comparison later is
+    /// against the same row rather than whichever row is topmost by then — lazy rows join
+    /// and leave the tree, so position alone does not name a bubble.
+    ///
+    /// Growth happens at the end, below this one, so a reader who keeps their place keeps it
+    /// exactly where it was.
+    private func topBubble(_ app: XCUIApplication) -> (id: String, frame: CGRect)? {
+        bubbles(app).filter { $0.frame.maxY > 0 }.min { $0.frame.minY < $1.frame.minY }
+    }
+
+    /// The reader is in history: the end of the transcript is not in view, so the newest
+    /// bubble sits below the composer's top edge rather than resting above it.
+    ///
+    /// This is the complement of `testTheRowRestsOverTheComposerAtTheLiveBottom`'s assertion,
+    /// and it is deliberately about the transcript rather than about any indicator over it.
+    private func assertInHistory(_ app: XCUIApplication, _ state: String,
+                                 file: StaticString = #filePath, line: UInt = #line) {
+        let top = composerTop(app)
+        let frames = bubbles(app)
+        XCTAssertFalse(frames.isEmpty, "\(state): the transcript has rows", file: file, line: line)
+        guard let newest = frames.max(by: { $0.frame.maxY < $1.frame.maxY }) else { return }
+        XCTAssertGreaterThan(newest.frame.maxY, top + 1,
+                             "\(state): the reader is up in history, so the newest row is below "
+                             + "the fold rather than resting above the composer — newest "
+                             + "\(newest.id) \(newest.frame), composer top \(top)",
+                             file: file, line: line)
     }
 }

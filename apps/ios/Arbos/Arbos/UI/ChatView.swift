@@ -2476,6 +2476,9 @@ struct ChatSession: View {
                 .id(transcriptStackIdentity)
             }
             .defaultScrollAnchor(.bottom)
+            // A reader who has left the end keeps their offset through a resize; everyone
+            // else is still carried to it.
+            .modifier(TranscriptResizeAnchor(away: awayFromBottom))
             .modifier(ChatBarIndicatorMargin(bar: chatBarHeight))
             // iOS 26's automatic edge effect under a bottom inset would blur the rows under the
             // composer a second time; the canvas fade is the one treatment.
@@ -4622,6 +4625,30 @@ private struct NoBottomScrollEdgeEffect: ViewModifier {
     func body(content: Content) -> some View {
         if #available(iOS 26, *) {
             content.scrollEdgeEffectHidden(true, for: .bottom)
+        } else {
+            content
+        }
+    }
+}
+
+/// Who the bottom anchor is for, once the reader has left the end.
+///
+/// `.defaultScrollAnchor(.bottom)` does three jobs at once: a chat opens on its newest row,
+/// a reader at the end is carried there when the keyboard moves, and the end is kept against
+/// the container's bottom edge through any resize. The third one has no idea who caused the
+/// resize, so it also drags a reader who has gone up into history back down — the keyboard
+/// finishing its retraction after their own drag is a container resize like any other, and
+/// the reader loses the place they just took ([feedback typing-anchor-2026-11-08]).
+///
+/// iOS 18 splits the roles apart, so the size-change anchor can be dropped for a reader who
+/// is away while alignment keeps the bottom for everyone else. Below 18 the transcript keeps
+/// the old single anchor: the reader's place is worth less than opening on the newest row.
+private struct TranscriptResizeAnchor: ViewModifier {
+    var away: Bool
+
+    func body(content: Content) -> some View {
+        if #available(iOS 18, *) {
+            content.defaultScrollAnchor(away ? nil : .bottom, for: .sizeChanges)
         } else {
             content
         }
