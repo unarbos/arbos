@@ -12512,9 +12512,8 @@ impl Agent {
         let mut usage_total = json!({});
         let mut first_delta: Option<i64> = None;
         let mut done_err: Option<String> = None;
-        // Why the provider declined or failed this worker's last model call, if it did: the
-        // provider's own text, and whether pi called it a refusal (bug AR).
-        let mut model_err: Option<(String, bool)> = None;
+        // How the provider declined or failed this worker's last model call, if it did (bug AR).
+        let mut model_err: Option<ModelError> = None;
         let mut tool_calls: u32 = 0;
         let deadline = Instant::now() + Duration::from_secs(60 * 60);
         loop {
@@ -12652,7 +12651,7 @@ impl Agent {
                 // nothing would otherwise be blamed on the worker (bug AR).
                 AgentEvent::ModelError { detail, refusal } => {
                     tracing::warn!(subagent = %subagent_id, refusal, detail = %detail, "the worker's model call ended in error");
-                    model_err = Some((detail, refusal));
+                    model_err = Some(ModelError { detail, refusal });
                 }
                 AgentEvent::CompactionStarted => {}
                 AgentEvent::CompactionEnded { summary } => {
@@ -12734,12 +12733,17 @@ impl Agent {
         //
         // Tool calls do not excuse it. The second attempt ran one `bash` call and was refused on
         // the next model call, which left a worker with no answer settling as a clean `done`.
-        let mut permanent_model_failure = false;
-        if let Some((detail, refusal)) = model_err.filter(|_| text.trim().is_empty()) {
-            permanent_model_failure = model_error_is_permanent(&detail, refusal);
+        let model_failure = model_err.filter(|_| text.trim().is_empty());
+        // Whether a second worker is worth buying, and whether the user should be told to ask
+        // again in a moment, are the same question: will this clear? Settled here, where pi's
+        // own `rawStopReason` is still in hand.
+        let permanent_model_failure = model_failure
+            .as_ref()
+            .is_some_and(|m| model_error_is_permanent(&m.detail, m.refusal));
+        if let Some(m) = &model_failure {
             if done_err.is_none() {
-                tracing::warn!(subagent = %subagent_id, total_ms, refusal, permanent = permanent_model_failure, "the worker wrote nothing after its model call failed");
-                done_err = Some(detail);
+                tracing::warn!(subagent = %subagent_id, total_ms, refusal = m.refusal, permanent = permanent_model_failure, detail = %m.detail, "the worker wrote nothing after its model call failed");
+                done_err = Some(m.detail.clone());
             }
         }
         // A worker that settled with nothing — no words, no tool call, no error — did no work
@@ -12764,6 +12768,15 @@ impl Agent {
             }
         });
         let failed = done_err.is_some() || status == "blocked";
+        // The recorded sentence, carrying pi's refusal flag when that sentence is the provider's
+        // own — a job's failure line is chosen from the flag, not from the wording. Built after
+        // the last write to `done_err` above, so it cannot disagree with the row.
+        let job_error = done_err.as_deref().map(|detail| ModelError {
+            detail: detail.to_owned(),
+            refusal: model_failure
+                .as_ref()
+                .is_some_and(|m| m.refusal && m.detail == detail),
+        });
         let retired_wordless;
         {
             let h = host.lock().await;
@@ -12994,7 +13007,7 @@ impl Agent {
                     &sub_name,
                     &status,
                     &result_text,
-                    done_err.as_deref(),
+                    job_error.as_ref(),
                 )
                 .await;
         }
@@ -13048,7 +13061,7 @@ impl Agent {
                         &sub_name,
                         &status,
                         &result_text,
-                        done_err.as_deref(),
+                        job_error.as_ref(),
                     )
                     .await;
                 if r.is_ok() {
@@ -13188,7 +13201,10 @@ impl Agent {
         name: &str,
         status: &str,
         raw: &str,
-        error: Option<&str>,
+        // Why there is no answer, when there is none. A `ModelError` rather than a bare sentence
+        // so that the failure line below can rest on pi's own stop reason instead of on the
+        // provider's choice of words (bug AR).
+        error: Option<&ModelError>,
     ) -> Result<()> {
         let ask = {
             let h = host.lock().await;
@@ -13221,7 +13237,7 @@ impl Agent {
         let user = format!(
             "The user's message: {}\n\nStatus of the work: {status}{}{}\n\nNotes from the work (for you only):\n<<<\n{}\n>>>",
             if ask.trim().is_empty() { "(see the notes)" } else { ask.trim() },
-            error.map(|e| format!("\nIt ended with an error: {e}")).unwrap_or_default(),
+            error.map(|e| format!("\nIt ended with an error: {}", e.detail)).unwrap_or_default(),
             // Read from the job row rather than left to be worked out from the notes (bug AD).
             self.job_backgrounding_note(chat_id, in_reply_to)
                 .map(|n| format!("\n\n{n}"))
@@ -13240,12 +13256,8 @@ impl Agent {
             // spend cap is still reached. Bug AR ended here with the generic line while what had
             // actually happened — the provider declined the brief — was in `error` all along.
             // `ModelError`'s own lines say which of the two it was and what gets through.
-            match error.filter(|e| model_error_is_permanent(e, false)) {
-                Some(e) => ModelError {
-                    detail: e.to_owned(),
-                    refusal: ModelError::detail_is_refusal(e),
-                }
-                .chat_line_for(&owner_label),
+            match error.filter(|e| model_error_is_permanent(&e.detail, e.refusal)) {
+                Some(e) => e.chat_line_for(&owner_label),
                 None => "I couldn't finish that one. Ask me again in a moment.".to_owned(),
             }
         };

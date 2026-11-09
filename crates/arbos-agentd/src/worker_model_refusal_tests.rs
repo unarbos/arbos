@@ -30,7 +30,9 @@
 //! # What these cases hold
 //!
 //! 1. the event translation surfaces the refusal (`a_refused_model_call_reaches_the_worker_stream`);
-//! 2. the classifier tells a refusal from a 5xx (`a_refusal_is_permanent_a_five_hundred_is_not`);
+//! 2. the classifier tells a refusal from a 5xx (`a_refusal_is_permanent_a_five_hundred_is_not`),
+//!    and keys on pi's `rawStopReason` rather than on the provider's wording
+//!    (`a_refusal_pi_named_counts_even_when_its_prose_gives_nothing_away`);
 //! 3. end to end through `run_subagent`, the job row carries the provider's own sentence and the
 //!    job is `failed` rather than `queued` for a second identical attempt
 //!    (`a_refused_worker_fails_with_the_providers_reason_and_is_not_retried`).
@@ -45,7 +47,7 @@ use arbos_core::ids::ulid;
 use arbos_core::route::Harness;
 use arbos_core::rpc::Event;
 
-use crate::agent::{model_error_is_permanent, Agent, JobSpec};
+use crate::agent::{model_error_is_permanent, Agent, JobSpec, ModelError};
 use crate::harness::{translate_rpc_event, AgentEvent};
 
 const CHAT: &str = "01TESTCHATWORKERREFUSAL001";
@@ -142,6 +144,43 @@ fn a_refusal_is_permanent_a_five_hundred_is_not() {
         "an overloaded provider is exactly what a fresh worker is for"
     );
     assert!(!model_error_is_permanent("connection reset by peer", false));
+}
+
+/// **The flag is the key, not the wording.** `detail_is_refusal` catches round 22's text on the
+/// word "flagged", which is luck rather than design; the signal agentd can rely on is pi's
+/// `rawStopReason: refusal`, which is the provider saying so itself.
+///
+/// So a refusal worded in a way no keyword list predicted must still be permanent — otherwise
+/// the next provider rewording quietly puts bug AR back, with a second worker bought for a brief
+/// that cannot be run.
+#[test]
+fn a_refusal_pi_named_counts_even_when_its_prose_gives_nothing_away() {
+    let bland = "the request was declined by upstream policy";
+    assert!(
+        !ModelError::detail_is_refusal(bland),
+        "the premise of this case: the prose test finds nothing here"
+    );
+    assert!(
+        model_error_is_permanent(bland, true),
+        "and the flag alone must still settle it"
+    );
+    assert!(
+        !model_error_is_permanent(bland, false),
+        "while the same words with no flag stay retryable, so this is really testing the flag"
+    );
+
+    // And the line the user reads is the refusal line, which names what happened and what gets
+    // through, rather than "ask me again in a moment" for something that will not clear.
+    let line = ModelError {
+        detail: bland.to_owned(),
+        refusal: true,
+    }
+    .chat_line_for("Your");
+    assert!(line.contains("declined"), "{line}");
+    assert!(
+        line.contains("split it up"),
+        "a refusal has one way through and the line must say it: {line}"
+    );
 }
 
 /// A pi that refuses the worker's first model call the way the provider refused `tick22`'s, and
