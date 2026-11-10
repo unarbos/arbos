@@ -7,6 +7,10 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		A1ENT0000000000000000012 /* EntityProfileStructureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1ENT0000000000000000011 /* EntityProfileStructureTests.swift */; };
+		A1ENT0000000000000000002 /* EntityNavPushUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1ENT0000000000000000001 /* EntityNavPushUITests.swift */; };
+		A1GROK000000000000000012 /* AgentEditView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1GROK000000000000000011 /* AgentEditView.swift */; };
+		A1GROK000000000000000002 /* GrokEntityChrome.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1GROK000000000000000001 /* GrokEntityChrome.swift */; };
 		A1EE00000000000000000008 /* ErrorUILintTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1EE00000000000000000007 /* ErrorUILintTests.swift */; };
 		A1EE0000000000000000000A /* ToastStackTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1EE00000000000000000009 /* ToastStackTests.swift */; };
 		A1EE00000000000000000006 /* UserErrorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1EE00000000000000000005 /* UserErrorTests.swift */; };
@@ -305,6 +309,8 @@
 		A15C00000000000000000008 /* SessionRoom.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionRoom.swift; sourceTree = "<group>"; };
 		A15C0000000000000000000C /* CoreChatDoc.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoreChatDoc.swift; sourceTree = "<group>"; };
 		A124D4FA40F4E5025A2B2C9D /* AgentProfileView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentProfileView.swift; sourceTree = "<group>"; };
+		A1GROK000000000000000011 /* AgentEditView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentEditView.swift; sourceTree = "<group>"; };
+		A1GROK000000000000000001 /* GrokEntityChrome.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GrokEntityChrome.swift; sourceTree = "<group>"; };
 		A1EE5A7A5FF12E4EF7FE7B27 /* Avatar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Avatar.swift; sourceTree = "<group>"; };
 		A1686D5A87F44B94E76A8761 /* CallView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallView.swift; sourceTree = "<group>"; };
 		A1D946C1D0D3D6797F9935E9 /* ChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatView.swift; sourceTree = "<group>"; };
@@ -326,6 +332,7 @@
 		A1DA6B00000000000000B003 /* ChatSwipeTrackingUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatSwipeTrackingUITests.swift; sourceTree = "<group>"; };
 		A1BB00000000000000000005 /* BackSwipeUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackSwipeUITests.swift; sourceTree = "<group>"; };
 		A1NAV0000000000000000011 /* HomeNavPushUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeNavPushUITests.swift; sourceTree = "<group>"; };
+		A1ENT0000000000000000001 /* EntityNavPushUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EntityNavPushUITests.swift; sourceTree = "<group>"; };
 		A1BB00000000000000000030 /* ScrollPerfUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScrollPerfUITests.swift; sourceTree = "<group>"; };
 		A1F50000000000000000E003 /* PerfBaselineUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerfBaselineUITests.swift; sourceTree = "<group>"; };
 		A1BB00000000000000000032 /* HomeFilterTabsUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeFilterTabsUITests.swift; sourceTree = "<group>"; };
@@ -449,6 +456,7 @@
 		A1C5440000000000000003 /* ShellApprovalCardTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShellApprovalCardTests.swift; sourceTree = "<group>"; };
 		A1BD00000000000000000001 /* NewMessageSheetTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewMessageSheetTests.swift; sourceTree = "<group>"; };
 		A1NAV0000000000000000001 /* HomeNavPushTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeNavPushTests.swift; sourceTree = "<group>"; };
+		A1ENT0000000000000000011 /* EntityProfileStructureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EntityProfileStructureTests.swift; sourceTree = "<group>"; };
 		A1CC0000000000000000JA01 /* JacobAskGuardTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JacobAskGuardTests.swift; sourceTree = "<group>"; };
 		A15A00000000000000000030 /* ProfilePaneStructureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfilePaneStructureTests.swift; sourceTree = "<group>"; };
 		A1F7B0000000000000000003 /* BlockedStateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BlockedStateTests.swift; sourceTree = "<group>"; };
@@ -768,6 +776,7 @@
 				A1BC00000000000000000015 /* MessageActionsHitAreaTests.swift */,
 				A1BD00000000000000000001 /* NewMessageSheetTests.swift */,
 				A1NAV0000000000000000001 /* HomeNavPushTests.swift */,
+				A1ENT0000000000000000011 /* EntityProfileStructureTests.swift */,
 				A1CC0000000000000000JA01 /* JacobAskGuardTests.swift */,
 				A1BE00000000000000000001 /* LongTranscriptPerfTests.swift */,
 				EC6500000000000000000001 /* RowStorageTests.swift */,
@@ -818,6 +827,7 @@
 			children = (
 				A1BB00000000000000000005 /* BackSwipeUITests.swift */,
 				A1NAV0000000000000000011 /* HomeNavPushUITests.swift */,
+				A1ENT0000000000000000001 /* EntityNavPushUITests.swift */,
 				A1BB00000000000000000030 /* ScrollPerfUITests.swift */,
 				A1F50000000000000000E003 /* PerfBaselineUITests.swift */,
 				A1BB00000000000000000032 /* HomeFilterTabsUITests.swift */,
@@ -1075,6 +1085,8 @@
 				A15C00000000000000000009 /* SessionRoom.swift in Sources */,
 				A15C0000000000000000000D /* CoreChatDoc.swift in Sources */,
 				A1B0F9F54DB2257BA4BA7B63 /* AgentProfileView.swift in Sources */,
+				A1GROK000000000000000012 /* AgentEditView.swift in Sources */,
+				A1GROK000000000000000002 /* GrokEntityChrome.swift in Sources */,
 				A143D97A2803EDDA4BEA6B67 /* Avatar.swift in Sources */,
 				A11149E871067930CB116885 /* CallView.swift in Sources */,
 				A17FC3E175B29A6CC8654F7C /* ChatView.swift in Sources */,
@@ -1172,6 +1184,7 @@
 				A1BC00000000000000000016 /* MessageActionsHitAreaTests.swift in Sources */,
 				A1BD00000000000000000002 /* NewMessageSheetTests.swift in Sources */,
 				A1NAV0000000000000000002 /* HomeNavPushTests.swift in Sources */,
+				A1ENT0000000000000000012 /* EntityProfileStructureTests.swift in Sources */,
 				A1CC0000000000000000JA02 /* JacobAskGuardTests.swift in Sources */,
 				A1BE00000000000000000002 /* LongTranscriptPerfTests.swift in Sources */,
 				EC6500000000000000000002 /* RowStorageTests.swift in Sources */,
@@ -1222,6 +1235,7 @@
 			files = (
 				A1BB00000000000000000006 /* BackSwipeUITests.swift in Sources */,
 				A1NAV0000000000000000012 /* HomeNavPushUITests.swift in Sources */,
+				A1ENT0000000000000000002 /* EntityNavPushUITests.swift in Sources */,
 				A1BB00000000000000000031 /* ScrollPerfUITests.swift in Sources */,
 				A1F50000000000000000E004 /* PerfBaselineUITests.swift in Sources */,
 				A1BB00000000000000000033 /* HomeFilterTabsUITests.swift in Sources */,

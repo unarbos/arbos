@@ -1,46 +1,50 @@
 import XCTest
 @testable import Arbos
 
-/// The shared profile pane (D93): every kind lays out hero, then the tab
-/// pill, then the selected tab's options (then a footer when it has one) —
-/// kinds differ in their tab sets, not in that structure (Jacob, 2026-10-22).
-/// The Mac twin is `crates/arbos-mac/src/ui/profiles/pane.rs` `tests`.
+/// The shared profile pane (D93): tabbed kinds (person / own / channel) lay out
+/// hero → tab pill → options; overview kinds (agent / group / server) lay out
+/// hero → options with no pill — Grok Bot's landing
+/// ([feedback iphone-entity-profile-edit-2026-11-10]). The Mac twin is
+/// `crates/arbos-mac/src/ui/profiles/pane.rs` `tests`.
 final class ProfilePaneStructureTests: XCTestCase {
-    func testEveryKindLaysOutHeroThenPillThenOptions() {
-        for (kind, tabs) in PaneKinds.all {
+    func testTabbedKindsLayOutHeroThenPillThenOptions() {
+        for (kind, tabs) in PaneKinds.tabbed {
             XCTAssertGreaterThanOrEqual(tabs.count, 2, "\(kind): a pane has at least two tabs")
             XCTAssertEqual(ProfilePane.layout(tabs: tabs.count, footerSections: 1), [.hero, .tabPill, .options, .footer], kind)
             XCTAssertEqual(ProfilePane.layout(tabs: tabs.count, footerSections: 0), [.hero, .tabPill, .options], kind)
         }
-        // One tab: no pill, the options follow the hero directly.
+        // One tab / overview (0 tabs): no pill, the options follow the hero directly.
         XCTAssertEqual(ProfilePane.layout(tabs: 1, footerSections: 0), [.hero, .options])
+        XCTAssertEqual(ProfilePane.layout(tabs: 0, footerSections: 0), [.hero, .options])
     }
 
-    func testKindsKeepTheirOwnTabSets() {
-        // Grok Bot's agent tabs, the same on the Mac (#1679) and the iPhone
-        // ([feedback iphone-agent-pane-tabs-2026-10-25]).
-        XCTAssertEqual(PaneKinds.agent, ["Details", "Library", "Computer"])
+    func testOverviewKindsHaveNoTabPill() {
+        for (kind, rows) in PaneKinds.overview {
+            XCTAssertGreaterThanOrEqual(rows.count, 2, "\(kind): an overview has at least two rows")
+            XCTAssertEqual(ProfilePane.layout(tabs: 0, footerSections: 1), [.hero, .options, .footer], kind)
+        }
+    }
+
+    func testKindsKeepTheirOwnLabelSets() {
+        // Grok Bot overview rows on agent / group / server; tab pills on the rest
+        // ([feedback iphone-entity-profile-edit-2026-11-10]).
+        XCTAssertEqual(PaneKinds.agent, ["Coding", "Routines", "Library", "Computer"])
+        XCTAssertEqual(PaneKinds.outsideAgent, ["Library", "Connection"])
         XCTAssertEqual(PaneKinds.ownProfile, ["Profile", "Settings"])
         XCTAssertEqual(PaneKinds.person, ["Links", "Groups"])
         XCTAssertEqual(PaneKinds.group, ["Members", "Library"])
         XCTAssertEqual(PaneKinds.server, ["Channels", "Members", "Settings"])
         XCTAssertEqual(PaneKinds.channel, ["Profile", "Settings"])
         for (kind, tabs) in PaneKinds.all {
-            XCTAssertEqual(Set(tabs).count, tabs.count, "\(kind): a tab label appears once")
+            XCTAssertEqual(Set(tabs).count, tabs.count, "\(kind): a label appears once")
         }
     }
 
-    /// The agent pane's Details tab is the Settings card alone — no "Who may message", no
-    /// "Permissions", no "Profile" (Jacob 2026-10-25, [feedback
-    /// agent-details-remove-sections-ios-2026-10-25]); Coding / Routines come back ahead of
-    /// it only while the flag is on (routines for the owner alone). The copy is the Mac's
-    /// (`agent::tests` in `profiles/agent.rs`).
-    func testAgentDetailsIsSettingsAloneAndReadsLikeTheMac() {
-        XCTAssertFalse(AgentPane.agentDetailsShowCodingRoutines, "Coding and Routines stay hidden by default")
-        XCTAssertEqual(AgentPane.detailsOrder(mine: true), [.settings])
-        XCTAssertEqual(AgentPane.detailsOrder(mine: false), [.settings])
-        XCTAssertEqual(AgentPane.detailsOrder(mine: true, showCodingRoutines: true), [.coding, .routines, .settings])
-        XCTAssertEqual(AgentPane.detailsOrder(mine: false, showCodingRoutines: true), [.coding, .settings])
+    /// Agent overview shows Coding and Routines as rows; Settings live on Edit
+    /// ([feedback iphone-entity-profile-edit-2026-11-10]). Status copy stays the
+    /// Mac's (`agent::tests` in `profiles/agent.rs`).
+    func testAgentOverviewRowsAndStatusCopy() {
+        XCTAssertEqual(PaneKinds.agent, ["Coding", "Routines", "Library", "Computer"])
         XCTAssertEqual(AgentPane.subtitle(description: "", mine: true, ownerHandle: nil), "Add a label")
         XCTAssertEqual(AgentPane.subtitle(description: " Drafts before it sends. ", mine: true, ownerHandle: nil), "Drafts before it sends.")
         XCTAssertEqual(AgentPane.subtitle(description: "", mine: false, ownerHandle: "@sami"), "Run by @sami")

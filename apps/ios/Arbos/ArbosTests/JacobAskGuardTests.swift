@@ -213,10 +213,55 @@ final class JacobAskGuardTests: XCTestCase {
                       "the rig may only claim a role the app really has")
     }
 
-    /// [feedback agent-details-remove-sections-ios-2026-10-25] — the Details tab's Coding and
-    /// Routines cards stay hidden. The flag is the whole ask; a flip back is the regression.
-    func testTheAgentDetailsTabKeepsCodingAndRoutinesHidden() {
-        XCTAssertFalse(AgentPane.agentDetailsShowCodingRoutines,
-                       "Jacob asked for these two cards gone; flipping this back must be deliberate")
+    /// [feedback iphone-entity-profile-edit-2026-11-10] — Coding and Routines are overview
+    /// rows on the agent profile (Grok Bot). Supersedes the Details-tab hide ask
+    /// (`agent-details-remove-sections-ios-2026-10-25`).
+    func testTheAgentOverviewKeepsCodingAndRoutinesRows() {
+        XCTAssertEqual(PaneKinds.agent, ["Coding", "Routines", "Library", "Computer"],
+                       "Grok's overview rows; dropping Coding/Routines is the regression")
+        let profile = source("UI/AgentProfileView.swift")
+        XCTAssertTrue(profile.contains("overviewRow(icon: \"chevron.left.forwardslash.chevron.right\", title: \"Coding\""),
+                      "Coding is an overview row that pushes")
+        XCTAssertTrue(profile.contains("overviewRow(icon: \"clock\", title: \"Routines\""),
+                      "Routines is an overview row that pushes")
+        XCTAssertTrue(profile.contains("OverviewEdit.action"),
+                      "Edit pill opens the Grok-style edit page")
+        XCTAssertTrue(source("UI/AgentEditView.swift").contains("struct AgentEditView"),
+                      "Edit is its own pushed page")
+    }
+
+    /// [feedback iphone-create-entity-edit-style-2026-11-10] — Create uses the Edit-page
+    /// hierarchy (sectioned cards, Done/Create pill), not the old bottom-sheet layout.
+    func testCreateEntityUsesTheEditPageHierarchy() {
+        let create = source("UI/PeopleSheets.swift")
+        XCTAssertTrue(create.contains("EntityEditTopBar"),
+                      "Create draws the Grok edit top bar")
+        XCTAssertTrue(create.contains("EntitySectionHeader(title: \"Name\")"),
+                      "Name is a sectioned card")
+        XCTAssertTrue(create.contains("EntitySectionHeader(title: \"Appearance\")"),
+                      "Appearance is a sectioned card")
+        XCTAssertTrue(create.contains("accessibilityIdentifier(\"create-entity\")"),
+                      "the create page is named for UI tests")
+        XCTAssertFalse(create.contains(".frame(width: 84, height: 44).background(Capsule().fill(cancelBg))"),
+                       "the old Cancel/Create footer pills are gone")
+    }
+
+    /// [feedback iphone-entity-nav-push-2026-11-10] — Edit and create sub-pages push; avatar /
+    /// model / voice / reasoning from Edit are pushes, not sheets.
+    func testEntityEditSubpagesPushNotSheet() {
+        let edit = source("UI/AgentEditView.swift")
+        XCTAssertTrue(edit.contains("navigationDestination(isPresented: $showAvatar)"),
+                      "avatar from Edit is a push")
+        XCTAssertTrue(edit.contains("AvatarPickerPage"),
+                      "avatar uses the push wrapper")
+        XCTAssertTrue(edit.contains("ModelPickerPage") && edit.contains("pushed: true"),
+                      "model picker is pushed without sheet chrome")
+        let group = source("UI/ProfilePages.swift")
+        XCTAssertTrue(group.contains("struct GroupEditView"),
+                      "group edit is a pushed page, not GroupEditSheet")
+        XCTAssertFalse(group.contains("struct GroupEditSheet"),
+                       "the sheet form of group edit is gone")
+        XCTAssertTrue(group.contains("struct ServerEditView"),
+                      "server edit is a pushed page")
     }
 }

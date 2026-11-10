@@ -3067,27 +3067,32 @@ enum PaneBlock: Equatable {
     case footer
 }
 
-/// Row / tab labels for every profile kind. Person / own / channel still use
-/// these as tab pills; agent / group / server supersede tabs with the Grok
-/// overview → push hierarchy ([feedback iphone-entity-profile-edit-2026-11-10]) —
-/// the string arrays remain as the overview row names (and for tests that still
-/// reference them). Agent: Details · Library · Computer (Jacob 2026-10-24 / #1679;
-/// earlier tabs [feedback iphone-agent-pane-tabs-2026-10-25]).
+/// Labels for every profile kind. Person / own / channel still use these as
+/// tab pills. Agent / group / server use them as **overview row** names under
+/// the Grok hierarchy ([feedback iphone-entity-profile-edit-2026-11-10]) —
+/// Coding · Routines · Library · Computer for a native agent (tabs superseded;
+/// earlier [feedback iphone-agent-pane-tabs-2026-10-25]).
 enum PaneKinds {
     static let person = ["Links", "Groups"]
     static let ownProfile = ["Profile", "Settings"]
-    static let agent = ["Details", "Library", "Computer"]
-    /// A connected (outside) agent has no Arbos machine (#2142).
-    static let outsideAgent = ["Details", "Library"]
-    /// Overview row labels (tabs superseded for group/server/agent).
+    /// Overview rows on a native agent (Grok Bot profile).
+    static let agent = ["Coding", "Routines", "Library", "Computer"]
+    /// Overview rows on a connected (outside) agent — no Computer (#2142).
+    static let outsideAgent = ["Library", "Connection"]
+    /// Overview row labels (tabs superseded).
     static let group = ["Members", "Library"]
-    /// Overview row labels (tabs superseded for group/server/agent).
+    /// Overview row labels (tabs superseded).
     static let server = ["Channels", "Members", "Settings"]
     static let channel = ["Profile", "Settings"]
-    static let all: [(String, [String])] = [
-        ("person", person), ("own profile", ownProfile), ("agent", agent),
-        ("group", group), ("server", server), ("channel", channel),
+    /// Kinds that still draw a tab pill on the profile landing.
+    static let tabbed: [(String, [String])] = [
+        ("person", person), ("own profile", ownProfile), ("channel", channel),
     ]
+    /// Kinds whose landing is the overview (no pill); rows push further right.
+    static let overview: [(String, [String])] = [
+        ("agent", agent), ("group", group), ("server", server),
+    ]
+    static let all: [(String, [String])] = tabbed + overview
 }
 
 struct ProfilePane: View {

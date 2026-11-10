@@ -4324,6 +4324,9 @@ struct ModelPickerView: View {
     @Environment(\.theme) private var theme
     @Environment(\.dismiss) private var dismiss
     let project: Project
+    /// When true (Edit push), skip the sheet NavigationStack / Done / detents —
+    /// the parent page owns the chrome ([feedback iphone-entity-nav-push-2026-11-10]).
+    var pushed: Bool = false
     @State private var query = ""
     @State private var effort: Effort = .low
 
@@ -4338,79 +4341,89 @@ struct ModelPickerView: View {
     }
 
     var body: some View {
-        NavigationStack {
-            List {
-                Section {
-                    HStack(spacing: 8) {
-                        Image(systemName: "magnifyingglass")
-                            .font(theme.font(15, weight: .medium))
-                            .foregroundStyle(theme.muted)
-                        TextField("", text: $query, prompt: Text("Filter models").foregroundStyle(theme.placeholder))
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                            .font(theme.font(Theme.body))
-                            .foregroundStyle(theme.text)
-                        if !query.isEmpty {
-                            Button { query = "" } label: {
-                                Image(systemName: "xmark.circle.fill").foregroundStyle(theme.muted)
-                            }
-                            .buttonStyle(.plain)
+        Group {
+            if pushed {
+                list.onAppear { effort = current.effort }
+            } else {
+                NavigationStack {
+                    list
+                        .navigationTitle("Model")
+                        .navigationBarTitleDisplayMode(.inline)
+                        .toolbar {
+                            ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } }
                         }
-                    }
-                    .listRowBackground(theme.card)
+                        .onAppear { effort = current.effort }
                 }
-                Section("Reasoning") {
-                    Picker("Effort", selection: $effort) {
-                        ForEach(Effort.allCases) { e in Text(e.label).tag(e) }
-                    }
-                    .pickerStyle(.segmented)
-                    .onChange(of: effort) { _, new in
-                        model.setModel(projectId: project.id, model: current.model, effort: new)
-                    }
-                }
-                Section("Model") {
-                    if model.models.isEmpty {
-                        Text("Loading models from the relay…").foregroundStyle(theme.muted)
-                    }
-                    ForEach(ids, id: \.self) { id in
-                        Button {
-                            model.setModel(projectId: project.id, model: id, effort: effort)
-                            dismiss()
-                        } label: {
-                            HStack {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(Project.shortModel(id)).foregroundStyle(theme.text)
-                                    Text(id).font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
-                                }
-                                Spacer()
-                                if id == current.model {
-                                    Image(systemName: "checkmark").foregroundStyle(theme.text)
-                                }
-                            }
-                            .contentShape(Rectangle())
+                .presentationDetents([.medium, .large])
+            }
+        }
+    }
+
+    private var list: some View {
+        List {
+            Section {
+                HStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass")
+                        .font(theme.font(15, weight: .medium))
+                        .foregroundStyle(theme.muted)
+                    TextField("", text: $query, prompt: Text("Filter models").foregroundStyle(theme.placeholder))
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .font(theme.font(Theme.body))
+                        .foregroundStyle(theme.text)
+                    if !query.isEmpty {
+                        Button { query = "" } label: {
+                            Image(systemName: "xmark.circle.fill").foregroundStyle(theme.muted)
                         }
                         .buttonStyle(.plain)
-                        .listRowBackground(theme.card)
-                        .accessibilityLabel("\(Project.shortModel(id))\(id == current.model ? ", selected" : "")")
-                        .accessibilityAddTraits(id == current.model ? [.isSelected] : [])
                     }
                 }
-                if !current.modelNote.isEmpty {
-                    Section {
-                        Text(current.modelNote).font(theme.font(Theme.tiny)).foregroundStyle(theme.warn)
-                    }
+                .listRowBackground(theme.card)
+            }
+            Section("Reasoning") {
+                Picker("Effort", selection: $effort) {
+                    ForEach(Effort.allCases) { e in Text(e.label).tag(e) }
+                }
+                .pickerStyle(.segmented)
+                .onChange(of: effort) { _, new in
+                    model.setModel(projectId: project.id, model: current.model, effort: new)
                 }
             }
-            .scrollContentBackground(.hidden)
-            .background(theme.bg)
-            .navigationTitle("Model")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } }
+            Section("Model") {
+                if model.models.isEmpty {
+                    Text("Loading models from the relay…").foregroundStyle(theme.muted)
+                }
+                ForEach(ids, id: \.self) { id in
+                    Button {
+                        model.setModel(projectId: project.id, model: id, effort: effort)
+                        dismiss()
+                    } label: {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(Project.shortModel(id)).foregroundStyle(theme.text)
+                                Text(id).font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
+                            }
+                            Spacer()
+                            if id == current.model {
+                                Image(systemName: "checkmark").foregroundStyle(theme.text)
+                            }
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .listRowBackground(theme.card)
+                    .accessibilityLabel("\(Project.shortModel(id))\(id == current.model ? ", selected" : "")")
+                    .accessibilityAddTraits(id == current.model ? [.isSelected] : [])
+                }
             }
-            .onAppear { effort = current.effort }
+            if !current.modelNote.isEmpty {
+                Section {
+                    Text(current.modelNote).font(theme.font(Theme.tiny)).foregroundStyle(theme.warn)
+                }
+            }
         }
-        .presentationDetents([.medium, .large])
+        .scrollContentBackground(.hidden)
+        .background(theme.bg)
     }
 }
 
