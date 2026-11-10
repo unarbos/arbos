@@ -4439,7 +4439,11 @@ async fn fetch_blob_bytes(shared: &Arc<Shared>, id: &str, key: &str) -> Result<(
     Ok((mime, response.bytes().await?.to_vec()))
 }
 
-async fn fetch_blob_response(shared: &Arc<Shared>, id: &str, key: &str) -> Result<reqwest::Response> {
+async fn fetch_blob_response(
+    shared: &Arc<Shared>,
+    id: &str,
+    key: &str,
+) -> Result<reqwest::Response> {
     // Same refresh-once path as `get_json`: an expired access token must not leave
     // thumbnails / downloads stuck on "No preview" and a weekly `mac:thumbnail:* http 401`
     // diagnostic while the JSON APIs quietly rotate and succeed.
