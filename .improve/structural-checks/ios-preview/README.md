@@ -29,7 +29,9 @@ invocation explicitly fails rather than claiming a skipped runtime check passed.
 The host leaf compiles29literal actual definitions:19Model DTOs, MediaItem/Album,
 Block/Quote/RowKind/MediaSender/Row/Transcript/Delivery, and ChatView.refreshRows.
 The actual cache method is enclosed in a test owner with observer/data fixtures;
-no cache decision or renderer is reimplemented. Baseline/new API binding adapters
+no cache decision or renderer is reimplemented. The test account collaborator is
+always current solely to reach the guarded cache method; account rejection and
+retirement are covered by separate actual ownership checks, not this fixture. Baseline/new API binding adapters
 only provide the same policy input through the old global or new argument.
 Twelve output scenarios include two caller-isolation failures and stale cached
 previews on unchanged/tail/append paths, plus seven positive controls. The fixed
