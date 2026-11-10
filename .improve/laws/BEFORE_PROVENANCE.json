@@ -1,0 +1,7 @@
+{
+  "source_base": "2865cb29b806121d4a90f55ba6ce151a150279a0",
+  "native_binary_sha256": "da7f7165909e8b76528d199838610e39f1a482c737e1173af7e5448b6903386d",
+  "ordinary_laws": 5,
+  "ordinary_generated_cases": 1280,
+  "boundary": "Falsified before product fix; same binary for boundary shrink/replay"
+}

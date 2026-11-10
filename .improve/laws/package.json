@@ -1,0 +1,21 @@
+{
+  "name": "arbos-laws",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.28.0",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build:native": "cargo build --manifest-path native/Cargo.toml --release --locked --offline",
+    "test:bridge": "node --test bridge.test.ts",
+    "test:laws": "node --test laws.test.ts",
+    "test": "node --test --test-concurrency=1 bridge.test.ts laws.test.ts",
+    "record": "node check.ts",
+    "check:boundary": "node check.ts --boundary"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "effect": "4.1.2",
+    "typescript": "5.9.3"
+  }
+}

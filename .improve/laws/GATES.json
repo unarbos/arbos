@@ -1,0 +1,89 @@
+[
+  {
+    "gate": "typecheck",
+    "command": [
+      "pnpm",
+      "--dir",
+      ".improve/laws",
+      "typecheck"
+    ],
+    "exit_code": 0,
+    "seconds": 0.690479
+  },
+  {
+    "gate": "tests",
+    "command": [
+      "pnpm",
+      "--dir",
+      ".improve/laws",
+      "test"
+    ],
+    "exit_code": 0,
+    "seconds": 2.149837,
+    "counts": {
+      "tests": 18,
+      "pass": 18,
+      "fail": 0,
+      "skipped": 0
+    }
+  },
+  {
+    "gate": "record",
+    "command": [
+      "node",
+      ".improve/laws/check.ts"
+    ],
+    "exit_code": 0,
+    "seconds": 1.504475
+  },
+  {
+    "gate": "laws-after-unicode-url",
+    "command": [
+      "pnpm",
+      "--dir",
+      ".improve/laws",
+      "test:laws"
+    ],
+    "exit_code": 0,
+    "seconds": 1.692125,
+    "counts": {
+      "tests": 8,
+      "pass": 8,
+      "fail": 0,
+      "skipped": 0
+    }
+  },
+  {
+    "gate": "record",
+    "command": [
+      "node",
+      ".improve/laws/check.ts"
+    ],
+    "exit_code": 0,
+    "seconds": 1.528709
+  },
+  {
+    "native_source_sha256": "51053e0dd677a570466b66431d8863519dbd9628175f8556cfd0589db4e8117c",
+    "bridge_source_sha256": "de4e5a2674cd2082ce55008124bb4219e50998441c449df13363748ad3efffba",
+    "url_source_sha256": "270528323de247de120709b6c7521764cc3c5abb00b3cc1f87a0a55bcc42259f",
+    "node_types_download": {
+      "version": "22.20.5",
+      "unpacked_bytes": 2438360,
+      "source": "https://registry.npmjs.org/@types%2fnode/22.20.5",
+      "ignore_scripts": true
+    },
+    "bend2": {
+      "bend2": null,
+      "bend": null
+    },
+    "typescript_source_sha256": {
+      "catalog.ts": "513b0b09151d6295390c25e4fb074f23874568a1d217e646b680fdde18b33cfc",
+      "bridge.ts": "b762bd7500dd4d3f22b474a1c298e93333f83a5bf0ffaf1776b3bd8b0fb330de",
+      "protocol.ts": "fa628277777b5fa8c8bbd4c0222b31fd24fe81960de668b9c875cf4670bd9658",
+      "laws.test.ts": "31f174583419c042bd974dba181f2b00bf91388bb0d1cdab75042115e97c54ba",
+      "bridge.test.ts": "1ef0a50f0221011922d6f827becaef3405887d7a34196e409d6cc005d5536414",
+      "check.ts": "93127aad6c7082256498416cee34193ee12f503b3c78b65745ab67c2bfc909d4",
+      "pnpm-lock.yaml": "e5e9e83c501a370a693223e448501a512349ebd05fc55afb9ec27e4ef4965c76"
+    }
+  }
+]
