@@ -88,6 +88,7 @@ CREATE TABLE IF NOT EXISTS rows (
   PRIMARY KEY (room, seq)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS rows_batch ON rows(room, batch_id);
+CREATE INDEX IF NOT EXISTS rows_room_activity ON rows(room, created_at);
 -- Rows the relay could not decode as a Loro update, moved out of `rows` so that compaction can
 -- proceed. The bytes are kept, never served: `rooms::quarantine_undecodable_rows` moves a row here
 -- and the relay then checkpoints over its seq, which is the only way to reopen a room whose

@@ -17,7 +17,7 @@ import time
 
 HERE=Path(__file__).resolve().parent
 ROOT=HERE.parents[1]
-SOURCES=[f'crates/arbos-relay/src/{name}.rs'for name in ['people','db_people','db_accounts','api','notify','avatar']]
+SOURCES=[f'crates/arbos-relay/src/{name}.rs'for name in ['people','db_people','db','db_accounts','api','notify','avatar']]
 SCALES=[1,10,100,1000]
 BASE='d499090b71f01795e1f2f99ee1ffe56db0aaa23f'
 
@@ -171,7 +171,7 @@ def main():
     parser.add_argument('--before',default=BASE);parser.add_argument('--after',default='HEAD')
     parser.add_argument('--pairs',type=int,default=21);parser.add_argument('--dependency-seed',type=Path,help='optional inactive owned Cargo target; all workspace packages are cleaned in each clone')
     args=parser.parse_args()
-    if not 21<=args.pairs<=101:parser.error('Use21–101 paired samples')
+    if not 21<=args.pairs<=63:parser.error('Use21–63 paired samples (the bounded native protocol permits256 requests)')
     out=args.output.resolve();out.mkdir(parents=True,exist_ok=False)
     seed=args.dependency_seed.resolve()if args.dependency_seed else None
     builds={arm:prepare(arm,revision,out,seed)for arm,revision in [('before',args.before),('after',args.after)]}

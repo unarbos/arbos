@@ -67,3 +67,23 @@ At 10,000 rooms, warm SQL p50 was 84.308→27.615 ms (3.05×), p95 89.277→29.2
 The earlier `run.py` registry series remains a retained original-SQL control for the room-position experiment. It is not the current native roster path; use `roster.py` for the batching comparison.
 
 Measurement provenance check: the final main RESULTS.json, supplementary metadata and current engine all share build_content_sha256 `297787c1d9c34e3d4bd34ea0b1f58f5b634d99734218f16da4ac01ba109961c4`, SQLite source hash and compile flags. The retained main measurement driver therefore matches current source exactly. The earlier1,341,672-byte figure came from the unnamed `scan.dylib` smoke build; the content-addressed Mach-O filename embeds a longer install name and is1,341,688 bytes. The final profiles all used the latter; no query/driver logic changed after profiling.
+
+
+## Complete handler and long-history follow-through
+
+[PEOPLE_DTO.md](PEOPLE_DTO.md) documents the real Rust handler/JSON benchmark,
+with request-local profile batching and live-device indexing. Its committed
+component timings pin d499090b → b96ef1f90. The separate activity suite measures
+the unchanged head/maximum-timestamp SELECTs and the additive history index,
+including its explicit append-write and storage costs:
+
+```sh
+python3 .improve/load-test/activity_index.py --check
+python3 .improve/load-test/activity_index.py
+python3 .improve/load-test/render_people_dto.py
+python3 .improve/load-test/render_activity.py
+```
+
+Both scripts accept generated-data controls only, with no DSN or service URL.
+Charts are standalone HTML with embedded SVG and separate PNG exports. Native
+checks and combined CI remain distinct from SQL profiling.
