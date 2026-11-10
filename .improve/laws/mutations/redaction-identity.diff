@@ -1,0 +1,11 @@
+--- actual/redact.rs
++++ temporary-mutant/redact.rs
+@@ -297,7 +297,7 @@
+ 
+ /// Both passes: what a debugging reader may see.
+ pub fn scrub(text: &str) -> String {
+-    redact_placeholders(&redact_patterns(text))
++    text.to_owned()
+ }
+ 
+ /// `scrub` over every string inside a JSON value (keys are left alone).

@@ -1,0 +1,33 @@
+--- actual/redact.rs
++++ temporary-mutant/redact.rs
+@@ -11,29 +11,7 @@
+ /// The shapes come from [`KEY_PREFIXES`], with word boundaries or a nonword tail: keys ending
+ /// in `-` must also disappear. A consumed nonword delimiter is kept in the output.
+ pub fn redact_patterns(text: &str) -> String {
+-    let mut out = text.to_owned();
+-    for (body, _, marker) in KEY_PREFIXES {
+-        if let Some((re, replacement)) = key_redaction(body, marker) {
+-            out = re.replace_all(&out, replacement.as_str()).into_owned();
+-        }
+-    }
+-    // Not token shapes, so not in the table: a header whose value is any bearer token, and a
+-    // `NAME=value` line whose name says it holds a secret.
+-    for (pat, rep) in [
+-        (
+-            r"(?i)(authorization:\s*bearer\s+)[A-Za-z0-9._\-]+",
+-            "${1}[REDACTED:bearer]",
+-        ),
+-        (
+-            r"(?im)^(\s*(?:export\s+)?[A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD)[A-Z0-9_]*\s*=\s*)\S+",
+-            "${1}[REDACTED:env]",
+-        ),
+-    ] {
+-        if let Ok(re) = regex_lite::Regex::new(pat) {
+-            out = re.replace_all(&out, rep).into_owned();
+-        }
+-    }
+-    out
++    String::new()
+ }
+ 
+ fn key_redaction(body: &str, marker: &str) -> Option<(regex_lite::Regex, String)> {
