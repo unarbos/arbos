@@ -25,12 +25,14 @@ the actual asynchronous approval trust boundary.
 | Confident credentials disappear | Each generated synthetic known-shape token must first be recognized confidently, then be absent from scrubbed output; matched ranges are ordered, in bounds and on UTF-8 boundaries | Generated nonvacuous checks; generic opaque guesses are intentionally outside the removal guarantee |
 | JSON shape and non-string data survive | Object keys, array lengths, numbers, booleans and null remain identical; each string leaf equals the text scrub of that leaf | Generated bounded nested JSON through actual `scrub_value`; object ordering is not a semantic guarantee |
 | URL hints preserve visible/copy text | `plain(hint_bare_urls(text)) == text`; URL break hints must not drop visible characters | Generated scalar Unicode around HTTP/HTTPS links and punctuation. Excludes pre-existing reserved HOLD/BREAK characters and lone UTF-16 surrogates. Does not test font geometry/GPUI |
-| A terminal approval refusal cannot be reopened | Later checked/polled/park-answer events cannot turn denied, parked, failed or blocked-pending outcomes into permission | Phase 4 owns 256 Schema-generated cases over its new reducer, plus real-hook regressions. Its module does not exist on this independent baseline branch; no copied mock or conditional skip pretends otherwise |
-| Room position agrees with full state | Missing room gives `(0,0)`; append/checkpoint updates agree on head/floor; SQL errors remain errors | Phase 7 SQL equivalence and written native regressions. Arbitrary native interleavings require the unavailable full relay build |
-| Retries and durable progress are safe | Duplicate batches do not append twice; a committed cursor never overtakes successfully applied updates; checkpoint import and cache position agree | Existing protocol tests and Phase 3/4 findings. Failure-injected native/sidecar adapter laws remain blocked by native gates; no claim that known durability findings are fixed |
-| Account/session ownership survives callbacks | A completion from an old identity or canceled call cannot republish state or clear another room's pending sends | High native lifecycle findings; need runnable Mac/iOS/Matrix adapter regressions before transition rewrites |
-| Credit balances and charge caps obey the ledger | Debits and refunds reconcile with balances; configured caps are never bypassed; failed multi-step writes do not lose money | Billing/auth is high risk. No financial behavior changed; production-version ledger fixtures and native transaction/failure-path tests remain required. This chat application has no owned staking/rebalancing allocation module to translate |
-| Local-store migration replay preserves data | Reopening existing schemas is idempotent and adding the worker index preserves complete latest-row selection | Phase 7 fresh/existing-store SQL checks include timestamp ties, NULL and missing workers on bundled SQLite. Native Store open/build still unverified |
+| Terminal approval refusal remains terminal | Checked/polled/park answers cannot reopen denied/parked/failed outcomes | Phase4 actual reducer + configured-hook regressions and Schema generation |
+| Pending dispatch and creation have one owner | Actual SQL decision claim, one-shot sender delivery and cancellation-safe per-user creation permit | Phase4 pending-owner laws compile21 actual definitions;1280 generated inputs +9 protocol negatives |
+| Process attempts cannot erase a successor | Actual main-slot/worker-ticket transitions, cancellation/drop and current-owner publication | Phase4 actual worker/RPC ownership laws, native blocked-writer/physical writer tests; final Linux runtime gate remains required |
+| Account, Matrix, call and draft ownership | Retired tickets cannot admit/publish; same-account refresh stays valid; per-draft sends preserve FIFO | Phase4 actual Rust/Swift bridges +Schema-derived lifetime/queue laws and real raw-HTTP boundary cases |
+| Retry/durable room visibility | Duplicate batches do not append twice; rejected speculative cache is not published; cursor never overtakes mirror/wake/save | Phase3 actual sidecar/protocol regressions; Phase4 actual Loro/SQLite ownership tests include32 seeded finite traces, not a copied JavaScript room model |
+| Billing is atomic under preserved policy | Cumulative receipts/debits/legacy setup roll back together; retries/refusals never debit twice; clamps/soft-cap/threshold order stay pinned | Phase4 actual bundledSQLite settlement:1024 generated inputs +9 protocol negatives,4 actual-source mutants;41 separate native caller/concurrency cases |
+| Restart/release/deploy/feedback/runner own effects | Only current typed lease/admission can publish, release, drain or finalize; cancellation retains cleanup ownership | Phase4 generated actual-definition laws and adapter/OS/SQL fault regressions, with exact counterexample replays |
+| Local schema replay preserves data | Reopening schemas/index migrations preserves complete selection, scope/order/ties/NULL/error behavior | Phase7 bundledSQLite equivalence/index/fault checks and native DB/handler gates; no shared DDL execution |
 
 The suite links its Cargo library directly to `crates/arbos-core/src/redact.rs`
 and its binary to the actual std-only runtime of Mac `ui/urlwrap.rs`. A persistent
@@ -83,14 +85,15 @@ The [independent review](reviews/laws.md) explains scope and negative controls.
 | TypeScript tests | five initial narrower laws pass; not the final domain | 18 pass/0 fail/skipped, 2.150 s; final Unicode law rerun 8 pass, 1.692 s |
 | Generated adversarial boundary law | Falsified after 1 case, 1 shrink; failure replayed before fix | all 7 laws × 256 pass, 1.529 s final record |
 | Four independent actual-function mutations | unmodified controls each pass 256 cases | all mutations falsified and replayed; portable runner retained |
-| Full workspace/native integration | blocked/unmeasured | blocked/unmeasured |
+| Full workspace/native integration | originally unavailable | Actual combined Mac all-target Clippy/app link, relay Clippy/privacy/DTO and iOS SDK/test-source compilation now pass; final full Linux/Swift CI remains a separate required gate |
 
 The before/after gate times include cache differences and are not speedup claims.
 The security correction intentionally also removes some formerly exposed trailing
 hyphens from longer supported tokens; historical byte identity is not claimed.
-Full workspace clippy/check/test/build and device/CRDT/network integration remain
-blocked. Original pure-core tests can run in the small actual-source leaf crate;
-that does not make the full native workspace green.
+The former blanket disk/SDK/fork-CI blockers are obsolete. Original pure-core
+checks run in the small actual-source leaf; actual native and SDK checkpoints
+are now available. Full final-source Linux/Swift runtime CI and device acceptance
+remain distinct from these finite laws. See Phase9 for exact source/gate status.
 
 ## Needs the owner
 
@@ -98,7 +101,18 @@ Neither `bend` nor `bend2` is installed. Per the requested skill, this does not
 block retaining runnable properties. Recommended default: keep these checks and
 agree on a pinned Bend2 toolchain and a small proof target (for example terminal
 approval absorption) before claiming a proof. No unexecuted proof file is offered
-as established verification. Native law coverage also depends on the existing
-build-capacity/fork-CI decision recorded in the final report. Also review the
+as established verification. Native property coverage is now delivered alongside the Phase4 implementations;
+there is no remaining build-capacity/fork-CI approval prerequisite. Also review the
 intentional supported-token security fix: recommended default is to retain the
 failing-before regressions and removal behavior, preserving delimiter text.
+
+
+## Ownership laws live with the implementation
+
+[State-machine coverage](laws/STATE-MACHINE-COVERAGE.md) indexes the actual Phase4
+law files and their native adapters. These files deliberately are not copied into
+this independent baseline-based branch: the implementation and its tests should
+change together. The combined gate must include them; this index is not a skipped
+or substitute test. Effect generation is used at the rebuilt asynchronous state
+boundaries; existing native Loro/SQLite/protocol property traces stay native so
+they exercise the real persistence/ownership types without a second JS algorithm.
