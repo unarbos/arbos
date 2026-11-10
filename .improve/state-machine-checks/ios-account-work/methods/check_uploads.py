@@ -12,10 +12,10 @@ struct RelayError:Error{let status:Int}
 final class CallAuthority{var bearer:String;init(_ token:String){bearer=token}}
 struct RelayEndpoint{let httpUrl="http://synthetic.invalid"}
 @MainActor final class Session{
- let label:String;var authorizations:[String]=[];var names:[String]=[];var bytes:[Data]=[];var mimes:[String]=[];var pause=false;var failNames:Set<String>=[];var waiter:CheckedContinuation<String,Error>?
+ let label:String;var authorizations:[String]=[];var names:[String]=[];var bytes:[Data]=[];var mimes:[String]=[];var pause=false;var failNames:Set<String>=[];var waiters:[CheckedContinuation<String,Error>]=[];var waiter:CheckedContinuation<String,Error>?{waiters.first}
  init(_ label:String){self.label=label}
- func put(_ key:String,_ mime:String,_ data:Data)async throws->String{names.append(key);bytes.append(data);mimes.append(mime);if pause{return try await withCheckedThrowingContinuation{waiter=$0}};if failNames.contains(key){throw RelayError(status:500)};return key}
- func finish(_ failed:Bool=false){let w=waiter;waiter=nil;pause=false;if failed{w?.resume(throwing:RelayError(status:500))}else{w?.resume(returning:"opaque")}}
+ func put(_ key:String,_ mime:String,_ data:Data)async throws->String{names.append(key);bytes.append(data);mimes.append(mime);if pause{return try await withCheckedThrowingContinuation{waiters.append($0)}};if failNames.contains(key){throw RelayError(status:500)};return key}
+ func finish(_ failed:Bool=false){let saved=waiters;waiters=[];pause=false;for w in saved{if failed{w.resume(throwing:RelayError(status:500))}else{w.resume(returning:"opaque")}}}
 }
 @MainActor final class RelayAPI{
  let endpoint=RelayEndpoint();let session:Session;var token:()->String;var refresher:(()async->Bool)?;var sourceAuthorization:(@MainActor ()->String?)?;var cleanupAuthority:CallAuthority?
@@ -60,9 +60,9 @@ T=r'''
    let prefix=people ? "people":"project"
    func send(_ m:AppModel){if people{m.peopleUpload(attachments:attachments)}else{m.send(chatId:"chat",text:"synthetic",attachments:attachments,replyTo:"reply",forwardedFrom:"forward",extraParts:[["kind":"chart"]])}}
    do{let a=Session("A");let m=AppModel(a);let b=Session("B");send(m);m.replace(b);for _ in 0..<100{await Task.yield()};record(prefix+"-queued-A-never-uses-B",b.authorizations.isEmpty && m.commits.isEmpty)}
-   for failed in [false,true]{let a=Session("A");a.pause=true;let m=AppModel(a);send(m);let began=await spin{a.waiter != nil};let b=Session("B");m.replace(b);a.finish(failed);for _ in 0..<100{await Task.yield()};record(prefix+(failed ? "-stale-error-no-paint":"-stale-success-no-commit"),began && b.authorizations.isEmpty && m.commits.isEmpty && m.errors.isEmpty && a.names==["a"])}
-   do{let a=Session("A");a.failNames=["a"];let m=AppModel(a);send(m);let done=await spin{!m.commits.isEmpty};let c=m.commits.first;record(prefix+"-current-partial-failure-policy",done && m.commits.count==1 && a.names==["a","b"] && m.errors.count==1 && (people ? c?.attachments.map(\.name)==["b"] : c?.attachments.map(\.name)==["a","b"] && c?.attachments.first?.blobRef==nil) && c?.attachments.last?.blobRef=="b" && c?.forwarded=="forward" && c?.extraParts.first?["kind"] as? String=="chart" && c?.reply=="reply")}
-   do{let a=Session("A");let m=AppModel(a);send(m);let done=await spin{!m.commits.isEmpty};record(prefix+"-current-order-bytes-single-commit",done && m.commits.count==1 && m.commits[0].attachments.map(\.name)==["a","b"] && a.bytes==[Data([1]),Data([2])] && a.mimes==["image/png","text/plain"] && m.errors.isEmpty)}
+   for failed in [false,true]{let a=Session("A");a.pause=true;let m=AppModel(a);send(m);let began=await spin{a.waiter != nil};let admitted=a.names;let b=Session("B");m.replace(b);a.finish(failed);for _ in 0..<100{await Task.yield()};record(prefix+(failed ? "-stale-error-no-paint":"-stale-success-no-commit"),began && b.authorizations.isEmpty && m.commits.isEmpty && m.errors.isEmpty && a.names==admitted && !admitted.isEmpty)}
+   do{let a=Session("A");a.failNames=["a"];let m=AppModel(a);send(m);let done=await spin{!m.commits.isEmpty};let c=m.commits.first;record(prefix+"-current-partial-failure-policy",done && m.commits.count==1 && Set(a.names)==Set(["a","b"]) && a.names.count==2 && m.errors.count==1 && (people ? c?.attachments.map(\.name)==["b"] : c?.attachments.map(\.name)==["a","b"] && c?.attachments.first?.blobRef==nil) && c?.attachments.last?.blobRef=="b" && c?.forwarded=="forward" && c?.extraParts.first?["kind"] as? String=="chart" && c?.reply=="reply")}
+   do{let a=Session("A");let m=AppModel(a);send(m);let done=await spin{!m.commits.isEmpty};record(prefix+"-current-order-bytes-single-commit",done && m.commits.count==1 && m.commits[0].attachments.map(\.name)==["a","b"] && Dictionary(uniqueKeysWithValues:zip(a.names,a.bytes))==["a":Data([1]),"b":Data([2])] && Dictionary(uniqueKeysWithValues:zip(a.names,a.mimes))==["a":"image/png","b":"text/plain"] && m.errors.isEmpty)}
   }
   do{let a=Session("A");let m=AppModel(a);m.isFixture=true;m.send(chatId:"chat",text:"synthetic",attachments:attachments);record("project-fixture-no-network-control",a.authorizations.isEmpty && m.commits.count==1 && m.commits[0].attachments.allSatisfy{$0.blobRef==nil})}
   let failed=results.filter{!($0["pass"]as!Bool)}.count;print(String(data:try! JSONSerialization.data(withJSONObject:["passed":results.count-failed,"failed":failed,"total":results.count,"results":results],options:[.sortedKeys]),encoding:.utf8)!);exit(failed==0 ? 0:1)
@@ -78,6 +78,8 @@ def main():
  fixture+=M
  for name in ['accountWork','boundCallAPI']:
   if re.search(r'^    (?:private )?func '+name+r'\(',app,re.M):fixture+=method(app,name)+'\n'
+ if 'func uploadAttachments('in app:
+  at=app.index('    private enum AttachmentUpload {');fixture+=app[at:app.index('\n    }',at)+6]+'\n'+method(app,'uploadAttachments')+'\n'
  fixture+=method(app,'send')+'\n'
  people=method(app,'sendPeople');begin=people.index('        markUnacked(chatId: chatId, messageId: messageId)')
  if 'let work = accountWork()' in people[:begin]:begin=people.rindex('        guard let work = accountWork()',0,begin)
