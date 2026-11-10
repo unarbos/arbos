@@ -13,6 +13,7 @@ def table(headings,rows):
     return '<div class="table"><table><thead><tr>'+''.join('<th>'+escape(v)+'</th>'for v in headings)+'</tr></thead><tbody>'+''.join('<tr>'+''.join('<td>'+escape(str(v))+'</td>'for v in row)+'</tr>'for row in rows)+'</tbody></table></div>'
 
 def render():
+    plt.rcParams.update({"svg.fonttype":"none", "svg.hashsalt":"arbos-scale-v1"})
     data=json.loads((HERE/'PEOPLE_DTO_RESULTS.json').read_text());stats=data['summary'];sql=data['sql'];profiles=data['raw']['profiles'];x=[s['scale']for s in stats]
     fig,axes=plt.subplots(1,2,figsize=(12,5),layout='constrained')
     for arm,color in [('before','#b45f24'),('after','#197f77')]:
@@ -24,7 +25,7 @@ def render():
     for ax in axes:
         ax.set(xscale='log',yscale='log',xlabel='Generated group chats (log scale)');ax.set_xticks(x,[f'{n:,}'for n in x]);ax.grid(alpha=.2,which='both');ax.legend()
     fig.suptitle('People chat list: batch profiles + index live-device owner\n21 randomized pairs/scale · workspace opt0 · warm local workers',fontsize=13)
-    text=StringIO();fig.savefig(text,format='svg',bbox_inches='tight',pad_inches=.15);fig.savefig(HERE/'people-dto.png',dpi=160,bbox_inches='tight',pad_inches=.15);plt.close(fig)
+    text=StringIO();fig.savefig(text,format='svg',metadata={'Date':None},bbox_inches='tight',pad_inches=.15);fig.savefig(HERE/'people-dto.png',dpi=160,bbox_inches='tight',pad_inches=.15);plt.close(fig)
     timings=[];work=[]
     for s,c,p in zip(stats,sql,profiles):
         timing=[f"{s['scale']:,}"]
