@@ -13,7 +13,7 @@ The runner extracts actual product method/closure bodies, the real tagged
 pins all eight input source files before and after all checks. There is no copied
 transition or algorithm used as an implementation oracle.
 
-The 116 cases cover stale, unavailable, cancelled and current card/session/menu
+The 122 cases cover stale, unavailable, cancelled and current card/session/menu
 callbacks; same-owner refreshed-API row equality; different-owner invalidation;
 late image decode, thumbnail, audio and clipboard completion; fetch admission
 before current-model URL/bearer reads; and current-scroll versus account-retirement
@@ -26,9 +26,11 @@ Full iOS SDK compilation is a separate gate.
 [Recorded before results](RESULTS-BEFORE.json) retain 111 original-body cases:
 61 semantic failures and 50 positive controls. The original StickerBubble work
 parameter is exercised unchanged (an earlier normalized local trial is excluded).
-[Final results](RESULTS-AFTER.json) retain all 116 passing cases in 11 groups,
-10.675 seconds, with the exact eight source hashes unchanged through execution.
+[Final results](RESULTS-AFTER.json) retain all 122 passing cases in 12 groups,
+with measured duration in the JSON artifact, with the exact eight source hashes unchanged through execution.
 The extra five cases protect normal playback while exercising retirement cleanup;
+the pending-permission slide-cancel path now revokes the recorder request even
+before recording starts (one actual semantic failure plus five preserved controls);
 the initial draft incorrectly stopped playback in a cancelled current-owner scroll
 callback, and the retained refinement fixes that distinction.
 [Preservation evidence](PRESERVATION.json) pins unchanged sendMemo and audio

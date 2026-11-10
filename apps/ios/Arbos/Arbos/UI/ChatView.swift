@@ -3922,7 +3922,7 @@ struct ChatSession: View {
                 // Slide-left discard: drop the memo instead of sending.
                 if cancel {
                     memoFinishWhenPermission = false
-                    if recorder.recording { recorder.cancel() }
+                    recorder.cancel()
                     return
                 }
                 // Hold-to-talk: release after the threshold sends.
