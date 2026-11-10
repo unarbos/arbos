@@ -859,3 +859,15 @@ See `state-machine-checks/session-owner/{ROOT-REPLAY,NATIVE-GATES}.json` and
 an owner migration decision. More iOS admitted account-work callers and final
 unfiltered integration gates are still being completed; no global phase exit is
 claimed at this checkpoint.
+
+
+### H4 approval delivery admission
+
+The existing ApprovalState/outcome and SQL terminal CAS remain explicit. The High
+seam was ownership across delivery lanes and durable grant claim. A tagged sender
+owner, one decision/park transition and an atomic decision+claim transaction now
+cover that seam. Five original native semantic failures pass after the change;
+full approval40P on identical space-free source, with a separate test fixture path
+quoting cleanup pending. See `state-machine-checks/approval-delivery/`. Committed
+Approved delivery loss is deliberately spent/abandoned; owner review is required
+for that fail-closed behavior, and no external exactly-once guarantee is asserted.

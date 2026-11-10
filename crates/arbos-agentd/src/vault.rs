@@ -32,7 +32,7 @@ use arbos_core::approval::{ApprovalOutcome, ApprovalRequest, Risk};
 use arbos_core::ids::{now_ms, ulid};
 
 use crate::agent::Agent;
-use crate::approval::WaitMode;
+use crate::approval::WaitDelivery;
 use crate::config::Config;
 use crate::mcp::{err_result, text_result};
 
@@ -1326,7 +1326,7 @@ async fn obtain_grant(
             None => chat_id.to_owned(),
         };
         match agent
-            .begin_approval(&card_chat, req, WaitMode::Inline, Some(tx))
+            .begin_approval(&card_chat, req, WaitDelivery::Inline(tx))
             .await
         {
             Ok(id) => (Some(id), Some(rx)),

@@ -1986,20 +1986,44 @@ impl Store {
         })
     }
 
-    /// Record the decision; returns false when the row was already decided (first decision wins).
+    /// Record the decision; returns false when already decided (first decision wins).
+    /// Active inline/polled callers must own the one-use grant before Approved is visible.
+    /// Deferred decisions retain it for the existing canonical re-run claim path.
     pub fn decide_approval(
         &self,
         id: &str,
         state: &str,
         decided_by: Option<&str>,
         reason: Option<&str>,
+        claim_grant: bool,
     ) -> Result<bool> {
+        if claim_grant && state != "approved" {
+            anyhow::bail!("only an approved decision can claim a grant");
+        }
         self.with(|c| {
-            c.execute(
+            let transaction = rusqlite::Transaction::new_unchecked(
+                c,
+                rusqlite::TransactionBehavior::Immediate,
+            )?;
+            let now = now_ms();
+            let decided = transaction.execute(
                 "UPDATE approvals SET state = ?2, decided_at = ?3, decided_by = ?4, reason = ?5 WHERE id = ?1 AND state = 'pending'",
-                params![id, state, now_ms(), decided_by, reason],
-            )
-            .map(|n| n > 0)
+                params![id, state, now, decided_by, reason],
+            )?;
+            if decided == 0 {
+                return Ok(false);
+            }
+            if claim_grant {
+                let claimed = transaction.execute(
+                    "UPDATE approvals SET grant_consumed_at = ?2 WHERE id = ?1 AND state = 'approved' AND grant_consumed_at IS NULL",
+                    params![id, now],
+                )?;
+                if claimed != 1 {
+                    return Err(rusqlite::Error::QueryReturnedNoRows);
+                }
+            }
+            transaction.commit()?;
+            Ok(true)
         })
     }
 
