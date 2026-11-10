@@ -302,6 +302,11 @@ struct MentionTextView: UIViewRepresentable {
     /// Paste menu → image / GIF from the pasteboard (feedback
     /// app-01M5TGH18WV3QCK5KZT6XKG7FG). `mime` stays image/gif or image/webp.
     var onPasteImage: ((Data, String, String) -> Void)? = nil
+    /// How many lines the text wraps to at the width it was offered, reported when it changes.
+    /// Measured here because `sizeThatFits` is where the truth already is: the owner needs the
+    /// count to move its controls onto their own row (Grok's multi-line composer), and a second
+    /// measurement elsewhere would be a second answer to the same question.
+    var onLines: ((Int) -> Void)? = nil
 
     /// Grok: the caret 17 pt in from the field's edge, one 22 pt line centred in 48.
     static let insets = UIEdgeInsets(top: Theme.composerTextPadY, left: Theme.composerTextInset, bottom: Theme.composerTextPadY, right: 0)
@@ -364,6 +369,14 @@ struct MentionTextView: UIViewRepresentable {
         c.syncFocus(view)
     }
 
+    /// Lines the text occupies, from the height it wants and the height of one line. Pure, so
+    /// the rounding that decides "has this wrapped" is testable without a text view.
+    static func lines(fit: CGFloat, line: CGFloat, insets: UIEdgeInsets) -> Int {
+        guard line > 0 else { return 1 }
+        let text = fit - insets.top - insets.bottom
+        return max(1, Int((text / line).rounded()))
+    }
+
     func sizeThatFits(_ proposal: ProposedViewSize, uiView: MentionUITextView, context: Context) -> CGSize? {
         // Greedy in width like `TextField` (the mic and the round button beside
         // it are fixed); the height hugs the text, one to `maxLines` lines.
@@ -376,6 +389,12 @@ struct MentionTextView: UIViewRepresentable {
         let h = min(max(fit.height, minH), maxH)
         let scroll = fit.height > maxH + 0.5
         if uiView.isScrollEnabled != scroll { uiView.isScrollEnabled = scroll }
+        // Deferred: this runs inside layout, and the owner turns the count into state.
+        let lines = MentionTextView.lines(fit: fit.height, line: line, insets: Self.insets)
+        if context.coordinator.lastLines != lines {
+            context.coordinator.lastLines = lines
+            DispatchQueue.main.async { onLines?(lines) }
+        }
         return CGSize(width: width, height: h.rounded(.up))
     }
 
@@ -388,6 +407,8 @@ struct MentionTextView: UIViewRepresentable {
         /// Set while this side writes the view, so the delegate does not echo
         /// the change back into SwiftUI state mid-update.
         var rebuilding = false
+        /// Last line count handed to `onLines`, so layout only reports a change.
+        var lastLines = 0
         private(set) var font = UIFont.systemFont(ofSize: Theme.body)
         private var themeKey = ""
         private var chipCache: [String: UIImage] = [:]

@@ -970,7 +970,9 @@ struct ChatSession: View {
     /// With a picture or video staged, the field is the description bar for that
     /// send — one message, not a follow-up text bubble.
     private func composerPrompt(for draft: String) -> String {
-        if pending.contains(where: Self.isCaptionablePending) { return "Add a description…" }
+        // A staged picture no longer renames the field. Grok previews the picture inside the
+        // composer and leaves the prompt alone, so the field still says who will answer
+        // ([feedback attachment-in-composer-2026-11-09]).
         if transcribing { return "Transcribing…" }
         if let channel { return "Message #\(channel.name)" }
         if isJobTab { return "Steer this task" }
@@ -2541,7 +2543,13 @@ struct ChatSession: View {
             // Top fade is `headerBlur` over the transcript — a ScrollView `.mask`
             // forced an offscreen pass of every row on each scroll frame and made
             // long / group chats feel sticky (feedback app-01M5MQ2GFB1681YXNJMZV4EK7J).
-            .onAppear { settleToBottom(proxy) }
+            .onAppear {
+                settleToBottom(proxy)
+                let rigged = DebugHooks.fixtureComposerAttachments
+                if rigged > 0, pending.isEmpty {
+                    pending = (0..<rigged).map { Self.riggedAttachment(seed: $0) }
+                }
+            }
             // `rows.last` (not only its id): a streaming reply keeps the same id while its
             // text grows; pinning must follow that growth too (#1444 / lazy window #1399).
             .onChange(of: rows.last) { old, new in
@@ -3565,58 +3573,6 @@ struct ChatSession: View {
             } else if let r = replyTo {
                 replyPreview(r)
             }
-            if !pending.isEmpty {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
-                        ForEach(pending) { a in
-                            // Images show a real thumbnail (same 28 pt chip as Mac);
-                            // other files keep the SF Symbol + name pill.
-                            // Tap the chip (not ×) to open a picture/video while the
-                            // description bar is focused ([feedback app-01M5Z01FAES7QFEDGC1RKGS9DK]).
-                            let thumb = a.mime.hasPrefix("image/") ? UIImage(data: a.data) : nil
-                            let canPreview = Self.isCaptionablePending(a)
-                            HStack(spacing: 6) {
-                                Button {
-                                    openPendingPreview(a)
-                                } label: {
-                                    HStack(spacing: 6) {
-                                        if let thumb {
-                                            Image(uiImage: thumb)
-                                                .resizable()
-                                                .scaledToFill()
-                                                .frame(width: 28, height: 28)
-                                                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                                        } else {
-                                            Image(systemName: a.mime.hasPrefix("image/") ? "photo" : (a.mime.hasPrefix("audio/") ? "waveform" : (a.mime.hasPrefix("video/") ? "film" : "doc")))
-                                                .font(theme.font(12))
-                                        }
-                                        Text(a.name).font(theme.font(Theme.tiny)).lineLimit(1)
-                                    }
-                                }
-                                .buttonStyle(.plain)
-                                .disabled(!canPreview)
-                                .accessibilityLabel(canPreview ? "\(a.name), tap to open" : a.name)
-                                // The remove ✕: always drawn, a full-size hit target
-                                // (not the 10 pt glyph alone), named for VoiceOver
-                                // ([feedback composer-attachment-removal-ios-2026-10-27]).
-                                Button { removePending(a.id) } label: {
-                                    Image(systemName: "xmark").font(.system(size: Theme.pendingRemoveGlyph, weight: .bold))
-                                        .frame(width: Theme.pendingRemoveHit, height: Theme.pendingRemoveHit)
-                                        .contentShape(Rectangle())
-                                }
-                                .buttonStyle(.plain)
-                                .accessibilityLabel("Remove attachment")
-                                .accessibilityIdentifier("composer-remove-attachment")
-                            }
-                            .foregroundStyle(theme.text)
-                            .padding(.leading, thumb != nil ? 4 : 10)
-                            .padding(.trailing, Theme.pendingChipTrailing)
-                            .padding(.vertical, thumb != nil ? 3 : 6)
-                            .background(Capsule().fill(theme.bubbleAssistant))
-                        }
-                    }
-                }
-            }
             textField
         }
         // The mention list floats 8 pt above the composer, over the transcript. As a row of
@@ -3662,12 +3618,12 @@ struct ChatSession: View {
     private var attachButton: some View {
         Button { showAttach = true } label: {
             ZStack {
-                ControlSurface(shape: Circle())
+                ComposerDisc()
                 Image(systemName: "plus")
                     .font(theme.font(Theme.composerPlusGlyph, weight: .regular)) // control-size: exception plusGlyph
                     .foregroundStyle(theme.text)
             }
-            .frame(width: Theme.composerPlusDisc, height: Theme.composerPlusDisc)
+            .frame(width: Theme.composerDisc, height: Theme.composerDisc)
             .contentShape(Circle())
             .accessibilityIdentifier("composer-plus")
         }
@@ -3733,6 +3689,26 @@ struct ChatSession: View {
     }
 
     /// Picture or video pending in the composer — the field is their description bar.
+    /// A drawn picture for `ARBOS_FIXTURE_COMPOSER_ATTACHMENT`. Drawn rather than bundled so
+    /// the rig carries no asset, and recognisable rather than flat so a capture shows the
+    /// thumbnail really is the picture and not a placeholder.
+    /// `seed` shifts the hue so a row of several is visibly several pictures rather than one
+    /// picture repeated, which is the whole point of the multiple-attachment shot.
+    private static func riggedAttachment(seed: Int) -> AppModel.PendingAttachment {
+        let side = CGSize(width: 640, height: 640)
+        let hue = CGFloat(seed % 5) / 5
+        let image = UIGraphicsImageRenderer(size: side).image { ctx in
+            UIColor(hue: hue, saturation: 0.55, brightness: 0.42, alpha: 1).setFill()
+            ctx.fill(CGRect(origin: .zero, size: side))
+            UIColor(hue: hue, saturation: 0.70, brightness: 0.95, alpha: 1).setFill()
+            ctx.cgContext.fillEllipse(in: CGRect(x: 150, y: 110, width: 340, height: 340))
+            UIColor(hue: hue, saturation: 0.45, brightness: 0.62, alpha: 1).setFill()
+            ctx.fill(CGRect(x: 0, y: 440, width: side.width, height: 200))
+        }
+        return AppModel.PendingAttachment(name: "photo-\(seed + 1).png", mime: "image/png",
+                                          data: image.pngData() ?? Data())
+    }
+
     private static func isCaptionablePending(_ a: AppModel.PendingAttachment) -> Bool {
         let mime = a.mime.lowercased()
         return mime.hasPrefix("image/") || mime.hasPrefix("video/")
@@ -3763,6 +3739,10 @@ struct ChatSession: View {
             isChannel: isChannel,
             needsAnswer: needsAnswer,
             hasPending: !pending.isEmpty,
+            pending: pending,
+            canOpenPending: { Self.isCaptionablePending($0) },
+            onOpenPending: { openPendingPreview($0) },
+            onRemovePending: { removePending($0) },
             memoHoldActive: memoHoldActive,
             memoCancelArmed: memoCancelArmed,
             memoDragX: memoDragX,
@@ -4953,17 +4933,42 @@ final class ComposerDraft: ObservableObject {
 /// finish the memo. Pure, so `ComposerMetricsTests` can pin the pair that
 /// cross-fades ([feedback composer-send-crossfade-2026-10-30]).
 enum ComposerTrailing {
-    /// The mic is in its slot and takes touches: an empty field, or any
-    /// recording. The moment the field has text the mic is leaving, and a
-    /// leaving mic answers nothing.
-    static func micShown(draftEmpty: Bool, recording: Bool) -> Bool {
-        draftEmpty || recording
+    /// The mic is in its slot and takes touches, always. Grok keeps it beside the send arrow
+    /// while you type (Jacob, 2026-11-09, shots 2 and 3); ours used to drop it on the first
+    /// character, which took the voice memo away from anyone who had started typing and
+    /// changed their mind. There is no state that hides it now — it is a function rather than
+    /// a literal so the rule has one home and one test.
+    static func micShown() -> Bool {
+        true
     }
 
     /// The round pill sends rather than calls: something to send, a recording
     /// to finish, or a server channel, which has no calls (C1).
     static func sendShown(canSend: Bool, recording: Bool, isChannel: Bool) -> Bool {
         canSend || recording || isChannel
+    }
+}
+
+/// How the composer arranges itself. Grok puts the `+`, mic and send arrow on the text's own
+/// line while it is one line, and drops them onto a row of their own underneath once the text
+/// wraps, with the text then running the full width (Jacob, 2026-11-09, shots 2 and 3). Ours
+/// kept one row at every height and centred the controls against the growing text, which is
+/// shot 4.
+enum ComposerLayout {
+    /// The controls take their own row, and stay there until the field is empty.
+    ///
+    /// The latch is not timidity, it is the only stable answer. The two arrangements offer the
+    /// text different widths — stacking hands it back the ~135 pt the controls were using — so
+    /// a line that wraps inline may well fit unstacked, which would unstack it, which would
+    /// wrap it again. Deciding afresh on every measurement trades the layout back and forth for
+    /// any text near that boundary. Holding the row until the draft is empty costs nothing a
+    /// reader would notice and cannot oscillate.
+    static func stacked(wasStacked: Bool, lines: Int, empty: Bool, attachments: Int) -> Bool {
+        // A staged picture always makes the tall card: the thumbnail needs the width, and the
+        // controls belong under it ([feedback attachment-in-composer-2026-11-09]).
+        if attachments > 0 { return true }
+        if empty { return false }
+        return wasStacked || lines >= 2
     }
 }
 
@@ -4982,6 +4987,12 @@ private struct ComposerField<Leading: View>: View {
     let isChannel: Bool
     let needsAnswer: Bool
     let hasPending: Bool
+    /// Staged pictures and files, previewed inside the box
+    /// ([feedback attachment-in-composer-2026-11-09]).
+    let pending: [AppModel.PendingAttachment]
+    let canOpenPending: (AppModel.PendingAttachment) -> Bool
+    let onOpenPending: (AppModel.PendingAttachment) -> Void
+    let onRemovePending: (UUID) -> Void
     /// Hold-to-talk state owned by the chat screen (slide-to-cancel).
     let memoHoldActive: Bool
     let memoCancelArmed: Bool
@@ -5013,7 +5024,19 @@ private struct ComposerField<Leading: View>: View {
 
     /// The mic is in its slot and takes touches.
     private var micShown: Bool {
-        ComposerTrailing.micShown(draftEmpty: draft.text.isEmpty, recording: recorder.recording)
+        ComposerTrailing.micShown()
+    }
+
+    /// Lines the field is wrapping to, reported by the field's own measurement.
+    @State private var lines = 1
+    /// Latched by `ComposerLayout.stacked`; see its note on why this does not re-decide.
+    @State private var stackedLatch = false
+
+    /// The controls are on their own row. Never while recording: that row is the recorder's.
+    private var stacked: Bool {
+        !recorder.recording
+            && ComposerLayout.stacked(wasStacked: stackedLatch, lines: lines,
+                                      empty: draft.text.isEmpty, attachments: pending.count)
     }
 
     /// The round pill sends rather than calls.
@@ -5066,8 +5089,15 @@ private struct ComposerField<Leading: View>: View {
     /// slot its caller always keeps, so the field beside it cannot move.
     @ViewBuilder
     private var micButton: some View {
-        micGlyph
-            .foregroundStyle(recorder.recording ? theme.danger : theme.icon)
+        ZStack {
+            // The same disc the `+` sits on at the other end of the field. Grok shades behind
+            // both; ours had the mic as a bare glyph, which read as unfinished next to a `+`
+            // that already had one (Jacob, 2026-11-09).
+            ComposerDisc()
+                .frame(width: Theme.composerDisc, height: Theme.composerDisc)
+            micGlyph
+                .foregroundStyle(recorder.recording ? theme.danger : theme.icon)
+        }
             .frame(width: Theme.micHitWidth, height: Theme.composerHeight)
             .contentShape(Rectangle())
             .id("memo-mic")
@@ -5089,7 +5119,15 @@ private struct ComposerField<Leading: View>: View {
     /// eight lines and covering the transcript. Hug content with `fixedSize`,
     /// and still cap at 8 lines (Grok's 22 pt body pitch) for wrap glitches.
     private var composerFieldMaxHeight: CGFloat {
-        Theme.composerHeight + 7 * 22
+        let text = Theme.composerHeight + 7 * 22
+        guard stacked else { return text }
+        // The stacked card carries the control row under the text, and a staged picture over
+        // it; without the extra room the cap clips whichever arrived last.
+        var tall = text + Theme.composerStackGap + Theme.composerHeight
+        if !pending.isEmpty {
+            tall += ComposerAttachment.side + ComposerAttachment.overhang + Theme.composerStackGap
+        }
+        return tall
     }
 
     /// The field's rim: Grok's edge highlight, or the recording / needs-answer tint.
@@ -5099,107 +5137,155 @@ private struct ComposerField<Leading: View>: View {
         return nil
     }
 
-    var body: some View {
-        HStack(spacing: 8) {
-            // The `+`, inside the pill and opposite the action capsule. Bare on purpose: a
-            // channel passes no button, and an `EmptyView` carrying this slot's inset and
-            // frame would still hold its place in the stack. The caller styles it instead.
-            leading()
-            if recorder.recording {
-                // Visible discard control (tap) — also used after a short tap that
-                // left recording on; hold-to-talk can slide left instead.
-                Button(action: onCancelRecording) {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(theme.danger)
-                        .frame(width: 44, height: Theme.composerHeight)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Cancel")
-                if memoCancelArmed {
-                    Text("Release to cancel")
-                        .font(theme.font(Theme.small))
-                        // error-ui: exception status-mark
-                        .foregroundStyle(theme.danger)
-                        .frame(maxWidth: .infinity, alignment: .center)
-                } else if memoHoldActive && memoDragX < -12 {
-                    Text("Slide to cancel")
-                        .font(theme.font(Theme.small))
-                        .foregroundStyle(theme.muted)
-                        .frame(maxWidth: .infinity, alignment: .center)
-                        .opacity(min(1, -memoDragX / cancelDistance))
-                } else {
-                    HStack(spacing: 8) {
-                        // The braille spinner, not a red dot (Jacob, 2026-10-27).
-                        WorkingSpinner(size: 8, glyphSize: 11)
-                        // Level bars drawn into whatever width is left (newest on the right),
-                        // so the recorder row never pushes the composer past the screen edge.
-                        Canvas { ctx, size in
-                            let pitch: CGFloat = 5, w: CGFloat = 3
-                            let levels = recorder.levels
-                            let n = min(levels.count, max(0, Int(size.width / pitch)))
-                            for i in 0..<n {
-                                let l = CGFloat(levels[levels.count - n + i])
-                                let h = min(size.height, 4 + l * 20)
-                                let x = size.width - CGFloat(n - i) * pitch
-                                let rect = CGRect(x: x, y: (size.height - h) / 2, width: w, height: h)
-                                ctx.fill(Path(roundedRect: rect, cornerRadius: w / 2), with: .color(theme.text))
-                            }
+    /// The `+`, inside the pill and opposite the action capsule. Bare on purpose: a
+    /// channel passes no button, and an `EmptyView` carrying this slot's inset and
+    /// frame would still hold its place in the stack. The caller styles it instead.
+    @ViewBuilder private var leadingSlot: some View {
+        leading()
+    }
+
+    /// The recorder's own row while recording, otherwise the text field.
+    @ViewBuilder private var middle: some View {
+        if recorder.recording {
+            // Visible discard control (tap) — also used after a short tap that
+            // left recording on; hold-to-talk can slide left instead.
+            Button(action: onCancelRecording) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(theme.danger)
+                    .frame(width: 44, height: Theme.composerHeight)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Cancel")
+            if memoCancelArmed {
+                Text("Release to cancel")
+                    .font(theme.font(Theme.small))
+                    // error-ui: exception status-mark
+                    .foregroundStyle(theme.danger)
+                    .frame(maxWidth: .infinity, alignment: .center)
+            } else if memoHoldActive && memoDragX < -12 {
+                Text("Slide to cancel")
+                    .font(theme.font(Theme.small))
+                    .foregroundStyle(theme.muted)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .opacity(min(1, -memoDragX / cancelDistance))
+            } else {
+                HStack(spacing: 8) {
+                    // The braille spinner, not a red dot (Jacob, 2026-10-27).
+                    WorkingSpinner(size: 8, glyphSize: 11)
+                    // Level bars drawn into whatever width is left (newest on the right),
+                    // so the recorder row never pushes the composer past the screen edge.
+                    Canvas { ctx, size in
+                        let pitch: CGFloat = 5, w: CGFloat = 3
+                        let levels = recorder.levels
+                        let n = min(levels.count, max(0, Int(size.width / pitch)))
+                        for i in 0..<n {
+                            let l = CGFloat(levels[levels.count - n + i])
+                            let h = min(size.height, 4 + l * 20)
+                            let x = size.width - CGFloat(n - i) * pitch
+                            let rect = CGRect(x: x, y: (size.height - h) / 2, width: w, height: h)
+                            ctx.fill(Path(roundedRect: rect, cornerRadius: w / 2), with: .color(theme.text))
                         }
-                        .frame(maxWidth: .infinity, maxHeight: 24)
-                        Text(recorder.timeLabel)
-                            .font(theme.font(Theme.small, design: .monospaced))
-                            .foregroundStyle(theme.text)
                     }
+                    .frame(maxWidth: .infinity, maxHeight: 24)
+                    Text(recorder.timeLabel)
+                        .font(theme.font(Theme.small, design: .monospaced))
+                        .foregroundStyle(theme.text)
+                }
+            }
+        } else {
+            // The field with mention chips (#1596): one to eight lines, the
+            // chips as attachments; `draft.text` stays the plain `@handle` text.
+            MentionTextView(text: $draft.text, mentions: $draft.mentions, caret: $draft.caret, isFocused: $focus,
+                            placeholder: prompt(draft.text), theme: theme,
+                            agentProject: { model.agent(member: $0, chatId: chatId) },
+                            onPasteMedia: onPasteMedia,
+                            onDeleteBackwardEmpty: onDeleteBackwardEmpty,
+                            onPasteImage: onPasteImage,
+                            onLines: { lines = $0 })
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    @ViewBuilder private var trailingCluster: some View {
+        // Grok's trailing cluster: mic glyph centre 24 pt before the pill, the pill
+        // 8⅔ pt from the field's edge, both centred on the field's bottom line.
+        HStack(spacing: Theme.micPillGap) {
+            // The mic's frame is here whether the mic is or not: the text
+            // field must not change width when the arrow replaces the pair
+            // ([feedback composer-send-crossfade-2026-10-30]). The mic
+            // stays mounted while recording too, so a hold-to-talk release
+            // can finish without a second tap.
+            micButton
+                .scaleEffect(micShown ? 1 : Theme.composerSwapScale)
+                .opacity(micShown ? 1 : 0)
+                // A mic on its way out answers nothing: a swap that
+                // swallows the touch that started it is worse than a cut.
+                .allowsHitTesting(micShown)
+                .accessibilityHidden(!micShown)
+                .animation(swap, value: micShown)
+            // While recording: tap send also finishes (same as release). Otherwise
+            // Grok keeps the composer usable while the bot works: text sends, an
+            // empty field starts a voice call with the agent (Grok's voice-wave pill).
+            Button(action: onPrimary) {
+                Capsule()
+                    .fill(theme.primary)
+                    .frame(width: Theme.actionPillWidth, height: Theme.actionPillHeight)
+                    .overlay(actionGlyph)
+                    .frame(height: Theme.composerHeight)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .opacity(isChannel && !canSend && !recorder.recording ? 0.45 : 1)
+            .animation(swap, value: canSend)
+            // The label follows the action, not the fade: the button sends
+            // from the first frame of the swap, so it says so at once.
+            .accessibilityLabel((canSend || recorder.recording) ? "Send" : (isChannel ? "Send" : "Call"))
+            .accessibilityIdentifier("composer-action")
+        }
+        .padding(.trailing, Theme.actionPillTrailing)
+    }
+
+    var body: some View {
+        Group {
+            if stacked {
+                // Grok's wrapped composer: the text runs the full width, and the
+                // controls sit on their own row beneath it, bottom-aligned.
+                VStack(alignment: .leading, spacing: Theme.composerStackGap) {
+                    if !pending.isEmpty {
+                        ComposerAttachmentRow(pending: pending, canOpen: canOpenPending,
+                                              onOpen: onOpenPending, onRemove: onRemovePending)
+                    }
+                    // Full width in both rows: the text is no longer sharing the line with
+                    // the controls, and the trailing cluster needs the whole width to be
+                    // pushed to the right edge.
+                    middle
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    HStack(spacing: 8) {
+                        leadingSlot
+                        Spacer(minLength: 0)
+                        trailingCluster
+                    }
+                    .frame(maxWidth: .infinity)
                 }
             } else {
-                // The field with mention chips (#1596): one to eight lines, the
-                // chips as attachments; `draft.text` stays the plain `@handle` text.
-                MentionTextView(text: $draft.text, mentions: $draft.mentions, caret: $draft.caret, isFocused: $focus,
-                                placeholder: prompt(draft.text), theme: theme,
-                                agentProject: { model.agent(member: $0, chatId: chatId) },
-                                onPasteMedia: onPasteMedia,
-                                onDeleteBackwardEmpty: onDeleteBackwardEmpty,
-                                onPasteImage: onPasteImage)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            // Grok's trailing cluster: mic glyph centre 24 pt before the pill, the pill
-            // 8⅔ pt from the field's edge, both centred on the field's bottom line.
-            HStack(spacing: Theme.micPillGap) {
-                // The mic's frame is here whether the mic is or not: the text
-                // field must not change width when the arrow replaces the pair
-                // ([feedback composer-send-crossfade-2026-10-30]). The mic
-                // stays mounted while recording too, so a hold-to-talk release
-                // can finish without a second tap.
-                micButton
-                    .scaleEffect(micShown ? 1 : Theme.composerSwapScale)
-                    .opacity(micShown ? 1 : 0)
-                    // A mic on its way out answers nothing: a swap that
-                    // swallows the touch that started it is worse than a cut.
-                    .allowsHitTesting(micShown)
-                    .accessibilityHidden(!micShown)
-                    .animation(swap, value: micShown)
-                // While recording: tap send also finishes (same as release). Otherwise
-                // Grok keeps the composer usable while the bot works: text sends, an
-                // empty field starts a voice call with the agent (Grok's voice-wave pill).
-                Button(action: onPrimary) {
-                    Capsule()
-                        .fill(theme.primary)
-                        .frame(width: Theme.actionPillWidth, height: Theme.actionPillHeight)
-                        .overlay(actionGlyph)
-                        .frame(height: Theme.composerHeight)
-                        .contentShape(Rectangle())
+                HStack(spacing: 8) {
+                    leadingSlot
+                    middle
+                    trailingCluster
                 }
-                .buttonStyle(.plain)
-                .opacity(isChannel && !canSend && !recorder.recording ? 0.45 : 1)
-                .animation(swap, value: canSend)
-                // The label follows the action, not the fade: the button sends
-                // from the first frame of the swap, so it says so at once.
-                .accessibilityLabel((canSend || recorder.recording) ? "Send" : (isChannel ? "Send" : "Call"))
-                .accessibilityIdentifier("composer-action")
             }
-            .padding(.trailing, Theme.actionPillTrailing)
+        }
+        // Latched here rather than recomputed in `stacked`, so the arrangement is remembered
+        // across the measurement it causes; see `ComposerLayout.stacked`.
+        .onChange(of: lines) { _, n in
+            stackedLatch = ComposerLayout.stacked(wasStacked: stackedLatch, lines: n,
+                                                  empty: draft.text.isEmpty,
+                                                  attachments: pending.count)
+        }
+        .onChange(of: draft.text.isEmpty) { _, isEmpty in
+            if isEmpty { stackedLatch = false }
         }
         // Hard max so a TextField layout glitch cannot paint over the transcript.
         .frame(minHeight: Theme.composerHeight, maxHeight: composerFieldMaxHeight, alignment: .bottom)
@@ -5211,6 +5297,8 @@ private struct ComposerField<Leading: View>: View {
         // iphone-composer-glass-2026-10-28]). Rim below.
         .background(PillSurface(shape: fieldShape)) // control-size: source (the family's field, rim below)
         .overlay(ComposerRim(shape: fieldShape, tint: rimTint))
+        // Grok lights the pill under a resting finger while the Paste / AutoFill menu comes up.
+        .inputHoldHighlight(fieldShape)
         .alert("Microphone access is off", isPresented: $recorder.permissionDenied) {
             Button("OK", role: .cancel) { }
         } message: {
