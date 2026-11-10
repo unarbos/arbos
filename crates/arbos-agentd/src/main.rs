@@ -135,10 +135,14 @@ mod worker_model_refusal_tests;
 mod worker_retention_tests;
 mod workspace;
 
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use arbos_core::relay_url::SignedRelayUrl;
+use base64::Engine;
 use clap::{Parser, Subcommand};
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde_json::{json, Value};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -370,28 +374,180 @@ fn mask(s: &str) -> String {
     }
 }
 
-/// The relay URL baked into the sandbox env goes stale when the relay's public URL changes (quick
-/// tunnels change on every restart). The relay writes the current URL to `<state>/relay-url` at
-/// every wake; agentd prefers a reachable file URL over the env, and keeps re-reading the file
-/// until one of the candidates answers `/healthz`. Returns the URL that answered.
-async fn resolve_relay_url() -> String {
-    // The relay uploads the file as the sandbox user, which cannot write under the root-owned
-    // `/work` any more (D70 isolation): the file lives in that user's home. The old location is
-    // still read for boxes created before the move.
-    let file = std::path::PathBuf::from(
-        std::env::var("ARBOS_RELAY_URL_FILE")
+/// Where this box may be told to find the relay, and how much that telling is worth.
+struct RelayUrlSource {
+    /// Paths holding an address the relay pushed, newest-looking first.
+    files: Vec<PathBuf>,
+    /// The address baked into the create-time environment. The relay wrote it into the
+    /// environment of a root process, so nothing inside the box can rewrite it — it is a
+    /// trustworthy candidate, not a last resort.
+    env_url: Option<String>,
+    /// The public key this box verifies pushed addresses against, pinned in that same
+    /// environment. `None` on a box created by a relay that cannot sign.
+    verify_key: Option<VerifyingKey>,
+    /// Who the address must have been signed for.
+    box_id: String,
+}
+
+/// One address worth probing, and where its authority comes from.
+struct Candidate {
+    url: String,
+    /// `Some` for a verified signature, carrying its counter; `None` for the create-time
+    /// environment, which needs no signature because the attacker cannot write it either.
+    signed_counter: Option<i64>,
+}
+
+fn verify_key_from_env() -> Option<VerifyingKey> {
+    let raw = std::env::var(arbos_core::relay_url::VERIFY_KEY_ENV).ok()?;
+    if raw.trim().is_empty() {
+        return None;
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(raw.trim())
+        .ok()?;
+    let bytes: [u8; 32] = bytes.try_into().ok()?;
+    match VerifyingKey::from_bytes(&bytes) {
+        Ok(k) => Some(k),
+        Err(e) => {
+            tracing::error!(error = %e, "{} is not an Ed25519 public key", arbos_core::relay_url::VERIFY_KEY_ENV);
+            None
+        }
+    }
+}
+
+impl RelayUrlSource {
+    fn from_env() -> Self {
+        // The file lives in the sandbox user's home because the relay's push could not write
+        // under the root-owned `/work` (D70 isolation); the old location is still read for boxes
+        // created before the move.
+        let file = PathBuf::from(
+            std::env::var("ARBOS_RELAY_URL_FILE")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| "/home/daytona/.arbos/relay-url".to_owned()),
+        );
+        let legacy_file = PathBuf::from(format!(
+            "{}/.arbos/relay-url",
+            std::env::var("ARBOS_WORK_DIR").unwrap_or_else(|_| "/work".into())
+        ));
+        Self {
+            files: vec![file, legacy_file],
+            env_url: std::env::var("ARBOS_RELAY_URL")
+                .ok()
+                .map(|u| u.trim().trim_end_matches('/').to_owned())
+                .filter(|u| !u.is_empty()),
+            verify_key: verify_key_from_env(),
+            box_id: std::env::var("ARBOS_USER_ID").unwrap_or_default(),
+        }
+    }
+
+    /// Read one pushed address and decide whether this box may act on it.
+    ///
+    /// With a key pinned, the authority is the signature beside the file and not the file: the
+    /// signed payload carries the address, an unsigned or unverifiable file is refused outright,
+    /// and `/healthz` is left doing the only job it can do, which is liveness. Without a key —
+    /// a box created by a relay that cannot sign — the plain file is read as it always was, so
+    /// that this change does not strand boxes already in the field.
+    fn read_file(&self, path: &Path, now_ms: i64) -> Option<Candidate> {
+        let Some(key) = self.verify_key.as_ref() else {
+            let url = std::fs::read_to_string(path)
+                .ok()
+                .map(|u| u.trim().trim_end_matches('/').to_owned())
+                .filter(|u| !u.is_empty())?;
+            return Some(Candidate {
+                url,
+                signed_counter: None,
+            });
+        };
+        let sig_path = PathBuf::from(format!(
+            "{}{}",
+            path.display(),
+            arbos_core::relay_url::SIG_FILE_SUFFIX
+        ));
+        let raw = std::fs::read_to_string(&sig_path).ok()?;
+        let signed: SignedRelayUrl = match serde_json::from_str(&raw) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(path = %sig_path.display(), error = %e, "relay url signature is not readable; refusing it");
+                return None;
+            }
+        };
+        if let Err(why) = signed.check(&self.box_id, now_ms) {
+            tracing::warn!(
+                path = %sig_path.display(),
+                url = %signed.url,
+                reason = why.as_str(),
+                "refusing a pushed relay address"
+            );
+            return None;
+        }
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(signed.sig.trim())
             .ok()
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| "/home/daytona/.arbos/relay-url".to_owned()),
-    );
-    let legacy_file = std::path::PathBuf::from(format!(
-        "{}/.arbos/relay-url",
-        std::env::var("ARBOS_WORK_DIR").unwrap_or_else(|_| "/work".into())
-    ));
-    let env_url = std::env::var("ARBOS_RELAY_URL")
-        .ok()
-        .map(|u| u.trim().trim_end_matches('/').to_owned())
-        .filter(|u| !u.is_empty());
+            .and_then(|b| Signature::from_slice(&b).ok());
+        let Some(sig) = decoded else {
+            tracing::warn!(path = %sig_path.display(), "relay url signature is malformed; refusing it");
+            return None;
+        };
+        if key.verify(signed.message().as_bytes(), &sig).is_err() {
+            // Reaching an address proves only that something is listening. This is the check that
+            // says it is ours, and it runs offline, before anything is sent.
+            tracing::error!(
+                path = %sig_path.display(),
+                url = %signed.url,
+                "a relay address on this box is not signed by our relay; refusing it"
+            );
+            return None;
+        }
+        Some(Candidate {
+            url: signed.trimmed_url().to_owned(),
+            signed_counter: Some(signed.counter),
+        })
+    }
+
+    /// Everything worth probing, best first: the newest verified address, then the create-time
+    /// environment. Ordering by counter is what stops a single stale write from being preferred
+    /// to a fresher one for the life of the box.
+    fn candidates(&self, now_ms: i64) -> Vec<Candidate> {
+        let mut out: Vec<Candidate> = self
+            .files
+            .iter()
+            .filter_map(|p| self.read_file(p, now_ms))
+            .collect();
+        out.sort_by_key(|c| std::cmp::Reverse(c.signed_counter));
+        if let Some(env) = &self.env_url {
+            out.push(Candidate {
+                url: env.clone(),
+                signed_counter: None,
+            });
+        }
+        let mut seen = Vec::new();
+        out.retain(|c| {
+            let fresh = !seen.contains(&c.url);
+            if fresh {
+                seen.push(c.url.clone());
+            }
+            fresh
+        });
+        out
+    }
+}
+
+/// The relay URL baked into the sandbox env goes stale when the relay's public URL changes (quick
+/// tunnels change on every restart), so the relay pushes the current one into the box at every
+/// wake. Returns the first address that is both ours and answers `/healthz`.
+///
+/// agentd does not write any of these files. It cannot sign one, and writing back the address it
+/// adopted is what used to make a single bad write outlive every restart.
+async fn resolve_relay_url() -> String {
+    let src = RelayUrlSource::from_env();
+    if src.verify_key.is_none() {
+        tracing::warn!(
+            "no {} in this box's environment: a pushed relay address cannot be told from any \
+             other host that answers /healthz",
+            arbos_core::relay_url::VERIFY_KEY_ENV
+        );
+    }
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .build()
@@ -399,58 +555,36 @@ async fn resolve_relay_url() -> String {
     let mut attempt = 0u32;
     loop {
         attempt += 1;
-        let read = |p: &std::path::Path| {
-            std::fs::read_to_string(p)
-                .ok()
-                .map(|u| u.trim().trim_end_matches('/').to_owned())
-                .filter(|u| !u.is_empty())
-        };
-        let file_url = read(&file);
-        let legacy_url = read(&legacy_file);
-        let mut candidates: Vec<String> = Vec::new();
-        for u in [file_url.clone(), legacy_url, env_url.clone()]
-            .into_iter()
-            .flatten()
-        {
-            if !candidates.contains(&u) {
-                candidates.push(u);
-            }
-        }
-        for u in &candidates {
+        let candidates = src.candidates(chrono::Utc::now().timestamp_millis());
+        for c in &candidates {
             let ok = http
-                .get(format!("{u}/healthz"))
+                .get(format!("{}/healthz", c.url))
                 .send()
                 .await
                 .map(|r| r.status().is_success())
                 .unwrap_or(false);
             if ok {
-                if file_url.as_deref() != Some(u.as_str()) {
-                    // agentd runs as root; the relay's next push arrives as the sandbox user, so
-                    // the directory and the file must stay writable for it — and the directory
-                    // must not be sticky, or that user could not replace a root-written file.
-                    use std::os::unix::fs::PermissionsExt;
-                    if let Some(dir) = file.parent() {
-                        if std::fs::create_dir_all(dir).is_ok() {
-                            let _ = std::fs::set_permissions(
-                                dir,
-                                std::fs::Permissions::from_mode(0o777),
-                            );
-                        }
-                    }
-                    if std::fs::write(&file, format!("{u}\n")).is_ok() {
-                        let _ =
-                            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o666));
-                    }
+                if src.env_url.as_deref() != Some(c.url.as_str()) {
+                    // Distinct from the ordinary rotation note below, and from nothing at all: a
+                    // box that has been pointed somewhere other than where it was created leaves
+                    // a record naming both addresses.
+                    tracing::warn!(
+                        event = "relay_url_differs_from_create_time",
+                        adopted = %c.url,
+                        created_with = ?src.env_url,
+                        signed_counter = ?c.signed_counter,
+                        "this box is using a relay address it was not created with"
+                    );
+                } else {
+                    tracing::info!(url = %c.url, "relay address is the one this box was created with");
                 }
-                if env_url.as_deref() != Some(u.as_str()) {
-                    tracing::warn!(url = %u, env = ?env_url, "relay url from the wake file (env is stale)");
-                }
-                return u.clone();
+                return c.url.clone();
             }
         }
         if attempt == 1 || attempt % 15 == 0 {
+            let urls: Vec<&str> = candidates.iter().map(|c| c.url.as_str()).collect();
             tracing::warn!(
-                ?candidates,
+                ?urls,
                 attempt,
                 "no relay url answers /healthz; waiting for the relay to push one"
             );
@@ -649,4 +783,230 @@ async fn boot() -> Result<()> {
     tracing::info!("SIGTERM: stopping workspaces and persisting docs");
     let _ = tokio::time::timeout(Duration::from_secs(45), sup.shutdown()).await;
     std::process::exit(0);
+}
+
+#[cfg(test)]
+mod relay_url_tests {
+    use super::*;
+    use arbos_core::relay_url;
+    use ed25519_dalek::{Signer, SigningKey};
+
+    const BOX_ID: &str = "user:alice";
+
+    fn key() -> SigningKey {
+        SigningKey::from_bytes(&[3u8; 32])
+    }
+
+    fn sig_json(
+        k: &SigningKey,
+        url: &str,
+        box_id: &str,
+        counter: i64,
+        expires_at_ms: i64,
+    ) -> String {
+        let msg = relay_url::signing_message(url, box_id, counter, expires_at_ms);
+        let signed = SignedRelayUrl {
+            url: url.into(),
+            box_id: box_id.into(),
+            counter,
+            expires_at_ms,
+            sig: base64::engine::general_purpose::STANDARD
+                .encode(k.sign(msg.as_bytes()).to_bytes()),
+        };
+        serde_json::to_string(&signed).unwrap()
+    }
+
+    struct Box_ {
+        dir: PathBuf,
+    }
+
+    impl Box_ {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "arbos-agentd-relay-url-{}-{name}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Self { dir }
+        }
+
+        /// The plain address file, as a local process could write it.
+        fn write_url(&self, name: &str, url: &str) -> PathBuf {
+            let p = self.dir.join(name);
+            std::fs::write(&p, format!("{url}\n")).unwrap();
+            p
+        }
+
+        fn write_sig(&self, name: &str, json: &str) {
+            std::fs::write(self.dir.join(format!("{name}.sig")), json).unwrap();
+        }
+    }
+
+    impl Drop for Box_ {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn source(files: Vec<PathBuf>, env_url: Option<&str>, verify: bool) -> RelayUrlSource {
+        RelayUrlSource {
+            files,
+            env_url: env_url.map(str::to_owned),
+            verify_key: verify.then(|| key().verifying_key()),
+            box_id: BOX_ID.into(),
+        }
+    }
+
+    #[test]
+    fn a_properly_signed_address_is_accepted() {
+        let b = Box_::new("ok");
+        let p = b.write_url("relay-url", "https://relay.example");
+        b.write_sig(
+            "relay-url",
+            &sig_json(&key(), "https://relay.example", BOX_ID, 7, i64::MAX),
+        );
+        let got = source(vec![p], None, true).candidates(0);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].url, "https://relay.example");
+        assert_eq!(got[0].signed_counter, Some(7));
+    }
+
+    #[test]
+    fn an_unsigned_file_is_refused_once_a_key_is_pinned() {
+        let b = Box_::new("unsigned");
+        // What a local process can do after the mode fix is nothing; this is the belt to that
+        // braces — even if it could write the file, with no signature beside it the address is
+        // not usable.
+        let p = b.write_url("relay-url", "https://evil.example");
+        let got = source(vec![p], Some("https://relay.example"), true).candidates(0);
+        let urls: Vec<&str> = got.iter().map(|c| c.url.as_str()).collect();
+        assert_eq!(
+            urls,
+            vec!["https://relay.example"],
+            "only the create-time address should survive; an unsigned file is not authority"
+        );
+    }
+
+    #[test]
+    fn a_signature_lifted_from_another_box_is_refused() {
+        let b = Box_::new("otherbox");
+        let p = b.write_url("relay-url", "https://relay.example");
+        b.write_sig(
+            "relay-url",
+            &sig_json(&key(), "https://relay.example", "user:bob", 7, i64::MAX),
+        );
+        assert!(source(vec![p], None, true).candidates(0).is_empty());
+    }
+
+    #[test]
+    fn a_signature_moved_onto_another_address_is_refused() {
+        let b = Box_::new("tampered");
+        let p = b.write_url("relay-url", "https://relay.example");
+        let mut signed: SignedRelayUrl = serde_json::from_str(&sig_json(
+            &key(),
+            "https://relay.example",
+            BOX_ID,
+            7,
+            i64::MAX,
+        ))
+        .unwrap();
+        signed.url = "https://evil.example".into();
+        b.write_sig("relay-url", &serde_json::to_string(&signed).unwrap());
+        assert!(
+            source(vec![p], None, true).candidates(0).is_empty(),
+            "controlling the address must not be enough; the signature covers it"
+        );
+    }
+
+    #[test]
+    fn a_signature_from_a_different_relay_is_refused() {
+        let b = Box_::new("otherkey");
+        let p = b.write_url("relay-url", "https://evil.example");
+        let other = SigningKey::from_bytes(&[9u8; 32]);
+        b.write_sig(
+            "relay-url",
+            &sig_json(&other, "https://evil.example", BOX_ID, 99, i64::MAX),
+        );
+        assert!(
+            source(vec![p], None, true).candidates(0).is_empty(),
+            "a signature is only worth the key it was made with"
+        );
+    }
+
+    #[test]
+    fn an_expired_signature_is_refused_so_an_old_address_cannot_be_replayed_for_ever() {
+        let b = Box_::new("expired");
+        let p = b.write_url("relay-url", "https://relay.example");
+        b.write_sig(
+            "relay-url",
+            &sig_json(&key(), "https://relay.example", BOX_ID, 7, 1_000),
+        );
+        assert!(source(vec![p.clone()], None, true)
+            .candidates(1_001)
+            .is_empty());
+        assert_eq!(source(vec![p], None, true).candidates(1_000).len(), 1);
+    }
+
+    #[test]
+    fn the_newest_signed_address_is_preferred_to_an_older_one() {
+        let b = Box_::new("counters");
+        let old = b.write_url("old", "https://old.example");
+        b.write_sig(
+            "old",
+            &sig_json(&key(), "https://old.example", BOX_ID, 1, i64::MAX),
+        );
+        let new = b.write_url("new", "https://new.example");
+        b.write_sig(
+            "new",
+            &sig_json(&key(), "https://new.example", BOX_ID, 2, i64::MAX),
+        );
+        // Given in the stale-first order the old code would have honoured.
+        let got = source(vec![old, new], None, true).candidates(0);
+        let urls: Vec<&str> = got.iter().map(|c| c.url.as_str()).collect();
+        assert_eq!(
+            urls,
+            vec!["https://new.example", "https://old.example"],
+            "a rolled-back address must not be preferred to the newest one the relay signed"
+        );
+    }
+
+    #[test]
+    fn the_create_time_address_is_always_a_candidate_and_never_duplicated() {
+        let b = Box_::new("env");
+        let p = b.write_url("relay-url", "https://relay.example");
+        b.write_sig(
+            "relay-url",
+            &sig_json(&key(), "https://relay.example", BOX_ID, 7, i64::MAX),
+        );
+        // Same address from both sources: one candidate, not two.
+        let same = source(vec![p.clone()], Some("https://relay.example"), true).candidates(0);
+        assert_eq!(same.len(), 1);
+        // A different create-time address stays available behind the signed one.
+        let both = source(vec![p], Some("https://baked.example"), true).candidates(0);
+        let urls: Vec<&str> = both.iter().map(|c| c.url.as_str()).collect();
+        assert_eq!(urls, vec!["https://relay.example", "https://baked.example"]);
+    }
+
+    #[test]
+    fn a_box_with_no_pinned_key_still_reads_the_plain_file() {
+        let b = Box_::new("nokey");
+        let p = b.write_url("relay-url", "https://relay.example");
+        let got = source(vec![p], Some("https://baked.example"), false).candidates(0);
+        let urls: Vec<&str> = got.iter().map(|c| c.url.as_str()).collect();
+        assert_eq!(
+            urls,
+            vec!["https://relay.example", "https://baked.example"],
+            "boxes created before signing existed must keep working"
+        );
+        assert_eq!(got[0].signed_counter, None);
+    }
+
+    #[test]
+    fn a_signature_that_is_not_json_is_refused_rather_than_ignored() {
+        let b = Box_::new("garbage");
+        let p = b.write_url("relay-url", "https://relay.example");
+        b.write_sig("relay-url", "{not json");
+        assert!(source(vec![p], None, true).candidates(0).is_empty());
+    }
 }

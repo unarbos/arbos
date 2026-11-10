@@ -102,7 +102,15 @@ ARBOS_RELAY_LISTEN=0.0.0.0:7700 ARBOS_RELAY_PUBLIC_URL=https://relay.example.com
 
 `scripts/relay-start.sh` starts the relay with a cloudflared tunnel beside it: `ARBOS_TUNNEL=named` (a Zero Trust tunnel whose token is in `ARBOS_TUNNEL_TOKEN`; `ARBOS_TUNNEL_HOSTNAME` sets the name), `ARBOS_TUNNEL=quick` (dev only — a random `*.trycloudflare.com` URL that changes on every restart), or `ARBOS_TUNNEL=none` with your own `ARBOS_RELAY_PUBLIC_URL`. `scripts/deploy/relay-server.sh` is the systemd + Caddy install used for relay.arbos.life (`--from-source <ref>` builds the relay on the server).
 
-If the public URL changes, the relay writes the new one into every machine at the next wake (`/work/.arbos/relay-url`) and agentd prefers that file; a machine that still cannot say hello within 60 s is bounced once and then shown as `error · box cannot reach relay`.
+If the public URL changes, the relay writes the new one into every machine at the next wake (`/home/daytona/.arbos/relay-url`, and the legacy `/work/.arbos/relay-url` where it exists) and agentd prefers that file over the URL baked into the machine's environment; a machine that still cannot say hello within 60 s is bounced once and then shown as `error · box cannot reach relay`.
+
+**Set `ARBOS_RELAY_URL_SIGNING_KEY`.** That file names the host a machine sends its box token to, so the relay signs the address and agentd verifies it offline before it sends anything. Reaching an address proves only that something is listening, not that it is your relay. Generate a key and keep it with the relay's other secrets:
+
+```bash
+ARBOS_RELAY_URL_SIGNING_KEY=$(head -c 32 /dev/urandom | base64)
+```
+
+The relay hands each machine the public half as `ARBOS_RELAY_VERIFY_KEY` at create, and signatures last `ARBOS_RELAY_URL_TTL_S` (30 days by default; the relay re-signs at every wake). A key that is set but not 32 base64-encoded bytes stops the relay at startup rather than quietly disabling signing. With no key set the relay still runs and logs a warning per push, and machines fall back to accepting the pushed address unverified — the pre-signing behaviour, kept so that machines created by an older relay keep working. Machines created with a verify key refuse an unsigned or wrongly signed address outright.
 
 ## 5. Real machines on Daytona
 
