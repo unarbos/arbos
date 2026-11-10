@@ -261,7 +261,7 @@ extension AppModel {
     /// bytes, never a thumbnail) and the pasteboard is written when they are in.
     /// `slot` is where the chat's blobs live (`<project id>` or `people:<chat id>`).
     @MainActor
-    func copyMessage(_ message: Message, slot: String, isCurrent: @MainActor () -> Bool = { true }) async {
+    func copyMessage(_ message: Message, slot: String, isCurrent: @MainActor () -> Bool) async {
         guard isCurrent() else { return }
         guard let body = message.body else {
             notice = Notice(text: message.hasUploadingAttachment ? "Still uploading — try again in a moment" : "Nothing to copy")
@@ -274,7 +274,7 @@ extension AppModel {
     /// the picture (or file) without the message's words. `true` when it was copied.
     @MainActor
     @discardableResult
-    func copyAttachment(_ attachment: Attachment, slot: String, isCurrent: @MainActor () -> Bool = { true }) async -> Bool {
+    func copyAttachment(_ attachment: Attachment, slot: String, isCurrent: @MainActor () -> Bool) async -> Bool {
         guard isCurrent() else { return false }
         guard attachment.isOnRelay else {
             notice = Notice(text: attachment.blobRef?.hasPrefix("local:") == true ? "Still uploading — try again in a moment" : "Nothing to copy")
@@ -285,7 +285,7 @@ extension AppModel {
 
     @MainActor
     @discardableResult
-    private func copy(text: String, attachments: [Attachment], slot: String, isCurrent: @MainActor () -> Bool = { true }) async -> Bool {
+    private func copy(text: String, attachments: [Attachment], slot: String, isCurrent: @MainActor () -> Bool) async -> Bool {
         guard isCurrent() else { return false }
         if attachments.isEmpty {
             MessagePasteboard.write(MessagePasteboard.items(text: text, fetched: []))
