@@ -36,8 +36,16 @@ def extract():
         raise ValueError('room_state SQL shape changed; update the fixture explicitly')
     cols = re.search(r'const MEMBER_COLS:\s*&str\s*=\s*"([^"\\]+)";', people).group(1)
     members, chats = selects(body(people, 'members_of')), selects(body(people, 'chats_of_member'))
-    if len(members) != 1 or len(chats) != 1 or '{MEMBER_COLS}' not in members[0]:
+    if len(members) != 1 or len(chats) not in (1, 2) or '{MEMBER_COLS}' not in members[0]:
         raise ValueError('People query shape changed')
+    batched = chats[1] if len(chats) == 2 else None
+    if batched is not None and not (
+        batched.startswith('SELECT {MEMBER_COLS} FROM people_members')
+        and 'WHERE left_at IS NULL AND chat_id IN (' in batched
+        and 'WHERE m.member = ?1 AND m.left_at IS NULL AND p.deleted_at IS NULL' in batched
+        and 'ORDER BY chat_id, joined_at, CASE WHEN member LIKE' in batched
+    ):
+        raise ValueError('Batched roster SQL shape changed; review the fixture explicitly')
     migrations = []
     for table in ('devices', 'projects'):
         found = re.findall(r'"(ALTER TABLE ' + table + r" ADD COLUMN user_id TEXT NOT NULL DEFAULT 'u_default')\"", db)
@@ -47,4 +55,5 @@ def extract():
     return {'schema': raw_constant(db, 'SCHEMA'), 'people_schema': raw_constant(people, 'PEOPLE_SCHEMA'),
             'migrations': migrations, 'project_name_index': re.search(r'"(CREATE UNIQUE INDEX IF NOT EXISTS projects_user_name ON projects\(user_id, name\))"', db).group(1), 'room_state': state, 'room_position': position[0] if len(position) == 1 else None,
             'members_of': members[0].replace('{MEMBER_COLS}', cols), 'chats_of_member': chats[0],
+            'batched_rosters': batched.replace('{MEMBER_COLS}', cols) if batched is not None else None,
             'source_sha256': {str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest() for p in (DB, PEOPLE)}}

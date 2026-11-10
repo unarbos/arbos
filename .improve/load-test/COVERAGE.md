@@ -121,9 +121,22 @@ fresh/replay/latest/tie/missing/NULL assertions; its duration was not separately
 instrumented, so no before-duration claim is made. These are newly added
 SQL-boundary checks, not pre-existing native tests.
 
-Full native workspace/FFI/GPUI tests remain blocked by local disk capacity and
-fork CI approval. Device blob restore/eviction, valid Loro snapshots and
+At the original supplementary capture, native workspace/FFI/GPUI execution was
+unrun. Later targeted native roster/unread gates use unique source-pinned targets;
+current full workspace/platform CI status is reported by the parent phase. Device blob restore/eviction, valid Loro snapshots and
 concurrent writers/WAL pressure are outside these SELECT profiles. Synapse's
 external PostgreSQL and Matrix SDK in-memory timelines are separate systems.
 Other relay/box families in the scope review remain unmeasured. These limits
 do not erase the runnable SQL checks or turn them into a whole-app latency claim.
+
+
+## Unread index tradeoff follow-up
+
+The [withheld-index study](UNREAD_RESEARCH.md) and [all-case chart](unread-index.html)
+add101paired comparisons at four scales for sparse/broad ACLs and people-heavy/
+mixed legacy histories. The partial project index makes sparse reads bounded but
+regresses all broad-visibility cases, so no unread index is added. The source SELECT
+and schema remain unchanged; two actual native ACL/full-row characterization tests
+are retained. The portable profiler applies the captured candidate only to newly
+generated temporary files. This is a measured design decision, not a claim that
+local testing is blocked or that synthetic ratios describe production.

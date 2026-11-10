@@ -481,7 +481,7 @@ impl Db {
 
     /// Live chats a member (`user:<id>` or `agent:<project>`) is in.
     pub fn chats_of_member(&self, member: &str) -> Result<Vec<ChatWithMembers>> {
-        let chats: Vec<PeopleChat> = self.with(|c| {
+        self.with(|c| {
             let mut st = c.prepare(
                 "SELECT p.id, p.kind, p.created_by, p.created_at, p.title, p.image_key, p.avatar_leaf, p.avatar_leaf_color, p.description FROM people_chats p
                  JOIN people_members m ON m.chat_id = p.id
@@ -489,15 +489,33 @@ impl Db {
                  ORDER BY p.created_at DESC",
             )?;
             let rows = st.query_map(params![member], people_chat_from_row)?;
-            rows.collect()
-        })?;
-        chats
-            .into_iter()
-            .map(|chat| {
-                let members = self.members_of(&chat.id)?;
-                Ok(ChatWithMembers { chat, members })
-            })
-            .collect()
+            let chats = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+            if chats.is_empty() {
+                return Ok(Vec::new());
+            }
+            // Fetch all rosters together, retaining members_of's per-chat total order.
+            // Keep the first query's chat order, including equal-created_at ties.
+            let mut st = c.prepare(&format!(
+                "SELECT {MEMBER_COLS} FROM people_members
+                 WHERE left_at IS NULL AND chat_id IN (
+                   SELECT p.id FROM people_chats p JOIN people_members m ON m.chat_id = p.id
+                   WHERE m.member = ?1 AND m.left_at IS NULL AND p.deleted_at IS NULL
+                 )
+                 ORDER BY chat_id, joined_at, CASE WHEN member LIKE 'user:%' THEN 0 ELSE 1 END, member"
+            ))?;
+            let rows = st.query_map(params![member], membership_from_row)?;
+            let mut out: Vec<_> = chats.into_iter()
+                .map(|chat| ChatWithMembers { chat, members: Vec::new() }).collect();
+            let positions: std::collections::HashMap<_, _> = out.iter().enumerate()
+                .map(|(index, cm)| (cm.chat.id.clone(), index)).collect();
+            for row in rows {
+                let row = row?;
+                if let Some(&index) = positions.get(&row.chat_id) {
+                    out[index].members.push(row);
+                }
+            }
+            Ok(out)
+        })
     }
 
     /// The existing DM between two users, if any (both still members).
@@ -1534,6 +1552,192 @@ mod tests {
             )
             .unwrap();
         assert_eq!(roster(&chat.id).last().unwrap(), "user:gh_0");
+    }
+}
+
+#[cfg(test)]
+mod roster_batch_tests {
+    use super::*;
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    fn chat(db: &Db, id: &str, created_at: i64, member: &str) {
+        db.insert_people_chat(&PeopleChat {
+            id: id.into(),
+            kind: "group".into(),
+            created_by: "owner".into(),
+            created_at,
+            title: Some(format!("Room {id}")),
+            image_key: None,
+            avatar_leaf: None,
+            avatar_leaf_color: Some(3),
+            description: Some("About é".into()),
+        })
+        .unwrap();
+        db.update_people_chat_profile(id, None, Some(Some(&format!("image/{id}"))), None, None)
+            .unwrap();
+        db.add_member(id, member, "owner", "owner", &serde_json::json!({}))
+            .unwrap();
+    }
+
+    #[test]
+    fn batched_rosters_preserve_scope_total_order_and_all_fields() {
+        let state = test_state(AuthMode::Github);
+        let db = &state.db;
+        for (id, at, member) in [
+            ("old", 1, "user:owner"),
+            ("tie-b", 3, "user:owner"),
+            ("tie-a", 3, "user:owner"),
+            ("deleted", 4, "user:owner"),
+            ("left", 5, "user:owner"),
+            ("foreign", 6, "user:other"),
+        ] {
+            chat(db, id, at, member);
+        }
+        db.with(|c| {
+            c.execute(
+                "UPDATE people_chats SET deleted_at=9 WHERE id='deleted'",
+                [],
+            )
+        })
+        .unwrap();
+        db.remove_member("left", "user:owner", false).unwrap();
+        for id in ["old", "tie-b", "tie-a"] {
+            for member in [
+                "agent:z",
+                "user:z",
+                "user:a",
+                "agent:a",
+                "user:left",
+                "user:banned",
+            ] {
+                db.add_member(id, member, "member", "owner", &serde_json::json!({}))
+                    .unwrap();
+            }
+            db.remove_member(id, "user:left", false).unwrap();
+            db.remove_member(id, "user:banned", true).unwrap();
+            db.with(|c| {
+                c.execute(
+                    "UPDATE people_members SET joined_at=7 WHERE chat_id=?1",
+                    params![id],
+                )
+            })
+            .unwrap();
+            db.add_member(id, "user:later", "member", "owner", &serde_json::json!({}))
+                .unwrap();
+            db.set_member_role(id, "user:a", "admin").unwrap();
+            db.set_member_settings(
+                id,
+                "user:a",
+                &serde_json::json!({"nested":["é",true,null,4]}),
+            )
+            .unwrap();
+            db.set_member_muted(id, "user:a", true).unwrap();
+            db.set_member_silenced(id, "user:a", true, Some(123))
+                .unwrap();
+        }
+        let chats = db.chats_of_member("user:owner").unwrap();
+        assert_eq!(
+            chats.iter().map(|c| c.chat.id.as_str()).collect::<Vec<_>>(),
+            ["tie-b", "tie-a", "old"]
+        );
+        for cm in &chats {
+            let detail = db.members_of(&cm.chat.id).unwrap();
+            assert_eq!(
+                serde_json::to_value(&cm.members).unwrap(),
+                serde_json::to_value(detail).unwrap()
+            );
+            assert_eq!(
+                cm.members
+                    .iter()
+                    .map(|m| m.member.as_str())
+                    .collect::<Vec<_>>(),
+                [
+                    "user:a",
+                    "user:owner",
+                    "user:z",
+                    "agent:a",
+                    "agent:z",
+                    "user:later"
+                ]
+            );
+            let admin = &cm.members[0];
+            assert_eq!(
+                (admin.role.as_str(), admin.added_by.as_str()),
+                ("admin", "owner")
+            );
+            assert_eq!(
+                admin.settings,
+                serde_json::json!({"nested":["é",true,null,4]})
+            );
+            assert!(admin.muted && admin.silenced);
+            assert_eq!(admin.silenced_until, Some(123));
+            assert_eq!(admin.joined_at, 7);
+            assert_eq!(cm.chat.image_key, Some(format!("image/{}", cm.chat.id)));
+            assert_eq!(cm.chat.avatar_leaf_color, Some(3));
+            assert_eq!(cm.chat.description.as_deref(), Some("About é"));
+        }
+        assert!(db.chats_of_member("user:missing").unwrap().is_empty());
+        assert_eq!(
+            db.chats_of_member("user:other").unwrap()[0].chat.id,
+            "foreign"
+        );
+    }
+
+    #[test]
+    fn roster_select_count_does_not_grow_per_room() {
+        std::thread_local! {
+            static STATEMENTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        }
+        unsafe extern "C" fn count_statement(
+            kind: u32,
+            _context: *mut std::ffi::c_void,
+            _statement: *mut std::ffi::c_void,
+            _sql: *mut std::ffi::c_void,
+        ) -> i32 {
+            if kind == rusqlite::ffi::SQLITE_TRACE_STMT as u32 {
+                let _ = STATEMENTS.try_with(|count| count.set(count.get().saturating_add(1)));
+            }
+            0
+        }
+        for rooms in [0, 1, 10] {
+            let state = test_state(AuthMode::Github);
+            let db = &state.db;
+            for n in 0..rooms {
+                chat(db, &format!("room-{n}"), n, "user:owner");
+            }
+            STATEMENTS.with(|count| count.set(0));
+            db.with(|c| {
+                // SAFETY: handle stays owned/locked by Db; callback has no SQLite calls.
+                let rc = unsafe {
+                    rusqlite::ffi::sqlite3_trace_v2(
+                        c.handle(),
+                        rusqlite::ffi::SQLITE_TRACE_STMT as u32,
+                        Some(count_statement),
+                        std::ptr::null_mut(),
+                    )
+                };
+                assert_eq!(rc, rusqlite::ffi::SQLITE_OK);
+                Ok(())
+            })
+            .unwrap();
+            let result = db.chats_of_member("user:owner");
+            db.with(|c| {
+                // SAFETY: the connection remains owned/locked; the callback holds no context pointer.
+                let rc = unsafe {
+                    rusqlite::ffi::sqlite3_trace_v2(c.handle(), 0, None, std::ptr::null_mut())
+                };
+                assert_eq!(rc, rusqlite::ffi::SQLITE_OK);
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(result.unwrap().len(), rooms as usize);
+            assert_eq!(
+                STATEMENTS.with(std::cell::Cell::get),
+                if rooms == 0 { 1 } else { 2 },
+                "room count {rooms}"
+            );
+        }
     }
 }
 

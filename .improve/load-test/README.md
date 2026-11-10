@@ -31,7 +31,7 @@ Value checks cover existing DM/group positions, missing-room `(0,0)` defaults, c
 
 ## Recorded verification
 
-The suite is new; there was no pre-existing suite-test baseline. Its initial completed regression gate passed8 tests/0fail/0skip in8.138s. After the final engine content-cache/version check, the same8 tests passed in6.028s. These are suite gates, not native Rust test results or performance improvements. Before/after query profiles each contain1616 changed-query executions plus168 unchanged-control executions (3568 total). All8 fixtures passed value/default/integrity checks. Native Rust integration tests and full workspace/native CI remain blocked as reported by the parent phase; this suite does not turn them green.
+The suite is new; there was no pre-existing suite-test baseline. Its initial completed regression gate passed8 tests/0fail/0skip in8.138s. After the final engine content-cache/version check, the same8 tests passed in6.028s. These are suite gates, not native Rust test results or performance improvements. Before/after query profiles each contain1616 changed-query executions plus168 unchanged-control executions (3568 total). All8 fixtures passed value/default/integrity checks. Native integration was unrun at that original capture. The later roster follow-up below adds actual native package gates; full workspace/platform CI status is reported separately by the parent phase.
 
 `test_suite.py` checks known percentile interpolation, strict pairing, exact sign-test values, tie behavior, stale-source rejection, meaningful fixture relationships/defaults, row counters, N+1 statement counts, and failure paths. No production behavior is mocked as a passing native gate.
 
@@ -45,6 +45,25 @@ Statistics use p50/p95/p99 with linear interpolation, seeded2000-resample bootst
 
 `RESULTS.json` retains source hashes, all raw samples/order, fixture counts/bytes, plans, logical visits and VM steps. `RESULTS.md` is the compact summary. `latency.html` is self-contained inline SVG plus complete p50/p95/p99 table, with no external resources; `latency.png` is the inspected QA/export image. All chart panels use milliseconds, p50 lines and p50→p95 shading.
 
-Other databases/read paths remain separate coverage: box local store/FTS/jobs and relay unread get supplementary probes, while native DeviceStore/Mac blob persistence, Matrix SDK/Synapse, operational migration history, CRDT validity, concurrent writes, WAL/checkpoint pressure and production distributions require their real environments and gates. The narrow improvement removes an unnecessary indexed **range scan** for statistics; it neither adds a missing index nor fixes the separately measured registry N+1.
+Other databases/read paths remain separate coverage: box local store/FTS/jobs and relay unread get supplementary probes, while native DeviceStore/Mac blob persistence, Matrix SDK/Synapse, operational migration history and CRDT validity need their own targeted environments and gates. Concurrent writes and WAL/checkpoint pressure are unmeasured workloads, rather than an external blocker to local SQL testing. Production distributions are unknown. The original room-position improvement removes an unnecessary indexed **range scan** for statistics; the later roster comparison below addresses the measured N+1 separately.
+
+## Native roster batching follow-up
+
+```sh
+cargo test --locked --offline -p arbos-relay roster_batch_tests
+python3 -m unittest discover -s .improve/load-test -p 'test_*.py' -v
+python3 .improve/load-test/roster.py
+python3 .improve/load-test/render_roster.py
+```
+
+Use a verified network fence for native test execution. The recorded native gates used a fresh HOME and a sandbox denying every network operation; the fixtures use generated local data. `ROSTER_BEFORE_SOURCE.json` is extracted from published Phase7 commit `586f37aa5708e88b91cd7dc45a10aad86eb36aa7`. The first chat SELECT and individual-room roster SELECT are unchanged. `source.py` additionally extracts the reviewed batched roster SELECT and rejects unknown query shapes.
+
+The three actual Rust regressions pin complete list/detail JSON parity with hidden/read/banned state, live/deleted/left/foreign membership scope, tie ordering and all membership fields. Before the fix, both behavioral controls passed while the actual SQLite trace budget failed: 10 rooms executed 11 statements. The fixed function executes one statement for an empty result and two for nonempty results. All three tests passed; broader DB and people filters, package check/build and Clippy over all targets with warnings denied also passed. The Python suite now has 12 passing tests, including a deleted-chat-guard negative control. Native verification uses separate target directories per source snapshot, with workspace packages forcibly cleaned before each rebuild. A discovered shared-target Cargo cache alias superseded the earlier shared-cache GREEN rows. Isolated original verification reproduced two passing behavioral controls plus the 11-versus-2 statement-budget failure; the independently rebuilt fixed snapshot passed all three tests, broader filters, check, Clippy and build. No SQL timing artifact changed.
+
+`roster.py` compares the retained original N+1 against the actual two-SELECT path on the same four registry fixtures with 101 randomized pairs per scale. It checks complete ordered SQL row equality for owner, peer, agent and missing principals. `ROSTER_RESULTS.json` retains raw pairs, source hashes, counters and plans. `roster.html` is a self-contained Matplotlib SVG/table report; `roster.png` is its inspected export.
+
+At 10,000 rooms, warm SQL p50 was 84.308→27.615 ms (3.05×), p95 89.277→29.275 ms, with 10,001→2 statements and identical 60,000 returned chat/member rows. Paired median saving 95% interval was 56.538–56.852 ms; exact sign-test p was 7.89e-31. Repeated scope selection raises logical visits 70,000→90,000 and VM steps 2,165,015→2,465,039. These are declared synthetic SQL measurements, excluding Rust mapping, mutex waits, network and rendering. The new native method holds one connection lock through both queries, whereas the old method reacquired it between rosters; concurrent writer latency is unmeasured. No complete app speedup is claimed.
+
+The earlier `run.py` registry series remains a retained original-SQL control for the room-position experiment. It is not the current native roster path; use `roster.py` for the batching comparison.
 
 Measurement provenance check: the final main RESULTS.json, supplementary metadata and current engine all share build_content_sha256 `297787c1d9c34e3d4bd34ea0b1f58f5b634d99734218f16da4ac01ba109961c4`, SQLite source hash and compile flags. The retained main measurement driver therefore matches current source exactly. The earlier1,341,672-byte figure came from the unnamed `scan.dylib` smoke build; the content-addressed Mach-O filename embeds a longer install name and is1,341,688 bytes. The final profiles all used the latter; no query/driver logic changed after profiling.

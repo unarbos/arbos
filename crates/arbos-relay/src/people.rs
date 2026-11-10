@@ -5492,6 +5492,130 @@ mod membership_notice_tests {
 }
 
 #[cfg(test)]
+mod roster_batch_tests {
+    use super::tests_support::{dm, group, person, project_of};
+    use super::*;
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    async fn json_response(response: Response) -> Value {
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn list_matches_detail_json_with_read_state_and_visibility_boundaries() {
+        let state = test_state(AuthMode::Github);
+        let (alice, dev) = person(&state, 91);
+        let (bob, _) = person(&state, 92);
+        let (carol, _) = person(&state, 93);
+        let (dave, _) = person(&state, 94);
+        let visible = group(&state, &[&alice, &bob, &carol, &dave]);
+        let direct = dm(&state, &alice, &bob);
+        let hidden = group(&state, &[&alice, &bob]);
+        let deleted = group(&state, &[&alice, &bob]);
+        let left = group(&state, &[&alice, &bob]);
+        let foreign = group(&state, &[&bob, &carol]);
+        state
+            .db
+            .set_hidden(&hidden, &device_of(&dev), true)
+            .unwrap();
+        state
+            .db
+            .set_hidden(&direct, "another-device", true)
+            .unwrap();
+        state
+            .db
+            .with(|c| {
+                c.execute(
+                    "UPDATE people_chats SET deleted_at=1 WHERE id=?1",
+                    rusqlite::params![deleted],
+                )
+            })
+            .unwrap();
+        state
+            .db
+            .remove_member(&left, &format!("user:{alice}"), false)
+            .unwrap();
+        state
+            .db
+            .remove_member(&visible, &format!("user:{carol}"), false)
+            .unwrap();
+        state
+            .db
+            .remove_member(&visible, &format!("user:{dave}"), true)
+            .unwrap();
+        for name in ["Zed", "Ada"] {
+            let project = project_of(&state, &alice, name);
+            state
+                .db
+                .add_member(
+                    &visible,
+                    &format!("agent:{project}"),
+                    "agent",
+                    &alice,
+                    &json!({}),
+                )
+                .unwrap();
+        }
+        state
+            .db
+            .set_member_settings(
+                &visible,
+                &format!("user:{alice}"),
+                &json!({"nested":["é",true,null]}),
+            )
+            .unwrap();
+        state
+            .db
+            .set_member_muted(&visible, &format!("user:{bob}"), true)
+            .unwrap();
+        state
+            .db
+            .set_member_silenced(&visible, &format!("user:{bob}"), true, Some(i64::MAX))
+            .unwrap();
+        for n in 0..3 {
+            state
+                .db
+                .append_row(
+                    &room_of(&visible),
+                    "test-device",
+                    &format!("row-{n}"),
+                    b"fixture",
+                )
+                .unwrap();
+        }
+        state
+            .db
+            .set_read_mark(&visible, &device_of(&dev), 1)
+            .unwrap();
+        state.db.advance_user_cursor(&alice, &visible, 2).unwrap();
+
+        let list = json_response(chats_list(State(state.clone()), dev.clone()).await).await;
+        let entries = list.as_array().unwrap();
+        assert_eq!(entries.len(), 2);
+        for id in [&visible, &direct] {
+            let listed = entries.iter().find(|value| value["id"] == *id).unwrap();
+            let detail =
+                json_response(chat_get(State(state.clone()), dev.clone(), Path(id.clone())).await)
+                    .await;
+            assert_eq!(*listed, detail, "list and individual-room DTO must agree");
+        }
+        let listed = entries.iter().find(|value| value["id"] == visible).unwrap();
+        assert_eq!(listed["read_seq"], 2);
+        assert_eq!(listed["head_seq"], 3);
+        assert_eq!(listed["members"].as_array().unwrap().len(), 4);
+        assert_eq!(listed["banned"].as_array().unwrap().len(), 1);
+        for id in [&hidden, &deleted, &left, &foreign] {
+            assert!(!entries.iter().any(|value| value["id"] == *id));
+        }
+    }
+}
+
+#[cfg(test)]
 mod read_cursor_tests {
     //! #1438: one read cursor per user. A chat is unread only for announced messages someone
     //! else wrote after the user's read mark — never for the user's own rows (from any of their
