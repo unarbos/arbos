@@ -1,0 +1,28 @@
+{
+  "run_id": 42828800182,
+  "head_sha": "84cb882feefc327e67167b723c9441015ab65944",
+  "run_attempt": 1,
+  "status": "completed",
+  "conclusion": "failure",
+  "artifact_id": 13777124404,
+  "artifact_bytes": 117634,
+  "artifact_sha256": "029567f1b94430209ac8f847b2ebf6de5e5d5f7938b94df1d1f2542e3b836b3d",
+  "github_digest_match": true,
+  "entries": [
+    {
+      "name": "xcodebuild-test-build.log",
+      "mode": "0o100644",
+      "compressed_bytes": 51900,
+      "bytes": 741064,
+      "sha256": "721dc37341e6750281ef034f72147563d9f00bdcebee63735811667c02a9d2d8"
+    },
+    {
+      "name": "xcodebuild-test.log",
+      "mode": "0o100644",
+      "compressed_bytes": 65440,
+      "bytes": 638639,
+      "sha256": "a0fe4db1c34fb8bd82837f9ad7c6ffa33f790165e74ea42ccc7f6518c2ddb05c"
+    }
+  ],
+  "safety": "Inspected exact two regular0644 UTF8 text log entries, bounded sizes, no path traversal/links/encryption/NUL; no archive executable ran."
+}

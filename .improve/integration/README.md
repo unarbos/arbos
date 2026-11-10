@@ -1,37 +1,37 @@
-# Reviewed redaction overlap resolution
+# Review and reproduce the phase composition
 
-PR #2953 (Phase 6, `373c94b021e70ca0d1ae5049cd0e720b98aa103a`)
-and PR #2955 (Phase 8, `e978f28d145d8674cbd5de5b1ecb02f3cc2f5d2d`)
-independently start from the same upstream baseline and change the same redaction
-region. Their overlap requires deliberate resolution.
+All ten phase PRs target the recorded upstream main base independently. Review
+them in the order listed in [the report](../REPORT.md). Nothing was merged or
+deployed. Their overlapping files are deliberate: a blanket ours/theirs conflict
+resolution can discard ownership, privacy or performance fixes.
 
-[redaction-after-performance.patch](redaction-after-performance.patch) is the
-reviewed Phase-8 delta **against the Phase-6 version of this file**. It retains
-all three LazyLocks and the concurrency regression; builds the new token matcher
-and owned replacement strings once; keeps `KEY_PREFIXES`, the placeholder cache
-and classifier cache unchanged; and retains all three new boundary regressions.
-The cached redaction loop uses `replacement.as_str()`.
+[The versioned assembler](assembly/README.md) pins immutable phase3–9 code inputs.
+It reads Git blobs, applies guarded private-index changes, materializes a new local
+source tree and records every source hash/mode. It never fetches, merges, commits,
+updates refs, pushes, runs the app or contacts a network. Run only after reviewing
+the pins and assets; missing inputs, moving labels or unknown conflicts fail.
 
-For a local review checkout containing the Phase-6 file, check and apply the
-patch, then retain that combined file when resolving Phase 8's overlap. Take the
-other Phase-8 suite files normally. The patch is not intended for pristine main,
-and an already-resolved or later-modified file should not be overwritten blindly.
+The important overlaps are explicit:
 
-```sh
-git apply --check .improve/integration/redaction-after-performance.patch
-git apply .improve/integration/redaction-after-performance.patch
-```
+- Phase4 carries Phase3 policies and shared test repairs. Twelve differing
+  supersets have exact source/diff guards; identical blob/mode copies carry once.
+- Phase6 upload concurrency layers onto the owned/local-fixture-aware AppModel.
+  Its standalone main-based file cannot replace that ownership implementation.
+- Phase6 relay/API and Phase7 people changes preserve earlier lifetime/privacy
+  behavior through narrowly reviewed deltas.
+- The canonical redaction patch combines the Phase8 credential-boundary repair
+  with Phase6 cached matchers, preserving actual expected outputs.
+- Common Swift/Rust runtime fences remain identical where required. The new
+  identical Phase3/4 consumer workflow carries once; Phase9 retains all tests
+  while adding only the three free CI fixes.
 
-Canonical combined file SHA256:
-`1919913639b72ba43ffcff9a51bd29fe3038f08701de5e390463613b2dbde3da`.
-The independent review checked patch application and exact resulting bytes.
-The blank-line context spaces in this unified patch are preserved deliberately;
-its local Git attribute affects patch artifacts only.
+The recipe produces source, rather than generated FFI binaries, SDKs or caches.
+Build artifacts have their own pinned ABI/native receipts. Its Phase9 code pin
+contains historical report metadata; this later publication supplies the final
+report/recipe/results without changing those tested product-source inputs.
+Compilation, tests and benchmark receipts are separate from assembly success.
+See [source projection](../verification/source-projection/README.md) for the exact
+relationship to the completed Linux and native executions.
 
-The isolated combined validation materializes relevant baseline files and applies
-each independent phase patch. Phases 3–7 apply cleanly; redaction is the sole
-Phase-8 conflict. The canonical resolution is tested with actual-source core
-unit tests and generated laws, together with Phase 6's optimized URL module.
-See [the final report](../REPORT.md) and retained verification summaries for counts,
-commands, source hashes and remaining integration limits. No branch merge,
-production operation or deployment was performed.
+Synthetic local profiles do not establish live-user chat-open/send latency.
+Telemetry remains owner-deferred for discussion with Jacob (const).

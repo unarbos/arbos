@@ -1,0 +1,24 @@
+{
+  "status": "PASS for native input source projection only",
+  "tracked_native_files": 470,
+  "actual_compiler_unique_files": 192,
+  "Git_tree_blob_checks": 470,
+  "byte_or_mode_mismatches": 0,
+  "unexpected_native_paths": 0,
+  "external_prepared_input_mismatches": 0,
+  "synthetic_validator_contract_checks": {
+    "passed": 11,
+    "failed": 0,
+    "seconds": 0.019,
+    "scope": "Temporary synthetic filesystem only; no Arbos application/build/tests"
+  },
+  "retained_complete_native_reference_check": "PASS",
+  "native_execution_this_task": false,
+  "script_hashes": {
+    "prepare.py": "15f6e3f7259db53d16b991bab5ff9b6b4425de0325b94ce3683cf100d035ff5c",
+    "validate.py": "65144d8828490e4e0deff4f97050585976b65c1c2240e1e98fc4f383fd7aaa75",
+    "blob_check.py": "26ea8b9316009e0bf7ef73a329001d2e7437530a8361c10c3e68b8a45a5a91f2",
+    "test_validate.py": "70039544e44a28bbb9f94cea99521f495a8eff72dad19a3677bb954897c25059"
+  },
+  "ceiling": "Source parity does not create another native runtime gate or an all-final-source unfiltered UI claim."
+}

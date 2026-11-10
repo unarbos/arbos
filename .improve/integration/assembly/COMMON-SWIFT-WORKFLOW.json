@@ -1,0 +1,44 @@
+{
+  "path": ".github/workflows/swift-core-check.yml",
+  "phases": {
+    "3": {
+      "sha256": "9863a44d7bb4f7488dab349fd4de911cb20f3d6dd3cf88c7dded40745d2814a7",
+      "mode": "100644",
+      "changed_from_BASE": true
+    },
+    "4": {
+      "sha256": "9863a44d7bb4f7488dab349fd4de911cb20f3d6dd3cf88c7dded40745d2814a7",
+      "mode": "100644",
+      "changed_from_BASE": true
+    },
+    "5": {
+      "sha256": "4ca0c75cc5979da5a156f458ef6f12a886d128b3fc5e9f7da158777f2f904243",
+      "mode": "100644",
+      "changed_from_BASE": false
+    },
+    "6": {
+      "sha256": "4ca0c75cc5979da5a156f458ef6f12a886d128b3fc5e9f7da158777f2f904243",
+      "mode": "100644",
+      "changed_from_BASE": false
+    },
+    "7": {
+      "sha256": "4ca0c75cc5979da5a156f458ef6f12a886d128b3fc5e9f7da158777f2f904243",
+      "mode": "100644",
+      "changed_from_BASE": false
+    },
+    "8": {
+      "sha256": "4ca0c75cc5979da5a156f458ef6f12a886d128b3fc5e9f7da158777f2f904243",
+      "mode": "100644",
+      "changed_from_BASE": false
+    },
+    "9": {
+      "sha256": "4ca0c75cc5979da5a156f458ef6f12a886d128b3fc5e9f7da158777f2f904243",
+      "mode": "100644",
+      "changed_from_BASE": false
+    }
+  },
+  "expected_combined_sha256": "9863a44d7bb4f7488dab349fd4de911cb20f3d6dd3cf88c7dded40745d2814a7",
+  "mode": "100644",
+  "composition": "P3 normal patch; P4 existing exact-identical skip; later phase diffs do not touch workflow. No new broad workflow exception or changed assembler.",
+  "postassembly_check": "Verify exact expected workflow hash in complete output manifest."
+}

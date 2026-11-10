@@ -1,0 +1,34 @@
+{
+  "runs": [
+    {
+      "local_run_label": "corrected-full-v1",
+      "log_sha256": "39af787c3c8c09589395ad4fd484d5fa4503d86bb0854be8006919ebd700fd0f",
+      "cases": [
+        {
+          "name": "AddMembersActionTests.testAnOldRelayWithoutTheBatchRouteGetsThePerItemCalls",
+          "status": "passed",
+          "seconds": 0.045
+        },
+        {
+          "name": "ChatSearchResultJumpUITests.testAResultTapOnTheSenderAvatarAlsoStaysInTheChat",
+          "status": "passed",
+          "seconds": 20.839
+        }
+      ],
+      "scope": "Existing later integrated source run, read-only case observation; no rerun and no proof of old hosted failure cause."
+    },
+    {
+      "local_run_label": "observer-v3-native",
+      "log_sha256": "38f1ff0f4c5f811ec8018bdf07e4d44efb3dfc548a9d6e38d94a222ba1c36309",
+      "cases": [
+        {
+          "name": "AddMembersActionTests.testAnOldRelayWithoutTheBatchRouteGetsThePerItemCalls",
+          "status": "passed",
+          "seconds": 0.036
+        }
+      ],
+      "scope": "Existing later integrated source run, read-only case observation; no rerun and no proof of old hosted failure cause."
+    }
+  ],
+  "limits": "These sources differ from immutable P6 and do not relabel that historical failed run as passing."
+}

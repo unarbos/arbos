@@ -1,0 +1,14 @@
+{
+  "scope": "No repeat305 solely for DEBUGobserver change; exact source-method projection reuse, not a new execution.",
+  "account_work_receipt": "corrected-preflight-v1/ACCOUNT-WORK/GATES.json",
+  "recorded_runtime_assertions": 305,
+  "recorded_groups": 38,
+  "recorded_seconds": 35.70728691702243,
+  "old_ChatView_sha256": "ce7e5c6b54cefdf25c47236e81652e63770a03dcf55eb6d22a44b2b349167240",
+  "new_ChatView_sha256": "9a1ef5c35bda8fefa417ce24114f1b56d1633f48d2b231f2ff34c1bd8caf5e57",
+  "entire_ChatView_outside_ComposerDraft_DEBUG_block_byte_identical": true,
+  "projection_sha256": "f80036f5b06a10eff2915054440043cae7a1cb0dac0e0de3a128aa4e87e7daa2",
+  "other_change": "ComposerMetricsTests oracle changes are not selected controller method inputs; actual559unit/5Avatar gate is separately reported.",
+  "separate_changed_helper_checks": "Draft18 includedinactual305; source-consumer29 andCalendar29 separatelypassed; changed source/checker bytes are explicit in EXPECTED-PROJECTION.",
+  "final_manifest_obligation": "All50 exact reviewed delta paths/modes/hashes and nine corrected Swift inputs must match after actual assembly; every other path must equal419d."
+}
