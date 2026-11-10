@@ -1654,12 +1654,12 @@ struct RowView: View, Equatable {
                     // ScrollView so a drag on / onto a bubble sticks
                     // ([feedback app-01M5Q1N6C1HAKHC6P2XPEWMRSS]). Copy is on long-press.
                     if !linkOnly {
-                        TypedBody(text: text, ink: theme.userText, chip: theme.userCodeChip, mentions: mentions)
+                        TypedBody(text: text, ink: theme.userText, chip: theme.userCodeChip, mentions: mentions, mediaOrigin: MediaOrigin(model, account: account))
                     }
                     // The link preview card under the text — or as the whole bubble when the
                     // message was only the link ([feedback link-embeds-ios-2026-10-27]).
                     if let preview {
-                        LinkPreviewCard(preview: preview, chatId: chatId, messageId: row.messageId, own: true)
+                        LinkPreviewCard(preview: preview, chatId: chatId, messageId: row.messageId, own: true, origin: MediaOrigin(model, account: account))
                             .padding(.top, linkOnly ? 0 : 2)
                     }
                 }
@@ -1705,10 +1705,10 @@ struct RowView: View, Equatable {
                             .padding(.bottom, Self.quoteToTextGap)
                     }
                     if !(text.isEmpty && preview != nil) {
-                        TypedBody(text: text, ink: theme.text, chip: theme.codeChip, mentions: mentions)
+                        TypedBody(text: text, ink: theme.text, chip: theme.codeChip, mentions: mentions, mediaOrigin: MediaOrigin(model, account: account))
                     }
                     if let preview {
-                        LinkPreviewCard(preview: preview, chatId: chatId, messageId: row.messageId, own: false)
+                        LinkPreviewCard(preview: preview, chatId: chatId, messageId: row.messageId, own: false, origin: MediaOrigin(model, account: account))
                             .padding(.top, text.isEmpty ? 0 : 8)
                     }
                 }
@@ -1756,7 +1756,7 @@ struct RowView: View, Equatable {
                         }
                         VStack(alignment: .leading, spacing: 8) {
                             ForEach(Array(blocks.enumerated()), id: \.offset) { i, block in
-                                BlockView(block: block, live: live && i == blocks.count - 1, mentions: mentions, chatId: chatId, messageId: row.messageId)
+                                BlockView(block: block, live: live && i == blocks.count - 1, mentions: mentions, chatId: chatId, messageId: row.messageId, mediaOrigin: MediaOrigin(model, account: account))
                             }
                         }
                     }
@@ -1777,7 +1777,7 @@ struct RowView: View, Equatable {
                         quoteHeader(quote, color: theme.text)
                     }
                     ForEach(Array(blocks.enumerated()), id: \.offset) { i, block in
-                        BlockView(block: block, live: live && i == blocks.count - 1, mentions: mentions, chatId: chatId, messageId: row.messageId)
+                        BlockView(block: block, live: live && i == blocks.count - 1, mentions: mentions, chatId: chatId, messageId: row.messageId, mediaOrigin: MediaOrigin(model, account: account))
                     }
                 }
                 .padding(.horizontal, Theme.bubbleHPad)
@@ -2295,6 +2295,7 @@ struct BlockView: View {
     var ink: Color? = nil
     /// The code chip behind `` `code` `` (`nil` = `theme.codeChip`).
     var chip: Color? = nil
+    var mediaOrigin: MediaOrigin? = nil
 
     /// The quote bar's width and the gap to the quoted text (Mac `QUOTE_BAR` / `QUOTE_GAP`).
     static let quoteBar: CGFloat = 3
@@ -2340,7 +2341,7 @@ struct BlockView: View {
                     .accessibilityIdentifier("quote-bar")
                 VStack(alignment: .leading, spacing: 6) {
                     ForEach(Array(inner.enumerated()), id: \.offset) { _, b in
-                        BlockView(block: b, live: false, mentions: mentions, ink: muted, chip: chip)
+                        BlockView(block: b, live: false, mentions: mentions, ink: muted, chip: chip, mediaOrigin: mediaOrigin)
                     }
                 }
             }
@@ -2377,7 +2378,7 @@ struct BlockView: View {
         case .chart(let partId, let spec, _):
             ChartCard(partId: partId, spec: spec)
         case .linkPreview(_, let preview):
-            LinkPreviewCard(preview: preview, chatId: chatId, messageId: messageId, own: false)
+            LinkPreviewCard(preview: preview, chatId: chatId, messageId: messageId, own: false, origin: mediaOrigin)
         case .math(let source):
             // Display math: typeset, a size up, centred on its own line (KaTeX's display
             // mode in Grok Bot).
@@ -2407,12 +2408,13 @@ struct TypedBody: View {
     let ink: Color
     let chip: Color
     let mentions: MentionTable
+    var mediaOrigin: MediaOrigin? = nil
 
     var body: some View {
         let blocks = Markdown.blocks(text)
         VStack(alignment: .leading, spacing: 6) {
             ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
-                BlockView(block: block, live: false, mentions: mentions, ink: ink, chip: chip)
+                BlockView(block: block, live: false, mentions: mentions, ink: ink, chip: chip, mediaOrigin: mediaOrigin)
             }
         }
     }
