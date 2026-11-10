@@ -1,0 +1,71 @@
+{
+  "before": {
+    "scope": "Five complete AvatarBackSwipe case verdicts from incomplete original full C19 run; same owned iOS26.2 device and unchanged UI source",
+    "cases": [
+      {
+        "test": "testASwipeRightStartingOnASenderAvatarGoesBack",
+        "result": "failed",
+        "seconds": 25.699
+      },
+      {
+        "test": "testASwipeRightStartingOnTheHeaderAvatarGoesBack",
+        "result": "passed",
+        "seconds": 9.309
+      },
+      {
+        "test": "testATapOnASenderAvatarStillOpensTheProfile",
+        "result": "failed",
+        "seconds": 25.92
+      },
+      {
+        "test": "testATapOnTheHeaderAvatarStillOpensTheProfile",
+        "result": "passed",
+        "seconds": 8.237
+      },
+      {
+        "test": "testAVerticalDragStartingOnASenderAvatarStillScrolls",
+        "result": "failed",
+        "seconds": 25.511
+      }
+    ],
+    "log_sha256": "7516bd4b537f0b0abc211a3a3fa35eadc13e6e362bd93c7129e06ff84afc380b"
+  },
+  "after": {
+    "scope": "Existing whole AvatarBackSwipe class selected for causal one-line check; not fullsuite",
+    "cases": [
+      {
+        "test": "testASwipeRightStartingOnASenderAvatarGoesBack",
+        "result": "passed",
+        "seconds": 10.571
+      },
+      {
+        "test": "testASwipeRightStartingOnTheHeaderAvatarGoesBack",
+        "result": "passed",
+        "seconds": 9.55
+      },
+      {
+        "test": "testATapOnASenderAvatarStillOpensTheProfile",
+        "result": "passed",
+        "seconds": 8.597
+      },
+      {
+        "test": "testATapOnTheHeaderAvatarStillOpensTheProfile",
+        "result": "passed",
+        "seconds": 8.399
+      },
+      {
+        "test": "testAVerticalDragStartingOnASenderAvatarStillScrolls",
+        "result": "passed",
+        "seconds": 9.299
+      }
+    ],
+    "xcodebuild_exit": 0,
+    "xcresult_summary_exit": 0,
+    "log_sha256": "ea4fec7cc0bd1a34af355ac72ecf79e7eef656bef266dc88f1e4b148cd4e67b6"
+  },
+  "test_source_bytes_unchanged": true,
+  "all2689_variant_sources_unchanged": true,
+  "FFI_bytes_unchanged": true,
+  "golden_fixture_addition_noninterference": "FIXTURE-NONINTERFERENCE.json",
+  "claim": "The one-line removal restores the three exercised sender-avatar interactions while both header controls stay green. Full corrected unfiltered unit/UI validation remains required."
+}

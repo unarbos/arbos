@@ -48,6 +48,7 @@ enum LibraryList {
         let f = DateFormatter()
         f.calendar = calendar
         f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = calendar.timeZone
         if (0..<7).contains(days) {
             f.dateFormat = "EEEE"
         } else if calendar.component(.year, from: date) == calendar.component(.year, from: today) {
@@ -92,6 +93,7 @@ enum LibraryList {
         let f = DateFormatter()
         f.calendar = calendar
         f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = calendar.timeZone
         f.dateFormat = "h:mm a"
         let time = f.string(from: date)
         if calendar.isDate(date, inSameDayAs: now) { return "Today \(time)" }

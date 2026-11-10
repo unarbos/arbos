@@ -15,7 +15,7 @@ METHODS = {
     'poll_data': 9, 'people': 5, 'servers': 8, 'store_docs': 4,
     'matrix_entry': 4, 'secrets': 9, 'push_admission': 5,
     'feedback_capture': 5, 'startup': 6, 'notification': 6,
-    'push_registration': 6, 'draft_sends': 9, 'reset': 9,
+    'push_registration': 6, 'draft_sends': 18, 'reset': 9,
     'uploads': 11, 'identity': 6, 'media': 8, 'memo': 5,
     'forward': 6, 'actions': 19, 'connectors': 6, 'ui_identity': 4,
     'firstlogin': 5, 'people_actions': 12, 'avatar_state': 5,

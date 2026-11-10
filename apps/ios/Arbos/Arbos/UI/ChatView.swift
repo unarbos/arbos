@@ -4599,7 +4599,6 @@ extension ChatSession {
                     isMessage: reply,
                     mentions: mentions)
                 .equatable()
-                .id(account)
                 // Search result rows take a tap (simultaneous, so a link still reaches the
                 // system; `searchHit` above stands the inner routes down for the same rows).
                 .modifier(SearchResultTap(active: searchHitsActive && Self.isMessageBubble(row)) {
@@ -4925,10 +4924,12 @@ final class ComposerDraft: ObservableObject {
     var onCaretOrMentions: (() -> Void)?
 
     #if DEBUG
-    /// Drafts alive right now, so a test can see a closed chat's draft free.
-    nonisolated(unsafe) static var live = 0
-    init() { Self.live += 1 }
-    deinit { Self.live -= 1 }
+    /// Weak debug inventory for observing the exact hosted composer instances.
+    private static let liveObjects = NSHashTable<ComposerDraft>.weakObjects()
+    /// A temporary strong snapshot. Lifetime tests keep only weak references to
+    /// their newly hosted drafts, while explicitly retaining pre-existing ones.
+    static var liveInstances: [ComposerDraft] { liveObjects.allObjects }
+    init() { Self.liveObjects.add(self) }
     #endif
 }
 

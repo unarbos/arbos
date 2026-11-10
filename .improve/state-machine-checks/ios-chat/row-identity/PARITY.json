@@ -1,0 +1,11 @@
+{
+  "canonical_input_count": 2689,
+  "all_expected_source_bytes_and_modes_unchanged_after_run": true,
+  "all14_repository_UI_Swift_sources_byte_identical_to_C19": true,
+  "only_one_product_line_removed": true,
+  "all_ChatView_numeric_tokens_unchanged": true,
+  "host_account_identity_retained": true,
+  "RowView_account_equality_retained": true,
+  "unique_row_scroll_anchor_retained": true,
+  "scope": "Parity verification, no tests run by this script"
+}

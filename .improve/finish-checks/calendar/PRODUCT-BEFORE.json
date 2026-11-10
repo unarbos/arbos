@@ -1,0 +1,60 @@
+{
+  "sources": {
+    "0:apps/ios/Arbos/Arbos/UI/LibraryList.swift": "b56c88fefcb51654b14c04d9c7cb4e35161c73057d5757f446f7af319647fd69",
+    "1:apps/ios/Arbos/Arbos/UI/BlockedState.swift": "0847f399fd699ad3740a79482af3e725fc26e99efa2feb5fc957771721a5f79f",
+    "2:apps/ios/Arbos/ArbosTests/LibraryListTests.swift": "b3a4f65b6ad45de2e72f83c7112f66d049a684fd4a34285a9b74da0585c518fa",
+    "3:apps/ios/Arbos/ArbosTests/BlockedStateTests.swift": "52009f8b80f8060e5c5f2e13865bd70b07c56e592800701d2d965ff2c20e49dd"
+  },
+  "fixture_sha256": "b1e1e3144bbd643c3fd00891ce2eb53fb94ab7d2025cba5001e6028c0a5aee34",
+  "compile_exit": 0,
+  "exit_code": 1,
+  "results": {
+    "assertions": 29,
+    "current_zone": "America/Denver",
+    "failed": 8,
+    "failures": [
+      {
+        "actual": "Yesterday 4:00 PM",
+        "expected": "Yesterday 10:00 PM",
+        "group": "existing-library-words"
+      },
+      {
+        "actual": "Oct 3, 5:00 AM",
+        "expected": "Oct 3, 11:00 AM",
+        "group": "existing-library-words"
+      },
+      {
+        "actual": "Thursday",
+        "expected": "Friday",
+        "group": "opposing-zone-boundaries"
+      },
+      {
+        "actual": "Dec 30, 2025",
+        "expected": "Dec 31, 2025",
+        "group": "opposing-zone-boundaries"
+      },
+      {
+        "actual": "Yesterday 7:00 AM",
+        "expected": "Yesterday 10:00 PM",
+        "group": "opposing-zone-boundaries"
+      },
+      {
+        "actual": "Dec 30, 2025, 8:30 AM",
+        "expected": "Dec 31, 2025, 12:30 AM",
+        "group": "opposing-zone-boundaries"
+      },
+      {
+        "actual": "Yesterday 4:00 AM",
+        "expected": "Yesterday 10:00 PM",
+        "group": "opposing-zone-boundaries"
+      },
+      {
+        "actual": "Dec 31, 2025, 5:30 AM",
+        "expected": "Dec 31, 2025, 12:30 AM",
+        "group": "opposing-zone-boundaries"
+      }
+    ],
+    "passed": 21
+  },
+  "seconds": 1.3188059999374673
+}

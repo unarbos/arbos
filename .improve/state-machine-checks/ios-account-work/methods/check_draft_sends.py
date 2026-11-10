@@ -15,6 +15,8 @@ fixture=fixture.replace(' func users()async throws->[Person]{if let authorizatio
 fixture+=method(api,'bound')+'\n}\n'+helper
 if 'struct AccountWork' in app:
  m=re.search(r'^(?:private )?struct AccountWork \{',app,re.M);fixture+='\n'+app[m.start():app.index('\n}',m.start())+2]
+if 'private enum DraftDMWork {' in app:
+ m=re.search(r'^private enum DraftDMWork \{',app,re.M);fixture+='\n'+app[m.start():app.index('\n}',m.start())+2]
 if queue.exists():
  fixture+='\n'+queue.read_text()
  a=app.index('    private var draftSends =');b=app.index('\n',a);state=app[a:b]+'\n';a=app.index('    var draftDMSending: Bool {');state+=app[a:app.index('\n    }',a)+6]
@@ -28,17 +30,19 @@ struct RelayError:Error{let type="not_available"}
 struct UserError{let tag:String;static func refused(_ verb:String,_ detail:String)->Self{Self(tag:"refused")};static func classify(_ verb:String,_ error:Error)->Self{Self(tag:verb)}}
 let peopleSlot="people"
 @MainActor final class AppModel {
- var credentials:Bool?=true;var isFixture=false;var api:RelayAPI;var accountLifetime=WorkLifetime();var peopleChats:[PeopleChat]=[];var ensured:[String]=[];var failures:[String]=[];var delivered:[String]=[];var draftDM:PeopleChat?;var messages:[Id:Int]=[:];var caughtUp:Set<Id>=[];var path:[Route]=[];var clearedDrafts:[String]=[];var trackedTasks:[Task<Void,Never>]=[]
+ var credentials:Bool?=true;var isFixture=false;var api:RelayAPI;var accountLifetime=WorkLifetime();var peopleChats:[PeopleChat]=[];var ensured:[String]=[];var failures:[String]=[];var delivered:[String]=[];var draftDM:PeopleChat?;var messages:[Id:Int]=[:];var caughtUp:Set<Id>=[];var path:[Route]=[];var clearedDrafts:[String]=[];var trackedTasks:[Task<Void,Never>]=[];var fixtureCalls:[String]=[]
  static let draftDMPrefix="draft-dm:"
 '''+state+r'''
  init(_ session:Session){api=RelayAPI(session)}
  func refreshTokens(expectedOwner:WorkLifetime.Ticket?=nil)async->Bool{expectedOwner.map{accountLifetime.accepts($0)} ?? true}
  func replace(_ session:Session){accountLifetime.close();RESET_DRAFT;accountLifetime.reopen();api=RelayAPI(session);peopleChats=[];ensured=[];failures=[];delivered=[];draftDM=PeopleChat(id:"draft-dm:bob");messages=[:];caughtUp=[];path=[.chat(chatId:"draft-dm:bob",projectId:peopleSlot)]}
  func submit(_ handle:String,_ label:String){let draft=PeopleChat(id:Self.draftDMPrefix+handle);draftDM=draft;messages[draft.id]=0;caughtUp.insert(draft.id);path=[.chat(chatId:draft.id,projectId:peopleSlot)];sendDraftDM(draft){[weak self] id in self?.delivered.append(label+"->"+id)}}
+ func fixtureOpenDM(handle:String,navigate:Bool)->PeopleChat?{fixtureCalls.append(handle);let dm=PeopleChat(id:"fixture-"+handle);peopleChats.append(dm);return dm}
+ func fixtureAttachDoc(chatId:String){ensured.append(chatId)}
  func trackTask(_ body:@escaping @MainActor ()async->Void){trackedTasks.append(Task{@MainActor in await body()})}
  func ensureRoom(projectId:String,key:String,roomChat:String){ensured.append(key)};func fail(_ value:UserError){failures.append(value.tag)};func setComposerDraft(_ value:String,for id:String){clearedDrafts.append(id)}
 '''
-for name in ['accountWork','boundCallAPI','retireDraftSends']:
+for name in ['accountWork','boundCallAPI','retireDraftSends','draftDMWork']:
  if re.search(r'^    (?:private )?func '+name+r'\(',app,re.M):fixture+=method(app,name)+'\n'
 for name in ['createDM','sendDraftDM']:
  body=method(app,name)
@@ -59,16 +63,26 @@ fixture+='}\n'+r'''
   do{let a=Session("A");let m=AppModel(a);m.submit("alice","old");let b=Session("B");m.replace(b);await settle();let untouched=b.requests.isEmpty && m.delivered.isEmpty;b.finishDM("alice");a.finishDM("alice");await settle();record("queued-old-draft-task-cannot-originate-as-B",untouched)}
   do{let a=Session("A");let m=AppModel(a);m.submit("alice","old");let began=await spin{a.waiters["alice"] != nil};let b=Session("B");m.replace(b);m.submit("alice","new");await settle();let own=b.waiters["alice"] != nil;b.finishDM("alice");await settle();a.finishDM("alice");await settle();record("same-draft-new-account-starts-independent-current-request",began && own && m.delivered==["new->dm-alice-B"] && m.peopleChats==[PeopleChat(id:"dm-alice-B")])}
   do{let a=Session("A");let m=AppModel(a);m.submit("alice","admitted");let began=await spin{a.waiters["alice"] != nil};m.trackedTasks.last?.cancel();a.finishDM("alice");await settle();record("admitted-same-account-send-finishes-after-caller-cancellation",began && !m.draftDMSending && m.delivered==["admitted->dm-alice-A"])}
+  do{let a=Session("A");let m=AppModel(a);m.credentials=nil;m.isFixture=true;m.submit("alice","fixture-first");await settle();record("direct-load-fixture-without-credentials-creates-DM-and-delivers",m.fixtureCalls==["alice"] && m.ensured==["fixture-alice"] && m.peopleChats==[PeopleChat(id:"fixture-alice")] && m.delivered==["fixture-first->fixture-alice"] && m.draftDM==nil && m.path==[.chat(chatId:"fixture-alice",projectId:peopleSlot)] && a.requests.isEmpty)}
+  do{let a=Session("A");let m=AppModel(a);m.credentials=nil;m.isFixture=true;m.submit("alice","one");m.submit("alice","two");await settle();record("fixture-same-draft-FIFO-with-no-relay",m.fixtureCalls==["alice"] && m.delivered==["one->fixture-alice","two->fixture-alice"] && a.requests.isEmpty)}
+  do{let a=Session("A");let m=AppModel(a);m.credentials=nil;m.isFixture=true;m.submit("alice","old");m.replace(Session("B"));await settle();record("fixture-queued-retirement-cannot-create-or-drain",m.fixtureCalls.isEmpty && m.delivered.isEmpty && m.peopleChats.isEmpty && m.draftDM?.id=="draft-dm:bob")}
+  do{let a=Session("A");let m=AppModel(a);m.credentials=nil;m.submit("alice","unpaired");await settle();record("unpaired-live-path-remains-refused",a.requests.isEmpty && m.delivered.isEmpty && m.peopleChats.isEmpty && !m.draftDMSending)}
+  do{let a=Session("A");let m=AppModel(a);m.submit("alice","captured");let b=Session("B");m.api=RelayAPI(b);let began=await spin{a.waiters["alice"] != nil};a.finishDM("alice");await settle();record("same-owner-api-rebind-still-uses-admitted-API",began && a.requests==["alice"] && b.requests.isEmpty && m.delivered==["captured->dm-alice-A"])}
+  do{let a=Session("A");let m=AppModel(a);m.credentials=nil;m.isFixture=true;let caller=Task{@MainActor in m.submit("alice","cancelled")};caller.cancel();await caller.value;await settle();record("already-cancelled-fixture-caller-is-not-admitted",m.fixtureCalls.isEmpty && m.delivered.isEmpty && !m.draftDMSending && a.requests.isEmpty)}
+  do{let a=Session("A");let m=AppModel(a);m.credentials=nil;m.isFixture=true;m.accountLifetime.close();m.submit("alice","closed");await settle();record("closed-fixture-lifetime-is-not-admitted",m.fixtureCalls.isEmpty && m.delivered.isEmpty && !m.draftDMSending && a.requests.isEmpty)}
+  do{let a=Session("A");let m=AppModel(a);m.credentials=nil;m.isFixture=true;m.submit("alice","admitted");m.trackedTasks.last?.cancel();await settle();record("admitted-fixture-send-finishes-after-caller-cancellation",m.fixtureCalls==["alice"] && m.delivered==["admitted->fixture-alice"] && !m.draftDMSending && a.requests.isEmpty)}
+  do{let a=Session("A");let m=AppModel(a);m.credentials=nil;m.isFixture=true;m.submit("alice","captured-local");m.isFixture=false;await settle();record("queued-fixture-work-keeps-captured-local-tag",m.fixtureCalls==["alice"] && m.delivered==["captured-local->fixture-alice"] && a.requests.isEmpty)}
   let failed=results.filter{!($0["pass"]as!Bool)}.count;let value:[String:Any]=["passed":results.count-failed,"failed":failed,"total":results.count,"results":results];print(String(data:try! JSONSerialization.data(withJSONObject:value,options:[.sortedKeys]),encoding:.utf8)!);exit(failed==0 ? 0:1)
  }
 }
 '''
 if queue.exists():assert 'retireDraftSends()'in method(app,'unpair'),'The real account teardown must retire the queue'
 fixture=fixture.replace('RESET_DRAFT;','retireDraftSends();'if queue.exists()else'')
+(out/'extracted.swift').write_text(fixture)
 start=time.monotonic()
 with tempfile.TemporaryDirectory(prefix='arbos-ios-draft-sends-')as raw:
  tmp=Path(raw);src=tmp/'main.swift';src.write_text(fixture);binary=tmp/'checks';env={'PATH':'/usr/bin:/bin','HOME':str(tmp),'TMPDIR':str(tmp)}
- c=subprocess.run(['swiftc','-swift-version','5','-parse-as-library',str(src),'-o',str(binary)],env=env,text=True,capture_output=True,timeout=120);(out/'compile.log').write_text((c.stdout+c.stderr).replace(raw,'<fresh-build>'));row={'sources':sources,'fixture_sha256':hashlib.sha256(fixture.encode()).hexdigest(),'compile_exit':c.returncode}
+ c=subprocess.run(['swiftc','-D','DEBUG','-swift-version','5','-parse-as-library',str(src),'-o',str(binary)],env=env,text=True,capture_output=True,timeout=120);(out/'compile.log').write_text((c.stdout+c.stderr).replace(raw,'<fresh-build>'));row={'sources':sources,'fixture_sha256':hashlib.sha256(fixture.encode()).hexdigest(),'compile_exit':c.returncode}
  if c.returncode==0:
   r=subprocess.run(['/usr/bin/sandbox-exec','-p','(version 1)(allow default)(deny network*)(deny file-read* file-write* (subpath "/Users/Shared"))',str(binary)],env=env,text=True,capture_output=True,timeout=20);row.update(exit_code=r.returncode,results=json.loads(r.stdout));(out/'tests.log').write_text(r.stdout+r.stderr)
- row['seconds']=time.monotonic()-start;assert sources=={str(p.relative_to(tree)):hashlib.sha256(p.read_bytes()).hexdigest()for p in paths},'Sources changed';(out/'GATES.json').write_text(json.dumps(row,indent=2)+'\n');print(json.dumps(row));assert c.returncode==0 and row['results']['total']==9 and row['results']['failed']==0,'Expected9 draft routing/ownership controls'
+ row['seconds']=time.monotonic()-start;assert sources=={str(p.relative_to(tree)):hashlib.sha256(p.read_bytes()).hexdigest()for p in paths},'Sources changed';(out/'GATES.json').write_text(json.dumps(row,indent=2)+'\n');print(json.dumps(row));assert c.returncode==0 and row['results']['total']==18 and row['results']['failed']==0,'Expected18 actual draft routing/fixture/ownership controls'

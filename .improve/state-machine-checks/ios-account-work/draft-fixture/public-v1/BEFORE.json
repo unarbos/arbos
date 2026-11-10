@@ -1,0 +1,75 @@
+{
+  "sources": {
+    "apps/ios/Arbos/Arbos/Store/AppModel.swift": "2fb19532c675bdda31e60e658a032543f5c9178fce185fcd327bcd628aad81ca",
+    "apps/ios/Arbos/Arbos/Sync/RelayAPI.swift": "79a41459c976e98f3ced1a3fcdba24dda59bb0a755265ac8af40991486a69467",
+    "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f",
+    "apps/ios/Arbos/Arbos/Sync/DraftSendQueue.swift": "0985e595fa179b2919fed2c5b401d8f15a956fed78ce9b9f6ed6d20ecebc9e94"
+  },
+  "fixture_sha256": "fa0a4e669a629dca12ad9800007e6430a1340bd14e527219fdc1290e784e86c2",
+  "compile_exit": 0,
+  "exit_code": 1,
+  "results": {
+    "failed": 2,
+    "passed": 12,
+    "results": [
+      {
+        "name": "same-draft-single-create-FIFO-control",
+        "pass": true
+      },
+      {
+        "name": "different-drafts-route-only-to-own-recipients",
+        "pass": true
+      },
+      {
+        "name": "A-completion-preserves-B-current-draft-and-pending-state",
+        "pass": true
+      },
+      {
+        "name": "current-failure-keeps-draft-and-retry-policy",
+        "pass": true
+      },
+      {
+        "name": "retired-A-success-cannot-drain-or-clear-B",
+        "pass": true
+      },
+      {
+        "name": "retired-A-error-cannot-fail-or-clear-B",
+        "pass": true
+      },
+      {
+        "name": "queued-old-draft-task-cannot-originate-as-B",
+        "pass": true
+      },
+      {
+        "name": "same-draft-new-account-starts-independent-current-request",
+        "pass": true
+      },
+      {
+        "name": "admitted-same-account-send-finishes-after-caller-cancellation",
+        "pass": true
+      },
+      {
+        "name": "direct-load-fixture-without-credentials-creates-DM-and-delivers",
+        "pass": false
+      },
+      {
+        "name": "fixture-same-draft-FIFO-with-no-relay",
+        "pass": false
+      },
+      {
+        "name": "fixture-queued-retirement-cannot-create-or-drain",
+        "pass": true
+      },
+      {
+        "name": "unpaired-live-path-remains-refused",
+        "pass": true
+      },
+      {
+        "name": "same-owner-api-rebind-still-uses-admitted-API",
+        "pass": true
+      }
+    ],
+    "total": 14
+  },
+  "seconds": 2.6760444999672472
+}

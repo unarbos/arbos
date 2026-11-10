@@ -32,6 +32,7 @@ on:
       - "Cargo.lock"
       - "rust-toolchain.toml"
       - "apps/ios/Arbos/**"
+      - ".improve/finish-checks/source-consumers/**"
       - ".github/workflows/swift-core-check.yml"
 
 permissions:
@@ -125,6 +126,8 @@ jobs:
           newest="$(find /Applications -maxdepth 1 -name 'Xcode_*.app' | sort -V | tail -1)"
           if [[ -n "$newest" ]]; then sudo xcode-select -s "$newest"; fi
           xcodebuild -version
+      - name: Selected actual source consumer contracts
+        run: python3 .improve/finish-checks/source-consumers/check.py --tree . --out "$RUNNER_TEMP/arbos-source-consumers"
       - name: Rust toolchain
         run: |
           set -euo pipefail

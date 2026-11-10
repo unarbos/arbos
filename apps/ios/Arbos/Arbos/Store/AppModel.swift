@@ -14,6 +14,24 @@ struct AccountWork {
     let api: RelayAPI
 }
 
+/// Draft fixtures need local lifetime authority; live sends also retain the
+/// exact API captured at admission, before their queued task starts.
+private enum DraftDMWork {
+    #if DEBUG || ARBOS_FIXTURE
+    case fixture(WorkLifetime.Ticket)
+    #endif
+    case relay(AccountWork)
+
+    var owner: WorkLifetime.Ticket {
+        switch self {
+        #if DEBUG || ARBOS_FIXTURE
+        case .fixture(let owner): return owner
+        #endif
+        case .relay(let work): return work.owner
+        }
+    }
+}
+
 /// Theme choice: System follows the device; Dark is the default for anyone who
 /// never picked (D90, which replaced D81's System default). The order is the
 /// Settings order (System first, then Light, then Dark).
@@ -3864,17 +3882,20 @@ final class AppModel: ObservableObject {
 
     /// `POST /chats/dm`: the relay makes the DM (or answers the one it has) and tells the
     /// other person. Only the first send of a draft calls it.
-    private func createDM(handle: String, work: AccountWork) async -> PeopleChat? {
+    private func createDM(handle: String, work: DraftDMWork) async -> PeopleChat? {
         guard accountLifetime.accepts(work.owner) else { return nil }
+        let api: RelayAPI
+        switch work {
         #if DEBUG || ARBOS_FIXTURE
-            if isFixture {
-                let dm = fixtureOpenDM(handle: handle, navigate: false)
-                if let dm { fixtureAttachDoc(chatId: dm.id) }
-                return dm
-            }
+        case .fixture:
+            let dm = fixtureOpenDM(handle: handle, navigate: false)
+            if let dm { fixtureAttachDoc(chatId: dm.id) }
+            return dm
         #endif
+        case .relay(let work): api = work.api
+        }
         do {
-            let chat = try await work.api.openDM(handle: handle)
+            let chat = try await api.openDM(handle: handle)
             guard accountLifetime.accepts(work.owner) else { return nil }
             if !peopleChats.contains(where: { $0.id == chat.id }) { peopleChats.insert(chat, at: 0) }
             ensureRoom(projectId: peopleSlot, key: chat.id, roomChat: chat.id)
@@ -3957,8 +3978,19 @@ final class AppModel: ObservableObject {
         draftDM = nil
     }
 
+    private func draftDMWork() -> DraftDMWork? {
+        #if DEBUG || ARBOS_FIXTURE
+        if isFixture {
+            guard let owner = accountLifetime.ticket, !Task.isCancelled else { return nil }
+            return .fixture(owner)
+        }
+        #endif
+        guard let work = accountWork() else { return nil }
+        return .relay(work)
+    }
+
     private func sendDraftDM(_ draft: PeopleChat, send: @escaping (Id) -> Void) {
-        guard let work = accountWork() else { return }
+        guard let work = draftDMWork() else { return }
         if draftSends.owner != work.owner { draftSends = DraftSendQueue(owner: work.owner) }
         let attempt = WorkLifetime().ticket!
         guard

@@ -1,0 +1,21 @@
+{
+  "status": "passed selected actual-class controls",
+  "sources": {
+    "apps/ios/Arbos/Arbos/UI/ChatView.swift": "9a1ef5c35bda8fefa417ce24114f1b56d1633f48d2b231f2ff34c1bd8caf5e57",
+    "apps/ios/Arbos/ArbosTests/ComposerMetricsTests.swift": "030d305d5f681669483e48b7df9ab1436d33dea2a71c9cd1c10f7379d50a5f4b"
+  },
+  "fixture_sha256": "6f3169bdc6928f0cc959a7e9360f8602744299286c8a6dac003e7d9e19ea7ab1",
+  "gate": {
+    "name": "actual-controls",
+    "compile_exit": 0,
+    "exit": 0,
+    "results": {
+      "failed": 0,
+      "passed": 11
+    },
+    "seconds": 1.138930166955106
+  },
+  "scope": "Real frozenComposerDraft DEBUGclass andactual2testcontrolmethods/helpers, with Foundation/Combine and inertempty ComposerMention collaborator; noUIKit/app/simulator/XCTest execution.",
+  "Release": "Static byte-parity of class withDEBUGblock omitted; noReleasecompilerpass claimed.",
+  "receipt_source_sha256": "b5c59e42c9cbb6b3e8bbc666c86c90091bc65b9eff8a3cad16b1eaa2c9bc1ab6"
+}

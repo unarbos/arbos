@@ -368,7 +368,7 @@ method gates do not render SwiftUI or exercise devices. Full SDK source compilat
 and canonical XCTest execution are distinct final layers, recorded in the finish
 report. Persistent unknown legacy cache ownership remains owner work.
 
-Final scoped iOS method/caller gates pass296 account-work cases (38groups),122
+Final scoped iOS method/caller gates pass305 account-work cases (38groups),122
 chat cases (12groups), and80 media/preview cases. The suites overlap and use
 synthetic effects. Media original copy/save failures and preview8load/6tap controls
 are distinguished from new receipt predicates and constructor propagation.
@@ -378,6 +378,34 @@ shared signatures require that argument; five compiler controls show explicit
 calls compile and omitted predicates refuse. Runtime bodies stay unchanged. The
 bounded constructor review includes all3 link-card paths. These checks do not
 claim every UI callback or every possible interleaving is proven.
+
+The corrected-source account replay actually completed305/305 in38 entrypoints
+(35.707s); historical296 and280 checkpoints are unchanged. Its draft adapter now
+covers18 cases, retaining the original live behavior while permitting DEBUG local
+fixtures through a tagged lifetime ticket rather than invented credentials. Live
+draft work still captures AccountWork before scheduling; queued fixture work
+cannot turn into a relay request. No store or global account setup was added.
+
+Tests-last corrections are separate from that aggregate: LibraryList now honors
+the injected calendar timezone, and the BlockedState sentence fixture preserves
+its14:30 expectation using local-calendar input. The29 calendar assertions and
+29 actual source-consumer contracts are not added to the305 account total. Four
+fragile formatting assertions were migrated to actual call/callback execution;
+all other native assertions and existing UI test methods remain.
+
+Account identity stays on the chat host and in row equality. Removing only the
+redundant inner RowView `.id(account)` restores the existing sender navigation /
+back-swipe contract: the same isolated five-case UI class changed from3fail/2pass
+to5pass, with header controls, row IDs, gestures and test code unchanged. This is
+a causal UI regression fix, not an application speed measurement or full-suite
+pass. A DEBUG weak-instance observer replaces the global composer count oracle;
+its actual integrated native lifetime checks pass within all559 accepted unit
+cases (including one intentional expected-failure control) and five avatar UI cases. Keeping pre-existing
+instances alive and only weak probes for newly observed drafts prevents an
+unrelated release from hiding retention, but captures all new identities during
+the host window rather than a direct host→draft link. An unrelated newly created
+draft could false-fail the observation; it cannot hide a captured retained draft.
+No Release product behavior changes at that observer boundary.
 
 **Transport and snapshot lifetime (High).** SessionRoom terminal403/404 retires
 generation before cancelling tasks/socket and emits terminal failure once. The

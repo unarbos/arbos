@@ -1,0 +1,18 @@
+{
+  "baseline_commit": "419d3944cf77a31086b44ee36534864bc5662758",
+  "baseline_tree": "c19a6e2ab764c53065d8f79e53bbe90f76508c4d",
+  "files": {
+    "apps/ios/Arbos/Arbos/Store/AppModel.swift": {
+      "before": "2fb19532c675bdda31e60e658a032543f5c9178fce185fcd327bcd628aad81ca",
+      "after": "f0f596d4757209173c3a39141174097cafa9fac4bac52568af0bcfda1b6f9ee7"
+    },
+    "apps/ios/Arbos/ArbosTests/HomeSearchTests.swift": {
+      "before": "f6e7d0a53746ec64d5b9c281359665d2e81b4c649c40fadf15b254e2bf2a51e1",
+      "after": "994e3f5de50bcb086b651029aa6a77502ea7fe52613e17326349373305be5084"
+    }
+  },
+  "patch": {
+    "sha256": "e42ca08a713c06e6c266a84fe93f30475b78c7d28bb5e0d3da625cb7958f95fa",
+    "bytes": 4733
+  }
+}

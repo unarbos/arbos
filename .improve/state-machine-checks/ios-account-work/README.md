@@ -8,7 +8,10 @@ python3 -I -B .improve/state-machine-checks/ios-account-work/run_all.py --out /t
 
 The output path must not exist. `--tree PATH` checks an explicit source tree;
 `--only uploads` (or another named gate from `--help`) runs one controller group.
-The complete command now has 38 entrypoints and 296 runtime assertions. It compiles
+The corrected-source full run completed 38 entrypoints and 305 runtime assertions
+in 35.707 seconds, with source hashes stable. The draft fixture follow-up expands
+its selected group from 9 to 18 checks; the historical296 and280 receipts remain
+unchanged. The command compiles
 selected **actual production method bodies** into fresh temporary executables,
 with paused synthetic API/store/UI/SDK collaborators, then runs them under
 `network*` denial. No relay, account, keychain, model, device, microphone, camera,
@@ -60,6 +63,25 @@ Item confirmations have their separate actual-helper suite. The final ChatView
 and card callback audit is a separate source handoff; these counts do not include
 that later work. Parent SDK verification compiles the full app against real
 LiveKit/FFI; unit/UI execution and physical media/device behavior remain separate.
+
+## Direct fixture draft admission follow-up
+
+The actual app XCTest exposed a direct `loadFixture()` entry with no relay
+credentials: the relay-only work guard blocked its first send before the existing
+local fixture branch. Draft work now captures a DEBUG/ARBOS_FIXTURE local owner
+or the live owner-bound API before queuing. The relay guard remains unchanged.
+The same nine live controller checks are retained, alongside local first-send
+and FIFO, stale/closed/cancelled fixture ownership, captured local mode, unpaired
+live refusal and same-owner API rebind controls. This group compiles with DEBUG
+to execute the actual fixture dispatch; local fixture/SDK effects remain synthetic.
+
+```sh
+python3 -I -B .improve/state-machine-checks/ios-account-work/run_all.py --only draft_sends --out /tmp/arbos-draft-fixture-checks
+```
+
+The repaired group has 18 checks; this alone does not recertify the other groups.
+The actual XCTest first-send assertion is retained and three new XCTest cases
+exercise FIFO, account retirement and already-cancelled admission in the app.
 
 ## Draft reducer laws
 
@@ -119,9 +141,35 @@ cases while twelve current/unbound/wire-policy controls passed (1.582 seconds).
 to JSON, blob PUT/read, avatar PUT and transcription. All sixteen cases pass
 in 1.528 seconds; `RAW-API-BEFORE.json` and `RAW-API-AFTER.json` record them.
 Bodies, MIME, response handling, the transcription deadline and the original raw
-methods' no-401-retry behavior are preserved. These cases are additive to the
-280-case checkpoint; a later full command records 296 only when actually run.
+methods' no-401-retry behavior are preserved. These cases were added to the
+280-case checkpoint; an actual later full run recorded296, and the corrected
+draft18 adapter is included in the current305-case replay above.
 The current and original selected HTTP adapters include this actual helper;
 the historical Matrix adapter also includes the shared AccountWork boundary
 required by the evolved production startup method. No copied authority model
 is used to decide the expected retired-owner outcome.
+
+## Corrected native test contracts
+
+The18 draft adapter cases distinguish local DEBUG fixture work from captured live
+AccountWork. A credential-free fixture uses only its existing lifetime ticket;
+retirement/cancellation still refuses it, and captured fixture work cannot fall
+back to a later relay API. Live requests keep their originally admitted API. This
+fix does not install synthetic account credentials or clear production storage.
+
+The separate actual-source consumer gate has29 checks (six row-input contracts
+plus23 callbacks), and the calendar gate has29 assertions. They replace four
+fragile implementation-format assertions and correct a local-time test input;
+all other assertions and existing native/UI methods remain. They are not part
+of this305 total. The separate corrected chat/media/predicate checkers retain
+122/80/5 results, with5 denoting compiler contracts rather than runtime effects.
+
+The isolated existing five-case avatar/back-swipe class passes after removal of
+one redundant inner row account identity; host account retirement, row identity,
+owner equality and gestures remain. Full corrected native execution and DEBUG
+composer weak-instance observation remain separate gates. The earlier global
+live-count mismatch alone does not prove a hosted-draft leak. Actual integrated native lifetime
+verification now accepts all559 unit cases (one intentional expected-failure
+control) and passes all five avatar cases. The predecessor full UI target passes
+55 cases with13 existing opt-in skips; source versions and scopes stay separate
+in the finish report. Controller checks alone do not imply that native result.

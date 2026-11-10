@@ -1,0 +1,28 @@
+{
+  "exact_native_failure": {
+    "actual_live_counter": 0,
+    "expected_baseline_live_counter": 1,
+    "source": "ComposerMetricsTests.swift308",
+    "observed_scope": "Global live instance count, not deinit count or identity-specific draft reference."
+  },
+  "interpretation": "Global equality can fail when a pre-existing instance disappears, even if the tested draft is released; it can also hide an owned leak when another instance disappears. This does not identify which object freed in the native run and is not a product-retention proof.",
+  "original_case_history": {
+    "P8_hosted": "passed1.306s",
+    "a4_hosted": "passed1.219s",
+    "C19_partial_local": "passed1.211s",
+    "corrected_full_local": "failed1.232s"
+  },
+  "ComposerDraft_actual_class_sha256": {
+    "BASE": "30f194b973cc4f68f2178fa3dad86aeb44551e4021e12dec457b6921040f272b",
+    "P8": "30f194b973cc4f68f2178fa3dad86aeb44551e4021e12dec457b6921040f272b",
+    "a4": "30f194b973cc4f68f2178fa3dad86aeb44551e4021e12dec457b6921040f272b",
+    "C19": "30f194b973cc4f68f2178fa3dad86aeb44551e4021e12dec457b6921040f272b"
+  },
+  "current_before_class_sha256": "30f194b973cc4f68f2178fa3dad86aeb44551e4021e12dec457b6921040f272b",
+  "candidate_class_sha256": "4ef8e4b1ceddab43ba8a657d5a23e39c84218877db250f824c532a6e1200cda3",
+  "class_release_projection_byte_identical": true,
+  "class_release_projection_sha256": "175f0e10ea180ca0dd1e77d74b646fdadb7938f5d1b0e773568e4f64cf26337a",
+  "existing_safe_instance_access": "MentionTextView.Coordinator.parent contains only projected Binding values; no ComposerDraft root reference. Weak coordinator observation would not exclude a remaining draft callback cycle.",
+  "candidate": "DEBUG-only weak inventory replaces unused live counter; exact new weak probes, retained existing identities; same original public ChatView/window/autorelease/0.3s sequence and2deterministic controls.",
+  "pending": "Control leaf and targeted native/fullunit checks pending; no runtime-green claim."
+}
