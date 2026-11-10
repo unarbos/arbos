@@ -115,7 +115,9 @@ With `DAYTONA_API_KEY` set, `project create` (without `--local-box`) creates a s
 
 ## 6. The machine image
 
-`.github/workflows/image.yml` builds `image/Dockerfile` on an image tag (`image-v<version>`) or by hand (`workflow_dispatch` with a version), pushes it to GHCR as `ghcr.io/unarbos/arbos/arbos-agent:<version>` (public), smoke-tests it, and registers the Daytona snapshot `arbos-agent-<version>` with `image/register-snapshot.sh` (needs the `DAYTONA_API_KEY` repository secret; otherwise run the script by hand). The image bakes in `arbos-agentd`, so every agentd change needs an image rebuild; machines do not update it at boot.
+`.github/workflows/image.yml` builds `image/Dockerfile` on an image tag (`image-v<version>`) or by hand (`workflow_dispatch` with a version), pushes it to GHCR as `ghcr.io/unarbos/arbos/arbos-agent:<version>` (public) and smoke-tests it. The image bakes in `arbos-agentd`, so every agentd change needs an image rebuild; machines do not update it at boot.
+
+CI does not register a Daytona snapshot any more: Daytona is being retired (2026-11-09), the key is not exposed to the workflow, and a host machine pulls the GHCR tag straight. `image/register-snapshot.sh` is still there and the deploy worker's image roll still calls it; run it by hand for a Daytona sandbox that is still alive.
 
 Without CI, the same build runs on any Docker host and goes to Daytona's transient registry (tags are immutable: bump the version for every rebuild):
 
