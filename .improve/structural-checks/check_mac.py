@@ -10,8 +10,11 @@ import time
 
 ROOT = Path(__file__).resolve().parents[2]
 OUT = Path(__file__).resolve().parent / "generated"
-MODULES = {"chat_title": 8, "mentions": 3, "agent_link_expiry": 2,
-           "pending_messages": 5, "snapshot_schedule": 7}
+MODULES = {"chat_title": ("chat_title.rs", 8), "mentions": ("mentions.rs", 3),
+           "agent_link_expiry": ("agent_link_expiry.rs", 2),
+           "pending_messages": ("pending_messages.rs", 5),
+           "snapshot_schedule": ("snapshot_schedule.rs", 7),
+           "room_docs": ("sync/room_docs.rs", 7)}
 
 
 def main():
@@ -22,8 +25,8 @@ def main():
     results = []
     with tempfile.TemporaryDirectory(prefix="arbos-mac-policies-") as directory:
         temporary = Path(directory)
-        for name, expected in MODULES.items():
-            source = ROOT / "crates/arbos-mac/src" / f"{name}.rs"
+        for name, (relative_path, expected) in MODULES.items():
+            source = ROOT / "crates/arbos-mac/src" / relative_path
             binary = temporary / name
             started = time.monotonic()
             command = ["rustc", "--edition=2021", "--test", "-D", "warnings", str(source), "-o", str(binary)]

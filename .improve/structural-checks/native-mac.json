@@ -1,0 +1,53 @@
+{
+  "command": [
+    "sandbox-exec",
+    "-p",
+    "(version 1) (allow default) (deny network*)",
+    "cargo",
+    "clippy",
+    "--locked",
+    "--offline",
+    "-p",
+    "arbos-mac",
+    "--all-targets",
+    "--",
+    "-D",
+    "warnings"
+  ],
+  "exit_code": 0,
+  "seconds": 23.290909874951467,
+  "source_before": {
+    "crates/arbos-mac/src/sync/relay.rs": "5bdab10d48d93aae1350f4ba02e13ab2580861831bae3419411cecabc84057e9",
+    "crates/arbos-mac/src/sync/room_docs.rs": "7acd0d7de19f0778cf845bf077b663dd5599d5f10b159017d2fcb8b23697ccb3",
+    "crates/arbos-mac/src/sync/mod.rs": "4977c90543461379fe83195232adb5f29055ef387a68ecd56dd0005ef96c9a0a",
+    "crates/arbos-mac/src/ui/transcript.rs": "36ec19e3d573eb04720a76f6ef641049f3d51ee6651ca9247e76c2ea09e54e59",
+    "crates/arbos-mac/src/app.rs": "51d881e9c6faa5fdcf7e8c1b048f6032864e7c5d9d37122df3af1785148e0549",
+    "crates/arbos-mac/src/sync/fixture.rs": "1c1be1f09eb11bcbeb2be958f58145f2b7011765c51ace704ac7c35753a7675c",
+    "crates/arbos-mac/src/pasteboard.rs": "743d2f5274dca6a380494ff92f5909b4ba17a2d3f2dea46af28a0091f76411b7",
+    "crates/arbos-mac/src/ui/avatars.rs": "39dbb366eada05b2da4dd7c4b74099d0c2a5114386c848aa0db3edb29bcb134c",
+    "crates/arbos-mac/src/ui/sf_symbols.rs": "f04b14aed09c7db0416df0b8de59d1495b84b7afae5381af1a224789883b57bc",
+    "crates/arbos-mac/src/ui/video_player.rs": "5a075858eae1b152de3401d577b42b373d030e278089f3cc9176c468f35b54d1"
+  },
+  "source_after": {
+    "crates/arbos-mac/src/sync/relay.rs": "5bdab10d48d93aae1350f4ba02e13ab2580861831bae3419411cecabc84057e9",
+    "crates/arbos-mac/src/sync/room_docs.rs": "7acd0d7de19f0778cf845bf077b663dd5599d5f10b159017d2fcb8b23697ccb3",
+    "crates/arbos-mac/src/sync/mod.rs": "4977c90543461379fe83195232adb5f29055ef387a68ecd56dd0005ef96c9a0a",
+    "crates/arbos-mac/src/ui/transcript.rs": "36ec19e3d573eb04720a76f6ef641049f3d51ee6651ca9247e76c2ea09e54e59",
+    "crates/arbos-mac/src/app.rs": "51d881e9c6faa5fdcf7e8c1b048f6032864e7c5d9d37122df3af1785148e0549",
+    "crates/arbos-mac/src/sync/fixture.rs": "1c1be1f09eb11bcbeb2be958f58145f2b7011765c51ace704ac7c35753a7675c",
+    "crates/arbos-mac/src/pasteboard.rs": "743d2f5274dca6a380494ff92f5909b4ba17a2d3f2dea46af28a0091f76411b7",
+    "crates/arbos-mac/src/ui/avatars.rs": "39dbb366eada05b2da4dd7c4b74099d0c2a5114386c848aa0db3edb29bcb134c",
+    "crates/arbos-mac/src/ui/sf_symbols.rs": "f04b14aed09c7db0416df0b8de59d1495b84b7afae5381af1a224789883b57bc",
+    "crates/arbos-mac/src/ui/video_player.rs": "5a075858eae1b152de3401d577b42b373d030e278089f3cc9176c468f35b54d1"
+  },
+  "network": "deny network*",
+  "workspace_packages_cleaned": 12,
+  "source_unchanged": true,
+  "sdk": {
+    "url": "https://github.com/livekit/rust-sdks/releases/download/webrtc-89d790b/webrtc-mac-arm64-release.zip",
+    "published_and_verified_sha256": "9f25fea48588deac18d68e120d18b33af7ef10f921f74b7c57f66b642262c348",
+    "configured_with": "LK_CUSTOM_WEBRTC; local verified include/lib archive; no SDK executable launched"
+  },
+  "scope": "Full actual Mac all-target compiler/Clippy, no app/test execution. Pure module/selected-method runtime evidence is separate. Full combined native tests remain pending.",
+  "log_sha256": "c5f4a2cbd9bac661663f836b5f9ea65a865c3af72c7c6f400510691e696487bf"
+}

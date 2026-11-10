@@ -1179,8 +1179,6 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         | ClientCommand::UnblockUser { .. }
         | ClientCommand::InviteToProject { .. }
         | ClientCommand::RemoveProjectMember { .. }
-        | ClientCommand::SetMessageGrant { .. }
-        | ClientCommand::RemoveMessageGrant { .. }
         | ClientCommand::FetchAvatar { .. }
         | ClientCommand::DeleteProject { .. }
         | ClientCommand::ConnectAgent { .. }
@@ -8260,56 +8258,6 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                 .events
                 .send(SyncEvent::Notice(format!("@{handle} unblocked.")));
             emit_blocked(shared);
-            true
-        }
-        // "Who may message X" (agent-to-agent messaging): the grant list lives on the project.
-        ClientCommand::SetMessageGrant {
-            project_id,
-            grantee,
-            enabled,
-        } => {
-            let mut projects = shared.projects.lock().unwrap();
-            if let Some(p) = projects.iter_mut().find(|p| p.id == *project_id) {
-                if let Some(g) = p.message_grants.iter_mut().find(|g| g.grantee == *grantee) {
-                    g.enabled = *enabled;
-                } else {
-                    let handle = grantee.trim_start_matches('@').to_lowercase();
-                    let Some(other) = directory().into_iter().find(|p| p.handle == handle) else {
-                        drop(projects);
-                        let _ = shared
-                            .events
-                            .send(SyncEvent::PeopleError(no_such_user("give access", &handle)));
-                        return true;
-                    };
-                    p.message_grants.push(crate::model::MessageGrant {
-                        grantee: format!("user:{}", other.id),
-                        kind: "person".into(),
-                        id: other.id.clone(),
-                        name: other.name.clone(),
-                        handle: Some(other.handle.clone()),
-                        avatar_url: other.avatar_url.clone(),
-                        enabled: *enabled,
-                        note: String::new(),
-                        created_at: now_ms() as i64,
-                        last_at: None,
-                    });
-                }
-            }
-            drop(projects);
-            emit_projects(shared);
-            true
-        }
-        ClientCommand::RemoveMessageGrant {
-            project_id,
-            grantee,
-        } => {
-            {
-                let mut projects = shared.projects.lock().unwrap();
-                if let Some(p) = projects.iter_mut().find(|p| p.id == *project_id) {
-                    p.message_grants.retain(|g| g.grantee != *grantee);
-                }
-            }
-            emit_projects(shared);
             true
         }
         ClientCommand::InviteToProject { project_id, handle } => {

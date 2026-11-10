@@ -1,0 +1,79 @@
+{
+  "scope": "Exact extracted production snapshot/newest-message/pending methods; actual DTO and pending tracker; paused fake document and local channel collaborator. No SDK/app runtime claim.",
+  "checks": [
+    {
+      "name": "before2",
+      "exit_code": 101,
+      "expected_semantic_outcome": true,
+      "seconds": 11.450357624911703,
+      "source": {
+        "relay_sha256": "29218564051756e15d746b08847347b112cee0a8d5c703c65b619f8a48f70bbe",
+        "methods": {
+          "newest_message_id": "6b9074ade7e8fb824ecf6361636abbcc90aeba5f30d5c68e13f98d81016dd563",
+          "apply_pending": "766525d3aa24ba41a8ed823f792ee3dc859c2ea0f926047d181a539336b7e970",
+          "emit_snapshot": "cc9e105118e71585bcf1b35b4f8d219d9a8a6c472d8c8264a83d875b9f75c92e"
+        },
+        "owned_room_map": false,
+        "scope": "actual methods; fake paused doc and unbounded event collaborator, actual message DTO and pending tracker; no SDK/network"
+      },
+      "network": "sandbox deny network*",
+      "unique_target_packages_cleaned": [
+        "arbos-core",
+        "doc-ownership-check"
+      ]
+    },
+    {
+      "name": "after3",
+      "exit_code": 0,
+      "expected_semantic_outcome": true,
+      "seconds": 19.26985020900611,
+      "source": {
+        "relay_sha256": "5bdab10d48d93aae1350f4ba02e13ab2580861831bae3419411cecabc84057e9",
+        "methods": {
+          "newest_message_id": "7b19b9d59e2fe48dd848b7dfe7579e73c085efa8d79cf97645ada203cd45a2f4",
+          "apply_pending": "766525d3aa24ba41a8ed823f792ee3dc859c2ea0f926047d181a539336b7e970",
+          "emit_snapshot": "5974c2689bb3696204415e8d075ab005c858846605ea37f05a05261fc8664a5b"
+        },
+        "room_docs_sha256": "7acd0d7de19f0778cf845bf077b663dd5599d5f10b159017d2fcb8b23697ccb3",
+        "owned_room_map": true,
+        "scope": "actual methods; fake paused doc and unbounded event collaborator, actual message DTO and pending tracker; no SDK/network"
+      },
+      "root_sources_unchanged": true,
+      "network": "sandbox deny network*",
+      "unique_target_packages_cleaned": [
+        "arbos-core",
+        "doc-ownership-check"
+      ]
+    }
+  ],
+  "before_assertions": {
+    "passed": 4,
+    "failed": 1
+  },
+  "after_assertions": {
+    "passed": 5,
+    "failed": 0
+  },
+  "room_docs": {
+    "source_sha256": "7acd0d7de19f0778cf845bf077b663dd5599d5f10b159017d2fcb8b23697ccb3",
+    "actual_std_tests_passed": 7,
+    "failed": 0,
+    "ignored": 0,
+    "checks": [
+      "independent-room progress",
+      "pointer replacement",
+      "account retirement",
+      "retired read does not wait",
+      "post-lock retirement recheck",
+      "registry drop",
+      "poisoned publisher teardown"
+    ]
+  },
+  "retirement_mutant": "Removing the actual post-lock retirement recheck was detected by the contending-reader test; private output retained.",
+  "limits": [
+    "Room mutex remains necessary because the core document contains RefCell/Cell.",
+    "Old in-flight work may finish on its isolated handle; publication requires exact current handle.",
+    "Account retirement call sites and broader store/cache/task ownership compose in Phase4.",
+    "No whole-app latency or device/media claim."
+  ]
+}

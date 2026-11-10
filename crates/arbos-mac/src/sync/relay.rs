@@ -5,6 +5,7 @@
 //! doc room (`{project}/project`) that carries `threads`, `status`,
 //! `settings` and `memory`.
 
+use super::room_docs::{RoomDoc, RoomDocs};
 use crate::mentions::text_has_at_token;
 use crate::pending_messages::PendingMessages;
 use crate::snapshot_schedule::SnapshotSchedule;
@@ -215,7 +216,7 @@ struct Shared {
     ws_url: String,
     creds: RwLock<Option<DeviceCredentials>>,
     /// Chat docs keyed by chat id; project docs keyed by `proj:{project_id}`.
-    docs: Mutex<HashMap<Id, ChatDoc>>,
+    docs: RoomDocs<ChatDoc>,
     rooms: Mutex<HashMap<Id, Room>>,
     projects: Mutex<Vec<Project>>,
     chats: Mutex<Vec<Chat>>,
@@ -324,9 +325,20 @@ impl Shared {
 
     /// Newest message id in a chat doc, if the doc is open and non-empty.
     fn newest_message_id(&self, chat_id: &str) -> Option<String> {
-        let docs = self.docs.lock().unwrap();
-        let doc = docs.get(chat_id)?;
+        let handle = self.docs.get(chat_id)?;
+        let doc = handle.lock()?;
         doc.read_all().last().map(|m| m.id.clone())
+    }
+
+    fn room_token(&self, room_doc: &RoomDoc<ChatDoc>) -> Result<String> {
+        let creds = self.creds.read().unwrap();
+        if room_doc.is_retired() {
+            anyhow::bail!("room document retired");
+        }
+        creds
+            .as_ref()
+            .map(|creds| creds.access_token.clone())
+            .ok_or_else(|| anyhow!("room account ended"))
     }
 
     fn token(&self) -> String {
@@ -542,13 +554,6 @@ impl Shared {
     /// Run `f` against the store when there is one.
     fn with_store<R>(&self, f: impl FnOnce(&Store) -> R) -> Option<R> {
         self.store.lock().unwrap().as_ref().map(f)
-    }
-
-    /// A room's doc or cursor changed: the flusher saves it on its next tick.
-    fn mark_dirty(&self, key: &str) {
-        if self.store.lock().unwrap().is_some() {
-            self.dirty.lock().unwrap().insert(key.to_string());
-        }
     }
 
     /// Close the store; `wipe` also deletes the file (sign-out, revoked token).
@@ -847,7 +852,7 @@ impl SyncSource for RelaySource {
                 http_url: self.http_url.clone(),
                 ws_url: self.ws_url.clone(),
                 creds: RwLock::new(credentials::load(&self.http_url)),
-                docs: Mutex::new(HashMap::new()),
+                docs: RoomDocs::default(),
                 rooms: Mutex::new(HashMap::new()),
                 focused_chat: Mutex::new(None),
                 read_receipts: AtomicBool::new(true),
@@ -1420,8 +1425,10 @@ fn start_store_flusher(shared: &Arc<Shared>) {
                     .copied()
                     .unwrap_or(0);
                 let snapshot = {
-                    let docs = shared.docs.lock().unwrap();
-                    let Some(doc) = docs.get(&key) else { continue };
+                    let Some(handle) = shared.docs.get(&key) else {
+                        continue;
+                    };
+                    let Some(doc) = handle.lock() else { continue };
                     if doc.core.doc.oplog_frontiers().is_empty() {
                         continue;
                     }
@@ -2492,10 +2499,10 @@ fn call_error(verb: &str, err: &anyhow::Error) -> UserError {
 /// Calls v1 (contract §1): the client writes the system lines. One Loro row,
 /// role `system`, text, `callId`; the room syncs it like any message.
 fn write_system_line(shared: &Arc<Shared>, chat_id: &str, text: String, call_id: Option<String>) {
-    let docs = shared.docs.lock().unwrap();
-    let Some(doc) = docs.get(chat_id) else {
+    let Some(handle) = shared.docs.get(chat_id) else {
         return;
     };
+    let Some(doc) = handle.lock() else { return };
     let device = shared.device_id();
     doc.core.transact(|d| {
         let _ = d.append_system_line(&new_id(), &text, &device, call_id.as_deref());
@@ -2506,8 +2513,10 @@ fn write_system_line(shared: &Arc<Shared>, chat_id: &str, text: String, call_id:
 /// device that created the project. Idempotent: a chat that already holds a
 /// `greeting: true` row (ours or another device's) gets nothing.
 fn write_greeting(shared: &Arc<Shared>, chat_id: &str, project_id: &str, agent_name: &str) -> bool {
-    let docs = shared.docs.lock().unwrap();
-    let Some(doc) = docs.get(chat_id) else {
+    let Some(handle) = shared.docs.get(chat_id) else {
+        return false;
+    };
+    let Some(doc) = handle.lock() else {
         return false;
     };
     if doc.core.has_greeting() {
@@ -3020,9 +3029,49 @@ fn apply_pending(shared: &Shared, room_key: &str, message: &mut Message) {
     }
 }
 
+fn emit_doc_event(shared: &Shared, key: &str, doc: &Arc<RoomDoc<ChatDoc>>, event: SyncEvent) {
+    shared.docs.publish_if_current(key, doc, || {
+        let _ = shared.events.send(event);
+    });
+}
+
+fn mark_room_dirty(shared: &Shared, key: &str, doc: &Arc<RoomDoc<ChatDoc>>) {
+    if shared.store.lock().unwrap().is_some() {
+        let mut dirty = shared.dirty.lock().unwrap();
+        if !doc.is_retired() {
+            dirty.insert(key.to_string());
+        }
+    }
+}
+
+fn set_room_caught_up_for(shared: &Shared, key: &str, doc: &Arc<RoomDoc<ChatDoc>>, up: bool) {
+    let _ = shared
+        .docs
+        .publish_if_current(key, doc, || set_room_caught_up(shared, key, up));
+}
+
+fn save_room_pending(
+    shared: &Shared,
+    key: &str,
+    doc: &RoomDoc<ChatDoc>,
+    pending: &[(String, Vec<u8>)],
+) {
+    shared.with_store(|store| {
+        if !doc.is_retired() {
+            store.save_pending(key, pending);
+        }
+    });
+}
+
 fn emit_snapshot(shared: &Shared, chat_id: &str) {
-    let docs = shared.docs.lock().unwrap();
-    let Some(doc) = docs.get(chat_id) else { return };
+    let Some(handle) = shared.docs.get(chat_id) else {
+        return;
+    };
+    emit_snapshot_from(shared, chat_id, &handle);
+}
+
+fn emit_snapshot_from(shared: &Shared, chat_id: &str, handle: &Arc<RoomDoc<ChatDoc>>) {
+    let Some(doc) = handle.lock() else { return };
     let mut messages = doc.read_all();
     for m in &mut messages {
         apply_pending(shared, chat_id, m);
@@ -3038,9 +3087,11 @@ fn emit_snapshot(shared: &Shared, chat_id: &str) {
             now_ms()
         );
     }
-    let _ = shared.events.send(SyncEvent::ChatSnapshot {
-        chat_id: chat_id.to_string(),
-        messages,
+    let _ = shared.docs.publish_if_current(chat_id, handle, || {
+        let _ = shared.events.send(SyncEvent::ChatSnapshot {
+            chat_id: chat_id.to_string(),
+            messages,
+        });
     });
 }
 
@@ -3058,10 +3109,16 @@ fn set_room_caught_up(shared: &Shared, key: &str, up: bool) {
 }
 
 fn emit_project_doc(shared: &Shared, project_id: &str) {
-    let docs = shared.docs.lock().unwrap();
-    let Some(doc) = docs.get(&project_doc_key(project_id)) else {
+    let key = project_doc_key(project_id);
+    let Some(handle) = shared.docs.get(&key) else {
         return;
     };
+    emit_project_doc_from(shared, project_id, &handle);
+}
+
+fn emit_project_doc_from(shared: &Shared, project_id: &str, handle: &Arc<RoomDoc<ChatDoc>>) {
+    let key = project_doc_key(project_id);
+    let Some(doc) = handle.lock() else { return };
     let to_json = |v: loro::LoroValue| serde_json::to_value(v).unwrap_or(Value::Null);
     let threads_v = to_json(doc.core.doc.get_map("threads").get_deep_value());
     let mut threads: Vec<ThreadInfo> = threads_v
@@ -3089,9 +3146,11 @@ fn emit_project_doc(shared: &Shared, project_id: &str) {
             .to_string(),
         model_note: view_settings_note(&doc.core.doc),
     };
-    let _ = shared.events.send(SyncEvent::ProjectDoc {
-        project_id: project_id.to_string(),
-        view,
+    let _ = shared.docs.publish_if_current(&key, handle, || {
+        let _ = shared.events.send(SyncEvent::ProjectDoc {
+            project_id: project_id.to_string(),
+            view,
+        });
     });
 }
 
@@ -3150,7 +3209,7 @@ fn ensure_room_with(
         subs.push(sub);
         subs.push(local_sub);
     }
-    shared.docs.lock().unwrap().insert(key.to_string(), doc);
+    let room_doc = shared.docs.insert(key.to_string(), doc);
     if from_store {
         // Paint from disk now; the room's backfill only adds what is new.
         shared
@@ -3169,8 +3228,17 @@ fn ensure_room_with(
     let shared2 = shared.clone();
     let key2 = key.to_string();
     let project2 = project_id.to_string();
+    let changes_doc = room_doc.clone();
     tokio::spawn(async move {
-        forward_changes(shared2, project2, key2, is_project_doc, change_rx).await;
+        forward_changes(
+            shared2,
+            project2,
+            key2,
+            is_project_doc,
+            changes_doc,
+            change_rx,
+        )
+        .await;
     });
 
     let shared3 = shared.clone();
@@ -3179,7 +3247,7 @@ fn ensure_room_with(
     let room_chat = room_chat.to_string();
     let task = tokio::spawn(async move {
         room_loop(
-            shared3, project, key3, room_chat, cursor, pending, local_rx, cmd_rx,
+            shared3, project, key3, room_chat, room_doc, cursor, pending, local_rx, cmd_rx,
         )
         .await;
     });
@@ -3195,11 +3263,15 @@ async fn forward_changes(
     project_id: Id,
     key: Id,
     is_project_doc: bool,
+    room_doc: Arc<RoomDoc<ChatDoc>>,
     mut rx: mpsc::UnboundedReceiver<super::doc::Touched>,
 ) {
     // Message upserts must bypass catch-up paint coalescing (#1405).
     let mut snapshots = SnapshotSchedule::default();
     loop {
+        if room_doc.is_retired() {
+            return;
+        }
         let wait_pending = snapshots.deadline();
         tokio::select! {
             _ = async {
@@ -3209,16 +3281,18 @@ async fn forward_changes(
                     std::future::pending::<()>().await;
                 }
             }, if wait_pending.is_some() => {
+                if room_doc.is_retired() { return; }
                 if snapshots.timer_fired(room_caught_up(&shared, &key)) {
-                    emit_snapshot(&shared, &key);
+                    emit_snapshot_from(&shared, &key, &room_doc);
                 }
             }
             touched = rx.recv() => {
                 let Some(touched) = touched else { break };
-                shared.mark_dirty(&key);
+                if room_doc.is_retired() { return; }
+                mark_room_dirty(&shared, &key, &room_doc);
                 if is_project_doc {
-                    emit_project_doc(&shared, &project_id);
-                    apply_project_doc_status(&shared, &project_id);
+                    emit_project_doc_from(&shared, &project_id, &room_doc);
+                    apply_project_doc_status_from(&shared, &project_id, &room_doc);
                     continue;
                 }
                 if touched.list_changed {
@@ -3226,17 +3300,17 @@ async fn forward_changes(
                         tokio::time::Instant::now().into_std(),
                         room_caught_up(&shared, &key),
                     ) {
-                        emit_snapshot(&shared, &key);
+                        emit_snapshot_from(&shared, &key, &room_doc);
                     }
-                    mark_activity(&shared, &key);
+                    mark_activity(&shared, &key, &room_doc);
                     continue;
                 }
-                let docs = shared.docs.lock().unwrap();
-                let Some(doc) = docs.get(&key) else { continue };
+                let handle = &room_doc;
+                let Some(doc) = handle.lock() else { continue };
                 for ix in touched.messages {
                     if let Some(mut message) = doc.read_message(ix) {
                         apply_pending(&shared, &key, &mut message);
-                        let _ = shared.events.send(SyncEvent::MessageUpsert {
+                        emit_doc_event(&shared, &key, &room_doc, SyncEvent::MessageUpsert {
                             chat_id: key.clone(),
                             message: Box::new(message),
                         });
@@ -3302,8 +3376,11 @@ fn mentions_for(shared: &Shared, chat_id: &str, text: &str, tokens: &[String]) -
     out
 }
 
-fn mark_activity(shared: &Shared, chat_id: &str) {
+fn mark_activity(shared: &Shared, chat_id: &str, doc: &RoomDoc<ChatDoc>) {
     let mut chats = shared.chats.lock().unwrap();
+    if doc.is_retired() {
+        return;
+    }
     if let Some(c) = chats.iter_mut().find(|c| c.id == chat_id) {
         c.last_message_at = now_ms();
     }
@@ -3356,44 +3433,56 @@ fn set_machine_from_reply(shared: &Shared, dto: &MachineStateDto) {
 /// running|stopped, since}` is this project. Older docs carry `box` as a bare
 /// word — read that as both.
 fn apply_project_doc_status(shared: &Shared, project_id: &str) {
+    let Some(handle) = shared.docs.get(&project_doc_key(project_id)) else {
+        return;
+    };
+    apply_project_doc_status_from(shared, project_id, &handle);
+}
+
+fn apply_project_doc_status_from(
+    shared: &Shared,
+    project_id: &str,
+    handle: &Arc<RoomDoc<ChatDoc>>,
+) {
     let status = {
-        let docs = shared.docs.lock().unwrap();
-        let Some(doc) = docs.get(&project_doc_key(project_id)) else {
-            return;
-        };
+        let Some(doc) = handle.lock() else { return };
         serde_json::to_value(doc.core.doc.get_map("status").get_deep_value()).unwrap_or(Value::Null)
     };
-    match status.get("box") {
-        Some(Value::Object(b)) => {
-            let word = b.get("state").and_then(Value::as_str).unwrap_or("");
-            let since = b.get("since").and_then(Value::as_u64).filter(|v| *v > 0);
-            let state = machine_state_from_word(word);
-            // The box can only say awake/asleep; never let a stale "asleep"
-            // mirror override the relay's live "waking".
-            let waking = shared.machine.lock().unwrap().state == MachineState::Waking;
-            if !(waking && state == MachineState::Asleep) {
-                set_machine(shared, state, since, None);
+    let _ = shared
+        .docs
+        .publish_if_current(&project_doc_key(project_id), handle, || {
+            match status.get("box") {
+                Some(Value::Object(b)) => {
+                    let word = b.get("state").and_then(Value::as_str).unwrap_or("");
+                    let since = b.get("since").and_then(Value::as_u64).filter(|v| *v > 0);
+                    let state = machine_state_from_word(word);
+                    // The box can only say awake/asleep; never let a stale "asleep"
+                    // mirror override the relay's live "waking".
+                    let waking = shared.machine.lock().unwrap().state == MachineState::Waking;
+                    if !(waking && state == MachineState::Asleep) {
+                        set_machine(shared, state, since, None);
+                    }
+                }
+                Some(Value::String(word)) => {
+                    set_machine(shared, machine_state_from_word(word), None, None);
+                    if let Some(state) = box_state_from_word(word) {
+                        set_project_state(shared, project_id, state, None);
+                    }
+                }
+                Some(_) | None => {}
             }
-        }
-        Some(Value::String(word)) => {
-            set_machine(shared, machine_state_from_word(word), None, None);
-            if let Some(state) = box_state_from_word(word) {
-                set_project_state(shared, project_id, state, None);
+            if let Some(ws) = status.get("workspace").and_then(Value::as_object) {
+                if let Some(word) = ws.get("state").and_then(Value::as_str) {
+                    let _ = shared.events.send(SyncEvent::Workspace {
+                        project_id: project_id.to_string(),
+                        running: word == "running",
+                    });
+                    if let Some(state) = box_state_from_word(word) {
+                        set_project_state(shared, project_id, state, None);
+                    }
+                }
             }
-        }
-        Some(_) | None => {}
-    }
-    if let Some(ws) = status.get("workspace").and_then(Value::as_object) {
-        if let Some(word) = ws.get("state").and_then(Value::as_str) {
-            let _ = shared.events.send(SyncEvent::Workspace {
-                project_id: project_id.to_string(),
-                running: word == "running",
-            });
-            if let Some(state) = box_state_from_word(word) {
-                set_project_state(shared, project_id, state, None);
-            }
-        }
-    }
+        });
 }
 
 /// `GET /machine`: state, spec, spend and every workspace's state.
@@ -3471,22 +3560,34 @@ async fn room_loop(
     project_id: Id,
     key: Id,
     room_chat: String,
+    room_doc: Arc<RoomDoc<ChatDoc>>,
     saved_cursor: i64,
     saved_pending: Vec<(String, Vec<u8>)>,
     mut local_rx: mpsc::UnboundedReceiver<Vec<u8>>,
     mut cmd_rx: mpsc::UnboundedReceiver<RoomCmd>,
 ) {
+    if room_doc.is_retired() {
+        return;
+    }
     let is_people = shared.is_people(&room_chat);
     let room = room::room_path(&project_id, &room_chat, is_people);
     let mut session = RoomSession::new(shared.device_id(), room, saved_cursor, saved_pending);
     // The first dial: the chat is about to catch up, so the pill (after its
     // grace) says "Syncing…", not "Reconnecting…".
-    set_room_caught_up(&shared, &key, false);
-    let _ = shared.events.send(SyncEvent::RoomLink {
-        key: key.clone(),
-        state: LinkState::Syncing,
-    });
+    set_room_caught_up_for(&shared, &key, &room_doc, false);
+    emit_doc_event(
+        &shared,
+        &key,
+        &room_doc,
+        SyncEvent::RoomLink {
+            key: key.clone(),
+            state: LinkState::Syncing,
+        },
+    );
     loop {
+        if room_doc.is_retired() {
+            return;
+        }
         // Re-resolve on every dial. Before RoomSession, run_session re-checked
         // the people HashSet each attempt; baking the path once meant a cold
         // start with an empty set dialed `{id}/{id}` forever while iOS used
@@ -3506,12 +3607,16 @@ async fn room_loop(
             &project_id,
             &key,
             &room_chat,
+            &room_doc,
             is_people,
             &mut session,
             &mut local_rx,
             &mut cmd_rx,
         )
         .await;
+        if room_doc.is_retired() {
+            return;
+        }
         // What the pill says while this room is down, from the real failure:
         // a dial that could not reach the relay is "Offline" / "Relay down";
         // a socket that was up and dropped is "Reconnecting…".
@@ -3526,10 +3631,15 @@ async fn room_loop(
             }
             Ok(()) => LinkState::Reconnecting,
         };
-        let _ = shared.events.send(SyncEvent::RoomLink {
-            key: key.clone(),
-            state,
-        });
+        emit_doc_event(
+            &shared,
+            &key,
+            &room_doc,
+            SyncEvent::RoomLink {
+                key: key.clone(),
+                state,
+            },
+        );
         // If run_session returned without closing (e.g. dial failure), close now.
         if !session.is_closed() {
             session.on_close(now_ms());
@@ -3539,6 +3649,7 @@ async fn room_loop(
             &project_id,
             &key,
             &room_chat,
+            &room_doc,
             is_people,
             &mut session,
             None,
@@ -3595,32 +3706,50 @@ async fn run_session(
     project_id: &str,
     key: &str,
     room_chat: &str,
+    room_doc: &Arc<RoomDoc<ChatDoc>>,
     is_people: bool,
     session: &mut RoomSession,
     local_rx: &mut mpsc::UnboundedReceiver<Vec<u8>>,
     cmd_rx: &mut mpsc::UnboundedReceiver<RoomCmd>,
 ) -> Result<()> {
+    if room_doc.is_retired() {
+        anyhow::bail!("room document retired");
+    }
     let room = session.room().to_string();
-    let url = format!("{}/room/{}?token={}", shared.ws_url, room, shared.token());
+    let url = format!(
+        "{}/room/{}?token={}",
+        shared.ws_url,
+        room,
+        shared.room_token(room_doc)?
+    );
     let (ws, _) = timeout(HELLO_DEADLINE, connect_async(&url))
         .await
         .context("dial timed out")
         .context(DialFailed)?
         .context(DialFailed)?;
+    if room_doc.is_retired() {
+        anyhow::bail!("room document retired");
+    }
     let (mut tx, mut rx) = ws.split();
 
     // Socket up: catching up until RowsDone (`RoomAction::LinkLive`).
-    set_room_caught_up(shared, key, false);
-    let _ = shared.events.send(SyncEvent::RoomLink {
-        key: key.to_string(),
-        state: LinkState::Syncing,
-    });
+    set_room_caught_up_for(shared, key, room_doc, false);
+    emit_doc_event(
+        shared,
+        key,
+        room_doc,
+        SyncEvent::RoomLink {
+            key: key.to_string(),
+            state: LinkState::Syncing,
+        },
+    );
     session.on_open(now_ms());
     perform_room_actions(
         shared,
         project_id,
         key,
         room_chat,
+        room_doc,
         is_people,
         session,
         Some(&mut tx),
@@ -3632,6 +3761,9 @@ async fn run_session(
     // The close code the relay sent, if it sent one before the stream ended.
     let mut close_code: Option<u16> = None;
     loop {
+        if room_doc.is_retired() {
+            anyhow::bail!("room document retired");
+        }
         if session.is_closed() {
             anyhow::bail!("session closed");
         }
@@ -3640,7 +3772,7 @@ async fn run_session(
                 let Some(msg) = msg else {
                     session.on_close(now_ms());
                     perform_room_actions(
-                        shared, project_id, key, room_chat, is_people, session, Some(&mut tx),
+                        shared, project_id, key, room_chat, room_doc, is_people, session, Some(&mut tx),
                     ).await?;
                     if let Some(code) = close_code.filter(|c| is_restart_close(*c)) {
                         return Err(anyhow::Error::new(ServerRestart(code)));
@@ -3655,14 +3787,14 @@ async fn run_session(
                 let WsMessage::Binary(bytes) = msg else { continue };
                 session.on_frame(&bytes);
                 perform_room_actions(
-                    shared, project_id, key, room_chat, is_people, session, Some(&mut tx),
+                    shared, project_id, key, room_chat, room_doc, is_people, session, Some(&mut tx),
                 ).await?;
             }
             bytes = local_rx.recv() => {
                 let Some(bytes) = bytes else { anyhow::bail!("doc dropped") };
                 session.on_local_commit(bytes);
                 perform_room_actions(
-                    shared, project_id, key, room_chat, is_people, session, Some(&mut tx),
+                    shared, project_id, key, room_chat, room_doc, is_people, session, Some(&mut tx),
                 ).await?;
             }
             cmd = cmd_rx.recv() => {
@@ -3686,19 +3818,19 @@ async fn run_session(
                     }
                 }
                 perform_room_actions(
-                    shared, project_id, key, room_chat, is_people, session, Some(&mut tx),
+                    shared, project_id, key, room_chat, room_doc, is_people, session, Some(&mut tx),
                 ).await?;
             }
             _ = presence.tick() => {
                 session.presence(shared.presence_header());
                 perform_room_actions(
-                    shared, project_id, key, room_chat, is_people, session, Some(&mut tx),
+                    shared, project_id, key, room_chat, room_doc, is_people, session, Some(&mut tx),
                 ).await?;
             }
             _ = tick.tick() => {
                 session.on_tick(now_ms());
                 perform_room_actions(
-                    shared, project_id, key, room_chat, is_people, session, Some(&mut tx),
+                    shared, project_id, key, room_chat, room_doc, is_people, session, Some(&mut tx),
                 ).await?;
             }
         }
@@ -3718,6 +3850,7 @@ async fn perform_room_actions(
     project_id: &str,
     key: &str,
     room_chat: &str,
+    room_doc: &Arc<RoomDoc<ChatDoc>>,
     is_people: bool,
     session: &mut RoomSession,
     mut tx: Option<&mut WsSink>,
@@ -3731,6 +3864,9 @@ async fn perform_room_actions(
         }
         let mut abort_batch = false;
         for action in actions {
+            if room_doc.is_retired() {
+                anyhow::bail!("room document retired");
+            }
             match action {
                 RoomAction::SendFrame(bytes) => {
                     if let Some(tx) = tx.as_mut() {
@@ -3742,19 +3878,20 @@ async fn perform_room_actions(
                     frontier,
                     checkpoint_seq: _,
                 } => {
-                    let contained = {
-                        let docs = shared.docs.lock().unwrap();
-                        docs.get(key)
-                            .is_some_and(|doc| doc.core.contains_frontier(&frontier))
-                    };
+                    let contained = room_doc
+                        .lock()
+                        .is_some_and(|doc| doc.core.contains_frontier(&frontier));
                     if contained {
                         session.on_checkpoint_skipped();
                     } else {
-                        match fetch_checkpoint(shared, &room).await {
+                        let checkpoint = fetch_checkpoint(shared, &room, room_doc).await;
+                        if room_doc.is_retired() {
+                            anyhow::bail!("room document retired");
+                        }
+                        match checkpoint {
                             Ok((seq, bytes)) => {
                                 let import_ok = {
-                                    let docs = shared.docs.lock().unwrap();
-                                    if let Some(doc) = docs.get(key) {
+                                    if let Some(doc) = room_doc.lock() {
                                         match doc.core.doc.import(&bytes) {
                                             Ok(_) => true,
                                             Err(err) => {
@@ -3793,8 +3930,7 @@ async fn perform_room_actions(
                     // (failed, parked): parked = Loro holds the ops until their dependencies
                     // arrive; the session keeps the persisted cursor below that row.
                     let (import_failed, parked) = {
-                        let docs = shared.docs.lock().unwrap();
-                        if let Some(doc) = docs.get(key) {
+                        if let Some(doc) = room_doc.lock() {
                             match doc.core.doc.import(&bytes) {
                                 Ok(status) => (false, status.pending.is_some()),
                                 Err(err) => {
@@ -3820,28 +3956,44 @@ async fn perform_room_actions(
                     }
                 }
                 RoomAction::Cursor(cursor) => {
-                    shared
-                        .room_seq
-                        .lock()
-                        .unwrap()
-                        .insert(key.to_string(), cursor);
-                    shared.mark_dirty(key);
+                    let _ = shared.docs.publish_if_current(key, room_doc, || {
+                        shared
+                            .room_seq
+                            .lock()
+                            .unwrap()
+                            .insert(key.to_string(), cursor);
+                    });
+                    mark_room_dirty(shared, key, room_doc);
                 }
                 RoomAction::Pending(pending) => {
-                    shared.with_store(|s| s.save_pending(key, &pending));
+                    save_room_pending(shared, key, room_doc, &pending);
                 }
                 RoomAction::Ack { .. } => {
-                    let had = shared.pending_messages.lock().unwrap().ack_room(key);
+                    let Some((had, cleared)) =
+                        shared.docs.publish_if_current(key, room_doc, || {
+                            (
+                                shared.pending_messages.lock().unwrap().ack_room(key),
+                                shared.push_refused.lock().unwrap().remove(room_chat),
+                            )
+                        })
+                    else {
+                        anyhow::bail!("room document retired");
+                    };
                     if had && room_chat != PROJECT_DOC_CHAT_ID {
-                        emit_snapshot(shared, key);
+                        emit_snapshot_from(shared, key, room_doc);
                     }
                     // Refusal recovery is independently scoped to this room's ACK.
-                    if shared.push_refused.lock().unwrap().remove(room_chat) {
-                        let _ = shared.events.send(SyncEvent::PushRefused {
-                            chat_id: room_chat.to_string(),
-                            refused: false,
-                            why: PushRefusal::default(),
-                        });
+                    if cleared {
+                        emit_doc_event(
+                            shared,
+                            key,
+                            room_doc,
+                            SyncEvent::PushRefused {
+                                chat_id: room_chat.to_string(),
+                                refused: false,
+                                why: PushRefusal::default(),
+                            },
+                        );
                     }
                 }
                 RoomAction::PushRefused {
@@ -3854,22 +4006,31 @@ async fn perform_room_actions(
                     // The chat-level note draws it (`PushRefused`); the room link stays live.
                     // A refusal with a reason is sent even while the room already stands
                     // refused, so the note can name the block the moment the relay does.
-                    let fresh = shared
-                        .push_refused
-                        .lock()
-                        .unwrap()
-                        .insert(room_chat.to_string());
+                    let Some(fresh) = shared.docs.publish_if_current(key, room_doc, || {
+                        shared
+                            .push_refused
+                            .lock()
+                            .unwrap()
+                            .insert(room_chat.to_string())
+                    }) else {
+                        anyhow::bail!("room document retired");
+                    };
                     if room_chat != PROJECT_DOC_CHAT_ID && (fresh || reason.is_some()) {
-                        let _ = shared.events.send(SyncEvent::PushRefused {
-                            chat_id: room_chat.to_string(),
-                            refused: true,
-                            why: PushRefusal {
-                                code,
-                                reason,
-                                by_handle,
-                                by_name,
+                        emit_doc_event(
+                            shared,
+                            key,
+                            room_doc,
+                            SyncEvent::PushRefused {
+                                chat_id: room_chat.to_string(),
+                                refused: true,
+                                why: PushRefusal {
+                                    code,
+                                    reason,
+                                    by_handle,
+                                    by_name,
+                                },
                             },
-                        });
+                        );
                     }
                 }
                 RoomAction::BoxState {
@@ -3877,8 +4038,16 @@ async fn perform_room_actions(
                     detail,
                     poll_machine,
                 } => {
-                    set_project_state(shared, project_id, map_box(state), detail.clone());
-                    set_machine(shared, machine_from_wire(state), None, detail);
+                    if shared
+                        .docs
+                        .publish_if_current(key, room_doc, || {
+                            set_project_state(shared, project_id, map_box(state), detail.clone());
+                            set_machine(shared, machine_from_wire(state), None, detail);
+                        })
+                        .is_none()
+                    {
+                        anyhow::bail!("room document retired");
+                    }
                     if poll_machine {
                         let poll = shared.clone();
                         tokio::spawn(async move { refresh_machine(&poll).await });
@@ -3888,17 +4057,27 @@ async fn perform_room_actions(
                     // Catch-up done: mark live so forward_changes stops
                     // coalescing, then paint once (the "plus one when catch-up
                     // ends" snapshot). A pending coalesce timer is skipped.
-                    set_room_caught_up(shared, key, true);
-                    let _ = shared.events.send(SyncEvent::Link(Link::Live));
-                    let _ = shared.events.send(SyncEvent::RoomLink {
-                        key: key.to_string(),
-                        state: LinkState::Live,
-                    });
+                    set_room_caught_up_for(shared, key, room_doc, true);
+                    emit_doc_event(shared, key, room_doc, SyncEvent::Link(Link::Live));
+                    emit_doc_event(
+                        shared,
+                        key,
+                        room_doc,
+                        SyncEvent::RoomLink {
+                            key: key.to_string(),
+                            state: LinkState::Live,
+                        },
+                    );
                     if room_chat == PROJECT_DOC_CHAT_ID {
-                        emit_project_doc(shared, project_id);
+                        emit_project_doc_from(shared, project_id, room_doc);
                     } else {
-                        emit_snapshot(shared, key);
-                        let _ = shared.events.send(SyncEvent::ChatSynced(key.to_string()));
+                        emit_snapshot_from(shared, key, room_doc);
+                        emit_doc_event(
+                            shared,
+                            key,
+                            room_doc,
+                            SyncEvent::ChatSynced(key.to_string()),
+                        );
                     }
                 }
                 RoomAction::HealCheck { relay_vv } => {
@@ -3906,8 +4085,7 @@ async fn perform_room_actions(
                     // checkpoint, #1518), push the difference back once so the room heals.
                     // Always answer (even empty) so the session can release the held pending resend.
                     let missing = {
-                        let docs = shared.docs.lock().unwrap();
-                        match (docs.get(key), arbos_core::doc::decode_vv(&relay_vv)) {
+                        match (room_doc.lock(), arbos_core::doc::decode_vv(&relay_vv)) {
                             (Some(doc), Some(vv)) => doc.core.updates_beyond(&vv),
                             _ => Vec::new(),
                         }
@@ -3928,10 +4106,15 @@ async fn perform_room_actions(
                     if code == "restart_soon" {
                         // The relay restarts in a few seconds (#1340): the
                         // pill says so; the clean close that follows redials.
-                        let _ = shared.events.send(SyncEvent::RoomLink {
-                            key: key.to_string(),
-                            state: LinkState::RestartSoon,
-                        });
+                        emit_doc_event(
+                            shared,
+                            key,
+                            room_doc,
+                            SyncEvent::RoomLink {
+                                key: key.to_string(),
+                                state: LinkState::RestartSoon,
+                            },
+                        );
                     } else if code != "state_timeout" && code != "lagging" {
                         eprintln!("relay room {}: error {}: {}", session.room(), code, message);
                     }
@@ -3948,10 +4131,15 @@ async fn perform_room_actions(
                         if !mine
                             && shared.in_call.lock().unwrap().as_deref() != Some(call_id.as_str())
                         {
-                            let _ = shared.events.send(SyncEvent::CallSeen {
-                                chat_id: room_chat.to_string(),
-                                call_id,
-                            });
+                            emit_doc_event(
+                                shared,
+                                key,
+                                room_doc,
+                                SyncEvent::CallSeen {
+                                    chat_id: room_chat.to_string(),
+                                    call_id,
+                                },
+                            );
                         }
                     }
                     if let (false, Some(handle)) = (mine, handle) {
@@ -3960,18 +4148,28 @@ async fn perform_room_actions(
                             .and_then(Value::as_str)
                             .filter(|s| !s.is_empty())
                             .map(str::to_string);
-                        let _ = shared.events.send(SyncEvent::Presence {
-                            handle: handle.clone(),
-                            chat_id: is_people.then(|| room_chat.to_string()),
-                            seen,
-                        });
+                        emit_doc_event(
+                            shared,
+                            key,
+                            room_doc,
+                            SyncEvent::Presence {
+                                handle: handle.clone(),
+                                chat_id: is_people.then(|| room_chat.to_string()),
+                                seen,
+                            },
+                        );
                         if is_people {
                             if let Some(active) = typing {
-                                let _ = shared.events.send(SyncEvent::Typing {
-                                    chat_id: room_chat.to_string(),
-                                    handle,
-                                    active,
-                                });
+                                emit_doc_event(
+                                    shared,
+                                    key,
+                                    room_doc,
+                                    SyncEvent::Typing {
+                                        chat_id: room_chat.to_string(),
+                                        handle,
+                                        active,
+                                    },
+                                );
                             }
                         }
                     }
@@ -3990,11 +4188,15 @@ async fn perform_room_actions(
     }
 }
 
-async fn fetch_checkpoint(shared: &Shared, room: &str) -> Result<(i64, Vec<u8>)> {
+async fn fetch_checkpoint(
+    shared: &Shared,
+    room: &str,
+    room_doc: &RoomDoc<ChatDoc>,
+) -> Result<(i64, Vec<u8>)> {
     let resp = shared
         .http
         .get(format!("{}/room/{}/checkpoint", shared.http_url, room))
-        .bearer_auth(shared.token())
+        .bearer_auth(shared.room_token(room_doc)?)
         .send()
         .await?;
     if !resp.status().is_success() {
@@ -4774,7 +4976,7 @@ async fn send_message(
     mentions: Vec<String>,
 ) {
     // No room doc yet: queue while NewChat is in flight, otherwise fail visibly.
-    if !shared.docs.lock().unwrap().contains_key(&chat_id) {
+    let Some(room_doc) = shared.docs.get(&chat_id) else {
         {
             let mut pending = shared.pending_new_chats.lock().unwrap();
             if let Some(queue) = pending.get_mut(&chat_id) {
@@ -4800,7 +5002,7 @@ async fn send_message(
             error,
         });
         return;
-    }
+    };
 
     let project_id = project_of(&shared, &chat_id).unwrap_or_default();
     // People chats keep their blobs under `people:<chat_id>`; project chats under the
@@ -4861,10 +5063,8 @@ async fn send_message(
             .unwrap_or(false)
     };
     {
-        let docs = shared.docs.lock().unwrap();
-        let Some(doc) = docs.get(&chat_id) else {
+        let Some(doc) = room_doc.lock() else {
             // Room torn down between the early check and now — fail visibly.
-            drop(docs);
             shared
                 .pending_messages
                 .lock()
@@ -4958,7 +5158,7 @@ async fn send_message(
                 .insert(chat_id.clone(), now_ms());
         }
     }
-    mark_activity(&shared, &chat_id);
+    mark_activity(&shared, &chat_id, &room_doc);
     // Other people in the chat get a notification with the text (API §7c); the relay never
     // reads rows, so the writer announces. Solo projects have nobody else to tell.
     if in_people {
@@ -5436,9 +5636,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         let new_dm = serde_json::from_value::<PeopleChatDto>(v)
                             .ok()
                             .map(|dto| dto.id)
-                            .filter(|id| {
-                                !id.is_empty() && !shared.docs.lock().unwrap().contains_key(id)
-                            });
+                            .filter(|id| !id.is_empty() && !shared.docs.contains_key(id));
                         if let Some(id) = &new_dm {
                             shared
                                 .pending_new_chats
@@ -5968,54 +6166,6 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 }
             });
         }
-        ClientCommand::SetMessageGrant {
-            project_id,
-            grantee,
-            enabled,
-        } => {
-            let shared = shared.clone();
-            tokio::spawn(async move {
-                match shared
-                    .put_json(
-                        &format!("/projects/{project_id}/message-access"),
-                        json!({ "grantee": grantee, "enabled": enabled }),
-                    )
-                    .await
-                {
-                    Ok(_) => {
-                        let _ = refresh_registry(&shared).await;
-                    }
-                    Err(err) => {
-                        let _ = shared
-                            .events
-                            .send(SyncEvent::PeopleError(UserError::classify(
-                                "give access",
-                                &err,
-                            )));
-                    }
-                }
-            });
-        }
-        ClientCommand::RemoveMessageGrant {
-            project_id,
-            grantee,
-        } => {
-            let shared = shared.clone();
-            tokio::spawn(async move {
-                if let Err(err) = shared
-                    .delete(&format!("/projects/{project_id}/message-access/{grantee}"))
-                    .await
-                {
-                    let _ = shared
-                        .events
-                        .send(SyncEvent::PeopleError(UserError::classify(
-                            "remove the access",
-                            &err,
-                        )));
-                }
-                let _ = refresh_registry(&shared).await;
-            });
-        }
         ClientCommand::RemoveProjectMember {
             project_id,
             user_id,
@@ -6229,21 +6379,21 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             );
         }
         ClientCommand::Stop { chat_id } => {
-            let docs = shared.docs.lock().unwrap();
-            if let Some(doc) = docs.get(&chat_id) {
+            let handle = shared.docs.get(&chat_id);
+            if let Some(doc) = handle.as_ref().and_then(|handle| handle.lock()) {
                 let device = shared.device_id();
                 doc.core.transact(|d| {
                     d.push_command("stop", json!({}), &device);
                 });
-            }
+            };
         }
         ClientCommand::StopJob {
             chat_id,
             job_id,
             message_id,
         } => {
-            let docs = shared.docs.lock().unwrap();
-            if let Some(doc) = docs.get(&chat_id) {
+            let handle = shared.docs.get(&chat_id);
+            if let Some(doc) = handle.as_ref().and_then(|handle| handle.lock()) {
                 let device = shared.device_id();
                 doc.core.transact(|d| {
                     d.push_command(
@@ -6252,7 +6402,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         &device,
                     );
                 });
-            }
+            };
         }
         ClientCommand::JobsRefresh { project_id } => {
             let shared = shared.clone();
@@ -6274,8 +6424,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             emoji,
         } => {
             let me = format!("user:{}", shared.me_id());
-            let docs = shared.docs.lock().unwrap();
-            if let Some(doc) = docs.get(&chat_id) {
+            let handle = shared.docs.get(&chat_id);
+            if let Some(doc) = handle.as_ref().and_then(|handle| handle.lock()) {
                 let base = arbos_core::doc::normalize_reaction_emoji(&emoji);
                 let already = doc
                     .index_of(&message_id)
@@ -6294,7 +6444,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 {
                     eprintln!("relay: reaction: {e:#}");
                 }
-            }
+            };
         }
         ClientCommand::DeleteMessage {
             chat_id,
@@ -6378,23 +6528,23 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         } => {
             // Same path as the iPhone: write `edit_message_text` into the local
             // chat doc; peers see the body via room sync (no HTTP edit).
-            let docs = shared.docs.lock().unwrap();
-            if let Some(doc) = docs.get(&chat_id) {
+            let handle = shared.docs.get(&chat_id);
+            if let Some(doc) = handle.as_ref().and_then(|handle| handle.lock()) {
                 if let Err(e) = doc
                     .core
                     .transact(|d| d.edit_message_text(&message_id, &text))
                 {
                     eprintln!("relay: edit message: {e:#}");
                 }
-            }
+            };
         }
         ClientCommand::Approve {
             chat_id,
             approval_id,
             grant,
         } => {
-            let docs = shared.docs.lock().unwrap();
-            if let Some(doc) = docs.get(&chat_id) {
+            let handle = shared.docs.get(&chat_id);
+            if let Some(doc) = handle.as_ref().and_then(|handle| handle.lock()) {
                 let device = shared.device_id();
                 let mut payload = json!({ "approvalId": approval_id });
                 if let Some(g) = grant {
@@ -6403,15 +6553,15 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 doc.core.transact(|d| {
                     d.push_command("approve", payload, &device);
                 });
-            }
+            };
         }
         ClientCommand::Reject {
             chat_id,
             approval_id,
             reason,
         } => {
-            let docs = shared.docs.lock().unwrap();
-            if let Some(doc) = docs.get(&chat_id) {
+            let handle = shared.docs.get(&chat_id);
+            if let Some(doc) = handle.as_ref().and_then(|handle| handle.lock()) {
                 let mut payload = json!({ "approvalId": approval_id });
                 if let Some(r) = reason.filter(|r| !r.trim().is_empty()) {
                     payload["reason"] = json!(r);
@@ -6420,19 +6570,19 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 doc.core.transact(|d| {
                     d.push_command("reject", payload, &device);
                 });
-            }
+            };
         }
         ClientCommand::Retry {
             chat_id,
             message_id,
         } => {
-            let docs = shared.docs.lock().unwrap();
-            if let Some(doc) = docs.get(&chat_id) {
+            let handle = shared.docs.get(&chat_id);
+            if let Some(doc) = handle.as_ref().and_then(|handle| handle.lock()) {
                 let device = shared.device_id();
                 doc.core.transact(|d| {
                     d.push_command("retry", json!({ "messageId": message_id }), &device);
                 });
-            }
+            };
         }
         ClientCommand::RenameGroup { chat_id, title } => {
             {
@@ -6569,13 +6719,13 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 .insert(chat_id.clone(), now_ms());
             emit_chats(shared);
             {
-                let docs = shared.docs.lock().unwrap();
-                if let Some(doc) = docs.get(&chat_id) {
+                let handle = shared.docs.get(&chat_id);
+                if let Some(doc) = handle.as_ref().and_then(|handle| handle.lock()) {
                     let device = shared.device_id();
                     doc.core.transact(|d| {
                         d.push_command("retitle", json!({ "title": title }), &device);
                     });
-                }
+                };
             }
             let shared = shared.clone();
             tokio::spawn(async move {
@@ -7450,13 +7600,13 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             // Mirror into the project doc `settings` too (crdt-sync §6.3): the
             // box reads the doc first, so both must agree.
             {
-                let docs = shared.docs.lock().unwrap();
-                if let Some(doc) = docs.get(&project_doc_key(&project_id)) {
+                let handle = shared.docs.get(&project_doc_key(&project_id));
+                if let Some(doc) = handle.as_ref().and_then(|handle| handle.lock()) {
                     let effort_s = effort_to(effort);
                     doc.core.transact(|d| {
                         let _ = d.set_model_settings(&model, effort_s);
                     });
-                }
+                };
             }
             {
                 let mut projects = shared.projects.lock().unwrap();
@@ -8275,8 +8425,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         Ok(e) => {
                             // Answer the card with the reference: the box's waiting tool
                             // gets `{ id, name, env }` and nothing else.
-                            let docs = shared.docs.lock().unwrap();
-                            if let Some(doc) = docs.get(&chat_id) {
+                            let handle = shared.docs.get(&chat_id);
+                            if let Some(doc) = handle.as_ref().and_then(|handle| handle.lock()) {
                                 let device = shared.device_id();
                                 let payload = json!({ "approvalId": approval_id,
                                     "secret": { "id": e.secret.id, "name": e.secret.name, "env": e.secret.env } });

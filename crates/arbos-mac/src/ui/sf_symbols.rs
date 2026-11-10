@@ -315,8 +315,10 @@ mod mac {
     type SizeKey = (String, u32, Weight);
     type RasterKey = (String, u32, Weight, u32, [u8; 4]);
 
-    fn sizes() -> &'static Mutex<HashMap<SizeKey, Option<(f32, f32)>>> {
-        static SIZES: OnceLock<Mutex<HashMap<SizeKey, Option<(f32, f32)>>>> = OnceLock::new();
+    type Sizes = Mutex<HashMap<SizeKey, Option<(f32, f32)>>>;
+
+    fn sizes() -> &'static Sizes {
+        static SIZES: OnceLock<Sizes> = OnceLock::new();
         SIZES.get_or_init(Default::default)
     }
 
