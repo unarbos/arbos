@@ -14,8 +14,8 @@ worktrees are left alone. Before/after source hashes, clean commands, expected
 nonzero counts and fresh results are retained. This is artifact isolation, not a
 new compiler trust or performance claim.
 
-The root combined Phase3 recheck now passes33actual native regressions:3append,
-11privacy,13sidecar daemon,4mirror,2core route-fixture checks. Four-package
+The root combined Phase3 recheck now passes35actual native regressions:3append,
+11privacy,15sidecar daemon,4mirror,2core route-fixture checks. Four-package
 all-target Clippy passes19.673s after forced workspace rebuild. Mac25std-only
 checks use direct rustc, Node37checks and guarded voice84cases use different
 runtimes, and generated pure laws/independent leaf targets are separate. The SQL

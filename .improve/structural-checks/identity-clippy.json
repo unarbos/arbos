@@ -1,0 +1,20 @@
+{
+  "command": [
+    "/usr/bin/sandbox-exec",
+    "-p",
+    "(version 1) (allow default) (deny network*)",
+    "cargo",
+    "clippy",
+    "--locked",
+    "--offline",
+    "-p",
+    "arbos-sidecar",
+    "--all-targets",
+    "--",
+    "-D",
+    "warnings"
+  ],
+  "exit_code": 0,
+  "seconds": 46.11414754099678,
+  "unique_source_target": true
+}

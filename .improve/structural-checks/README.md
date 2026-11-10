@@ -54,3 +54,11 @@ The reviewed test-plan relay isolation is carried here as a safety prerequisite
 before any core-path push can start Swift checks. It is byte-identical to the
 Phase9 helper/Fastfile change; integration must recognize that identical overlap.
 It keeps the complete test scheme and does not force global fixture state.
+
+A later review caught an intermediate page-dedup regression: two distinct
+messages were collapsed when positions were missing/shared. Two new actual daemon
+cases failed before the correction. The final key includes chat/event/message
+identity, and all15daemon+4mirror cases pass. Identical copies still wake once;
+completed-page replay remains unchanged. `identity-red.json`, `identity-clippy.json`
+and the final root native gate record distinguish this follow-up from the earlier
+13-case candidate.
