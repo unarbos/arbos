@@ -1613,9 +1613,19 @@ impl SyncHub {
         let hosts: Vec<SharedHost> = self.hosts.lock().await.values().cloned().collect();
         let mut total = 0usize;
         let mut connected = 0usize;
+        let mut busy = 0usize;
         let mut trouble = Vec::new();
         for h in hosts {
-            let h = h.lock().await;
+            // A room someone else holds is counted and skipped, never waited for (2026-11-09). This
+            // is a status surface: a room whose lock is held by a sync push, a turn writing into
+            // the document or a boot-time load would otherwise make `/box/state` wait for that
+            // work to finish, which is exactly when a person is asking what the box is doing.
+            // `survey_rooms` already reads the hosts this way.
+            let Ok(h) = h.try_lock() else {
+                total += 1;
+                busy += 1;
+                continue;
+            };
             if h.closed {
                 continue;
             }
@@ -1634,7 +1644,9 @@ impl SyncHub {
             }
         }
         json!({
-            "rooms": total, "connected": connected, "trouble": trouble,
+            // `busy` is the part of `rooms` this pass could not read: open, in use, and not
+            // counted in `connected` or `trouble`. Without it a loaded box looks disconnected.
+            "rooms": total, "connected": connected, "busy": busy, "trouble": trouble,
             // #2367: the room budget, so a box's own numbers explain its socket count.
             "cap": max_open_rooms(), "idle_secs": room_idle_ms() / 1000,
             "closed_cold": self.closed_cold.load(std::sync::atomic::Ordering::Relaxed),

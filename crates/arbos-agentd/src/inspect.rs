@@ -632,7 +632,7 @@ pub async fn box_state(sup: &Supervisor) -> Value {
             "source": "proc",
         }),
     };
-    json!({
+    let mut out = json!({
         "device_id": sup.cfg.device_id,
         "user_id": sup.cfg.user_id,
         "agentd_version": env!("CARGO_PKG_VERSION"),
@@ -651,7 +651,11 @@ pub async fn box_state(sup: &Supervisor) -> Value {
         "warnings_in_ring": warnings,
         "rooms": rooms_json(sup).await,
         "workspaces": workspaces,
-    })
+    });
+    // `workspaces` above is what the box has started so far; the boot fields say whether that
+    // is the whole set yet (2026-11-09), so a reader is never left guessing at an empty list.
+    crate::http::merge_boot(&mut out, sup.boot.json());
+    out
 }
 
 /// The box's whole room budget in one place, because no per-workspace `links` block can show it:

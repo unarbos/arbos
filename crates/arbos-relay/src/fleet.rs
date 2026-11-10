@@ -30,7 +30,7 @@ use arbos_core::ids::now_ms;
 use arbos_core::wire::BoxState;
 
 use crate::auth::Principal;
-use crate::boxes::{self, Provider};
+use crate::boxes::{self, docker_failure, Provider};
 use crate::db::Sandbox;
 use crate::signin::api_error;
 use crate::state::AppState;
@@ -427,17 +427,16 @@ pub fn run_args(
 }
 
 async fn docker(args: &[String]) -> Result<String> {
-    let out = tokio::process::Command::new("docker")
+    let out = match tokio::process::Command::new("docker")
         .args(args)
         .output()
         .await
-        .with_context(|| format!("docker {}", args.first().cloned().unwrap_or_default()))?;
+    {
+        Ok(out) => out,
+        Err(e) => return Err(docker_failure(args, &e.to_string())),
+    };
     if !out.status.success() {
-        return Err(anyhow!(
-            "docker {} failed: {}",
-            args.first().cloned().unwrap_or_default(),
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
+        return Err(docker_failure(args, &String::from_utf8_lossy(&out.stderr)));
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
 }
@@ -1523,6 +1522,56 @@ mod tests {
         assert_eq!(a.last().map(String::as_str), Some("img:1"));
         assert_eq!(container_name("gh_108417131"), "arbos-box-gh_108417131");
         assert_eq!(container_name("Odd/Id"), "arbos-box-odd-id");
+    }
+
+    /// A `docker run` for an `arbos-agent-*` image that fails is logged with the command that
+    /// failed, and that command carries the box's whole environment as `-e NAME=value`. On
+    /// 2026-11-09 an OpenRouter key reached journald that way. The failure line must name the
+    /// variables and the image and carry no value at all, from the argument list or from
+    /// docker's own stderr.
+    #[test]
+    fn a_failed_run_logs_no_secret_from_the_command_or_the_stderr() {
+        let key = "sk-or-v1-abcdefghijklmnopqrstuvwxyz0123456789";
+        let token = "abx_0123456789abcdef0123456789abcdef";
+        let env = std::collections::BTreeMap::from([
+            ("OPENROUTER_API_KEY".to_owned(), key.to_owned()),
+            ("ARBOS_BOX_TOKEN".to_owned(), token.to_owned()),
+            ("ARBOS_USER_ID".to_owned(), "u".to_owned()),
+        ]);
+        let args = run_args(
+            &FleetCfg::default(),
+            "arbos-box-u",
+            Path::new("/d/boxes/u/mnt"),
+            Path::new("/d/boxes/resolv.conf"),
+            "ghcr.io/unarbos/arbos/arbos-agent:0.1.203",
+            &env,
+        );
+        let line = docker_failure(
+            &args,
+            &format!("docker: Error response from daemon: no such image (env had OPENROUTER_API_KEY={key})"),
+        )
+        .to_string();
+
+        assert!(
+            !line.contains(key),
+            "the openrouter key reaches the log: {line}"
+        );
+        assert!(
+            !line.contains(token),
+            "the box token reaches the log: {line}"
+        );
+        assert!(line.contains("OPENROUTER_API_KEY=[REDACTED:env]"), "{line}");
+        assert!(line.contains("ARBOS_BOX_TOKEN=[REDACTED:env]"), "{line}");
+        // Still debuggable: the subcommand, the container, the image and docker's reason.
+        assert!(
+            line.starts_with("docker run -d --name arbos-box-u"),
+            "{line}"
+        );
+        assert!(line.contains("arbos-agent:0.1.203"), "{line}");
+        assert!(line.contains("no such image"), "{line}");
+        // Every `-e` value goes, secret-looking or not: the box's environment holds vault values
+        // under names this pass cannot know, so the name is the most a log line may carry.
+        assert!(line.contains("-e ARBOS_USER_ID=[REDACTED:env]"), "{line}");
     }
 
     #[test]

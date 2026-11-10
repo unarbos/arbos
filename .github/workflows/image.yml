@@ -1,10 +1,14 @@
 name: image
 
-# Builds the production `arbos-agent` image (sandbox-image.md §6), pushes it to GHCR, and registers it
-# as the Daytona snapshot `arbos-agent-<version>`. Runs on an image tag or by hand.
+# Builds the production `arbos-agent` image (sandbox-image.md §6), pushes it to GHCR, and smoke-tests
+# it. Runs on an image tag or by hand.
 #
-# Secrets: DAYTONA_API_KEY (register the snapshot), GHCR_READ_TOKEN (a PAT with read:packages that
-# Daytona uses to pull from GHCR; registered once as a Daytona registry by image/register-snapshot.sh).
+# It used to register the image as a Daytona snapshot as a last step. Daytona is being retired (Jacob,
+# 2026-11-09), its key is not exposed to this workflow, and a host machine pulls the GHCR tag straight,
+# so that step only ever failed the run after a good build. A box still on Daytona is left as it is and
+# its sandbox is retired by hand; nothing in CI needs DAYTONA_API_KEY.
+#
+# Secrets: GITHUB_TOKEN only (the GHCR push).
 
 on:
   push:
@@ -20,7 +24,7 @@ env:
   IMAGE: ghcr.io/${{ github.repository }}/arbos-agent
 
 jobs:
-  build-push-register:
+  build-push:
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -96,10 +100,3 @@ jobs:
             ! find /opt/arbos/src -name '.env' -o -name '*.p8' -o -name '*.p12' -o -name '*.pem' | grep -q .
             ! env | grep -E "KEY|TOKEN"
           '
-
-      - name: Register the Daytona snapshot
-        env:
-          DAYTONA_API_KEY: ${{ secrets.DAYTONA_API_KEY }}
-          GHCR_READ_TOKEN: ${{ secrets.GHCR_READ_TOKEN }}
-          GHCR_USER: ${{ github.actor }}
-        run: image/register-snapshot.sh "arbos-agent-${{ steps.v.outputs.version }}" "${{ env.IMAGE }}:${{ steps.v.outputs.version }}"

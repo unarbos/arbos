@@ -53,6 +53,73 @@ pub fn redact_placeholders(text: &str) -> String {
     out
 }
 
+/// Flags whose next argument is `NAME=value` with a secret on the value side.
+const ENV_FLAGS: &[&str] = &["-e", "--env", "--build-arg"];
+
+/// Flags whose next argument is a bare secret.
+const VALUE_FLAGS: &[&str] = &["--password", "--token", "--secret"];
+
+/// `NAME=value` with the value removed, keeping the name. A bare `NAME` (the pass-through form
+/// of `-e`, whose value comes from the parent's environment) carries nothing and is kept whole.
+fn redact_assignment(arg: &str) -> String {
+    match arg.split_once('=') {
+        Some((name, _)) => format!("{name}=[REDACTED:env]"),
+        None => arg.to_owned(),
+    }
+}
+
+/// Render a child process's argument list for a log line with every secret value removed.
+///
+/// A `docker run` that fails is worth logging with the command that failed, but that command
+/// carries the box's whole environment as `-e NAME=value` pairs: printed verbatim it writes live
+/// API keys into the journal. Flag names, variable names, the image and every other argument
+/// survive — only the values go — so the line still says what was run and with which variables.
+///
+/// [`scrub`] runs over the arguments this pass does not know about, so a credential that arrives
+/// in some other position (a URL query, a positional token) is removed as well.
+pub fn redact_argv<S: AsRef<str>>(args: &[S]) -> String {
+    /// Longer than this and an argument is a script or a prompt, not a flag worth reading whole.
+    const MAX_ARG: usize = 160;
+
+    let mut out: Vec<String> = Vec::with_capacity(args.len());
+    let mut pending: Option<bool> = None;
+    for arg in args {
+        let arg = arg.as_ref();
+        let rendered = match pending.take() {
+            Some(true) => redact_assignment(arg),
+            Some(false) => "[REDACTED:arg]".to_owned(),
+            None if ENV_FLAGS.contains(&arg) => {
+                pending = Some(true);
+                arg.to_owned()
+            }
+            None if VALUE_FLAGS.contains(&arg) => {
+                pending = Some(false);
+                arg.to_owned()
+            }
+            // The `--flag=NAME=value` spelling of the same thing.
+            None => match ENV_FLAGS
+                .iter()
+                .find_map(|f| arg.strip_prefix(&format!("{f}=")).map(|rest| (f, rest)))
+            {
+                Some((flag, rest)) => format!("{flag}={}", redact_assignment(rest)),
+                None => scrub(arg),
+            },
+        };
+        out.push(clip(&rendered, MAX_ARG));
+    }
+    out.join(" ")
+}
+
+/// `text` cut to `max` characters, with an ellipsis when it was cut. Counts characters rather
+/// than bytes so a cut never lands inside one.
+fn clip(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_owned();
+    }
+    let head: String = text.chars().take(max).collect();
+    format!("{head}…")
+}
+
 /// A token in a message that looks like a credential: where it sits and what it is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyLike {
@@ -510,6 +577,100 @@ mod tests {
         assert!(matches_hint(v, &h));
         assert!(!matches_hint(concat!("sk_", "live_other"), &h));
         assert_eq!(key_hint("short"), "…");
+    }
+
+    /// The journald leak of 2026-11-09: a failed `docker run` for an `arbos-agent-*` box was
+    /// logged with the command that failed, and the command carries the box's environment as
+    /// `-e NAME=value`, so an OpenRouter key reached the system journal in plaintext. Every
+    /// value goes; the names, the flags and the image stay, so the line is still debuggable.
+    #[test]
+    fn docker_run_argv_logs_the_names_and_never_the_values() {
+        let key = "sk-or-v1-abcdefghijklmnopqrstuvwxyz0123456789";
+        let argv = vec![
+            "run".to_owned(),
+            "-d".to_owned(),
+            "--name".to_owned(),
+            "arbos-box-u_default".to_owned(),
+            "-p".to_owned(),
+            "127.0.0.1::7788".to_owned(),
+            "-e".to_owned(),
+            format!("OPENROUTER_API_KEY={key}"),
+            "-e".to_owned(),
+            "ARBOS_BOX_TOKEN=abx_0123456789abcdef0123456789abcdef".to_owned(),
+            "-e".to_owned(),
+            "PI_TELEMETRY=0".to_owned(),
+            "-e".to_owned(),
+            "ARBOS_USER_ID".to_owned(),
+            "--label".to_owned(),
+            "arbos.fleet=gvisor".to_owned(),
+            "arbos-agent-0.1.203".to_owned(),
+        ];
+        let line = redact_argv(&argv);
+
+        assert!(!line.contains(key), "the openrouter key survives: {line}");
+        assert!(
+            !line.contains("abx_0123456789abcdef0123456789abcdef"),
+            "the box token survives: {line}"
+        );
+        assert!(
+            line.contains("OPENROUTER_API_KEY=[REDACTED:env]"),
+            "the variable name is gone too, so the line cannot be debugged: {line}"
+        );
+        assert!(line.contains("ARBOS_BOX_TOKEN=[REDACTED:env]"), "{line}");
+        // Structure a reader needs: the subcommand, the container, the port, the image, and a
+        // non-secret value such as a label or a pass-through `-e NAME` with no value of its own.
+        assert!(
+            line.starts_with("run -d --name arbos-box-u_default"),
+            "{line}"
+        );
+        assert!(line.contains("-p 127.0.0.1::7788"), "{line}");
+        assert!(line.contains("arbos-agent-0.1.203"), "{line}");
+        assert!(line.contains("--label arbos.fleet=gvisor"), "{line}");
+        assert!(line.contains("-e ARBOS_USER_ID "), "{line}");
+        assert!(line.contains("-e PI_TELEMETRY=[REDACTED:env]"), "{line}");
+    }
+
+    /// The other half of the same log line: docker's own stderr, and any argument the `-e` rule
+    /// does not cover, go through [`scrub`], so a credential in a flag value or an error message
+    /// does not reach the journal either.
+    #[test]
+    fn argv_values_outside_the_env_flags_are_scrubbed() {
+        let key = "sk-or-v1-abcdefghijklmnopqrstuvwxyz0123456789";
+        let line = redact_argv(&[
+            "login".to_owned(),
+            "--password".to_owned(),
+            key.to_owned(),
+            "--build-arg".to_owned(),
+            format!("OPENROUTER_API_KEY={key}"),
+            format!("--env=ANTHROPIC_API_KEY={key}"),
+            format!("https://openrouter.ai/api/v1?key={key}"),
+        ]);
+        assert!(!line.contains(key), "{line}");
+        assert!(line.contains("--password [REDACTED:arg]"), "{line}");
+        assert!(
+            line.contains("--build-arg OPENROUTER_API_KEY=[REDACTED:env]"),
+            "{line}"
+        );
+        assert!(
+            line.contains("--env=ANTHROPIC_API_KEY=[REDACTED:env]"),
+            "{line}"
+        );
+        assert!(line.contains("[REDACTED:openrouter-key]"), "{line}");
+
+        let stderr = scrub(&format!(
+            "docker: Error response from daemon: invalid env OPENROUTER_API_KEY={key}"
+        ));
+        assert!(!stderr.contains(key), "{stderr}");
+        assert!(stderr.contains("Error response from daemon"), "{stderr}");
+    }
+
+    /// A helper script passed as one argument is pages long; a log line must not carry all of it.
+    #[test]
+    fn long_arguments_are_cut_rather_than_logged_whole() {
+        let script = "echo hi; ".repeat(100);
+        let line = redact_argv(&["run".to_owned(), "-c".to_owned(), script]);
+        assert!(line.chars().count() < 200, "{}", line.chars().count());
+        assert!(line.ends_with('…'), "{line}");
     }
 
     #[test]

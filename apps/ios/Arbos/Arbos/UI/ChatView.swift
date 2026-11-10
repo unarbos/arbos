@@ -973,7 +973,9 @@ struct ChatSession: View {
     /// With a picture or video staged, the field is the description bar for that
     /// send — one message, not a follow-up text bubble.
     private func composerPrompt(for draft: String) -> String {
-        if pending.contains(where: Self.isCaptionablePending) { return "Add a description…" }
+        // A staged picture no longer renames the field. Grok previews the picture inside the
+        // composer and leaves the prompt alone, so the field still says who will answer
+        // ([feedback attachment-in-composer-2026-11-09]).
         if transcribing { return "Transcribing…" }
         if let channel { return "Message #\(channel.name)" }
         if isJobTab { return "Steer this task" }
@@ -1320,9 +1322,6 @@ struct ChatSession: View {
                         .padding(.horizontal, composerSideInset)
                         .padding(.bottom, 10)
                 }
-                presenceRow
-                    .environment(\.composerInset, composerSideInset)
-                    .animation(.easeOut(duration: 0.25), value: composerFocused)
                 Group {
                     if isChannel, !model.channelCanPost(chatId) {
                         // Rule 9: a restricted channel I cannot post in — one quiet line, no composer.
@@ -2301,6 +2300,11 @@ struct ChatSession: View {
         .contentShape(Circle().inset(by: -(44 - Theme.voiceButton) / 2))
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(jumpBackTo == nil ? "Scroll to bottom" : "Back to reply")
+        // `newMessagesPill` below has carried `chat-jump-to-latest` since it was written and
+        // this one carried nothing, so a test reaching for "the reader is away from the end"
+        // could only name the case where rows had also landed below them. The bare chevron is
+        // the other half of the same state and needs its own name.
+        .accessibilityIdentifier("chat-scroll-to-bottom")
         .accessibilityAddTraits(.isButton)
         .accessibilityAction { jumpBackOrLatest() }
     }
@@ -2433,12 +2437,19 @@ struct ChatSession: View {
                     // Keystrokes do not reach this body (the composer is isolated); the other
                     // publishes re-diff the ids and let each realized `RowView` skip by `==`.
                     transcriptRows(shown: shown, mentions: mentions, width: width)
-                    // Who is working is the presence row over the composer
-                    // (`PresenceRow`), not a transcript row.
-                    // Clears the chat bar and the `Theme.composerFade` above it, so the
-                    // last row at rest is never under the fade; the status row rises into
-                    // that clearance (`Theme.presenceLift`) and is clear of the ramp too,
-                    // which now ends at the composer's top edge.
+                    // Who is working belongs to the end of the transcript, not to the bar
+                    // over it ([feedback typing-anchor-2026-11-08]). Pinned to the bar it
+                    // stayed on screen while the reader scrolled up, and since it draws no
+                    // background of its own it landed as a second line of text across
+                    // whichever old bubble happened to be under it. As the transcript's own
+                    // last child it scrolls away with the end it describes and comes back
+                    // when the reader does.
+                    presenceRow
+                        .environment(\.composerInset, composerSideInset)
+                        .animation(.easeOut(duration: 0.25), value: composerFocused)
+                    // Clears the chat bar and the `Theme.composerFade` above it, so the last
+                    // row at rest is never under the fade; the presence row settles back
+                    // into that clearance itself, so the tail is the same either way.
                     TranscriptTail(bar: chatBarHeight).id("bottom")
                 }
                 .padding(.horizontal, 16)
@@ -2470,6 +2481,9 @@ struct ChatSession: View {
                 .id(transcriptStackIdentity)
             }
             .defaultScrollAnchor(.bottom)
+            // A reader who has left the end keeps their offset through a resize; everyone
+            // else is still carried to it.
+            .modifier(TranscriptResizeAnchor(away: awayFromBottom))
             .modifier(ChatBarIndicatorMargin(bar: chatBarHeight))
             // iOS 26's automatic edge effect under a bottom inset would blur the rows under the
             // composer a second time; the canvas fade is the one treatment.
@@ -2536,6 +2550,10 @@ struct ChatSession: View {
                 guard !settledOnOpen else { return }
                 settledOnOpen = true
                 settleToBottom(proxy)
+                let rigged = DebugHooks.fixtureComposerAttachments
+                if rigged > 0, pending.isEmpty {
+                    pending = (0..<rigged).map { Self.riggedAttachment(seed: $0) }
+                }
             }
             // `rows.last` (not only its id): a streaming reply keeps the same id while its
             // text grows; pinning must follow that growth too (#1444 / lazy window #1399).
@@ -3413,9 +3431,14 @@ struct ChatSession: View {
         .frame(height: 36)
     }
 
-    /// The presence row over the composer: ticks once a second so time-capped
+    /// The presence row at the transcript's end: ticks once a second so time-capped
     /// states (stale stream, hand-off grace, awaiting-reply cheat, a typing
-    /// mark's 6 s) expire without a stuck line. Left edge = the bubbles' 16 pt.
+    /// mark's 6 s) expire without a stuck line. Left edge = the bubbles' 16 pt,
+    /// which it inherits from the transcript's stack rather than padding itself.
+    ///
+    /// Its appearing and disappearing changes the transcript's height by the same
+    /// 26 pt it used to add to the bar, and at the end rather than in the reader's
+    /// view, so a turn starting while the reader is up in history moves nothing.
     @ViewBuilder
     private var presenceRow: some View {
         TimelineView(.periodic(from: .now, by: 1)) { _ in
@@ -3435,13 +3458,14 @@ struct ChatSession: View {
                             onWords: openNewest,
                             onPicture: { model.toggleProfile($0) },
                             pictureShowing: { model.profileShows($0) })
-                    .padding(.horizontal, 16)
-                    // Grok: 68 px from the picture's bottom to the composer's top.
-                    .padding(.bottom, Theme.presenceBottomGap)
-                    // Grok: 42 px from the last bubble to the picture's top — the row
-                    // rises into the transcript's tail instead of stacking under it
-                    // ([feedback status-row-gap-ios-2026-10-26]).
-                    .padding(.top, -Theme.presenceLift)
+                    // Grok: 42 px from the last bubble to the picture's top ([feedback
+                    // status-row-gap-ios-2026-10-26]). The transcript's stack already
+                    // carries the bubbles' 16 pt side inset.
+                    .padding(.top, Theme.presenceTopGap)
+                    // Grok: 68 px from the picture's bottom to the composer's top. The row
+                    // is the transcript's last child, so it settles down into the tail the
+                    // tail already reserves rather than stacking on top of it.
+                    .padding(.bottom, -Theme.presenceSettle)
             }
         }
     }
@@ -3554,58 +3578,6 @@ struct ChatSession: View {
             } else if let r = replyTo {
                 replyPreview(r)
             }
-            if !pending.isEmpty {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
-                        ForEach(pending) { a in
-                            // Images show a real thumbnail (same 28 pt chip as Mac);
-                            // other files keep the SF Symbol + name pill.
-                            // Tap the chip (not ×) to open a picture/video while the
-                            // description bar is focused ([feedback app-01M5Z01FAES7QFEDGC1RKGS9DK]).
-                            let thumb = a.mime.hasPrefix("image/") ? UIImage(data: a.data) : nil
-                            let canPreview = Self.isCaptionablePending(a)
-                            HStack(spacing: 6) {
-                                Button {
-                                    openPendingPreview(a)
-                                } label: {
-                                    HStack(spacing: 6) {
-                                        if let thumb {
-                                            Image(uiImage: thumb)
-                                                .resizable()
-                                                .scaledToFill()
-                                                .frame(width: 28, height: 28)
-                                                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                                        } else {
-                                            Image(systemName: a.mime.hasPrefix("image/") ? "photo" : (a.mime.hasPrefix("audio/") ? "waveform" : (a.mime.hasPrefix("video/") ? "film" : "doc")))
-                                                .font(theme.font(12))
-                                        }
-                                        Text(a.name).font(theme.font(Theme.tiny)).lineLimit(1)
-                                    }
-                                }
-                                .buttonStyle(.plain)
-                                .disabled(!canPreview)
-                                .accessibilityLabel(canPreview ? "\(a.name), tap to open" : a.name)
-                                // The remove ✕: always drawn, a full-size hit target
-                                // (not the 10 pt glyph alone), named for VoiceOver
-                                // ([feedback composer-attachment-removal-ios-2026-10-27]).
-                                Button { removePending(a.id) } label: {
-                                    Image(systemName: "xmark").font(.system(size: Theme.pendingRemoveGlyph, weight: .bold))
-                                        .frame(width: Theme.pendingRemoveHit, height: Theme.pendingRemoveHit)
-                                        .contentShape(Rectangle())
-                                }
-                                .buttonStyle(.plain)
-                                .accessibilityLabel("Remove attachment")
-                                .accessibilityIdentifier("composer-remove-attachment")
-                            }
-                            .foregroundStyle(theme.text)
-                            .padding(.leading, thumb != nil ? 4 : 10)
-                            .padding(.trailing, Theme.pendingChipTrailing)
-                            .padding(.vertical, thumb != nil ? 3 : 6)
-                            .background(Capsule().fill(theme.bubbleAssistant))
-                        }
-                    }
-                }
-            }
             textField
         }
         // The mention list floats 8 pt above the composer, over the transcript. As a row of
@@ -3651,12 +3623,12 @@ struct ChatSession: View {
     private var attachButton: some View {
         Button { showAttach = true } label: {
             ZStack {
-                ControlSurface(shape: Circle())
+                ComposerDisc()
                 Image(systemName: "plus")
                     .font(theme.font(Theme.composerPlusGlyph, weight: .regular)) // control-size: exception plusGlyph
                     .foregroundStyle(theme.text)
             }
-            .frame(width: Theme.composerPlusDisc, height: Theme.composerPlusDisc)
+            .frame(width: Theme.composerDisc, height: Theme.composerDisc)
             .contentShape(Circle())
             .accessibilityIdentifier("composer-plus")
         }
@@ -3722,6 +3694,26 @@ struct ChatSession: View {
     }
 
     /// Picture or video pending in the composer — the field is their description bar.
+    /// A drawn picture for `ARBOS_FIXTURE_COMPOSER_ATTACHMENT`. Drawn rather than bundled so
+    /// the rig carries no asset, and recognisable rather than flat so a capture shows the
+    /// thumbnail really is the picture and not a placeholder.
+    /// `seed` shifts the hue so a row of several is visibly several pictures rather than one
+    /// picture repeated, which is the whole point of the multiple-attachment shot.
+    private static func riggedAttachment(seed: Int) -> AppModel.PendingAttachment {
+        let side = CGSize(width: 640, height: 640)
+        let hue = CGFloat(seed % 5) / 5
+        let image = UIGraphicsImageRenderer(size: side).image { ctx in
+            UIColor(hue: hue, saturation: 0.55, brightness: 0.42, alpha: 1).setFill()
+            ctx.fill(CGRect(origin: .zero, size: side))
+            UIColor(hue: hue, saturation: 0.70, brightness: 0.95, alpha: 1).setFill()
+            ctx.cgContext.fillEllipse(in: CGRect(x: 150, y: 110, width: 340, height: 340))
+            UIColor(hue: hue, saturation: 0.45, brightness: 0.62, alpha: 1).setFill()
+            ctx.fill(CGRect(x: 0, y: 440, width: side.width, height: 200))
+        }
+        return AppModel.PendingAttachment(name: "photo-\(seed + 1).png", mime: "image/png",
+                                          data: image.pngData() ?? Data())
+    }
+
     private static func isCaptionablePending(_ a: AppModel.PendingAttachment) -> Bool {
         let mime = a.mime.lowercased()
         return mime.hasPrefix("image/") || mime.hasPrefix("video/")
@@ -3752,6 +3744,10 @@ struct ChatSession: View {
             isChannel: isChannel,
             needsAnswer: needsAnswer,
             hasPending: !pending.isEmpty,
+            pending: pending,
+            canOpenPending: { Self.isCaptionablePending($0) },
+            onOpenPending: { openPendingPreview($0) },
+            onRemovePending: { removePending($0) },
             memoHoldActive: memoHoldActive,
             memoCancelArmed: memoCancelArmed,
             memoDragX: memoDragX,
@@ -4620,6 +4616,30 @@ private struct NoBottomScrollEdgeEffect: ViewModifier {
     }
 }
 
+/// Who the bottom anchor is for, once the reader has left the end.
+///
+/// `.defaultScrollAnchor(.bottom)` does three jobs at once: a chat opens on its newest row,
+/// a reader at the end is carried there when the keyboard moves, and the end is kept against
+/// the container's bottom edge through any resize. The third one has no idea who caused the
+/// resize, so it also drags a reader who has gone up into history back down — the keyboard
+/// finishing its retraction after their own drag is a container resize like any other, and
+/// the reader loses the place they just took ([feedback typing-anchor-2026-11-08]).
+///
+/// iOS 18 splits the roles apart, so the size-change anchor can be dropped for a reader who
+/// is away while alignment keeps the bottom for everyone else. Below 18 the transcript keeps
+/// the old single anchor: the reader's place is worth less than opening on the newest row.
+private struct TranscriptResizeAnchor: ViewModifier {
+    var away: Bool
+
+    func body(content: Content) -> some View {
+        if #available(iOS 18, *) {
+            content.defaultScrollAnchor(away ? nil : .bottom, for: .sizeChanges)
+        } else {
+            content
+        }
+    }
+}
+
 /// The chat bar's measured height (`sessionCanvas`). Held by the screen as plain state and
 /// observed only by the views below, so a change re-renders them and not the transcript.
 @MainActor
@@ -4689,68 +4709,197 @@ private struct ChatBarIndicatorMargin: ViewModifier {
     }
 }
 
+/// Where one scroll-geometry sample leaves the reader, in the face of a container that can
+/// resize mid-gesture.
+///
+/// The transcript measures "how far from the end" from the container's bottom edge, so
+/// anything that resizes the container moves that number without a row having moved. The
+/// keyboard is the case that bites: `.scrollDismissesKeyboard(.interactively)` retracts it
+/// under the finger, and the only drag that retracts it is a drag away from the end. So at
+/// the exact moment the reader leaves the live bottom, the container grows by the keyboard's
+/// height and the raw sample says they are a keyboard's worth *nearer* the end than they are.
+///
+/// Latching on that is what loses the reader's place: `pinned` goes true, and the next growth
+/// re-sticks the transcript to the end under them. Holding the gesture's own container makes
+/// the reading about the content again — a gesture with no keyboard in it corrects by zero and
+/// reads exactly as it did before.
+enum TranscriptScrollLatch {
+    /// Past this the reader is reading history rather than following the end.
+    static let awayThreshold: CGFloat = 120
+
+    /// `sampled` re-measured against the container the gesture started with.
+    static func distance(sampled: CGFloat, container: CGFloat, gestureStart: CGFloat) -> CGFloat {
+        sampled + (container - gestureStart)
+    }
+
+    static func away(distance: CGFloat) -> Bool { distance > awayThreshold }
+
+    /// What a sample the reader did not cause means for the latch.
+    enum Settled: Equatable {
+        /// Content grew under a reader held at the end: follow it down.
+        case stick
+        /// Something moved the end relative to the reader: read where they are again.
+        case reread(away: Bool)
+        /// Nothing moved that changes the answer.
+        case hold
+    }
+
+    /// Outside the reader's own gesture, two different things can move the end.
+    ///
+    /// Content growth is the one this has always handled: a new or streaming row, which
+    /// re-sticks for a reader at the end and leaves a reader in history alone. The container
+    /// is the one it did not. The keyboard finishing its retraction after the finger lifts
+    /// resizes the container by its whole height without a row changing, which moves the end
+    /// past the reader while `away` keeps whatever the gesture last set — so the chevron
+    /// outlives the state it describes, and anything that reads `away` after a resize reads a
+    /// value from before it.
+    /// The container moved while the reader's own finger was on the scroll view.
+    ///
+    /// The one case that needs the offset put back, and the line between it and every other
+    /// resize. The keyboard rising or falling at the live bottom is not this — nothing is
+    /// being dragged, so the bottom anchor is free to do its job and a chat still opens and
+    /// stays on its newest row. A drag that retracts the keyboard is, and there the anchor
+    /// moves content the reader is holding.
+    ///
+    /// Not a question about `away`: at the instant the retraction starts the reader is a few
+    /// points into the drag and under the 120 pt threshold, so asking how far they have got
+    /// answers `false` and the resize goes unhandled. Asking who is dragging answers now.
+    static func resizedUnderTheFinger(userDriven: Bool,
+                                      oldContainer: CGFloat, newContainer: CGFloat) -> Bool {
+        userDriven && abs(newContainer - oldContainer) > 0.5
+    }
+
+    static func settled(grew: Bool, oldContainer: CGFloat, newContainer: CGFloat,
+                        distance: CGFloat, pinned: Bool) -> Settled {
+        if grew { return pinned ? .stick : .reread(away: true) }
+        if abs(newContainer - oldContainer) > 0.5 { return .reread(away: away(distance: distance)) }
+        return .hold
+    }
+}
+
+/// Below iOS 18 the transcript keeps the behaviour it always had: `onScrollGeometryChange`,
+/// `onScrollPhaseChange` and `ScrollPosition` all arrive together in 18, and the whole reporter
+/// depends on them. The split is for the availability of the *stored properties* — an
+/// `if #available` inside `body` covers the view it returns and not a `@State` beside it.
 private struct AwayFromBottomReporter: ViewModifier {
+    @Binding var away: Bool
+    @Binding var pinned: Bool
+    var onStick: () -> Void
+
+    func body(content: Content) -> some View {
+        if #available(iOS 18, *) {
+            content.modifier(AwayFromBottomReporterModern(away: $away, pinned: $pinned, onStick: onStick))
+        } else {
+            content
+        }
+    }
+}
+
+@available(iOS 18, *)
+private struct AwayFromBottomReporterModern: ViewModifier {
     @Binding var away: Bool
     @Binding var pinned: Bool
     var onStick: () -> Void
     /// The finger (or its deceleration) is moving the scroll view right now.
     @State private var userDriven = false
+    /// The container the gesture in flight began with, held for as long as it runs.
+    /// `distance` is measured from the container's bottom edge, and
+    /// `.scrollDismissesKeyboard(.interactively)` retracts the keyboard under the finger —
+    /// so the container grows mid-drag by the keyboard's whole height, and the drag that
+    /// grows it is a drag *into history*. Measured against the live container, a reader
+    /// leaving the end reads as a reader arriving at it, which latches `pinned` and lets
+    /// the next growth stick the transcript back to the bottom underneath them.
+    @State private var gestureContainer: CGFloat?
+    /// Set so the offset can be put back when the container moves under the reader's finger.
+    @State private var position = ScrollPosition()
 
     private struct Sample: Equatable {
         var height: CGFloat
+        var container: CGFloat
+        var offset: CGFloat
         var distance: CGFloat
     }
 
     func body(content: Content) -> some View {
-        if #available(iOS 18, *) {
-            content
-                // Only the reader's own scrolling decides whether they are at the bottom. Lazy
-                // rows (#2149) change the content height as rows are measured — up and down,
-                // during a flick and after it as pictures arrive — and a geometry sample alone
-                // cannot tell that from a scroll (iphone-scroll-perf: a flick up from the bottom
-                // was pulled back down by the next growth, every time).
-                .onScrollPhaseChange { _, phase in
-                    switch phase {
-                    case .tracking, .interacting, .decelerating: userDriven = true
-                    case .idle, .animating: userDriven = false
-                    @unknown default: userDriven = false
-                    }
+        content
+            // Only the reader's own scrolling decides whether they are at the bottom. Lazy
+            // rows (#2149) change the content height as rows are measured — up and down,
+            // during a flick and after it as pictures arrive — and a geometry sample alone
+            // cannot tell that from a scroll (iphone-scroll-perf: a flick up from the bottom
+            // was pulled back down by the next growth, every time).
+            .onScrollPhaseChange { _, phase in
+                switch phase {
+                case .tracking, .interacting, .decelerating: userDriven = true
+                case .idle, .animating: userDriven = false
+                @unknown default: userDriven = false
                 }
-                .onScrollGeometryChange(for: Sample.self) { g in
-                    Sample(
-                        height: g.contentSize.height,
-                        distance: g.contentSize.height - g.contentOffset.y - g.containerSize.height
-                    )
-                } action: { old, new in
-                    let grew = new.height > old.height + 0.5
-                    #if DEBUG
-                    PerfDriveProbe.lastScrollGeometry = Date()
-                    if SendTrace.recent {
-                        SendTrace.mark("scroll-geometry", detail: "grew=\(grew) distance=\(Int(new.distance)) pinned=\(pinned) user=\(userDriven)", once: false)
-                        // The "bottom" spacer and padding sit ~60 pt under the last bubble.
-                        if new.distance < 100 { SendTrace.mark("at-bottom", detail: "distance=\(Int(new.distance))") }
-                    }
-                    #endif
-                    if userDriven {
-                        let isAway = new.distance > 120
-                        away = isAway
-                        pinned = !isAway
-                        return
-                    }
-                    // Content or layout moved, not the reader: a growth while pinned (a new or
-                    // streaming row) re-sticks to the end; while away it stays put.
-                    if grew {
-                        if pinned {
-                            away = false
-                            onStick()
-                        } else {
-                            away = true
-                        }
-                    }
+            }
+            .scrollPosition($position)
+            .onScrollGeometryChange(for: Sample.self) { g in
+                Sample(
+                    height: g.contentSize.height,
+                    container: g.containerSize.height,
+                    offset: g.contentOffset.y,
+                    distance: g.contentSize.height - g.contentOffset.y - g.containerSize.height
+                )
+            } action: { old, new in
+                let grew = new.height > old.height + 0.5
+                #if DEBUG
+                PerfDriveProbe.lastScrollGeometry = Date()
+                if SendTrace.recent {
+                    SendTrace.mark("scroll-geometry", detail: "grew=\(grew) distance=\(Int(new.distance)) pinned=\(pinned) user=\(userDriven)", once: false)
+                    // The "bottom" spacer and padding sit ~60 pt under the last bubble.
+                    if new.distance < 100 { SendTrace.mark("at-bottom", detail: "distance=\(Int(new.distance))") }
                 }
-        } else {
-            content
-        }
+                #endif
+                if userDriven {
+                    // The finger owns the offset while it is down. A container resize
+                    // under it is the keyboard retracting out of the reader's own drag,
+                    // and `.defaultScrollAnchor(.bottom)` answers that by holding the
+                    // *end* against the container — which moves the content the reader is
+                    // holding. Put the offset back.
+                    //
+                    // Deliberately not conditioned on `away`: the reader has travelled only
+                    // a few points when the retraction starts, so the 120 pt threshold has
+                    // not been crossed yet and anything reading it here reads `false` (leg
+                    // 42604426988, where the conditional size-change anchor was chosen as
+                    // `.bottom` for exactly that reason). Who is dragging is knowable at
+                    // that instant; how far they have got is not yet meaningful.
+                    //
+                    // Outside a gesture this does not run at all, which is what keeps the
+                    // keyboard rising and falling at the live bottom anchored as before.
+                    if TranscriptScrollLatch.resizedUnderTheFinger(
+                        userDriven: true, oldContainer: old.container,
+                        newContainer: new.container) {
+                        position.scrollTo(y: old.offset)
+                    }
+                    let start = gestureContainer ?? old.container
+                    gestureContainer = start
+                    let isAway = TranscriptScrollLatch.away(
+                        distance: TranscriptScrollLatch.distance(sampled: new.distance,
+                                                                 container: new.container,
+                                                                 gestureStart: start))
+                    away = isAway
+                    pinned = !isAway
+                    return
+                }
+                gestureContainer = nil
+                // Content or layout moved, not the reader: a growth while pinned (a new or
+                // streaming row) re-sticks to the end; while away it stays put. A container
+                // resize moves the end too, and has to be read again rather than ignored.
+                switch TranscriptScrollLatch.settled(grew: grew, oldContainer: old.container,
+                                                     newContainer: new.container,
+                                                     distance: new.distance, pinned: pinned) {
+                case .stick:
+                    away = false
+                    onStick()
+                case .reread(let isAway):
+                    away = isAway
+                    pinned = !isAway
+                case .hold:
+                    break
+                }
+            }
     }
 }
 
@@ -4789,17 +4938,42 @@ final class ComposerDraft: ObservableObject {
 /// finish the memo. Pure, so `ComposerMetricsTests` can pin the pair that
 /// cross-fades ([feedback composer-send-crossfade-2026-10-30]).
 enum ComposerTrailing {
-    /// The mic is in its slot and takes touches: an empty field, or any
-    /// recording. The moment the field has text the mic is leaving, and a
-    /// leaving mic answers nothing.
-    static func micShown(draftEmpty: Bool, recording: Bool) -> Bool {
-        draftEmpty || recording
+    /// The mic is in its slot and takes touches, always. Grok keeps it beside the send arrow
+    /// while you type (Jacob, 2026-11-09, shots 2 and 3); ours used to drop it on the first
+    /// character, which took the voice memo away from anyone who had started typing and
+    /// changed their mind. There is no state that hides it now — it is a function rather than
+    /// a literal so the rule has one home and one test.
+    static func micShown() -> Bool {
+        true
     }
 
     /// The round pill sends rather than calls: something to send, a recording
     /// to finish, or a server channel, which has no calls (C1).
     static func sendShown(canSend: Bool, recording: Bool, isChannel: Bool) -> Bool {
         canSend || recording || isChannel
+    }
+}
+
+/// How the composer arranges itself. Grok puts the `+`, mic and send arrow on the text's own
+/// line while it is one line, and drops them onto a row of their own underneath once the text
+/// wraps, with the text then running the full width (Jacob, 2026-11-09, shots 2 and 3). Ours
+/// kept one row at every height and centred the controls against the growing text, which is
+/// shot 4.
+enum ComposerLayout {
+    /// The controls take their own row, and stay there until the field is empty.
+    ///
+    /// The latch is not timidity, it is the only stable answer. The two arrangements offer the
+    /// text different widths — stacking hands it back the ~135 pt the controls were using — so
+    /// a line that wraps inline may well fit unstacked, which would unstack it, which would
+    /// wrap it again. Deciding afresh on every measurement trades the layout back and forth for
+    /// any text near that boundary. Holding the row until the draft is empty costs nothing a
+    /// reader would notice and cannot oscillate.
+    static func stacked(wasStacked: Bool, lines: Int, empty: Bool, attachments: Int) -> Bool {
+        // A staged picture always makes the tall card: the thumbnail needs the width, and the
+        // controls belong under it ([feedback attachment-in-composer-2026-11-09]).
+        if attachments > 0 { return true }
+        if empty { return false }
+        return wasStacked || lines >= 2
     }
 }
 
@@ -4818,6 +4992,12 @@ private struct ComposerField<Leading: View>: View {
     let isChannel: Bool
     let needsAnswer: Bool
     let hasPending: Bool
+    /// Staged pictures and files, previewed inside the box
+    /// ([feedback attachment-in-composer-2026-11-09]).
+    let pending: [AppModel.PendingAttachment]
+    let canOpenPending: (AppModel.PendingAttachment) -> Bool
+    let onOpenPending: (AppModel.PendingAttachment) -> Void
+    let onRemovePending: (UUID) -> Void
     /// Hold-to-talk state owned by the chat screen (slide-to-cancel).
     let memoHoldActive: Bool
     let memoCancelArmed: Bool
@@ -4849,7 +5029,19 @@ private struct ComposerField<Leading: View>: View {
 
     /// The mic is in its slot and takes touches.
     private var micShown: Bool {
-        ComposerTrailing.micShown(draftEmpty: draft.text.isEmpty, recording: recorder.recording)
+        ComposerTrailing.micShown()
+    }
+
+    /// Lines the field is wrapping to, reported by the field's own measurement.
+    @State private var lines = 1
+    /// Latched by `ComposerLayout.stacked`; see its note on why this does not re-decide.
+    @State private var stackedLatch = false
+
+    /// The controls are on their own row. Never while recording: that row is the recorder's.
+    private var stacked: Bool {
+        !recorder.recording
+            && ComposerLayout.stacked(wasStacked: stackedLatch, lines: lines,
+                                      empty: draft.text.isEmpty, attachments: pending.count)
     }
 
     /// The round pill sends rather than calls.
@@ -4902,8 +5094,15 @@ private struct ComposerField<Leading: View>: View {
     /// slot its caller always keeps, so the field beside it cannot move.
     @ViewBuilder
     private var micButton: some View {
-        micGlyph
-            .foregroundStyle(recorder.recording ? theme.danger : theme.icon)
+        ZStack {
+            // The same disc the `+` sits on at the other end of the field. Grok shades behind
+            // both; ours had the mic as a bare glyph, which read as unfinished next to a `+`
+            // that already had one (Jacob, 2026-11-09).
+            ComposerDisc()
+                .frame(width: Theme.composerDisc, height: Theme.composerDisc)
+            micGlyph
+                .foregroundStyle(recorder.recording ? theme.danger : theme.icon)
+        }
             .frame(width: Theme.micHitWidth, height: Theme.composerHeight)
             .contentShape(Rectangle())
             .id("memo-mic")
@@ -4925,7 +5124,15 @@ private struct ComposerField<Leading: View>: View {
     /// eight lines and covering the transcript. Hug content with `fixedSize`,
     /// and still cap at 8 lines (Grok's 22 pt body pitch) for wrap glitches.
     private var composerFieldMaxHeight: CGFloat {
-        Theme.composerHeight + 7 * 22
+        let text = Theme.composerHeight + 7 * 22
+        guard stacked else { return text }
+        // The stacked card carries the control row under the text, and a staged picture over
+        // it; without the extra room the cap clips whichever arrived last.
+        var tall = text + Theme.composerStackGap + Theme.composerHeight
+        if !pending.isEmpty {
+            tall += ComposerAttachment.side + ComposerAttachment.overhang + Theme.composerStackGap
+        }
+        return tall
     }
 
     /// The field's rim: Grok's edge highlight, or the recording / needs-answer tint.
@@ -4935,107 +5142,155 @@ private struct ComposerField<Leading: View>: View {
         return nil
     }
 
-    var body: some View {
-        HStack(spacing: 8) {
-            // The `+`, inside the pill and opposite the action capsule. Bare on purpose: a
-            // channel passes no button, and an `EmptyView` carrying this slot's inset and
-            // frame would still hold its place in the stack. The caller styles it instead.
-            leading()
-            if recorder.recording {
-                // Visible discard control (tap) — also used after a short tap that
-                // left recording on; hold-to-talk can slide left instead.
-                Button(action: onCancelRecording) {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(theme.danger)
-                        .frame(width: 44, height: Theme.composerHeight)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Cancel")
-                if memoCancelArmed {
-                    Text("Release to cancel")
-                        .font(theme.font(Theme.small))
-                        // error-ui: exception status-mark
-                        .foregroundStyle(theme.danger)
-                        .frame(maxWidth: .infinity, alignment: .center)
-                } else if memoHoldActive && memoDragX < -12 {
-                    Text("Slide to cancel")
-                        .font(theme.font(Theme.small))
-                        .foregroundStyle(theme.muted)
-                        .frame(maxWidth: .infinity, alignment: .center)
-                        .opacity(min(1, -memoDragX / cancelDistance))
-                } else {
-                    HStack(spacing: 8) {
-                        // The braille spinner, not a red dot (Jacob, 2026-10-27).
-                        WorkingSpinner(size: 8, glyphSize: 11)
-                        // Level bars drawn into whatever width is left (newest on the right),
-                        // so the recorder row never pushes the composer past the screen edge.
-                        Canvas { ctx, size in
-                            let pitch: CGFloat = 5, w: CGFloat = 3
-                            let levels = recorder.levels
-                            let n = min(levels.count, max(0, Int(size.width / pitch)))
-                            for i in 0..<n {
-                                let l = CGFloat(levels[levels.count - n + i])
-                                let h = min(size.height, 4 + l * 20)
-                                let x = size.width - CGFloat(n - i) * pitch
-                                let rect = CGRect(x: x, y: (size.height - h) / 2, width: w, height: h)
-                                ctx.fill(Path(roundedRect: rect, cornerRadius: w / 2), with: .color(theme.text))
-                            }
+    /// The `+`, inside the pill and opposite the action capsule. Bare on purpose: a
+    /// channel passes no button, and an `EmptyView` carrying this slot's inset and
+    /// frame would still hold its place in the stack. The caller styles it instead.
+    @ViewBuilder private var leadingSlot: some View {
+        leading()
+    }
+
+    /// The recorder's own row while recording, otherwise the text field.
+    @ViewBuilder private var middle: some View {
+        if recorder.recording {
+            // Visible discard control (tap) — also used after a short tap that
+            // left recording on; hold-to-talk can slide left instead.
+            Button(action: onCancelRecording) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(theme.danger)
+                    .frame(width: 44, height: Theme.composerHeight)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Cancel")
+            if memoCancelArmed {
+                Text("Release to cancel")
+                    .font(theme.font(Theme.small))
+                    // error-ui: exception status-mark
+                    .foregroundStyle(theme.danger)
+                    .frame(maxWidth: .infinity, alignment: .center)
+            } else if memoHoldActive && memoDragX < -12 {
+                Text("Slide to cancel")
+                    .font(theme.font(Theme.small))
+                    .foregroundStyle(theme.muted)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .opacity(min(1, -memoDragX / cancelDistance))
+            } else {
+                HStack(spacing: 8) {
+                    // The braille spinner, not a red dot (Jacob, 2026-10-27).
+                    WorkingSpinner(size: 8, glyphSize: 11)
+                    // Level bars drawn into whatever width is left (newest on the right),
+                    // so the recorder row never pushes the composer past the screen edge.
+                    Canvas { ctx, size in
+                        let pitch: CGFloat = 5, w: CGFloat = 3
+                        let levels = recorder.levels
+                        let n = min(levels.count, max(0, Int(size.width / pitch)))
+                        for i in 0..<n {
+                            let l = CGFloat(levels[levels.count - n + i])
+                            let h = min(size.height, 4 + l * 20)
+                            let x = size.width - CGFloat(n - i) * pitch
+                            let rect = CGRect(x: x, y: (size.height - h) / 2, width: w, height: h)
+                            ctx.fill(Path(roundedRect: rect, cornerRadius: w / 2), with: .color(theme.text))
                         }
-                        .frame(maxWidth: .infinity, maxHeight: 24)
-                        Text(recorder.timeLabel)
-                            .font(theme.font(Theme.small, design: .monospaced))
-                            .foregroundStyle(theme.text)
                     }
+                    .frame(maxWidth: .infinity, maxHeight: 24)
+                    Text(recorder.timeLabel)
+                        .font(theme.font(Theme.small, design: .monospaced))
+                        .foregroundStyle(theme.text)
+                }
+            }
+        } else {
+            // The field with mention chips (#1596): one to eight lines, the
+            // chips as attachments; `draft.text` stays the plain `@handle` text.
+            MentionTextView(text: $draft.text, mentions: $draft.mentions, caret: $draft.caret, isFocused: $focus,
+                            placeholder: prompt(draft.text), theme: theme,
+                            agentProject: { model.agent(member: $0, chatId: chatId) },
+                            onPasteMedia: onPasteMedia,
+                            onDeleteBackwardEmpty: onDeleteBackwardEmpty,
+                            onPasteImage: onPasteImage,
+                            onLines: { lines = $0 })
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    @ViewBuilder private var trailingCluster: some View {
+        // Grok's trailing cluster: mic glyph centre 24 pt before the pill, the pill
+        // 8⅔ pt from the field's edge, both centred on the field's bottom line.
+        HStack(spacing: Theme.micPillGap) {
+            // The mic's frame is here whether the mic is or not: the text
+            // field must not change width when the arrow replaces the pair
+            // ([feedback composer-send-crossfade-2026-10-30]). The mic
+            // stays mounted while recording too, so a hold-to-talk release
+            // can finish without a second tap.
+            micButton
+                .scaleEffect(micShown ? 1 : Theme.composerSwapScale)
+                .opacity(micShown ? 1 : 0)
+                // A mic on its way out answers nothing: a swap that
+                // swallows the touch that started it is worse than a cut.
+                .allowsHitTesting(micShown)
+                .accessibilityHidden(!micShown)
+                .animation(swap, value: micShown)
+            // While recording: tap send also finishes (same as release). Otherwise
+            // Grok keeps the composer usable while the bot works: text sends, an
+            // empty field starts a voice call with the agent (Grok's voice-wave pill).
+            Button(action: onPrimary) {
+                Capsule()
+                    .fill(theme.primary)
+                    .frame(width: Theme.actionPillWidth, height: Theme.actionPillHeight)
+                    .overlay(actionGlyph)
+                    .frame(height: Theme.composerHeight)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .opacity(isChannel && !canSend && !recorder.recording ? 0.45 : 1)
+            .animation(swap, value: canSend)
+            // The label follows the action, not the fade: the button sends
+            // from the first frame of the swap, so it says so at once.
+            .accessibilityLabel((canSend || recorder.recording) ? "Send" : (isChannel ? "Send" : "Call"))
+            .accessibilityIdentifier("composer-action")
+        }
+        .padding(.trailing, Theme.actionPillTrailing)
+    }
+
+    var body: some View {
+        Group {
+            if stacked {
+                // Grok's wrapped composer: the text runs the full width, and the
+                // controls sit on their own row beneath it, bottom-aligned.
+                VStack(alignment: .leading, spacing: Theme.composerStackGap) {
+                    if !pending.isEmpty {
+                        ComposerAttachmentRow(pending: pending, canOpen: canOpenPending,
+                                              onOpen: onOpenPending, onRemove: onRemovePending)
+                    }
+                    // Full width in both rows: the text is no longer sharing the line with
+                    // the controls, and the trailing cluster needs the whole width to be
+                    // pushed to the right edge.
+                    middle
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    HStack(spacing: 8) {
+                        leadingSlot
+                        Spacer(minLength: 0)
+                        trailingCluster
+                    }
+                    .frame(maxWidth: .infinity)
                 }
             } else {
-                // The field with mention chips (#1596): one to eight lines, the
-                // chips as attachments; `draft.text` stays the plain `@handle` text.
-                MentionTextView(text: $draft.text, mentions: $draft.mentions, caret: $draft.caret, isFocused: $focus,
-                                placeholder: prompt(draft.text), theme: theme,
-                                agentProject: { model.agent(member: $0, chatId: chatId) },
-                                onPasteMedia: onPasteMedia,
-                                onDeleteBackwardEmpty: onDeleteBackwardEmpty,
-                                onPasteImage: onPasteImage)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            // Grok's trailing cluster: mic glyph centre 24 pt before the pill, the pill
-            // 8⅔ pt from the field's edge, both centred on the field's bottom line.
-            HStack(spacing: Theme.micPillGap) {
-                // The mic's frame is here whether the mic is or not: the text
-                // field must not change width when the arrow replaces the pair
-                // ([feedback composer-send-crossfade-2026-10-30]). The mic
-                // stays mounted while recording too, so a hold-to-talk release
-                // can finish without a second tap.
-                micButton
-                    .scaleEffect(micShown ? 1 : Theme.composerSwapScale)
-                    .opacity(micShown ? 1 : 0)
-                    // A mic on its way out answers nothing: a swap that
-                    // swallows the touch that started it is worse than a cut.
-                    .allowsHitTesting(micShown)
-                    .accessibilityHidden(!micShown)
-                    .animation(swap, value: micShown)
-                // While recording: tap send also finishes (same as release). Otherwise
-                // Grok keeps the composer usable while the bot works: text sends, an
-                // empty field starts a voice call with the agent (Grok's voice-wave pill).
-                Button(action: onPrimary) {
-                    Capsule()
-                        .fill(theme.primary)
-                        .frame(width: Theme.actionPillWidth, height: Theme.actionPillHeight)
-                        .overlay(actionGlyph)
-                        .frame(height: Theme.composerHeight)
-                        .contentShape(Rectangle())
+                HStack(spacing: 8) {
+                    leadingSlot
+                    middle
+                    trailingCluster
                 }
-                .buttonStyle(.plain)
-                .opacity(isChannel && !canSend && !recorder.recording ? 0.45 : 1)
-                .animation(swap, value: canSend)
-                // The label follows the action, not the fade: the button sends
-                // from the first frame of the swap, so it says so at once.
-                .accessibilityLabel((canSend || recorder.recording) ? "Send" : (isChannel ? "Send" : "Call"))
-                .accessibilityIdentifier("composer-action")
             }
-            .padding(.trailing, Theme.actionPillTrailing)
+        }
+        // Latched here rather than recomputed in `stacked`, so the arrangement is remembered
+        // across the measurement it causes; see `ComposerLayout.stacked`.
+        .onChange(of: lines) { _, n in
+            stackedLatch = ComposerLayout.stacked(wasStacked: stackedLatch, lines: n,
+                                                  empty: draft.text.isEmpty,
+                                                  attachments: pending.count)
+        }
+        .onChange(of: draft.text.isEmpty) { _, isEmpty in
+            if isEmpty { stackedLatch = false }
         }
         // Hard max so a TextField layout glitch cannot paint over the transcript.
         .frame(minHeight: Theme.composerHeight, maxHeight: composerFieldMaxHeight, alignment: .bottom)
@@ -5047,6 +5302,8 @@ private struct ComposerField<Leading: View>: View {
         // iphone-composer-glass-2026-10-28]). Rim below.
         .background(PillSurface(shape: fieldShape)) // control-size: source (the family's field, rim below)
         .overlay(ComposerRim(shape: fieldShape, tint: rimTint))
+        // Grok lights the pill under a resting finger while the Paste / AutoFill menu comes up.
+        .inputHoldHighlight(fieldShape)
         .alert("Microphone access is off", isPresented: $recorder.permissionDenied) {
             Button("OK", role: .cancel) { }
         } message: {

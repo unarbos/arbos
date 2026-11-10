@@ -431,16 +431,17 @@ push_tag() {
   rm -f "$askpass"
 }
 
-# image_run_state <tag> → ok | pending | failed | none  (the build + smoke steps; the register
-# step always fails in CI — no DAYTONA_API_KEY there — and is done here instead)
+# image_run_state <tag> → ok | pending | failed | none, from the build + smoke steps. Those two are
+# read by name rather than the job's conclusion because the workflow used to end with a Daytona
+# snapshot registration that always failed here (no DAYTONA_API_KEY in CI) after a perfectly good
+# build. That step is gone, so the job now fails only when the build or the smoke does.
 image_run_state() {
   local runs id jobs
   runs="$(gh_api "/actions/workflows/image.yml/runs?branch=$1&event=push&per_page=3" 2>/dev/null || true)"
   id="$(printf '%s' "$runs" | python3 -c 'import json,sys; r=json.load(sys.stdin).get("workflow_runs",[]); print(r[0]["id"] if r else "")' 2>/dev/null || true)"
   [[ -n "$id" ]] || { echo none; return; }
   jobs="$(gh_api "/actions/runs/$id/jobs" 2>/dev/null || true)"
-  local verdict
-  verdict="$(printf '%s' "$jobs" | python3 -c '
+  printf '%s' "$jobs" | python3 -c '
 import json, sys
 jobs = json.load(sys.stdin).get("jobs", [])
 steps = {s["name"]: s for j in jobs for s in j.get("steps", [])}
@@ -450,8 +451,9 @@ if len(want) < 2:
         print("pending")
     elif not steps:
         # GitHub sometimes answers a completed job with an empty steps list (2026-10-24,
-        # image-v0.1.114): decide from the job log instead of calling the build failed.
-        print("nosteps " + str(jobs[0]["id"]))
+        # image-v0.1.114). Every step in this workflow must pass now that the register step is
+        # gone, so the conclusion of the job answers it and no step has to be found.
+        print("ok" if jobs[0].get("conclusion") == "success" else "failed")
     else:
         print("failed")
     sys.exit()
@@ -462,21 +464,7 @@ elif all(s.get("conclusion") == "success" for s in st):
     print("ok")
 else:
     print("failed")
-' 2>/dev/null || echo pending)"
-  case "$verdict" in
-    nosteps\ *)
-      # The steps run in order and the job stops at the first failure, so a log that reaches
-      # the register step (the one that always fails in CI) means build + smoke passed.
-      local job_id="${verdict#nosteps }" logtxt
-      logtxt="$(gh_api "/actions/jobs/$job_id/logs" -L 2>/dev/null | tail -c 400000 || true)"
-      if printf '%s' "$logtxt" | grep -q 'Run image/register-snapshot.sh'; then
-        log "agentd: $1 — jobs API returned no steps; the log reached the register step, treating build + smoke as ok" >&2
-        echo ok
-      else
-        echo failed
-      fi ;;
-    *) echo "$verdict" ;;
-  esac
+' 2>/dev/null || echo pending
 }
 
 relay_db() { sudo -u arbos sqlite3 /var/lib/arbos-relay/relay.db "$@"; }
