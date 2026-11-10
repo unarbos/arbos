@@ -13,6 +13,7 @@ import time
 
 TREE = Path(__file__).resolve().parents[3]
 REPLAY = {'outcome':'Unchanged','terminal':'Released','tail':[]}
+PUBLICATION_REPLAY = {'kind':'relay','revision':0,'queued':'-','installed':'-','currentDefault':'-'}
 MUTANTS = [
     ('superseded-request-acknowledged', 89701,
      '    Observed:Changed) echo Superseded ;;',
@@ -23,6 +24,9 @@ MUTANTS = [
     ('terminal-lane-reopened', 89703,
      '    Deferred:*|Released:*) echo "$1" ;;',
      '    Deferred:*|Released:*) echo Granted ;;'),
+    ('changed-publication-receipt-granted', 89704,
+     '  if [[ "$1" == "$2" ]]; then echo Publish; else echo Superseded; fi',
+     '  echo Publish'),
 ]
 
 def digest(path):
@@ -46,11 +50,12 @@ def check(output):
                              cwd=TREE, env={'PATH':os.environ.get('PATH','/usr/bin:/bin')},
                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=45)
     (output/'control.log').write_text(control.stdout)
-    assert control.returncode == 0 and '# pass 4' in control.stdout, 'Original laws must pass before mutations'
-    control_record = {'exit_code':control.returncode,'tests':4,'laws':3,'cases':768,
+    assert control.returncode == 0 and '# pass 5' in control.stdout, 'Original laws must pass before mutations'
+    control_record = {'exit_code':control.returncode,'tests':5,'laws':4,'cases':1024,
                       'seconds':time.monotonic()-control_start,'log':'control.log'}
     results = []
     for name, seed, before, after in MUTANTS:
+        replay = PUBLICATION_REPLAY if seed == 89704 else REPLAY
         with tempfile.TemporaryDirectory(prefix='arbos-lease-mutant-') as temp:
             tree = Path(temp)
             (tree/'harness/arbos-pi-ext').mkdir(parents=True)
@@ -68,7 +73,7 @@ def check(output):
                       'mutant_sha256':digest(source),'replace':{'before':before,'after':after}}
             for mode in ('generated','replay'):
                 env = {'PATH':os.environ.get('PATH','/usr/bin:/bin'), 'ARBOS_DEPLOY_LAW':str(seed)}
-                if mode == 'replay': env['ARBOS_DEPLOY_REPLAY'] = json.dumps(REPLAY,separators=(',',':'))
+                if mode == 'replay': env['ARBOS_DEPLOY_REPLAY'] = json.dumps(replay,separators=(',',':'))
                 start = time.monotonic()
                 process = subprocess.run(['node','--test',str(tree/'harness/arbos-pi-ext/deploy-state-laws.test.ts')],
                                          cwd=tree,env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=30)
@@ -79,13 +84,13 @@ def check(output):
                     match = re.search(r'and ([01]) shrink\(s\)', process.stdout)
                     assert match, process.stdout
                     record['accepted_shrinks'] = int(match.group(1))
-                    if record['accepted_shrinks'] == 0:
-                        assert '"outcome": "Unchanged"' in process.stdout and '"terminal": "Released"' in process.stdout and '"tail": []' in process.stdout, process.stdout
+                    counterexample = re.search(r'Shrunk input:\s*(\{[\s\S]*?\})\s*Failure:', process.stdout)
+                    assert counterexample and json.loads(counterexample.group(1)) == replay, process.stdout
                 else:
                     assert 'canonical replay=' in process.stdout, process.stdout
                 record[mode] = {'exit_code':process.returncode,'wall_seconds':time.monotonic()-start,
                                 'log':f'mutants/{name}-{mode}.log'}
-            record['counterexample'] = REPLAY
+            record['counterexample'] = replay
             results.append(record)
     assert original == digest(source_path)
     final = {'mutations_are_isolated':True,'actual_functions':True,'original_sha256':original,'control':control_record,'results':results}

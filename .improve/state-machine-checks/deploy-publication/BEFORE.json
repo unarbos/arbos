@@ -1,0 +1,16 @@
+{
+  "exit_code": 1,
+  "tests": 11,
+  "semantic_failed": 8,
+  "positive_passed": 3,
+  "errors": 0,
+  "seconds": 5.148173541994765,
+  "source_sha256": {
+    "scripts/deploy/arbos-deploy-worker": "af33f30b8ca16937e71690f47b5d0ee62ad8b8f9704cb2d87fe48319b1cefd68",
+    "scripts/deploy/arbos-deploy-hook": "4f1164b7c135bb339b637378d1f156b85ca7681cbf2690d720ae2b722732c7fd",
+    "scripts/deploy/deploy-state.sh": "b61a22696ff68d0f47fdd9926fa1e392041f32d1e53043f344514545403a299a",
+    "scripts/feedback/feedback_poller.py": "81f5c55e03c7986de426fb121aa93d23a70934bd5c07c5a15001e1df730f8b9e"
+  },
+  "source_unchanged": true,
+  "fixture_sha256": "9857f6b53478ea61dba19991a3f9d553c34d262aaf9e8e1f74cc9443bf35474d"
+}

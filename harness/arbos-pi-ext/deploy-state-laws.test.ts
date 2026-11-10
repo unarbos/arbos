@@ -14,8 +14,8 @@ const script = fileURLToPath(new URL("../../scripts/deploy/tests/deploy_state_br
 const directory = mkdtempSync(join(tmpdir(), "arbos-deploy-laws-"));
 const environment = { PATH: process.env.PATH ?? "/usr/bin:/bin" };
 const python = ["-I", "-B", script];
-type Machine = "request" | "lane";
-type Event = { event: string };
+type Machine = "request" | "lane" | "publication";
+type Event = { event: string; args?: readonly string[] };
 const Observation = Schema.Struct({ state: Schema.String, status: Schema.Int });
 const Reply = Schema.Struct({ id: Schema.Int, initial: Observation, steps: Schema.Array(Observation) });
 type Reply = typeof Reply.Type;
@@ -142,6 +142,49 @@ law("deferred and released lane owners cannot authorize late work", 89703, async
   }
   return true;
 });
+
+const PublicationInput = Schema.Struct({
+  kind: Schema.Literals(["relay", "voice", "agentd"]),
+  revision: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0), Schema.isLessThanOrEqualTo(1000000)),
+  queued: Schema.Literals(["-", "aaaaaaa", "bbbbbbb"]),
+  installed: Schema.Literals(["-", "aaaaaaa", "bbbbbbb"]),
+  currentDefault: Schema.Literals(["-", "aaaaaaa", "bbbbbbb"]),
+});
+type PublicationInput = typeof PublicationInput.Type;
+const publicationCanonical: PublicationInput = { kind: "relay", revision: 0, queued: "-", installed: "-", currentDefault: "-" };
+const publicationArbitrary = Arbitrary.schema(PublicationInput, { shrink: (value) => isDeepStrictEqual(value, publicationCanonical) ? [] : [publicationCanonical] });
+async function publicationLaw(value: PublicationInput): Promise<boolean> {
+  const fields = [value.kind, String(value.revision), value.queued, value.installed, value.currentDefault];
+  const snapshot = fields.join(":");
+  const observe = async (expected: string, actual: string) =>
+    (await bridge.request("publication", "Checking", [{ event: expected, args: [actual] }])).steps[0]!;
+  const current = await observe(snapshot, snapshot);
+  if (current.status !== 0 || current.state !== "Publish") return false;
+  for (let index = 0; index < fields.length; index++) {
+    const changed = [...fields];
+    changed[index] = index === 0 ? (value.kind === "relay" ? "voice" : "relay")
+      : index === 1 ? String(value.revision + 2) : fields[index] === "aaaaaaa" ? "bbbbbbb" : "aaaaaaa";
+    const stale = await observe(snapshot, changed.join(":"));
+    if (stale.status !== 0 || stale.state !== "Superseded") return false;
+  }
+  const malformed = await observe(snapshot + ":extra", snapshot);
+  return malformed.status !== 0 && malformed.state === "Invalid";
+}
+
+if (!process.env.ARBOS_DEPLOY_LAW || process.env.ARBOS_DEPLOY_LAW === "89704") {
+  test("every observed publication field binds admission, including ABA revision: 256 seeded cases", async () => {
+    if (process.env.ARBOS_DEPLOY_REPLAY) {
+      const value = Schema.decodeUnknownSync(PublicationInput, { onExcessProperty: "error" })(JSON.parse(process.env.ARBOS_DEPLOY_REPLAY));
+      assert.equal(await publicationLaw(value), true, `seed=89704 canonical replay=${JSON.stringify(value)}`);
+      return;
+    }
+    const result = await Effect.runPromise(Arbitrary.checkEffect(publicationArbitrary,
+      (value) => Effect.tryPromise({ try: () => publicationLaw(value), catch: () => new Error("Pure publication observation failed") }),
+      { runs: 256, seed: 89704, size: 64, maxShrinks: 256, concurrency: 1 }));
+    assert.equal(result._tag, "Passed", Arbitrary.formatCheckFailure(result));
+    if (result._tag === "Passed") assert.equal(result.runs, 256);
+  });
+}
 
 test("pure deployment protocol rejects invalid input and recovers", () => {
   const bad = ["{", JSON.stringify({ id: 0, machine: "unknown", initial: "Observed", events: [] }),

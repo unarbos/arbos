@@ -4385,15 +4385,23 @@ class Loop:
         self.close_fixed(fid, st)
 
     @staticmethod
-    def queued_deploy_sha(kind: str) -> str | None:
-        """The sha currently queued for `kind` by the CD hook (one file per kind), or None."""
-        try:
-            for line in Path(DEPLOY_QUEUE, kind).read_text().splitlines():
-                if line.startswith("sha="):
-                    return line[4:].strip() or None
-        except OSError:
+    def deploy_observation(kind: str) -> tuple[str, str | None] | None:
+        """A hook-owned queue/installed snapshot, retained across the ancestry check."""
+        if kind not in ("relay", "voice", "agentd"):
             return None
-        return None
+        try:
+            result = subprocess.run([DEPLOY_HOOK, "--observe", kind], capture_output=True, text=True, timeout=60)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if result.returncode != 0 or len(result.stdout) > 256 or not result.stdout.endswith("\n"):
+            return None
+        receipt = result.stdout[:-1]
+        fields = receipt.split(":")
+        if len(fields) != 5 or fields[0] != kind or not re.fullmatch(r"0|[1-9][0-9]{0,17}", fields[1]):
+            return None
+        if any(value != "-" and not re.fullmatch(r"[0-9a-f]{7,40}", value) for value in fields[2:]):
+            return None
+        return receipt, None if fields[2] == "-" else fields[2]
 
     def request_deploys(self, fid: str, kinds: list[str], sha: str) -> None:
         """Ask the CD hook to deploy the relay / roll the image / redeploy voice for a landed fix. Only speeds the
@@ -4404,14 +4412,18 @@ class Loop:
             # The queue holds one sha per kind and the last write wins. Never replace a queued request that already
             # contains this fix with an older commit (22:01 Oct 21: the worker's "newest green" request b22f22b6 was
             # overwritten by a branch commit from 21:22, resetting the debounce and pointing the deploy backwards).
-            queued = self.queued_deploy_sha(kind)
+            observation = self.deploy_observation(kind)
+            if observation is None:
+                log(f"[{fid}] deploy {kind}: observation unavailable; request deferred")
+                continue
+            receipt, queued = observation
             if queued and queued != sha and self.gh.contains(queued, sha):
                 log(f"[{fid}] deploy {kind}: queued {queued[:8]} already carries {sha[:8]}; not requested again")
                 continue
             try:
                 # Direct call: the unit runs with NoNewPrivileges, so no sudo; the hook queues the request under
                 # /var/lib/arbos-feedback/deploy-requests/ (inside the unit's ReadWritePaths) for the CD worker.
-                r = subprocess.run([DEPLOY_HOOK, kind, sha], capture_output=True, text=True, timeout=60)
+                r = subprocess.run([DEPLOY_HOOK, kind, sha, receipt], capture_output=True, text=True, timeout=60)
                 log(f"[{fid}] deploy hook {kind} {sha[:8]}: exit {r.returncode} {(r.stdout or r.stderr).strip()[:120]}")
                 self.store.event(fid, "deploy_requested", deploy=kind, commit=sha, exit=r.returncode)
             except (OSError, subprocess.TimeoutExpired) as e:

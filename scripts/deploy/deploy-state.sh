@@ -22,6 +22,98 @@ deploy_queue_transaction() {
   deploy_queue_locked "$@" 8< "$queue/.queue.lock"
 }
 
+deploy_request_write_revision() {
+  local kind="$1" value="$2" tmp
+  tmp="$(mktemp "$QUEUE/.$kind.revision.XXXXXX")" || return 1
+  if ! { printf '%s\n' "$value" > "$tmp" && chmod 0644 "$tmp" && mv -f "$tmp" "$QUEUE/.$kind.revision"; }; then
+    rm -f "$tmp"
+    return 1
+  fi
+}
+
+deploy_request_ensure_revision() {
+  local kind="$1" file="$QUEUE/.$1.revision"
+  case "$kind" in relay|voice|agentd) ;; *) return 1 ;; esac
+  [[ ! -L "$file" ]] || return 1
+  if [[ ! -e "$file" ]]; then deploy_request_write_revision "$kind" 0 || return 1; fi
+  [[ -f "$file" ]]
+}
+
+deploy_request_revision() {
+  local file="$QUEUE/.$1.revision" value
+  [[ -f "$file" && ! -L "$file" ]] || return 1
+  (( $(wc -c < "$file") <= 19 )) || return 1
+  value="$(cat "$file")" || return 1
+  [[ "$value" =~ ^(0|[1-9][0-9]{0,17})$ ]] || return 1
+  (( $(wc -c < "$file") == ${#value} + 1 )) || return 1
+  printf '%s\n' "$value"
+}
+
+deploy_request_advance() {
+  local kind="$1" revision
+  deploy_request_ensure_revision "$kind" || return 1
+  revision="$(deploy_request_revision "$kind")" || return 1
+  (( revision < 999999999999999999 )) || return 1
+  # Advance before mutation: a later write/unlink failure only refuses stale work.
+  deploy_request_write_revision "$kind" "$((revision + 1))"
+}
+
+deploy_request_status() {
+  local file="$1" value
+  [[ -d "${file%/*}" && -x "${file%/*}" ]] || return 1
+  if [[ ! -e "$file" && ! -L "$file" ]]; then echo -; return 0; fi
+  [[ -f "$file" && ! -L "$file" && -r "$file" ]] || return 1
+  (( $(wc -c < "$file") <= 41 )) || return 1
+  value="$(cat "$file")" || return 1
+  [[ "$value" =~ ^[0-9a-f]{7,40}$ ]] || return 1
+  printf '%s\n' "$value"
+}
+
+deploy_request_installed() {
+  case "$1" in
+    relay) deploy_request_status /etc/arbos/relay.deployed-sha ;;
+    voice) deploy_request_status /etc/arbos/voice.deployed-sha ;;
+    agentd) deploy_request_status "${ARBOS_DEPLOY_STATE:-/var/lib/arbos-deploy}/agentd.deployed-sha" ;;
+    *) return 1 ;;
+  esac
+}
+
+deploy_request_default() {
+  case "$1" in
+    relay|voice) echo - ;;
+    agentd) deploy_request_status "${ARBOS_DEPLOY_STATE:-/var/lib/arbos-deploy}/agentd.rolling.sha" ;;
+    *) return 1 ;;
+  esac
+}
+
+deploy_receipt_valid() {
+  [[ "$1" =~ ^(relay|voice|agentd):(0|[1-9][0-9]{0,17}):(-|[0-9a-f]{7,40}):(-|[0-9a-f]{7,40}):(-|[0-9a-f]{7,40})$ ]]
+}
+
+deploy_publication_state() {
+  if ! deploy_receipt_valid "$1" || ! deploy_receipt_valid "$2"; then echo Invalid; return 1; fi
+  if [[ "$1" == "$2" ]]; then echo Publish; else echo Superseded; fi
+}
+
+deploy_request_observe_locked() {
+  local kind="$1" revision queued=- installed current_default file="$QUEUE/$1"
+  deploy_request_ensure_revision "$kind" || return 1
+  revision="$(deploy_request_revision "$kind")" || return 1
+  if [[ -e "$file" || -L "$file" ]]; then
+    deploy_request_valid "$file" "$kind" || return 1
+    queued="$(sed -n 's/^sha=//p' "$file")" || return 1
+  fi
+  installed="$(deploy_request_installed "$kind")" || return 1
+  current_default="$(deploy_request_default "$kind")" || return 1
+  local receipt="$kind:$revision:$queued:$installed:$current_default"
+  deploy_receipt_valid "$receipt" || return 1
+  printf '%s\n' "$receipt"
+}
+
+deploy_request_observe() {
+  deploy_queue_transaction "$QUEUE" deploy_request_observe_locked "$1"
+}
+
 deploy_request_valid() {
   local file="$1" expected="$2" key value seen=0 bit kind=""
   [[ -f "$file" && ! -L "$file" ]] || return 1
@@ -64,7 +156,10 @@ deploy_request_ack_locked() {
   local queued="$1" snapshot="$2" state=Observed event=Changed
   cmp -s "$queued" "$snapshot" && event=Unchanged
   state="$(deploy_request_transition "$state" "$event")" || return 1
-  if [[ "$state" == Acknowledged ]]; then rm -f "$queued"; fi
+  if [[ "$state" == Acknowledged ]]; then
+    deploy_request_advance "${queued##*/}" || return 1
+    rm -f "$queued"
+  fi
 }
 
 deploy_request_ack() {
@@ -76,7 +171,10 @@ deploy_request_ack_commit_locked() {
   deploy_request_valid "$queued" "$kind" || return 0
   [[ "$(sed -n 's/^sha=//p' "$queued")" == "$sha" ]] && event=Unchanged
   state="$(deploy_request_transition "$state" "$event")" || return 1
-  if [[ "$state" == Acknowledged ]]; then rm -f "$queued"; fi
+  if [[ "$state" == Acknowledged ]]; then
+    deploy_request_advance "$kind" || return 1
+    rm -f "$queued"
+  fi
 }
 
 deploy_request_ack_commit() {

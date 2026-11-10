@@ -11,7 +11,7 @@ import sys
 import time
 
 ROOT = Path(__file__).resolve().parents[3]
-FILES = {'deploy-state.sh': ('deploy_request_transition', 'deploy_lane_transition')}
+FILES = {'deploy-state.sh': ('deploy_request_transition', 'deploy_lane_transition', 'deploy_receipt_valid', 'deploy_publication_state')}
 
 SAFE = re.compile(r'^[A-Za-z0-9_./:-]{0,512}$')
 
@@ -42,10 +42,11 @@ enable -n command builtin exec eval source . hash kill enable
 while IFS='|' read -r machine state count; do
   printf '0|%s\n' "$state"
   for ((i=0; i<count; i++)); do
-    IFS='|' read -r event || exit 2
+    IFS='|' read -r event argument || exit 2
     case "$machine" in
       request) next=$(deploy_request_transition "$state" "$event"); status=$? ;;
       lane) next=$(deploy_lane_transition "$state" "$event"); status=$? ;;
+      publication) next=$(deploy_publication_state "$event" "$argument"); status=$? ;;
       *) exit 2 ;;
     esac
     state=$next
@@ -84,7 +85,7 @@ class Oracle:
     def request(self, machine, initial, events):
         lines = [f'{machine}|{initial}|{len(events)}']
         for event in events:
-            lines.append(event['event'])
+            lines.append(event['event'] + '|' + (event.get('args') or [''])[0])
         self.child.stdin.write(('\n'.join(lines) + '\n').encode('ascii'))
         self.child.stdin.flush()
         deadline = time.monotonic() + 5
@@ -115,14 +116,19 @@ def validate(item):
         raise ValueError('Invalid trace')
     if type(item['id']) is not int or not 0 <= item['id'] <= 2**53 - 1:
         raise ValueError('Invalid trace')
-    if item['machine'] not in ('request', 'lane') or not isinstance(item['initial'], str) or not SAFE.fullmatch(item['initial']):
+    if item['machine'] not in ('request', 'lane', 'publication') or not isinstance(item['initial'], str) or not SAFE.fullmatch(item['initial']):
         raise ValueError('Invalid trace')
     if not isinstance(item['events'], list) or len(item['events']) > 64:
         raise ValueError('Invalid trace')
     for event in item['events']:
-        if not isinstance(event, dict) or set(event) != {'event'} or not isinstance(event['event'], str) or not SAFE.fullmatch(event['event']):
+        if not isinstance(event, dict) or set(event) not in ({'event'}, {'event', 'args'}) or not isinstance(event['event'], str) or not SAFE.fullmatch(event['event']):
             raise ValueError('Invalid trace')
-
+        if item['machine'] == 'publication':
+            args = event.get('args')
+            if not isinstance(args, list) or len(args) != 1 or not isinstance(args[0], str) or not SAFE.fullmatch(args[0]):
+                raise ValueError('Invalid trace')
+        elif 'args' in event:
+            raise ValueError('Invalid trace')
 
 
 def audit(event, args):
