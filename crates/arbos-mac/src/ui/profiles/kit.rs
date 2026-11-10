@@ -441,12 +441,7 @@ pub fn edit_pill(id: &'static str, theme: &Theme) -> Stateful<Div> {
 }
 
 /// Grok Bot's white "Done" / "Create" / "Next" pill (Edit / Create pages).
-pub fn done_pill(
-    id: &'static str,
-    label: &str,
-    enabled: bool,
-    theme: &Theme,
-) -> Stateful<Div> {
+pub fn done_pill(id: &'static str, label: &str, enabled: bool, theme: &Theme) -> Stateful<Div> {
     let (bg, fg) = if enabled {
         (gpui::white(), gpui::black())
     } else {

@@ -6164,14 +6164,11 @@ impl AppState {
                     cx,
                 );
                 match part {
-                    "panel-members" => self.set_profile_subpage(
-                        Some(crate::ui::profiles::server::TAB_MEMBERS),
-                        cx,
-                    ),
-                    "panel-settings" => self.set_profile_subpage(
-                        Some(crate::ui::profiles::server::TAB_SETTINGS),
-                        cx,
-                    ),
+                    "panel-members" => {
+                        self.set_profile_subpage(Some(crate::ui::profiles::server::TAB_MEMBERS), cx)
+                    }
+                    "panel-settings" => self
+                        .set_profile_subpage(Some(crate::ui::profiles::server::TAB_SETTINGS), cx),
                     _ => {}
                 }
             } else if part == "add-members" {

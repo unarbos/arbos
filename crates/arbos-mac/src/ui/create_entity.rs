@@ -441,7 +441,8 @@ pub fn sheet(shell: &Shell, kind: Kind, cx: &mut Context<Shell>) -> Div {
         for t in Transport::ALL {
             let on = t == selected;
             let wire = t.wire();
-            let check = on.then(|| sf_symbols::glyph("checkmark", 14.0, p.title).into_any_element());
+            let check =
+                on.then(|| sf_symbols::glyph("checkmark", 14.0, p.title).into_any_element());
             let id = format!("connect-transport-{wire}");
             rows.push(
                 kit::row(

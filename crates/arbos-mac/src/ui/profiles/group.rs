@@ -238,12 +238,18 @@ pub(super) fn page(
             }))
             .into_any_element()];
             rows.push(
-                kit::nav_row("group-overview-library", "books.vertical", "Library", None, &theme)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.state
-                            .update(cx, |s, cx| s.set_profile_subpage(Some(TAB_LIBRARY), cx));
-                    }))
-                    .into_any_element(),
+                kit::nav_row(
+                    "group-overview-library",
+                    "books.vertical",
+                    "Library",
+                    None,
+                    &theme,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.state
+                        .update(cx, |s, cx| s.set_profile_subpage(Some(TAB_LIBRARY), cx));
+                }))
+                .into_any_element(),
             );
             vec![Section::Card(rows)]
         }

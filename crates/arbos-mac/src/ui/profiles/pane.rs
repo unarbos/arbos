@@ -449,10 +449,7 @@ mod tests {
         assert_eq!(agent, ["Coding", "Routines", "Library", "Computer"]);
         assert_eq!(agent[super::super::agent::TAB_LIBRARY], "Library");
         assert_eq!(agent[super::super::agent::TAB_COMPUTER], "Computer");
-        assert_eq!(
-            super::super::agent::OUTSIDE_TABS,
-            ["Library", "Connection"]
-        );
+        assert_eq!(super::super::agent::OUTSIDE_TABS, ["Library", "Connection"]);
         assert_eq!(super::super::me::TABS, ["Profile", "Settings"]);
         assert_eq!(super::super::user::TABS, ["Links", "Groups"]);
         assert_eq!(super::super::group::TABS, ["Members", "Library"]);

@@ -332,22 +332,16 @@ pub(super) fn page(
             cx,
         ),
         // ----- outside drill-ins -----------------------------------------------
-        (Some(_), Some(OUTSIDE_TAB_LIBRARY)) => library_sections(
-            content.expect("collected for Library"),
-            shell,
-            &theme,
-            cx,
-        ),
+        (Some(_), Some(OUTSIDE_TAB_LIBRARY)) => {
+            library_sections(content.expect("collected for Library"), shell, &theme, cx)
+        }
         (Some(info), _) => {
             crate::ui::connect_agent::details_sections(&pid, info, shell, &theme, cx)
         }
         // ----- native drill-ins ------------------------------------------------
-        (None, Some(TAB_LIBRARY)) => library_sections(
-            content.expect("collected for Library"),
-            shell,
-            &theme,
-            cx,
-        ),
+        (None, Some(TAB_LIBRARY)) => {
+            library_sections(content.expect("collected for Library"), shell, &theme, cx)
+        }
         (None, Some(TAB_COMPUTER)) => computer_sections(
             &project,
             mine,
@@ -516,8 +510,7 @@ fn overview_sections(
         ));
         if mine {
             let on_count = live.routines.iter().filter(|r| r.enabled).count();
-            let routines_value = (!live.routines.is_empty())
-                .then(|| format!("{on_count} on"));
+            let routines_value = (!live.routines.is_empty()).then(|| format!("{on_count} on"));
             rows.push(overview_row(
                 "agent-overview-routines",
                 "clock",
@@ -692,10 +685,7 @@ fn routines_sections(
             .into_any_element(),
         );
     }
-    vec![
-        Section::Title("Routines".into()),
-        Section::Card(rows),
-    ]
+    vec![Section::Title("Routines".into()), Section::Card(rows)]
 }
 
 /// What the Details tab's live cards read.
@@ -1295,22 +1285,20 @@ pub fn edit_sheet(shell: &Shell, cx: &mut Context<Shell>) -> Option<Stateful<Div
                 .on_click(cx.listener(|this, _, window, cx| this.save_agent_edit(window, cx))),
         );
 
-    let pic = div()
-        .size(px(PREVIEW))
-        .child(match hero_image {
-            Some(image) => div()
-                .size(px(PREVIEW))
-                .rounded_full()
-                .overflow_hidden()
-                .child(
-                    gpui::img(crate::ui::picture_fit::fit(&image, PREVIEW))
-                        .size(px(PREVIEW))
-                        .rounded_full()
-                        .object_fit(gpui::ObjectFit::Cover),
-                )
-                .into_any_element(),
-            None => avatars::project_hero(&project, PREVIEW, &theme).into_any_element(),
-        });
+    let pic = div().size(px(PREVIEW)).child(match hero_image {
+        Some(image) => div()
+            .size(px(PREVIEW))
+            .rounded_full()
+            .overflow_hidden()
+            .child(
+                gpui::img(crate::ui::picture_fit::fit(&image, PREVIEW))
+                    .size(px(PREVIEW))
+                    .rounded_full()
+                    .object_fit(gpui::ObjectFit::Cover),
+            )
+            .into_any_element(),
+        None => avatars::project_hero(&project, PREVIEW, &theme).into_any_element(),
+    });
     let pid_av = project.id.clone();
     let hero = div()
         .id("edit-avatar")
@@ -1326,12 +1314,13 @@ pub fn edit_sheet(shell: &Shell, cx: &mut Context<Shell>) -> Option<Stateful<Div
                 .relative()
                 .size(px(PREVIEW))
                 .when(mine, |el| {
-                    el.cursor_pointer().on_click(cx.listener(move |this, _, _, cx| {
-                        this.open_avatar_picker(
-                            crate::ui::avatar_picker::Target::Agent(pid_av.clone()),
-                            cx,
-                        );
-                    }))
+                    el.cursor_pointer()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.open_avatar_picker(
+                                crate::ui::avatar_picker::Target::Agent(pid_av.clone()),
+                                cx,
+                            );
+                        }))
                 })
                 .child(pic)
                 .when(mine, |el| {
@@ -1473,11 +1462,9 @@ pub fn edit_sheet(shell: &Shell, cx: &mut Context<Shell>) -> Option<Stateful<Div
             .flex()
             .flex_col()
             .child(kit::edit_section_header("Settings", &theme))
-            .child(
-                kit::card(&theme).child(
-                    kit::value_row("agent-model-row", "Model", model_text, &theme).into_any_element(),
-                ),
-            )
+            .child(kit::card(&theme).child(
+                kit::value_row("agent-model-row", "Model", model_text, &theme).into_any_element(),
+            ))
     };
 
     let card = div()
