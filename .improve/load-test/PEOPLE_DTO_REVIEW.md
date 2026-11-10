@@ -1,6 +1,11 @@
 # Bounded people DTO batch review
 
-Source-only review against improve/database-scale; six hashes/diff retained in MAP-REVIEW-SOURCE.json and MAP-REVIEW-DIFF.patch. No test/build/profile executed by Map. Final bounded source review PASS after the independent error-decoding correction below; exact final six hashes are MAP-REVIEW-SOURCE-FINAL.json. Parent owns actual native9/9 and all-target Clippy gates; those are not inferred from this source read.
+Source-only review of the batching and live-device index at commit `b96ef1f90`.
+The six reviewed hashes are retained in `PEOPLE_DTO_RESULTS.json` under
+`builds.after.sources`. No test/build/profile was executed by this reviewer.
+Final bounded review passes after the independent error-decoding correction below;
+parent native9 and Clippy gates are separate evidence. The later activity-index
+change and its additional test have their own `ACTIVITY_NATIVE_GATES.json`.
 
 ## Required correction identified
 

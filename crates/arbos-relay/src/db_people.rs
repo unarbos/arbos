@@ -2177,4 +2177,91 @@ mod profile_batch_tests {
         );
         assert_eq!(batch[&uid].seen, None);
     }
+    #[test]
+    fn room_activity_reads_history_extrema_without_scanning_retained_rows() {
+        use std::cell::Cell;
+        thread_local! { static STEPS: Cell<u64> = const { Cell::new(0) }; }
+        unsafe extern "C" fn profile(
+            _kind: u32,
+            _ctx: *mut std::ffi::c_void,
+            st: *mut std::ffi::c_void,
+            _extra: *mut std::ffi::c_void,
+        ) -> i32 {
+            let steps = unsafe {
+                rusqlite::ffi::sqlite3_stmt_status(
+                    st.cast(),
+                    rusqlite::ffi::SQLITE_STMTSTATUS_VM_STEP,
+                    1,
+                )
+            };
+            let _ = STEPS.try_with(|v| v.set(v.get().saturating_add(steps.max(0) as u64)));
+            0
+        }
+        let state = test_state(AuthMode::Github);
+        state.db.with(|c|{
+            let tx=rusqlite::Transaction::new_unchecked(c,rusqlite::TransactionBehavior::Immediate)?;
+            tx.execute("INSERT INTO room_seq(room,head,floor) VALUES ('people/activity',3000,500)",[])?;
+            for n in 0..2500 {
+                tx.execute("INSERT INTO rows(room,seq,device,batch_id,bytes,created_at) VALUES ('people/activity',?1,'fixture-device',?2,zeroblob(64),?3)",params![501+n,format!("fixture-batch-{n}"),if n==0 {9999}else{-n}])?;
+            }
+            tx.commit()
+        }).unwrap();
+        assert_eq!(state.db.room_activity("missing").unwrap(), (0, 0));
+        STEPS.with(|v| v.set(0));
+        state
+            .db
+            .with(|c| {
+                unsafe {
+                    rusqlite::ffi::sqlite3_trace_v2(
+                        c.handle(),
+                        rusqlite::ffi::SQLITE_TRACE_PROFILE as u32,
+                        Some(profile),
+                        std::ptr::null_mut(),
+                    );
+                }
+                Ok(())
+            })
+            .unwrap();
+        let activity = state.db.room_activity("people/activity");
+        state
+            .db
+            .with(|c| {
+                unsafe {
+                    rusqlite::ffi::sqlite3_trace_v2(c.handle(), 0, None, std::ptr::null_mut());
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            activity.unwrap(),
+            (3000, 9999),
+            "last activity is a timestamp maximum, not the last sequence"
+        );
+        let steps = STEPS.with(Cell::get);
+        assert!(
+            steps < 200,
+            "room activity walked retained history: {steps} VM steps"
+        );
+        state
+            .db
+            .with(|c| {
+                c.execute(
+                    "DELETE FROM rows WHERE room='people/activity' AND seq=501",
+                    [],
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            state.db.room_activity("people/activity").unwrap(),
+            (3000, -1)
+        );
+        state
+            .db
+            .with(|c| c.execute("DELETE FROM rows WHERE room='people/activity'", []))
+            .unwrap();
+        assert_eq!(
+            state.db.room_activity("people/activity").unwrap(),
+            (3000, 0)
+        );
+    }
 }

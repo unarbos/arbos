@@ -17,13 +17,27 @@ now both use69. The device lookup originally scanned5002 unrelated rows in a loc
 first tied legacy device name. A reviewer caught two candidate partial-row error
 regressions; both fail before the narrow decode amendment and pass after. These
 are candidate preservation defects, not additional original app defects.
-Final native9 cases and all-target Clippy with warnings denied pass; see
-PEOPLE_DTO_GATES.json. Final measured timing results are recorded after the exact
-committed-source portable suite, rather than treating earlier development timings
-as final-source proof.
+Nine native cases and all-target Clippy with warnings denied pass for this
+component; see PEOPLE_DTO_GATES.json. The later room-activity index adds a tenth
+case, recorded separately in ACTIVITY_NATIVE_GATES.json. The portable suite
+passed 21 randomized pairs at each scale with complete JSON byte equality.
+
+| Groups | Whole handler p50 before → after | SQLite statements | Logical visits |
+| --- | ---: | ---: | ---: |
+| 1 | 0.945 → 0.749 ms | 96 → 13 | 868 → 195 |
+| 10 | 6.360 → 3.645 ms | 942 → 85 | 8,672 → 970 |
+| 100 | 72.531 → 31.978 ms | 9,382 → 805 | 604,715 → 9,498 |
+| 1,000 | 1,832.479 → 321.528 ms | 93,822 → 8,005 | 57,962,963 → 94,778 |
+
+All four paired saving intervals are positive; exact sign-test p=9.54e-7 per
+scale (four-comparison Bonferroni p≤3.82e-6). The self-contained chart is
+[people-dto.html](people-dto.html); full raw samples, hashes and plans are in
+PEOPLE_DTO_RESULTS.json. These published whole-handler timings pin d499090b →
+b96ef1f90, before the additional history/activity index. That index is measured
+separately in ACTIVITY_RESULTS.json and is not folded into these numbers.
 
 ```sh
-python3 .improve/load-test/people_dto.py --output /tmp/arbos-people-profile-1
+python3 .improve/load-test/people_dto.py --after b96ef1f90 --output /tmp/arbos-people-profile-1
 ```
 
 Python3, Rust, a C compiler, cached locked Cargo dependencies and macOS Seatbelt or

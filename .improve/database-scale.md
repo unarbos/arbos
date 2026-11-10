@@ -1,8 +1,8 @@
 # Phase 7: database scale
 
-**Status: position projection, roster batching and worker lookup index verified
-with local scale profiles. Native relay regressions pass; combined whole-workspace
-and physical app measurements remain separate checks.**
+**Status: position/profile projections, roster batching and three lookup indexes
+verified with local scale profiles. Actual native relay checks pass; final combined
+workspace and physical app measurements remain separate gates.**
 
 The retained [suite, assumptions and reproduction commands](load-test/README.md)
 uses fresh generated local databases only. It extracts actual Rust DDL/SELECTs,
@@ -155,19 +155,64 @@ Recommended default: keep the unread index withheld and preserve current FTS and
 unbounded-result behavior. Run a representative device group-open/send trace and
 concurrent writer benchmark before attributing user-visible latency to these SQL
 savings. Security-sensitive membership behavior is pinned by failing-before or
-characterization tests and deserves maintainer review before merge.
+characterization tests and deserves maintainer review before merge. The additive
+live-device/history indexes also need storage/startup/write-budget review; default
+recommendation is to retain the measured indexes and review rollout timing. Those
+follow-up production/device decisions do not block these local contribution PRs.
 
 
-## Whole chat-list follow-through
+## Whole chat-list DTO work
 
-The earlier two-query roster result measured the storage helper, not all HTTP DTO
-mapping. A root actual-handler regression exposed repeated public profile,
-presence, agent-owner and block lookups: eight rooms used186/714 statements for
-2/24humans. Request-local profile batching reduces both to69; a narrow live-device
-user-id index removes unrelated-account scans without indexing the frequent
-presence timestamp. Final nine native checks and all-target Clippy pass, including
-legacy/device ties, alias resolution, full list/detail/visibility and independent
-partial decode errors. Independent source review passes. See
-`load-test/PEOPLE_DTO.md` and `PEOPLE_DTO_GATES.json`. Final portable committed-source
-1/10/100/1000-room measurement is running; earlier batch-only timings remain
-intermediate evidence, not final-source proof.
+The two-query roster result measures storage. The actual handler also used
+repeated profile, device-presence, agent-owner and block lookups: eight rooms
+used 186/714 statements for 2/24 humans. Request-local public profile batching
+reduces both to 69. The live-device user-id index avoids unrelated-account scans
+while leaving the frequently updated timestamp outside its key and preserving
+legacy tied-device order. Shared original DTO/name/avatar policy stays in one
+assembler; a malformed card and valid presence (or the reverse) still fail
+independently. Independent source review passes.
+
+| Generated groups | Native handler + JSON p50 before → after | Statements | Logical visits |
+| --- | ---: | ---: | ---: |
+| 1 | 0.945 → 0.749 ms | 96 → 13 | 868 → 195 |
+| 10 | 6.360 → 3.645 ms | 942 → 85 | 8,672 → 970 |
+| 100 | 72.531 → 31.978 ms | 9,382 → 805 | 604,715 → 9,498 |
+| 1,000 | 1,832.479 → 321.528 ms | 93,822 → 8,005 | 57,962,963 → 94,778 |
+
+All complete JSON bytes match at every scale and sample. There are 21 randomized
+pairs per scale; all paired median-saving intervals are positive, sign-test
+p=9.54e-7 per scale. At 1,000 rooms the paired saving interval is
+1,502.109–1,520.269 ms. Workspace opt0/dependencies opt2, warm workers, no exclusive
+host; these numbers omit transport and UI. The component is pinned to d499090b →
+b96ef1f90, before the activity index below. See the
+[whole-handler chart](load-test/people-dto.html), raw PEOPLE_DTO_RESULTS.json and
+[reproduction notes](load-test/PEOPLE_DTO.md). The 8,005 remaining statements show
+per-room metadata work honestly; this is not a constant-query complete-list claim.
+
+## Last-activity history index and costs
+
+The existing activity query needs the maximum timestamp, not the last sequence's
+timestamp. `rows(room, created_at)` lets its unchanged SQL read that maximum from
+a covering index. At 100/1,000/10,000/100,000 retained rows per room, SQL p50 is
+13→9 / 41→10 / 321→12 / 5,503→41 µs. Logical visits become 2 at every scale,
+from 101/1,001/10,001/100,001. Each scale has 31 randomized pairs and positive
+paired saving intervals; at the largest scale the saving interval is
+5.413–5.502 ms, p=9.31e-10. Nonmonotonic/negative timestamps, maximum deletion,
+missing/empty defaults, exact row preservation and index replay are checked.
+
+This has a real cost. At one million generated rows the index adds 27,045,888
+bytes; schema replay/index creation took 0.280 s with Python SQLite. In a separate
+bundled SQLite3.46 WAL/NORMAL/secure_delete SQL append sample, p50 rises
+26.158→34.627 µs; paired median added cost is 8.926 µs (95% interval
+5.415–10.908 µs), p=9.54e-7. That loop approximates one-row transactions, including
+Python dispatch/SQL preparation; it is not native sending latency. The index is
+chosen for recurring history reads. Production read/write ratios and total history
+size are unmeasured, so storage, startup DDL and write budget need review before
+shared rollout. No shared migration was applied.
+
+See the [activity chart](load-test/activity-index.html), ACTIVITY_RESULTS.json and
+runnable `load-test/activity_index.py`. The final exact seven-source native filter
+passes 10 cases in 28.349 s (including compile); all-target Clippy passes in
+16.249 s. The actual pre-index regression failed on 15,025 VM steps over 2,500
+rows; the indexed budget and full timestamp/deletion controls pass. The six SQL
+compatibility groups also pass. Tests were preserved.
