@@ -1,24 +1,24 @@
-# Phase 4: implicit state machines
+# Phase 4: state-machine inventory and disposition
 
-**Status: implementation and catalog reassessment in progress.** The
-whole-repository inventory separates real cross-field lifecycles from trivial
-booleans and already explicit reducers/enums. Static representability is not a
-runtime reproduction; details label confirmed cases, interleavings requiring a
-test, and invariants already enforced by existing guards.
+Base: `2865cb29b806121d4a90f55ba6ce151a150279a0`. This inventory covers all
+backend crates, native/FFI clients, voice, harness, edge/site, image, scripts and
+evals. A risk label describes consequences, not whether a rewrite is needed.
+Existing typed results, guarded SQL transitions and independent historical facts
+are distinguished from an undeclared collection of mutually exclusive modes.
+The original broad inventory incorrectly grouped several of those together;
+the reassessment below gives the source-level reason for each correction.
 
-The approval-hook lifecycle and voice call lifetime, audio application and vision
-consent controllers (AUX-H2–H5) now use explicit tagged states and pure
-transitions, with effects at their edges. The guarded SDK suite passes 84 tests;
-six generated voice laws exercise 1,536 cases separately from the existing 256
-approval cases. Remaining High native and operational migrations still require
-their stated regression gates. Safe fork native CI and local build capacity are now available; exact combined
-integration is still required. Pure state laws do not verify native callbacks,
-live SDK behavior, billing or deployment orchestration.
+**Current checkpoint:** backend and operational ownership fixes are committed and
+have scoped native/controller gates. The iOS AccountWork/UI successor is still
+being integrated and SDK typechecked. Generated approval/provisioning laws and
+final whole-workspace gates remain in progress. This document does not declare
+Phase4 complete, confuse component totals with distinct full-suite coverage, or
+claim physical-device, provider or deployment verification.
 
-Base: `2865cb29b806121d4a90f55ba6ce151a150279a0`. Coverage includes all backend
-crates, GPUI/Swift/FFI, harness, voice, edge/site, image, scripts and evals. Related
-cross-layer lifecycles may have separate catalog entries for their actual owners;
-the entry count is not a count of independent mathematical machines.
+Native languages keep their existing runtime and use Rust ownership/RAII and
+Swift tagged tickets at effect edges. Effect Schema arbitraries drive the
+TypeScript law transport over those actual implementations; stable native code
+is not rewritten into a second TypeScript runtime.
 
 ## Part 1: summary
 
@@ -26,18 +26,18 @@ the entry count is not a count of independent mathematical machines.
 
 | ID / title | Effective lifecycle / one-sentence description | Risk | 2–5 key files |
 | --- | --- | --- | --- |
-| H1 Agent foreground turn | Waiting/route/ack/result/tool/waiting-for-approval/preempted/failed/finished modes emerge from TurnState flags, optional fields and lane locks. | High | `arbos-agentd/src/agent.rs`, `status.rs`, `handoff.rs`, `reply.rs` (same directory) |
-| H2 Durable jobs and worker attempts | Queue/run/park/retry/cancel/interrupted/complete transitions coordinate SQL rows, worker maps, permits and process termination. | High | `arbos-agentd/src/store.rs`, `agent.rs`, `approval.rs`, `isolation.rs`, `job_cancel_window_tests.rs` |
-| H3 RPC process and supervisor | Missing/spawning/ready/parked/exited/restarting/shutting-down state combines child/stdin Options, readiness/exited atomics and retained-worker maps. | High | `arbos-agentd/src/rpc_child.rs`, `harness.rs`, `agent.rs`, `workspace.rs` |
-| H4 Approval waiting and dispatch receipt | A pending card can be inline/polled/deferred, decided once, then its persisted single-use grant can be consumed and dispatched. | High | `arbos-agentd/src/approval.rs`, `store.rs`, `arbos-core/src/approval.rs`, `arbos-agentd/src/mcp.rs` |
-| H5 Agent room synchronization | Cold/open/catchup/live/refused/oversize-parked/closed modes interact with pending dependency cursors, inflight batches and persisted snapshots. | High | `arbos-agentd/src/sync.rs`, `store.rs`, `workspace.rs`, `arbos-core/src/wire.rs` |
-| H6 Box provisioning/wake/liveness | A per-user box can be missing/creating/waking/awake/stale/stopping/held/failed while provider and local connection evidence arrive independently. | High | `arbos-relay/src/boxes.rs`, `state.rs`, `db.rs`, `db_accounts.rs`, `fleet.rs` |
-| H7 Upgrade/repair and retained sandboxes | Measuring/carrying/staged/swapped/verifying/rollback/retained/deleted states span current row, staging booleans, provider effects and history. | High | `arbos-relay/src/upgrade.rs`, `upgrade_carry.rs`, `db_accounts.rs`, `upgrade_rollback_tests.rs`, `upgrade_room_tests.rs` |
+| H1 Foreground turn / row presentation | TurnKind, ValidRoute and TurnOutcome already declare intent/route/result; remaining row and ACK presentation is narrower. | Medium; authority already explicit | `arbos-agentd/src/agent.rs`, `status.rs`, `handoff.rs`, `reply.rs` (same directory) |
+| H2 Durable jobs / worker attempts | Shared guarded SQL declares durable job transitions; independently owned execution attempts are covered by H3/H4. | High authority; already explicit | `arbos-agentd/src/store.rs`, `agent.rs`, `approval.rs`, `isolation.rs`, `job_cancel_window_tests.rs` |
+| H3 Main and worker processes — implemented | Main Pi slot and RPC/Claude worker registries own starting/ready/stopping/closed transitions with exact tickets and captured resources. | High | `arbos-agentd/src/rpc_child.rs`, `harness.rs`, `agent.rs`, `workspace.rs` |
+| H4 Approval waiting and dispatch receipt — implemented | A pending card can be inline/polled/deferred, decided once, then its persisted single-use grant can be consumed and dispatched. | High | `arbos-agentd/src/approval.rs`, `store.rs`, `arbos-core/src/approval.rs`, `arbos-agentd/src/mcp.rs` |
+| H5 Agent room synchronization | Exact inflight batch/VV ownership and guarded ACK/refusal transitions already exist; catchup/backoff presentation remains separate. | Medium; protocol authority already explicit | `arbos-agentd/src/sync.rs`, `store.rs`, `workspace.rs`, `arbos-core/src/wire.rs` |
+| H6 Box provisioning/wake/liveness — admission implemented | A per-user box can be missing/creating/waking/awake/stale/stopping/held/failed while provider and local connection evidence arrive independently. | High | `arbos-relay/src/boxes.rs`, `state.rs`, `db.rs`, `db_accounts.rs`, `fleet.rs` |
+| H7 Upgrade/repair and retained sandboxes | Typed Outcome/Task/Source and immutable error context already declare the one-shot pipeline and rollback policy. | High effects; already explicit | `arbos-relay/src/upgrade.rs`, `upgrade_carry.rs`, `db_accounts.rs`, `upgrade_rollback_tests.rs`, `upgrade_room_tests.rs` |
 | H8 Planned relay restart — implemented | Running/frozen/announced/draining/stopped combines closing signal, work-freeze bit, in-progress creates and socket count. | High | `arbos-relay/src/restart.rs`, `state.rs`, `boxes.rs`, `rooms.rs` |
-| H9 Sign-in, refresh rotation and device revocation | One-time OAuth grant, live/rotated/revoked/expired refresh state and session shutdown are coordinated across SQL, Matrix and live sockets. | High | `arbos-relay/src/signin.rs`, `auth.rs`, `db_accounts.rs`, `matrix/client.rs`, `rooms.rs` |
+| H9 Relay sign-in/rotation/revocation | Conditional grant/rotation SQL and checked protocol cases already own authority; cross-service delivery errors are returned. | High authority; already explicit | `arbos-relay/src/signin.rs`, `auth.rs`, `db_accounts.rs`, `matrix/client.rs`, `rooms.rs` |
 | H10 Secret/vault approval and access — receipt boundary implemented | Pending/allowed-once/standing/denied/expired/revoked grants combine expiry, source version, pause flags, directors and external vault access. | High | `arbos-relay/src/db_secrets.rs`, `secrets.rs`, `vault.rs`, `vaults.rs`, `shell_grants.rs` |
-| H11 Spend admission, kill switch and metering | Allowed/daily-blocked/credit-blocked/read-only and auto/manual kill modes interact with ledger debits and persisted meter cursor. | High | `arbos-relay/src/credits.rs`, `db_accounts.rs`, `proxy.rs`, `db_voice.rs`, `arbos-agentd/src/budget.rs` |
-| H12 Sidecar page receipt | Fetched/mirrored/wake-accepted/checkpointed stages govern whether replay can safely pass an ASP event. | High | `arbos-sidecar/src/daemon.rs`, `mirror.rs`, `waker.rs`, `relay.rs` |
+| H11 Billed usage settlement — implemented; informational meter retained | Allowed/daily-blocked/credit-blocked/read-only and auto/manual kill modes interact with ledger debits and persisted meter cursor. | High | `arbos-relay/src/credits.rs`, `db_accounts.rs`, `proxy.rs`, `db_voice.rs`, `arbos-agentd/src/budget.rs` |
+| H12 Sidecar page receipt — implemented in Phase3 | Fetched/mirrored/wake-accepted/checkpointed stages govern whether replay can safely pass an ASP event. | High | `arbos-sidecar/src/daemon.rs`, `mirror.rs`, `waker.rs`, `relay.rs` |
 | H13 Relay speculative document cache — implemented | Cold/rebuilt/advanced/push-imported/authorized/refused states decide whether cached Loro state can be reused after a speculative push. | High | `arbos-relay/src/rooms.rs`, `state.rs`, `push_guard.rs`, `db.rs` |
 | M1 Room socket delivery | Catchup/live/held/timeout-released modes share a boolean, last seq, held broadcast list and heal counter. | Medium | `arbos-relay/src/rooms.rs`, `room_health.rs`, `state.rs` |
 | M2 App session orthogonal substates | Existing explicit Phase coexists with heal, refusal, resend, checkpoint and pending-dependency state; audit the product of these fields rather than replacing Phase. | Medium | `arbos-client/src/room.rs`, `arbos-ffi/src/lib.rs`, `arbos-core/src/wire.rs` |
@@ -75,7 +75,7 @@ For paths shortened to filenames in a row, the directory is that row's first pat
 
 | Machine | Effective behavior and risk | 2–5 key files |
 | --- | --- | --- |
-| Account-session ownership | Login, pairing and token refresh asynchronously publish credentials/account state; stale work must never revive an ended session. **High** | I/Store/AppModel.swift; I/Sync/Auth.swift; I/Sync/RelayAPI.swift; M/sync/relay.rs; M/sync/credentials.rs |
+| Account-session ownership | Explicit account/control/task/cache ownership rejects stale publications and actions; final iOS UI composition is being verified. **High** | I/Store/AppModel.swift; I/Sync/Auth.swift; I/Sync/RelayAPI.swift; M/sync/relay.rs; M/sync/credentials.rs |
 | iOS transport-attempt lifecycle | Socket/task/generation flags coordinate idle, dialing, active, retrying and permanently stopped hosts around an already explicit room protocol. **High** | I/Sync/SessionRoom.swift; I/Store/AppModel.swift; F/lib.rs |
 | Mac pending delivery ownership | User-message pending sets change on enqueue, failure and room ACK, but room ownership currently disappears in one global set. **High** | M/sync/relay.rs; M/sync/mod.rs; M/app.rs; M/sync/chat_send_queue.rs |
 | Call-attempt ownership | REST call creation/join, UI cancellation and LiveKit/CallKit completion must belong to one current attempt. **High** | I/Store/CallManager.swift; I/Model/Call.swift; M/app.rs; M/calls.rs; M/ui/callview.rs |
@@ -83,7 +83,7 @@ For paths shortened to filenames in a row, the directory is that row's first pat
 | Snapshot publication lifetime | A detached doc read may complete after room/account cleanup and must not republish obsolete private messages. **High** | I/Store/AppModel.swift; I/Sync/CoreChatDoc.swift; I/UI/ChatView.swift |
 | Attachment-send lifecycle | Picked/uploading/committing/pending/failed attachment sends use transient tasks and multiple collections rather than one send state. **Medium** | I/Store/AppModel.swift; I/UI/ChatView.swift; M/sync/relay.rs; M/app.rs |
 | Per-chat FIFO worker lifetime | No-worker/active/queued/timed-out/cleared state is encoded by channel/task entries and timeout callbacks. **Medium** | M/sync/chat_send_queue.rs; M/sync/relay.rs |
-| Draft-DM creation | Empty local draft becomes one in-flight create with queued sends, then real DM or retained failed draft. **Medium** | I/Store/AppModel.swift; M/draft_dm.rs; M/app.rs; M/sync/relay.rs |
+| Draft-DM creation | A per-draft/account queue owns creation and FIFO sends; the reproduced wrong-recipient interleaving makes this **High**, now implemented in the pending iOS successor. | I/Store/AppModel.swift; M/draft_dm.rs; M/app.rs; M/sync/relay.rs |
 | Cache flush lifecycle | Dirty/coalescing/exporting/persisted/evicted state spans doc/cursor snapshots, dirty sets and timers. **Medium** | I/Store/AppModel.swift; I/Store/DeviceStore.swift; M/sync/relay.rs; M/sync/store.rs |
 | Read-mark coalescing | Unsent/in-flight/throttled/latest-queued read cursor is tracked through maps and per-chat tasks. **Medium** | I/Store/AppModel.swift; I/Sync/SessionRoom.swift; M/sync/relay.rs; M/sync/dto.rs |
 | Composer operation mode | Plain send, same-chat reply, cross-chat reply and edit are mutually exclusive semantic modes stored as independent nullable fields. **Medium** | I/UI/ChatView.swift; I/Store/AppModel.swift; M/app.rs; M/ui/composer.rs |
@@ -132,7 +132,7 @@ state machines.
 | AUX-H4 Voice audio mode and mute application — implemented | Separate application lanes distinguish unapplied, applying, applied and failed effects; mode commits its participant identity atomically. | High | `voice/arbos_voice/call_state.py`; `voice/arbos_voice/worker.py`; `voice/arbos_voice/listener.py`; `voice/tests/test_worker_lifecycle.py` |
 | AUX-H5 Vision consent, tracks and frame delivery — implemented | Enabled/disabled/closed generations and owned stream/session leases reject revoked frames and retain cleanup ownership. | High | `voice/arbos_voice/vision_state.py`; `voice/arbos_voice/vision.py`; `voice/tests/test_vision_consent.py`; `voice/tests/state_bridge.py` |
 | AUX-H6 Feedback commit admission and delivery — implemented | Shared typed admission gates every normal/prepared merge; delivery phase and prerequisite evidence persist together. | High | `scripts/feedback/feedback_state.py`; `scripts/feedback/feedback_poller.py`; `scripts/feedback/test_feedback_state.py`; `harness/arbos-pi-ext/feedback-state-laws.test.ts` |
-| AUX-H7 Deployment lanes and image rollout | Queue files, canary/restart markers, holds and per-box outcomes determine whether a release starts, pauses, retries or finishes. | High | `scripts/deploy/arbos-deploy-worker`; `scripts/deploy/arbos-deploy-hook`; `scripts/feedback/deploy-relay.sh`; `docs/process-rules.md` |
+| AUX-H7 Deployment lanes and image rollout — implemented | Queue files, canary/restart markers, holds and per-box outcomes determine whether a release starts, pauses, retries or finishes. | High | `scripts/deploy/arbos-deploy-worker`; `scripts/deploy/arbos-deploy-hook`; `scripts/feedback/deploy-relay.sh`; `docs/process-rules.md` |
 | AUX-H8 Release-object publication — implemented | Tagged observed/creating/uploading/finalizing/completed/refused/failed states preserve draft intent and require actual publication before success. Stateless merge reports and existing atomic receipts are excluded. | High | `scripts/release/publication.py`; `scripts/release/publish-release.sh`; `scripts/release/test_publication.py`; `harness/arbos-pi-ext/publication-state-laws.test.ts` |
 | AUX-H9 Shared Mac heavy-slot ownership — implemented | Explicit request/lease/GUI/boot states and an OS-backed permanent mutex serialize grants, reclaim and cancellation without changing calibrated scheduling policy. | High | `scripts/runner/arbos-heavy-slot.sh`; `scripts/runner/xcrun-slot-guard.sh`; `scripts/runner/gui-lock.sh`; `scripts/runner/tests/test_slot_lifecycle.py` |
 | AUX-M1 Voice inbox dedupe and pause scheduling | Seen IDs, pending speech tasks and quiet-window deadlines decide whether a chat update is contextualized and spoken once. | Medium | `voice/arbos_voice/updates.py`; `voice/arbos_voice/worker.py`; `voice/tests/test_updates.py` |
@@ -143,753 +143,295 @@ state machines.
 
 Image deny hooks and the edge site router are stateless decisions, not meaningful implicit lifecycle machines. Simple SERVE/configuration booleans, immutable judge decisions and task lists are excluded. GitHub Actions/Docker declarative ordering is already declared externally; the custom observation/controllers above are the relevant implicit machines.
 
-## Part 2: detail and regression prerequisites
+## Part 2: higher-risk transitions, evidence and retained scope
 
-The following records the discovered baseline and proposed transitions. The
-implemented approval and voice changes are described below; baseline source line
-numbers describe the audited revision, not positions after these extractions.
-Main-agent route correction is ranked Medium: it controls acknowledgement/prose,
-while actual tool permission is enforced separately. Its surprising fallback
-combination is not by itself an authorization failure. It remains documented.
+Locations below name symbols rather than stale line offsets. Public regression
+artifacts are under `.improve/state-machine-checks/`; the native tests live beside
+the actual implementation. “Before” means actual original-source execution unless
+explicitly identified as an introduced candidate defect. No row claims exhaustive
+coverage of every possible schedule.
 
-### Backend and shared Rust
+### Backend authority and resource boundaries
 
-#### H1 Agent foreground turn
+**H1/H2 — turn intent and durable jobs.** `TurnKind`, `ValidRoute`, `TurnOutcome`
+already name foreground modes. `route_failed` records exhausting route attempts
+and legitimately coexists with the fallback Reply. Routine/voice origin, posted
+row IDs and ACK history are independent facts. `Store::set_job_state` rejects
+cancelled→running, permits intentional queued/running reclaim, clears ended_at
+for the new attempt and preserves the first terminal timestamp. Existing tests
+pin these contracts. A blanket terminal-absorption law would break intentional
+requeue. Keep the narrower row/ACK presentation Medium; worker identity and
+approval authority are the separate High boundaries below. RAII semaphore
+permits and cancellation rechecks remain; no second DTO enum was added.
 
-- **Storage/states:** `agent.rs:1644–1788` TurnState plus Agent turn Option/turn_running/turn_lock (`:2095+`). Actual states include idle, queued, routing, acknowledgement live/closed, result live, tool-running, approval waiting, stopped/preempted, failed, complete; route mode and row mode are separate submachines.
-- **Transition owners:** command/send/retry/stop/model-event handling in Agent; `acquire_turn_lock:4581` voice preemption; status quick lane (`status.rs:633`); handoff/relay-result paths.
-- **Illegal combinations:** *representable, not established reachable* ack_split with incompatible assistant row, row_closed with dirty live text, turn_running with no owned turn or an ended turn, preempted but a later handoff still dispatching. Existing comments/tests document historical examples; do not assert they still occur.
-- **Formalization:** yes, split route/row/work-ownership states with one transition owner and effect outputs. Preserve independent facts such as routine/from_voice; they are not all lifecycle flags.
-- **Prerequisite:** capture existing user-visible ack/result/stop/voice-preempt behavior; add event-sequence illegal-combination regression tests; retain `turn_end_race_tests`, `ack_is_not_an_answer_tests`, refusal/model-switch suites. Full Agent integration is required.
+**H3 — main Pi, worker registries and child metadata.** Main `PiSlot` has explicit
+boot/ready/closed ownership. A `MainPiBoot` captures each child before a
+cancellable wait; only its current ticket can publish, record metadata or clear
+readiness. `CurrentPi` pairs the actual child and boot receipt. Model/effort/chat
+operations capture that pair, stage desired values, and publish under the same
+accepted owner; old recovery cannot kill its successor. Original main-child
+checks had5 semantic failures/1 control; the expanded30 selected checks passed.
+The later metadata baseline had7 failures/7 controls, plus a separately pinned
+thinking-tail preservation defect; final17 metadata checks passed.
 
-#### H2 Durable jobs and worker attempts
+`worker_lifetime::State<T>` is Accepting with per-session Starting/Ready/Stopping,
+or terminal Closed. Its single transition boundary owns Begin/Capture/Publish/
+Abort/Stop/Stopped/Shutdown; opaque monotonic tickets prevent a stale stop waiter
+from acquiring a resumed worker. RPC and Claude adapters use this actual state,
+not a copied reference model. Captured-resource guards survive cancellation;
+Store/session publication shares exact-ticket admission and never awaits a child
+under the registry lock. Ordinary stop remains reusable; shutdown closes first.
+Own Stopping or a contended registry reports unknown liveness; an independent
+Ready sibling honestly remains readable. Already dispatched external work cannot
+be recalled; reaping after runtime teardown remains best effort.
 
-- **Storage/states:** `store.rs:105–119,151–193` jobs/job_workers; `set_job_state:790–811` controls queued/running/done/failed/cancelled/interrupted and timestamps. Parked-for-approval is currently queued plus approval/step/worker facts, not a distinct SQL state.
-- **Transitions:** Agent start/requeue/finish/cancel paths, approval resume, restart reclaim, process reaper; Store forbids cancelled→running, permits cancelled→queued for explicit restart reclaim and preserves first terminal timestamp.
-- **Illegal combinations:** *representable* terminal with no ended_at; running with ended_at; cancelled job with worker/permit still starting; parked approval job consuming active capacity. Some races are already prevented by SQL and rechecks; treat those guards as evidence, not surplus.
-- **Formalization:** yes, typed persisted lifecycle decoded at Store seam and separate worker-attempt state; distinguish explicit reclaim from racing start.
-- **Prerequisite:** first-terminal-wins, cancelled-start exclusion, intentional reclaim, capacity accounting, one delivery per ask, and cancellation of actual process tree. Existing job cancel/queued/window/reparent/steer/retention tests must run. Exact SQL can be pinned in isolated SQLite, but that alone cannot verify process effects.
+Original RPC10 cases had8 semantic failures/2 controls;2 additional stop-waiter
+failures were pinned before the final refinement. Original Claude5 had4 semantic
+failures/1 control. Review caught an **introduced** stdin-first cleanup deadlock:
+both blocked-writer cases pass upstream, fail the held candidate, and pass the
+final kill-first adapter. No new grace/duration, CLI argument, model policy or
+process isolation was introduced. The latest independent Root checkpoint passes
+78 selected native tests plus all-target Clippy; its overlapping totals and exact
+source are in `worker-lifetime/CLAUDE-ROOT-COMPOSITION.json`. See `rpc-owner/`,
+`rpc-metadata/` and `worker-lifetime/`. Linux-only sweep expectations are handled
+in Tests last; full Linux and final combined source gates are still required.
 
-#### H3 RPC process and supervisor
+**H4 — approval delivery.** Durable ApprovalState/Outcome and first-decision CAS
+already existed. The repaired submachine is `WaitDelivery::Inline(sender) |
+Polled | Deferred` plus `transition_delivery` and one transactional decision/
+claim edge before grant-bearing dispatch. Inline-without-sender and an abandoned
+approved authority are no longer independent flags. Failed or uncertain delivery
+spends the claim; it never restores authority automatically. Pending cards still
+have no invented deadline; late approval does not reopen cancelled jobs.
+Original5 semantic failures cover SQL ABORT/IGNORE, polling before claim,
+competing claim+inline and receiver loss. The rejected-notification race was
+separately pinned during review. Final40 native cases passed, including6 park
+controls; see `approval-delivery/`. Generated laws of the actual transition and
+Store methods are a remaining Phase8 task at this checkpoint.
 
-- **Storage/states:** `rpc_child.rs:17–49` child/stdin Options, exited bit, pending replies and pid/tree; Agent pi_ready/ext_loaded/pi_parked/shutting_down and optional child. Effective absent→spawning→ready→parked/shutting down→exited→respawn.
-- **Transitions:** spawn/read loop (`:70+`), call/call_timeout (`:208–240`), shutdown (`:250`), is_alive/exit report; supervisor/reaper and harness adapter maps participate.
-- **Illegal combinations:** *representable* exited with pending callers never resolved, ready with absent stdin, shutdown while respawn allowed, contended map misread as dead. The last is a historical bug covered by current safe `Option<bool>` semantics in HarnessAdapter; not evidence of current reachability.
-- **Formalization:** yes for process ownership plus one shutdown owner, while OS observations remain three-valued (alive/dead/unknown).
-- **Prerequisite:** real stub subprocess EOF/timeout/crash/restart/shutdown plus cancellation/reap contention tests. No pure enum-only test proves OS behavior.
+**H5 — agent room protocol.** Existing `Option<(batch,VV)>` owns exactly one
+outbound batch. ACK/refusal requires that batch, refusal preserves acknowledged
+VV, retirement clears inflight, and pending dependencies cap the durable cursor.
+Current-session caught_up, historical ever_caught_up and one-time recovered are
+intentionally independent. A retained closed host is rejected by registry/read
+paths and retires its task; historical caught_up does not itself make it illegal.
+Phase3 fixes the real cursor/snapshot receipt boundaries. Keep link/catchup/
+backoff presentation Medium rather than add an unused parallel reducer.
 
-#### H4 Approval waiting and dispatch receipt
+**H6 — same-user creation admission.** Wire BoxState already declares box state;
+provider status, sockets and last-seen timestamps are independent observations.
+The reproduced gap was two ensure callers reading missing state, writing two
+placeholders and issuing two provider POSTs, while one cancelled guard removed
+another's restart marker. `CreationPermit` now owns one per-user async lease
+before the existence read and throughout the existing provider pipeline.
+`CreatingGuard` mutably borrows that permit; cleanup precedes lease release, and
+a waiting caller owns no marker. Both ensure and staged replacement use the
+admitted builder, deriving user identity from the permit. The short weak-slot
+registry is never held over an await; different users still progress independently.
+Original5 cases had2 semantic failures/3 controls; final13 box-row tests pass.
+No distributed exactly-once provider or automatic retry guarantee is claimed.
+Uncertain cancellation retains the existing durable create intent and placeholder
+for reconciliation. Constants/hold/live-row/staged policy remain. See
+`create-admission/`; generated real-future admission traces are in progress.
 
-- **Storage/states:** `approval.rs:118–143` WaitMode plus optional waiter; SQL pending/approved/rejected/legacy-expired/cancelled and optional grant_consumed_at (`store.rs:1917–2007`). Effective waiting-inline/polled/deferred→decided→approved-unclaimed→claimed→dispatch attempted.
-- **Transitions:** begin/request (`approval.rs:376,558`), decide command/decision (`:594,660`), grant consume (`store.rs:1979`), resume worker (`approval.rs:1444–1497`) and park (`:1717`). Core ApprovalState/Outcome are **already explicit**; the cross-layer dispatch/wait submachine is what remains implicit.
-- **Illegal combinations:** *representable* Inline with no waiter, deferred with a live waiter, grant consumed on non-approved card, a decision re-dispatching a cancelled job, wait timeout treated as rejection. Existing CAS SQL and core outcome types prevent some of these today.
-- **Formalization:** yes; tagged WaitDelivery and durable grant receipt type, one transition edge that claims before dispatch, preserve exactly-once uncertainty policy.
-- **Prerequisite:** pin no deadline for unanswered agent cards, first decision wins, restart-surviving single-use grants, late approval doesn't reopen cancelled work, and bounded permit queue behavior. Existing tests at `approval.rs:3136,3287,3381` are required; auth/security boundaries apply.
+**H7 — upgrade/repair.** `Outcome`, `Task`, `Source`, successful Packed input and
+structured carry/rollback already define this pipeline. Progress strings do not
+dispatch control. `Staged { keep, swapped }` is immutable error context: unpack
+failure has keep=holds_data/swapped=false; swap failure has true/true. Rollback
+retains if keep OR swapped and restores the source row before cleanup. The
+original “swapped but disposable” finding was a false positive. Keep actual
+fake-provider rollback/row-identity tests, independent retained-history facts and
+existing fail-safe cleanup; do not invent a second lifecycle or promise a remote
+transaction across crashes. Operational deployment authority is AUX-H7 below.
 
-#### H5 Agent room synchronization
+**H8 — planned restart.** The used `Planned` owner moves Serving→Freezing→Notifying
+→Draining→Ready, with terminal Shutdown. Drop thaws only its own cancelled plan;
+a later plan cannot be cleared by an earlier owner. Creation admission and socket
+counts remain separate observations. Original cancellation/overlap failures were
+pinned; final10 native tests,4×256 actual-reducer laws and mutant/replay pass.
+The90s reset and all notification/drain timing remain. See `RESTART.md`.
 
-- **Storage/states:** DocHost `sync.rs:47–111`: caught_up/closed/recovered/ever_caught_up, inflight Option, push_blocked_until, refusal/oversize counters, first_pending_seq, acknowledged VV; Store room_docs cursor+snapshot.
-- **Transitions:** next_push (`:320+`), budget chunk export, inbound STATE/ROW/ACK/ERROR, catchup completion, reconnect and close/ceiling paths. Cold/catching up/live/blocked/refused/closed are lifecycle states; dependency repair and outbound state are orthogonal.
-- **Illegal combinations:** *representable* closed host returned as active, cursor persisted past an unimported dependency, ACK advancing VV for a different batch, inflight plus export allowed, old pre-join command replayed as new work. Existing guards/tests address these and must remain.
-- **Formalization:** yes, separate link/catchup and outbound push reducer with persistence actions.
-- **Prerequisite:** restart with pending deps, same batch reconnect, refusal/rate timeout, oversize causal prefix, room cap close with live work, join-time replay exclusion and cursor/snapshot atomicity.
+**H9 — relay auth.** Unexpired/unused auth grants are conditionally consumed before
+token issue; rotation CAS is checked. A serialized lookup/row/claim/issue/grace
+path already defines refresh replay and restart behavior. Rotated and revoked
+history may legitimately coexist. Device revocation attempts local cutoff and
+both relay/Matrix halves, returning a typed combined error on failure. There is
+no durable cross-service outbox/transaction: that delivery/retry concern remains
+explicit. Do not silently change grace, token family or revocation policy based
+on DTO flags. Native clients' stale account authority is the separate repaired
+High boundary below; this classification does not establish universal auth safety.
 
-#### H6 Box provisioning/wake/liveness
+**H10 — one-use secret/vault authority.** Exact observed-grant claim and a
+non-Clone receipt now own each disclosure/prepared external attempt. The shared
+Immediate transaction deduplicates and claims every unique row in a batch;
+changed status/scope/expiry, SQL ABORT/IGNORE or any lost row rolls back the set.
+Preparation/decryption/validation precedes claim, while no transaction spans
+external I/O. After claim, uncertain outcome consumes authority; no automatic
+restoration/retry is added. Original6 handler cases had3 semantic failures/3
+controls; builder/batch refinements have separately labelled introduced failures.
+Final42 selected native cases and4×256 exact-SQL laws plus mutant/replay pass.
+Existing project/target/host/use-kind/asker selection remains; the row's stored
+chat is compared but no new operation-chat restriction is invented. This
+intentional at-most-one attempt tradeoff requires owner review before merging.
+See `authorization-receipts.md` and `ONCE_CLAIM.md`.
 
-- **Storage/states:** boxes/box_creates/box_wake_jobs SQL (`db.rs:60–82`), AppState maps (`state.rs:284+`), typed BoxState plus independent provider status/last_seen/held flag. States missing/creating/starting/reachable/connected/stale/stopped/held/failed.
-- **Transitions:** create (`boxes.rs:123,134`), start/stop (`:540,665`), ensure_awake (`:981`), websocket/http liveness (`:1107–1157`), wake runner (`:1696`), fleet eviction/admission.
-- **Illegal combinations:** *representable* a registered live box with no sandbox, held-stopped but automatic wake proceeds, duplicate create attempts, stale network sample overriding fresh socket evidence, create during freeze. Existing CreatingGuard/state helpers protect some cases.
-- **Formalization:** yes, per-user durable lifecycle with provider effects as explicit commands; do not turn uncertain liveness into false.
-- **Prerequisite:** fake provider create/start/stop failures and racing wake/hold/restart/eviction tests; verify local provider behavior without contacting cloud. Current full-native blocker applies; no provider smoke execution.
+**H11 — billed voice/vision settlement.** One Immediate transaction owns cumulative
+observation, exact existing ordered debit/clamp/refusal policy, legacy account
+initialization and cursor advance. Transaction-private preparation can only yield
+a committed `VoiceSettlement`/`PostfactDebit`; required account-cap writes verify
+one affected row. Original13 cases had5 semantic failures/8 controls. Root review
+caught two ignored-row metadata faults in the candidate; final41 scoped native
+checks pass, including finite actual-helper traces. See `voice-settlement/`.
+Generated-law coverage is being audited separately; finite cases are not labelled
+property proofs. Existing kill-mode constructors are already explicit.
+Informational machine time is a separate Medium durability issue: its ledger kind
+is excluded from balances/spending caps and its daily alert is log-only. Existing
+credits-read/kill-decode/aggregate failure defaults favor availability and remain
+unchanged; fail-open versus fail-closed policy is owner-visible, not silently
+rewritten as part of the state classification.
 
-#### H7 Upgrade/repair and retained sandboxes
+**H12 — sidecar receipt (Phase3).** Actual `apply_page` sequences mirror→accepted
+wake handoff→durable cursor save→installed cursor. Event/mirror/wake/save failure
+cannot advance the receipt; replay recovers wakes from already mirrored but
+uncommitted rows.13 daemon +4 mirror cursor/wake checks pass. Accepted channel
+delivery can repeat across a crash; this is not a persistent outbox or exactly-once
+claim. No duplicate Phase4 model is needed.
 
-- **Storage/states:** UpgradeStatus string phase (`state.rs:425`), upgrade/refusal maps, current box row, retained history partial/archived/deleted flags, `Staged {keep,swapped}` (`upgrade.rs:549`). Measure→pack→stage→carry→swap→health verify→success or rollback→retention cleanup.
-- **Transitions:** start (`upgrade.rs:151`), task execution, staged cleanup around `:549–620`, repair (`:891`), history sweeper (`:992`).
-- **Illegal combinations:** *representable* swapped but disposable staged object, partial retained box eligible as repair source, current box deleted by cleanup, rollback selecting already-deleted fallback. Existing rollback and staged cleanup logic is load-bearing, not proof these remain reachable.
-- **Formalization:** yes; owned tagged stages so cleanup eligibility follows stage, persistent recovery receipt for restart.
-- **Prerequisite:** fake carry/upgrade matrices for every error/cancel edge, archive/rollback ownership, manifest preservation, no deletion of current box, restart mid-create. Keep existing rollback/room suites; paid Daytona ignored test stays unrun.
-
-#### H8 Planned relay restart
-
-- **Storage/states:** RestartSignal (`state.rs:221–252`) closing watch/open_sockets/work_frozen/creating and upgrading map; effective running/frozen/waiting work/announced/draining/exited.
-- **Transitions:** freeze (`restart.rs:106`), thaw (`:114`), announce (`:42`), close/drain (`:70`), SIGTERM handler (`:213`), create guards and socket joins/leaves.
-- **Illegal combinations:** *representable* closing while new box work starts, drain reports zero with late socket admitted, cancelled restart leaves frozen forever, no create receipt for externally running sandbox. Historical create orphan case is documented; existing guards need preservation.
-- **Formalization:** yes; one restart coordinator state plus counted scoped leases for socket/create work.
-- **Prerequisite:** late room opens, active upgrade, mid-create, interrupted restart and timeout tests. Existing room restart tests must run with fake providers.
-
-#### H9 Sign-in, refresh rotation and device revocation
-
-- **Storage/states:** auth_flows/auth_grants expiry+used timestamps; refresh_tokens expiry/rotation/revocation plus device revoked_at (`db_accounts.rs:24–36,117–133`). Session active/expired/rotated/revoked, with pending downstream device revocation.
-- **Transitions:** OAuth start/callback/token (`signin.rs:410,529,668`), refresh (`:702`), logout/everywhere/device revoke (`:820,1025,1231`), Db take grant/mark rotation/revoke (`db_accounts.rs:608,857,919,930`).
-- **Illegal combinations:** *representable* used grant exchanged again, rotated token accepted as fresh, revoked DB device still live on socket/Matrix, competing refresh requests minting two valid successors. Guards/CAS and immediate socket checks already address parts; no current exploit established.
-- **Formalization:** yes, separate grant/token/device transition models and typed authority extraction. Maintain existing signatures and runtime checks.
-- **Prerequisite:** replay/concurrent-refresh/revocation tests first; loopback stub OAuth/Matrix only; verify device-family semantics. No real credentials/accounts.
-
-#### H10 Secret/vault approval and access
-
-- **Storage/states:** secret_requests string status, decided_by/at, expires_at (`db_secrets.rs:41–46`); versions/retirement, access disabled state, vault status/disconnected_at, pause controls. Pending→allowed-once→consumed/expired, standing grant→revoked, source→rotated/retired.
-- **Transitions:** expiry helper (`:447`), request lookup/decision/consume (`:914–996`), source revoke/disconnect paths (`:657,1212`) and secrets/vault handlers.
-- **Illegal combinations:** *representable* one-use grant consumed twice; expired authorization used; paused system allows egress; grant points at retired secret or disconnected vault; prior director authority treated as current. SQL predicates and handler checks guard many paths; not demonstrated reachable.
-- **Formalization:** yes at grant/access authorization seam; tagging status alone without atomic claim is insufficient.
-- **Prerequisite:** existing ownership/director/host/source-version tests plus concurrent one-use consumption, pause/revoke between request and effect, expiry boundary/replay. Security policy applies to any implementation.
-
-#### H11 Spend admission, kill switch and metering
-
-- **Storage/states:** SpendLimit is already typed; implicit pieces are KillSwitch on/auto/reason/at (`db_accounts.rs:200–214`), account ledger/cap/override, machine_meter tick state, voice cumulative usage/charged state (`db_voice.rs:125`). Agent BudgetState maps refusal/expiry/notice (`budget.rs:117–130`).
-- **Transitions:** check/read_only/call admission (`credits.rs:221,237,284`), charge (`:298,318`), meter loop (`:334`), ledger debit (`db_accounts.rs:978–1040`), UTC auto-clear and local refusal hold/retry.
-- **Illegal combinations:** *representable* manual kill cleared by auto-reset, capped/credit blocked work dispatched before admission, duplicate usage report charged twice, meter tick advances without matching debit, voice/vision receipts drift. No new accounting defect established; existing code must be pinned as money-sensitive.
-- **Formalization:** yes for kill-mode and charge/receipt lifecycle; preserve intentional soft-cap/current missing-account semantics unless owner approves a tested behavior fix.
-- **Prerequisite:** conservation/idempotency over duplicate/reordered reports, UTC boundary, manual-vs-auto clear, nonfinite/negative rejection, budget notice/retry behavior. Isolated SQL laws are possible; real call/proxy integration still needed.
-
-#### H12 Sidecar page receipt
-
-- **Storage/states:** State.cursor persisted JSON, per-chat message JSONL and wake channel. Fetched→mirror written→wake accepted→cursor committed.
-- **Transitions:** `daemon.rs:58–82 apply_page`, poll loop (`:88–142`), Mirror.apply_event (`mirror.rs:373+`), waker receipt/done.
-- **Illegal combination:** **confirmed by code**: mirror.apply_event Err and failed wake send are ignored/logged but page.next persists. A forced local I/O error can therefore produce a committed cursor for an unmirrored event. Partial-success replay can also suppress a needed wake because already-written rows return no new candidate; this second edge needs a regression test, not an asserted runtime report.
-- **Formalization:** yes, explicit per-event durable delivery receipt with retry state, preserving idempotent replay and separating best-effort brief updates.
-- **Prerequisite:** fault injection before/after file append, wake channel closure, metadata failure and restart replay, plus current Source-driven success/reconnect tests. No external relay required; full sidecar crate is smaller than app but has HTTP/process adapters to compile/check.
-
-#### H13 Relay speculative document cache
-
-- **Storage/states:** `state.rs:159–189` optional room doc/key/message IDs. `rooms.rs:118–173 push_message_changes` imports untrusted payload before authorization into cached doc; caller must invalidate cache on refusal. States absent/rebuilt/current/speculative/accepted/invalidated.
-- **Transitions:** cold build (`rooms.rs:33`), advance (`:62`), diff push (`:122–173`), authorize/refuse/append (`:762–834`), socket retirement cache drop.
-- **Illegal combinations:** *representable* speculative refused state reused as committed, message-ID mirror advanced without stored append, two cold builds replacing newer accepted cache, key reports current while doc includes rejected bytes. Refusal-reset logic and existing regression at `rooms.rs:3471` cover a real historical failure; not evidence every listed race is present.
-- **Formalization:** yes, transactional/speculative ownership type or reducer with accept/rollback action; preserve off-executor cold rebuild and incremental projection.
-- **Prerequisite:** authorized/refused/append-failure interleavings, two simultaneous cold pushes, version-vector vs full rebuild law, rejected-removal followed by valid reply and quarantine consistency. Native integration required.
-
-#### Medium/Low next-action details
-
-Medium/Low are owner backlog, not silently migrated. Highest value among them: M6 timeline paging can issue duplicate concurrent loads and later response can overwrite a newer pagination token; add controlled out-of-order response tests before an explicit Loading/Loaded/AtStart state. M8 breaker should be `Closed { failures } | Open { until } | HalfOpen`, preserving single probe and configured windows. M4 outbox should prevent done_at+failed_at terminal overlap at write/decoded type seams while preserving poison-job parking and chat order. M1 socket CatchingUp/Live state must keep seq ordering and timeout semantics. M27 is already a narrow module with meaningful paused-clock tests; a claimed flag isn't automatically a defect.
-
-Core command/status/route/widget approval enums, static feature/config booleans, one-shot parser flags, ordinary sorting and immutable DTO Options are **excluded** unless they participate in a lifecycle above. FFI forwarding enums are bindings, not a second implementation to rewrite.
-
-#### Pure/high-risk seam feasibility
-
-The existing High machines are integrated with Agent, Store, HTTP/process effects or durable receipts; none has a ready isolated reducer comparable to the verified standalone `core/redact.rs` test seam. Cheap prerequisite experiments can run the **exact** job transition/approval claim SQL against local in-memory SQLite without the app, including cancelled→running rejection and first terminal timestamp/single-use predicates. Those are genuine SQL laws but do not prove the Agent/process effects. A next implementation can extract a small native job/receipt transition file, test that actual file through an isolated Cargo harness, and retain native integration as blocked until full gates run. Do not call a newly modeled transition test a before-failing regression of existing runtime behavior.
-
-No backend High transition rewrite was made. This portion is inventory complete /
-High migrations blocked, with the exact native verification owner action recorded.
+**H13 — speculative room cache.** `PendingRoomPush` owns a private moved Loro cache
+and exact per-room admission through durable append. Refusal/drop cannot publish;
+only accepted nonduplicate commit installs bookkeeping. Cold readers reconcile
+the durable head and registry publication uses exact identity. Original rate-limit
+bypass, in-flight and concurrent failures are retained;13 native tests include32
+finite real Loro/SQLite traces. See `room-cache-ownership.md` and CACHE_VERIFICATION.
+The Phase4 standalone aggregate cost is replaced by Phase7's indexed room position
+in the final composition; no standalone app speedup is claimed.
 
 ### Native clients and FFI
 
-#### H1. Account-session ownership
-
-**Effective states:** unauthenticated; browser/paircode sign-in in flight;
-authenticated legacy device; authenticated refresh-capable session; refresh in
-flight; signing out/revoked; changed relay/account. Errors are outcomes of an
-attempt, not an independently combinable logged-in identity.
-
-**Storage and transitions:** iOS credentials/tokens/user, signingIn/signInError,
-pairingBusy/error and refreshTask live in AppModel (`:185–301`). Sign-in at
-`:1438`, adopt at `:1496`, refresh at `:1523`, signOut at `:1570`, relay switch at
-`:1596`, pair/unpair at `:1779,1801`. Mac stores optional creds and refresh lock
-in Shared (`M/sync/relay.rs:207,226`), refreshes at `:344`, publishes a response
-at `:394`, and clears session at `:525`.
-
-**Illegal/surprising combinations and evidence:** iOS refresh captures current
-tokens then awaits; completion calls adopt without checking that session/account
-is still current. signOut/unpair/relay switch do not epoch-check the completion or
-cancel refreshTask. A refresh finishing after logout can therefore attempt to
-restore credentials; an obsolete failure can sign out a replacement session.
-Equivalent Mac refresh response publication should be covered against concurrent
-sign-out, even though its mutex already prevents refresh storms. This is a code
-interleaving lead, not an executed exploit or demonstrated production incident.
-
-**Worth formalizing:** yes. One session type with account/relay/generation identity;
-attempt events carry that identity. Transition ignores stale success/failure;
-credential writes and remote logout occur at accepted transition edges. Paircode
-and refresh-capable sessions remain distinct legitimate cases.
-
-**Regression first:** delay refresh using a loopback response; logout before
-completion; assert no credentials/Keychain rewrite. Repeat A→B account/relay
-switch and stale 401, simultaneous refresh single-flight, transient refresh error,
-and revoked refresh. This touches auth and requires current behavior pinned plus
-owner review. Native integration gates blocked; do not change auth here.
-
-#### H2. iOS transport-attempt lifecycle
-
-**Effective states:** new/not-started; dialing with socket+generation+deadline;
-open awaiting protocol hello/catch-up; live host; reconnect delay; terminal
-unavailable/stopped. The protocol's own states are already explicit and excluded.
-
-**Storage and transitions:** `SessionRoom.swift:87–116` stores socket,
-generation, started/stopped/sawOpen, drain flags, pendingFault/cleanClose and six
-task handles. start/stop at `:195,201`; connect at `:247`; receive/failure at
-`:340`; action drain at `:376`; reconnect at `:510`; send-chain at `:551`.
-Generation guards already suppress many stale callbacks and must be retained.
-
-**Illegal/surprising combinations:** the representation permits stopped with live
-protocol/socket/task remnants, new host with obsolete pendingFault, or callback
-delivery from a previous generation. `started && stopped` itself is **legal** for
-a permanently stopped started object; do not “fix” it by guessing. The forbidden
-condition is a stopped/obsolete attempt producing a send, cursor or live callback.
-
-**Worth formalizing:** yes, around host attempt resources; avoid a second protocol
-state machine. Carry socket+generation+tasks in active cases and edge effects for
-cancel/dial. Reentrant drain remains a separate guarded execution concern.
-
-**Regression first:** controllable socket: stop before open callback; foreground
-redial then old receive/checkpoint/send completion; 403/404 terminal unavailable;
-restart close fresh backoff; failed row leaves cursor intact; refused pushes keep
-batch ids and do not reconnect. Existing `SessionRoomTests` covers several pieces,
-but every newly forbidden interleaving needs a failing-before case. Native gates
-blocked; no broad transport rewrite.
-
-#### H3. Mac pending delivery ownership
-
-**Effective states:** queued send; local row committed/pending; refused but retained;
-ACKed/delivered; local failure/timeout; room/account removed. MessageStatus and
-opacity projections alone do not own the pending transitions.
-
-**Storage/transitions:** global pending user-id set in `M/sync/relay.rs:218`;
-insert at `:4928`, failure remove at `:4944`, UI projection at `:3008`, ACK drains
-the entire set at `:3913`. Queue timeout sends MessageSendFailed via initialization
-at `:876`; UI consumes at `M/app.rs:3362`. Push refusal is already room-scoped.
-
-**Illegal combination:** pending B lost because A's ACK drains global state.
-Two simultaneous chats and project-doc versus user-chat ACK make ownership
-ambiguous. No need to infer from boolean combinations: the current collection
-operation explicitly erases unrelated ids. Test the actual behavior before change.
-
-**Worth formalizing:** yes. A dependency-free pending-delivery type can own
-`room → message ids` and room ACK/failure/removal transitions. Keep the real
-protocol batch id/cursor semantics; a room ACK is not necessarily proof that every
-later batch in that room was ACKed. Scope the improvement precisely.
-
-**Standalone seam:** this collection state can be tested with std-only
-`rustc --test`; reproduce original HashSet insert/drain first and then test the
-production tracker module. Required properties: A ACK leaves B pending;
-project-doc ACK leaves user messages pending; failure removes only its message;
-duplicate ACK is idempotent; clearing account removes all. Native caller compile
-still cannot be claimed green from this standalone check. Root owns whether this
-limited extraction is appropriate under the blocked workspace gates.
-
-#### H4. Call-attempt ownership around existing phase enums
-
-**Effective states:** no attempt; outgoing REST create/join pending; incoming ring;
-accepted permission/join pending; media connecting/connected/reconnecting; cancelled/
-tearing down. Existing Phase/CallStatus describes media/UI progress, but current
-attempt identity and cancellation acceptance are implicit.
-
-**Storage/transitions:** iOS CallManager has Phase plus call/incoming/UUID,
-outgoing/ring timeouts, ringback intent, audio ownership and isTearingDown
-(`:97–173`). start/join await relay at `:227,257`; accepted join at `:482,499`;
-connect at `:615`; teardown clears at `:674–713`. Mac `my_call`, incoming call,
-timestamps and tones live in AppState (`:995–1021`); start at `:11902`, leave at
-`:12066`, REST result at `:12129`; a separate worker has optional Session and
-event receiver (`M/calls.rs:112`).
-
-**Illegal/surprising interleavings:** Mac on_call_ready uses
-`my_call.get_or_insert_with` and unconditionally emits Join. A delayed result can
-recreate my_call after leave_call removed it. iOS start/join similarly adopts the
-REST response and calls connect after an await without current-attempt validation;
-hangUp does not own/cancel those async functions. Connecting with call=nil during
-REST create is intentional, so a rule “every connecting phase must have a Call”
-would be wrong. Distinguish requesting metadata from connecting media.
-
-**Worth formalizing:** yes. Payload-bearing attempt states with request generation
-and session/call identity. Accept REST/media completion only for the active attempt;
-cancel edges stop audio/SDK work and make late success perform cleanup, never
-rejoin. Preserve CallKit immediate reporting/fulfillment and audio-device rules.
-
-**Regression first:** delay call-create and join responses; cancel before completion;
-assert no Join, microphone/camera activation or call resurrection. Switch attempt A
-to B and deliver A's late media/error callbacks; B must remain unchanged. Retain
-CallKit duplicate push, denied mic and immediate-answer checks. Native gates/media
-test environment blocked; no claim these races were reproduced on a device.
-
-#### H5. Matrix bridge identity lifetime
-
-**Effective states:** unavailable/off; eligible/not-started; starting for account
-generation; active client+listener; disconnected active client; stopped/superseded.
-Matrix SDK's own connection states are not being reinventoried.
-
-**Storage/transitions:** iOS AppModel matrixClient/listener/snapshot/connected/
-disconnectedSince/starting at `:469–489`; ServerStore start at `:718`, stop at
-`:742`, callback dispatch at `:14–33`, connection/timeline apply at `:764,778`.
-FFI bridge is an adapter over shared MatrixClient (`F/matrix.rs:171–197`). Mac
-Shared optional client, started-at and servers-off flag at `M/sync/relay.rs:273–283`
-with start/stop/restart paths (`:518,1737`).
-
-**Illegal/surprising combinations:** iOS startup completion checks credentials !=nil
-and matrixClient==nil. Account A can sign out then B sign in during the handshake;
-the old A completion sees B's nonnil credentials and may install A's client.
-Listener callbacks dispatch onto MainActor with a model reference but no session
-epoch. A stale timeline/connection update can arrive after stop. Initial
-matrixConnected=true with no client is deliberately “not showing a failure,” not
-evidence of an illegal connected session by itself.
-
-**Worth formalizing:** yes. Client identity/generation is required input to accepted
-callbacks, with one state owner for starting/active resources and teardown effects.
-FFI API can pass a generation-carrying native adapter rather than rewriting SDK.
-
-**Regression first:** delay start A; sign out and start B; complete A; assert A is
-stopped and never installed. Deliver A's queued timeline after B starts; assert B's
-rows do not change. Retry current-session failure and duplicate start guards.
-Native/Matrix SDK gates blocked; no credential/protocol edit in this audit.
-
-#### H6. Detached snapshot publication lifetime
-
-**Effective states:** no room; active doc revision; read queued/running for that
-room generation; result accepted/superseded; room/account disposed.
-
-**Storage/transitions:** AppModel docs/rooms/messages and snapshotGeneration at
-`:902–940`; emitSnapshot captures doc and generation at `:2634`, reads detached
-then MainActor applies when generation matches or current messages are empty.
-wipeRoom at `:2565` and unpair at `:1801` remove docs/messages but do not pair the
-background task with a room/account generation. applySnapshot at `:2671` accepts
-list even when no current doc exists (its doc check is optional).
-
-**Illegal/surprising interleaving:** an old read completing after room/account
-disposal can satisfy the empty-messages escape hatch and republish the old list.
-The escape hatch itself fixes a real starvation problem during continuous updates;
-do not remove it without preserving first-paint behavior.
-
-**Worth formalizing:** yes. Room epoch plus doc revision in each read ticket;
-disposed epoch always rejects. Same-epoch superseded reads may still paint an empty
-view when that is the deliberate starvation rule. Account epoch composes with room
-epoch rather than making every row builder auth-aware.
-
-**Regression first:** controllable read executor: start slow snapshot, wipe room or
-unpair, finish read, assert messages remain absent. Then new room same key with new
-doc, and continuous newer reads over same active doc; retain current blank-chat
-and starvation recovery tests. Native test host blocked; no data-lifetime patch.
-
-#### Medium/low disposition and completion boundary
-
-Keep Medium/Low entries for owner prioritization. Strong first refinements after
-native gates become available are composer-operation tagged union (mutually
-exclusive fields are already documented), bounded draft creation/send state, and
-cache/read-mark tests using current native seams. Gesture/scroll/audio state must
-preserve calibrated distances, timing and accessibility behavior.
-
-No formal state rewrite was made by this read-only subtask. The full native
-Phase 4 outcome is **blocked**, not passed: High items require failing-before
-regressions against real lifecycle seams and full caller/native checks. Current
-local disk is ~1.6 GiB free; fork CI requires maintainer approval (`action_required`,
-no jobs). The std-only pending-delivery seam can make limited progress, but cannot
-establish that every High machine is explicit or native behavior fully verified.
-
-### Harness, voice and operational tooling
-
-#### AUX-M6 — Main-agent routing and correction (Medium)
-
-Storage: closure `routeAttempts`, `routed`, `relayTurn`, `routeCorrections`, `correcting` at index.ts:262–270. Effective states include awaiting initial route, first-route rejection/retry, routed, stamped-steer continuation, pending one corrective continuation, corrected completion and fallback-reply completion. Relay turn is an orthogonal source/context, not itself a terminal state.
-
-Transitions: before_agent_start resets state (:308–317); tool_call prevents unrouted direct calls and permits the relay send_message implicit reply (:356–417); route.execute handles invalid retry/fallback, successful route and correction completion (:580–632); input handles stamped continuations (:889–900); agent_before_settle requests at most one correction (:907–926). Effects are hook requests, audit events and user-facing tool results.
-
-Illegal/surprising combinations: booleans allow routed plus correcting and a correction with no counted correction. The former is concretely reachable when correction is requested, two route attempts fail, and fallback sets routed=true but returns before clearing correcting (:587–595). This is an observed combination, not yet proof that current externally visible behavior is wrong; pin its intended semantics before forbidding it. Counter/state duplication also permits unconstrained repeated calls after routing.
-
-Worth making explicit: yes. This can be a pure transition seam with effects outside it. The existing Node/TypeScript gates work: **native/LiveKit capacity does not block this machine**. First add local fake-hook regression sequences for second-invalid fallback during correction, ordinary next-turn reset, stamped steer, relay implicit reply and repeated settle. Do not silently decide new behavior for the surprising combination. A cosmetic object containing the same booleans does not complete the rewrite.
-
-#### AUX-H2 — Approval polling and parking
-
-Storage: `ApprovalState` union (:209), generic HookResponse, local state/approvalId/deadline/reason in awaitApproval (:468–533). The union enumerates wire labels, and the final switch is exhaustive; it does not declare the lifecycle or encode which states require an approval ID. Effective lifecycle: standalone local mode, checking, unavailable/error, allowed, pending-with-ID, polling, park requested, parked, approved, rejected, cancelled, and legacy expired.
-
-Baseline transitions: /hook/approval supplies the initial decision; periodic /approval-status may decide during grace; /approval-park atomically hands pending execution back to agentd; decided outcomes either admit the client call or block it. The baseline first hook failure returned undefined (allow/no gate), whereas later pending failures retained pending/block semantics. This was pinned and intentionally fixed below; distinguish standalone no-hook configuration from configured-hook outage.
-
-Illegal/surprising combinations: pending without a nonempty approvalId is representable and would be polled/parked; generic response shapes can describe parked and decided simultaneously; an initial malformed/absent state defaults to allowed; client execution after a successful park would duplicate agentd execution. Unknown final labels already fail closed. These are wire/lifecycle validation concerns, not a reason to remove the current exhaustive switch.
-
-Worth making explicit: yes, at the shared approval protocol seam. Prerequisites: local fake-hook tests pin no-hook mode, initial outage, pending/empty ID, decision at deadline, park wins versus approval wins, cancellation and malformed labels. Authorization behavior changes require owner visibility and the affected security-boundary requirements. No live approval operations are necessary or permitted.
-
-#### AUX-H3 — Voice call lifetime, charged work and shutdown — implemented
-
-The baseline stored leaving/stop_reason/open_work alongside tasks and nullable
-resources. Actual VoiceCall regressions reproduced stranded finalization after a
-cleanup exception, caller cancellation canceling teardown, concurrent finish
-returning early, and late callbacks starting work after termination.
-
-`call_state.py` now declares Connecting, WaitingForHuman, StartingSession, Running,
-Finishing, CleanupFailed and Closed. `lifecycle_transition` owns startup progress,
-first-reason-wins stop requests, attempt tokens and failed-step retries. Closed is
-absorbing. The worker shares one shielded finisher; it never cancels or gathers
-itself. Failed local resource cleanup remains owned and retryable; successful
-steps are not repeated. `_done` and one SDK shutdown request happen even when
-cleanup raises. Startup, queued tool dispatch, deferred results, look/context and
-group/greeting work check lifetime or ownership again after relevant awaits.
-
-The final cumulative usage report and event flush remain **one best-effort
-first-attempt operation each**. No financial retries, durable event replay or new
-billing policy were introduced. Pre-session cap stops start no audio and send no
-new final usage. Open-work status derives from owned pending tool tasks, rather
-than an independent counter. Original unlimited/cost-stop/leak-guard tests remain.
-
-New five-second cooperative waits cover local cleanup; the session close already
-used five seconds. Task drain uses asyncio.wait and retains unfinished ownership.
-asyncio.wait_for requires cancellation cooperation, so arbitrary SDK hangs are
-not proved bounded. Native billing/durability and live-call behavior remain
-outside this local verification.
-
-#### AUX-H4 — Audio mode and mute application — implemented
-
-The baseline wrote mode and mute intent before awaited SDK effects. Tests first
-reproduced a failed mute followed by a false “Already muted,” partial mode
-application looking complete, and late mode completion after close.
-
-Two orthogonal application lanes now use Unapplied, Applying, Applied and
-ApplyFailed plus monotonic attempt tokens through `apply_transition`. Group and
-Duplex(identity) are tagged mode values; Duplex rejects absent/empty identities.
-The mode and participant commit together only after all SDK steps succeed. A
-failed/uncertain lane must apply again even when the requested target equals its
-last confirmed value. Mode changes serialize, instructions use the target mode,
-and finishing invalidates pending ownership without waiting on the mode lock.
-Resources created during partial application remain owned for cleanup.
-
-Proactive say/greeting requires confirmed unmuted output. Interactive group
-model/tool handling remains available while stably or uncertainly muted so the
-existing unmute_self recovery path remains reachable. Lifecycle/epoch checks
-prevent stale judge/silence completions starting new work; they do not invent a
-new provider or text-only mode. The one-shot goodbye while Finishing is preserved.
-
-#### AUX-H5 — Vision consent and frame delivery — implemented
-
-Paused-encoder tests reproduced frames/JPEG results escaping disable, close,
-re-enable, session replacement, detach and mute/unmute. The first six cases had
-4 failures and 2 positive controls; the expanded baseline had 7 failures and the
-same 2 controls. Later source-before-change tests pinned cleanup ownership,
-immediate seeing retirement and cancellation of stop/detach.
-
-`vision_state.py` declares Enabled(generation), Disabled(generation) and
-Closed(generation), with one pure transition function and generation leases.
-Closed absorbs valid events; old leases stay revoked after re-enable. The adapter
-also checks its exact camera-map ownership, stream and model-session identity at
-frame delivery and after executor encoding. Seeing identities derive from
-currently enabled owned streams; queued attributes/status writes check generation.
-
-Retirement accounts camera time before awaits and retains actual SDK close tasks.
-Stop schedules every retired close before awaiting; caller cancellation cannot
-cancel those tasks, and later stop joins remaining cleanup even with an empty
-camera map. Ordinary SDK close errors retain best-effort behavior with type-only
-warnings; physical cleanup after an SDK error is not guaranteed. Already-dispatched
-uploads are not recalled. No live camera, model or provider call was needed.
-
-#### AUX-H6 — Feedback fix approval, gating and shipping
-
-Storage: per-item state.json through Store (:960–997), mutable status strings, branch_head/gated_head, awaiting fields, approved_by_jacob, do_not_merge, gate/Rust/iOS results; global approval and cursor files. Effective item states include queued, running, gating, awaiting owner (ready/stale/conflict), pushed/merged awaiting release, shipped, failed, rejected, deferred, no_change, duplicate and handed_off.
-
-Transitions are distributed across intake/launch/result (:1950–2099), hold_for_approval/keep_current (:1440–1585), gate and merge paths (:2140–3700), check_ship/ship/mark_deployed (:3782–4439, :5146), and late-push followups (:4793–4876).
-
-Illegal combinations are those existing guards already protect: outside item merged without per-item approval; operator-held item merged; branch live head differs from the gated head; stale gate attached to new head; shipped before the required artifact/deploy proof; followup losing source approval tier. JSON permits these shapes, so enforcement is spread over many branches. Do not claim a current bypass merely because such combinations are representable.
-
-Worth making explicit: yes, as versioned persisted item states plus a pure transition policy and effect adapters. Safe prerequisite is a hermetic fake-GitHub/store fixture replaying owner approval, live-head, followup inheritance, restart and artifact completion sequences. Existing repository rules and negative controls remain authoritative. Live operations are forbidden; absence of permission for live deployment alone is not an architectural blocker—offline coverage must be built before this high-impact controller rewrite. No operational changes were attempted.
-
-#### AUX-H7 — Deployment lanes and image rollout
-
-Storage: deployment queue requests, deployed-sha files, per-kind failed markers, agentd.hold/canary/rolling markers, relay.deploying/www.reloading markers, skip lists, retry/failure counters and externally reported per-box state. Effective lanes include idle, queued, settling, blocked by hold/quota/other lane, building image, canary, rolling test/real boxes, retry pending, failed/held and deployed.
-
-Transitions: worker helpers :129–225, deploy_relay/deploy_voice :353–402, image build/roll and per-box passes :403–1015, finish_roll :945–996, roll_continue/tick thereafter, operator hold dispatch :1765–1769.
-
-Illegal combinations: held lane proceeding; relay restart/canary conflict; declared deployed while eligible boxes remain pending or commit ancestry is unproven; skipped/refused boxes mistaken for successful upgrades; automatic prose/tag mutation lifting a manual hold. Existing selftest deliberately protects manual hold semantics and passed at baseline. Do not convert persisted markers to a single cosmetic enum while leaving all writers independent.
-
-Worth making explicit: yes, with atomic persisted phase transitions and per-box results. First expand hermetic fake-command/filesystem tests for restart/crash and failure ordering while preserving existing hold controls. Operational effects and new runtime writes are outside this audit; no deployment runs or shared state were inspected.
-
-#### AUX-H8 — Merge/release observation and publication
-
-Storage: shell locals verdict/class/GO state, artifact digest cache, current tag and candidate commit, CI/release metadata, persistent loop files. The small verdict_class/verdict_clears_go functions in checks.sh:415–450 are already explicit, exhaustive, fail-closed classifiers. **Do not count those pure classifiers as an undeclared machine or replace their guarantees.** The implicit part is the wider temporal observation/coverage/publication lifecycle.
-
-Transitions: merge-window verdict (:135–260), go (:419–551), after (:553–610), artifact verification helpers; auto-stable planning/tag/main publication; release-gate debt observations. Effective observations include waiting, red, untested, unknown/blocked, no applicable path, covered by a descendant, artifact pending, verified release and published/live.
-
-Illegal combinations: aborted zero-task CI interpreted as green; unknown label interpreted as wait/pass; a covering release for the wrong tag/ancestry; cached verification for another digest; tag published but artifact absent presented as shipped. Existing negative controls cover many of these. Baseline merge selftests cannot fully execute on this Mac (Bash 3.2/GNU-stat assumptions).
-
-Worth making explicit: yes at the orchestration seam while preserving existing declared classifiers. First restore a supported local GNU/Linux test environment or provide portable-test coverage, then replay the real negative controls and crash/partial publication sequences. Never merge, tag, publish or deploy to verify the rewrite.
-
-#### AUX-H9 — Shared Mac heavy-slot ownership
-
-Storage: atomic slot directories containing owner PID/name/time/UDID, gate/rig/release queue markers, fairness counters, priority/lease/load flags in arbos-heavy-slot.sh. Effective states: request not queued, queued, refused for release, owner dead, bounded timeout, granted normal/priority/fair/uncapped lease, released and stale/reclaimed.
-
-Transitions: acquire (:271–429), liveness/lease reclamation helpers, release/bind/dispatch (:438–449), xcrun guard. Existing comments describe physical host overload and ownership bugs; preserve them and the calibrated limits.
-
-Illegal combinations: grant after owner death; active rig grant during a release exclusion window; timed-out no-wait/bounded requester leaving a marker or becoming uncapped; simulator boot without owned slot; reclaiming a live exempt release lease. These are the intended guarded invariants, not newly demonstrated regressions.
-
-Worth making explicit: yes, with separate request/lease states and filesystem/PID effect adapters. Pin fake-process/filesystem sequences, FIFO/fairness, release precedence, owner death and bounded timeout first. Never test on shared slot directories or boot shared simulators. The current audit changes nothing in this operational boundary.
-
-#### Medium/low disposition and completion boundary
-
-Medium machines remain report-only as the skill requests. In particular, voice updates must deduplicate tool/inbox copies and never speak over a person; watchdogs must distinguish a real completed verdict from a killed unfinished test; eval observers must distinguish an acknowledgement from terminal work. Existing sleeps encode these timing rules and are not removed.
-
-The auxiliary inventory is complete for the meaningful controllers found by the scoped scan, with explicit exclusions above; it is not a proof that every source line lacks another machine. AUX-H2–H5 are implemented and locally verified. AUX-H6–H9 still require hermetic orchestration/process/filesystem fixtures before a high-impact rewrite. Medium route correction remains report-only per the phase rule; working TS tooling is not a blocker. The initial missing voice test prerequisites were resolved with a private, hash-verified wheel-only SDK environment, rather than retained as a blocker.
-
-
-## Implemented High machine: shell approval
-
-`harness/arbos-pi-ext/approval.ts` declares checking, pending-with-ID/deadline,
-parking and terminal allowed/denied/parked/failed states, with one pure
-`approvalTransition` function. Network, timer and audit effects stay at its edges.
-Effect 4.1.2 is pinned for this actual async/validation/error seam; phase-specific
-Effect Schema decoders reject malformed/unknown fields and bound identifiers,
-text, response size (64 KiB), UTF-8 and each request (10 seconds). Initial,
-status and park shapes match the Rust producer. Standalone no-hook mode remains
-explicit; configured hook, import or runtime failures cannot grant permission.
-
-This intentionally fixes three reproduced admission bugs: an error reply,
-missing state and unsuccessful HTTP status with an allowed JSON body all formerly
-allowed the call. Valid policy grants, single-use/standing grants, decisions and
-parking races stay covered. Tool audit retains identifiers and input hash while
-removing raw command previews; a synthetic privacy regression failed before the
-removal. Other runtimes' existing raw previews are left to the logging phase.
-
-Both image recipes supply one manifest-pinned shared Effect installation and
-preserve workspace symlinks. The dev bootstrap must include package.json. Installs
-occur at build/boot preparation, never at module initialization; lifecycle scripts
-are disabled. `image/tests/test_runtime_packaging.py` exercises actual recipe
-shell with a no-network npm double and real installed-module resolution.
-
-Effect is loaded only on the first configured shell approval. Ten fresh Node
-processes per arm, alternating order, measured cold index import 68.30 → 68.27 ms
-(within noise); first approval 8.94 → 60.60 ms; 50 warmed checks 0.919 → 1.354 ms.
-RSS after the first approval was 106.5 → 126.6 MB. This is an explicit security
-validation cost, not an application speedup; ordinary index startup avoids it.
-Filesystem caches were not flushed and no app/model latency was measured.
-
-## Implemented High machines: voice lifetime, audio and vision
-
-AUX-H3–H5 now have pure, immutable tagged states in `call_state.py` and
-`vision_state.py`; `worker.py` and `vision.py` own SDK effects and task/stream
-resources. The adapter regressions exercise the actual controllers with synthetic
-local effects under the actual SDK imports. The final guarded gate is **84 passed,
-0 failed, 0 skipped**, 6.203 s wall / 5.21 s pytest: unchanged original 10 tests,
-53 worker cases and 21 vision cases. Network denial and credential/network/
-subprocess audit reported zero access attempts. No provider, device, room join or
-model download ran. One existing pytest import-rewrite warning remains.
-
-The initial worker tests were RED before product changes: 6 failed / 2 controls
-passed (3.070 s). Vision's first six cases were 4 failed / 2 controls passed
-(1.73 s pytest); adding three revocation cases produced the separately retained
-expanded baseline of 7 failed / 2 controls (1.989 s guarded wall). Later tests
-pinned startup, late speech/tool work, stream ownership and cleanup cancellation
-before those respective fixes. The final queued-dispatch regression was 1 failed /
-52 passed before its fix. These are parameterized cases at different stages, not
-counts of distinct bugs; [GATES.json](state-machine-checks/GATES.json) retains each
-exact set/count and duration.
-
-Six Effect Schema/Arbitrary laws, seeds 84001–84006 and 256 generated cases each,
-exercise the actual pure Python transitions through an isolated SDK-free JSONL
-bridge: **1,536 new voice cases**, separate from the approval law's 256. Mandatory
-critical transitions prevent vacuous success; generated traces vary surrounding
-events. Four isolated actual-function mutants falsify five target laws and each
-shrinks once with retained replay data. This is finite exploration, not a proof.
-The final harness is 44/44 (7.300 s); strict typecheck passes (2.558 s).
-
-The two original voice test files and runtime dependency declarations are
-unchanged. A small optional test extra and `voice/tests/README.md` expose routine
-setup. The prior missing SDK/test dependencies were resolved with a private,
-hash-verified wheel-only environment; there is no remaining SDK ABI/setup blocker
-for these local tests. [Retained checks](state-machine-checks/README.md) provide
-portable commands, sanitized gates, source hashes, review and a mutant harness.
-
-Calibration checks preserve all original module constants, VAD/turn handling,
-silence/idle/usage loops, goodbye body, original prompt strings and speech
-arguments; vision encoding/diff, camera-time math and calibration constants are
-unchanged. `respond_group` and `greet` gained ownership guards, so their whole
-functions are deliberately **not** claimed AST-identical. New five-second local
-cleanup waits are distinct from the preserved calibration values, and depend on
-cooperative SDK cancellation. One best-effort final usage report and event flush
-remain unchanged in policy; no financial retry, durable-event replay or live
-media/billing guarantee is asserted. Independent scoped controller review is
-PASS at the source hashes retained in the checks directory.
-
-## Before / after verification
-
-| Row | Before | After |
-| --- | --- | --- |
-| Harness typecheck | pass, 2.372 s (original package/compiler) | pass, 4.282 s (`pnpm -r typecheck`) |
-| Harness build | pass, 2.803 s (same original no-emit compiler) | pass, 4.337 s (`pnpm -r build`) |
-| Original harness tests | 14 passed, 0 failed/skipped; 0.343 s | all retained within 37 passing tests |
-| Valid approval controls | 24 total passed, 0 failed/skipped; 0.713 s | retained |
-| Three admission regressions | 24 passed / 3 failed / 0 skipped; 0.730 s | pass |
-| Complete harness suite | original baseline 14 tests | 37 passed / 0 failed / 0 skipped; 1.424 s |
-| Terminal refusal law | absent | 256 Schema-derived cases, fixed seed; included in suite |
-| Final harness including voice | prior approval suite 37 tests | 44 passed / 0 failed / 0 skipped; 7.300 s; typecheck 2.558 s |
-| Original voice tests | initial collection blocked by routine test dependencies; later original 10 pass | unchanged 10 retained within final 84 |
-| Worker controller regressions | initial 6 failed / 2 passed; 3.070 s wall | 53 passed within final guarded gate |
-| Vision controller regressions | initial 4 failed / 2 passed; expanded 7 failed / 2 passed | 21 passed within final guarded gate |
-| Combined actual-SDK gate | original 10 tests; negative controls added before each respective fix | 84 passed / 0 failed / 0 skipped; 6.203 s wall / 5.21 s pytest |
-| New voice transition laws | absent | 6 × 256 = 1,536 cases; seven invalid-protocol requests; 1.308 s |
-| Voice mutation controls | absent | four isolated actual-function mutants detected; five laws falsified, each with one shrink/replay |
-| Raw-command privacy regression | 1 failed before preview removal | pass; hash/IDs retained |
-| Byte-limit negative control | byte-guard-only mutant fails 1/1 | real code passes padded valid-JSON test |
-| Runtime packaging regression | absent | 9 passed / 0 failed / 0 skipped; 2.399 s |
-| Formatting/lint | baseline Rust fmt pass; shellcheck/actionlint unavailable | Rust sources unchanged; diff check passes; actual generated shell parses in packaging suite |
-| Native clippy/check/test/build | blocked | blocked; no passing counts claimed |
-| Full Docker image build/smoke | blocked | blocked; local shell/import checks do not prove a full image |
-| Whole High migration inventory | implicit cross-field lifecycles | AUX-H2–H5 explicit and locally verified; native/operational High prerequisites remain blocked |
-
-Run `cd harness && pnpm install --frozen-lockfile --ignore-scripts && pnpm -r typecheck && pnpm -r build && pnpm -r test`,
-and `python3 image/tests/test_runtime_packaging.py`. The latter uses temporary
-files; its real Effect import check explicitly skips if dependencies are absent.
-The 10-second timeout is source-inspected; no timing-based timeout test is claimed.
-Independent approval, packaging and voice controller reviews found no remaining
-actionable defect in the implemented scope. Voice commands and compact evidence
-are retained in [state-machine-checks](state-machine-checks/README.md).
-
-## Needs the owner
-
-Review the intentional fail-closed approval/privacy behavior and the reproduced
-voice failure-path fixes, then approve native fork CI (or provide local build
-capacity) before the remaining native High migrations. Preserve standalone mode,
-one best-effort voice final usage report and existing media calibration. Prioritize
-room/account lifetime and durable receipt regressions next.
-
-Operational AUX-H6–H9 still need hermetic controller/process/filesystem fixtures;
-owner decisions are needed where those fixtures reveal ambiguous persisted
-approval, hold or release semantics. No merge, deploy or live access is requested
-to test them. Voice SDK setup is resolved; live provider/device/media behavior,
-native billing/durability and arbitrary SDK cancellation suppression remain
-unverified. The whole-repository Phase 4 exit remains **blocked**, despite the
-implemented and locally passing AUX-H2–H5 scope.
-
-
-## Operational ownership follow-up
-
-The [publication inventory](state-machine-checks/release-publication.md) corrects
-the original umbrella: merge-window/release-debt reports are fresh derived
-observations, cache receipts are already explicit, and the actual release-object
-publisher had two reachable lifecycle defects. Its five-case original replay had
-3 positive passes and 2 semantic failures. The applied tagged-state implementation
-passes 21 actual-wrapper/helper tests (root repeat 14.388 s), including malformed
-observations, option-looking assets and owned-child cancellation. Three generated
-laws cover 768 cases, with a real-function mutant shrunk and replayed. Signing,
-verification and feed/prune boundaries remain byte-identical. No real release or
-credential was used. NoPromote refuses an existing stable release, preserves an
-existing draft, and retains the historical public-prerelease policy for new tags.
-
-The [runner inventory](state-machine-checks/runner-leases.md) records atomic
-admission/publication, authoritative owner metadata, retirement accounting, GUI
-exclusion and cancellation. The original expanded batch had 7 passes/10 failures;
-later overlapping failure-first batches are kept separately, never summed. The
-applied source passes 34 actual controller/OS tests (root repeat 20.813 s), with
-no skipped tests or real shared paths. Scheduling constants and policy helpers
-are unchanged. macOS uses native lockf, Linux a flock adapter; actual Linux
-controller execution remains a separate platform check. Runtime-tagged Bash
-states do not offer a compile-time algebraic type. Hard host failure, PID reuse
-and already-dispatched physical work remain explicit ceilings.
-
-Both follow-ups are local correctness checks, with no application speed claim.
-The exact applied-source counts are in
-[ROOT_OPS_GATES.json](state-machine-checks/ROOT_OPS_GATES.json). The reviewed Swift
-loopback test-plan fence is carried identically here before native-source pushes;
-its 12 helper/DSL contract groups pass. Broader native ownership fixes and the
-catalog's blanket blocked wording are under active reassessment; missing tests,
-old SDK availability and code size are not external blockers.
-
-
-## Feedback and generated operational laws
-
-The [feedback inventory](state-machine-checks/feedback-admission.md) and
-[verification](state-machine-checks/FEEDBACK_VERIFICATION.md) close a prepared-tree
-approval bypass and interrupted shipping-state writes. Actual original Loop/Store
-fixtures had 6 positive passes and 14 overlapping semantic failures; the applied
-controller passes all 20 (root repeat 0.031 s test time), without live merge,
-feedback messages, key/JWT operations or deployment. Human approval remains
-per-item, while gate coverage and current branch identity are SHA-bound. All
-members must pass before the single prepared-tree merge effect. Delivery phase,
-pending work and device evidence use the existing atomic record write. Both
-installers include the new stdlib runtime module; neither installer was executed.
-
-Five feedback laws cover 1,280 generated cases with an actual-function mutant
-shrunk/replayed. Four runner laws cover 1,024 cases plus bounded protocol recovery;
-two actual-function mutants are detected, shrunk and replayed. The public runner
-mutant adapter was corrected to accept an explicit repository/new output directory,
-copy only its four required sources, and rerun its unmodified control, avoiding a
-private-layout dependency. That adapter passes its control and both negative
-controls. No controller source is mutated in place.
-
-The complete applied harness passes **59 tests / 0 failed/skipped** in 23.294 s,
-with TypeScript passing in 3.309 s. This includes the earlier approval/voice cases
-and new publication/runner/feedback laws; do not add overlapping counts as separate
-coverage. [OPS_HARNESS_GATES.json](state-machine-checks/OPS_HARNESS_GATES.json)
-retains commands and summaries. Native account/call/snapshot ownership and remaining
-backend classification are still active work, not blanket external blockers.
-
-## Additional relay ownership boundaries
-
-H8 now owns each planned restart with an exact-generation guard and the actual
-Serving/Freezing/Notifying/Draining/Ready/Shutdown reducer. H10 requires operation-
-owned one-use receipts from one exact observed-set transaction. H13 moves Loro
-speculation into a private PendingRoomPush held by one per-room admission owner;
-only the successful durable path publishes it. Their original actual-handler/
-socket failures, limits, laws and owner-review decisions are documented in
-[state-machine-checks/authorization-receipts.md](state-machine-checks/authorization-receipts.md),
-[restart ownership](state-machine-checks/restart-ownership.md) and
-[room-cache ownership](state-machine-checks/room-cache-ownership.md).
-
-The root's combined relay gate passes65distinct selected native tests (42secret/
-vault,10restart,13covered-push) and all-target Clippy with warnings denied22.033s.
-Counts overlap the authors' focused regressions and must not be added twice.
-The complete catalog reassessment/native-client/financial follow-up remains in
-progress; these scoped results do not declare every original High entry resolved.
-
-The complete harness run now covers all9test files:69passed/0failed/skipped,
-plus strict TypeScript3.321s. On macOS,64tests run under the validated loopback
-fence and5lease-law tests use their own stricter child sandbox because nested
-Seatbelt is rejected. No test is omitted or source isolation weakened; the final
-Linux namespace gate runs the complete normal suite. Both new actual transition
-mutant drivers pass their unmodified256-case control and falsify/shrink/replay
-their mutant. Relay production build also passes48.604s. Portable commands and
-normalized evidence are in state-machine-checks/RELAY_HARNESS_GATES.json and
-RELAY_BUILD_GATES.json.
-
-### H11 billed usage settlement — verified implementation
-
-One Immediate transaction owns observation, existing ordered debit policy and
-settlement receipt; only committed typed facts reach effects. Actual storage
-faults and concurrent reports previously allowed duplicated or lost debits.
-Five original failures plus eight policy controls pin that behavior. Two extra
-required-metadata SQL-ignore faults failed against the initial candidate and
-now roll back with the settlement. Final voice24 +credits8 +accounts9 gives
-41distinct native passes; an actual finite32-trace law is included. Thresholds,
-legacy defaults, soft cap/clamp, UTC placement and voice-before-vision remain.
-[Financial receipt evidence](state-machine-checks/voice-settlement/README.md)
-records exact counts, hashes and owner review before merge. Informational machine
-metering remains separate; this does not claim all H11 catalog entries complete.
-
-
-### Native ownership integration checkpoint
-
-Account/control work tickets, coordinator replacement, call attempts and store-file
-retirement are explicit owned lifetimes in the current native source. Genuine
-account replacement creates fresh private state; same-account refresh preserves
-its session. Root replay passes the 66 selected call cases, UI21/backend23/Matrix2/
-Swift-auth16 adapters, seven generated laws (1,792 cases) and protocol recovery.
-Actual Mac all-target Clippy passes against the pinned SDK; 17 actual Cargo helper
-cases pass. These scopes overlap and are not a whole-application test total.
-See `state-machine-checks/session-owner/{ROOT-REPLAY,NATIVE-GATES}.json` and
-`STORE-LIFETIME.md`. Persistent attribution of preexisting unbound cache files is
-an owner migration decision. More iOS admitted account-work callers and final
-unfiltered integration gates are still being completed; no global phase exit is
-claimed at this checkpoint.
-
-
-### H4 approval delivery admission
-
-The existing ApprovalState/outcome and SQL terminal CAS remain explicit. The High
-seam was ownership across delivery lanes and durable grant claim. A tagged sender
-owner, one decision/park transition and an atomic decision+claim transaction now
-cover that seam. Five original native semantic failures pass after the change;
-full approval40P on identical space-free source, with a separate test fixture path
-quoting cleanup pending. See `state-machine-checks/approval-delivery/`. Committed
-Approved delivery loss is deliberately spent/abandoned; owner review is required
-for that fail-closed behavior, and no external exactly-once guarantee is asserted.
-
-
-### H3 main Pi slot ownership
-
-The real child slot is now a tagged resource owner, transitioned through one
-function at boot, readiness, watcher, retirement, park, shutdown and test admission.
-Original actual Agent6-case suite1P/5semanticF becomes green; scoped native30P,
-all-target check/Clippy/build and three actual-slot Effect laws768 traces pass.
-See `state-machine-checks/rpc-owner/`. The unchanged Linux-only RSS test remains
-mandatory in final Linux CI; Darwin's11P/1F is explained, not hidden. Late child
-session/model metadata publication is a related reviewer lead still being pinned;
-this checkpoint does not claim H3's entire caller audit finished.
-
-
-### AUX-H7 deployment core ownership checkpoint
-
-Shared request receipts and scoped kernel lane leases replace racy marker-only
-admission, with dry scratch ownership established first. Actual selected adapters
-22P and three generated laws768 cases plus protocol recovery pass; see
-`state-machine-checks/deploy-lanes/`. Two intentional fail-closed changes require
-owner review. Automatic publication ABA and a reviewer-found snapshot-switch
-restart lease bypass remain active follow-ups; this is not the final AUX-H7 exit.
+**Account/control/task/cache ownership (High).** `WorkLifetime`/account tickets,
+`UiSession`/control tickets and TaskOwner open/closed state explicitly bind work
+to account+relay+generation. A genuine adoption creates fresh Mac Shared state;
+same-account refresh retains queues. Commands/events/connect/rig work carry their
+admitted control and account; Matrix owns both client and generation. UI models
+and private caches reset on genuine account replacement while calibration and
+same-account progress remain. HTTP refresh captures A authority before await,
+rejects stale publication/401, and cannot retry with B's bearer. CallRegistry
+metadata is keyed by call+user and contains no bearer; only captured known-user
+cleanup may leave a call. Existing unknown legacy provenance is conservatively
+retained, not attributed to a guessed owner.
+
+StoreOwner serializes close/unlink/open for the canonical account database path
+with Empty/Open/Retiring states and an exact weak-slot receipt, retaining original
+I/O paths and allowing independent paths to progress. This closes the live
+retirement/successor-open race; it does **not** solve unknown persistent legacy
+cache provenance. A new hash namespace and persisted owner-binding migration
+remain owner work before treating old unbound files as authenticated data.
+
+Actual Swift/Rust auth, UI, task, Matrix, call and cache tests accompany the
+implementation;7 Effect Schema laws run1792 generated cases and8 actual-function
+mutants falsify/replay. SDK/native controller checks have different scope; see
+`native-ownership/`, `session-owner/`, and `session-owner/NATIVE-GATES.json`.
+
+**iOS async/callback origin and draft queue (High, integration pending).** The
+private successor's AccountWork captures one owner plus bound API before optimism,
+Task creation and awaited chains; accepted-owner guards protect effects, late
+UI/error/busy publication and return values. Secrets/devices/server/profile and
+onboarding/people/creation/picker callbacks carry the same origin. Account-ticket
+view identity retires private @State across atomic A→B adoption without resetting
+same-account refresh state. DraftSendQueue owns per-draft/account FIFO creation,
+callbacks and close/retire transitions, preventing a B draft from flushing to
+A's newly created DM. Actual source-derived failures/positive controls and
+Schema-derived queue laws are retained by the pending iOS handoff. Settings,
+shared confirmation and ChatView caller review, full SDK typecheck and final
+combined tests remain required; no “all callers verified” claim at this checkpoint.
+
+**Transport and snapshot lifetime (High).** SessionRoom terminal403/404 retires
+generation before cancelling tasks/socket and emits terminal failure once. The
+old started&&stopped combination remains legitimate for a permanently stopped
+started object. Original3 controls/2 semantic failures become5 passes, with
+actual XCTest added. Snapshot admission requires current account, exact live doc
+and revision; detached completion cannot repaint obsolete private messages.
+Same-live-doc empty-paint fallback remains intentional.
+
+**Call/Matrix ownership (High).** Request-order admission and exact attempt/client
+tickets prevent stale joins, leave cleanup, events or Matrix failure from changing
+a replacement. Explicit logout can use its captured A cleanup authority once;
+auto401 does not fabricate a logout. Same-account Matrix client replacement still
+invalidates old work. Already issued server effects cannot be recalled. Detailed
+scoped native/Swift controller gates remain separate from physical CallKit/
+LiveKit/audio/device calibration, which was not exercised or changed.
+
+### Harness, voice and operations
+
+**AUX-H2 — shell approval.** Tagged checking/pending/parking/terminal states and
+strict Effect Schema wire decoding fail closed for configured hook/network/
+missing-decision errors. Unconfigured standalone mode remains explicit.
+Actual24 controls+3 baseline failures become37 passes; validation does not expose
+raw command input. The lazy pinned Effect runtime and packaging failure checks
+are retained; first configured check adds measured import/validation latency.
+See README/GATES and the harness approval tests.
+
+**AUX-H3–H5 — voice lifetime, audio and vision consent.** Call phases own charged
+work and finishing/failed-cleanup/closed state. Separate audio application lanes
+commit participant+mode only after successful effects. Vision generations and
+owned frame/stream/session leases reject revoked or retired work. Failed local
+cleanup can be retried without reopening external work or duplicating best-effort
+usage reporting. Original SDK/controller failures precede each fix;84 actual-SDK
+checks,6×256 laws and4 actual-function mutant/replays pass. Existing VAD, prompts,
+usage policy, volume and physical timing/calibration remain unchanged. No live
+room/provider/device was used.
+
+**AUX-H6 — feedback admission/delivery.** Shared typed admission validates actual
+normal and prepared merge paths; required SHA ancestry/gate evidence and delivery
+phase persist together. It cannot claim delivery before prerequisite evidence.
+Original6 controls/14 semantic failures become20 passes;5×256 laws and a real
+mutant/replay pass.15 existing policy helper bodies are byte-equal. See
+`feedback-admission.md`; no real merge or deployment ran.
+
+**AUX-H7 — deployment publication/activation.** Used queue/lease transitions bind
+kind+revision+queued/installed/default evidence. Revision advances before accepted
+publish/ack/activation mutation; automatic callers require their observed receipt.
+Ancestry checks, builds and box rollout stay outside the short queue lock.
+Activation keeps its lease through smoke, config/default, non200 restart/grace/
+health and public marker. Core22 +publication19 +activation5 actual adapter groups
+pass, with generated transition laws and actual mutants. Manual two-argument
+operator policy remains; there is no remote atomic/crash-recovery guarantee.
+See `deploy-lanes/`, `deploy-publication/`, `deploy-activation/`. Tests use fake
+commands/endpoints and never invoke a service, read operator env or deploy.
+
+**AUX-H8 — release publication.** Tagged observed/creating/uploading/finalizing/
+completed/refused/failed transitions preserve draft intent and require actual
+publication before success. Bounded64KiB/60s child handling and TERM reap are
+owned;404 is Missing, draft NoPromote and stable Refused.21 native checks,
+3×256 laws and a mutant/replay pass. Stateless merge reports/atomic receipts do
+not need another state model. See `release-publication.md`.
+
+**AUX-H9 — Mac heavy-slot ownership.** Explicit request/lease/GUI/boot transitions
+and a permanent OS-backed mutex serialize grants, reclaim and cancellation.
+Hidden staging leases prevent mkdir/PID-publication and check-then-move races;
+cleanup requires the observed receipt.34 native checks,4×256 laws and2 mutants
+pass.10 scheduling policy helpers remain byte-equal. See `runner-leases.md`.
+
+### Medium/Low disposition and verification limits
+
+The Part1 Medium/Low inventory is retained for the owner. Highest-value seams are
+Matrix pagination's in-flight token, circuit-breaker single probe, outbox poison/
+terminal receipts, room socket catchup/held-delivery order and informational
+machine-meter durability. Independent read marks, historical join/leave facts,
+cosmetic toggles, immutable DTO fields and already explicit RoomSession/UpdatePhase/
+FirstLogin Stage/CallPhase are not duplicate machines to rebuild merely because
+they contain booleans or Options. Navigation/composer/search behavior retains its
+existing layout and physical calibration; account-origin guards are shared with
+the High boundary rather than duplicated per presentation mode.
+
+Verification is layered: finite before-failing native/SQL/Swift controller tests;
+Schema-derived laws against actual Rust/Swift/Python boundaries with bounded
+transports; actual-function mutants with replay; then whole-source compiler and
+unfiltered isolated CI gates. Component totals overlap. The successful safe
+baseline CI (2373 Rust passes and606 Swift/UI passes) precedes these new sources;
+it is not a final combined-source verdict. Final Linux/Swift composition remains
+required. The existing search-reveal UI rig is red on two independent phase heads
+and overlaps upstream PR2539; it is not reported as green or as a proven app bug.
+Bend2 is absent and remains an optional owner follow-up. Broader observability is
+explicitly deferred for the owner's discussion with Jacob (const); it does not
+block ownership implementation or verification.
