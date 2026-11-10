@@ -71,8 +71,9 @@ remain proportional to the registry, while network/decoder work is capped at fou
 
 `RESULTS.json` retains all pairs, source/fixture/output hashes, timing units,
 randomization/statistics seeds and RSS counters. `BEFORE.json` / `AFTER.json`
-retain the public correctness cases and mapped snapshots. JSON methods still
-use the account-bound request admission supplied by the separate ownership fix.
+retain the public correctness cases and mapped snapshots. In the composed ownership/performance tree, JSON methods use the account-bound
+request admission supplied by the separate ownership fix. This independent
+performance branch retains upstream authorization behavior.
 Only registry types/methods change in this performance patch; composing it must
 preserve that authorization helper and the raw upload/read/transcription fence.
 A full real-SDK app compile is separate from these SDK-free method checks.
