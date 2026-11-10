@@ -1800,6 +1800,8 @@ struct RowView: View, Equatable {
                 Spacer(minLength: 0)
             }
         case .system(let icon, let text, let avatarProject):
+            // Extra air above the stamp: `systemGap` alone was landing "Today …"
+            // on the bubble above it ([feedback AGgL7fykRs0BE9uiHscNCvk]).
             HStack(spacing: 5) {
                 if let icon {
                     Image(systemName: icon).font(.system(size: 13, weight: .regular))
@@ -1810,6 +1812,7 @@ struct RowView: View, Equatable {
             .foregroundStyle(theme.muted)
             .frame(maxWidth: .infinity)
             .multilineTextAlignment(.center)
+            .padding(.top, 16)
         case .hidden(let count, _, let handle, let name):
             // The blocker's folded line ([feedback blocked-state-ios-2026-10-26]); Unblock
             // opens the person's sheet (its Unblock asks first).
