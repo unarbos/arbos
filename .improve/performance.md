@@ -184,7 +184,7 @@ Eighteen selected controls pass. Actual Mac all-target Clippy and complete app
 linking also pass on the final structural/ownership/performance composition.
 
 Twenty-one paired local12ms GET/PUT samples show a small16MiB latency improvement
-85.584→83.660ms, mean-saving95% interval1.281–3.533ms. Smaller payload intervals
+85.584→83.660ms, paired-median-saving95% interval1.281–3.533ms. Smaller payload intervals
 include zero and do not establish latency improvement. Separate allocation pairs
 show requested bytes53,017,257→36,240,032 at16MiB (one payload allocation2→1).
 Peak heap is unchanged; no lower RSS or end-to-end send claim follows. Streaming
