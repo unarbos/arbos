@@ -986,16 +986,17 @@ Pinned by `ArbosTests/BottomBarFadeTests` and `PillGlassTests`. Records: project
 
 Grok's chat list: the top buttons and the bottom search bar float over the list;
 rows stay visible and fade out under them while scrolling. Ours cut the list
-hard — an opaque block through the discs and the whole tab bar at the top
-(#1988's answer to rows behind the status bar) and an opaque block behind the
-search capsule at the bottom. Supersedes #1988's opaque-through-the-tabs rule;
-nothing still reads behind the status bar itself.
+hard — an opaque block through the discs at the top (#1988's answer to rows
+behind the status bar) and an opaque block behind the search capsule at the
+bottom. The All / Agents / People / Servers filter tabs are gone
+([feedback chat-list-no-filter-ios-2026-11-10]); Home and search share the
+bar-only top inset. Nothing still reads behind the status bar itself.
 
 | Item | Rule (pt / alpha) | Code |
 | --- | --- | --- |
-| Top layer | opaque through the status bar + **4**, then one eased ramp: **0.75** at the disc row's bottom, **0.55** at the tab bar's bottom, **0** where the first row rests (`listTop`, unchanged); search mode has no tabs: 0.75 at the discs, 0 at `barOnlyListTop` | `ListTopFade.Screen.home/.homeSearch`, `HomeChrome.topSolid / discsWash / tabsWash` |
+| Top layer | opaque through the status bar + **4**, then one eased ramp: **0.75** at the disc row's bottom, **0** where the first row rests (`barOnlyListTop`) — same curve for Home and search | `ListTopFade.Screen.home/.homeSearch`, `HomeChrome.topSolid / discsWash` |
 | Bottom layer | the shared see-through fade of the rule above (`BottomBarFade.home`): clear 28 above the capsule, 0.3 at its top edge, 0.5 at its bottom edge, 0.8 at the home indicator / keyboard — rows readable behind the capsule | `BottomBarFadeView`, `BottomBarFade.home` |
-| Lists | leading clear row = the top layer's height (first row reachable at rest), trailing clear row = the bottom fade (last row / result reachable) | `HomeChrome.listTop`, `listBottom` |
+| Lists | leading clear row = the top layer's height (first row reachable at rest), trailing clear row = the bottom fade (last row / result reachable) | `HomeChrome.barOnlyListTop`, `listBottom` |
 | Controls | unchanged: glass discs / capsules of the control family (`GlassCircle`, `controlField()`) | — |
 | Material | top layer — Matte: the page colour, Glass: `.ultraThinMaterial` under the 0.94 wash; bottom layer — the page colour on both; same geometry | `ListTopFade`, `BottomBarFadeView` |
 
@@ -1054,7 +1055,7 @@ A new screen declares itself there.
 | `plusGlyph` | composer `+` glyph 22.5 regular | Grok-measured (#1841); the family glyph is 19 |
 | `callControls` | call screen 64 pt action discs, 108 pt avatar disc, 150 pt ring, 44 pt chips | Grok's call UI, a different surface |
 | `inCallStrip` | in-call strip chip and voice button 36 | the strip is 48 tall |
-| `filterChips` | 30 pt All · Agents · People · Servers chips, pane tab pills | Grok's home filter |
+| `filterChips` | 30 pt pane tab pills (Profile | Settings, and the other pane tab sets) | Grok's pane tabs |
 | `rowIconTiles` | 36–44 pt leading tiles in rows and sheets, the hero camera badge, avatar-cluster placeholder | row content, not a floating control |
 | `illustrationDiscs` | 72 / 92 / 112 pt discs (primer, feedback done, join link, hero) | illustration |
 | `transcriptJumpChip` | Grok's 36 pt scroll-to-bottom circle, the "New messages" chip | Grok-measured transcript furniture |
