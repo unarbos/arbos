@@ -274,12 +274,13 @@ extension AppModel {
     /// the picture (or file) without the message's words. `true` when it was copied.
     @MainActor
     @discardableResult
-    func copyAttachment(_ attachment: Attachment, slot: String) async -> Bool {
+    func copyAttachment(_ attachment: Attachment, slot: String, isCurrent: @MainActor () -> Bool = { true }) async -> Bool {
+        guard isCurrent() else { return false }
         guard attachment.isOnRelay else {
             notice = Notice(text: attachment.blobRef?.hasPrefix("local:") == true ? "Still uploading — try again in a moment" : "Nothing to copy")
             return false
         }
-        return await copy(text: "", attachments: [attachment], slot: slot)
+        return await copy(text: "", attachments: [attachment], slot: slot, isCurrent: isCurrent)
     }
 
     @MainActor

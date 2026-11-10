@@ -243,7 +243,8 @@ struct StickerBubble: View {
         .accessibilityLabel("Sticker")
         .task(id: item.cacheKey) { await load() }
         .fullScreenCover(item: $viewer) { v in
-            MediaViewer(album: v.items, index: v.index, onClose: { viewer = nil })
+            MediaViewer(album: v.items, index: v.index, onClose: { if account.accepts(model) { viewer = nil } },
+                        origin: MediaOrigin(model, account: account))
                 .environmentObject(model)
                 .environment(\.theme, theme)
         }

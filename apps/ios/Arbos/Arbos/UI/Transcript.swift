@@ -3300,7 +3300,8 @@ struct ImageBubble: View {
         .onAppear { animate = stillFrame != nil }
         .onDisappear { animate = false }
         .fullScreenCover(item: $viewer) { v in
-            MediaViewer(album: v.items, index: v.index, onClose: { viewer = nil })
+            MediaViewer(album: v.items, index: v.index, onClose: { if account.accepts(model) { viewer = nil } },
+                        origin: MediaOrigin(model, account: account))
                 .environmentObject(model)
                 .environment(\.theme, theme)
         }
@@ -3781,7 +3782,8 @@ struct FileCard: View {
         }
         .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(fromUser ? theme.bubbleUser : theme.bubbleAssistant))
         .fullScreenCover(item: $viewer) { v in
-            MediaViewer(album: v.items, index: v.index, onClose: { viewer = nil })
+            MediaViewer(album: v.items, index: v.index, onClose: { if account.accepts(model) { viewer = nil } },
+                        origin: MediaOrigin(model, account: account))
                 .environmentObject(model)
                 .environment(\.theme, theme)
         }

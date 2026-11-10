@@ -178,6 +178,7 @@ struct LibraryDayCard: View {
     @Environment(\.theme) private var theme
     let day: LibraryList.Day
     let album: [MediaItem]
+    @State private var capturedOrigin: MediaOrigin?
     @State private var expanded = false
     @State private var viewer: MediaViewerState?
     @State private var viewerForward = false
@@ -186,13 +187,15 @@ struct LibraryDayCard: View {
     private var shown: Int { LibraryList.visibleRows(day.items.count, expanded: expanded) }
 
     var body: some View {
+        let origin = capturedOrigin ?? MediaOrigin(model)
         ProfileCard(separatorInset: PaneKit.inset + LibraryList.thumb + PaneKit.gap) {
             ForEach(day.items.prefix(shown)) { item in
-                LibraryRow(item: item, open: { open(item) }, forward: { open(item, forward: true) },
-                           save: { open(item, download: true) })
+                LibraryRow(item: item, open: { open(item, origin: origin) }, forward: { open(item, forward: true, origin: origin) },
+                           save: { open(item, download: true, origin: origin) }, origin: origin)
             }
             if day.items.count > LibraryList.showMoreAfter {
                 Button {
+                    guard origin.allowsPrivate(model) else { return }
                     withAnimation(.easeOut(duration: 0.18)) { expanded.toggle() }
                 } label: {
                     HStack(spacing: 6) {
@@ -210,16 +213,18 @@ struct LibraryDayCard: View {
                 .accessibilityIdentifier("library-show-more")
             }
         }
+        .onAppear { if capturedOrigin == nil { capturedOrigin = origin } }
         .fullScreenCover(item: $viewer) { v in
-            MediaViewer(album: v.items, index: v.index, onClose: { viewer = nil },
-                        openForward: viewerForward, openDownload: viewerDownload)
+            MediaViewer(album: v.items, index: v.index, onClose: { if origin.allowsPrivate(model) { viewer = nil } },
+                        openForward: viewerForward, openDownload: viewerDownload, origin: origin)
                 .environmentObject(model)
                 .environment(\.theme, theme)
         }
     }
 
     /// A tap opens the album at the row's place; a link opens in Safari.
-    private func open(_ item: ChatItem, forward: Bool = false, download: Bool = false) {
+    private func open(_ item: ChatItem, forward: Bool = false, download: Bool = false, origin: MediaOrigin) {
+        guard origin.allowsPrivate(model) else { return }
         if let media = item.media {
             viewerForward = forward
             viewerDownload = download
@@ -240,19 +245,23 @@ struct LibraryRow: View {
     let open: () -> Void
     let forward: () -> Void
     let save: () -> Void
+    let origin: MediaOrigin
 
     /// The row's picture or file on the pasteboard (`AppModel.copyAttachment`).
-    private func copy() {
-        guard let media = item.media else { return }
+    private func copy(origin: MediaOrigin) {
+        guard origin.allowsPrivate(model), let media = item.media else { return }
         let attachment = Attachment(name: media.name, mime: media.mime, blobRef: media.blobRef,
                                     kind: media.kind == .image ? "image" : media.kind == .video ? "video" : nil)
-        Task { await model.copyAttachment(attachment, slot: media.slot) }
+        Task {
+            guard origin.allowsPrivate(model) else { return }
+            _ = await model.copyAttachment(attachment, slot: media.slot, isCurrent: { origin.allowsPrivate(model) })
+        }
     }
 
     var body: some View {
-        Button(action: open) {
+        Button(action: { if origin.allowsPrivate(model) { open() } }) {
             HStack(spacing: PaneKit.gap) {
-                LibraryThumb(item: item)
+                LibraryThumb(item: item, origin: origin)
                 Text(item.kind == .link ? (item.url.map(LibraryList.bareURL) ?? item.title) : item.title)
                     .font(theme.font(Theme.body, weight: .medium))
                     .foregroundStyle(theme.text)
@@ -274,22 +283,22 @@ struct LibraryRow: View {
         .contextMenu {
             switch item.kind {
             case .media, .file:
-                Button(action: open) { Label("Open", systemImage: "arrow.up.right.square") }
-                Button(action: copy) { Label("Copy", systemImage: "doc.on.doc") }
-                Button(action: forward) { Label("Forward", systemImage: "arrowshape.turn.up.right") }
-                Button(action: save) {
+                Button(action: { if origin.allowsPrivate(model) { open() } }) { Label("Open", systemImage: "arrow.up.right.square") }
+                Button(action: { copy(origin: origin) }) { Label("Copy", systemImage: "doc.on.doc") }
+                Button(action: { if origin.allowsPrivate(model) { forward() } }) { Label("Forward", systemImage: "arrowshape.turn.up.right") }
+                Button(action: { if origin.allowsPrivate(model) { save() } }) {
                     Label(item.kind == .media ? "Save to Photos" : "Save", systemImage: "arrow.down.to.line")
                 }
             case .voice, .link:
-                Button(action: open) { Label("Open link", systemImage: "safari") }
+                Button(action: { if origin.allowsPrivate(model) { open() } }) { Label("Open link", systemImage: "safari") }
                 if let url = item.url {
-                    Button { UIPasteboard.general.string = url.absoluteString } label: {
+                    Button { if origin.allowsPrivate(model) { UIPasteboard.general.string = url.absoluteString } } label: {
                         Label("Copy link", systemImage: "link")
                     }
                 }
             }
         } preview: {
-            LibraryPreview(item: item)
+            LibraryPreview(item: item, origin: origin)
                 .environmentObject(model)
                 .environment(\.theme, theme)
         }
@@ -301,6 +310,7 @@ struct LibraryRow: View {
 struct LibraryThumb: View {
     @Environment(\.theme) private var theme
     let item: ChatItem
+    let origin: MediaOrigin
 
     var body: some View {
         ZStack {
@@ -308,7 +318,7 @@ struct LibraryThumb: View {
             switch item.kind {
             case .media:
                 if let media = item.media, media.kind == .image {
-                    BlobImage(item: media)
+                    BlobImage(item: media, origin: origin)
                 } else {
                     Image(systemName: "play.fill").font(theme.font(13, weight: .semibold)).foregroundStyle(theme.muted)
                 }
@@ -336,6 +346,7 @@ struct LibraryPreview: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
     let item: ChatItem
+    let origin: MediaOrigin
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -344,7 +355,7 @@ struct LibraryPreview: View {
                 switch item.kind {
                 case .media:
                     if let media = item.media, media.kind == .image {
-                        BlobImage(item: media)
+                        BlobImage(item: media, origin: origin)
                     } else {
                         Image(systemName: "play.fill").font(.system(size: 36)).foregroundStyle(theme.muted)
                     }

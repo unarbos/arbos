@@ -1527,7 +1527,8 @@ struct ChatSession: View {
         // composer bar, goes back one level — `BackSwipe.swift`, shared by every chat screen.
         .backSwipeToPop()
         .fullScreenCover(item: $rigViewer) { v in
-            MediaViewer(album: v.items, index: v.index, onClose: { rigViewer = nil }, openForward: rigViewerForward)
+            MediaViewer(album: v.items, index: v.index, onClose: { if account.accepts(model) { rigViewer = nil } },
+                        openForward: rigViewerForward, origin: MediaOrigin(model, account: account))
                 .environmentObject(model)
                 .environment(\.theme, theme)
         }
@@ -1567,7 +1568,8 @@ struct ChatSession: View {
             AgentEditSheet(projectId: projectId).environmentObject(model).environment(\.theme, theme)
         }
         .sheet(item: $pendingForward) { pending in
-            ForwardSheet(fromName: pending.from, attachmentNote: pending.message.body?.hasMedia == true) { target in
+            ForwardSheet(fromName: pending.from, attachmentNote: pending.message.body?.hasMedia == true,
+                         origin: MediaOrigin(model, account: account)) { target in
                 guard account.accepts(model) else { return }
                 pendingForward = nil
                 // Text-only: opens the target chat with the text drafted; the user
