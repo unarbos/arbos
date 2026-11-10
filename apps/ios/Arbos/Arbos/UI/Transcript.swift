@@ -359,13 +359,17 @@ enum Transcript {
     /// Whether the message's bubble draws a reply quote — a person's `replyRef` / `replyTo`;
     /// an agent's `replyTo`, else `inReplyTo` in a people chat (the row builder's fallback
     /// for member bubbles). A quoted bubble names its sender and starts its own run.
-    static func carriesQuote(_ message: Message, people: Bool) -> Bool {
+    /// `multiParty`: group / channel / people group. In a solo 1:1 agent chat (`!people &&
+    /// !multiParty`) agent bubbles never quote — even when an older box attached `replyTo`
+    /// ([feedback solo-1to1-no-agent-reply-quote-ios-2026-11-10]).
+    static func carriesQuote(_ message: Message, people: Bool, multiParty: Bool = false) -> Bool {
         func set(_ id: String?) -> Bool { !(id ?? "").isEmpty }
         switch message.role {
         case .user:
             if let r = message.replyRef, !r.chatId.isEmpty, !r.messageId.isEmpty { return true }
             return set(message.replyTo)
         case .assistant, .project:
+            if !people && !multiParty { return false }
             return set(message.replyTo) || (people && message.senderHandle != nil && set(message.inReplyTo))
         case .system:
             return false
@@ -482,7 +486,8 @@ enum Transcript {
             // ask starts its own run and is named, a quick follow-up within the window is not.
             let runStart = dateBreak || !Self.continuesRun(prevSender: prevSender, prevAt: prevAt,
                                                            sender: message.sender, at: message.createdAt,
-                                                           quoted: Self.carriesQuote(message, people: people))
+                                                           quoted: Self.carriesQuote(message, people: people,
+                                                                                     multiParty: multiParty))
             let named = multiParty && runStart
             switch message.role {
             case .user:
@@ -615,11 +620,15 @@ enum Transcript {
                 let agentId: String? = message.sender.hasPrefix("agent:") ? String(message.sender.dropFirst(6)) : nil
                 // Quote the message this answers: `replyTo` is the platform reply the box sets by
                 // the #1521 rule (always in groups / channels / people chats and for a row another
-                // agent sent; in a 1:1 only when answering an earlier message than the latest).
-                // Member bubbles from older boxes fall back to `inReplyTo`; a plain 1:1 answer to
-                // the latest message carries no quote.
-                let platformQuote = message.replyTo.flatMap { $0.isEmpty ? nil : Quote.forReply($0, in: byId) }
-                let replyQuote = platformQuote ?? message.inReplyTo.flatMap { $0.isEmpty ? nil : Quote.forReply($0, in: byId) }
+                // agent sent; never in a solo 1:1 agent chat — Jacob 2026-11-10). Member bubbles
+                // from older boxes fall back to `inReplyTo`. Clients also hide a stale `replyTo`
+                // on agent bubbles in solo 1:1 so older rows render clean
+                // ([feedback solo-1to1-no-agent-reply-quote-ios-2026-11-10]).
+                let soloAgentChat = !people && !multiParty
+                let platformQuote = soloAgentChat ? nil
+                    : message.replyTo.flatMap { $0.isEmpty ? nil : Quote.forReply($0, in: byId) }
+                let replyQuote = soloAgentChat ? nil
+                    : (platformQuote ?? message.inReplyTo.flatMap { $0.isEmpty ? nil : Quote.forReply($0, in: byId) })
                 // Error parts wait until the prose is known: under a real answer they stay the
                 // chip with Retry; on an answer with no words they become the words.
                 var errors: [(id: Id, code: String, text: String)] = []
