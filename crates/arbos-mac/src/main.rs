@@ -1,5 +1,6 @@
 //! Arbos desktop client. GPUI on the zui fork; tokio for the sync sources.
 
+mod agent_link_expiry;
 mod app;
 mod audio;
 mod auth;
@@ -9,14 +10,17 @@ mod chat_title;
 mod draft_dm;
 mod image_picker;
 mod jobtabs;
+mod mentions;
 mod model;
 mod onboarding;
 mod palette;
 mod panic_log;
 mod pasteboard;
+mod pending_messages;
 mod search;
 mod search_index;
 mod sign_in;
+mod snapshot_schedule;
 mod sync;
 mod ui;
 mod update;

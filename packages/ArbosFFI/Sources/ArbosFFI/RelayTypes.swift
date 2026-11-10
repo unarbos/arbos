@@ -442,7 +442,7 @@ public struct ChatMeDto: Codable {
 	}
 }
 
-/// Project chat (`chat_json` / `chat_json_for`).
+/// Project chat (`chat_dto` / `chat_dto_for`).
 public struct ChatDto: Codable {
 	public let id: String
 	public let project_id: String

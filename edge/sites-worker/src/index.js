@@ -29,7 +29,9 @@ const RESERVED = new Set([
   "arbos", "sites", "site", "edge", "worker", "workers", "r2", "preview", "demo", "ops", "root",
   "localhost", "local", "internal", "proxy", "vpn", "git", "ci", "hub", "voice", "voice-api",
   "hub-api", "download", "downloads", "update", "updates", "release", "releases",
-  "s", "g", "i", "privacy", "welcome", "u",
+  "s", "g", "i", "privacy", "welcome", "u", "about", "terms",
+  "favicon.ico", "favicon.svg", "apple-touch-icon.png", "robots.txt", "sitemap.xml",
+  "index.html", "main.js", "style.css",
 ]);
 
 const SUB_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
@@ -135,14 +137,14 @@ export default {
 };
 
 /** The one routing function (keep in step with `arbos_core::sites::Route::parse_request`). */
-function resolve(scheme, labels, pathname) {
+export function resolve(scheme, labels, pathname) {
   const segs = pathname.replace(/^\/+/, "").split("/");
   if (scheme === "subdomain") {
     if (labels.includes(".")) return "passthrough";
-    if (RESERVED.has(labels) || labels.startsWith("_") || !SUB_RE.test(labels)) return "passthrough";
+    if (!validSubdomain(labels)) return "passthrough";
     if (segs.length === 1 && segs[0] === "") return { kind: "user", prefix: labels };
     const app = segs[0];
-    if (!APP_RE.test(app)) return { kind: "bad" };
+    if (!validApp(app)) return { kind: "bad" };
     if (segs.length === 1) return { kind: "site", prefix: labels, app, rest: "", needsSlash: true };
     return { kind: "site", prefix: labels, app, rest: segs.slice(1).join("/"), needsSlash: false };
   }
@@ -151,11 +153,20 @@ function resolve(scheme, labels, pathname) {
     if (i < 0) return "passthrough";
     const app = labels.slice(0, i);
     const prefix = labels.slice(i + 1);
-    if (prefix.includes(".") || RESERVED.has(prefix) || !SUB_RE.test(prefix) || !APP_RE.test(app)) return "passthrough";
+    if (prefix.includes(".") || !validSubdomain(prefix) || !validApp(app)) return "passthrough";
     return { kind: "site", prefix, app, rest: segs.join("/").replace(/^\/+/, ""), needsSlash: false };
   }
   // path scheme: only on the apex, which this Worker does not front; everything else passes.
   return "passthrough";
+}
+
+// The allocator in arbos_core::sites is authoritative for names the Worker may serve.
+function validSubdomain(label) {
+  return SUB_RE.test(label) && !RESERVED.has(label) && !label.startsWith("xn--");
+}
+
+function validApp(app) {
+  return APP_RE.test(app) && !app.includes("--");
 }
 
 function validKey(key) {

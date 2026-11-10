@@ -7,10 +7,9 @@
 //! | `leaf_avatars`, `leaf_lottie` (retired: the leaf artwork is gone) | — | always off, see [`leaf_avatars`] |
 //! | `voice_mode` (spoken replies, voice picker, reply playback; 2026-10-22 Jacob: hidden until it works end to end) | `ARBOS_FEATURE_VOICE_MODE` | off; the relay also refuses `/proxy/v1/audio/speech` while off, so no client can spend on TTS |
 //!
-//! `GET /secrets` serves the same object (`vaults::features()` delegates here).
+//! `GET /secrets` serves the same object from [`dto`].
 
 use arbos_core::api::MeFeaturesDto;
-use serde_json::{json, Value};
 
 /// `1|true|on|yes` → on, `0|false|off|no` → off, anything else → `default`.
 pub fn env_flag(name: &str, default: bool) -> bool {
@@ -49,11 +48,6 @@ pub fn dto() -> MeFeaturesDto {
     }
 }
 
-/// `dto()` as JSON (for `GET /secrets`, whose body is hand-built).
-pub fn features() -> Value {
-    serde_json::to_value(dto()).unwrap_or_else(|_| json!({}))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -79,13 +73,14 @@ mod tests {
 
     /// Voice mode is off unless the relay is started with the flag; the object always carries
     /// the key, so a client never has to guess. (The flag itself is not flipped here: other
-    /// tests snapshot `features()` concurrently.)
+    /// tests snapshot the feature DTO concurrently.)
     #[test]
     fn voice_mode_is_off_by_default_and_always_sent() {
+        let features = serde_json::to_value(dto()).expect("feature DTO JSON");
         if std::env::var_os("ARBOS_FEATURE_VOICE_MODE").is_none() {
             assert!(!voice_mode());
-            assert_eq!(features()["voice_mode"], serde_json::json!(false));
+            assert_eq!(features["voice_mode"], serde_json::json!(false));
         }
-        assert!(features().get("voice_mode").is_some());
+        assert!(features.get("voice_mode").is_some());
     }
 }

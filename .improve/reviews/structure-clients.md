@@ -1,5 +1,9 @@
 # Phase 3: native-client structural audit and redesign
 
+Historical audit snapshot: later implementation, corrected native artifact isolation
+and current prerequisites are recorded in [the phase report](../structure.md).
+The original disk/fork-approval observations below are not current blanket blockers.
+
 Inspected base: `2865cb29b806121d4a90f55ba6ce151a150279a0`.
 Scope inventory: 125 Mac Rust files (~156K lines), 88 iOS application Swift files
 (~60K), 85 XCTest files (~11K), 14 UI-test files (~3.7K), generated relay DTOs and

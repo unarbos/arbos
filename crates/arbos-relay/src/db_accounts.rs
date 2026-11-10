@@ -440,7 +440,7 @@ impl Db {
     }
 
     /// Who may add this person to a people group (`anyone` | `people_i_know` | `nobody`).
-    /// Missing column / missing row → `anyone` (today's open default).
+    /// NULL / missing row → `anyone` (today's open default). Read errors propagate.
     pub fn group_add_policy(&self, user_id: &str) -> Result<String> {
         self.with(|c| {
             c.query_row(

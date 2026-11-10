@@ -1,5 +1,9 @@
 # Phase 3 structural audit — backend/shared Rust
 
+Historical audit snapshot: later implementation, corrected native artifact isolation
+and current prerequisites are recorded in [the phase report](../structure.md).
+The original disk/fork-approval observations below are not current blanket blockers.
+
 Inspected base `2865cb29b806121d4a90f55ba6ce151a150279a0`, isolated worktree, branch `improve/structure`. This audit makes no source edits. Inventory spans all 283 Rust files across 11 assigned crates; GPUI is assigned separately. Module/file inventory plus search and focused reads is not a claim of line-by-line review. Supporting raw scan: `backend-special-cases.txt`; count inventory: `backend-structural-inventory.json`; workspace dependency graph: `backend-dependencies.dot`.
 
 ## Status and exit condition

@@ -476,13 +476,6 @@ impl Fetcher {
     }
 }
 
-/// One bounded, pinned, checked GET for other relay modules (the shared link-icon resolver
-/// fetches a host's icon through this; `accept` and `max` as in [`Fetcher::get`]).
-#[allow(dead_code)] // kept for other relay modules; the site-icon resolver drives a `Fetcher` of its own
-pub async fn fetch_bounded(url: &str, accept: &str, max: usize) -> Option<Fetched> {
-    Fetcher::new().get(url, accept, max).await
-}
-
 fn host_rate_ok(host: &str) -> bool {
     static HITS: OnceLock<Mutex<HashMap<String, VecDeque<i64>>>> = OnceLock::new();
     let now = now_ms();

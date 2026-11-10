@@ -15,7 +15,7 @@ use gpui::{
 use crate::app::{AppState, ProfilePage};
 use crate::ui::sf_symbols;
 use crate::ui::shell::Shell;
-use crate::ui::theme::{Theme, TEXT_TINY};
+use crate::ui::theme::Theme;
 
 use super::{hero, kit, pushed_frame, tab_bar, HeroClick, HERO_AVATAR, PANE_FADE_BAND};
 
@@ -41,7 +41,7 @@ pub struct ProfilePane {
 
 pub struct Hero {
     pub picture: Picture,
-    /// `name(text)` for a read-only name, `editable_name(..)` when owned.
+    /// Page-provided name element; pages choose read-only or editable rendering.
     pub name: AnyElement,
     /// Glyph after the name ("lock" on a private channel).
     pub badge: Option<&'static str>,
@@ -70,9 +70,6 @@ pub enum Picture {
     Glyph(&'static str),
 }
 
-// Every variant is part of the published API; a page uses the ones its tabs
-// need (D93).
-#[allow(dead_code)]
 pub enum Section {
     /// Small caps title over a card ("Images · 4", "Archived").
     Title(SharedString),
@@ -85,30 +82,11 @@ pub enum Section {
         rows: Vec<AnyElement>,
         open: usize,
     },
-    /// A picker card: a `kit` row that opens and closes it, the swatch grid
-    /// under it (leaves, colours), a small note under the grid.
-    Picker {
-        header: AnyElement,
-        swatches: AnyElement,
-        note: SharedString,
-    },
     /// Centred muted line for an empty tab.
     Empty(SharedString),
     Footnote(SharedString),
     /// Escape hatch — say why on the component's issue.
     Custom(AnyElement),
-}
-
-/// The read-only hero name.
-#[allow(dead_code)]
-pub fn name(text: impl Into<SharedString>, theme: &Theme) -> AnyElement {
-    div()
-        .text_size(px(22.0))
-        .font_weight(gpui::FontWeight::BOLD)
-        .text_color(theme.text)
-        .truncate()
-        .child(text.into())
-        .into_any_element()
 }
 
 /// The page's frame title, for the pushed bar.
@@ -197,22 +175,6 @@ fn section(part: Section, theme: &Theme, cx: &mut Context<Shell>) -> AnyElement 
                 None => card.into_any_element(),
             }
         }
-        Section::Picker {
-            header,
-            swatches,
-            note,
-        } => kit::card(theme)
-            .child(header)
-            .child(div().pt(px(14.0)).child(swatches))
-            .child(
-                div()
-                    .px(px(kit::INSET))
-                    .pb(px(12.0))
-                    .text_size(px(TEXT_TINY))
-                    .text_color(theme.label_muted())
-                    .child(note),
-            )
-            .into_any_element(),
         Section::Empty(t) => kit::empty(&t, theme).into_any_element(),
         Section::Footnote(t) => kit::footnote(t, theme).into_any_element(),
         Section::Custom(el) => el,

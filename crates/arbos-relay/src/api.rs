@@ -1206,11 +1206,6 @@ fn machine_dto(state: &AppState, user_id: &str, bs: BoxState, since: i64) -> Mac
     }
 }
 
-#[allow(dead_code)] // helper kept for wire/fixture tests; handlers use chat_dto
-pub(crate) fn chat_json(c: &Chat) -> Value {
-    serde_json::to_value(chat_dto(c)).expect("ChatDto")
-}
-
 pub(crate) fn chat_dto(c: &Chat) -> ChatDto {
     ChatDto {
         id: c.id.clone(),
