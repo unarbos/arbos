@@ -4,7 +4,7 @@ import SwiftUI
 
 /// Link previews ([feedback link-embeds-ios-2026-10-27]): the `link_preview` part parses, becomes
 /// a card under the text (or the whole bubble for a bare link), is hidden by `preview: "off"`
-/// and the global switch, joins an agent's bubble as its last block, and the menu offers
+/// and the caller's setting, joins an agent's bubble as its last block, and the menu offers
 /// Remove preview only where Delete is offered too.
 final class LinkPreviewCardTests: XCTestCase {
     private let chat = "fx-affine-main"
@@ -35,15 +35,17 @@ final class LinkPreviewCardTests: XCTestCase {
     }
 
     private func userRow(_ rows: [Row]) throws -> (text: String, preview: LinkPreview?) {
-        for row in rows {
+        let values = rows.compactMap { row -> (text: String, preview: LinkPreview?)? in
             if case .user(let text, _, _, let preview) = row.kind { return (text, preview) }
+            return nil
         }
-        throw XCTSkip("no user row")
+        return try XCTUnwrap(values.first, "Expected a user row")
     }
 
-    override func setUp() {
-        super.setUp()
-        Transcript.linkPreviewsEnabled = true
+    func testMissingUserRowIsAnAssertionFailure() {
+        XCTExpectFailure("A missing mandatory row must fail, not skip the regression") {
+            _ = try? userRow([])
+        }
     }
 
     func testThePartParsesAndUnknownFieldsAreIgnored() throws {
@@ -90,17 +92,15 @@ final class LinkPreviewCardTests: XCTestCase {
         XCTAssertEqual(r3.text, "")
     }
 
-    func testPreviewOffAndTheGlobalSwitchHideTheCard() throws {
+    func testPreviewOffAndTheCallerSettingHideTheCard() throws {
         let off = try XCTUnwrap(DocJSON.message(userMessage(url, preview: "off"), chatId: chat))
         XCTAssertNil(off.linkPreview)
         let r = try userRow(Transcript.rows([off], projectId: "p"))
         XCTAssertNil(r.preview)
         XCTAssertTrue(r.text.hasPrefix("https://"), "the plain link is back")
 
-        Transcript.linkPreviewsEnabled = false
-        defer { Transcript.linkPreviewsEnabled = true }
         let on = try XCTUnwrap(DocJSON.message(userMessage(url), chatId: chat))
-        let r2 = try userRow(Transcript.rows([on], projectId: "p"))
+        let r2 = try userRow(Transcript.rows([on], projectId: "p", linkPreviews: false))
         XCTAssertNil(r2.preview)
         XCTAssertTrue(r2.text.hasPrefix("https://"))
     }
