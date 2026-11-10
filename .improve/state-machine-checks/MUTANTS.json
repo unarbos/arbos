@@ -1,0 +1,200 @@
+{
+  "live_source_unchanged": true,
+  "live_source_sha256": {
+    "harness/arbos-pi-ext/voice-state-laws.test.ts": "1d81ee6d8019b69c4df01d4d5a6059304a4e5df5bb87f8dadfbf3048cf13e69d",
+    "voice/tests/state_bridge.py": "22191c113026fa378e2e26a68e25ea04ca14a8b482811b4082c60cc7c10868a6",
+    "voice/arbos_voice/__init__.py": "42b6123a97bc14fa32cd32ded0d311596d3e910c0eca4577260cc4e09634ad91",
+    "voice/arbos_voice/call_state.py": "6ada1e75f963c13a6b679a97ce054df98360ae7da1715110dc26fe0e93c7af6e",
+    "voice/arbos_voice/vision_state.py": "b0f2b22c884c002323b71fe738a217934e8352f15b1be819e0c885f4d4f86785"
+  },
+  "mutants": [
+    {
+      "name": "vision-stale-generation",
+      "actual_function_source": "voice/arbos_voice/vision_state.py",
+      "isolated_mutant_sha256": "9b5891d5345bd16acb1a472d353b35269b7d3f2c02143c2d80700ac1d3125230",
+      "seed": 84002,
+      "command": [
+        "node",
+        "--test",
+        "--test-name-pattern=revoked frame leases",
+        "voice-state-laws.test.ts"
+      ],
+      "exit_code": 1,
+      "wall_seconds": 0.24268616701010615,
+      "property_falsified": true,
+      "counterexamples": [
+        {
+          "runs": 1,
+          "shrinks": 1,
+          "shrunk_input": {
+            "vision": [],
+            "call": [],
+            "mute": [],
+            "mode": [],
+            "firstReason": "asked",
+            "lastReason": "shutdown",
+            "initialMute": false,
+            "failedStep": "vision"
+          },
+          "replay": [
+            0,
+            "84002",
+            0,
+            0,
+            [
+              0
+            ],
+            "ReturnedFalse"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "failed-mute-commits",
+      "actual_function_source": "voice/arbos_voice/call_state.py",
+      "isolated_mutant_sha256": "4a5936f9468f4f75c8bc6ef68822961c4a572116ba097c8eb2b34f2e47721e21",
+      "seed": 84004,
+      "command": [
+        "node",
+        "--test",
+        "--test-name-pattern=failed mute is not committed",
+        "voice-state-laws.test.ts"
+      ],
+      "exit_code": 1,
+      "wall_seconds": 1.6512804160593078,
+      "property_falsified": true,
+      "counterexamples": [
+        {
+          "runs": 1,
+          "shrinks": 1,
+          "shrunk_input": {
+            "vision": [],
+            "call": [],
+            "mute": [],
+            "mode": [],
+            "firstReason": "asked",
+            "lastReason": "shutdown",
+            "initialMute": false,
+            "failedStep": "vision"
+          },
+          "replay": [
+            0,
+            "84004",
+            0,
+            0,
+            [
+              0
+            ],
+            "ReturnedFalse"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "stale-audio-completion",
+      "actual_function_source": "voice/arbos_voice/call_state.py",
+      "isolated_mutant_sha256": "dfc9c7057a64be41492794540298c2f29b2f04d145d385643611ed07c8c93501",
+      "seed": 84005,
+      "command": [
+        "node",
+        "--test",
+        "--test-name-pattern=old (mute|mode) completions",
+        "voice-state-laws.test.ts"
+      ],
+      "exit_code": 1,
+      "wall_seconds": 0.1993362499633804,
+      "property_falsified": true,
+      "counterexamples": [
+        {
+          "runs": 1,
+          "shrinks": 1,
+          "shrunk_input": {
+            "vision": [],
+            "call": [],
+            "mute": [],
+            "mode": [],
+            "firstReason": "asked",
+            "lastReason": "shutdown",
+            "initialMute": false,
+            "failedStep": "vision"
+          },
+          "replay": [
+            0,
+            "84005",
+            0,
+            0,
+            [
+              0
+            ],
+            "ReturnedFalse"
+          ]
+        },
+        {
+          "runs": 1,
+          "shrinks": 1,
+          "shrunk_input": {
+            "vision": [],
+            "call": [],
+            "mute": [],
+            "mode": [],
+            "firstReason": "asked",
+            "lastReason": "shutdown",
+            "initialMute": false,
+            "failedStep": "vision"
+          },
+          "replay": [
+            0,
+            "84006",
+            0,
+            0,
+            [
+              0
+            ],
+            "ReturnedFalse"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "closed-call-restarts",
+      "actual_function_source": "voice/arbos_voice/call_state.py",
+      "isolated_mutant_sha256": "a86e4c3efecf05f365447521d7ff347401d5eef56452b143ba530e9cc8ee5ab7",
+      "seed": 84001,
+      "command": [
+        "node",
+        "--test",
+        "--test-name-pattern=closed call and vision",
+        "voice-state-laws.test.ts"
+      ],
+      "exit_code": 1,
+      "wall_seconds": 1.1228804159909487,
+      "property_falsified": true,
+      "counterexamples": [
+        {
+          "runs": 1,
+          "shrinks": 1,
+          "shrunk_input": {
+            "vision": [],
+            "call": [],
+            "mute": [],
+            "mode": [],
+            "firstReason": "asked",
+            "lastReason": "shutdown",
+            "initialMute": false,
+            "failedStep": "vision"
+          },
+          "replay": [
+            0,
+            "84001",
+            0,
+            0,
+            [
+              0
+            ],
+            "ReturnedFalse"
+          ]
+        }
+      ]
+    }
+  ]
+}

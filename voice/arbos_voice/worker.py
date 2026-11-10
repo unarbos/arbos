@@ -64,6 +64,13 @@ from openai.types.realtime.audio_transcription import AudioTranscription
 from openai.types.realtime.realtime_audio_input_turn_detection import SemanticVad, ServerVad
 
 from . import __version__
+from .call_state import (
+    Applied, ApplyErrored, ApplyRequested, ApplyState, ApplySucceeded, Applying,
+    CleanupFailed, Closed, Connecting, Duplex, Finalized, Finishing, Group,
+    Lifecycle, ModeValue, PreSessionStopped, Running, StartupProgress,
+    StopRequested, Unapplied, apply_transition, confirmed_value,
+    lifecycle_transition,
+)
 
 WORKER_SHA = os.environ.get("ARBOS_VOICE_SHA", "").strip() or None
 from .config import CONFIG, Config
@@ -126,6 +133,8 @@ GOODBYE = {
     "asked": "Okay, leaving. Bye.",
     "alone": "",
 }
+
+ENDING_CALL = "The call is ending; do not start new work."
 
 
 def now_ms() -> int:
@@ -208,10 +217,11 @@ def similar_reply(a: str, b: str) -> bool:
 
 @dataclass
 class CallState:
-    mode: str = "duplex"  # duplex | group
+    lifecycle: Lifecycle = field(default_factory=Connecting)
+    mode_application: ApplyState[ModeValue] = field(default_factory=Unapplied)
+    mute_application: ApplyState[bool] = field(default_factory=lambda: Unapplied(False))
     agent_state: str = "initializing"
     user_state: str = "listening"
-    linked_identity: str | None = None
     # Timers for the measurements.
     user_turn_ended_at: float | None = None
     barge_started_at: float | None = None
@@ -234,14 +244,31 @@ class CallState:
     last_agent_at: float = 0.0
     # When set, the next agent reply in this window is the auto-answer to a noise transcript — drop it.
     noise_turn_at: float | None = None
-    open_work: int = 0
     idle_asked: bool = False
-    leaving: bool = False
-    stop_reason: str | None = None
-    # True while mute_self has detached our audio output (people cannot hear us).
-    muted: bool = False
     # leave_call: the model said its own goodbye; finish() must not add the canned one.
     goodbye_said: bool = False
+
+    @property
+    def mode(self) -> str:
+        route = confirmed_value(self.mode_application)
+        return "group" if isinstance(route, Group) else "duplex"
+
+    @property
+    def linked_identity(self) -> str | None:
+        route = confirmed_value(self.mode_application)
+        return route.identity if isinstance(route, Duplex) else None
+
+    @property
+    def leaving(self) -> bool:
+        return isinstance(self.lifecycle, (Finishing, CleanupFailed, Closed))
+
+    @property
+    def stop_reason(self) -> str | None:
+        return getattr(self.lifecycle, "reason", None)
+
+    @property
+    def muted(self) -> bool:
+        return confirmed_value(self.mute_application) is True
 
 
 class ArbosVoiceAgent(Agent):
@@ -280,13 +307,21 @@ class VoiceCall:
         self._tasks: set[asyncio.Task] = set()
         self._speak_lock = asyncio.Lock()
         self._pending_tools: set[asyncio.Task] = set()
+        self._finish_task: asyncio.Task | None = None
+        self._mode_task: asyncio.Task | None = None
+        self._mode_lock = asyncio.Lock()
+        self._mute_lock = asyncio.Lock()
 
     # ---- helpers -----------------------------------------------------------------------------------
 
     def spawn(self, coro) -> asyncio.Task:
         t = asyncio.create_task(coro)
         self._tasks.add(t)
-        t.add_done_callback(self._tasks.discard)
+        def completed(task: asyncio.Task) -> None:
+            self._tasks.discard(task)
+            if not task.cancelled() and (error := task.exception()) is not None:
+                log.warning("call task failed (%s)", type(error).__name__)
+        t.add_done_callback(completed)
         return t
 
     def humans(self) -> list[rtc.RemoteParticipant]:
@@ -348,20 +383,30 @@ class VoiceCall:
     # ---- lifecycle ---------------------------------------------------------------------------------
 
     async def run(self) -> None:
+        if self.state.leaving:
+            return
         ctx = self.ctx
         # Audio for everyone; video only when vision is on (vision.py subscribes per track).
         await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
+        if self.state.leaving:
+            return
         log.info("joined room %s as %s for call %s (project %s)", ctx.room.name, ctx.room.local_participant.identity, self.call_id, self.project_id)
         try:
             self.info = await self.relay.call_info(self.call_id, self.project_id)
         except Exception as e:
             log.error("call info failed: %s", e)
             self.info = {}
+        if self.state.leaving:
+            return
         caps = (self.info.get("caps") or {})
         if caps.get("stop"):
             log.warning("cost stop %s before joining; leaving", caps["stop"])
+            self.state.lifecycle = lifecycle_transition(self.state.lifecycle, PreSessionStopped(caps["stop"]))
             self.event("left", reason=caps["stop"])
-            await self.events.close()
+            try:
+                await self.events.close()
+            finally:
+                self._done.set()
             return
         settings = self.info.get("settings") or {}
         self.chattiness = settings.get("chattiness") or self.chattiness
@@ -375,51 +420,22 @@ class VoiceCall:
 
         # Wait for a human if the room is empty at dispatch (the caller is still connecting).
         if not self.humans():
+            self.state.lifecycle = lifecycle_transition(self.state.lifecycle, StartupProgress("waiting"))
             try:
                 await asyncio.wait_for(self._wait_for_human(), timeout=45.0)
             except asyncio.TimeoutError:
                 log.info("nobody joined within 45 s; leaving")
                 await self.finish("alone")
                 return
+        if self.state.leaving:
+            return
 
-        self.state.mode = "group" if len(self.humans()) >= 2 else "duplex"
-        instructions = self.instructions()
-        self.agent = ArbosVoiceAgent(self, instructions)
-        self.rt_model = openai.realtime.RealtimeModel(
-            model=self.cfg.model,
-            voice=self.voice,
-            api_key=self.cfg.openai_api_key,
-            turn_detection=self.turn_detection_for(self.state.mode),
-            input_audio_transcription=AudioTranscription(model=self.cfg.stt_model),
-            # Filter ambient / room noise before VAD so background sound does not become a
-            # user turn (and a chat line the agent answers).
-            input_audio_noise_reduction=DUPLEX_NOISE_REDUCTION if self.state.mode == "duplex" else None,
-        )
-        self.session = AgentSession(
-            llm=self.rt_model,
-            allow_interruptions=True,
-            turn_detection="realtime_llm" if self.state.mode == "duplex" else "manual",
-            user_away_timeout=None,
-        )
-        self.hook_session(self.session)
-        self.hook_room()
-        linked = self.humans()[0].identity if self.state.mode == "duplex" else None
-        self.state.linked_identity = linked
-        input_opts: dict[str, Any] = {
-            "audio_enabled": self.state.mode == "duplex",
-            "text_enabled": False,
-            "close_on_disconnect": False,
-        }
-        if linked:
-            input_opts["participant_identity"] = linked
-        await self.session.start(
-            self.agent,
-            room=ctx.room,
-            room_input_options=RoomInputOptions(**input_opts),
-            room_output_options=RoomOutputOptions(transcription_enabled=True, audio_enabled=True),
-        )
-        if self.state.mode == "group":
-            await self.start_group_listening()
+        self.state.lifecycle = lifecycle_transition(self.state.lifecycle, StartupProgress("starting"))
+        route = Group() if len(self.humans()) >= 2 else Duplex(self.humans()[0].identity)
+        await self._start_session(route)
+        if self.state.leaving:
+            return
+        self.state.lifecycle = lifecycle_transition(self.state.lifecycle, StartupProgress("running"))
         self.hook_realtime()
         self.start_vision()
         self.start_updates()
@@ -427,14 +443,77 @@ class VoiceCall:
         self.spawn(self.usage_loop())
         self.spawn(self.idle_loop())
         self.spawn(self.settings_loop())
-        await self.greet()
+        greeting = self.spawn(self.greet())
+        try:
+            await asyncio.shield(greeting)
+        except asyncio.CancelledError:
+            if asyncio.current_task().cancelling() or not self.state.leaving:
+                raise
+            # Teardown owns the canceled greeting; its caller still waits for finalization.
         await self._done.wait()
 
+    async def _start_session(self, route: ModeValue) -> None:
+        ctx = self.ctx
+        async with self._mode_lock, self._mute_lock:
+            if self.state.leaving:
+                return
+            lease = apply_transition(self.state.mode_application, ApplyRequested(route))
+            assert isinstance(lease, Applying)
+            self.state.mode_application = lease
+            self._mode_task = asyncio.current_task()
+            try:
+                instructions = self.instructions(mode=route)
+                self.agent = ArbosVoiceAgent(self, instructions)
+                self.rt_model = openai.realtime.RealtimeModel(
+                    model=self.cfg.model,
+                    voice=self.voice,
+                    api_key=self.cfg.openai_api_key,
+                    turn_detection=self.turn_detection_for("group" if isinstance(route, Group) else "duplex"),
+                    input_audio_transcription=AudioTranscription(model=self.cfg.stt_model),
+                    # Filter ambient / room noise before VAD so background sound does not become a
+                    # user turn (and a chat line the agent answers).
+                    input_audio_noise_reduction=DUPLEX_NOISE_REDUCTION if isinstance(route, Duplex) else None,
+                )
+                self.session = AgentSession(
+                    llm=self.rt_model,
+                    allow_interruptions=True,
+                    turn_detection="realtime_llm" if isinstance(route, Duplex) else "manual",
+                    user_away_timeout=None,
+                )
+                self.hook_session(self.session)
+                self.hook_room()
+                linked = route.identity if isinstance(route, Duplex) else None
+                input_opts: dict[str, Any] = {
+                    "audio_enabled": isinstance(route, Duplex),
+                    "text_enabled": False,
+                    "close_on_disconnect": False,
+                }
+                if linked:
+                    input_opts["participant_identity"] = linked
+                await self.session.start(
+                    self.agent,
+                    room=ctx.room,
+                    room_input_options=RoomInputOptions(**input_opts),
+                    room_output_options=RoomOutputOptions(transcription_enabled=True, audio_enabled=True),
+                )
+                self._check_mode(lease)
+                if isinstance(route, Group):
+                    await self.start_group_listening()
+                    self._check_mode(lease)
+                self.state.mode_application = apply_transition(lease, ApplySucceeded(lease.attempt))
+                mute = apply_transition(self.state.mute_application, ApplyRequested(False))
+                self.state.mute_application = apply_transition(mute, ApplySucceeded(mute.attempt))
+            except BaseException:
+                self.state.mode_application = apply_transition(self.state.mode_application, ApplyErrored(lease.attempt))
+                raise
+            finally:
+                self._mode_task = None
+
     async def _wait_for_human(self) -> None:
-        while not self.humans():
+        while not self.humans() and not self.state.leaving:
             await asyncio.sleep(0.2)
 
-    def instructions(self) -> str:
+    def instructions(self, *, mode: ModeValue | None = None) -> str:
         ctxpack = (self.info.get("context") or {}) if isinstance(self.info.get("context"), dict) else {}
         extra = ctxpack.get("system") or ""
         if not extra:
@@ -472,7 +551,7 @@ class VoiceCall:
         people = self.people_on_call()
         return system_prompt(
             name=self.agent_name,
-            group=self.state.mode == "group",
+            group=isinstance(mode, Group) if mode is not None else self.state.mode == "group",
             extra=extra,
             people=people,
             platform=call.get("platform"),
@@ -529,7 +608,27 @@ class VoiceCall:
             interrupt_response=True,
         )
 
+    def _can_speak(self) -> bool:
+        return (
+            isinstance(self.state.lifecycle, Running)
+            and self.session is not None
+            and isinstance(self.state.mute_application, Applied)
+            and not self.state.muted
+        )
+
+    def _group_current(self, route: ApplyState[ModeValue]) -> bool:
+        return (
+            isinstance(self.state.lifecycle, Running)
+            and self.session is not None
+            and self.state.mode_application is route
+            and isinstance(route, Applied)
+            and isinstance(route.value, Group)
+        )
+
     async def greet(self) -> None:
+        if not self._can_speak():
+            return
+        route = self.state.mode_application
         assert self.session
         humans = self.info.get("humans") or []
         owner = next((h for h in humans if h.get("role") == "owner"), None)
@@ -538,6 +637,8 @@ class VoiceCall:
             line = f"{self.agent_name}, {owner_label}'s agent, has joined and can hear this call."
             self.call_note(line)
             await self.wait_for_silence()
+            if not self._can_speak() or self.state.mode_application is not route:
+                return
             self.speak_line(line)
         else:
             # One fixed greeting line (no free-form generate: that raced the VAD and produced a
@@ -546,12 +647,109 @@ class VoiceCall:
             self.speak_line(f"Hey — {self.agent_name} here. What do you need?")
 
     async def finish(self, reason: str) -> None:
-        if self.state.leaving:
+        previous = self.state.lifecycle
+        lease = lifecycle_transition(previous, StopRequested(reason))
+        if lease is previous:
+            if isinstance(lease, Finishing) and self._finish_task is not asyncio.current_task():
+                await asyncio.shield(self._finish_task)
             return
-        self.state.leaving = True
-        self.state.stop_reason = reason
-        self.meter.stop_reason = reason
-        log.info("leaving call %s: %s", self.call_id, reason)
+        assert isinstance(lease, Finishing)
+        self.state.lifecycle = lease
+        if isinstance(self.state.mode_application, Applying):
+            self.state.mode_application = apply_transition(self.state.mode_application, ApplyErrored(self.state.mode_application.attempt))
+        if self._mode_task and self._mode_task is not asyncio.current_task():
+            self._mode_task.cancel()
+        self._finish_task = asyncio.create_task(self._finish(lease))
+        await asyncio.shield(self._finish_task)
+
+    async def _finish(self, lease: Finishing) -> None:
+        remaining = set(lease.pending_steps)
+        cancelled = False
+        first = lease.attempt == 1
+        try:
+            if first:
+                self.meter.stop_reason = lease.reason
+                log.info("leaving call %s: %s", self.call_id, lease.reason)
+                try:
+                    await self._goodbye(lease.reason)
+                except asyncio.CancelledError:
+                    cancelled = True
+                self.call_note(f"{self.agent_name} left the call" + ("" if lease.reason in ("alone", "asked", "idle") else f" · {lease.reason.replace('_', ' ')}"))
+                self.event("left", reason=lease.reason)
+            for name in ("listeners", "vision", "updates"):
+                if name not in remaining:
+                    continue
+                resource = getattr(self, name)
+                try:
+                    if resource:
+                        if name == "vision":
+                            self.sync_vision_meter()
+                        await asyncio.wait_for(resource.stop(), timeout=5.0)
+                    remaining.remove(name)
+                except asyncio.CancelledError:
+                    cancelled = True
+                except Exception as error:
+                    log.warning("call cleanup failed: %s (%s)", name, type(error).__name__)
+            if first:
+                # One best-effort final cumulative report, unchanged by local cleanup retries.
+                try:
+                    payload = self.meter.usage(ended=True)
+                    await self.relay.usage(self.call_id, self.project_id, payload)
+                except asyncio.CancelledError:
+                    cancelled = True
+                except Exception as error:
+                    log.warning("final usage post failed (%s)", type(error).__name__)
+                try:
+                    await self.events.close()
+                except asyncio.CancelledError:
+                    cancelled = True
+                except Exception as error:
+                    log.warning("call event cleanup failed (%s)", type(error).__name__)
+            if "session" in remaining:
+                try:
+                    if self.session:
+                        await asyncio.wait_for(self.session.aclose(), timeout=5.0)
+                    remaining.remove("session")
+                except asyncio.CancelledError:
+                    cancelled = True
+                except Exception as error:
+                    log.warning("call cleanup failed: session (%s)", type(error).__name__)
+            if "tasks" in remaining:
+                owned = self._tasks | self._pending_tools
+                if self._mode_task:
+                    owned.add(self._mode_task)
+                owned.difference_update({asyncio.current_task(), self._finish_task})
+                for task in owned:
+                    task.cancel()
+                if owned:
+                    done, pending = await asyncio.wait(owned, timeout=5.0)
+                    for task in done:
+                        if not task.cancelled():
+                            task.exception()  # Retrieve terminal failures; none may escape finalization.
+                    self._tasks.difference_update(done)
+                    self._pending_tools.difference_update(done)
+                else:
+                    pending = set()
+                if not pending:
+                    remaining.remove("tasks")
+            if first:
+                try:
+                    log.info("call %s summary: %s", self.call_id, json.dumps({**self.meter.summary(), "vision": self.vision.summary() if self.vision else None}))
+                except Exception as error:
+                    log.warning("call summary unavailable (%s)", type(error).__name__)
+        finally:
+            failed = tuple(step for step in lease.pending_steps if step in remaining)
+            self.state.lifecycle = lifecycle_transition(self.state.lifecycle, Finalized(lease.attempt, failed))
+            if first:
+                self._done.set()
+                try:
+                    self.ctx.shutdown(reason=lease.reason)
+                except Exception as error:
+                    log.warning("call shutdown request failed (%s)", type(error).__name__)
+        if cancelled:
+            raise asyncio.CancelledError()
+
+    async def _goodbye(self, reason: str) -> None:
         try:
             if self.session and reason != "alone" and GOODBYE.get(reason):
                 own = self.agent_speaking() or self.state.goodbye_said
@@ -581,30 +779,6 @@ class VoiceCall:
                     pass
         except Exception as e:
             log.warning("goodbye failed: %s", e)
-        self.call_note(f"{self.agent_name} left the call" + ("" if reason in ("alone", "asked", "idle") else f" · {reason.replace('_', ' ')}"))
-        self.event("left", reason=reason)
-        if self.listeners:
-            await self.listeners.stop()
-        if self.vision:
-            self.sync_vision_meter()
-            await self.vision.stop()
-        if self.updates:
-            await self.updates.stop()
-        try:
-            await self.relay.usage(self.call_id, self.project_id, self.meter.usage(ended=True))
-        except Exception as e:
-            log.warning("final usage post failed: %s", e)
-        await self.events.close()
-        log.info("call %s summary: %s", self.call_id, json.dumps({**self.meter.summary(), "vision": self.vision.summary() if self.vision else None}))
-        if self.session:
-            try:
-                await asyncio.wait_for(self.session.aclose(), timeout=5.0)
-            except Exception:
-                pass
-        for t in list(self._tasks):
-            t.cancel()
-        self._done.set()
-        self.ctx.shutdown(reason=reason)
 
     # ---- session events ------------------------------------------------------------------------------
 
@@ -652,7 +826,7 @@ class VoiceCall:
 
         @session.on("user_input_transcribed")
         def _user_transcribed(ev: UserInputTranscribedEvent) -> None:
-            if self.state.mode != "duplex" or not ev.is_final:
+            if self.state.leaving or self.state.mode != "duplex" or not ev.is_final:
                 return
             text = (ev.transcript or "").strip()
             if not text:
@@ -799,49 +973,105 @@ class VoiceCall:
             self.spawn(self.finish(self.state.stop_reason or "room_closed"))
 
     async def on_humans_changed(self) -> None:
+        if self.state.leaving:
+            return
         await asyncio.sleep(0.3)
+        if self.state.leaving:
+            return
         humans = self.humans()
         if not humans:
             await asyncio.sleep(10.0)
             if not self.humans() and not self.state.leaving:
                 await self.finish("alone")
             return
-        want = "group" if len(humans) >= 2 else "duplex"
-        if want != self.state.mode:
-            await self.switch_mode(want)
-        elif want == "duplex" and self.state.linked_identity != humans[0].identity and self.session:
-            self.state.linked_identity = humans[0].identity
-            self.session.room_io.set_participant(humans[0].identity)
+        async with self._mode_lock:
+            humans = self.humans()
+            if not humans or self.state.leaving:
+                return
+            route = Group() if len(humans) >= 2 else Duplex(humans[0].identity)
+            await self._apply_mode(route)
 
     async def switch_mode(self, mode: str) -> None:
-        assert self.session and self.agent and self.rt_model
-        log.info("mode %s → %s", self.state.mode, mode)
-        self.state.mode = mode
-        self.meter.mode = mode if self.meter.mode == mode else "mixed"
-        rt = self.agent.realtime_llm_session
-        if mode == "group":
+        if mode not in ("group", "duplex"):
+            raise ValueError("Unknown audio mode")
+        async with self._mode_lock:
+            humans = self.humans()
+            if self.state.leaving or not humans:
+                return
+            await self._apply_mode(Group() if mode == "group" else Duplex(humans[0].identity))
+
+    def _check_mode(self, lease: Applying[ModeValue]) -> None:
+        if self.state.leaving or self.state.mode_application is not lease or asyncio.current_task().cancelling():
+            raise asyncio.CancelledError()
+
+    async def _quiesce_mode(self) -> None:
+        try:
             self.session.input.set_audio_enabled(False)
-            if rt:
-                rt.update_options(turn_detection=None)
-            self.session.update_options(turn_detection="manual")
-            self.state.linked_identity = None
-            await self.start_group_listening()
-            await self.agent.update_instructions(self.instructions())
-            line = f"{self.agent_name} can hear everyone on this call now."
-            self.call_note(line)
-        else:
-            if self.listeners:
-                await self.listeners.stop()
+        except Exception as error:
+            log.warning("audio mode input cleanup failed (%s)", type(error).__name__)
+        if self.listeners:
+            try:
+                await asyncio.wait_for(self.listeners.stop(), timeout=5.0)
                 self.listeners = None
-            human = self.humans()[0]
-            self.state.linked_identity = human.identity
-            self.session.room_io.set_participant(human.identity)
-            if rt:
-                rt.update_options(turn_detection=self.turn_detection_for("duplex"))
-            self.session.update_options(turn_detection="realtime_llm")
-            self.session.input.set_audio_enabled(True)
-            await self.agent.update_instructions(self.instructions())
-        self.event("metric", mode_switch=mode)
+            except Exception as error:
+                log.warning("audio mode listener cleanup failed (%s)", type(error).__name__)
+
+    async def _apply_mode(self, route: ModeValue) -> None:
+        assert self.session and self.agent and self.rt_model
+        previous = self.state.mode_application
+        lease = apply_transition(previous, ApplyRequested(route))
+        if lease is previous:
+            return
+        assert isinstance(lease, Applying)
+        self.state.mode_application = lease
+        self._mode_task = asyncio.current_task()
+        mode = "group" if isinstance(route, Group) else "duplex"
+        self.meter.mode = mode if self.meter.mode == mode else "mixed"
+        try:
+            self._check_mode(lease)
+            log.info("mode %s → %s", self.state.mode, mode)
+            rt = self.agent.realtime_llm_session
+            relink = isinstance(previous, Applied) and isinstance(previous.value, Duplex) and isinstance(route, Duplex)
+            if relink:
+                self.session.room_io.set_participant(route.identity)
+            elif isinstance(route, Group):
+                self.session.input.set_audio_enabled(False)
+                if rt:
+                    rt.update_options(turn_detection=None)
+                self.session.update_options(turn_detection="manual")
+                if self.listeners:
+                    await self.listeners.stop()
+                    self._check_mode(lease)
+                    self.listeners = None
+                await self.start_group_listening()
+                self._check_mode(lease)
+                await self.agent.update_instructions(self.instructions(mode=route))
+                self._check_mode(lease)
+            else:
+                if self.listeners:
+                    await self.listeners.stop()
+                    self._check_mode(lease)
+                    self.listeners = None
+                self.session.room_io.set_participant(route.identity)
+                if rt:
+                    rt.update_options(turn_detection=self.turn_detection_for("duplex"))
+                self.session.update_options(turn_detection="realtime_llm")
+                await self.agent.update_instructions(self.instructions(mode=route))
+                self._check_mode(lease)
+                self.session.input.set_audio_enabled(True)
+        except BaseException:
+            self.state.mode_application = apply_transition(self.state.mode_application, ApplyErrored(lease.attempt))
+            if not self.state.leaving:
+                await self._quiesce_mode()
+            raise
+        else:
+            self.state.mode_application = apply_transition(self.state.mode_application, ApplySucceeded(lease.attempt))
+            if isinstance(route, Group):
+                self.call_note(f"{self.agent_name} can hear everyone on this call now.")
+            if not relink:
+                self.event("metric", mode_switch=mode)
+        finally:
+            self._mode_task = None
 
     # ---- group mode ---------------------------------------------------------------------------------
 
@@ -864,6 +1094,8 @@ class VoiceCall:
         await self.listeners.start()
 
     def on_group_speech_start(self, identity: str, at: float) -> None:
+        if self.state.leaving:
+            return
         self.state.last_human_speech_at = at
         self.state.idle_asked = False
         if self.agent_speaking() and self.session:
@@ -888,10 +1120,13 @@ class VoiceCall:
             chattiness=self.chattiness,
             recent=self.state.window[-10:],
             agent_last_spoke_s_ago=(time.monotonic() - last) if last else None,
-            agent_has_open_work=self.state.open_work > 0,
+            agent_has_open_work=bool(self._pending_tools),
         )
 
     async def on_group_utterance(self, u: Utterance) -> None:
+        route = self.state.mode_application
+        if not self._group_current(route):
+            return
         speaker = speaker_of(self.participant(u.identity), u.identity)
         label = label_of(speaker)
         self.transcript(speaker, u.text)
@@ -900,6 +1135,8 @@ class VoiceCall:
         ctx = self.judge_ctx()
         decision = await self.judge.decide(u.text, label, ctx)
         self.meter.add_decision(decision.cost_usd)
+        if not self._group_current(route):
+            return
         # Attention window: the person the agent just answered gets the benefit of the doubt.
         in_window = (
             self.state.last_asker is not None
@@ -942,9 +1179,16 @@ class VoiceCall:
             await asyncio.sleep(0.05)
 
     async def respond_group(self, u: Utterance, speaker: dict, decision: Decision) -> None:
+        route = self.state.mode_application
+        if not self._group_current(route):
+            return
         assert self.session
         async with self._speak_lock:
+            if not self._group_current(route):
+                return
             await self.wait_for_silence()
+            if not self._group_current(route):
+                return
             label = label_of(speaker)
             lines = "\n".join(f"{w['from']}: {w['text']}" for w in self.state.window[-8:-1])
             user_input = (f"Recent lines on the call:\n{lines}\n\n" if lines else "") + f"{label} just said: {u.text}"
@@ -1007,28 +1251,31 @@ class VoiceCall:
         return [ask_agent, look, mute_self, unmute_self, leave_call]
 
     async def set_muted(self, muted: bool) -> str:
-        """Detach or re-attach our audio output so the call cannot / can hear us."""
-        if self.state.muted == muted:
-            return "Already muted." if muted else "Already unmuted."
-        self.state.muted = muted
-        if muted and self.session:
-            try:
-                self.session.interrupt()
-            except Exception as e:
-                log.warning("interrupt on mute failed: %s", e)
-        if self.session:
+        """Commit the applied flag only after the SDK audio output accepts the change."""
+        async with self._mute_lock:
+            failure = "Could not change mute on the audio path; say so briefly." if muted else "Could not unmute on the audio path; say so briefly."
+            if self.state.leaving or not self.session:
+                return failure
+            previous = self.state.mute_application
+            lease = apply_transition(previous, ApplyRequested(muted))
+            if lease is previous:
+                return "Already muted." if muted else "Already unmuted."
+            self.state.mute_application = lease
+            if muted:
+                try:
+                    self.session.interrupt()
+                except Exception as error:
+                    log.warning("interrupt on mute failed (%s)", type(error).__name__)
             try:
                 self.session.output.set_audio_enabled(not muted)
-            except Exception as e:
-                log.warning("set_audio_enabled(%s) failed: %s", not muted, e)
-                return (
-                    "Could not change mute on the audio path; say so briefly."
-                    if muted
-                    else "Could not unmute on the audio path; say so briefly."
-                )
-        self.call_note(f"{self.agent_name} muted" if muted else f"{self.agent_name} unmuted")
-        log.info("agent %s", "muted" if muted else "unmuted")
-        return "Muted. Stay silent until unmute_self." if muted else "Unmuted. You can speak again."
+            except Exception as error:
+                self.state.mute_application = apply_transition(lease, ApplyErrored(lease.attempt))
+                log.warning("audio output change failed (%s)", type(error).__name__)
+                return failure
+            self.state.mute_application = apply_transition(lease, ApplySucceeded(lease.attempt))
+            self.call_note(f"{self.agent_name} muted" if muted else f"{self.agent_name} unmuted")
+            log.info("agent %s", "muted" if muted else "unmuted")
+            return "Muted. Stay silent until unmute_self." if muted else "Unmuted. You can speak again."
 
     async def leave_by_tool(self) -> str:
         """Dismiss ourselves from the call after the model has said goodbye."""
@@ -1054,6 +1301,8 @@ class VoiceCall:
 
     def add_context(self, text: str) -> None:
         """A note into the model's conversation, no reply asked for."""
+        if self.state.leaving:
+            return
         rt = None
         try:
             rt = self.agent.realtime_llm_session if self.agent else None
@@ -1065,10 +1314,10 @@ class VoiceCall:
 
     async def say(self, instructions: str) -> None:
         """One reply from the voice agent, played out. Never interrupts: callers wait for a pause."""
-        if self.state.leaving or not self.session or self.state.muted:
+        if not self._can_speak():
             return
         async with self._speak_lock:
-            if self.state.leaving or not self.session or self.state.muted:
+            if not self._can_speak():
                 return
             handle = self.session.generate_reply(instructions=instructions)
             try:
@@ -1134,10 +1383,14 @@ class VoiceCall:
         return pid if pid and pid != "people" else f"people:{self.chat_id}"
 
     async def look(self, what: str, *, hand_to_agent: bool = False, participant: str = "") -> str:
+        if self.state.leaving:
+            return ENDING_CALL
         if not self.vision or not self.vision_enabled:
             return "Vision is off for this agent, so you cannot look. Say so briefly."
         identity = self.identity_for(participant)
         got = await self.vision.look(identity)
+        if self.state.leaving:
+            return ENDING_CALL
         if got is None:
             return "No camera is on right now. Ask them to turn their camera on, then look again."
         jpeg, seen_identity = got
@@ -1150,24 +1403,31 @@ class VoiceCall:
         try:
             await self.relay.put_blob(self.blob_slot(), key, jpeg, "image/jpeg")
         except Exception as e:
+            if self.state.leaving:
+                return ENDING_CALL
             log.warning("blob upload failed: %s", e)
             return f"The full-resolution frame is in front of you, but it could not be sent to your agent ({e}). Answer about: {what}"
+        if self.state.leaving:
+            return ENDING_CALL
         attachment = {"name": f"camera-{time.strftime('%H%M%S', time.gmtime())}.jpg", "mime": "image/jpeg", "ref": key}
         request = f"{what.strip()} (A photo from {label}'s camera on the call is attached.)"
         return await self.ask_agent(request, attachments=[attachment], tool_name="look")
 
     async def ask_agent(self, request: str, *, attachments: list[dict] | None = None, tool_name: str = "ask_agent") -> str:
+        if self.state.leaving:
+            return ENDING_CALL
         speaker = self.state.last_asker or (
             speaker_of(self.participant(self.state.linked_identity or ""), self.state.linked_identity or "") if self.state.linked_identity else {}
         )
         self.meter.tool_calls += 1
-        self.state.open_work += 1
         request_id = uuid.uuid4().hex[:12]
         self.event("tool", name=tool_name, status="started", request=request[:500], request_id=request_id, speaker=label_of(speaker) if speaker else None)
         log.info("%s[%s] from %s: %s", tool_name, request_id, label_of(speaker) if speaker else "?", request[:120])
         t0 = time.monotonic()
 
         async def run() -> dict:
+            if self.state.leaving:
+                return {}
             return await self.relay.tool(
                 self.call_id, self.project_id, speaker=speaker, request=request, mode=self.state.mode, request_id=request_id,
                 attachments=attachments,
@@ -1179,18 +1439,21 @@ class VoiceCall:
         try:
             result = await asyncio.wait_for(asyncio.shield(task), timeout=self.cfg.tool_quick_wait_s)
         except asyncio.TimeoutError:
+            if self.state.leaving:
+                return ENDING_CALL
             self.spawn(self.deliver_later(task, request_id, speaker))
             return "The agent is working on it; this may take a while. Tell the person you will report back when it is done, then stop talking."
         except asyncio.CancelledError:
-            self.state.open_work -= 1
             return "Cancelled."
         except ToolPending:
-            self.state.open_work -= 1
+            if self.state.leaving:
+                return ENDING_CALL
             # The relay's wait ran out; the answer lands in the chat later and reaches this
             # call through the inbox. Say so.
             return "The agent is still working on it; the answer will show up in the chat (and you will hear of it). Tell the person that in one short sentence."
         except RelayError as e:
-            self.state.open_work -= 1
+            if self.state.leaving:
+                return ENDING_CALL
             self.event("tool", name="ask_agent", status="failed", request_id=request_id, error=str(e.body)[:300], ms=int((time.monotonic() - t0) * 1000))
             if e.status == 503:
                 return NO_LINK_LINE + " Say exactly that, briefly, and offer to do it in the text chat."
@@ -1198,9 +1461,11 @@ class VoiceCall:
                 return "Spending is capped right now, so I can't run that. Say so briefly."
             return f"The request failed: {str(e.body)[:200]}. Say so briefly."
         except Exception as e:
-            self.state.open_work -= 1
+            if self.state.leaving:
+                return ENDING_CALL
             return f"The request failed: {e}. Say so briefly."
-        self.state.open_work -= 1
+        if self.state.leaving:
+            return ENDING_CALL
         ms = int((time.monotonic() - t0) * 1000)
         self.event("tool", name="ask_agent", status="done" if result.get("ok") else "failed", request_id=request_id, ms=ms, message_id=result.get("message_id"))
         if not result.get("ok"):
@@ -1239,7 +1504,8 @@ class VoiceCall:
         try:
             result = await task
         except ToolPending:
-            self.state.open_work -= 1
+            if self.state.leaving:
+                return
             log.warning("deferred tool %s still pending after relay wait; the inbox carries the answer", request_id)
             if self.updates:
                 await self.updates.handle(
@@ -1252,14 +1518,16 @@ class VoiceCall:
                 )
             return
         except Exception as e:
-            self.state.open_work -= 1
+            if self.state.leaving:
+                return
             log.warning("deferred tool %s failed: %s", request_id, e)
             if self.updates:
                 await self.updates.handle(
                     Update(kind="result", message_id=f"failed:{request_id}", text=f"The task from this call failed: {e}", sender=agent)
                 )
             return
-        self.state.open_work -= 1
+        if self.state.leaving:
+            return
         text = (result.get("text") or "").strip() if result.get("ok") else f"it failed: {result.get('error')}"
         message_id = str(result.get("message_id") or f"deferred:{request_id}")
         self.event("tool", name="ask_agent", status="done" if result.get("ok") else "failed", request_id=request_id, message_id=message_id, deferred=True)
@@ -1301,6 +1569,8 @@ class VoiceCall:
             except Exception as e:
                 log.debug("settings re-read failed: %s", e)
                 continue
+            if self.state.leaving:
+                return
             enabled = s.get("vision_enabled", True) is not False
             if enabled != self.vision_enabled:
                 self.vision_enabled = enabled
@@ -1308,10 +1578,18 @@ class VoiceCall:
                 if self.vision:
                     self.vision.set_enabled(enabled)
                 if self.agent:
-                    try:
-                        await self.agent.update_instructions(self.instructions())
-                    except Exception as e:
-                        log.warning("update_instructions failed: %s", e)
+                    async with self._mode_lock:
+                        if self.state.leaving:
+                            return
+                        self._mode_task = asyncio.current_task()
+                        try:
+                            await self.agent.update_instructions(self.instructions())
+                        except Exception as error:
+                            log.warning("update_instructions failed (%s)", type(error).__name__)
+                        finally:
+                            self._mode_task = None
+                if self.state.leaving:
+                    return
                 self.call_note(f"{self.agent_name} {'can see cameras on this call now' if enabled else 'no longer sees cameras on this call'}")
             chattiness = s.get("chattiness")
             if chattiness and chattiness != self.chattiness:

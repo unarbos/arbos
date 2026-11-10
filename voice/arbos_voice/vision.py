@@ -42,6 +42,7 @@ from livekit.agents.utils.images import EncodeOptions, ResizeOptions, encode
 from PIL import Image
 
 from .config import Config
+from .vision_state import Closed, Disabled, Enabled, VisionState, accepts_frame, capture_generation, transition
 
 log = logging.getLogger("arbos-voice.vision")
 
@@ -104,6 +105,13 @@ class SentFrame:
     look: bool = False
 
 
+@dataclass(frozen=True)
+class _FrameLease:
+    generation: int
+    stream: rtc.VideoStream
+    rt: Any
+
+
 class Vision:
     """One per call. `rt` (the realtime session) is set once the agent session is up."""
 
@@ -122,7 +130,7 @@ class Vision:
         self.agent_identity = agent_identity
         self.agent_name = agent_name
         self.label_of = label_of
-        self.enabled = enabled
+        self._state: VisionState = Enabled() if enabled else Disabled()
         self.rt: Any = None
         self.local_ctx: Callable[[], Any] | None = None
         self.cameras: dict[str, Camera] = {}
@@ -131,14 +139,19 @@ class Vision:
         self.looks = 0
         self.bytes_sent = 0
         self._camera_seconds = 0.0
-        self._seeing: set[str] = set()
         self._task: asyncio.Task | None = None
-        self._closed = False
+        self._closing_tasks: set[asyncio.Task[None]] = set()
         self.on_first_frame: Callable[[str], None] | None = None
 
     # ---- lifecycle -------------------------------------------------------------------------------
 
+    @property
+    def enabled(self) -> bool:
+        return isinstance(self._state, Enabled)
+
     def start(self) -> None:
+        if isinstance(self._state, Closed):
+            return
         if self._task is None:
             self._task = asyncio.create_task(self._sampler())
         for p in self.room.remote_participants.values():
@@ -146,29 +159,40 @@ class Vision:
                 self.consider(pub, p)
 
     async def stop(self) -> None:
-        self._closed = True
+        self._state = transition(self._state, "close")
         if self._task:
             self._task.cancel()
-        for key in list(self.cameras):
-            await self.detach(key, signal=False)
-        self._seeing.clear()
+        for cam, stream in self._retire_cameras():
+            if stream is not None:
+                self._schedule_close(cam, stream)
+        if self._closing_tasks:
+            # Caller deadlines must not abandon native streams or cancel another stop's cleanup.
+            await asyncio.shield(asyncio.gather(*tuple(self._closing_tasks)))
 
     def set_enabled(self, enabled: bool) -> None:
-        if enabled == self.enabled:
+        state = transition(self._state, "enable" if enabled else "disable")
+        if state is self._state:
             return
-        self.enabled = enabled
+        self._state = state
         log.info("vision %s", "on" if enabled else "off")
         if enabled:
             for p in self.room.remote_participants.values():
                 for pub in p.track_publications.values():
                     self.consider(pub, p)
         else:
+            # Retire old camera ownership synchronously. A re-subscription may attach a
+            # replacement before SDK close completes; that cleanup must own only its old stream.
+            closing = self._retire_cameras()
             for p in self.room.remote_participants.values():
                 for pub in p.track_publications.values():
                     if pub.kind == rtc.TrackKind.KIND_VIDEO and pub.subscribed:
                         pub.set_subscribed(False)
-            for key in list(self.cameras):
-                asyncio.create_task(self.detach(key))
+            for identity in {cam.identity for cam, _ in closing}:
+                self._signal(identity, False)
+                self._forget(identity, keep=1)
+            for cam, stream in closing:
+                if stream is not None:
+                    self._schedule_close(cam, stream)
 
     # ---- tracks ------------------------------------------------------------------------------------
 
@@ -203,54 +227,78 @@ class Vision:
             # Published but off: keep the subscription, wait for unmute.
             self.cameras[key] = cam
             return
-        self._open(cam)
         self.cameras[key] = cam
+        try:
+            self._open(cam)
+        except Exception:
+            if self.cameras.get(key) is cam:
+                del self.cameras[key]
+            raise
 
     def _open(self, cam: Camera) -> None:
-        if cam.stream is not None:
+        generation = capture_generation(self._state)
+        if generation is None or self.cameras.get(cam.sid) is not cam or cam.stream is not None:
             return
         cam.stream = rtc.VideoStream(cam.track)
-        cam.task = asyncio.create_task(self._read(cam))
+        cam.task = asyncio.create_task(self._read(cam, cam.stream, generation))
         cam.started_at = time.monotonic()
         cam.last_thumb = None
         log.info("%s on: %s (%s)", cam.source, cam.identity, cam.sid)
         self._signal(cam.identity, True)
 
-    async def _close(self, cam: Camera) -> None:
-        if cam.stream is None:
-            return
+    def _begin_close(self, cam: Camera) -> rtc.VideoStream | None:
+        stream = cam.stream
+        if stream is None:
+            return None
         self._camera_seconds += max(0.0, time.monotonic() - cam.started_at)
         if cam.task:
             cam.task.cancel()
             cam.task = None
-        try:
-            await cam.stream.aclose()
-        except Exception:
-            pass
         cam.stream = None
         cam.latest = None
+        return stream
+
+    def _retire_cameras(self) -> list[tuple[Camera, rtc.VideoStream | None]]:
+        closing = [(cam, self._begin_close(cam)) for cam in self.cameras.values()]
+        self.cameras.clear()
+        return closing
+
+    async def _finish_close(self, cam: Camera, stream: rtc.VideoStream) -> None:
+        try:
+            await stream.aclose()
+        except Exception as error:
+            # SDK aclose disposes the native handle before awaiting its frame pump. Keep
+            # ordinary cleanup failures best-effort, without logging raw SDK diagnostics.
+            log.warning("video stream close failed (%s)", type(error).__name__)
         log.info("%s off: %s (%s)", cam.source, cam.identity, cam.sid)
+
+    def _schedule_close(self, cam: Camera, stream: rtc.VideoStream) -> asyncio.Task[None]:
+        task = asyncio.create_task(self._finish_close(cam, stream))
+        self._closing_tasks.add(task)
+        task.add_done_callback(self._closing_tasks.discard)
+        return task
 
     async def detach(self, sid: str, *, signal: bool = True) -> None:
         cam = self.cameras.pop(sid, None)
         if cam is None:
             return
-        await self._close(cam)
+        stream = self._begin_close(cam)
         if signal and not any(c.identity == cam.identity and c.stream for c in self.cameras.values()):
             self._signal(cam.identity, False)
             self._forget(cam.identity, keep=1)
+        if stream is not None:
+            await asyncio.shield(self._schedule_close(cam, stream))
 
     def muted(self, pub: rtc.RemoteTrackPublication, participant: rtc.RemoteParticipant) -> None:
         cam = self.cameras.get(pub.sid)
         if cam is None:
             return
-        asyncio.create_task(self._mute(cam))
-
-    async def _mute(self, cam: Camera) -> None:
-        await self._close(cam)
+        stream = self._begin_close(cam)
         if not any(c.identity == cam.identity and c.stream for c in self.cameras.values()):
             self._signal(cam.identity, False)
             self._forget(cam.identity, keep=1)
+        if stream is not None:
+            self._schedule_close(cam, stream)
 
     def unmuted(self, pub: rtc.RemoteTrackPublication, participant: rtc.RemoteParticipant) -> None:
         cam = self.cameras.get(pub.sid)
@@ -258,11 +306,12 @@ class Vision:
             return
         self._open(cam)
 
-    async def _read(self, cam: Camera) -> None:
-        assert cam.stream
+    async def _read(self, cam: Camera, stream: rtc.VideoStream, generation: int) -> None:
         first = True
         try:
-            async for ev in cam.stream:
+            async for ev in stream:
+                if not accepts_frame(self._state, generation) or self.cameras.get(cam.sid) is not cam or cam.stream is not stream:
+                    break
                 cam.latest = ev.frame
                 cam.latest_at = time.monotonic()
                 if first:
@@ -277,7 +326,7 @@ class Vision:
     # ---- state -------------------------------------------------------------------------------------
 
     def seeing(self) -> list[str]:
-        return sorted(self._seeing)
+        return sorted({c.identity for c in self.live_cameras()}) if self.enabled else []
 
     def live_cameras(self) -> list[Camera]:
         return [c for c in self.cameras.values() if c.stream is not None]
@@ -287,10 +336,11 @@ class Vision:
         return self._camera_seconds + sum(max(0.0, now - c.started_at) for c in self.live_cameras())
 
     def _signal(self, identity: str, seeing: bool) -> None:
-        if seeing:
-            self._seeing.add(identity)
-        else:
-            self._seeing.discard(identity)
+        if isinstance(self._state, Closed) or (seeing and not self.enabled):
+            return
+        generation = self._state.generation
+        snapshot = self.seeing()
+        seeing = identity in snapshot
         lp = self.room.local_participant
         payload = json.dumps(
             {
@@ -299,15 +349,22 @@ class Vision:
                 "seeing": seeing,
                 "agent_name": self.agent_name,
                 "agent": self.agent_identity,
-                "seeing_identities": sorted(self._seeing),
+                "seeing_identities": snapshot,
             }
         )
 
+        def current() -> bool:
+            return self._state.generation == generation and not isinstance(self._state, Closed) and self.seeing() == snapshot
+
         async def send() -> None:
+            if not current():
+                return
             try:
                 await lp.publish_data(payload, reliable=True, topic=VISION_TOPIC)
             except Exception as e:
                 log.warning("publish_data failed: %s", e)
+            if not current():
+                return
             try:
                 await lp.set_attributes({VISION_ATTR: payload})
             except Exception as e:
@@ -317,11 +374,25 @@ class Vision:
 
     # ---- frames ------------------------------------------------------------------------------------
 
+    def _capture(self, cam: Camera) -> _FrameLease | None:
+        generation = capture_generation(self._state)
+        if generation is None or self.cameras.get(cam.sid) is not cam or cam.stream is None:
+            return None
+        return _FrameLease(generation, cam.stream, self.rt)
+
+    def _current(self, cam: Camera, lease: _FrameLease) -> bool:
+        return (
+            accepts_frame(self._state, lease.generation)
+            and self.cameras.get(cam.sid) is cam
+            and cam.stream is lease.stream
+            and self.rt is lease.rt
+        )
+
     async def _sampler(self) -> None:
         period = 1.0 / max(0.2, self.cfg.vision_fps)
-        while not self._closed:
+        while not isinstance(self._state, Closed):
             await asyncio.sleep(0.2)
-            if self.rt is None:
+            if not self.enabled or self.rt is None:
                 continue
             now = time.monotonic()
             for cam in self.live_cameras():
@@ -329,6 +400,9 @@ class Vision:
                     continue
                 since = now - cam.last_sent_at
                 if since < MIN_GAP_S:
+                    continue
+                lease = self._capture(cam)
+                if lease is None:
                     continue
                 try:
                     jpeg, thumb = self._encode(cam.latest, self.cfg.vision_long_edge)
@@ -342,38 +416,51 @@ class Vision:
                     pass
                 else:
                     continue
-                self._send(cam, jpeg, thumb, detail="low", look=False, why=f"scene change {diff:.0f}" if (diff or 0) >= SCENE_CHANGE_DIFF else "")
+                self._send(cam, jpeg, thumb, lease=lease, detail="low", look=False, why=f"scene change {diff:.0f}" if (diff or 0) >= SCENE_CHANGE_DIFF else "")
 
     def trigger(self, identity: str | None = None) -> bool:
         """Someone said "look at this": send the newest frame now (from them, else from anyone)."""
+        if not self.enabled:
+            return False
         cams = [c for c in self.live_cameras() if c.latest is not None and (identity is None or c.identity == identity)]
         if not cams and identity is not None:
             cams = [c for c in self.live_cameras() if c.latest is not None]
         if not cams or self.rt is None:
             return False
         cam = max(cams, key=lambda c: c.latest_at)
+        lease = self._capture(cam)
+        if lease is None:
+            return False
         try:
             jpeg, thumb = self._encode(cam.latest, self.cfg.vision_long_edge)
         except Exception as e:
             log.warning("encode failed: %s", e)
             return False
-        self._send(cam, jpeg, thumb, detail="low", look=False, why="asked to look")
-        return True
+        return self._send(cam, jpeg, thumb, lease=lease, detail="low", look=False, why="asked to look") is not None
 
     async def look(self, identity: str | None = None) -> tuple[bytes, str] | None:
         """Full-resolution frame for the `look` tool → (jpeg, identity). None when no camera is on."""
+        if not self.enabled:
+            return None
         cams = [c for c in self.live_cameras() if c.latest is not None and (identity is None or c.identity == identity)]
         if not cams and identity is not None:
             cams = [c for c in self.live_cameras() if c.latest is not None]
         if not cams:
             return None
         cam = max(cams, key=lambda c: c.latest_at)
+        lease = self._capture(cam)
+        if lease is None:
+            return None
         jpeg, thumb = await asyncio.get_running_loop().run_in_executor(
             None, self._encode, cam.latest, self.cfg.vision_look_long_edge, 85
         )
+        if not self._current(cam, lease):
+            return None
+        if lease.rt is not None and self._send(cam, jpeg, thumb, lease=lease, detail="high", look=True, why="look") is None:
+            return None
         self.looks += 1
-        if self.rt is not None:
-            self._send(cam, jpeg, thumb, detail="high", look=True, why="look")
+        if not self._current(cam, lease):
+            return None
         return jpeg, cam.identity
 
     def _encode(self, frame: rtc.VideoFrame, long_edge: int, quality: int = 70) -> tuple[bytes, np.ndarray]:
@@ -394,7 +481,9 @@ class Vision:
             return None
         return float(np.mean(np.abs(a - b)))
 
-    def _send(self, cam: Camera, jpeg: bytes, thumb: np.ndarray, *, detail: str, look: bool, why: str) -> str:
+    def _send(self, cam: Camera, jpeg: bytes, thumb: np.ndarray, *, lease: _FrameLease, detail: str, look: bool, why: str) -> str | None:
+        if not self._current(cam, lease) or lease.rt is None:
+            return None
         item_id = "vis_" + uuid.uuid4().hex[:12]
         label = self.label_of(cam.identity)
         what = "screen share" if cam.source == "screen" else "camera"
@@ -403,7 +492,9 @@ class Vision:
             if look
             else f"{label}'s {what} right now ({clock()} UTC). Mention it only when it is relevant or asked."
         )
-        self.rt.send_event(
+        if not self._current(cam, lease):
+            return None
+        lease.rt.send_event(
             {
                 "type": "conversation.item.create",
                 "item": {

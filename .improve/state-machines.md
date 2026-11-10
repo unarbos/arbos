@@ -6,11 +6,14 @@ booleans and already explicit reducers/enums. Static representability is not a
 runtime reproduction; details label confirmed cases, interleavings requiring a
 test, and invariants already enforced by existing guards.
 
-The approval-hook lifecycle has a locally runnable regression seam and is now
-explicit with validated tagged states and effects at transitions. Other High
-native, voice and operational migrations require their stated regression gates;
-full native CI is awaiting maintainer approval and local build disk is inadequate.
-Do not interpret a pure model test as verification of native callbacks/processes.
+The approval-hook lifecycle and voice call lifetime, audio application and vision
+consent controllers (AUX-H2–H5) now use explicit tagged states and pure
+transitions, with effects at their edges. The guarded SDK suite passes 84 tests;
+six generated voice laws exercise 1,536 cases separately from the existing 256
+approval cases. Remaining High native and operational migrations still require
+their stated regression gates. Full native CI awaits maintainer approval and
+local build disk is inadequate. Pure state laws do not verify native callbacks,
+live SDK behavior, billing or deployment orchestration.
 
 Base: `2865cb29b806121d4a90f55ba6ce151a150279a0`. Coverage includes all backend
 crates, GPUI/Swift/FFI, harness, voice, edge/site, image, scripts and evals. Related
@@ -124,10 +127,10 @@ state machines.
 | Machine | One-sentence description | Risk | Key files (2–5) |
 |---|---|---|---|
 | AUX-M6 Main-agent routing and correction | Route-first admission, stamped-steer continuation, relay replies and post-hoc correction emerge from five closure variables. | Medium | `harness/arbos-pi-ext/index.ts`; `harness/arbos-pi-ext/route-schema.ts`; `harness/arbos-pi-ext/index.test.ts`; `crates/arbos-agentd/src/agent.rs` |
-| AUX-H2 Shell approval polling and parking | A risky call moves among local/unavailable, pending, parked and decided outcomes across several hook responses. | High | `harness/arbos-pi-ext/index.ts`; `crates/arbos-core/src/approval.rs`; `crates/arbos-agentd/src/hooks.rs` |
-| AUX-H3 Voice call lifetime, charged work and shutdown | A call joins, works, waits for tool results and tears down while multiple owned tasks and budget stops update separate flags. | High | `voice/arbos_voice/worker.py`; `voice/arbos_voice/relay.py`; `voice/arbos_voice/meter.py`; `voice/tests/test_usage_loop.py` |
-| AUX-H4 Voice audio mode and mute application | Duplex/group input ownership and mute intent are applied to asynchronous SDK audio state without declared transition states. | High | `voice/arbos_voice/worker.py`; `voice/arbos_voice/listener.py`; `voice/arbos_voice/config.py` |
-| AUX-H5 Vision consent, tracks and frame delivery | Owner enablement, track subscription, encoding and terminal shutdown jointly determine whether a frame may reach the model. | High | `voice/arbos_voice/vision.py`; `voice/arbos_voice/worker.py`; `voice/arbos_voice/config.py` |
+| AUX-H2 Shell approval polling and parking — implemented | Validated checking/pending/parking/terminal transitions distinguish configured failure from standalone mode and fail closed. | High | `harness/arbos-pi-ext/approval.ts`; `harness/arbos-pi-ext/index.ts`; `harness/arbos-pi-ext/approval.test.ts`; `crates/arbos-agentd/src/hooks.rs` |
+| AUX-H3 Voice call lifetime, charged work and shutdown — implemented | Startup, running, finishing, cleanup-failed and closed phases own tasks and retry only failed local cleanup while preserving one best-effort final usage report. | High | `voice/arbos_voice/call_state.py`; `voice/arbos_voice/worker.py`; `voice/tests/test_worker_lifecycle.py`; `voice/tests/test_usage_loop.py` |
+| AUX-H4 Voice audio mode and mute application — implemented | Separate application lanes distinguish unapplied, applying, applied and failed effects; mode commits its participant identity atomically. | High | `voice/arbos_voice/call_state.py`; `voice/arbos_voice/worker.py`; `voice/arbos_voice/listener.py`; `voice/tests/test_worker_lifecycle.py` |
+| AUX-H5 Vision consent, tracks and frame delivery — implemented | Enabled/disabled/closed generations and owned stream/session leases reject revoked frames and retain cleanup ownership. | High | `voice/arbos_voice/vision_state.py`; `voice/arbos_voice/vision.py`; `voice/tests/test_vision_consent.py`; `voice/tests/state_bridge.py` |
 | AUX-H6 Feedback fix approval/gating/shipping | Mutable JSON status, approval flags and several commit identities coordinate whether a fix may merge and be called shipped. | High | `scripts/feedback/feedback_poller.py`; `scripts/feedback/rust-gate.sh`; `scripts/feedback/ios-gate.sh`; `docs/process-rules.md` |
 | AUX-H7 Deployment lanes and image rollout | Queue files, canary/restart markers, holds and per-box outcomes determine whether a release starts, pauses, retries or finishes. | High | `scripts/deploy/arbos-deploy-worker`; `scripts/deploy/arbos-deploy-hook`; `scripts/feedback/deploy-relay.sh`; `docs/process-rules.md` |
 | AUX-H8 Merge/release observation and publication | Release eligibility and completion are inferred from CI verdicts, covering commits, tags, digests and pending artifacts. | High | `scripts/merge/merge-window.sh`; `scripts/merge/checks.sh`; `scripts/release/auto-stable.sh`; `scripts/release/release-gate.py`; `scripts/merge/selftest.sh` |
@@ -143,7 +146,8 @@ Image deny hooks and the edge site router are stateless decisions, not meaningfu
 ## Part 2: detail and regression prerequisites
 
 The following records the discovered baseline and proposed transitions. The
-implemented approval changes are described in the implementation section below.
+implemented approval and voice changes are described below; baseline source line
+numbers describe the audited revision, not positions after these extractions.
 Main-agent route correction is ranked Medium: it controls acknowledgement/prose,
 while actual tool permission is enforced separately. Its surprising fallback
 combination is not by itself an authorization failure. It remains documented.
@@ -264,7 +268,8 @@ Core command/status/route/widget approval enums, static feature/config booleans,
 
 The existing High machines are integrated with Agent, Store, HTTP/process effects or durable receipts; none has a ready isolated reducer comparable to the verified standalone `core/redact.rs` test seam. Cheap prerequisite experiments can run the **exact** job transition/approval claim SQL against local in-memory SQLite without the app, including cancelled→running rejection and first terminal timestamp/single-use predicates. Those are genuine SQL laws but do not prove the Agent/process effects. A next implementation can extract a small native job/receipt transition file, test that actual file through an isolated Cargo harness, and retain native integration as blocked until full gates run. Do not call a newly modeled transition test a before-failing regression of existing runtime behavior.
 
-No High transition rewrite was made in this audit. Phase 4 can be reported as inventory complete / High migrations blocked, with the exact native verification owner action already recorded.
+No backend High transition rewrite was made. This portion is inventory complete /
+High migrations blocked, with the exact native verification owner action recorded.
 
 ### Native clients and FFI
 
@@ -482,43 +487,82 @@ Worth making explicit: yes. This can be a pure transition seam with effects outs
 
 Storage: `ApprovalState` union (:209), generic HookResponse, local state/approvalId/deadline/reason in awaitApproval (:468–533). The union enumerates wire labels, and the final switch is exhaustive; it does not declare the lifecycle or encode which states require an approval ID. Effective lifecycle: standalone local mode, checking, unavailable/error, allowed, pending-with-ID, polling, park requested, parked, approved, rejected, cancelled, and legacy expired.
 
-Transitions: /hook/approval supplies the initial decision; periodic /approval-status may decide during grace; /approval-park atomically hands pending execution back to agentd; decided outcomes either admit the client call or block it. The first hook failure currently returns undefined (allow/no gate), whereas later pending failures retain pending/block semantics. Preserve this existing behavior until pinned and explicitly reviewed; distinguish standalone no-hook configuration from configured-hook outage.
+Baseline transitions: /hook/approval supplies the initial decision; periodic /approval-status may decide during grace; /approval-park atomically hands pending execution back to agentd; decided outcomes either admit the client call or block it. The baseline first hook failure returned undefined (allow/no gate), whereas later pending failures retained pending/block semantics. This was pinned and intentionally fixed below; distinguish standalone no-hook configuration from configured-hook outage.
 
 Illegal/surprising combinations: pending without a nonempty approvalId is representable and would be polled/parked; generic response shapes can describe parked and decided simultaneously; an initial malformed/absent state defaults to allowed; client execution after a successful park would duplicate agentd execution. Unknown final labels already fail closed. These are wire/lifecycle validation concerns, not a reason to remove the current exhaustive switch.
 
 Worth making explicit: yes, at the shared approval protocol seam. Prerequisites: local fake-hook tests pin no-hook mode, initial outage, pending/empty ID, decision at deadline, park wins versus approval wins, cancellation and malformed labels. Authorization behavior changes require owner visibility and the affected security-boundary requirements. No live approval operations are necessary or permitted.
 
-#### AUX-H3 — Voice call lifetime, charged work and shutdown
+#### AUX-H3 — Voice call lifetime, charged work and shutdown — implemented
 
-Storage: CallState dataclass worker.py:211–244 (`leaving`, `stop_reason`, `open_work`, mode and speaker fields); VoiceCall `_done`, `_tasks`, `_pending_tools`, nullable session/listener/vision/update objects (:275–294); meter and event batcher hold related state separately. CallState names fields but is not a tagged lifecycle or transition function.
+The baseline stored leaving/stop_reason/open_work alongside tasks and nullable
+resources. Actual VoiceCall regressions reproduced stranded finalization after a
+cleanup exception, caller cancellation canceling teardown, concurrent finish
+returning early, and late callbacks starting work after termination.
 
-Effective states: dispatched, joining, waiting for first human, connected, running with quick/deferred/pending tool requests, stopping with a reason, cleanup in progress, closed, and cleanup failed. Speech/goodbye may legitimately continue while stopping; do not classify every leaving+speaking combination as invalid.
+`call_state.py` now declares Connecting, WaitingForHuman, StartingSession, Running,
+Finishing, CleanupFailed and Closed. `lifecycle_transition` owns startup progress,
+first-reason-wins stop requests, attempt tokens and failed-step retries. Closed is
+absorbing. The worker shares one shielded finisher; it never cancels or gathers
+itself. Failed local resource cleanup remains owned and retryable; successful
+steps are not repeated. `_done` and one SDK shutdown request happen even when
+cleanup raises. Startup, queued tool dispatch, deferred results, look/context and
+group/greeting work check lifetime or ownership again after relevant awaits.
 
-Transitions: run (:348–435); finish (:545–608); ask_agent and deliver_later (:1159–1270); usage_loop (:1272–1291); idle_loop (:1321–1341); room/session callbacks and leave tool. Important effects include usage charging, final report, audio/track shutdown and SDK shutdown.
+The final cumulative usage report and event flush remain **one best-effort
+first-attempt operation each**. No financial retries, durable event replay or new
+billing policy were introduced. Pre-session cap stops start no audio and send no
+new final usage. Open-work status derives from owned pending tool tasks, rather
+than an independent counter. Original unlimited/cost-stop/leak-guard tests remain.
 
-Illegal/surprising combinations: terminal closure with active owned work; open_work diverging from live request ownership; a cleanup exception after leaving=true but before `_done.set()`/ctx.shutdown leaves later finish calls returning early. `finish` awaits listener/vision/update shutdown without a cleanup-failed state or one guaranteed finalization edge. The last case is a concrete failure-path possibility visible in control flow, not a runtime reproduction.
+New five-second cooperative waits cover local cleanup; the session close already
+used five seconds. Task drain uses asyncio.wait and retains unfinished ownership.
+asyncio.wait_for requires cancellation cooperation, so arbitrary SDK hangs are
+not proved bounded. Native billing/durability and live-call behavior remain
+outside this local verification.
 
-Worth making explicit: yes, separating call lifecycle from per-request work and speaker state. Blocked for safe full rewrite by missing runnable offline voice runtime gates (baseline collection lacks pytest_asyncio/aiohttp/LiveKit stack). Preserve cost-stop tests: unlimited means no budget hangup, relay stop ends a call, leak guard remains distinct. Add fault-injected cleanup and quick→deferred→cancel/done sequences first. Do not change billing semantics silently.
+#### AUX-H4 — Audio mode and mute application — implemented
 
-#### AUX-H4 — Audio mode and mute application
+The baseline wrote mode and mute intent before awaited SDK effects. Tests first
+reproduced a failed mute followed by a false “Already muted,” partial mode
+application looking complete, and late mode completion after close.
 
-Storage: CallState.mode/muted/linked_identity, SDK input/output options, nullable GroupListeners. Effective audio states include stable duplex with linked human, switching to group, stable group with manual turn detection, switching to duplex, muting/unmuting, applied muted/unmuted and effect failure. Mute and mode are orthogonal; avoid one giant union that forbids legitimate combinations.
+Two orthogonal application lanes now use Unapplied, Applying, Applied and
+ApplyFailed plus monotonic attempt tokens through `apply_transition`. Group and
+Duplex(identity) are tagged mode values; Duplex rejects absent/empty identities.
+The mode and participant commit together only after all SDK steps succeed. A
+failed/uncertain lane must apply again even when the requested target equals its
+last confirmed value. Mode changes serialize, instructions use the target mode,
+and finishing invalidates pending ownership without waiting on the mode lock.
+Resources created during partial application remain owned for cleanup.
 
-Transitions: on_room_changed and switch_mode (:805–854), start_group_listening (:858–875), set_muted (:1009–1031). switch_mode writes logical mode before awaited effect completion; a partial transition/failure can leave stable-looking state describing incomplete SDK effects.
+Proactive say/greeting requires confirmed unmuted output. Interactive group
+model/tool handling remains available while stably or uncertainly muted so the
+existing unmute_self recovery path remains reachable. Lifecycle/epoch checks
+prevent stale judge/silence completions starting new work; they do not invent a
+new provider or text-only mode. The one-shot goodbye while Finishing is preserved.
 
-**Concrete reachable illegal state:** set_muted sets `state.muted = muted` before output.set_audio_enabled. If the SDK call raises, it returns a failure message while retaining the requested flag. A repeated mute then returns “Already muted.” although actual audio output may still be enabled. This is an effect-failure consistency issue, not a cosmetic type objection.
+#### AUX-H5 — Vision consent and frame delivery — implemented
 
-Worth making explicit: yes. First pin fake-output failure/retry, mode-change failure, rapid participant join/leave and overlapping finish. The audio SDK/voice test stack is unavailable, so the full rewrite is blocked until those tests run. Do not alter voice timing, VAD thresholds, echo suppression, silence windows or interruption calibration.
+Paused-encoder tests reproduced frames/JPEG results escaping disable, close,
+re-enable, session replacement, detach and mute/unmute. The first six cases had
+4 failures and 2 positive controls; the expanded baseline had 7 failures and the
+same 2 controls. Later source-before-change tests pinned cleanup ownership,
+immediate seeing retirement and cancellation of stop/detach.
 
-#### AUX-H5 — Vision consent and frame delivery
+`vision_state.py` declares Enabled(generation), Disabled(generation) and
+Closed(generation), with one pure transition function and generation leases.
+Closed absorbs valid events; old leases stay revoked after re-enable. The adapter
+also checks its exact camera-map ownership, stream and model-session identity at
+frame delivery and after executor encoding. Seeing identities derive from
+currently enabled owned streams; queued attributes/status writes check generation.
 
-Storage: Vision.enabled, `_closed`, rt, `_task`, cameras, per-Camera stream/task/latest frame and `_seeing` (vision.py:110–163, :205–231); owner flag in VoiceCall and settings_loop. Effective states: disabled, enabled waiting for track/session, subscribed-muted, streaming, encoding a look, disabling/detaching, stopping, closed.
-
-Transitions: start/stop/set_enabled (:140–178); attach/open/close/detach (:190–275); sampler/trigger/look (:320–380); settings_loop in worker.py:1293–1319.
-
-**Concrete race candidate:** look awaits run_in_executor encoding, then sends a frame without rechecking enabled/_closed. set_enabled(False) flips the flag and schedules detach asynchronously. A previously started encoding can resume and send a frame after disable/close. Sampler, trigger and _send do not independently enforce enabled, relying on track teardown ordering. This is a visible missing revocation check; a deterministic paused-encoder test should establish the required privacy behavior before changing it.
-
-Worth making explicit: yes, with a generation/consent token at frame delivery edges and a terminal closed state, preserving existing media calibration. Blocked by unavailable voice/image SDK test environment and an unpinned consent-revocation race. Test disable and close while encoding, rapid disable/re-enable and old-frame completion before changing behavior. No live camera or model calls are permitted.
+Retirement accounts camera time before awaits and retains actual SDK close tasks.
+Stop schedules every retired close before awaiting; caller cancellation cannot
+cancel those tasks, and later stop joins remaining cleanup even with an empty
+camera map. Ordinary SDK close errors retain best-effort behavior with type-only
+warnings; physical cleanup after an SDK error is not guaranteed. Already-dispatched
+uploads are not recalled. No live camera, model or provider call was needed.
 
 #### AUX-H6 — Feedback fix approval, gating and shipping
 
@@ -564,7 +608,7 @@ Worth making explicit: yes, with separate request/lease states and filesystem/PI
 
 Medium machines remain report-only as the skill requests. In particular, voice updates must deduplicate tool/inbox copies and never speak over a person; watchdogs must distinguish a real completed verdict from a killed unfinished test; eval observers must distinguish an acknowledgement from terminal work. Existing sleeps encode these timing rules and are not removed.
 
-This inventory is complete for the meaningful auxiliary controllers found by the scoped scan, with explicit exclusions above; it is not a proof that every source line lacks another machine. No High machine was rewritten by this read-only subtask. High findings are not resolved by naming their booleans, and missing regression coverage is remaining work, not automatically an external impossibility. In particular AUX-H1 is locally actionable with current TS tooling; blocked native/LiveKit gates apply to their actual adapters, not to the whole list indiscriminately.
+The auxiliary inventory is complete for the meaningful controllers found by the scoped scan, with explicit exclusions above; it is not a proof that every source line lacks another machine. AUX-H2–H5 are implemented and locally verified. AUX-H6–H9 still require hermetic orchestration/process/filesystem fixtures before a high-impact rewrite. Medium route correction remains report-only per the phase rule; working TS tooling is not a blocker. The initial missing voice test prerequisites were resolved with a private, hash-verified wheel-only SDK environment, rather than retained as a blocker.
 
 
 ## Implemented High machine: shell approval
@@ -598,6 +642,53 @@ RSS after the first approval was 106.5 → 126.6 MB. This is an explicit securit
 validation cost, not an application speedup; ordinary index startup avoids it.
 Filesystem caches were not flushed and no app/model latency was measured.
 
+## Implemented High machines: voice lifetime, audio and vision
+
+AUX-H3–H5 now have pure, immutable tagged states in `call_state.py` and
+`vision_state.py`; `worker.py` and `vision.py` own SDK effects and task/stream
+resources. The adapter regressions exercise the actual controllers with synthetic
+local effects under the actual SDK imports. The final guarded gate is **84 passed,
+0 failed, 0 skipped**, 6.203 s wall / 5.21 s pytest: unchanged original 10 tests,
+53 worker cases and 21 vision cases. Network denial and credential/network/
+subprocess audit reported zero access attempts. No provider, device, room join or
+model download ran. One existing pytest import-rewrite warning remains.
+
+The initial worker tests were RED before product changes: 6 failed / 2 controls
+passed (3.070 s). Vision's first six cases were 4 failed / 2 controls passed
+(1.73 s pytest); adding three revocation cases produced the separately retained
+expanded baseline of 7 failed / 2 controls (1.989 s guarded wall). Later tests
+pinned startup, late speech/tool work, stream ownership and cleanup cancellation
+before those respective fixes. The final queued-dispatch regression was 1 failed /
+52 passed before its fix. These are parameterized cases at different stages, not
+counts of distinct bugs; [GATES.json](state-machine-checks/GATES.json) retains each
+exact set/count and duration.
+
+Six Effect Schema/Arbitrary laws, seeds 84001–84006 and 256 generated cases each,
+exercise the actual pure Python transitions through an isolated SDK-free JSONL
+bridge: **1,536 new voice cases**, separate from the approval law's 256. Mandatory
+critical transitions prevent vacuous success; generated traces vary surrounding
+events. Four isolated actual-function mutants falsify five target laws and each
+shrinks once with retained replay data. This is finite exploration, not a proof.
+The final harness is 44/44 (7.300 s); strict typecheck passes (2.558 s).
+
+The two original voice test files and runtime dependency declarations are
+unchanged. A small optional test extra and `voice/tests/README.md` expose routine
+setup. The prior missing SDK/test dependencies were resolved with a private,
+hash-verified wheel-only environment; there is no remaining SDK ABI/setup blocker
+for these local tests. [Retained checks](state-machine-checks/README.md) provide
+portable commands, sanitized gates, source hashes, review and a mutant harness.
+
+Calibration checks preserve all original module constants, VAD/turn handling,
+silence/idle/usage loops, goodbye body, original prompt strings and speech
+arguments; vision encoding/diff, camera-time math and calibration constants are
+unchanged. `respond_group` and `greet` gained ownership guards, so their whole
+functions are deliberately **not** claimed AST-identical. New five-second local
+cleanup waits are distinct from the preserved calibration values, and depend on
+cooperative SDK cancellation. One best-effort final usage report and event flush
+remain unchanged in policy; no financial retry, durable-event replay or live
+media/billing guarantee is asserted. Independent scoped controller review is
+PASS at the source hashes retained in the checks directory.
+
 ## Before / after verification
 
 | Row | Before | After |
@@ -609,27 +700,41 @@ Filesystem caches were not flushed and no app/model latency was measured.
 | Three admission regressions | 24 passed / 3 failed / 0 skipped; 0.730 s | pass |
 | Complete harness suite | original baseline 14 tests | 37 passed / 0 failed / 0 skipped; 1.424 s |
 | Terminal refusal law | absent | 256 Schema-derived cases, fixed seed; included in suite |
+| Final harness including voice | prior approval suite 37 tests | 44 passed / 0 failed / 0 skipped; 7.300 s; typecheck 2.558 s |
+| Original voice tests | initial collection blocked by routine test dependencies; later original 10 pass | unchanged 10 retained within final 84 |
+| Worker controller regressions | initial 6 failed / 2 passed; 3.070 s wall | 53 passed within final guarded gate |
+| Vision controller regressions | initial 4 failed / 2 passed; expanded 7 failed / 2 passed | 21 passed within final guarded gate |
+| Combined actual-SDK gate | original 10 tests; negative controls added before each respective fix | 84 passed / 0 failed / 0 skipped; 6.203 s wall / 5.21 s pytest |
+| New voice transition laws | absent | 6 × 256 = 1,536 cases; seven invalid-protocol requests; 1.308 s |
+| Voice mutation controls | absent | four isolated actual-function mutants detected; five laws falsified, each with one shrink/replay |
 | Raw-command privacy regression | 1 failed before preview removal | pass; hash/IDs retained |
 | Byte-limit negative control | byte-guard-only mutant fails 1/1 | real code passes padded valid-JSON test |
 | Runtime packaging regression | absent | 9 passed / 0 failed / 0 skipped; 2.399 s |
 | Formatting/lint | baseline Rust fmt pass; shellcheck/actionlint unavailable | Rust sources unchanged; diff check passes; actual generated shell parses in packaging suite |
 | Native clippy/check/test/build | blocked | blocked; no passing counts claimed |
 | Full Docker image build/smoke | blocked | blocked; local shell/import checks do not prove a full image |
-| Whole High migration inventory | implicit cross-field lifecycles | approval made explicit; other High prerequisites remain blocked |
+| Whole High migration inventory | implicit cross-field lifecycles | AUX-H2–H5 explicit and locally verified; native/operational High prerequisites remain blocked |
 
-Run `cd harness && pnpm install --frozen-lockfile && pnpm -r typecheck && pnpm -r build && pnpm -r test`,
+Run `cd harness && pnpm install --frozen-lockfile --ignore-scripts && pnpm -r typecheck && pnpm -r build && pnpm -r test`,
 and `python3 image/tests/test_runtime_packaging.py`. The latter uses temporary
 files; its real Effect import check explicitly skips if dependencies are absent.
 The 10-second timeout is source-inspected; no timing-based timeout test is claimed.
-Independent approval and packaging reviews found no remaining actionable defect
-in the implemented scope.
+Independent approval, packaging and voice controller reviews found no remaining
+actionable defect in the implemented scope. Voice commands and compact evidence
+are retained in [state-machine-checks](state-machine-checks/README.md).
 
 ## Needs the owner
 
-Review the intentional fail-closed approval/privacy behavior and approve native
-fork CI (or provide local build capacity) before the remaining High migrations.
-Recommended default: preserve the tested fail-closed boundary and existing
-standalone mode; prioritize room/account lifetime and durable receipt regressions.
-Voice/operational rewrites additionally need the stated offline SDK/fixture gates;
-no production or staging access is needed or authorized. This phase is partial,
-not a claim that every High machine is already converted.
+Review the intentional fail-closed approval/privacy behavior and the reproduced
+voice failure-path fixes, then approve native fork CI (or provide local build
+capacity) before the remaining native High migrations. Preserve standalone mode,
+one best-effort voice final usage report and existing media calibration. Prioritize
+room/account lifetime and durable receipt regressions next.
+
+Operational AUX-H6–H9 still need hermetic controller/process/filesystem fixtures;
+owner decisions are needed where those fixtures reveal ambiguous persisted
+approval, hold or release semantics. No merge, deploy or live access is requested
+to test them. Voice SDK setup is resolved; live provider/device/media behavior,
+native billing/durability and arbitrary SDK cancellation suppression remain
+unverified. The whole-repository Phase 4 exit remains **blocked**, despite the
+implemented and locally passing AUX-H2–H5 scope.
