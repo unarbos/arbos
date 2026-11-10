@@ -7,7 +7,8 @@ python3 .improve/structural-checks/check_mac.py --mutants
 ```
 
 This compiles the production modules used by main/relay/fixture: title8, mentions3,
-expiry2, pending ownership5 and snapshot scheduling7 tests (25total). Three broken
+expiry2, pending ownership5, snapshot scheduling7 and room-document ownership7
+tests (32total). Three broken
 snapshot decisions must fail those same production-module tests. No app, device,
 network, model or environment credentials are loaded. Generated logs/results stay
 ignored. This does not compile the surrounding GPUI caller.
@@ -62,3 +63,18 @@ identity, and all15daemon+4mirror cases pass. Identical copies still wake once;
 completed-page replay remains unchanged. `identity-red.json`, `identity-clippy.json`
 and the final root native gate record distinguish this follow-up from the earlier
 13-case candidate.
+
+Room document work now holds one owned per-room mutex handle, while the registry
+lock only looks up/replaces handles or admits short publication. Same-room Loro
+serialization stays intact. Exact-source replay of snapshot versus newest-message
+read reproduces the old cross-room block, then passes with the new ownership
+boundary; `room-docs.json` distinguishes five assertions from the seven production
+module tests. Replacement, retirement and registry destruction revoke old handles.
+The Phase4 account-session work supplies real account retirement hooks and owns
+the broader store/task lifetime; this module alone does not prove account isolation.
+
+The full actual Mac all-target compiler/Clippy gate passes with warnings denied
+(`native-mac.json`,23.291s). It uses the inspected, checksum-verified pinned public
+media SDK locally, locked offline dependencies, a private target with all workspace
+crate artifacts cleaned, and network denial. It is compiler/lint evidence, not a
+physical device or complete GUI test run. Whole combined tests remain separate.

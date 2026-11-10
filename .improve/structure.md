@@ -4,8 +4,8 @@
 pass yet.** The original two extractions were followed by native durability,
 authorization, pending-room ownership and policy cleanup once targeted package
 builds became feasible. The public contributor fork now runs its own isolated
-CI; upstream approval is not a blanket native blocker. Full local GPUI capacity
-remains below its documented floor. Outstanding work is listed explicitly below.
+CI; upstream approval is not a blanket native blocker. Local build headroom and the pinned media SDK are now available. Actual full Mac
+all-target compiler/Clippy passes with warnings denied. Outstanding work is below.
 
 Scope and all findings are in [backend review](reviews/structure-backend.md),
 [client review](reviews/structure-clients.md) and
@@ -33,7 +33,8 @@ generated TypeScript laws, without converting stable runtime code.
 
 ## Comments and Tests
 
-Both selected additions were applied in order:
+Both additions are applied at completed seams, with test cleanup last; the final
+whole-repository pass follows the remaining implementation:
 
 | Addition | Requested description | Result |
 | --- | --- | --- |
@@ -125,7 +126,7 @@ relay URLs before test execution, and has no unfenced fallback.
 | Room pending |4fail/1same-room control on extracted production module,.236s | Same5pass,.185s; strict std compile pass |
 | Snapshot scheduling |4checks of test-only copies |7actual-source checks pass,.184s;3broken production decisions detected |
 | Mention/expiry policies | Identical original3+2checks pass | Same5checks pass; token copies2→1; two expiry transport→UI edges removed |
-| Mac std-only production modules | Existing title8 plus new pinned original cases |25pass/0fail/ignored;3snapshot mutants detected by portable runner |
+| Mac std-only production modules | Existing title8 plus new pinned original cases |32pass/0fail/ignored, including7room ownership checks;3snapshot mutants detected by portable runner |
 | Route parity | Worker9fail/28pass | Worker37pass,.079s; actual Rust2pass52.109s incl feature compilation |
 | Backend surplus checks | Nine wrappers unused by runtime; baseline44isolated controls pass | Same44isolated native controls pass(42relay+2core); check18.551s/clippy20.687s/build30.601s/format pass |
 | Swift plan contracts | Original12groups contain13failing subcase assertions |12groups pass; no app launch in these local checks |
@@ -144,8 +145,8 @@ commands/hashes and the portable runner are in [structural checks](structural-ch
 
 ## Remaining structural exit
 
-The global doc-map lock/room handle lifetime, stale identity/native callbacks,
-and bounded hydration/upload work remain real follow-up work. The concrete
+The global doc-map lock/room handle lifetime is addressed below. Stale identity/native
+callbacks and bounded hydration/upload work remain real follow-up work. The concrete
 ambient preview-policy/cache mismatch is fixed below. They are not all externally blocked merely because tests must be
 written. The measured roster N+1 is addressed by Phase7 roster batching. Voice ownership is
 superseded by the independently verified Phase4 implementation. Existing protocol
@@ -189,12 +190,50 @@ forced package cleanup prevent cross-snapshot artifact reuse.
 
 Two retained native builder tests cover on→off→on through a warm cache, unchanged
 policy cache hits, plain-link restoration, and independent transcript settings.
-They are pending the final whole-workspace native gate; the extraction does not
-prove the complete renderer or caller compilation. See
+They compile in the actual full Mac all-target gate; runtime execution remains
+pending the combined native suite. The extraction does not prove the complete renderer. See
 [render-policy.json](structural-checks/render-policy.json). No performance claim
 is made for this settings correctness fix.
 
 Independent read-only review confirms policy propagation at every caller and
 cache lookup, unchanged row-version comparison, and removal of all global-switch
-readers. Workspace formatting and whitespace checks pass. Full native builder
-execution remains explicitly pending.
+readers. Workspace formatting and whitespace checks pass. Full native caller compilation
+now passes; builder runtime execution remains pending.
+
+## Owned room documents
+
+The document registry previously held one mutex through snapshot reads, imports,
+exports and writes for every room. It now returns an owned handle after a short
+lookup; expensive work holds only that room's mutex. Core documents contain
+RefCell/Cell, so same-room synchronization stays. Original handles follow room
+sessions and forward-change tasks instead of being looked up again after awaits.
+Replacement/retirement marks handles before detaching them; publication checks
+pointer identity under the registry lock. Publishers are short channel/in-memory
+operations and never await, perform SQL or lock a document. Teardown drops
+resources outside registry/account guards, including poisoned-publisher cleanup.
+
+An exact-source harness pauses the real snapshot method's document collaborator
+and invokes the real newest-message method for another room. The original passes
+four payload/default assertions but fails independent-room progress; the final
+candidate passes all five assertions (19.270s including isolated compilation).
+Seven retained tests of the actual production ownership module cover progress,
+replacement, retirement before/after a wait, and destruction. A mutant removing
+the post-lock retirement check is detected. See
+[room-docs.json](structural-checks/room-docs.json) for hashes and exact scope.
+
+Independent bounded review found no registry/document lock-order defect. This
+change does not fence every mutable Shared background task or store flush. The
+separate Phase4 account close/replacement hooks and fresh per-account Shared
+boundary remain prerequisites for broader account-isolation claims. No measured
+whole-app speedup, cross-room throughput or forced cancellation of running Loro
+work is claimed.
+
+The actual Mac all-target compiler/Clippy gate passes with warnings denied
+(23.291s); see [native-mac.json](structural-checks/native-mac.json). The scoped
+runtime checks do not replace full combined tests or device/media acceptance.
+Native compilation also exposed unused platform-only clipboard helpers and two
+unconstructed commands left by removed grant-picker UI. Clipboard helpers now
+compile only on their actual platform/test path; the unused command/fixture/
+transport arms are removed. Server consent routes, DTOs and authorization stay
+intact. The SF cache type alias and const thread-local initialization preserve
+runtime behavior without lint suppressions.

@@ -44,7 +44,7 @@ mod platform {
     }
 
     thread_local! {
-        static ACTIVE: RefCell<Option<Active>> = RefCell::new(None);
+        static ACTIVE: RefCell<Option<Active>> = const { RefCell::new(None) };
     }
 
     fn content_view(window: &gpui::Window) -> Option<Retained<NSView>> {
