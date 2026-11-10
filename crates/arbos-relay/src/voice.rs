@@ -2019,7 +2019,10 @@ mod inbox_tests {
             &[],
         )
         .await;
-        assert!(event_id.is_some(), "job result still lands in the chat after the call");
+        assert!(
+            event_id.is_some(),
+            "job result still lands in the chat after the call"
+        );
         // Voice path is a no-op: no live call to wake.
         call_update(&state, &chat_ref, &agent, &body).await;
         let (items, _) = state.voice_inbox.take(&call_id, &bubble, 0).await;
