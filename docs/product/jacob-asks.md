@@ -62,7 +62,7 @@ Deleting a row, or the test it names, needs sign-off — see **Changing a guard*
 | `search-settings-ios-2026-10-26` | 2026-10-26 | iPhone | A Settings row opened from search lands on that page. | `SearchSettingsTests` |
 | `secrets-agent-picker-ios-2026-10-26` | 2026-10-26 | iPhone | Every Secrets form picks agents through the one shared picker. | `AgentPickerTests` |
 | `shared-search-matcher-ios-2026-10-26` | 2026-10-26 | iPhone | Entity search ranks exact over prefix over word-start, name before handle, diacritics folded — the Mac's rule. | `SharedSearchTests` |
-| `status-row-gap-ios-2026-10-26` | 2026-10-26 | iPhone | The status row rises into the transcript's tail instead of stacking under it: Grok's 42 px to the last bubble. | `ComposerMetricsTests.testStatusRowRisesIntoTheTranscriptTail` |
+| `status-row-gap-ios-2026-10-26` | 2026-10-26 | iPhone | The status row sits Grok's 42 px under the last bubble rather than stacking beneath it. | `ComposerMetricsTests.testStatusRowSettlesIntoTheTranscriptTail` |
 | `add-your-agent-row-removal-ios-2026-10-27` | 2026-10-27 | iPhone | A pane carries at most one add row. | `OneAddRowPerPaneTests` |
 | `add-your-agent-row-removal-mac-2026-10-27` | 2026-10-27 | Mac | The same one-add-row rule on the Mac's panes. | `OneAddRowPerPaneTests` |
 | `chat-markdown-ios-2026-10-27` | 2026-10-27 | iPhone | Chat markdown parses the full block set, quotes nesting inside quotes. | `ChatMarkdownTests` |
@@ -113,25 +113,13 @@ Deleting a row, or the test it names, needs sign-off — see **Changing a guard*
 | `iphone-bottom-fade-newest-bubble-2026-11-01` | 2026-11-01 | iPhone | The bottom fade is placed from the composer's controls, so a status row or error note does not drag it up over the rows. | `BottomBarFadeTests` |
 | `iphone-blank-chat-on-open-2026-11-03` | 2026-11-03 | iPhone | A chat's first frame has its rows: no blank transcript on open. | `TranscriptFirstFrameUITests` |
 | `time-dividers-2026-11-05` | 2026-11-05 | iPhone | A centred time line appears on a new local day or an hour's gap, by the core's shared rule. | `TimeDividerTests` |
+| `typing-anchor-2026-11-08` | 2026-11-08 | iPhone | The presence row belongs to the end of the transcript: it scrolls away with the end it describes rather than riding the bar over old bubbles. | `PresenceAnchorUITests` |
 | `attachment-in-composer-2026-11-09` | 2026-11-09 | iPhone | A picked image shows as a thumbnail inside the composer box, Grok-style, before it is sent. | `ComposerParityUITests.testAStagedPicturePreviewsInsideTheComposer` |
+| `composer-hold-highlight-2026-11-09` | 2026-11-09 | iPhone | Resting a finger on the composer lights the box, as Grok's does, while the system menu comes up. | `ComposerParityUITests.testTheBoxVisiblyLightsUnderAHoldingFinger` |
 | `connection-pill` | — | iPhone | The header pill shows the worst of the disagreeing signals, and says nothing at all while the link is live. | `JacobAskGuardTests.testTheConnectionPillShowsTheWorstSignalAndStaysQuietWhenLive` |
 | `in-call-bar` | — | iPhone | The in-call strip's chip stays 36 pt, a recorded exception to the one app-wide control height. | `JacobAskGuardTests.testTheInCallChipKeepsItsRecordedException` |
 | `reply-preview-fixed-height` | — | iPhone | The reply bar above the field is one row high whatever it quotes: the quote is flattened to a line and capped. | `JacobAskGuardTests.testTheReplyPreviewIsOneRowWhateverItQuotes` |
 | `2005` | — | iPhone | After an unblock, the rooms standing refused are asked to resend; a room that is not refused ignores the nudge. | `SessionRoomTests.testChatToRetryNamesOnlyMembershipAndSettingsChanges` |
-
-## Waiting on a tag
-
-An ask is registered once the code answering it carries a `[feedback …]` tag, which is what ties
-a row to its guard. This one is answered and guarded but not yet tagged, so it cannot be enforced
-here yet.
-
-| ask | asked | what it must do | guard | what it needs |
-| --- | --- | --- | --- | --- |
-| touch-and-hold highlight | 2026-11-09 11:55 | Holding a finger on the composer lights the box. | `ComposerParityUITests.testTheBoxLightsUnderAHoldingFinger` | A `[feedback composer-hold-highlight-2026-11-09]` tag on the code that drives the lit state, then a row above. |
-
-Worth knowing, from the lane that built it: `ControlSurface` has always taken a `pressed` flag and
-`Theme.controlPill` has always plumbed it, but nothing ever passed `true` — so the highlight is new
-rather than regressed, and a test that only checked the flag existed would have passed throughout.
 
 ## Superseded
 

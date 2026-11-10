@@ -102,29 +102,26 @@ def test_cases(root: Path) -> list[TestCase]:
 
 ROW_RE = re.compile(r"^\|\s*`([a-z0-9][a-z0-9-]*)`\s*\|(.+)\|\s*`([A-Za-z0-9_.]+)`\s*\|\s*$")
 SUPERSEDED_HEADING = "## Superseded"
-PENDING_HEADING = "## Waiting on a tag"
 
 
 def read_registry(root: Path) -> tuple[dict[str, str], set[str], list[str]]:
     """Registered asks and their guards, the superseded ones, and any parse complaints.
 
-    Rows under 'Waiting on a tag' and 'Superseded' are prose, not promises: an ask there has no
-    tag to tie a guard to yet, or has been answered by a later ask.
+    A row is a promise until the 'Superseded' heading, after which it is history: an ask there
+    was answered by a later one and is kept so its tag still resolves.
     """
     path = root / REGISTRY
     if not path.exists():
         # A tree from before the register: it promised nothing, so nothing can be lost.
         return {}, set(), []
     text = path.read_text(encoding="utf-8")
-    pending_at = text.find(PENDING_HEADING)
     superseded_at = text.find(SUPERSEDED_HEADING)
     if superseded_at < 0:
         return {}, set(), [f"{REGISTRY} has no '{SUPERSEDED_HEADING}' section"]
 
-    live_end = pending_at if 0 <= pending_at < superseded_at else superseded_at
     guarded: dict[str, str] = {}
     problems: list[str] = []
-    for line in text[:live_end].splitlines():
+    for line in text[:superseded_at].splitlines():
         if (m := ROW_RE.match(line)) is None:
             continue
         ask, guard = m.group(1), m.group(3)
