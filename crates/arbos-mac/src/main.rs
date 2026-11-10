@@ -8,6 +8,7 @@ mod calls;
 mod chat_search;
 mod chat_title;
 mod draft_dm;
+mod external_open;
 mod image_picker;
 mod jobtabs;
 mod mentions;
