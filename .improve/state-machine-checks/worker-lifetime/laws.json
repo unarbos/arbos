@@ -1,0 +1,18 @@
+{
+  "command": [
+    "/usr/bin/sandbox-exec",
+    "-f",
+    "<owned-checkout>/.improve/evidence/rpc-sessions/loopback-only.sb",
+    "node",
+    "--test",
+    "worker-lifetime-laws.test.ts"
+  ],
+  "exit": 0,
+  "seconds": 1.0621567079797387,
+  "source_hashes": {
+    "crates/arbos-agentd/src/worker_lifetime.rs": "4be122177185843850e5241e7217bdeb49e2b90192bc282f55386b743ab56243",
+    ".improve/state-machine-checks/worker_lifetime_bridge.rs": "8f27c5644e089ad4e889d59b6902b7ff19528820db3e63c6cdd183109e72b3cc",
+    "harness/arbos-pi-ext/worker-lifetime-laws.test.ts": "9c7c7daff3959f1d4436212dfcb921399beaf6513dbfe8e6c78aca105d3b8656"
+  },
+  "source_unchanged": true
+}

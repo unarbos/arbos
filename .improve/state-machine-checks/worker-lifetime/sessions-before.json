@@ -1,0 +1,30 @@
+{
+  "command": [
+    "/usr/bin/sandbox-exec",
+    "-f",
+    "<owned-checkout>/.improve/evidence/rpc-sessions/loopback-only.sb",
+    "cargo",
+    "test",
+    "--locked",
+    "--offline",
+    "-p",
+    "arbos-agentd",
+    "harness::worker_owner_regressions::",
+    "--",
+    "--test-threads=2"
+  ],
+  "exit": 101,
+  "seconds": 34.439780083019286,
+  "results": [
+    [
+      "FAILED",
+      "2",
+      "8",
+      "0"
+    ]
+  ],
+  "source_unchanged": true,
+  "source_sha256": "89c5c13e47f92db6287a1a3f545cf69e12e1436dc16d6b5c909cdb69abf2ef17",
+  "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+  "scope": "actual pinned43b839 source plus synthetic tests; own target/workspace packages cleaned; validated loopback-only fence; fresh HOME/no inherited opt-ins"
+}

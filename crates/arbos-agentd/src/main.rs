@@ -130,6 +130,7 @@ mod turn_marks_tests;
 mod vault;
 mod voice;
 mod web;
+mod worker_lifetime;
 #[cfg(test)]
 mod worker_model_refusal_tests;
 #[cfg(test)]

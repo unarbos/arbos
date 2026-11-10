@@ -363,50 +363,217 @@ pub fn translate_rpc_event(e: &Event) -> Vec<AgentEvent> {
     }
 }
 
-/// Shared implementation for the two pi-schema RPC harnesses (pi, prime-agent).
+/// Shared resource registry for both pi-schema worker adapters. Stream senders belong to the
+/// same admitted resource as the child; a subscription alone never owns process publication.
+struct RpcWorker {
+    child: Arc<RpcChild>,
+    stream: broadcast::Sender<AgentEvent>,
+}
 struct RpcSessions {
-    children: Mutex<HashMap<String, Arc<RpcChild>>>,
-    streams: Mutex<HashMap<String, broadcast::Sender<AgentEvent>>>,
+    state: Mutex<crate::worker_lifetime::State<Arc<RpcWorker>>>,
+    changed: tokio::sync::Notify,
 }
 
-impl RpcSessions {
-    fn new() -> Self {
-        Self {
-            children: Mutex::new(HashMap::new()),
-            streams: Mutex::new(HashMap::new()),
+#[derive(Default)]
+struct OwnedWorkers(Vec<Arc<RpcChild>>);
+impl OwnedWorkers {
+    fn own(&mut self, child: Arc<RpcChild>) {
+        if !self.0.iter().any(|held| Arc::ptr_eq(held, &child)) {
+            self.0.push(child);
         }
     }
-
-    async fn pgid(&self, session_id: &str) -> Option<u32> {
-        self.children.lock().await.get(session_id)?.tree().pgid
+    async fn close(&mut self) {
+        while let Some(child) = self.0.last().cloned() {
+            child.shutdown().await;
+            self.0.pop();
+        }
     }
-
-    async fn attach(
+}
+impl Drop for OwnedWorkers {
+    fn drop(&mut self) {
+        for child in self.0.drain(..) {
+            child.retire_owned();
+        }
+    }
+}
+struct WorkerBoot {
+    sessions: Arc<RpcSessions>,
+    id: String,
+    ticket: crate::worker_lifetime::Ticket,
+    owned: OwnedWorkers,
+    armed: bool,
+}
+impl Drop for WorkerBoot {
+    fn drop(&mut self) {
+        use crate::worker_lifetime::Event;
+        if !self.armed {
+            return;
+        }
+        if let Ok(mut state) = self.sessions.state.try_lock() {
+            if let crate::worker_lifetime::Action::Retired(resource) =
+                state.transition(Event::Abort {
+                    id: self.id.clone(),
+                    ticket: self.ticket,
+                })
+            {
+                drop(resource);
+            }
+            self.sessions.changed.notify_waiters();
+        } else if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let sessions = self.sessions.clone();
+            let id = self.id.clone();
+            let ticket = self.ticket;
+            runtime.spawn(async move {
+                if let crate::worker_lifetime::Action::Retired(resource) = sessions
+                    .state
+                    .lock()
+                    .await
+                    .transition(Event::Abort { id, ticket })
+                {
+                    drop(resource);
+                }
+                sessions.changed.notify_waiters();
+            });
+        }
+    }
+}
+struct WorkerStop {
+    sessions: Arc<RpcSessions>,
+    id: String,
+    ticket: crate::worker_lifetime::Ticket,
+    owned: Option<OwnedWorkers>,
+}
+impl WorkerStop {
+    async fn finish(mut self) {
+        if let Some(owned) = &mut self.owned {
+            owned.close().await;
+        }
+        self.sessions.stopped(&self.id, self.ticket).await;
+        self.owned.take();
+    }
+}
+impl Drop for WorkerStop {
+    fn drop(&mut self) {
+        let Some(mut owned) = self.owned.take() else {
+            return;
+        };
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let sessions = self.sessions.clone();
+            let id = self.id.clone();
+            let ticket = self.ticket;
+            runtime.spawn(async move {
+                owned.close().await;
+                sessions.stopped(&id, ticket).await;
+            });
+        }
+        // Without a runtime, OwnedWorkers falls back to captured-child retirement. A stopped
+        // runtime cannot admit a new worker or promise a synchronous reap.
+    }
+}
+impl RpcSessions {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(Default::default()),
+            changed: tokio::sync::Notify::new(),
+        })
+    }
+    async fn begin(self: &Arc<Self>, id: &str) -> Result<WorkerBoot> {
+        use crate::worker_lifetime::{Action, Event};
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let action = self
+                .state
+                .lock()
+                .await
+                .transition(Event::Begin(id.to_owned()));
+            match action {
+                Action::Begun { ticket, retired } => {
+                    let mut owned = OwnedWorkers::default();
+                    if let Some(resource) = retired {
+                        owned.own(resource.child.clone());
+                    }
+                    return Ok(WorkerBoot {
+                        sessions: self.clone(),
+                        id: id.to_owned(),
+                        ticket,
+                        owned,
+                        armed: true,
+                    });
+                }
+                Action::Wait => changed.await,
+                Action::Closed(resources) => {
+                    for resource in resources {
+                        resource.child.clone().retire_owned();
+                    }
+                    return Err(anyhow!("worker adapter is shut down"));
+                }
+                _ => unreachable!("Begin returns admission, wait or terminal refusal"),
+            }
+        }
+    }
+    async fn capture(&self, boot: &mut WorkerBoot, child: Arc<RpcChild>) -> Result<()> {
+        use crate::worker_lifetime::{Action, Event};
+        // Capture before the first cancellable registry/boot await.
+        boot.owned.own(child.clone());
+        let (stream, _) = broadcast::channel(4096);
+        let resource = Arc::new(RpcWorker { child, stream });
+        let action = self.state.lock().await.transition(Event::Capture {
+            id: boot.id.clone(),
+            ticket: boot.ticket,
+            resource: resource.clone(),
+        });
+        match action {
+            Action::Accepted => Ok(()),
+            Action::Rejected(refused) => {
+                drop(refused);
+                Err(anyhow!("worker admission was retired"))
+            }
+            _ => Err(anyhow!("worker admission was retired")),
+        }
+    }
+    async fn publish(
         &self,
-        session_id: &str,
-        child: Arc<RpcChild>,
+        boot: &mut WorkerBoot,
         settled_is_agent_end: bool,
-    ) -> broadcast::Receiver<AgentEvent> {
-        let (tx, rx) = broadcast::channel(4096);
-        self.streams
-            .lock()
-            .await
-            .insert(session_id.to_owned(), tx.clone());
-        self.children
-            .lock()
-            .await
-            .insert(session_id.to_owned(), child.clone());
-        let mut events = child.subscribe();
-        let child2 = child.clone();
+        record: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
+        use crate::worker_lifetime::{Action, Event};
+        let mut state = self.state.lock().await;
+        if !state
+            .entry(&boot.id)
+            .is_some_and(|entry| entry.starting(boot.ticket))
+        {
+            return Err(anyhow!("worker admission was retired"));
+        }
+        record()?;
+        if !matches!(
+            state.transition(Event::Publish {
+                id: boot.id.clone(),
+                ticket: boot.ticket
+            }),
+            Action::Accepted
+        ) {
+            return Err(anyhow!("worker admission was retired"));
+        }
+        let resource = state
+            .entry(&boot.id)
+            .and_then(|entry| entry.ready())
+            .expect("accepted Publish has a resource")
+            .clone();
+        boot.owned.0.clear();
+        boot.armed = false;
+        drop(state);
+        let mut events = resource.child.subscribe();
         tokio::spawn(async move {
             loop {
                 match events.recv().await {
                     Ok(e) => {
-                        // Prime has no agent_settled: treat agent_end as Done (design §4.4.2).
                         if settled_is_agent_end {
-                            if let Event::AgentEnd { will_retry, .. } = &e {
+                            if let arbos_core::rpc::Event::AgentEnd { will_retry, .. } = &e {
                                 if !*will_retry {
-                                    let _ = tx.send(AgentEvent::Done {
+                                    let _ = resource.stream.send(AgentEvent::Done {
                                         aborted: false,
                                         error: None,
                                     });
@@ -414,11 +581,12 @@ impl RpcSessions {
                                 continue;
                             }
                         }
-                        for ae in translate_rpc_event(&e) {
-                            let _ = tx.send(ae);
+                        for event in translate_rpc_event(&e) {
+                            let _ = resource.stream.send(event);
                         }
-                        if matches!(e, Event::Other) && !child2.is_alive() {
-                            let _ = tx.send(AgentEvent::Done {
+                        if matches!(e, arbos_core::rpc::Event::Other) && !resource.child.is_alive()
+                        {
+                            let _ = resource.stream.send(AgentEvent::Done {
                                 aborted: true,
                                 error: Some("child exited".into()),
                             });
@@ -430,75 +598,167 @@ impl RpcSessions {
                 }
             }
         });
-        rx
+        Ok(())
     }
-
-    async fn child(&self, session_id: &str) -> Result<Arc<RpcChild>> {
-        self.children
+    async fn child(&self, id: &str) -> Result<Arc<RpcChild>> {
+        self.state
             .lock()
             .await
-            .get(session_id)
-            .cloned()
-            .ok_or_else(|| anyhow!("session {session_id} is not open"))
+            .entry(id)
+            .and_then(|entry| entry.ready())
+            .map(|resource| resource.child.clone())
+            .ok_or_else(|| anyhow!("session {id} is not open"))
     }
-
-    /// Live children with their own idle clocks. A contended lock yields nothing, never a guess.
+    fn stream(&self, id: &str) -> Option<broadcast::Receiver<AgentEvent>> {
+        self.state
+            .try_lock()
+            .ok()?
+            .entry(id)?
+            .ready()
+            .map(|resource| resource.stream.subscribe())
+    }
+    fn is_open(&self, id: &str) -> Option<bool> {
+        let state = self.state.try_lock().ok()?;
+        if state.entry(id).is_some_and(|entry| entry.stopping()) {
+            return None;
+        }
+        Some(
+            state
+                .entry(id)
+                .and_then(|entry| entry.ready())
+                .is_some_and(|resource| resource.child.is_alive()),
+        )
+    }
+    async fn pgid(&self, id: &str) -> Option<u32> {
+        self.child(id).await.ok()?.tree().pgid
+    }
     fn retained(&self) -> Vec<RetainedWorker> {
-        let Ok(children) = self.children.try_lock() else {
+        let Ok(state) = self.state.try_lock() else {
             return Vec::new();
         };
-        children
-            .iter()
-            .filter(|(_, ch)| ch.is_alive())
-            .map(|(session_id, ch)| RetainedWorker {
-                session_id: session_id.clone(),
-                pid: ch.pid(),
-                idle_ms: ch.idle_ms(),
+        state
+            .ready()
+            .filter(|(_, resource)| resource.child.is_alive())
+            .map(|(id, resource)| RetainedWorker {
+                session_id: id.to_owned(),
+                pid: resource.child.pid(),
+                idle_ms: resource.child.idle_ms(),
             })
             .collect()
     }
-
-    /// Remove and close this session's child if its clock is still at least `min_idle_ms` old.
-    ///
-    /// The clock is re-read **inside** the lock, which is what makes this safe to call from a
-    /// pass that decided to evict some milliseconds ago: a session prompted in that window has a
-    /// clock of nearly zero and is kept, so the resume branch at `run_subagent` is never raced
-    /// into prompting a child that is being closed underneath it.
-    ///
-    /// `shutdown` runs after the removal and outside the lock. Holding the map across its
-    /// five-second wait would stall every other session's `prompt`, and the child is already
-    /// unreachable once it is out of the map.
-    async fn stop_if_idle(&self, session_id: &str, min_idle_ms: u64) -> bool {
-        let child = {
-            let mut children = self.children.lock().await;
-            match children.get(session_id) {
-                Some(ch) if ch.idle_ms() >= min_idle_ms => children.remove(session_id),
-                _ => None,
+    async fn stopped(&self, id: &str, ticket: crate::worker_lifetime::Ticket) {
+        let _ = self
+            .state
+            .lock()
+            .await
+            .transition(crate::worker_lifetime::Event::Stopped {
+                id: id.to_owned(),
+                ticket,
+            });
+        self.changed.notify_waiters();
+    }
+    async fn stop(self: &Arc<Self>, id: &str, min_idle_ms: Option<u64>) -> bool {
+        use crate::worker_lifetime::{Action, Entry, Event};
+        let mut waiting_for = None;
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let action = {
+                let mut state = self.state.lock().await;
+                // A stop that observed A's cleanup never gains authority over a later B.
+                if let Some(waited) = waiting_for {
+                    if !matches!(state.entry(id), Some(Entry::Stopping {ticket,..}) if *ticket == waited)
+                    {
+                        return true;
+                    }
+                }
+                if let Some(min) = min_idle_ms {
+                    if !state
+                        .entry(id)
+                        .and_then(|entry| entry.ready())
+                        .is_some_and(|resource| resource.child.idle_ms() >= min)
+                    {
+                        return false;
+                    }
+                }
+                if let Some(Entry::Stopping { ticket, .. }) = state.entry(id) {
+                    waiting_for = Some(*ticket);
+                }
+                state.transition(Event::Stop(id.to_owned()))
+            };
+            match action {
+                Action::Stopping { ticket, resource } => {
+                    let mut owned = OwnedWorkers::default();
+                    if let Some(resource) = resource {
+                        owned.own(resource.child.clone());
+                    }
+                    WorkerStop {
+                        sessions: self.clone(),
+                        id: id.to_owned(),
+                        ticket,
+                        owned: Some(owned),
+                    }
+                    .finish()
+                    .await;
+                    return true;
+                }
+                Action::Wait => changed.await,
+                Action::Missing | Action::Closed(_) => return false,
+                _ => unreachable!("Stop returns cleanup, wait or absence"),
             }
-        };
-        match child {
-            Some(ch) => {
-                ch.shutdown().await;
-                true
-            }
-            None => false,
         }
     }
-
-    #[cfg(test)]
-    async fn test_age_idle_clock(&self, session_id: &str, ms: u64) -> Option<()> {
-        self.children.lock().await.get(session_id).map(|ch| {
-            ch.test_age_idle_clock(ms);
-        })
+    async fn shutdown(&self) {
+        let action = self
+            .state
+            .lock()
+            .await
+            .transition(crate::worker_lifetime::Event::Shutdown);
+        self.changed.notify_waiters();
+        let mut owned = OwnedWorkers::default();
+        if let crate::worker_lifetime::Action::Closed(resources) = action {
+            for resource in resources {
+                owned.own(resource.child.clone());
+            }
+        }
+        owned.close().await;
     }
-
+    async fn stop_if_idle(self: &Arc<Self>, id: &str, min_idle_ms: u64) -> bool {
+        self.stop(id, Some(min_idle_ms)).await
+    }
+    #[cfg(test)]
+    async fn attach(self: &Arc<Self>, id: &str, child: Arc<RpcChild>, settled_is_agent_end: bool) {
+        let mut boot = match self.begin(id).await {
+            Ok(boot) => boot,
+            Err(_) => {
+                child.retire_owned();
+                return;
+            }
+        };
+        boot.owned.close().await;
+        if self.capture(&mut boot, child).await.is_ok() {
+            let _ = self
+                .publish(&mut boot, settled_is_agent_end, || Ok(()))
+                .await;
+        }
+    }
+    #[cfg(test)]
+    async fn test_age_idle_clock(&self, id: &str, ms: u64) -> Option<()> {
+        self.state
+            .lock()
+            .await
+            .entry(id)?
+            .ready()
+            .map(|resource| resource.child.test_age_idle_clock(ms))
+    }
     #[cfg(test)]
     async fn test_hold_children_until(
         &self,
         ready: tokio::sync::oneshot::Sender<()>,
         release: tokio::sync::oneshot::Receiver<()>,
     ) {
-        let _held = self.children.lock().await;
+        let _held = self.state.lock().await;
         let _ = ready.send(());
         let _ = release.await;
     }
@@ -534,7 +794,7 @@ pub struct PrimeAdapter {
     /// The agent's live model slots: a child is spawned with the model the agent has now, not
     /// with the one the box booted with (Jacob, 2026-11-04).
     models: LiveModels,
-    sessions: RpcSessions,
+    sessions: Arc<RpcSessions>,
 }
 
 impl PrimeAdapter {
@@ -651,6 +911,8 @@ impl HarnessAdapter for PrimeAdapter {
     }
 
     async fn start(&self, req: StartRequest) -> Result<()> {
+        let mut boot = self.sessions.begin(&req.session_id).await?;
+        boot.owned.close().await;
         // Prime has no --session-id: it mints a UUID; we keep subagent_id → uuid for --resume.
         let extra = vec![
             "--provider".into(),
@@ -663,6 +925,7 @@ impl HarnessAdapter for PrimeAdapter {
         let child = self.spawn(&req.session_id, &extra, &req.cwd).await?;
         // A child that never answers `get_state` (a thrashing box) is killed here, not left
         // running: the reader task holds the Arc, so dropping it would not reap the process.
+        self.sessions.capture(&mut boot, child.clone()).await?;
         let state = match child
             .call_timeout(
                 RpcCommand::GetState {
@@ -682,20 +945,25 @@ impl HarnessAdapter for PrimeAdapter {
             .get("sessionFile")
             .and_then(Value::as_str)
             .map(str::to_owned);
-        if let Some(uuid) = state.get("sessionId").and_then(Value::as_str) {
-            self.store
-                .meta_set(&format!("prime_uuid:{}", req.session_id), uuid)?;
-        }
-        self.store.upsert_session(
-            &req.session_id,
-            Some(&req.session_id),
-            path.as_deref(),
-            &req.cwd.display().to_string(),
-            &req.model,
-            "prime",
-            "subagent",
-        )?;
-        self.sessions.attach(&req.session_id, child, true).await;
+        self.sessions
+            .publish(&mut boot, true, || {
+                if let Some(uuid) = state.get("sessionId").and_then(Value::as_str) {
+                    self.store
+                        .meta_set(&format!("prime_uuid:{}", req.session_id), uuid)?;
+                }
+                self.store.upsert_session(
+                    &req.session_id,
+                    Some(&req.session_id),
+                    path.as_deref(),
+                    &req.cwd.display().to_string(),
+                    &req.model,
+                    "prime",
+                    "subagent",
+                )?;
+                Ok(())
+            })
+            .await?;
+
         Ok(())
     }
 
@@ -706,6 +974,8 @@ impl HarnessAdapter for PrimeAdapter {
         if self.is_open(session_id).unwrap_or(false) {
             return Ok(());
         }
+        let mut boot = self.sessions.begin(session_id).await?;
+        boot.owned.close().await;
         let uuid = self
             .store
             .meta_get(&format!("prime_uuid:{session_id}"))?
@@ -719,7 +989,8 @@ impl HarnessAdapter for PrimeAdapter {
             resume_model(&self.store, &self.models, session_id).await,
         ];
         let child = self.spawn(session_id, &extra, &self.cfg.work_dir).await?;
-        self.sessions.attach(session_id, child, true).await;
+        self.sessions.capture(&mut boot, child).await?;
+        self.sessions.publish(&mut boot, true, || Ok(())).await?;
         Ok(())
     }
 
@@ -764,11 +1035,7 @@ impl HarnessAdapter for PrimeAdapter {
     }
 
     fn stream(&self, session_id: &str) -> Option<broadcast::Receiver<AgentEvent>> {
-        self.sessions
-            .streams
-            .try_lock()
-            .ok()
-            .and_then(|s| s.get(session_id).map(|tx| tx.subscribe()))
+        self.sessions.stream(session_id)
     }
 
     /// Prime has no `get_entries`: tail the JSONL by byte offset (design §4.4.2).
@@ -785,34 +1052,18 @@ impl HarnessAdapter for PrimeAdapter {
         tail_jsonl(&path, cursor)
     }
 
-    /// The guard is held across `shutdown` — the `if let` scrutinee's temporary lives to the end
-    /// of the block — so this is the hold `HarnessAdapter::is_open` answers `None` for. Not an
-    /// accident to tidy away: a `remove` that dropped the guard first would let a concurrent
-    /// sweep read a session that is still shutting down as already gone.
+    /// Reusable stop retains unknown liveness until its owned cleanup completes.
     async fn stop(&self, session_id: &str) -> Result<()> {
-        if let Some(c) = self.sessions.children.lock().await.remove(session_id) {
-            c.shutdown().await;
-        }
+        self.sessions.stop(session_id, None).await;
         Ok(())
     }
 
     async fn shutdown_all(&self) {
-        let children: Vec<Arc<RpcChild>> = self
-            .sessions
-            .children
-            .lock()
-            .await
-            .drain()
-            .map(|(_, c)| c)
-            .collect();
-        for c in children {
-            c.shutdown().await;
-        }
+        self.sessions.shutdown().await;
     }
 
     fn is_open(&self, session_id: &str) -> Option<bool> {
-        let children = self.sessions.children.try_lock().ok()?;
-        Some(children.get(session_id).is_some_and(|ch| ch.is_alive()))
+        self.sessions.is_open(session_id)
     }
 
     async fn child_pgid(&self, session_id: &str) -> Option<u32> {
@@ -834,7 +1085,7 @@ pub struct PiAdapter {
     cfg: Arc<Config>,
     store: Store,
     models: LiveModels,
-    sessions: RpcSessions,
+    sessions: Arc<RpcSessions>,
 }
 
 impl PiAdapter {
@@ -963,6 +1214,8 @@ impl HarnessAdapter for PiAdapter {
     }
 
     async fn start(&self, req: StartRequest) -> Result<()> {
+        let mut boot = self.sessions.begin(&req.session_id).await?;
+        boot.owned.close().await;
         let extra = vec!["--session-id".into(), req.session_id.clone()];
         let model = if req.model.trim().is_empty() {
             self.models
@@ -983,6 +1236,7 @@ impl HarnessAdapter for PiAdapter {
                 &model,
             )
             .await?;
+        self.sessions.capture(&mut boot, child.clone()).await?;
         let state = child
             .call_ok(RpcCommand::GetState {
                 id: child.next_id("st"),
@@ -993,16 +1247,21 @@ impl HarnessAdapter for PiAdapter {
             .get("sessionFile")
             .and_then(Value::as_str)
             .map(str::to_owned);
-        self.store.upsert_session(
-            &req.session_id,
-            Some(&req.session_id),
-            path.as_deref(),
-            &req.cwd.display().to_string(),
-            &req.model,
-            "pi",
-            "subagent",
-        )?;
-        self.sessions.attach(&req.session_id, child, false).await;
+        self.sessions
+            .publish(&mut boot, false, || {
+                self.store.upsert_session(
+                    &req.session_id,
+                    Some(&req.session_id),
+                    path.as_deref(),
+                    &req.cwd.display().to_string(),
+                    &req.model,
+                    "pi",
+                    "subagent",
+                )?;
+                Ok(())
+            })
+            .await?;
+
         Ok(())
     }
 
@@ -1013,6 +1272,8 @@ impl HarnessAdapter for PiAdapter {
         if self.is_open(session_id).unwrap_or(false) {
             return Ok(());
         }
+        let mut boot = self.sessions.begin(session_id).await?;
+        boot.owned.close().await;
         let extra = vec!["--session".into(), session_id.to_owned()];
         let pack = std::fs::read_to_string(
             self.cfg
@@ -1025,7 +1286,8 @@ impl HarnessAdapter for PiAdapter {
         let child = self
             .spawn(session_id, &extra, &self.cfg.work_dir, &pack, &model)
             .await?;
-        self.sessions.attach(session_id, child, false).await;
+        self.sessions.capture(&mut boot, child).await?;
+        self.sessions.publish(&mut boot, false, || Ok(())).await?;
         Ok(())
     }
 
@@ -1070,11 +1332,7 @@ impl HarnessAdapter for PiAdapter {
     }
 
     fn stream(&self, session_id: &str) -> Option<broadcast::Receiver<AgentEvent>> {
-        self.sessions
-            .streams
-            .try_lock()
-            .ok()
-            .and_then(|s| s.get(session_id).map(|tx| tx.subscribe()))
+        self.sessions.stream(session_id)
     }
 
     async fn read_history(
@@ -1101,34 +1359,18 @@ impl HarnessAdapter for PiAdapter {
         Ok((entries, leaf))
     }
 
-    /// The guard is held across `shutdown` — the `if let` scrutinee's temporary lives to the end
-    /// of the block — so this is the hold `HarnessAdapter::is_open` answers `None` for. Not an
-    /// accident to tidy away: a `remove` that dropped the guard first would let a concurrent
-    /// sweep read a session that is still shutting down as already gone.
+    /// Reusable stop retains unknown liveness until its owned cleanup completes.
     async fn stop(&self, session_id: &str) -> Result<()> {
-        if let Some(c) = self.sessions.children.lock().await.remove(session_id) {
-            c.shutdown().await;
-        }
+        self.sessions.stop(session_id, None).await;
         Ok(())
     }
 
     async fn shutdown_all(&self) {
-        let children: Vec<Arc<RpcChild>> = self
-            .sessions
-            .children
-            .lock()
-            .await
-            .drain()
-            .map(|(_, c)| c)
-            .collect();
-        for c in children {
-            c.shutdown().await;
-        }
+        self.sessions.shutdown().await;
     }
 
     fn is_open(&self, session_id: &str) -> Option<bool> {
-        let children = self.sessions.children.try_lock().ok()?;
-        Some(children.get(session_id).is_some_and(|ch| ch.is_alive()))
+        self.sessions.is_open(session_id)
     }
 
     async fn child_pgid(&self, session_id: &str) -> Option<u32> {
@@ -1625,4 +1867,369 @@ pub fn entry_text(entry: &Value) -> Option<(String, String)> {
         return None;
     }
     Some((role, text))
+}
+
+#[cfg(test)]
+mod worker_owner_regressions {
+    use super::*;
+    use std::future::Future;
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::Duration;
+
+    const SESSION: &str = "01WORKEROWNERSHIPFIXTURE00";
+    const STUB: &str = r#"#!/usr/bin/env python3
+import json, select, sys, time
+from pathlib import Path
+marker, release, exited, finish = Path(@MARKER@), Path(@RELEASE@), Path(@EXITED@), Path(@FINISH@)
+try:
+    while not finish.exists():
+        if not select.select([sys.stdin], [], [], 0.01)[0]:
+            continue
+        line = sys.stdin.readline()
+        if not line:
+            if (marker.parent / "pause-close").exists():
+                (marker.parent / "closing").write_text("closing")
+                while not (marker.parent / "close-release").exists():
+                    time.sleep(0.005)
+            break
+        command = json.loads(line)
+        if command.get("type") == "get_state":
+            marker.write_text("waiting")
+            while not release.exists() and not finish.exists():
+                if select.select([sys.stdin], [], [], 0.01)[0] and not sys.stdin.readline():
+                    sys.exit(0)
+            if finish.exists():
+                break
+        print(json.dumps({"type":"response", "command":command.get("type"), "id":command.get("id"), "success":True, "data":{}}), flush=True)
+finally:
+    exited.write_text("exited")
+"#;
+
+    struct Fixture {
+        adapter: Arc<dyn HarnessAdapter>,
+        store: Store,
+        root: PathBuf,
+        agent_root: PathBuf,
+        marker: PathBuf,
+        release: PathBuf,
+        exited: PathBuf,
+        finish: PathBuf,
+    }
+    impl Fixture {
+        async fn new(prime: bool) -> Self {
+            let root = std::env::temp_dir()
+                .join(format!("arbos-worker-owned-{}", arbos_core::ids::ulid()));
+            std::fs::create_dir_all(&root).unwrap();
+            let script = root.join("worker.py");
+            let marker = root.join("marker");
+            let release = root.join("release");
+            let exited = root.join("exited");
+            let finish = root.join("finish");
+            std::fs::write(
+                &script,
+                STUB.replace("@MARKER@", &format!("{marker:?}"))
+                    .replace("@RELEASE@", &format!("{release:?}"))
+                    .replace("@EXITED@", &format!("{exited:?}"))
+                    .replace("@FINISH@", &format!("{finish:?}")),
+            )
+            .unwrap();
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let (agent, agent_root) =
+                crate::status::tests::test_agent_with_pi(script.to_str().unwrap()).await;
+            let mut cfg = (*agent.cfg).clone();
+            cfg.prime_bin = script.display().to_string();
+            std::fs::create_dir_all(&cfg.work_dir).unwrap();
+            let models = LiveModels::new(&cfg);
+            let cfg = Arc::new(cfg);
+            let adapter: Arc<dyn HarnessAdapter> = if prime {
+                Arc::new(PrimeAdapter::new(cfg, agent.store.clone(), models))
+            } else {
+                Arc::new(PiAdapter::new(cfg, agent.store.clone(), models))
+            };
+            Self {
+                adapter,
+                store: agent.store.clone(),
+                root,
+                agent_root,
+                marker,
+                release,
+                exited,
+                finish,
+            }
+        }
+        fn start(&self) -> tokio::task::JoinHandle<Result<()>> {
+            let adapter = self.adapter.clone();
+            let cwd = self.root.clone();
+            tokio::spawn(async move {
+                adapter
+                    .start(StartRequest {
+                        session_id: SESSION.into(),
+                        cwd,
+                        system_prompt: "synthetic fixture".into(),
+                        model: "mock-sub".into(),
+                        thinking: "off".into(),
+                    })
+                    .await
+            })
+        }
+        async fn wait(path: &std::path::Path, bound: Duration) -> bool {
+            tokio::time::timeout(bound, async {
+                while !path.exists() {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .is_ok()
+        }
+        async fn reached(&self) {
+            assert!(
+                Self::wait(&self.marker, Duration::from_secs(5)).await,
+                "actual worker never reached its RPC barrier"
+            );
+        }
+        fn release(&self) {
+            std::fs::write(&self.release, "release").unwrap();
+        }
+        async fn cleanup(&self) {
+            self.adapter.shutdown_all().await;
+            std::fs::write(&self.finish, "fixture cleanup").unwrap();
+            if self.marker.exists() {
+                assert!(
+                    Self::wait(&self.exited, Duration::from_secs(5)).await,
+                    "owned fixture child did not exit during cleanup"
+                );
+            }
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+            let _ = std::fs::remove_dir_all(&self.agent_root);
+        }
+    }
+
+    async fn cancelled_boot(prime: bool) {
+        let f = Fixture::new(prime).await;
+        let task = f.start();
+        f.reached().await;
+        task.abort();
+        let _ = task.await;
+        let cleaned = Fixture::wait(&f.exited, Duration::from_secs(1)).await;
+        f.cleanup().await;
+        assert!(
+            cleaned,
+            "cancelled real adapter boot retained an unpublished RPC child"
+        );
+    }
+    async fn late_attach(prime: bool, all: bool) {
+        let f = Fixture::new(prime).await;
+        let task = f.start();
+        f.reached().await;
+        if all {
+            f.adapter.shutdown_all().await;
+        } else {
+            f.adapter.stop(SESSION).await.unwrap();
+        }
+        f.release();
+        let result = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap();
+        let open = f.adapter.is_open(SESSION);
+        f.cleanup().await;
+        assert!(
+            result.is_err(),
+            "retired adapter admission published a late successful start"
+        );
+        assert_eq!(open, Some(false));
+    }
+    async fn post_shutdown(prime: bool) {
+        let f = Fixture::new(prime).await;
+        f.adapter.shutdown_all().await;
+        f.release();
+        let result = tokio::time::timeout(Duration::from_secs(5), f.start())
+            .await
+            .unwrap()
+            .unwrap();
+        let open = f.adapter.is_open(SESSION);
+        f.cleanup().await;
+        assert!(
+            result.is_err(),
+            "terminal adapter shutdown accepted new worker admission"
+        );
+        assert_eq!(open, Some(false));
+    }
+    async fn ordinary_start_and_stop(prime: bool) {
+        let f = Fixture::new(prime).await;
+        f.release();
+        f.start().await.unwrap().unwrap();
+        assert_eq!(f.adapter.is_open(SESSION), Some(true));
+        assert!(f.adapter.stream(SESSION).is_some());
+        f.adapter.stop(SESSION).await.unwrap();
+        assert_eq!(f.adapter.is_open(SESSION), Some(false));
+        f.cleanup().await;
+    }
+    #[tokio::test]
+    async fn cancelled_prime_boot_retires_its_unpublished_child() {
+        cancelled_boot(true).await;
+    }
+    #[tokio::test]
+    async fn cancelled_pi_boot_retires_its_unpublished_child() {
+        cancelled_boot(false).await;
+    }
+    #[tokio::test]
+    async fn shutdown_refuses_late_prime_attach() {
+        late_attach(true, true).await;
+    }
+    #[tokio::test]
+    async fn shutdown_refuses_late_pi_attach() {
+        late_attach(false, true).await;
+    }
+    #[tokio::test]
+    async fn stop_refuses_late_prime_attach() {
+        late_attach(true, false).await;
+    }
+    #[tokio::test]
+    async fn stop_refuses_late_pi_attach() {
+        late_attach(false, false).await;
+    }
+    #[tokio::test]
+    async fn terminal_shutdown_refuses_new_prime_start() {
+        post_shutdown(true).await;
+    }
+    #[tokio::test]
+    async fn terminal_shutdown_refuses_new_pi_start() {
+        post_shutdown(false).await;
+    }
+    #[tokio::test]
+    async fn current_prime_start_stream_and_stop_work() {
+        ordinary_start_and_stop(true).await;
+    }
+    #[tokio::test]
+    async fn current_pi_start_stream_and_stop_work() {
+        ordinary_start_and_stop(false).await;
+    }
+    async fn failed_session_record_retires_child(prime: bool) {
+        let f = Fixture::new(prime).await;
+        f.store.with(|c| c.execute_batch("CREATE TRIGGER fixture_session_failure BEFORE INSERT ON sessions BEGIN SELECT RAISE(ABORT, 'synthetic session write refusal'); END")).unwrap();
+        f.release();
+        let result = f.start().await.unwrap();
+        let closed = Fixture::wait(&f.exited, Duration::from_secs(1)).await;
+        let open = f.adapter.is_open(SESSION);
+        f.cleanup().await;
+        assert!(result.is_err());
+        assert!(
+            closed,
+            "a local session-write error leaked its already spawned worker"
+        );
+        assert_eq!(open, Some(false));
+    }
+    async fn cancelled_stop_releases_all_resume_waiters(prime: bool) {
+        let f = Fixture::new(prime).await;
+        f.release();
+        f.start().await.unwrap().unwrap();
+        std::fs::write(f.root.join("pause-close"), "pause").unwrap();
+        let stop = {
+            let adapter = f.adapter.clone();
+            tokio::spawn(async move { adapter.stop(SESSION).await })
+        };
+        assert!(Fixture::wait(&f.root.join("closing"), Duration::from_secs(5)).await);
+        assert_eq!(
+            f.adapter.is_open(SESSION),
+            None,
+            "the cleanup owner still holds an unknown live process"
+        );
+        let mut waiters = Vec::new();
+        for _ in 0..3 {
+            let adapter = f.adapter.clone();
+            waiters.push(tokio::spawn(async move { adapter.resume(SESSION).await }));
+        }
+        tokio::task::yield_now().await;
+        waiters.pop().unwrap().abort();
+        stop.abort();
+        let _ = stop.await;
+        // Cancelling shutdown drops its captured kill_on_drop Child. Cleanup can already
+        // finish and admit a resumed owner here; the pending-stop assertion above is the fence.
+        std::fs::remove_file(f.root.join("pause-close")).unwrap();
+        std::fs::write(f.root.join("close-release"), "release").unwrap();
+        let mut admitted = 0;
+        for waiter in waiters {
+            if tokio::time::timeout(Duration::from_secs(5), waiter)
+                .await
+                .expect("resume waiter lost its notification")
+                .unwrap()
+                .is_ok()
+            {
+                admitted += 1;
+            }
+        }
+        let open = f.adapter.is_open(SESSION);
+        f.cleanup().await;
+        assert!(admitted >= 1);
+        assert_eq!(open, Some(true));
+    }
+    #[tokio::test]
+    async fn prime_record_error_cleans_unpublished_child() {
+        failed_session_record_retires_child(true).await;
+    }
+    #[tokio::test]
+    async fn pi_record_error_cleans_unpublished_child() {
+        failed_session_record_retires_child(false).await;
+    }
+    #[tokio::test]
+    async fn cancelled_prime_stop_preserves_unknown_until_cleanup_and_wakes_resumers() {
+        cancelled_stop_releases_all_resume_waiters(true).await;
+    }
+    #[tokio::test]
+    async fn cancelled_pi_stop_preserves_unknown_until_cleanup_and_wakes_resumers() {
+        cancelled_stop_releases_all_resume_waiters(false).await;
+    }
+    async fn old_stop_waiter_preserves_resumed_owner(prime: bool) {
+        let f = Fixture::new(prime).await;
+        f.release();
+        f.start().await.unwrap().unwrap();
+        std::fs::write(f.root.join("pause-close"), "pause").unwrap();
+        let first = {
+            let adapter = f.adapter.clone();
+            tokio::spawn(async move { adapter.stop(SESSION).await })
+        };
+        assert!(Fixture::wait(&f.root.join("closing"), Duration::from_secs(5)).await);
+        let second = f.adapter.stop(SESSION);
+        tokio::pin!(second);
+        std::future::poll_fn(|context| {
+            assert!(
+                second.as_mut().poll(context).is_pending(),
+                "second actual stop must observe pending cleanup"
+            );
+            std::task::Poll::Ready(())
+        })
+        .await;
+        // Keep the admitted second caller's continuation unpolled until a normal resume owns B.
+        std::fs::remove_file(f.root.join("pause-close")).unwrap();
+        std::fs::write(f.root.join("close-release"), "release").unwrap();
+        first.await.unwrap().unwrap();
+        f.adapter.resume(SESSION).await.unwrap();
+        let replacement = f.adapter.child_pgid(SESSION).await;
+        assert!(replacement.is_some());
+        tokio::time::timeout(Duration::from_secs(5), &mut second)
+            .await
+            .unwrap()
+            .unwrap();
+        let retained = f.adapter.child_pgid(SESSION).await;
+        let open = f.adapter.is_open(SESSION);
+        f.cleanup().await;
+        assert_eq!(
+            retained, replacement,
+            "a stop admitted while A was retiring stopped later resumed B"
+        );
+        assert_eq!(open, Some(true));
+    }
+    #[tokio::test]
+    async fn old_stop_waiter_cannot_retire_resumed_prime() {
+        old_stop_waiter_preserves_resumed_owner(true).await;
+    }
+    #[tokio::test]
+    async fn old_stop_waiter_cannot_retire_resumed_pi() {
+        old_stop_waiter_preserves_resumed_owner(false).await;
+    }
 }
