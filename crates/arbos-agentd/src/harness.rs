@@ -121,16 +121,11 @@ pub trait HarnessAdapter: Send + Sync {
     /// worker's whole tree was collectable for as long as a sibling session took to stop. Every
     /// caller that decides whether to signal a process must treat `None` as alive.
     ///
-    /// **Where the contention comes from, because it has been got wrong once.** `stop` below
-    /// takes that mutex and holds it across `RpcChild::shutdown`, since the `if let` scrutinee's
-    /// temporary lives to the end of the block. `shutdown` closes the child's stdin and then
-    /// waits up to five seconds for it to exit on EOF, **sending no signal at all**. So the
-    /// window is as wide as a slow child's exit, and the `cgroup.kill` a cancel issues runs
-    /// strictly afterwards and cannot shorten it. A cancel overlapping the five-minute
-    /// `Agent::reap_unreachable_workers` tick is enough, and
-    /// `sweep_contention_tests::a_cancel_through_the_job_path_opens_the_window_and_a_timer_tick_reads_it`
-    /// is that, measured. Do not read this as defensive-only and delete it: the `false` it
-    /// replaced is bug AQ.
+    /// Cleanup owns an exact Starting/Stopping receipt outside the registry lock. That
+    /// session remains unknown until cleanup completes; independent Ready siblings are
+    /// readable. A genuinely contended registry also remains unknown. The timer/cancel
+    /// regression keeps physical writers alive and names only the unread receipt; neither
+    /// uncertainty may be turned into evidence that a process is dead (bug AQ).
     fn is_open(&self, session_id: &str) -> Option<bool>;
     /// The process group this session's child leads, so a cancel can reap everything the child
     /// spawned after the child itself is gone (bug Z). `None` for an adapter whose children are
@@ -184,6 +179,17 @@ pub trait HarnessAdapter: Send + Sync {
     #[cfg(test)]
     async fn test_age_idle_clock(&self, _session_id: &str, _ms: u64) -> Option<()> {
         None
+    }
+
+    /// Hold one captured RPC process handle, without holding its stdin or the registry.
+    #[cfg(test)]
+    async fn test_hold_process_until(
+        &self,
+        _session_id: &str,
+        _ready: tokio::sync::oneshot::Sender<()>,
+        _release: tokio::sync::oneshot::Receiver<()>,
+    ) -> Result<()> {
+        Err(anyhow!("adapter has no RPC process fixture"))
     }
 
     /// Take the children map, say so on `ready`, and hold it until `release` fires, so a case can
@@ -1392,6 +1398,18 @@ impl HarnessAdapter for PiAdapter {
     #[cfg(test)]
     async fn test_age_idle_clock(&self, session_id: &str, ms: u64) -> Option<()> {
         self.sessions.test_age_idle_clock(session_id, ms).await
+    }
+
+    #[cfg(test)]
+    async fn test_hold_process_until(
+        &self,
+        session_id: &str,
+        ready: tokio::sync::oneshot::Sender<()>,
+        release: tokio::sync::oneshot::Receiver<()>,
+    ) -> Result<()> {
+        let child = self.sessions.child(session_id).await?;
+        child.test_hold_process_until(ready, release).await;
+        Ok(())
     }
 
     #[cfg(test)]
@@ -3142,5 +3160,208 @@ while not (root/'finish').exists():
             "the controlled writer must keep the actual cleanup future pending before cancellation"
         );
         assert_eq!(reusable, Some(true));
+    }
+}
+
+#[cfg(test)]
+mod rpc_blocked_cleanup_regressions {
+    use super::*;
+    use arbos_core::rpc::Command;
+    use std::time::Duration;
+
+    struct Fixture {
+        root: PathBuf,
+        child: Arc<RpcChild>,
+        eof: std::path::PathBuf,
+    }
+    impl Fixture {
+        async fn new(reads: bool) -> Self {
+            let root =
+                std::env::temp_dir().join(format!("arbos-rpc-cleanup-{}", arbos_core::ids::ulid()));
+            std::fs::create_dir_all(&root).unwrap();
+            let ready = root.as_path().join("ready");
+            let eof = root.as_path().join("eof");
+            let code = r#"import os, sys, time
+from pathlib import Path
+Path(os.environ['FIXTURE_READY']).write_text('ready')
+if os.environ['FIXTURE_READS'] == 'yes':
+    sys.stdin.buffer.read()
+    Path(os.environ['FIXTURE_EOF']).write_text('eof')
+else:
+    time.sleep(60)
+"#;
+            let child = RpcChild::spawn(
+                "synthetic-rpc-cleanup",
+                "/usr/bin/python3",
+                &["-I".into(), "-u".into(), "-c".into(), code.into()],
+                &[
+                    ("FIXTURE_READY".into(), ready.to_string_lossy().into_owned()),
+                    ("FIXTURE_EOF".into(), eof.to_string_lossy().into_owned()),
+                    (
+                        "FIXTURE_READS".into(),
+                        if reads { "yes" } else { "no" }.into(),
+                    ),
+                ],
+                root.as_path(),
+                &root.as_path().join("child.log"),
+                None,
+            )
+            .await
+            .unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !ready.exists() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the owned synthetic child starts");
+            Self { root, child, eof }
+        }
+        async fn blocked_writer(
+            &self,
+        ) -> tokio::task::JoinHandle<Result<arbos_core::rpc::Response>> {
+            let child = self.child.clone();
+            let writing = tokio::spawn(async move {
+                child
+                    .call(Command::Prompt {
+                        id: "synthetic-large-prompt".into(),
+                        message: "synthetic ".repeat(128 * 1024),
+                        streaming_behavior: None,
+                        images: Vec::new(),
+                    })
+                    .await
+            });
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !self.child.test_stdin_is_locked() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("actual write_all retains the stdin lock under backpressure");
+            assert!(
+                !writing.is_finished(),
+                "the actual writer must still be pending"
+            );
+            writing
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            self.child.clone().retire_owned();
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+    async fn blocked_cleanup(all: bool) {
+        let fixture = Fixture::new(false).await;
+        let sessions = RpcSessions::new();
+        sessions
+            .attach("synthetic-session", fixture.child.clone(), false)
+            .await;
+        assert_eq!(sessions.is_open("synthetic-session"), Some(true));
+        let mut writing = fixture.blocked_writer().await;
+        let owned = sessions.clone();
+        let mut closing = tokio::spawn(async move {
+            if all {
+                owned.shutdown().await;
+            } else {
+                owned.stop("synthetic-session", None).await;
+            }
+        });
+        // The original RPC policy grants five seconds for EOF; one extra second is test slack.
+        let completed = tokio::time::timeout(Duration::from_secs(6), &mut closing)
+            .await
+            .is_ok();
+        let writer_released = if completed {
+            tokio::time::timeout(Duration::from_secs(1), &mut writing)
+                .await
+                .is_ok()
+        } else {
+            false
+        };
+        // Always clean the owned fixture before asserting a regression, even on original code.
+        if !writer_released {
+            writing.abort();
+            let _ = writing.await;
+        }
+        if !completed {
+            tokio::time::timeout(Duration::from_secs(7), closing)
+                .await
+                .expect("fixture cleanup after aborting its writer")
+                .unwrap();
+        }
+        assert!(
+            completed,
+            "owned RPC cleanup waited beyond its five-second grace for a retained stdin writer"
+        );
+        assert!(
+            writer_released,
+            "cleanup must unblock the actual writer without its caller aborting it"
+        );
+        assert!(!fixture.child.is_alive());
+        assert_eq!(sessions.is_open("synthetic-session"), Some(false));
+    }
+    #[tokio::test]
+    async fn rpc_blocked_cleanup_stop_does_not_wait_forever_for_stdin() {
+        blocked_cleanup(false).await;
+    }
+    #[tokio::test]
+    async fn rpc_blocked_cleanup_shutdown_does_not_wait_forever_for_stdin() {
+        blocked_cleanup(true).await;
+    }
+    #[tokio::test]
+    async fn rpc_blocked_cleanup_cancel_retains_captured_process_cleanup() {
+        let fixture = Fixture::new(false).await;
+        let sessions = RpcSessions::new();
+        sessions
+            .attach("synthetic-cancel", fixture.child.clone(), false)
+            .await;
+        let mut writing = fixture.blocked_writer().await;
+        let owned = sessions.clone();
+        let closing = tokio::spawn(async move { owned.stop("synthetic-cancel", None).await });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !fixture.child.test_process_is_captured() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("owned cleanup captures its real process before waiting for stdin");
+        closing.abort();
+        let _ = closing.await;
+        let released = tokio::time::timeout(Duration::from_secs(1), &mut writing)
+            .await
+            .is_ok();
+        if !released {
+            writing.abort();
+            let _ = writing.await;
+        }
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while fixture.child.is_alive() || sessions.is_open("synthetic-cancel") != Some(false) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancelled cleanup retires only its captured process and receipt");
+        assert!(
+            released,
+            "aborting cleanup must still unblock the retained actual writer"
+        );
+    }
+
+    #[tokio::test]
+    async fn rpc_blocked_cleanup_preserves_graceful_eof() {
+        let fixture = Fixture::new(true).await;
+        let sessions = RpcSessions::new();
+        sessions
+            .attach("synthetic-eof", fixture.child.clone(), false)
+            .await;
+        tokio::time::timeout(Duration::from_secs(6), sessions.stop("synthetic-eof", None))
+            .await
+            .expect("ordinary EOF cleanup stays within the existing grace");
+        assert!(
+            fixture.eof.exists(),
+            "the actual child must see EOF rather than forced termination"
+        );
+        assert!(!fixture.child.is_alive());
+        assert_eq!(sessions.is_open("synthetic-eof"), Some(false));
     }
 }

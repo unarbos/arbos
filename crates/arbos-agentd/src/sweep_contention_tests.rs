@@ -604,14 +604,14 @@ async fn a_cancel_and_timer_tick_keep_live_work_and_name_only_the_stopping_sessi
         "the subject must have detached work for a broken sweep to take"
     );
 
-    // The job the user cancels. Its brief marks its worker as the one that does not answer the
-    // close of its stdin, so the `shutdown` inside the cancel runs to its five-second timeout.
+    // The job the user cancels. Keep the existing marked worker fixture; the cleanup
+    // window below is owned by a process-handle barrier, not its response to stdin EOF.
     let doomed_job = a_job_in(
         &agent,
         &host,
         CHAT_VIA_JOB,
         ASK_VIA_JOB,
-        "Waiting for worker EOF",
+        "Waiting for owned cleanup",
         &format!("Start some work and leave it running. {HANG_BRIEF}"),
         vec![format!("{}/doomed", fx.root.display())],
     )
@@ -622,6 +622,21 @@ async fn a_cancel_and_timer_tick_keep_live_work_and_name_only_the_stopping_sessi
         "the two sessions must differ or this measures nothing"
     );
 
+    // Hold only the doomed child's process handle before cancellation. stop_jobs can
+    // still send its RPC and reap its tree; owned cleanup then pauses without making
+    // the independent Ready subject's registry receipt unreadable.
+    let adapter = agent.adapter(Harness::Pi);
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let held = adapter.clone();
+    let held_session = doomed.clone();
+    let holding = tokio::spawn(async move {
+        held.test_hold_process_until(&held_session, ready_tx, release_rx)
+            .await
+            .expect("the doomed process is captured");
+    });
+    ready_rx.await.expect("the doomed process handle is held");
+
     // The cancel, through the path a user's `stop_job` takes. Nothing here calls `adapter.stop`.
     let cancelling = {
         let agent = agent.clone();
@@ -629,22 +644,22 @@ async fn a_cancel_and_timer_tick_keep_live_work_and_name_only_the_stopping_sessi
         tokio::spawn(async move { agent.stop_jobs(CHAT_VIA_JOB, Some(&job)).await })
     };
 
-    // Synchronised on the job row rather than on `is_open`, so the wait does not depend on the
-    // guard under test: `stop_jobs` writes `cancelled` before it reaches any process. What is
-    // left after that is the `Abort` round trip and one `/proc` read of the worker's tree, both
-    // of which are milliseconds against `shutdown`'s five-second hold.
+    // The persisted cancellation and exact Stopping receipt establish the overlap;
+    // a killed child may exit immediately, so elapsed time cannot establish it.
     wait_for("the cancel reaches the doomed job's row", || {
         job_state(&agent, &doomed_job) == "cancelled"
     })
     .await;
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    wait_for("owned cleanup reaches the held doomed process", || {
+        adapter.is_open(&doomed).is_none() && adapter.is_open(&subject) == Some(true)
+    })
+    .await;
     assert!(
         !cancelling.is_finished(),
         "the cancel had already returned, so the tick below ran outside the window and this \
          measured nothing"
     );
 
-    let adapter = agent.adapter(Harness::Pi);
     assert_eq!(adapter.is_open(&subject), Some(true));
     assert_eq!(adapter.is_open(&doomed), None);
     // The five-minute keepalive tick, which is this call and nothing else.
@@ -683,5 +698,9 @@ async fn a_cancel_and_timer_tick_keep_live_work_and_name_only_the_stopping_sessi
     assert_eq!(unread.sessions, vec![doomed.clone()], "{unread:?}");
     assert!(!unread.sessions.contains(&subject));
 
+    release_tx
+        .send(())
+        .expect("release the owned process handle");
+    holding.await.expect("the process barrier completed");
     let _ = cancelling.await;
 }

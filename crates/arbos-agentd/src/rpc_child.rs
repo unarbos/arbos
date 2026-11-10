@@ -246,16 +246,32 @@ impl RpcChild {
         Ok(r.data.unwrap_or(serde_json::Value::Null))
     }
 
-    /// Orderly shutdown: close stdin, wait up to 5 s, then kill.
+    /// Give the whole EOF cleanup five seconds, then kill the captured process.
     pub async fn shutdown(&self) {
-        self.stdin.lock().await.take();
-        if let Some(mut child) = self.child.lock().await.take() {
-            if tokio::time::timeout(Duration::from_secs(5), child.wait())
-                .await
-                .is_err()
-            {
+        // Keep the handle outside the timed future: cancelling the grace must not
+        // discard the authority needed to kill and reap a backpressured child.
+        let mut process = None;
+        let graceful = async {
+            process = self.child.lock().await.take();
+            self.stdin.lock().await.take();
+            if let Some(child) = process.as_mut() {
+                let _ = child.wait().await;
+            }
+        };
+        if tokio::time::timeout(Duration::from_secs(5), graceful)
+            .await
+            .is_err()
+        {
+            // A process-handle owner may have delayed capture. Never wait for the
+            // blocked stdin writer before terminating this exact process.
+            if process.is_none() {
+                process = self.child.lock().await.take();
+            }
+            if let Some(child) = process.as_mut() {
+                // Tokio's kill also waits/reaps, retaining the existing best-effort error policy.
                 let _ = child.kill().await;
             }
+            self.stdin.lock().await.take();
         }
         self.exited.store(true, Ordering::SeqCst);
     }
@@ -294,6 +310,29 @@ impl RpcChild {
 
     pub fn is_alive(&self) -> bool {
         !self.exited.load(Ordering::SeqCst)
+    }
+
+    /// Pause only this captured process handle while a test observes owned cleanup.
+    /// RPC stdin, sibling processes and the session registry remain independent.
+    #[cfg(test)]
+    pub(crate) async fn test_hold_process_until(
+        &self,
+        ready: oneshot::Sender<()>,
+        release: oneshot::Receiver<()>,
+    ) {
+        let _process = self.child.lock().await;
+        let _ = ready.send(());
+        let _ = release.await;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_process_is_captured(&self) -> bool {
+        self.child.try_lock().is_ok_and(|process| process.is_none())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_stdin_is_locked(&self) -> bool {
+        self.stdin.try_lock().is_err()
     }
 
     /// This child carried traffic just now.
