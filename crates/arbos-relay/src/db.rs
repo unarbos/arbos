@@ -55,7 +55,7 @@ CREATE TABLE IF NOT EXISTS sandboxes (
   snapshot TEXT, region TEXT, last_started_at INTEGER, last_stopped_at INTEGER, last_seen_at INTEGER,
   box_url TEXT, preview_token TEXT, local_pid INTEGER
 );
--- One Daytona computer per user (design change 2026-10-15): every project of a user is a workspace
+-- One computer per user (design change 2026-10-15): every project of a user is a workspace
 -- on that box. `sandboxes` above is the legacy per-project registry, kept for migration only.
 CREATE TABLE IF NOT EXISTS boxes (
   user_id TEXT PRIMARY KEY, provider TEXT NOT NULL, sandbox_id TEXT,
@@ -70,9 +70,9 @@ CREATE TABLE IF NOT EXISTS box_creates (
   user_id TEXT PRIMARY KEY, sandbox_name TEXT NOT NULL, provider TEXT NOT NULL, snapshot TEXT,
   replacing TEXT, started_at INTEGER NOT NULL
 );
--- Per-user box class: the Daytona snapshot (which fixes vCPU/RAM/disk) a user's box is created
--- from; NULL = the relay default (ARBOS_DAYTONA_SNAPSHOT). Raise a user's class later by setting
--- it and recreating the box; no code change needed.
+-- Per-user box class: the snapshot a user's box is created from; NULL = the relay default
+-- (ARBOS_DAYTONA_SNAPSHOT, which keeps its name). Raise a user's class later by setting it and
+-- recreating the box; no code change needed.
 CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY, snapshot TEXT, spend_cap_usd REAL NOT NULL DEFAULT 25.0, created_at INTEGER NOT NULL
 );
@@ -1488,10 +1488,10 @@ impl Db {
 
     /// Write the user's box row. A row that names a sandbox is never overwritten by one that does
     /// not (#2262: a sandbox-less row over a live box hid it from rolls and always-on); that write
-    /// is refused with an error and the row stays as it was. Use
-    /// [`Db::upsert_box_clearing_sandbox`] when the sandbox is really gone.
+    /// is refused with an error and the row stays as it was. A box whose sandbox is really gone
+    /// loses the whole row ([`Db::delete_box_row`]), so nothing needs to blank one in place.
     pub fn upsert_box(&self, s: &Sandbox) -> Result<()> {
-        let written = self.write_box(s, false)?;
+        let written = self.write_box(s)?;
         if !written {
             tracing::error!(user = %s.user_id, "refused to overwrite a box row that has a sandbox with one that has none");
             anyhow::bail!(
@@ -1500,11 +1500,6 @@ impl Db {
             );
         }
         Ok(())
-    }
-
-    /// [`Db::upsert_box`] that may drop the row's sandbox: only for a sandbox that was deleted.
-    pub fn upsert_box_clearing_sandbox(&self, s: &Sandbox) -> Result<()> {
-        self.write_box(s, true).map(|_| ())
     }
 
     /// Write back a row read before a slow provider call (start, stop) only while the row still
@@ -1529,7 +1524,7 @@ impl Db {
         })
     }
 
-    fn write_box(&self, s: &Sandbox, may_clear_sandbox: bool) -> Result<bool> {
+    fn write_box(&self, s: &Sandbox) -> Result<bool> {
         self.with(|c| {
             c.execute(
                 "INSERT INTO boxes(user_id, provider, sandbox_id, daytona_state, device_id, box_token_hash, mcp_token, snapshot,
@@ -1540,12 +1535,11 @@ impl Db {
                     mcp_token=excluded.mcp_token, snapshot=excluded.snapshot, last_started_at=excluded.last_started_at,
                     last_stopped_at=excluded.last_stopped_at, last_seen_at=excluded.last_seen_at, box_url=excluded.box_url,
                     preview_token=excluded.preview_token, local_pid=excluded.local_pid, migrated_from=excluded.migrated_from
-                 WHERE ?16 OR excluded.sandbox_id IS NOT NULL OR boxes.sandbox_id IS NULL",
+                 WHERE excluded.sandbox_id IS NOT NULL OR boxes.sandbox_id IS NULL",
                 params![
                     s.user_id, s.provider, s.sandbox_id, s.daytona_state, s.device_id, s.box_token_hash, s.mcp_token, s.snapshot,
                     s.last_started_at, s.last_stopped_at, s.last_seen_at, s.box_url, s.preview_token, s.local_pid,
                     serde_json::to_string(&s.migrated_from).unwrap_or_else(|_| "[]".into()),
-                    may_clear_sandbox
                 ],
             )
             .map(|n| n > 0)
@@ -1775,51 +1769,6 @@ impl Db {
                 |r| r.get(0),
             )
             .optional()
-        })
-    }
-
-    /// Legacy per-project sandboxes (pre one-box-per-user) that still hold a project's /work.
-    pub fn legacy_sandboxes(&self) -> Result<Vec<(String, Sandbox, Option<String>)>> {
-        self.with(|c| {
-            let mut st = c.prepare(
-                "SELECT project_id, provider, sandbox_id, daytona_state, device_id, box_token_hash, mcp_token, snapshot,
-                        last_started_at, last_stopped_at, last_seen_at, box_url, preview_token, local_pid, migrated_to
-                 FROM sandboxes",
-            )?;
-            let rows = st.query_map([], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    Sandbox {
-                        user_id: r.get(0)?,
-                        provider: r.get(1)?,
-                        sandbox_id: r.get(2)?,
-                        daytona_state: r.get(3)?,
-                        device_id: r.get(4)?,
-                        box_token_hash: r.get(5)?,
-                        mcp_token: r.get(6)?,
-                        snapshot: r.get(7)?,
-                        last_started_at: r.get(8)?,
-                        last_stopped_at: r.get(9)?,
-                        last_seen_at: r.get(10)?,
-                        box_url: r.get(11)?,
-                        preview_token: r.get(12)?,
-                        local_pid: r.get(13)?,
-                        migrated_from: Vec::new(),
-                    },
-                    r.get::<_, Option<String>>(14)?,
-                ))
-            })?;
-            rows.collect()
-        })
-    }
-
-    pub fn mark_legacy_migrated(&self, project_id: &str, user_id: &str) -> Result<()> {
-        self.with(|c| {
-            c.execute(
-                "UPDATE sandboxes SET migrated_to = ?2, migrated_at = ?3 WHERE project_id = ?1",
-                params![project_id, user_id, now_ms()],
-            )
-            .map(|_| ())
         })
     }
 
