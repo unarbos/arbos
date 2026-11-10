@@ -1,0 +1,792 @@
+{
+  "scope": "selected actual pure production functions and search regex bindings; warm synthetic CPU work, no HTTP/agent/database/app execution",
+  "fixed_pattern_inventory_equal": true,
+  "source_sha256": {
+    "before": {
+      "crates/arbos-agentd/src/web.rs": "75cfca6b38a0c53e455bf4f1c73bf3e70ff5e7a0ab08a3207f57b533f5cdd648",
+      "crates/arbos-agentd/src/tree.rs": "426b0eb1cf33e47931ef894c6b6b85fa9dc1e60951788138f5093ca029662427",
+      "crates/arbos-agentd/src/llm.rs": "442ebe8b66318db8a0db5c0a9c6f51f77d5fb2664b4e6e82b27680274f772fa6"
+    },
+    "after": {
+      "crates/arbos-agentd/src/web.rs": "9a5f62fa25c5c68295b2ec6f2576ce09efc3f1c24e74ca0f4a76797f819b35d7",
+      "crates/arbos-agentd/src/tree.rs": "4a67551dfc6b0959b77a4c429a1770bb422270dbeae530e7698af97d1db6757c",
+      "crates/arbos-agentd/src/llm.rs": "442ebe8b66318db8a0db5c0a9c6f51f77d5fb2664b4e6e82b27680274f772fa6"
+    }
+  },
+  "build_seconds": {
+    "before": 3.6681034170323983,
+    "after": 3.7560021249810234
+  },
+  "output_sha256": "f262fad192e1bb73031eaddaee48d1a65872106a5af61e013daefe3056a879a4",
+  "samples": [
+    {
+      "pair": 0,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "html1": {
+          "calls": 1000,
+          "nanoseconds_per_call": 35251.208
+        },
+        "html32": {
+          "calls": 100,
+          "nanoseconds_per_call": 909866.25
+        },
+        "truncated_card": {
+          "calls": 2000,
+          "nanoseconds_per_call": 6140.4585
+        }
+      },
+      "after": {
+        "html1": {
+          "calls": 1000,
+          "nanoseconds_per_call": 7609.0
+        },
+        "html32": {
+          "calls": 100,
+          "nanoseconds_per_call": 818165.84
+        },
+        "truncated_card": {
+          "calls": 2000,
+          "nanoseconds_per_call": 2315.2915
+        }
+      }
+    },
+    {
+      "pair": 1,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "html1": {
+          "calls": 1000,
+          "nanoseconds_per_call": 35257.917
+        },
+        "html32": {
+          "calls": 100,
+          "nanoseconds_per_call": 908363.75
+        },
+        "truncated_card": {
+          "calls": 2000,
+          "nanoseconds_per_call": 5956.8125
+        }
+      },
+      "after": {
+        "html1": {
+          "calls": 1000,
+          "nanoseconds_per_call": 8152.542
+        },
+        "html32": {
+          "calls": 100,
+          "nanoseconds_per_call": 827576.25
+        },
+        "truncated_card": {
+          "calls": 2000,
+          "nanoseconds_per_call": 2425.8335
+        }
+      }
+    },
+    {
+      "pair": 2,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "html1": {
+          "calls": 1000,
+          "nanoseconds_per_call": 35034.583
+        },
+        "html32": {
+          "calls": 100,
+          "nanoseconds_per_call": 970646.25
+        },
+        "truncated_card": {
+          "calls": 2000,
+          "nanoseconds_per_call": 5985.7915
+        }
+      },
+      "after": {
+        "html1": {
+          "calls": 1000,
+          "nanoseconds_per_call": 7652.792
+        },
+        "html32": {
+          "calls": 100,
+          "nanoseconds_per_call": 809201.25
+        },
+        "truncated_card": {
+          "calls": 2000,
+          "nanoseconds_per_call": 2324.1045
+        }
+      }
+    },
+    {
+      "pair": 3,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "html1": {
+          "calls": 1000,
+          "nanoseconds_per_call": 35175.084
+        },
+        "html32": {
+          "calls": 100,
+          "nanoseconds_per_call": 903142.09
+        },
+        "truncated_card": {
+          "calls": 2000,
+          "nanoseconds_per_call": 5973.771
+        }
+      },
+      "after": {
+        "html1": {
+          "calls": 1000,
+          "nanoseconds_per_call": 7676.125
+        },
+        "html32": {
+          "calls": 100,
+          "nanoseconds_per_call": 805165.83
+        },
+        "truncated_card": {
+          "calls": 2000,
+          "nanoseconds_per_call": 2275.354
+        }
+      }
+    },
+    {
+      "pair": 4,
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "html1": {
+          "calls": 1000,
+          "nanoseconds_per_call": 7682.5
+        },
+        "html32": {
+          "calls": 100,
+          "nanoseconds_per_call": 807677.91
+        },
+        "truncated_card": {
+          "calls": 2000,
+          "nanoseconds_per_call": 2290.146
+        }
+      },
+      "before": {
+        "html1": {
+          "calls": 1000,
+          "nanoseconds_per_call": 33660.625
+        },
+        "html32": {
+          "calls": 100,
+          "nanoseconds_per_call": 870729.17
+        },
+        "truncated_card": {
+          "calls": 2000,
+          "nanoseconds_per_call": 5706.9585
+        }
+      }
+    },
+    {
+      "pair": 5,
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "html1": {
+          "calls": 1000,
+          "nanoseconds_per_call": 7357.5
+        },
+        "html32": {
+          "calls": 100,
+          "nanoseconds_per_call": 771274.17
+        },
+        "truncated_card": {
+          "calls": 2000,
+          "nanoseconds_per_call": 2219.5625
+        }
+      },
+      "before": {
+        "html1": {
+          "calls": 1000,
+          "nanoseconds_per_call": 33886.375
+        },
+        "html32": {
+          "calls": 100,
+          "nanoseconds_per_call": 878602.92
+        },
+        "truncated_card": {
+          "calls": 2000,
+          "nanoseconds_per_call": 5670.5
+        }
+      }
+    },
+    {
+      "pair": 6,
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "html1": {
+          "calls": 1000,
+          "nanoseconds_per_call": 7326.958
+        },
+        "html32": {
+          "calls": 100,
+          "nanoseconds_per_call": 774330.41
+        },
+        "truncated_card": {
+          "calls": 2000,
+          "nanoseconds_per_call": 2284.4795
+        }
+      },
+      "before": {
+        "html1": {
+          "calls": 1000,
+          "nanoseconds_per_call": 33799.417
+        },
+        "html32": {
+          "calls": 100,
+          "nanoseconds_per_call": 863780.42
+        },
+        "truncated_card": {
+          "calls": 2000,
+          "nanoseconds_per_call": 5673.9585
+        }
+      }
+    },
+    {
+      "pair": 7,
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "html1": {
+          "calls": 1000,
+          "nanoseconds_per_call": 7299.583
+        },
+        "html32": {
+          "calls": 100,
+          "nanoseconds_per_call": 775022.5
+        },
+        "truncated_card": {
+          "calls": 2000,
+          "nanoseconds_per_call": 2240.146
+        }
+      },
+      "before": {
+        "html1": {
+          "calls": 1000,
+          "nanoseconds_per_call": 33092.834
+        },
+        "html32": {
+          "calls": 100,
+          "nanoseconds_per_call": 873791.66
+        },
+        "truncated_card": {
+          "calls": 2000,
+          "nanoseconds_per_call": 5651.1665
+        }
+      }
+    },
+    {
+      "pair": 8,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "html1": {
+          "calls": 1000,
+          "nanoseconds_per_call": 32813.625
+        },
+        "html32": {
+          "calls": 100,
+          "nanoseconds_per_call": 860152.09
+        },
+        "truncated_card": {
+          "calls": 2000,
+          "nanoseconds_per_call": 5727.5
+        }
+      },
+      "after": {
+        "html1": {
+          "calls": 1000,
+          "nanoseconds_per_call": 7240.584
+        },
+        "html32": {
+          "calls": 100,
+          "nanoseconds_per_call": 775595.41
+        },
+        "truncated_card": {
+          "calls": 2000,
+          "nanoseconds_per_call": 2172.1875
+        }
+      }
+    },
+    {
+      "pair": 9,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "html1": {
+          "calls": 1000,
+          "nanoseconds_per_call": 33799.292
+        },
+        "html32": {
+          "calls": 100,
+          "nanoseconds_per_call": 867076.25
+        },
+        "truncated_card": {
+          "calls": 2000,
+          "nanoseconds_per_call": 5733.8125
+        }
+      },
+      "after": {
+        "html1": {
+          "calls": 1000,
+          "nanoseconds_per_call": 7373.625
+        },
+        "html32": {
+          "calls": 100,
+          "nanoseconds_per_call": 769795.0
+        },
+        "truncated_card": {
+          "calls": 2000,
+          "nanoseconds_per_call": 2232.0
+        }
+      }
+    },
+    {
+      "pair": 10,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "html1": {
+          "calls": 1000,
+          "nanoseconds_per_call": 33283.625
+        },
+        "html32": {
+          "calls": 100,
+          "nanoseconds_per_call": 873391.67
+        },
+        "truncated_card": {
+          "calls": 2000,
+          "nanoseconds_per_call": 5833.2085
+        }
+      },
+      "after": {
+        "html1": {
+          "calls": 1000,
+          "nanoseconds_per_call": 7264.167
+        },
+        "html32": {
+          "calls": 100,
+          "nanoseconds_per_call": 770670.83
+        },
+        "truncated_card": {
+          "calls": 2000,
+          "nanoseconds_per_call": 2223.3335
+        }
+      }
+    },
+    {
+      "pair": 11,
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "html1": {
+          "calls": 1000,
+          "nanoseconds_per_call": 7379.583
+        },
+        "html32": {
+          "calls": 100,
+          "nanoseconds_per_call": 772695.42
+        },
+        "truncated_card": {
+          "calls": 2000,
+          "nanoseconds_per_call": 2179.625
+        }
+      },
+      "before": {
+        "html1": {
+          "calls": 1000,
+          "nanoseconds_per_call": 33679.542
+        },
+        "html32": {
+          "calls": 100,
+          "nanoseconds_per_call": 856602.92
+        },
+        "truncated_card": {
+          "calls": 2000,
+          "nanoseconds_per_call": 5655.208
+        }
+      }
+    },
+    {
+      "pair": 12,
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "html1": {
+          "calls": 1000,
+          "nanoseconds_per_call": 7269.958
+        },
+        "html32": {
+          "calls": 100,
+          "nanoseconds_per_call": 772174.16
+        },
+        "truncated_card": {
+          "calls": 2000,
+          "nanoseconds_per_call": 2210.521
+        }
+      },
+      "before": {
+        "html1": {
+          "calls": 1000,
+          "nanoseconds_per_call": 33372.208
+        },
+        "html32": {
+          "calls": 100,
+          "nanoseconds_per_call": 865547.5
+        },
+        "truncated_card": {
+          "calls": 2000,
+          "nanoseconds_per_call": 5620.2705
+        }
+      }
+    },
+    {
+      "pair": 13,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "html1": {
+          "calls": 1000,
+          "nanoseconds_per_call": 32183.125
+        },
+        "html32": {
+          "calls": 100,
+          "nanoseconds_per_call": 844270.83
+        },
+        "truncated_card": {
+          "calls": 2000,
+          "nanoseconds_per_call": 5498.5
+        }
+      },
+      "after": {
+        "html1": {
+          "calls": 1000,
+          "nanoseconds_per_call": 7177.042
+        },
+        "html32": {
+          "calls": 100,
+          "nanoseconds_per_call": 758680.83
+        },
+        "truncated_card": {
+          "calls": 2000,
+          "nanoseconds_per_call": 2140.167
+        }
+      }
+    },
+    {
+      "pair": 14,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "html1": {
+          "calls": 1000,
+          "nanoseconds_per_call": 35623.458
+        },
+        "html32": {
+          "calls": 100,
+          "nanoseconds_per_call": 884730.42
+        },
+        "truncated_card": {
+          "calls": 2000,
+          "nanoseconds_per_call": 5978.667
+        }
+      },
+      "after": {
+        "html1": {
+          "calls": 1000,
+          "nanoseconds_per_call": 7273.583
+        },
+        "html32": {
+          "calls": 100,
+          "nanoseconds_per_call": 768752.08
+        },
+        "truncated_card": {
+          "calls": 2000,
+          "nanoseconds_per_call": 2164.0
+        }
+      }
+    },
+    {
+      "pair": 15,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "html1": {
+          "calls": 1000,
+          "nanoseconds_per_call": 33833.5
+        },
+        "html32": {
+          "calls": 100,
+          "nanoseconds_per_call": 864694.17
+        },
+        "truncated_card": {
+          "calls": 2000,
+          "nanoseconds_per_call": 5751.604
+        }
+      },
+      "after": {
+        "html1": {
+          "calls": 1000,
+          "nanoseconds_per_call": 7327.791
+        },
+        "html32": {
+          "calls": 100,
+          "nanoseconds_per_call": 773272.91
+        },
+        "truncated_card": {
+          "calls": 2000,
+          "nanoseconds_per_call": 2158.333
+        }
+      }
+    },
+    {
+      "pair": 16,
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "html1": {
+          "calls": 1000,
+          "nanoseconds_per_call": 7317.542
+        },
+        "html32": {
+          "calls": 100,
+          "nanoseconds_per_call": 771687.08
+        },
+        "truncated_card": {
+          "calls": 2000,
+          "nanoseconds_per_call": 2224.1875
+        }
+      },
+      "before": {
+        "html1": {
+          "calls": 1000,
+          "nanoseconds_per_call": 32567.25
+        },
+        "html32": {
+          "calls": 100,
+          "nanoseconds_per_call": 851907.92
+        },
+        "truncated_card": {
+          "calls": 2000,
+          "nanoseconds_per_call": 5450.854
+        }
+      }
+    },
+    {
+      "pair": 17,
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "html1": {
+          "calls": 1000,
+          "nanoseconds_per_call": 7281.375
+        },
+        "html32": {
+          "calls": 100,
+          "nanoseconds_per_call": 758289.58
+        },
+        "truncated_card": {
+          "calls": 2000,
+          "nanoseconds_per_call": 2165.167
+        }
+      },
+      "before": {
+        "html1": {
+          "calls": 1000,
+          "nanoseconds_per_call": 33614.917
+        },
+        "html32": {
+          "calls": 100,
+          "nanoseconds_per_call": 873275.0
+        },
+        "truncated_card": {
+          "calls": 2000,
+          "nanoseconds_per_call": 5664.7085
+        }
+      }
+    },
+    {
+      "pair": 18,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "html1": {
+          "calls": 1000,
+          "nanoseconds_per_call": 32529.875
+        },
+        "html32": {
+          "calls": 100,
+          "nanoseconds_per_call": 862460.0
+        },
+        "truncated_card": {
+          "calls": 2000,
+          "nanoseconds_per_call": 5614.3125
+        }
+      },
+      "after": {
+        "html1": {
+          "calls": 1000,
+          "nanoseconds_per_call": 7262.75
+        },
+        "html32": {
+          "calls": 100,
+          "nanoseconds_per_call": 763786.66
+        },
+        "truncated_card": {
+          "calls": 2000,
+          "nanoseconds_per_call": 2155.5835
+        }
+      }
+    },
+    {
+      "pair": 19,
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "html1": {
+          "calls": 1000,
+          "nanoseconds_per_call": 7417.0
+        },
+        "html32": {
+          "calls": 100,
+          "nanoseconds_per_call": 767733.33
+        },
+        "truncated_card": {
+          "calls": 2000,
+          "nanoseconds_per_call": 2224.0415
+        }
+      },
+      "before": {
+        "html1": {
+          "calls": 1000,
+          "nanoseconds_per_call": 33414.916
+        },
+        "html32": {
+          "calls": 100,
+          "nanoseconds_per_call": 860052.5
+        },
+        "truncated_card": {
+          "calls": 2000,
+          "nanoseconds_per_call": 5648.6665
+        }
+      }
+    },
+    {
+      "pair": 20,
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "html1": {
+          "calls": 1000,
+          "nanoseconds_per_call": 7211.583
+        },
+        "html32": {
+          "calls": 100,
+          "nanoseconds_per_call": 773967.5
+        },
+        "truncated_card": {
+          "calls": 2000,
+          "nanoseconds_per_call": 2180.9585
+        }
+      },
+      "before": {
+        "html1": {
+          "calls": 1000,
+          "nanoseconds_per_call": 33988.167
+        },
+        "html32": {
+          "calls": 100,
+          "nanoseconds_per_call": 875040.42
+        },
+        "truncated_card": {
+          "calls": 2000,
+          "nanoseconds_per_call": 5631.8125
+        }
+      }
+    }
+  ],
+  "measurements": {
+    "html1": {
+      "before_median_ns": 33679.542,
+      "after_median_ns": 7326.958,
+      "paired_median_saving_95ci_ns": [
+        25997.915999999997,
+        26528.875
+      ],
+      "two_sided_sign_test_p": 9.5367431640625e-07
+    },
+    "html32": {
+      "before_median_ns": 870729.17,
+      "after_median_ns": 772695.42,
+      "paired_median_saving_95ci_ns": [
+        89450.01000000001,
+        98769.16000000003
+      ],
+      "two_sided_sign_test_p": 9.5367431640625e-07
+    },
+    "truncated_card": {
+      "before_median_ns": 5673.9585,
+      "after_median_ns": 2223.3335,
+      "paired_median_saving_95ci_ns": [
+        3424.6250000000005,
+        3555.3125
+      ],
+      "two_sided_sign_test_p": 9.5367431640625e-07
+    }
+  },
+  "fixtures": {
+    "html": 39,
+    "card": 22,
+    "search": 3
+  }
+}
