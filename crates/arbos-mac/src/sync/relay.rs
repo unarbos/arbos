@@ -2582,159 +2582,164 @@ fn apply_open_chat_hook(shared: &Arc<Shared>) {
     }
 }
 
+async fn hydrate_project(
+    shared: &Arc<Shared>,
+    item: Value,
+    me_id: &str,
+) -> (Option<Project>, Vec<Chat>) {
+    // `GET /projects` overwrites `owner` with the user-id string (not a
+    // ProjectOwnerDto object), so the list row is not a full ProjectDto.
+    // Only id + list extras are read here; detail fills the rest.
+    let Some(id) = item.get("id").and_then(Value::as_str).map(str::to_owned) else {
+        return (None, Vec::new());
+    };
+    let list_shared = item.get("shared").and_then(Value::as_bool);
+    let list_owner_handle = item
+        .get("owner_handle")
+        .and_then(Value::as_str)
+        .filter(|h| !h.is_empty())
+        .map(str::to_owned);
+    let detail_val = match shared.get_json(&format!("/projects/{id}")).await {
+        Ok(v) => v,
+        Err(err) => {
+            // One bad project must not abort the whole refresh (reconnect loop).
+            log::warn!(
+                target: "arbos_mac::relay",
+                "GET /projects/{id}: {err:#}; keeping last good entry"
+            );
+            let previous = shared
+                .projects
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|x| x.id == id)
+                .cloned();
+            let prev_chats: Vec<Chat> = shared
+                .chats
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|c| c.project_id == id)
+                .cloned()
+                .collect();
+            return (previous, prev_chats);
+        }
+    };
+    // Outside agents (#2141): an extra key beside the DTO.
+    let outside: Option<crate::model::OutsideInfo> = detail_val
+        .get("outside")
+        .cloned()
+        .and_then(|v| serde_json::from_value(v).ok());
+    let detail: GetProjectResponseDto = match serde_json::from_value(detail_val) {
+        Ok(d) => d,
+        Err(err) => {
+            log::warn!(target: "arbos_mac::relay", "GetProjectResponseDto {id}: {err}");
+            return (None, Vec::new());
+        }
+    };
+    // Who else is in this project (D72 step 3); older relays answer 404.
+    let members = match shared.get_json(&format!("/projects/{id}/members")).await {
+        Ok(v) => match serde_json::from_value::<ProjectMembersDto>(v) {
+            Ok(m) => Some(m),
+            Err(err) => {
+                log::warn!(target: "arbos_mac::relay", "ProjectMembersDto {id}: {err}");
+                None
+            }
+        },
+        Err(_) => None,
+    };
+    let previous = shared
+        .projects
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|x| x.id == id)
+        .cloned();
+    let mut project = project_from_dto(&detail, members.as_ref());
+    project.outside = outside;
+    // D92 amendment: the agent's uploaded / generated picture — the public versioned route.
+    project.image_url = project_image_url(
+        &shared.http_url,
+        &id,
+        detail.project.image_key.as_deref(),
+        project.avatar_version,
+    );
+    // list_projects extras (shared / owner_handle) live on the list row.
+    if let Some(shared_flag) = list_shared {
+        project.shared = shared_flag;
+    }
+    if project.owner_handle.is_none() {
+        project.owner_handle = list_owner_handle;
+    }
+    project.people.retain(|p| p.id != me_id);
+    if let Some(prev) = &previous {
+        project.state_detail = prev.state_detail.clone();
+        project.muted = prev.muted;
+        if project.model.is_empty() {
+            project.model = prev.model.clone();
+        }
+        if project.avatar.is_none() {
+            project.avatar = prev.avatar.clone();
+        }
+        if project.avatar_color.is_none() {
+            project.avatar_color = prev.avatar_color.clone();
+        }
+    }
+    if project.model.is_empty() {
+        project.model = "anthropic/claude-haiku-5.5".into();
+    }
+    if project.avatar_color_index.is_none() {
+        project.avatar_color_index = Some(crate::ui::avatars::color_index(&id));
+    }
+    let chats: Vec<Chat> = detail.chats.iter().map(chat_from_dto).collect();
+    (Some(project), chats)
+}
+
+async fn fetch_people_list(shared: &Arc<Shared>) -> Result<Value> {
+    // Retry transient /chats failures twice before retaining the cached list.
+    let mut attempt = 0u32;
+    loop {
+        match shared.get_json("/chats").await {
+            Ok(list) => break Ok(list),
+            Err(err) => {
+                let text = format!("{err:#}");
+                if text.contains("HTTP 404") {
+                    break Err(err);
+                }
+                if diagnostics::is_transient(&text) && attempt < 2 {
+                    attempt += 1;
+                    sleep(Duration::from_millis(400 * u64::from(attempt))).await;
+                    continue;
+                }
+                break Err(err);
+            }
+        }
+    }
+}
+
 async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
     shared.ensure_me().await;
     // Snapshot time: field edits after this must win over the relay's older list.
     let refresh_started_at = now_ms();
     // Per-chat unread counts (people + agent). Older relays answer 404.
-    let unread_by_chat = fetch_unread_map(shared).await;
-    let list = shared.get_json("/projects").await?;
+    let (unread_by_chat, list) =
+        tokio::join!(fetch_unread_map(shared), shared.get_json("/projects"));
+    let list = list?;
     let items = list.as_array().cloned().unwrap_or_default();
+    let me_id = shared.me_id();
+    // Keep list order while limiting metadata work on large accounts. People
+    // hydration is independent: at most four project requests plus one people request.
+    let project_entries = futures::stream::iter(items)
+        .map(|item| hydrate_project(shared, item, &me_id))
+        .buffered(4)
+        .collect::<Vec<_>>();
+    let (entries, people_list) = tokio::join!(project_entries, fetch_people_list(shared));
     let mut projects: Vec<Project> = Vec::new();
     let mut all_chats: Vec<Chat> = Vec::new();
-    let me_id = shared.me_id();
-    for item in items {
-        // `GET /projects` overwrites `owner` with the user-id string (not a
-        // ProjectOwnerDto object), so the list row is not a full ProjectDto.
-        // Only id + list extras are read here; detail fills the rest.
-        let Some(id) = item.get("id").and_then(Value::as_str).map(str::to_owned) else {
-            continue;
-        };
-        let list_shared = item.get("shared").and_then(Value::as_bool);
-        let list_owner_handle = item
-            .get("owner_handle")
-            .and_then(Value::as_str)
-            .filter(|h| !h.is_empty())
-            .map(str::to_owned);
-        let detail_val = match shared.get_json(&format!("/projects/{id}")).await {
-            Ok(v) => v,
-            Err(err) => {
-                // One bad project must not abort the whole refresh (reconnect loop).
-                log::warn!(
-                    target: "arbos_mac::relay",
-                    "GET /projects/{id}: {err:#}; keeping last good entry"
-                );
-                if let Some(prev) = shared
-                    .projects
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .find(|x| x.id == id)
-                    .cloned()
-                {
-                    projects.push(prev);
-                }
-                let prev_chats: Vec<Chat> = shared
-                    .chats
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .filter(|c| c.project_id == id)
-                    .cloned()
-                    .collect();
-                all_chats.extend(prev_chats);
-                continue;
-            }
-        };
-        // Outside agents (#2141): an extra key beside the DTO.
-        let outside: Option<crate::model::OutsideInfo> = detail_val
-            .get("outside")
-            .cloned()
-            .and_then(|v| serde_json::from_value(v).ok());
-        let detail: GetProjectResponseDto = match serde_json::from_value(detail_val) {
-            Ok(d) => d,
-            Err(err) => {
-                log::warn!(target: "arbos_mac::relay", "GetProjectResponseDto {id}: {err}");
-                continue;
-            }
-        };
-        // Who else is in this project (D72 step 3); older relays answer 404.
-        let members = match shared.get_json(&format!("/projects/{id}/members")).await {
-            Ok(v) => match serde_json::from_value::<ProjectMembersDto>(v) {
-                Ok(m) => Some(m),
-                Err(err) => {
-                    log::warn!(target: "arbos_mac::relay", "ProjectMembersDto {id}: {err}");
-                    None
-                }
-            },
-            Err(_) => None,
-        };
-        let previous = shared
-            .projects
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|x| x.id == id)
-            .cloned();
-        let mut project = project_from_dto(&detail, members.as_ref());
-        project.outside = outside;
-        // D92 amendment: the agent's uploaded / generated picture — the public versioned route.
-        project.image_url = project_image_url(
-            &shared.http_url,
-            &id,
-            detail.project.image_key.as_deref(),
-            project.avatar_version,
-        );
-        // list_projects extras (shared / owner_handle) live on the list row.
-        if let Some(shared_flag) = list_shared {
-            project.shared = shared_flag;
-        }
-        if project.owner_handle.is_none() {
-            project.owner_handle = list_owner_handle;
-        }
-        project.people.retain(|p| p.id != me_id);
-        if let Some(prev) = &previous {
-            project.state_detail = prev.state_detail.clone();
-            project.muted = prev.muted;
-            if project.model.is_empty() {
-                project.model = prev.model.clone();
-            }
-            if project.avatar.is_none() {
-                project.avatar = prev.avatar.clone();
-            }
-            if project.avatar_color.is_none() {
-                project.avatar_color = prev.avatar_color.clone();
-            }
-        }
-        if project.model.is_empty() {
-            project.model = "anthropic/claude-haiku-5.5".into();
-        }
-        if project.avatar_color_index.is_none() {
-            project.avatar_color_index = Some(crate::ui::avatars::color_index(&id));
-        }
-        let chats: Vec<Chat> = detail.chats.iter().map(chat_from_dto).collect();
-        projects.push(project);
+    for (project, chats) in entries {
+        projects.extend(project);
         all_chats.extend(chats);
     }
-
-    // People chats (D72) share the rail: one space + one pinned chat each.
-    let people_ids: Vec<Id> = projects
-        .iter()
-        .filter(|p| p.is_people())
-        .map(|p| p.id.clone())
-        .collect();
-    // A brief connection timeout on GET /chats is common on flaky networks; retry twice
-    // before keeping the cached list (and only then file a diagnostic for non-transient errors).
-    let people_list = {
-        let mut attempt = 0u32;
-        loop {
-            match shared.get_json("/chats").await {
-                Ok(list) => break Ok(list),
-                Err(err) => {
-                    let text = format!("{err:#}");
-                    if text.contains("HTTP 404") {
-                        break Err(err);
-                    }
-                    if diagnostics::is_transient(&text) && attempt < 2 {
-                        attempt += 1;
-                        sleep(Duration::from_millis(400 * u64::from(attempt))).await;
-                        continue;
-                    }
-                    break Err(err);
-                }
-            }
-        }
-    };
     match people_list {
         Ok(list) => {
             let mut ids = shared.people.lock().unwrap();
@@ -2774,7 +2779,6 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
             }
         }
     }
-    let _ = people_ids;
     migrate_local_archive(shared, &mut all_chats).await;
     // The relay's archive state is the truth; the store keeps an offline copy.
     shared.with_store(|s| {
