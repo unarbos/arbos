@@ -19,6 +19,7 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tokio::time::sleep;
 
+use crate::chat_title::title_from;
 use crate::model::{
     AgentMember, Call, CallEnded, CallKind, LinkState, Machine, MachineState, MediaPick, Person,
     ProjectDocView, ReplyPolicy, ReplyRef, Sender, SpaceKind, ThreadInfo, Voice,
@@ -3983,19 +3984,6 @@ fn maybe_retitle(shared: &Shared, chat_id: &str, text: &str) {
     };
     if changed {
         emit_chats(shared);
-    }
-}
-
-fn title_from(text: &str) -> String {
-    let line = text.lines().next().unwrap_or("").trim();
-    let mut out: String = line.chars().take(34).collect();
-    if line.chars().count() > 34 {
-        out.push('…');
-    }
-    if out.is_empty() {
-        "New chat".into()
-    } else {
-        out
     }
 }
 

@@ -56,6 +56,7 @@ use super::{
     ClientCommand, CopyBlob, DraftPicture, PictureSource, PictureTarget, PushRefusal, SyncEvent,
     SyncSource,
 };
+use crate::chat_title::title_from;
 use crate::model::{
     new_id, now_ms, trace_rows, AccountView, Attachment, AttachmentKind, BoxReport, BoxState, Call,
     CallEnded, CallLeft, CallMissed, ChannelBinding, ChannelPairing, ChannelPlatform, ChannelsView,
@@ -4992,7 +4993,7 @@ async fn send_message(
             .iter()
             .any(|c| c.id == chat_id && !c.is_pinned && c.title == "New chat");
         let title = if untitled {
-            Some(crate::app::title_from(&text))
+            Some(title_from(&text))
         } else {
             None
         };
