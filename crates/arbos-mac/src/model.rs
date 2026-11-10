@@ -1416,7 +1416,7 @@ impl AttachmentKind {
         }
     }
 
-    fn from_name_and_mime(name: &str, mime: &str) -> Self {
+    pub fn from_name_and_mime(name: &str, mime: &str) -> Self {
         let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
         match ext.as_str() {
             "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp" | "heic" => {
@@ -1527,6 +1527,19 @@ pub enum MediaPick {
     Gif(Box<GifItem>),
 }
 
+/// A JPEG poster frame for a video (`{ ref, width, height, durationMs }`).
+/// Old messages and a failed grab have none
+/// (feedback app-01M61H3VVBQZ6NCE708XB41NCC).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoPoster {
+    #[serde(rename = "ref")]
+    pub blob_ref: String,
+    pub width: u32,
+    pub height: u32,
+    pub duration_ms: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Attachment {
@@ -1555,6 +1568,9 @@ pub struct Attachment {
     /// Boxed so [`Attachment`] stays small inside enums (Outgoing, library Entry).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<Box<AttachmentSource>>,
+    /// Poster frame for a video; when set the bubble shows the picture + Play.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poster: Option<Box<VideoPoster>>,
 }
 
 /// The thumbnail-cache key prefix for a provider-hosted picture (`url:<https://…>`); the
@@ -1612,6 +1628,11 @@ impl Attachment {
     /// An image that should render as a picture in the transcript, not a file name.
     pub fn is_image(&self) -> bool {
         self.kind() == AttachmentKind::Image || self.mime.starts_with("image/")
+    }
+
+    /// A video that should open in the media viewer (with or without a poster).
+    pub fn is_video(&self) -> bool {
+        self.kind() == AttachmentKind::Video || self.mime.starts_with("video/")
     }
 
     /// The blob is still on its way up from this device (`local:` key): nothing
@@ -5459,5 +5480,55 @@ mod unrecognised_approval_risk_tests {
             "the card dropped out of the pending set, so nothing will ask the user"
         );
         assert_eq!(risk.label(), "unrecognised");
+    }
+}
+
+#[cfg(test)]
+mod video_poster_tests {
+    use super::*;
+
+    #[test]
+    fn attachment_serde_with_and_without_a_poster() {
+        let with = Attachment {
+            name: "clip.mp4".into(),
+            mime: "video/mp4".into(),
+            blob_ref: Some("blob-vid".into()),
+            bytes: Some(1_200_000),
+            kind: Some(AttachmentKind::Video),
+            title: None,
+            chart_part: None,
+            url: None,
+            source: None,
+            poster: Some(Box::new(VideoPoster {
+                blob_ref: "blob-poster".into(),
+                width: 1280,
+                height: 720,
+                duration_ms: 7_000,
+            })),
+        };
+        let v = serde_json::to_value(&with).unwrap();
+        assert_eq!(v["poster"]["ref"], "blob-poster");
+        assert_eq!(v["poster"]["width"], 1280);
+        assert_eq!(v["poster"]["height"], 720);
+        assert_eq!(v["poster"]["durationMs"], 7000);
+        let back: Attachment = serde_json::from_value(v).unwrap();
+        assert_eq!(back.poster.as_ref().unwrap().blob_ref, "blob-poster");
+
+        let without = Attachment {
+            name: "clip.mp4".into(),
+            mime: "video/mp4".into(),
+            blob_ref: Some("blob-vid".into()),
+            bytes: None,
+            kind: Some(AttachmentKind::Video),
+            title: None,
+            chart_part: None,
+            url: None,
+            source: None,
+            poster: None,
+        };
+        let plain = serde_json::to_value(&without).unwrap();
+        assert!(plain.get("poster").is_none());
+        let back: Attachment = serde_json::from_value(plain).unwrap();
+        assert!(back.poster.is_none());
     }
 }

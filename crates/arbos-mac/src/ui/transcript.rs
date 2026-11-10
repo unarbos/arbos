@@ -3353,9 +3353,15 @@ impl Transcript {
                 forwarded_from,
                 quote,
             } => {
-                // The blob `ref`, or `url:<url>` for a picked GIF that lives with its
-                // provider (ARB-544) — the sync layer fetches either.
-                let preview = match attachment.preview_key() {
+                // Videos with a poster load the poster JPEG; pictures and GIFs use
+                // `preview_key` (blob `ref` or `url:<url>` for a picked GIF, ARB-544).
+                let preview_key = attachment
+                    .poster
+                    .as_ref()
+                    .filter(|_| attachment.is_video())
+                    .map(|p| p.blob_ref.clone())
+                    .or_else(|| attachment.preview_key());
+                let preview = match preview_key.as_ref() {
                     None => attachments::Preview::Unavailable,
                     Some(k) => {
                         let state = self.state.read(cx);

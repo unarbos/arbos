@@ -346,6 +346,7 @@ mod tests {
                 chart_part: None,
                 url: None,
                 source: None,
+                poster: None,
             },
         });
         m

@@ -531,8 +531,18 @@ pub struct AttachmentSource {
     pub page_url: String,
 }
 
+/// A JPEG poster frame for a video attachment (`{ ref, width, height, durationMs }`).
+/// `ref` is a JPEG blob in the same slot. Old messages and failed grabs have none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VideoPoster {
+    pub blob_ref: String,
+    pub width: u32,
+    pub height: u32,
+    pub duration_ms: u64,
+}
+
 /// One attachment part on a client user message (`name` / `mime` / optional `kind` / `ref`
-/// / optional `url` / optional `source`).
+/// / optional `url` / optional `source` / optional `poster`).
 ///
 /// `kind` is a free string the clients agree on: `image`, `audio`, `video`, `file`,
 /// and `sticker` (a picker sticker: drawn at a fixed size with no bubble).
@@ -548,6 +558,8 @@ pub struct UserAttachment {
     pub url: Option<String>,
     /// Attribution for a GIF / sticker picker result; omitted when absent.
     pub source: Option<AttachmentSource>,
+    /// Poster frame for a video; omitted when absent.
+    pub poster: Option<VideoPoster>,
 }
 
 fn lv_to_json(v: &LoroValue) -> Value {
@@ -963,6 +975,13 @@ impl ChatDoc {
                 loro_err(s.insert("provider", src.provider.as_str()))?;
                 loro_err(s.insert("id", src.id.as_str()))?;
                 loro_err(s.insert("pageUrl", src.page_url.as_str()))?;
+            }
+            if let Some(poster) = &att.poster {
+                let p = loro_err(a.insert_container("poster", LoroMap::new()))?;
+                loro_err(p.insert("ref", poster.blob_ref.as_str()))?;
+                loro_err(p.insert("width", poster.width as i64))?;
+                loro_err(p.insert("height", poster.height as i64))?;
+                loro_err(p.insert("durationMs", poster.duration_ms as i64))?;
             }
         }
         let part = loro_err(parts.push_container(LoroMap::new()))?;
@@ -3008,6 +3027,7 @@ mod tests {
                         blob_ref: Some("blob-1".into()),
                         url: None,
                         source: None,
+                        poster: None,
                     }],
                     ..UserMessageOpts::default()
                 },
@@ -3516,6 +3536,7 @@ mod tests {
                         blob_ref: Some("k".into()),
                         url: None,
                         source: None,
+                        poster: None,
                     }],
                     ..Default::default()
                 },
@@ -3562,6 +3583,7 @@ mod tests {
                             id: "abc".into(),
                             page_url: "https://giphy.com/gifs/abc".into(),
                         }),
+                        poster: None,
                     }],
                     ..UserMessageOpts::default()
                 },
@@ -3587,6 +3609,7 @@ mod tests {
                         blob_ref: Some("blob-png".into()),
                         url: None,
                         source: None,
+                        poster: None,
                     }],
                     ..UserMessageOpts::default()
                 },
@@ -3596,5 +3619,67 @@ mod tests {
         let plain = &without.to_json()["messages"][0]["parts"][0]["attachment"];
         assert!(plain.get("source").is_none());
         assert_eq!(plain["name"], "shot.png");
+    }
+
+    /// A video poster map round-trips through the doc and is absent when unset
+    /// (feedback app-01M61H3VVBQZ6NCE708XB41NCC).
+    #[test]
+    fn attachment_poster_round_trips_through_the_doc() {
+        let with = ChatDoc::new(None, false);
+        with.transact(|d| {
+            d.append_user_message(
+                "m-vid",
+                "clip",
+                "dev:a",
+                &UserMessageOpts {
+                    attachments: vec![UserAttachment {
+                        name: "clip.mp4".into(),
+                        mime: "video/mp4".into(),
+                        kind: Some("video".into()),
+                        blob_ref: Some("blob-vid".into()),
+                        url: None,
+                        source: None,
+                        poster: Some(VideoPoster {
+                            blob_ref: "blob-poster".into(),
+                            width: 1280,
+                            height: 720,
+                            duration_ms: 7_000,
+                        }),
+                    }],
+                    ..UserMessageOpts::default()
+                },
+            )
+            .unwrap();
+        });
+        let att = &with.to_json()["messages"][0]["parts"][0]["attachment"];
+        assert_eq!(att["poster"]["ref"], "blob-poster");
+        assert_eq!(att["poster"]["width"], 1280);
+        assert_eq!(att["poster"]["height"], 720);
+        assert_eq!(att["poster"]["durationMs"], 7000);
+
+        let without = ChatDoc::new(None, false);
+        without.transact(|d| {
+            d.append_user_message(
+                "m-plain",
+                "clip",
+                "dev:a",
+                &UserMessageOpts {
+                    attachments: vec![UserAttachment {
+                        name: "clip.mp4".into(),
+                        mime: "video/mp4".into(),
+                        kind: Some("video".into()),
+                        blob_ref: Some("blob-vid".into()),
+                        url: None,
+                        source: None,
+                        poster: None,
+                    }],
+                    ..UserMessageOpts::default()
+                },
+            )
+            .unwrap();
+        });
+        let plain = &without.to_json()["messages"][0]["parts"][0]["attachment"];
+        assert!(plain.get("poster").is_none());
+        assert_eq!(plain["name"], "clip.mp4");
     }
 }

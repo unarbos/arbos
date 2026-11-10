@@ -107,6 +107,70 @@ final class CoreFixturesTests: XCTestCase {
         XCTAssertTrue(messages[6].parts.contains { if case .status(_, let code, _) = $0 { return code == .askUser }; return false })
     }
 
+    /// A user row with a video poster map reads back through Model
+    /// (feedback app-01M61H3VVBQZ6NCE708XB41NCC).
+    func testCoreChatDocUserRowWithPosterReadsThroughModel() throws {
+        let row: [String: Any] = [
+            "id": "m-vid",
+            "role": "user",
+            "sender": "user:me",
+            "status": "done",
+            "createdAt": 1,
+            "parts": [[
+                "id": "p1",
+                "kind": "attachment",
+                "attachment": [
+                    "name": "clip.mp4",
+                    "mime": "video/mp4",
+                    "kind": "video",
+                    "ref": "blob-vid",
+                    "poster": [
+                        "ref": "blob-poster",
+                        "width": 1280,
+                        "height": 720,
+                        "durationMs": 7000,
+                    ],
+                ],
+            ], [
+                "id": "p2",
+                "kind": "text",
+                "text": "clip",
+            ]],
+        ]
+        let message = try XCTUnwrap(Message.message(row, chatId: "c1"))
+        guard case .attachment(_, let a) = message.parts.first else {
+            return XCTFail("expected attachment part")
+        }
+        let poster = try XCTUnwrap(a.poster)
+        XCTAssertEqual(poster.ref, "blob-poster")
+        XCTAssertEqual(poster.width, 1280)
+        XCTAssertEqual(poster.height, 720)
+        XCTAssertEqual(poster.durationMs, 7000)
+
+        let plain: [String: Any] = [
+            "id": "m-plain",
+            "role": "user",
+            "sender": "user:me",
+            "status": "done",
+            "createdAt": 1,
+            "parts": [[
+                "id": "p1",
+                "kind": "attachment",
+                "attachment": [
+                    "name": "clip.mp4",
+                    "mime": "video/mp4",
+                    "kind": "video",
+                    "ref": "blob-vid",
+                ],
+            ]],
+        ]
+        let without = try XCTUnwrap(Message.message(plain, chatId: "c1"))
+        guard case .attachment(_, let b) = without.parts.first else {
+            return XCTFail("expected attachment part")
+        }
+        XCTAssertNil(b.poster, "old messages have no poster map")
+    }
+
     /// arbos-ffi path: same snapshot through UniFFI ChatDoc.readRowsJson.
     func testFfiReadsCoreChatDocFixture() throws {
         let snap = try fixtureData("chat_doc.bin")

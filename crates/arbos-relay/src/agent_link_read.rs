@@ -1111,6 +1111,8 @@ mod tests {
                     blob_ref: Some("blobkey1".into()),
                     url: None,
                     source: None,
+
+                    poster: None,
                 }],
                 ..Default::default()
             },
