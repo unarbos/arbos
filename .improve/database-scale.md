@@ -156,3 +156,18 @@ unbounded-result behavior. Run a representative device group-open/send trace and
 concurrent writer benchmark before attributing user-visible latency to these SQL
 savings. Security-sensitive membership behavior is pinned by failing-before or
 characterization tests and deserves maintainer review before merge.
+
+
+## Whole chat-list follow-through
+
+The earlier two-query roster result measured the storage helper, not all HTTP DTO
+mapping. A root actual-handler regression exposed repeated public profile,
+presence, agent-owner and block lookups: eight rooms used186/714 statements for
+2/24humans. Request-local profile batching reduces both to69; a narrow live-device
+user-id index removes unrelated-account scans without indexing the frequent
+presence timestamp. Final nine native checks and all-target Clippy pass, including
+legacy/device ties, alias resolution, full list/detail/visibility and independent
+partial decode errors. Independent source review passes. See
+`load-test/PEOPLE_DTO.md` and `PEOPLE_DTO_GATES.json`. Final portable committed-source
+1/10/100/1000-room measurement is running; earlier batch-only timings remain
+intermediate evidence, not final-source proof.

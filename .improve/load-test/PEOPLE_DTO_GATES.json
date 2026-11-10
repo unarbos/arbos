@@ -1,0 +1,172 @@
+{
+  "scope": "Final exact native9 cases incl legacy/tie/malformed-component controls; actual whole chats_list statements69 for2/24humans over8rooms; full application/HTTP transport excluded",
+  "before_query_budget": {
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-relay",
+      "people::roster_batch_tests::",
+      "--",
+      "--test-threads=1",
+      "--nocapture"
+    ],
+    "exit_code": 101,
+    "seconds": 55.30175666697323,
+    "counts": [
+      [
+        3,
+        1,
+        0
+      ]
+    ],
+    "people_source_sha256": "b679fc3481debf24e67224ae0ceb9c1ffd6e15dd668007c454b893b730d198df",
+    "workspace_packages_cleaned": 12,
+    "scope": "actual chats_list/detail plus generated8-room2/24-human2-agent relationships; SQLite statement trace; no network/app/cache/user data",
+    "expected_counts": [
+      [
+        3,
+        1,
+        0
+      ]
+    ],
+    "count_matches": true,
+    "statement_counts": {
+      "eight_rooms_two_humans_two_agents": 186,
+      "eight_rooms_24_humans_two_agents": 714
+    },
+    "count_note": "Rust substring filter also selects two db_people roster controls; initial runner expected only two tests, corrected to all four recorded names. Actual DTO budget is the single semantic failure."
+  },
+  "before_device_index": {
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-relay",
+      "live_device_profile_reads",
+      "--",
+      "--test-threads=1",
+      "--nocapture"
+    ],
+    "exit_code": 101,
+    "seconds": 30.225021374993958,
+    "counts": [
+      [
+        "0",
+        "1",
+        "0"
+      ]
+    ],
+    "source_sha256": {
+      "people.rs": "b2977c2a042db13b06be5faf7232d88adb57368cc00f54528b9674741755c80f",
+      "db_people.rs": "d6f18ba0c80ebef3ef405b2dffd74db81329a89dc3624e846e5184f09fb3f317",
+      "api.rs": "c8eb110880359dd55ed98341f1005e6b4609dbf0affe26fb656a8f185bbbe2a7",
+      "notify.rs": "56d298654b6ea222187528b334eee2d110b726fc496ce717b171171171be13ed",
+      "avatar.rs": "1d645fc3f013a5e0b04a2b24c8fbf1eb258f1df5d7d2621b400c2df38faf7657"
+    },
+    "source_unchanged": true,
+    "network": "deny network*",
+    "target": "Unique per-workspace; all12 packages cleaned before baseline; changed relay cleaned before next proof"
+  },
+  "candidate_preservation_before": {
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-relay",
+      "decode_failure",
+      "--",
+      "--test-threads=1",
+      "--nocapture"
+    ],
+    "exit_code": 101,
+    "seconds": 26.57401962496806,
+    "counts": [
+      [
+        "0",
+        "2",
+        "0"
+      ]
+    ],
+    "source_sha256": {
+      "people.rs": "b2977c2a042db13b06be5faf7232d88adb57368cc00f54528b9674741755c80f",
+      "db_people.rs": "28e1df4da371168ff33679f2be0d335a22ae0f7695b953a55108fc773ce18979",
+      "db_accounts.rs": "d10a77d35fd41abee7c14cdb13b108bfa9888e10d6fb4ef1eb3387bad0afe537",
+      "api.rs": "c8eb110880359dd55ed98341f1005e6b4609dbf0affe26fb656a8f185bbbe2a7",
+      "notify.rs": "56d298654b6ea222187528b334eee2d110b726fc496ce717b171171171be13ed",
+      "avatar.rs": "1d645fc3f013a5e0b04a2b24c8fbf1eb258f1df5d7d2621b400c2df38faf7657"
+    },
+    "source_unchanged": true,
+    "network": "deny network*",
+    "target": "Unique per-workspace; all12 packages cleaned before baseline; changed relay cleaned before next proof"
+  },
+  "after": {
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-relay",
+      "batch_tests::",
+      "--",
+      "--test-threads=1",
+      "--nocapture"
+    ],
+    "exit_code": 0,
+    "seconds": 26.936292625032365,
+    "counts": [
+      [
+        "9",
+        "0",
+        "0"
+      ]
+    ],
+    "source_sha256": {
+      "people.rs": "b2977c2a042db13b06be5faf7232d88adb57368cc00f54528b9674741755c80f",
+      "db_people.rs": "d3846f6106a079b30a74e492a72c2770727a0b338764d98420280524170cda85",
+      "db_accounts.rs": "d10a77d35fd41abee7c14cdb13b108bfa9888e10d6fb4ef1eb3387bad0afe537",
+      "api.rs": "c8eb110880359dd55ed98341f1005e6b4609dbf0affe26fb656a8f185bbbe2a7",
+      "notify.rs": "56d298654b6ea222187528b334eee2d110b726fc496ce717b171171171be13ed",
+      "avatar.rs": "1d645fc3f013a5e0b04a2b24c8fbf1eb258f1df5d7d2621b400c2df38faf7657"
+    },
+    "source_unchanged": true,
+    "network": "deny network*",
+    "target": "Unique per-workspace; all12 packages cleaned before baseline; changed relay cleaned before next proof"
+  },
+  "clippy": {
+    "command": [
+      "cargo",
+      "clippy",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-relay",
+      "--all-targets",
+      "--",
+      "-D",
+      "warnings"
+    ],
+    "exit_code": 0,
+    "seconds": 15.245989207993262,
+    "counts": [],
+    "source_sha256": {
+      "people.rs": "b2977c2a042db13b06be5faf7232d88adb57368cc00f54528b9674741755c80f",
+      "db_people.rs": "d3846f6106a079b30a74e492a72c2770727a0b338764d98420280524170cda85",
+      "db_accounts.rs": "d10a77d35fd41abee7c14cdb13b108bfa9888e10d6fb4ef1eb3387bad0afe537",
+      "api.rs": "c8eb110880359dd55ed98341f1005e6b4609dbf0affe26fb656a8f185bbbe2a7",
+      "notify.rs": "56d298654b6ea222187528b334eee2d110b726fc496ce717b171171171be13ed",
+      "avatar.rs": "1d645fc3f013a5e0b04a2b24c8fbf1eb258f1df5d7d2621b400c2df38faf7657"
+    },
+    "source_unchanged": true,
+    "network": "deny network*",
+    "target": "Unique per-workspace; all12 packages cleaned before baseline; changed relay cleaned before next proof"
+  },
+  "performance": "Final portable suite against committed source pending; earlier batch-only profile retained as intermediate."
+}

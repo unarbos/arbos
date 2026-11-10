@@ -21,6 +21,7 @@ use crate::db::Db;
 
 pub const ACCOUNTS_SCHEMA: &str = r#"
 CREATE UNIQUE INDEX IF NOT EXISTS users_github ON users(github_id) WHERE github_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS devices_user_live ON devices(user_id) WHERE revoked_at IS NULL;
 CREATE TABLE IF NOT EXISTS auth_flows (
   state TEXT PRIMARY KEY, code_verifier TEXT NOT NULL, redirect TEXT NOT NULL,
   device_name TEXT NOT NULL, invite TEXT, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL
