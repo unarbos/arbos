@@ -9,9 +9,19 @@ args="$(printf '%s' "$input" | jq -c '.tool_input // {}')"
 session="$(printf '%s' "$input" | jq -r '.session_id // ""')"
 hay="$tool $args"
 
+audit() {
+  local input_hash
+  mkdir -p "$(dirname "$AUDIT")" 2>/dev/null || return 0
+  input_hash="$(printf '%s' "$args" | sha256sum 2>/dev/null)" || return 0
+  input_hash="${input_hash%% *}"
+  jq -cn --arg session "$session" --arg tool "$tool" --arg denied "$1" --arg input_hash "$input_hash" \
+    '{ts: (now * 1000 | floor), kind: "tool_call", role: "subagent", harness: "claude_code",
+      session: $session, tool: $tool, denied: (if $denied == "" then null else $denied end), input_hash: $input_hash}' \
+    2>/dev/null >> "$AUDIT" || true
+}
+
 block() {
-  printf '{"ts":%s,"kind":"tool_call","role":"subagent","harness":"claude_code","session":"%s","tool":"%s","denied":"%s","input_preview":%s}\n' \
-    "$(date +%s%3N)" "$session" "$tool" "$1" "$(printf '%s' "${args:0:200}" | jq -Rs .)" >> "$AUDIT" 2>/dev/null
+  audit "$1"
   echo "Blocked by the Arbos deny-list ($1): $2" >&2
   exit 2
 }
@@ -29,7 +39,5 @@ case "$tool" in
     fi ;;
 esac
 
-mkdir -p "$(dirname "$AUDIT")" 2>/dev/null
-printf '{"ts":%s,"kind":"tool_call","role":"subagent","harness":"claude_code","session":"%s","tool":"%s","denied":null,"input_preview":%s}\n' \
-  "$(date +%s%3N)" "$session" "$tool" "$(printf '%s' "${args:0:200}" | jq -Rs .)" >> "$AUDIT" 2>/dev/null
+audit ""
 exit 0
