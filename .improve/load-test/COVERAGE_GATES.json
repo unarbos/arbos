@@ -1,0 +1,40 @@
+{
+  "before_index": {
+    "original_actual_source_checks": "PASS: fresh/replay, latest, equal timestamps, missing and NULL workers",
+    "duration_seconds": null,
+    "duration_note": "Original pre-edit capture was not separately timed; no before-duration claim."
+  },
+  "after": {
+    "coverage": {
+      "exit_code": 0,
+      "duration_seconds": 0.116,
+      "result": {
+        "checks_passed": 6,
+        "checks": [
+          "relay extracted queries and relationship/results",
+          "relay existing path rejected",
+          "relay readonly bound queries/plans/counters",
+          "box extracted queries and relationship/results",
+          "box existing path rejected",
+          "box readonly bound queries/plans/counters"
+        ]
+      }
+    },
+    "job_index": {
+      "exit_code": 0,
+      "duration_seconds": 0.113,
+      "result": {
+        "checks_passed": 6,
+        "checks": [
+          "old fresh and replay",
+          "new fresh and replay",
+          "exact full-row latest equivalence",
+          "equal timestamp first-insertion equivalence",
+          "NULL and missing worker equivalence",
+          "existing old data upgrade and idempotent index replay"
+        ]
+      }
+    }
+  },
+  "store_sha256": "da01afe8858a06141e3da1bc5f7e69c39923c5d4ea4aa4cdf440707b56cbf391"
+}
