@@ -15081,6 +15081,10 @@ pub(crate) fn retire_row(doc: &arbos_core::doc::ChatDoc, msg_id: &str) {
 }
 
 /// Hide the turn's trailing wordless row (see the call site). Returns what was done.
+///
+/// Kept when this is the only client-visible reply to the ask: a hidden job / worker row is not
+/// a bubble (#2964), and retiring the empty result then leaves the ask with neither an answer
+/// nor the stock "didn't answer" line the apps draw from an empty Done row.
 pub(crate) fn trim_wordless_result_row(
     doc: &arbos_core::doc::ChatDoc,
     msg_id: &str,
@@ -15090,6 +15094,20 @@ pub(crate) fn trim_wordless_result_row(
     };
     let (wordless, only_empty) = wordless_row(&m);
     if !wordless {
+        return "kept";
+    }
+    let ask = m.rest.get("inReplyTo").and_then(Value::as_str);
+    let has_visible_sibling = ask.is_some_and(|ask| {
+        doc.messages().iter().any(|other| {
+            other.id != msg_id
+                && other.role == "assistant"
+                && other.rest.get("inReplyTo").and_then(Value::as_str) == Some(ask)
+                && other.rest.get("hidden").and_then(Value::as_bool) != Some(true)
+                && other.rest.get("job").is_none()
+                && other.has_visible_content()
+        })
+    });
+    if !has_visible_sibling {
         return "kept";
     }
     retire_row(doc, msg_id);

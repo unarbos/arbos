@@ -762,10 +762,18 @@ enum Transcript {
                 // (wordless, "Working…") must not get "didn't answer" under its own answer
                 // (Jacob, "run bubble sort", 2026-10-25). Another visible row of the same turn
                 // = an assistant row answering the same user message with words or a card.
+                //
+                // A hidden / job worker row does not count (#2964): the transcript skips those
+                // above, so treating their "Done." / status text as an answer left the ask with
+                // no bubble and no stock line after a research job finished without a delivery.
                 let turnAnsweredElsewhere: Bool = {
                     guard !failed, let ask = message.inReplyTo else { return false }
                     return messages.contains { other in
-                        other.id != message.id && other.role == .assistant && other.inReplyTo == ask
+                        other.id != message.id
+                            && other.role == .assistant
+                            && other.inReplyTo == ask
+                            && !other.hidden
+                            && other.job == nil
                             && (!other.plainText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                                 || other.parts.contains { part in
                                     switch part {
