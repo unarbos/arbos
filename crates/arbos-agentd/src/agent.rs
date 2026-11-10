@@ -10478,6 +10478,42 @@ impl Agent {
         });
     }
 
+    /// Put words on the chat's working row: the live streaming message the apps read for the
+    /// presence line, and the relay mirror. Used when a mid-busy ask is queued or steered — no
+    /// bubble (#1479); the presence line is the acknowledgement (Jacob, 2026-10-23).
+    pub(crate) async fn set_working_row(&self, host: &SharedHost, chat_id: &str, text: String) {
+        let text: String = text.chars().take(80).collect();
+        // Prefer the running turn of this chat.
+        {
+            let mut tl = self.turn.lock().await;
+            if let Some(t) = tl.as_mut().filter(|t| t.chat_id == chat_id) {
+                if t.activity.as_deref() != Some(text.as_str()) {
+                    t.activity = Some(text.clone());
+                    if !t.row_closed {
+                        let h = host.lock().await;
+                        h.doc.set_activity(&t.assistant_msg_id, Some(&text));
+                    }
+                }
+                self.post_activity(chat_id, Some(text));
+                return;
+            }
+        }
+        // No turn: the newest streaming assistant row in this room (a job's worker row).
+        {
+            let h = host.lock().await;
+            if let Some(m) = h
+                .doc
+                .messages()
+                .iter()
+                .rev()
+                .find(|m| m.role == "assistant" && m.status == "streaming")
+            {
+                h.doc.set_activity(&m.id, Some(&text));
+            }
+        }
+        self.post_activity(chat_id, Some(text));
+    }
+
     /// `start_job(title, brief, kind, touches?)` from the main turn (duplex step 2): returns at
     /// once with the job id; the job runs as a pi subagent beside the chat, its title and steps
     /// drive the status line, and its result comes back as a job notice turn.

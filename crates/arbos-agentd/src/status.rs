@@ -752,6 +752,9 @@ impl Agent {
         // #1479: Task mid-turn arrivals (and every canned "Still on it" fallback) never post a
         // chat bubble — the apps already show one quiet working indicator. Queue for the main
         // session; do not mark this wait as noted so a later status question can still answer.
+        // The working row is the acknowledgement (Jacob, 2026-10-23): "Queued: <ask>…" so a new
+        // ask while a job or turn is already running does not keep showing the old step
+        // ([feedback ACWckXaV2Ndc0uDYr0Xs8Fg]).
         if kind == SideKind::Task {
             let _ = self.store.t3_append(
                 chat_id,
@@ -770,11 +773,15 @@ impl Agent {
                     "steerable": snap.steerable, "silent": true,
                 })),
             );
+            let gist: String = user_text.split_whitespace().collect::<Vec<_>>().join(" ");
+            let gist: String = gist.chars().take(40).collect();
+            self.set_working_row(host, chat_id, format!("Queued: {gist}…"))
+                .await;
             tracing::info!(
                 chat_id,
                 ms = t0.elapsed().as_millis() as i64,
                 model_call = used_model,
-                "quick reply silent queue; no ack bubble"
+                "quick reply silent queue; working row only"
             );
             return QuickOutcome::Queued;
         }
@@ -813,21 +820,12 @@ impl Agent {
             self.mark_quick_noted(chat_id, turn_started);
         }
         if kind != SideKind::Status {
-            // Queued or steered: the working row carries it; nothing in the transcript until
-            // the real answer. The presence line names what was taken, briefly.
+            // Steered (Task returned above): the working row carries it; nothing in the
+            // transcript until the real answer. The presence line names what was taken, briefly.
             let gist: String = user_text.split_whitespace().collect::<Vec<_>>().join(" ");
             let gist: String = gist.chars().take(40).collect();
-            self.post_activity(
-                chat_id,
-                Some(format!(
-                    "{}: {gist}…",
-                    if kind == SideKind::Guide {
-                        "Steering"
-                    } else {
-                        "Queued"
-                    }
-                )),
-            );
+            self.set_working_row(host, chat_id, format!("Steering: {gist}…"))
+                .await;
             tracing::info!(
                 chat_id,
                 kind = kind.as_str(),
@@ -1752,7 +1750,9 @@ It ran as a real background job, not inline.";
 
     /// Jacob's rule (2026-10-23): a new ask while busy is queued silently — status on the
     /// working row, no acknowledgement bubble, no "Still on it…" placeholder; the real answer
-    /// is the only row the message ever gets.
+    /// is the only row the message ever gets. The working row must name the new ask
+    /// ("Queued: …"), not keep showing the step of the work that was already running
+    /// ([feedback ACWckXaV2Ndc0uDYr0Xs8Fg]).
     #[tokio::test]
     async fn busy_agent_queues_a_new_task_without_a_placeholder_row() {
         let (agent, root) = test_agent().await;
@@ -1760,6 +1760,13 @@ It ran as a real background job, not inline.";
         let chat = "01TESTCHATQUICKREPLY000001";
         let host = agent.sync.open_room(chat).await.unwrap();
         let busy = agent.test_hold_turn(chat).await;
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            t.activity = Some("Finding sock stores in LA".into());
+            agent.test_open_row(&host, t).await;
+        }
+        ACTIVITY_LOG.lock().unwrap().clear();
         let (msg_id, cmd) = send_cmd(&host, "also add a plot of the results when you are done");
         let a2 = agent.clone();
         let chat2 = chat.to_owned();
@@ -1785,6 +1792,40 @@ It ran as a real background job, not inline.";
         assert!(
             agent.take_side_notes(chat).is_none(),
             "a task is not a side note"
+        );
+        // The presence line names the new ask, not the step that was already running.
+        let seen = loop {
+            if let Some(a) = ACTIVITY_LOG
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|a| a.starts_with("Queued:"))
+                .cloned()
+            {
+                break a;
+            }
+            assert!(
+                t0.elapsed() < Duration::from_secs(FIRST_REPLY_GATE_SECS),
+                "no Queued activity on the working row"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        assert!(
+            seen.starts_with("Queued: also add a plot of the results"),
+            "{seen}"
+        );
+        assert_eq!(
+            agent
+                .turn
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .activity
+                .as_deref()
+                .map(|a| a.starts_with("Queued:")),
+            Some(true),
+            "the live turn's activity is the Queued line the apps read"
         );
         waiting.abort();
         drop(busy);
