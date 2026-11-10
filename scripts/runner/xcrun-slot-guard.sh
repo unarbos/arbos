@@ -11,6 +11,49 @@
 # load 548 on 2026-10-26 22:3x and ssh timed out for every worker.
 REAL=/usr/bin/xcrun
 SLOTS=/Users/Shared/arbos-run/heavy-slots
+
+# One tagged boot attempt: Checking -> Authorized:<slot> | Denied | Passthrough.
+# Only a live, fully published lease can authorize; terminal decisions are absorbing.
+boot_transition() {
+  case "$1" in Checking|Denied|Passthrough|Authorized:?*) ;; *) return 2 ;; esac
+  case "$1:$2" in
+    Checking:OwnedLease|Checking:ExplicitLiveLease)
+      [ -n "${3:-}" ] || return 2
+      echo "Authorized:$3" ;;
+    Checking:RejectedLease) echo Checking ;;
+    Checking:NoLease) echo Denied ;;
+    Checking:NonBoot|Checking:Workflow) echo Passthrough ;;
+    Authorized:*|Denied:*|Passthrough:*) echo "$1" ;;
+    *) return 2 ;;
+  esac
+}
+
+# The same pure constructor is used by explicit-slot and ancestor admission.
+boot_lease_event() {
+  case "$2:$1" in
+    Ancestor:Owned) echo OwnedLease ;;
+    Explicit:Owned|Explicit:External) echo ExplicitLiveLease ;;
+    *) echo RejectedLease ;;
+  esac
+}
+
+# Files/PID observations stay at this edge. Filename PID is the acquirer, not --pid owner.
+lease_snapshot() {
+  local slot=$1 pid name since
+  [ -d "$slot" ] || { echo Absent; return; }
+  [ ! -e "$slot/retired" ] || { echo Retired; return; }
+  pid=$(cat "$slot/pid" 2>/dev/null || true)
+  name=$(cat "$slot/name" 2>/dev/null || true)
+  since=$(cat "$slot/since" 2>/dev/null || true)
+  if ! [[ "$pid" =~ ^[0-9]{1,18}$ && "$since" =~ ^[0-9]{1,18}$ ]] || ! (( 10#$pid > 1 )) || [ -z "$name" ]; then
+    echo Unpublished; return
+  fi
+  ps -p "$pid" >/dev/null 2>&1 || { echo Dead; return; }
+  case " $anc " in *" $pid "*) echo Owned ;; *) echo External ;; esac
+}
+
+boot_main() {
+state=Checking
 is_boot=0
 if [ "${1:-}" = "simctl" ]; then
   case "${2:-}" in
@@ -18,24 +61,28 @@ if [ "${1:-}" = "simctl" ]; then
     bootstatus) for a in "$@"; do [ "$a" = "-b" ] && is_boot=1; done ;;
   esac
 fi
-[ "$is_boot" -eq 1 ] || exec "$REAL" "$@"
-[ -n "${GITHUB_ACTIONS:-}" ] && exec "$REAL" "$@"
-# Ancestors of this process.
+if [ "$is_boot" -ne 1 ]; then
+  state=$(boot_transition "$state" NonBoot); exec "$REAL" "$@"
+fi
+if [ -n "${GITHUB_ACTIONS:-}" ]; then
+  state=$(boot_transition "$state" Workflow); exec "$REAL" "$@"
+fi
 anc=""; p=$$
 while [ -n "$p" ] && [ "$p" -gt 1 ] 2>/dev/null; do anc="$anc $p"; p=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' '); done
-# The udid being booted (first 36-char UUID argument), bound to the allowing slot so an idle simulator
-# releases the slot by itself (arbos-heavy-slot.sh reclaim).
 udid=""; for a in "$@"; do case "$a" in [0-9A-F]*-*-*-*-*) [ ${#a} -eq 36 ] && udid=$a ;; esac; done
-# bind_and_exec <slot>: record the udid on the slot, then run the real xcrun with the ORIGINAL arguments
-# (08:4x Oct 27: the first version passed the slot path through to xcrun — "can't exec …slot").
 ORIG_ARGS=("$@")
 bind_and_exec() { [ -n "$udid" ] && /usr/local/bin/arbos-heavy-slot.sh bind "$1" "$udid" 2>/dev/null; exec "$REAL" "${ORIG_ARGS[@]}"; }
-[ -n "${ARBOS_HEAVY_SLOT:-}" ] && [ -d "${ARBOS_HEAVY_SLOT}" ] && bind_and_exec "$ARBOS_HEAVY_SLOT"
+if [ -n "${ARBOS_HEAVY_SLOT:-}" ]; then
+  event=$(boot_lease_event "$(lease_snapshot "$ARBOS_HEAVY_SLOT")" Explicit)
+  state=$(boot_transition "$state" "$event" "$ARBOS_HEAVY_SLOT")
+  case "$state" in Authorized:*) bind_and_exec "${state#Authorized:}" ;; esac
+fi
 for s in "$SLOTS"/*.slot; do
-  [ -d "$s" ] || continue
-  owner=$(basename "$s" | cut -d- -f2)
-  case " $anc " in *" $owner "*) bind_and_exec "$s" ;; esac
+  event=$(boot_lease_event "$(lease_snapshot "$s")" Ancestor)
+  state=$(boot_transition "$state" "$event" "$s")
+  case "$state" in Authorized:*) bind_and_exec "${state#Authorized:}" ;; esac
 done
+state=$(boot_transition "$state" NoLease)
 cat >&2 <<MSG
 xcrun simctl boot refused: no heavy slot is held by this process tree (rule #1957, shared EC2 Mac).
 A simulator boot keeps ~250 daemons runnable; two of them outside the cap took the box to load 548 and
@@ -48,3 +95,6 @@ export ARBOS_HEAVY_SLOT=<slot path> (a slot acquired in a subshell) or run /usr/
 are certain the box is idle — then say so on your issue.
 MSG
 exit 75
+
+}
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then boot_main "$@"; fi

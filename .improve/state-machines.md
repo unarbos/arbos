@@ -1,6 +1,6 @@
 # Phase 4: implicit state machines
 
-**Status: partial implementation; remaining High migrations blocked.** The
+**Status: implementation and catalog reassessment in progress.** The
 whole-repository inventory separates real cross-field lifecycles from trivial
 booleans and already explicit reducers/enums. Static representability is not a
 runtime reproduction; details label confirmed cases, interleavings requiring a
@@ -133,8 +133,8 @@ state machines.
 | AUX-H5 Vision consent, tracks and frame delivery — implemented | Enabled/disabled/closed generations and owned stream/session leases reject revoked frames and retain cleanup ownership. | High | `voice/arbos_voice/vision_state.py`; `voice/arbos_voice/vision.py`; `voice/tests/test_vision_consent.py`; `voice/tests/state_bridge.py` |
 | AUX-H6 Feedback fix approval/gating/shipping | Mutable JSON status, approval flags and several commit identities coordinate whether a fix may merge and be called shipped. | High | `scripts/feedback/feedback_poller.py`; `scripts/feedback/rust-gate.sh`; `scripts/feedback/ios-gate.sh`; `docs/process-rules.md` |
 | AUX-H7 Deployment lanes and image rollout | Queue files, canary/restart markers, holds and per-box outcomes determine whether a release starts, pauses, retries or finishes. | High | `scripts/deploy/arbos-deploy-worker`; `scripts/deploy/arbos-deploy-hook`; `scripts/feedback/deploy-relay.sh`; `docs/process-rules.md` |
-| AUX-H8 Merge/release observation and publication | Release eligibility and completion are inferred from CI verdicts, covering commits, tags, digests and pending artifacts. | High | `scripts/merge/merge-window.sh`; `scripts/merge/checks.sh`; `scripts/release/auto-stable.sh`; `scripts/release/release-gate.py`; `scripts/merge/selftest.sh` |
-| AUX-H9 Shared Mac heavy-slot ownership | PID-backed queue and lease markers arbitrate release priority, bounded waits, grants and stale reclamation. | High | `scripts/runner/arbos-heavy-slot.sh`; `scripts/runner/xcrun-slot-guard.sh`; `scripts/runner/gui-lock.sh`; `docs/process-rules.md` |
+| AUX-H8 Release-object publication — implemented | Tagged observed/creating/uploading/finalizing/completed/refused/failed states preserve draft intent and require actual publication before success. Stateless merge reports and existing atomic receipts are excluded. | High | `scripts/release/publication.py`; `scripts/release/publish-release.sh`; `scripts/release/test_publication.py`; `harness/arbos-pi-ext/publication-state-laws.test.ts` |
+| AUX-H9 Shared Mac heavy-slot ownership — implemented | Explicit request/lease/GUI/boot states and an OS-backed permanent mutex serialize grants, reclaim and cancellation without changing calibrated scheduling policy. | High | `scripts/runner/arbos-heavy-slot.sh`; `scripts/runner/xcrun-slot-guard.sh`; `scripts/runner/gui-lock.sh`; `scripts/runner/tests/test_slot_lifecycle.py` |
 | AUX-M1 Voice inbox dedupe and pause scheduling | Seen IDs, pending speech tasks and quiet-window deadlines decide whether a chat update is contextualized and spoken once. | Medium | `voice/arbos_voice/updates.py`; `voice/arbos_voice/worker.py`; `voice/tests/test_updates.py` |
 | AUX-M2 Listener/event-batcher worker lifetime | Nullable tasks, active/closed flags and pending child sets imply start, stop and restart conventions. | Medium | `voice/arbos_voice/listener.py`; `voice/arbos_voice/relay.py`; `voice/arbos_voice/vision.py` |
 | AUX-M3 Build/test watchdog verdict | A subprocess can still run after test completion, so PID liveness, verdict presence and timeout jointly determine the gate result. | Medium | `scripts/feedback/ios-gate.sh`; `scripts/feedback/rust-gate.sh`; `scripts/ci/xctestrun-env.py` |
@@ -738,3 +738,37 @@ to test them. Voice SDK setup is resolved; live provider/device/media behavior,
 native billing/durability and arbitrary SDK cancellation suppression remain
 unverified. The whole-repository Phase 4 exit remains **blocked**, despite the
 implemented and locally passing AUX-H2–H5 scope.
+
+
+## Operational ownership follow-up
+
+The [publication inventory](state-machine-checks/release-publication.md) corrects
+the original umbrella: merge-window/release-debt reports are fresh derived
+observations, cache receipts are already explicit, and the actual release-object
+publisher had two reachable lifecycle defects. Its five-case original replay had
+3 positive passes and 2 semantic failures. The applied tagged-state implementation
+passes 21 actual-wrapper/helper tests (root repeat 14.388 s), including malformed
+observations, option-looking assets and owned-child cancellation. Three generated
+laws cover 768 cases, with a real-function mutant shrunk and replayed. Signing,
+verification and feed/prune boundaries remain byte-identical. No real release or
+credential was used. NoPromote refuses an existing stable release, preserves an
+existing draft, and retains the historical public-prerelease policy for new tags.
+
+The [runner inventory](state-machine-checks/runner-leases.md) records atomic
+admission/publication, authoritative owner metadata, retirement accounting, GUI
+exclusion and cancellation. The original expanded batch had 7 passes/10 failures;
+later overlapping failure-first batches are kept separately, never summed. The
+applied source passes 34 actual controller/OS tests (root repeat 20.813 s), with
+no skipped tests or real shared paths. Scheduling constants and policy helpers
+are unchanged. macOS uses native lockf, Linux a flock adapter; actual Linux
+controller execution remains a separate platform check. Runtime-tagged Bash
+states do not offer a compile-time algebraic type. Hard host failure, PID reuse
+and already-dispatched physical work remain explicit ceilings.
+
+Both follow-ups are local correctness checks, with no application speed claim.
+The exact applied-source counts are in
+[ROOT_OPS_GATES.json](state-machine-checks/ROOT_OPS_GATES.json). The reviewed Swift
+loopback test-plan fence is carried identically here before native-source pushes;
+its 12 helper/DSL contract groups pass. Broader native ownership fixes and the
+catalog's blanket blocked wording are under active reassessment; missing tests,
+old SDK availability and code size are not external blockers.
