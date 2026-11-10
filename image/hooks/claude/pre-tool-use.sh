@@ -10,8 +10,8 @@ session="$(printf '%s' "$input" | jq -r '.session_id // ""')"
 hay="$tool $args"
 
 block() {
-  printf '{"ts":%s,"kind":"tool_call","role":"subagent","harness":"claude_code","session":"%s","tool":"%s","denied":"%s","input_preview":%s}\n' \
-    "$(date +%s%3N)" "$session" "$tool" "$1" "$(printf '%s' "${args:0:200}" | jq -Rs .)" >> "$AUDIT" 2>/dev/null
+  printf '{"ts":%s,"kind":"tool_call","role":"subagent","harness":"claude_code","session":"%s","tool":"%s","denied":"%s"}\n' \
+    "$(date +%s%3N)" "$session" "$tool" "$1" >> "$AUDIT" 2>/dev/null
   echo "Blocked by the Arbos deny-list ($1): $2" >&2
   exit 2
 }
@@ -30,6 +30,6 @@ case "$tool" in
 esac
 
 mkdir -p "$(dirname "$AUDIT")" 2>/dev/null
-printf '{"ts":%s,"kind":"tool_call","role":"subagent","harness":"claude_code","session":"%s","tool":"%s","denied":null,"input_preview":%s}\n' \
-  "$(date +%s%3N)" "$session" "$tool" "$(printf '%s' "${args:0:200}" | jq -Rs .)" >> "$AUDIT" 2>/dev/null
+printf '{"ts":%s,"kind":"tool_call","role":"subagent","harness":"claude_code","session":"%s","tool":"%s","denied":null}\n' \
+  "$(date +%s%3N)" "$session" "$tool" >> "$AUDIT" 2>/dev/null
 exit 0

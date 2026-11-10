@@ -16,8 +16,8 @@ if [ "${1:-}" = "-c" ] && [ $# -ge 2 ]; then
 fi
 
 deny() {
-  printf '{"ts":%s,"kind":"tool_call","tool":"bash","role":"subagent","harness":"prime","session":"%s","trace_id":"%s","cwd":"%s","denied":"%s","input_preview":%s}\n' \
-    "$(date +%s%3N)" "$SESSION" "$TRACE" "$PWD" "$1" "$(printf '%s' "${cmd:0:200}" | jq -Rs .)" >> "$AUDIT" 2>/dev/null
+  printf '{"ts":%s,"kind":"tool_call","tool":"bash","role":"subagent","harness":"prime","session":"%s","trace_id":"%s","cwd":"%s","denied":"%s"}\n' \
+    "$(date +%s%3N)" "$SESSION" "$TRACE" "$PWD" "$1" >> "$AUDIT" 2>/dev/null
   echo "arbos: blocked by the deny-list ($1): $2" >&2
   exit 126
 }
@@ -33,8 +33,8 @@ if [ -n "$cmd" ]; then
     deny arbos-state-tamper "agentd state and the audit log are not writable by the model"
   fi
   mkdir -p "$(dirname "$AUDIT")" 2>/dev/null
-  printf '{"ts":%s,"kind":"tool_call","tool":"bash","role":"subagent","harness":"prime","session":"%s","trace_id":"%s","cwd":"%s","denied":null,"input_preview":%s}\n' \
-    "$(date +%s%3N)" "$SESSION" "$TRACE" "$PWD" "$(printf '%s' "${cmd:0:200}" | jq -Rs .)" >> "$AUDIT" 2>/dev/null
+  printf '{"ts":%s,"kind":"tool_call","tool":"bash","role":"subagent","harness":"prime","session":"%s","trace_id":"%s","cwd":"%s","denied":null}\n' \
+    "$(date +%s%3N)" "$SESSION" "$TRACE" "$PWD" >> "$AUDIT" 2>/dev/null
 fi
 
 exec /bin/bash "$@"

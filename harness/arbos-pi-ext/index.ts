@@ -366,7 +366,6 @@ export default function arbosPiExt(pi: ExtensionAPI) {
       call_id: event.toolCallId,
       parent,
       input_hash: inputHash(event.input),
-      input_preview: JSON.stringify(event.input).slice(0, 200),
       denied:
         denied?.rule ??
         (directOnly ? "direct-only-from-script" : null) ??
