@@ -3434,35 +3434,67 @@ struct ChatSession: View {
     /// Its appearing and disappearing changes the transcript's height by the same
     /// 26 pt it used to add to the bar, and at the end rather than in the reader's
     /// view, so a turn starting while the reader is up in history moves nothing.
+    ///
+    /// When the awaiting cheat expires and no assistant row ever landed, the same
+    /// tick draws the stock "didn't answer" bubble here — Transcript only writes
+    /// that line under an empty finished assistant row, so a turn that never
+    /// opened one used to leave a dead transcript ([feedback AG5fMKSEGcm19R9A3FU1oKw]).
     @ViewBuilder
     private var presenceRow: some View {
         TimelineView(.periodic(from: .now, by: 1)) { _ in
-            let participants = presenceParticipants
-            if !participants.isEmpty {
-                // The tasks chip rides on the row while the agent has background jobs
-                // open in this chat (duplex §2.4); a tap opens the sheet.
-                let jobs = model.openJobs(chatId)
-                let openTasks: (() -> Void)? = jobs.isEmpty ? nil : { showTasks = true }
-                // The words link to the newest job's tab (not inside a job tab); the chip opens the list.
-                let openNewest: (() -> Void)? = (jobs.isEmpty || isJobTab) ? nil : { model.openNewestJobTab(from: chatId) }
-                PresenceRow(participants: participants,
-                            detail: model.currentActivity(chatId),
-                            queued: false,
-                            taskCount: jobs.count,
-                            onTasks: openTasks,
-                            onWords: openNewest,
-                            onPicture: { model.toggleProfile($0) },
-                            pictureShowing: { model.profileShows($0) })
-                    // Grok: 42 px from the last bubble to the picture's top ([feedback
-                    // status-row-gap-ios-2026-10-26]). The transcript's stack already
-                    // carries the bubbles' 16 pt side inset.
-                    .padding(.top, Theme.presenceTopGap)
-                    // Grok: 68 px from the picture's bottom to the composer's top. The row
-                    // is the transcript's last child, so it settles down into the tail the
-                    // tail already reserves rather than stacking on top of it.
-                    .padding(.bottom, -Theme.presenceSettle)
+            VStack(alignment: .leading, spacing: 0) {
+                if model.missedReply(chatId) {
+                    missedReplyBubble
+                }
+                let participants = presenceParticipants
+                if !participants.isEmpty {
+                    // The tasks chip rides on the row while the agent has background jobs
+                    // open in this chat (duplex §2.4); a tap opens the sheet.
+                    let jobs = model.openJobs(chatId)
+                    let openTasks: (() -> Void)? = jobs.isEmpty ? nil : { showTasks = true }
+                    // The words link to the newest job's tab (not inside a job tab); the chip opens the list.
+                    let openNewest: (() -> Void)? = (jobs.isEmpty || isJobTab) ? nil : { model.openNewestJobTab(from: chatId) }
+                    PresenceRow(participants: participants,
+                                detail: model.currentActivity(chatId),
+                                queued: model.machineWaiting(for: chatId),
+                                taskCount: jobs.count,
+                                onTasks: openTasks,
+                                onWords: openNewest,
+                                onPicture: { model.toggleProfile($0) },
+                                pictureShowing: { model.profileShows($0) })
+                        // Grok: 42 px from the last bubble to the picture's top ([feedback
+                        // status-row-gap-ios-2026-10-26]). The transcript's stack already
+                        // carries the bubbles' 16 pt side inset.
+                        .padding(.top, Theme.presenceTopGap)
+                        // Grok: 68 px from the picture's bottom to the composer's top. The row
+                        // is the transcript's last child, so it settles down into the tail the
+                        // tail already reserves rather than stacking on top of it.
+                        .padding(.bottom, -Theme.presenceSettle)
+                }
             }
         }
+    }
+
+    /// Same words Transcript uses for an empty finished assistant row, drawn when
+    /// no such row exists so the chat never goes silent after a send.
+    private var missedReplyBubble: some View {
+        let who = name.trimmingCharacters(in: .whitespaces)
+        let line = "\(who.isEmpty ? "The agent" : who) didn't answer. Ask again."
+        return HStack {
+            Text(line)
+                .font(theme.font(Theme.body))
+                .foregroundStyle(theme.text)
+                .padding(.horizontal, Theme.bubbleHPad)
+                .padding(.vertical, Theme.bubbleVPad)
+                .background(
+                    RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous)
+                        .fill(theme.bubbleAssistant)
+                )
+                .frame(maxWidth: 560, alignment: .leading)
+            Spacer(minLength: 0)
+        }
+        .padding(.top, Theme.presenceTopGap)
+        .accessibilityIdentifier("missed-reply")
     }
 
     /// Steer a job (contract: no command of its own): the composer becomes a reply to
