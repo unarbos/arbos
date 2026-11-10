@@ -1,0 +1,35 @@
+{
+  "platform": "darwin",
+  "tests": 7,
+  "before_pass": 7,
+  "after_pass": 7,
+  "fail": 0,
+  "ignored": 0,
+  "mutants_detected": 1,
+  "gates": [
+    {
+      "gate": "before",
+      "exit": 0,
+      "seconds": 1.3765142910415307,
+      "log_sha256": "d535c6ebda43053cdafddb457b004cba87bf8280c594bcd585e230a9ad6b2e26"
+    },
+    {
+      "gate": "after",
+      "exit": 0,
+      "seconds": 0.8451483329990879,
+      "log_sha256": "2545c995a973327f49b1d1f632c5c20335dafda0417ac23a076a6262b78f786b"
+    },
+    {
+      "gate": "actual-function-mutant",
+      "exit": 1,
+      "seconds": 0.8479043750558048,
+      "log_sha256": "e71e219ffea01b40f7b297d085b0df9a4cd0560d09ed072df1423995a0131f05",
+      "mutation": {
+        "before": ".arg(\"-p\")",
+        "after": ".arg(\"-R\")"
+      },
+      "detected": true
+    }
+  ],
+  "scope": "actual std-only functions, seven owned fake-PATH process argv/stdio/failure checks; no app launched, network denied; whole Mac compilation and actual nonhost branch execution remain separate gates"
+}

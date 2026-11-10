@@ -8240,7 +8240,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                                 // and non-mac always hand the file to the system.
                                 let open_external = quick_look || !cfg!(target_os = "macos");
                                 if open_external {
-                                    crate::ui::attachments::open_with_system(&path, quick_look);
+                                    crate::external_open::open_with_system(&path, quick_look);
                                 }
                                 opened_path = Some(path);
                             }
