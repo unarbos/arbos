@@ -1,11 +1,22 @@
-# iOS SDK compile checkpoint
+# Media ownership SDK checkpoint
 
-The actual app Swift source compiles against iOS26.2 simulator SDK, generated Rust FFI bindings/static library and reviewed LiveKit2.18.0/WebRTC150.7871.03/UniFFI0.1.9 artifacts. GATES.json records24.171s, exit0, sourceunchanged; MEMBERSHIP.json independently matches all93 app target Swift files with no missing/extra sources. Source hashes are retained in SOURCE.json. This checkpoint includes AccountWork/Settings/Confirm and precedes the later ChatView/card audit; a final-source repeat remains required.
+The complete 93-source app target builds with the seven frozen media product files
+at 9d9d6c212: 14.612 seconds using existing dependency/source caches, not a fresh
+93-file recompile. Both complete test modules then typecheck against that actual
+new module: 85 unit sources in 19.314 seconds, and 14 UI project entries / 13 unique
+sources in 1.917 seconds (21.253 seconds total). All compiler exit codes are zero,
+with zero errors and unchanged input hashes. Counts and wall times are source/gate
+evidence, not XCTest assertions executed or app latency measurements.
 
-Local Xcode26.2 destination planning refuses the available26.3.1 simulator runtime, before Swift compilation. A private SwiftPM compile-only harness uses the existing SDK directly (`swift build --target Arbos --triple arm64-apple-ios17.0-simulator --sdk <SDK>`), matching all runtime target source and pinned artifacts. Only dependency manifests are rewritten to local paths; test/doc-only upstream targets are excluded. Runtime source is unchanged. HARNESS.json pins original/compile manifest hashes. Three actual Shared source files are copied into the private target for membership; no product manifest/source workaround is introduced. No SWIFT_PACKAGE conditional exists in the app sources.
+MEMBERSHIP retains 93/93 app parity and 85/14-entry test Counter parity with no
+missing or extra source. AvatarBackSwipe is listed twice by the pbx project and
+compiled once. SOURCE pins 93 runtime files, 98 distinct test files plus project,
+seven media product files, generated FFI and preserved private P6 AppModel/API.
+CALLERS and REVIEW retain the finite helper/constructor admission review. CONTRACT
+proves four default-value removals with all other file bytes unchanged. TOOLCHAIN
+and GATES retain path-sanitized commands, fence scope and private raw-log hashes.
 
-The Rust FFI library was built locked/offline from43b source in329.977s and Swift bindings generated using inspected pinned UniFFI0.32.2. Current Phase4 FFI/client Rust sources are byte-equal to43b; its core API difference is one documentation comment and test-only sites_routes. No other checkout's build output is used. Full exact combined-source XCFramework construction and Xcode unit/UI execution remain separate CI gates.
-
-Two introduced integration errors were caught by full SDK compilation and corrected: duplicate announce API binding and a missing FunPicker searchField work parameter. Neither is counted as an original behavioral regression. Native selected-source checks now pin their corrected edges. Broader existing deprecation/Swift6 concurrency warnings remain; the project uses Swift5 mode and this is not a warning-free Swift6 migration claim.
-
-All compiler execution after public package resolution ran under network denial, fresh HOME/no accounts, no signing, and no application/test launch. SwiftPM’s nested sandbox was disabled only under the outer network-deny Seatbelt. Raw Xcode destination logs can contain local device identifiers and are deliberately not committed. Generated libraries/vendor sources/build output are private and excluded. Reproduce the canonical app gate with scripts/build-xcframework.sh and the repository's isolated Fastlane test lane on a compatible simulator host.
+This is source/type compatibility for the frozen P3/P4 + private P6 composition.
+No app, simulator, XCTest assertion, Photos effect, account or provider was launched.
+Full canonical CI/runtime validation remains separate. No product manifest, ref or
+index was changed. $APP_PROOF / $TEST_PROOF / $SDK_HARNESS / $REPO are path placeholders.
