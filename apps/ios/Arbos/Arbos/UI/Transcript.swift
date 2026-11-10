@@ -1486,6 +1486,8 @@ struct RowView: View, Equatable {
     var timeReveal: CGFloat = 0
     /// A tap on a reply bubble's quote header: the chat scrolls to this message id.
     var onQuoteTap: ((Quote) -> Void)? = nil
+    /// A tap on a "Messaged ◉ X" hand-off notice: open the destination chat.
+    var onHandoffTap: ((Id) -> Void)? = nil
     /// Briefly tinted after a quote tap landed on this row's message.
     var highlighted: Bool = false
     /// Search-in-chat hit: soft accent wash so the keyword match stands out while
@@ -1800,16 +1802,37 @@ struct RowView: View, Equatable {
                 Spacer(minLength: 0)
             }
         case .system(let icon, let text, let avatarProject):
-            HStack(spacing: 5) {
+            // Hand-off notices ("Messaged ◉ X") are tappable when the destination is one of
+            // the viewer's agents ([feedback iphone-messaged-notice-nav-2026-11-10]).
+            let handoff = row.id.hasSuffix("#handoff")
+                && model.canOpenHandoff(fromChat: chatId, messageId: row.messageId)
+            let line = HStack(spacing: 5) {
                 if let icon {
                     Image(systemName: icon).font(.system(size: 13, weight: .regular))
                 }
                 systemText(text, avatarProject: avatarProject)
+                if handoff {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(theme.muted.opacity(0.7))
+                }
             }
             .font(theme.font(Theme.small))
             .foregroundStyle(theme.muted)
             .frame(maxWidth: .infinity)
             .multilineTextAlignment(.center)
+            if handoff {
+                Button {
+                    onHandoffTap?(row.messageId)
+                } label: {
+                    line.contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("handoff-notice:\(row.messageId)")
+                .accessibilityAddTraits(.isLink)
+            } else {
+                line
+            }
         case .hidden(let count, _, let handle, let name):
             // The blocker's folded line ([feedback blocked-state-ios-2026-10-26]); Unblock
             // opens the person's sheet (its Unblock asks first).

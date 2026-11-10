@@ -34,6 +34,7 @@ final class ChatSearchCloseTests: XCTestCase {
         XCTAssertNotNil(closeButton, "the ✕ button calls closeSearch")
     }
 
+    /// The rule the Mac bar adopted too ([feedback search-toggle-click-outside-mac-2026-10-27]).
     func testTapOutsideClosesAndSwipeClosesOnlyWithoutAKeyword() {
         XCTAssertTrue(ChatSearchClose.tapOutsideCloses(open: true))
         XCTAssertFalse(ChatSearchClose.tapOutsideCloses(open: false))
@@ -43,6 +44,7 @@ final class ChatSearchCloseTests: XCTestCase {
         XCTAssertFalse(ChatSearchClose.scrollCloses(open: false, query: ""))
     }
 
+    /// Tapping a result jumps to that message ([feedback iphone-search-result-jump-2026-10-29]).
     func testATapOnAResultClosesThenReveals() {
         XCTAssertTrue(ChatSearchClose.resultTapReveals(open: true, query: "canvas"))
         XCTAssertFalse(ChatSearchClose.resultTapReveals(open: true, query: ""), "no keyword, no results to tap")

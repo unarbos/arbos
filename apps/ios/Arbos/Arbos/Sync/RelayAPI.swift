@@ -434,13 +434,21 @@ final class RelayAPI {
         _ = try await request("DELETE", "/outside-agents/\(projectId)")
     }
 
+    /// The PATCH body: an absent field is left alone, a blank one is cleared with `NSNull`.
+    static func wakeBody(url: String?, auth: String?) -> [String: Any] {
+        var body: [String: Any] = [:]
+        func field(_ v: String) -> Any {
+            v.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? NSNull() : v
+        }
+        if let url { body["wake_url"] = field(url) }
+        if let auth { body["wake_auth"] = field(auth) }
+        return body
+    }
+
     /// `PATCH /outside-agents/{id} {wake_url, wake_auth}` ([feedback outside-agents-wake-ios-2026-10-28]):
     /// `nil` leaves a field alone, an empty string clears it. → the agent's connection.
     func setOutsideWake(_ projectId: Id, url: String?, auth: String?) async throws -> OutsideAgentInfo? {
-        var body: [String: Any] = [:]
-        if let url { body["wake_url"] = url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? NSNull() : url }
-        if let auth { body["wake_auth"] = auth.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? NSNull() : auth }
-        let v = try await json("PATCH", "/outside-agents/\(projectId)", body: body)
+        let v = try await json("PATCH", "/outside-agents/\(projectId)", body: Self.wakeBody(url: url, auth: auth))
         return OutsideAgentInfo(json: (v as? [String: Any])?["agent"])
     }
 
@@ -1690,6 +1698,12 @@ struct OutsideLogEntry: Equatable, Identifiable {
     /// Rows worth a line on the card: replies, errors and session events; wakes, typing, reads
     /// and uploads are the plumbing behind them.
     var shown: Bool { kind == "reply" || kind == "post" || isError || isSession }
+
+    /// The lines the Session log card shows, newest first ([feedback sidecar-sessions-ios-2026-10-28]).
+    /// The rest are behind View all.
+    static func newestShown(_ entries: [OutsideLogEntry], limit: Int = 4) -> [OutsideLogEntry] {
+        Array(entries.reversed().filter(\.shown).prefix(limit))
+    }
 
     private static func secs(_ ms: Int64) -> String { String(format: "%.1f s", Double(ms) / 1000) }
 

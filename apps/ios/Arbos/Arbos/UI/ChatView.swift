@@ -4438,6 +4438,7 @@ extension ChatSession {
             RowView(model: model, theme: theme, composerInset: composerInset, row: row, chatId: chatId, width: width,
                     people: people, timeReveal: timeReveal,
                     onQuoteTap: { quote in revealQuoted(quote, from: row.messageId) },
+                    onHandoffTap: { id in model.openHandoff(fromChat: chatId, messageId: id) },
                     highlighted: highlightedMessage == row.messageId,
                     searchHit: searchHitsActive && Self.isMessageBubble(row),
                     isMessage: reply,
