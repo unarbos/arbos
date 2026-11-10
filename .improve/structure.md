@@ -145,9 +145,9 @@ commands/hashes and the portable runner are in [structural checks](structural-ch
 ## Remaining structural exit
 
 The global doc-map lock/room handle lifetime, stale identity/native callbacks,
-bounded hydration/upload work and ambient render-policy inputs remain real
-follow-up work. They are not all externally blocked merely because tests must be
-written. The measured roster N+1 is being addressed in Phase7. Voice ownership is
+and bounded hydration/upload work remain real follow-up work. The concrete
+ambient preview-policy/cache mismatch is fixed below. They are not all externally blocked merely because tests must be
+written. The measured roster N+1 is addressed by Phase7 roster batching. Voice ownership is
 superseded by the independently verified Phase4 implementation. Existing protocol
 host adapters, signed verification, quarantine/legacy compatibility and physical
 OS/media workarounds are requirements, not arbitrary surplus to delete.
@@ -167,3 +167,34 @@ retain opaque denials and existing replay/quarantine/within-room receipt semanti
 then require combined native/device gates before merging. The final Phase9 report
 collects owner decisions; no production, deployment, paid-runner or reduced-test
 permission is requested here.
+
+
+## Transcript-owned render policy
+
+The process-global link-preview switch coupled separate AppState instances to
+row construction, while its value was absent from the message-row cache key.
+A warm transcript could therefore retain old preview rows after the setting
+changed. The row builder and message menu now take the current AppState setting
+explicitly, and that immutable value participates in cache identity. Stored
+preference/default, sender removal, card content/layout and plain links stay the
+same. The global atomic and its test-only serialization lock are removed.
+
+A local harness compiles the exact extracted production fingerprint and real
+message DTO definitions, without GPUI/SDK effects. The original source passes
+same-policy stability and fails changed-policy invalidation; the candidate
+passes both assertions (9.482/9.966 s including compilation). This is a real
+function replay, not a copied hash model. An initial incomplete harness manifest
+failed compilation and is excluded from the RED evidence. Separate targets and
+forced package cleanup prevent cross-snapshot artifact reuse.
+
+Two retained native builder tests cover on→off→on through a warm cache, unchanged
+policy cache hits, plain-link restoration, and independent transcript settings.
+They are pending the final whole-workspace native gate; the extraction does not
+prove the complete renderer or caller compilation. See
+[render-policy.json](structural-checks/render-policy.json). No performance claim
+is made for this settings correctness fix.
+
+Independent read-only review confirms policy propagation at every caller and
+cache lookup, unchanged row-version comparison, and removal of all global-switch
+readers. Workspace formatting and whitespace checks pass. Full native builder
+execution remains explicitly pending.
