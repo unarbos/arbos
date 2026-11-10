@@ -130,6 +130,15 @@ image/register-snapshot.sh arbos-agent-<v> cr.app.daytona.io/<project>/arbos-age
 
 While no production snapshot is registered, point the relay at the dev image instead: `ARBOS_DAYTONA_DOCKERFILE=image/Dockerfile.dev-inline ARBOS_BOOTSTRAP_DIR=./dist ARBOS_DEFAULT_HARNESS=pi` (`dist/` holds the static agentd and `arbos-pi-ext.tar`; the machine fetches both at boot).
 
+The extension needs its `package.json` beside its TypeScript sources in that tarball,
+from the same checkout as agentd. The full image installs the manifest-pinned Effect
+runtime during its build; the dev image installs it once at boot and reuses a matching
+version. Both link the shared runtime into the extension so each project keeps links
+instead of a separate dependency tree. Starting the extension itself installs nothing.
+Run `python3 image/tests/test_runtime_packaging.py` to check packaging locally without
+building an image or contacting a registry; `pnpm install` in `harness/` also enables
+the check that imports the real Effect runtime through two workspace links.
+
 ## 7. Pointing the apps at your relay
 
 - **Mac**: `defaults write sh.arbos.mac RelayURL https://relay.example` for the bundled app, or `ARBOS_RELAY_URL=https://relay.example cargo run -p arbos-mac` from source (`ARBOS_RELAY_URL=fixture` runs the seeded demo without a relay). In `paircode` mode the sign-in screen falls back to the one-time code from the relay log. `ARBOS_RELAY_TOKEN` overrides the stored credentials.

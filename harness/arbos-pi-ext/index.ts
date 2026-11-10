@@ -203,11 +203,6 @@ const STABLE_PREFIX = (process.env.ARBOS_STABLE_PREFIX ?? "off").trim().toLowerC
 const CONTEXT_OPEN = "[Arbos context for this turn — working set, skills, project memory. Not from the user.]";
 const CONTEXT_CLOSE = "[End of Arbos context]";
 
-// `expired` is legacy: agentd stopped producing it when cards stopped expiring, but a stored row
-// from before that can still carry it. `cancelled` is a card closed because the work was called
-// off.
-type ApprovalState = "allowed" | "pending" | "approved" | "rejected" | "expired" | "cancelled";
-
 type HookResponse = { ok: boolean; error?: string; terminate?: boolean; text?: string; [k: string]: unknown };
 
 async function hook(path: string, body: unknown): Promise<HookResponse | null> {
@@ -366,7 +361,6 @@ export default function arbosPiExt(pi: ExtensionAPI) {
       call_id: event.toolCallId,
       parent,
       input_hash: inputHash(event.input),
-      input_preview: JSON.stringify(event.input).slice(0, 200),
       denied:
         denied?.rule ??
         (directOnly ? "direct-only-from-script" : null) ??
@@ -471,67 +465,31 @@ export default function arbosPiExt(pi: ExtensionAPI) {
     input: unknown,
     callId: string,
   ): Promise<{ block: true; reason: string } | undefined> {
-    const first = await hook("/hook/approval", { tool, input, session_id: sessionId, role: SESSION_ROLE });
-    if (!first) return undefined; // no agentd: local pi runs are not gated
-    if (!first.ok) {
-      audit({ kind: "approval_error", session: sessionId, tool, call_id: callId, error: first.error ?? null });
-      return undefined;
-    }
-    let state = String(first.state ?? "allowed") as ApprovalState;
-    if (state === "allowed") return undefined;
-    const approvalId = String(first.approvalId ?? "");
-    audit({ kind: "approval_wait", session: sessionId, tool, call_id: callId, approval_id: approvalId, title: first.title ?? null });
-    const waitMs = typeof first.waitMs === "number" && first.waitMs > 0 ? first.waitMs : APPROVAL_WAIT_MS;
-    const deadline = Date.now() + waitMs;
-    let reason: string | undefined;
-    while (state === "pending" && Date.now() < deadline) {
-      await new Promise((r) => setTimeout(r, APPROVAL_POLL_MS));
-      const cur = await hook("/hook/approval-status", { approvalId });
-      if (cur?.ok && typeof cur.state === "string") {
-        state = cur.state as ApprovalState;
-        if (typeof cur.reason === "string") reason = cur.reason;
-      }
-    }
-    if (state === "pending") {
-      // Nobody answered inside the grace, so stop holding things: a main-session call is
-      // holding the chat's turn, and a worker is holding a slot, a child process and an open
-      // job. The card stays answerable — it has no deadline — and agentd runs the call itself
-      // once it is approved, so this is a park rather than a failure. Holding on for the whole
-      // wait is Test5 round 5 bug R: fourteen minutes in which that chat could only answer from
-      // the quick lane, and the card was then closed unanswered.
-      const parked = await hook("/hook/approval-park", { approvalId });
-      if (parked?.ok && parked.parked === true) {
-        audit({ kind: "approval_parked", session: sessionId, tool, call_id: callId, approval_id: approvalId });
-        return { block: true, reason: String(parked.reason ?? "This needs the user's approval; nothing ran.") };
-      }
-      // Decided inside the grace, or already gone: fall through on the state agentd reports.
-      if (typeof parked?.state === "string") state = parked.state as ApprovalState;
-    }
-    audit({ kind: "approval_result", session: sessionId, tool, call_id: callId, approval_id: approvalId, state });
-    switch (state) {
-      case "allowed":
-      case "approved":
-        return undefined;
-      case "rejected":
-        return {
-          block: true,
-          reason: `The user rejected this action (approval ${approvalId})${reason ? `: ${reason}` : ""}. Do not retry it unchanged; tell the user.`,
-        };
-      case "cancelled":
-        return {
-          block: true,
-          reason: `This work was cancelled, so its approval card (${approvalId}) was closed and nothing ran. Whatever it was meant to post, send or change is NOT done.`,
-        };
-      case "expired":
-      case "pending":
-        return {
-          block: true,
-          reason: `Nothing ran: this needs the user's approval and card ${approvalId} is waiting for them. Do not call it again and do not wait for it — say in one short sentence that it needs their approval, then end your turn. When they approve, Arbos runs the call and gives you the result. Whatever it was meant to post, send or change is NOT done yet; never say it was posted or sent.`,
-        };
-      default: {
-        const _exhaustive: never = state;
-        return { block: true, reason: `Unknown approval state ${String(_exhaustive)}` };
-      }
+    if (!HOOK_URL) return undefined; // Explicit standalone configuration; a failed configured hook never reaches this branch.
+    try {
+      const { checkApproval, approvalVerdict } = await import("./approval.ts");
+      const state = await checkApproval({
+        hookUrl: HOOK_URL,
+        token: HOOK_TOKEN,
+        body: { tool, input, session_id: sessionId, role: SESSION_ROLE },
+        pollMs: APPROVAL_POLL_MS,
+        fallbackWaitMs: APPROVAL_WAIT_MS,
+        onTransition(state) {
+          const base = { session: sessionId, tool, call_id: callId };
+          switch (state._tag) {
+            case "Pending": audit({ kind: "approval_wait", ...base, approval_id: state.approvalId }); break;
+            case "Parked": audit({ kind: "approval_parked", ...base, approval_id: state.approvalId }); break;
+            case "Failed": audit({ kind: "approval_error", ...base, error: state.failure._tag }); break;
+            case "Denied": audit({ kind: "approval_result", ...base, approval_id: state.approvalId, state: state.decision }); break;
+            case "BlockedPending": audit({ kind: "approval_result", ...base, approval_id: state.approvalId, state: "pending" }); break;
+            case "Allowed": if (state.source === "approved") audit({ kind: "approval_result", ...base, approval_id: state.approvalId, state: "approved" }); break;
+          }
+        },
+      });
+      return approvalVerdict(state);
+    } catch {
+      audit({ kind: "approval_error", session: sessionId, tool, call_id: callId, error: "ApprovalUnavailable" });
+      return { block: true, reason: "Nothing ran: approval could not be checked. Do not bypass approval; try again when the service is available." };
     }
   }
 
