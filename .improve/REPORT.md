@@ -221,11 +221,12 @@ The load tests expose the unchanged roster N+1, unread work over unrelated event
 common-term FTS work and unbounded open-job output. Query families not exercised
 are explicitly inventoried. No blanket database scalability claim is made.
 
-The required whole-service OpenTelemetry exporter, function-coverage lint,
-W3C propagation, request/account context and sampled terminal events remain
-unimplemented. The repository has no existing OTLP destination contract; native
-integration cannot be checked on this host. Shell audit improvements cover a
-narrow independently runnable boundary and are not described as global tracing.
+Broader observability is explicitly deferred by the owner while they ask Jacob
+(const) which telemetry backend and conventions Arbos already uses. This includes
+OTLP export, definition-level tracing and coverage lint, W3C propagation, account
+context, wide terminal events and tail sampling. Keep the completed logging
+improvements. This decision does not block the remaining phases; no endpoint,
+account, key or production configuration is invented or inspected.
 
 Baseline red/environment rows: full native clippy/check/test/build and iOS
 artifacts unavailable; voice originally0tests/2collection errors, later resolved by the private SDK gate;
@@ -249,11 +250,11 @@ regressions. Existing operational scripts were not changed to conceal them.
    atomic append/cursor durability and membership error handling once native
    regressions run. Phases3,4and8 describe intentional security behavior changes and failing-before
    regressions.
-3. **Choose an operator-owned OTLP destination contract.** Recommended default:
-   optional environment-configured export to an existing local/owned collector,
-   no new paid account and no export until configured. Then implement and verify
-   the global tracing/propagation/coverage requirements. No endpoint or key was
-   invented and no operator environment was read.
+3. **Observability after the discussion with Jacob (const).** Recommended default:
+   keep the completed logging changes and finish the other phases now. The owner
+   will ask Jacob what telemetry Arbos already uses; implement broader tracing,
+   propagation, coverage lint, wide events and tail sampling only after that
+   existing-backend contract is known. No new paid account or invented endpoint.
 4. **Bend2 proofs.** Recommended default: keep runnable generated properties now;
    agree on a pinned Bend2 toolchain and proof scope later. Neither `bend` nor
    `bend2` is installed. No unexecuted proof is represented as established.
