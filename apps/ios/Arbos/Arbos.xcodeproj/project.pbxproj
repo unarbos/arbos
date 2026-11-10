@@ -169,6 +169,7 @@
 		A1F000000000000000000106 /* ComposerParityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F000000000000000000105 /* ComposerParityTests.swift */; };
 		A1E100000000000000000052 /* HiddenJobRowAttachmentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1E100000000000000000051 /* HiddenJobRowAttachmentTests.swift */; };
 		A1F100000000000000000002 /* NoAnswerLineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F100000000000000000001 /* NoAnswerLineTests.swift */; };
+		A1MR00000000000000000002 /* MissedReplyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1MR00000000000000000001 /* MissedReplyTests.swift */; };
 		A1F100000000000000000004 /* MarkdownTableTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F100000000000000000003 /* MarkdownTableTests.swift */; };
 		A1F100000000000000000008 /* LinkIconTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F100000000000000000007 /* LinkIconTests.swift */; };
 		A1C4E1000000000000000002 /* MentionChipSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C4E1000000000000000001 /* MentionChipSnapshotTests.swift */; };
@@ -435,6 +436,7 @@
 		A1F000000000000000000105 /* ComposerParityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerParityTests.swift; sourceTree = "<group>"; };
 		A1E100000000000000000051 /* HiddenJobRowAttachmentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HiddenJobRowAttachmentTests.swift; sourceTree = "<group>"; };
 		A1F100000000000000000001 /* NoAnswerLineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoAnswerLineTests.swift; sourceTree = "<group>"; };
+		A1MR00000000000000000001 /* MissedReplyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MissedReplyTests.swift; sourceTree = "<group>"; };
 		A1F100000000000000000003 /* MarkdownTableTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownTableTests.swift; sourceTree = "<group>"; };
 		A1F100000000000000000007 /* LinkIconTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinkIconTests.swift; sourceTree = "<group>"; };
 		A1C4E1000000000000000001 /* MentionChipSnapshotTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MentionChipSnapshotTests.swift; sourceTree = "<group>"; };
@@ -788,6 +790,7 @@
 				A1F000000000000000000105 /* ComposerParityTests.swift */,
 				A1E100000000000000000051 /* HiddenJobRowAttachmentTests.swift */,
 				A1F100000000000000000001 /* NoAnswerLineTests.swift */,
+				A1MR00000000000000000001 /* MissedReplyTests.swift */,
 				A1F100000000000000000003 /* MarkdownTableTests.swift */,
 				A1F100000000000000000007 /* LinkIconTests.swift */,
 				A1C4E1000000000000000001 /* MentionChipSnapshotTests.swift */,
@@ -1191,6 +1194,7 @@
 				A1E100000000000000000052 /* HiddenJobRowAttachmentTests.swift in Sources */,
 				A1BB00000000000000000004 /* BackSwipeTests.swift in Sources */,
 				A1F100000000000000000002 /* NoAnswerLineTests.swift in Sources */,
+				A1MR00000000000000000002 /* MissedReplyTests.swift in Sources */,
 				A1F100000000000000000004 /* MarkdownTableTests.swift in Sources */,
 				A1F100000000000000000008 /* LinkIconTests.swift in Sources */,
 				A1C4E1000000000000000002 /* MentionChipSnapshotTests.swift in Sources */,
