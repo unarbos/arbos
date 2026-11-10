@@ -1,0 +1,103 @@
+{
+  "gates": [
+    {
+      "name": "voice",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-relay",
+        "voice::",
+        "--",
+        "--test-threads=2"
+      ],
+      "seconds": 30.851919832988642,
+      "exit_code": 0,
+      "counts": [
+        [
+          24,
+          0,
+          0
+        ]
+      ]
+    },
+    {
+      "name": "credits",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-relay",
+        "credits::tests::",
+        "--",
+        "--test-threads=2"
+      ],
+      "seconds": 0.8925844168988988,
+      "exit_code": 0,
+      "counts": [
+        [
+          8,
+          0,
+          0
+        ]
+      ]
+    },
+    {
+      "name": "accounts",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-relay",
+        "db_accounts::",
+        "--",
+        "--test-threads=2"
+      ],
+      "seconds": 0.5655258750775829,
+      "exit_code": 0,
+      "counts": [
+        [
+          9,
+          0,
+          0
+        ]
+      ]
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-relay",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "seconds": 28.914303124998696,
+      "exit_code": 0,
+      "counts": []
+    }
+  ],
+  "source_sha256": {
+    "crates/arbos-relay/src/db_accounts.rs": "029b0adb718175fc50b24426f352b800814b8d3972cc2e804506ffa98e4412fd",
+    "crates/arbos-relay/src/db_voice.rs": "c90f55baeb9a4fa90f814164c87a50804713114f2536f70ddbc44be597be3846",
+    "crates/arbos-relay/src/credits.rs": "4835284e4b5c6bd355fbda94277833dd32746d75f62f5970cc2ecaa111eaf2ae",
+    "crates/arbos-relay/src/voice.rs": "14d4c7838c7dd058b961c082f95036ca73ac807b432f1460e098d9fe050f4216"
+  },
+  "source_unchanged": true,
+  "scope": "current Phase4 backend composition with exact frozen H11 plus two required-cap/user-write regressions and affected-row fix",
+  "distinct_financial_tests": 41,
+  "network": "all network denied by OS sandbox",
+  "private_HOME": true,
+  "workspace_packages_cleaned_initially": 12
+}

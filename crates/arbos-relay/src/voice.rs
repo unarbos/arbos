@@ -1248,27 +1248,23 @@ fn charge_report(
     usage: &VoiceUsage,
     model: &str,
 ) -> Result<f64, String> {
-    let row = state
+    let billing = crate::db_voice::VoiceBilling {
+        metered: crate::credits::metered(state),
+        legacy: crate::db_accounts::LegacyCreditDefaults {
+            limit: state.cfg.default_account_limit,
+            grant_usd: state.cfg.default_grant_usd,
+        },
+    };
+    let settled = state
         .db
-        .voice_usage_upsert(call_id, project_id, payer, started_at, usage)
-        .map_err(|e| e.to_string())?;
-    let delta = row.usage.usd - row.usd_charged;
-    if delta <= 0.000_001 {
-        return Ok(row.usd_charged);
+        .settle_voice_usage(call_id, project_id, payer, started_at, usage, &billing)
+        .map_err(|error| error.to_string())?;
+    if settled.reported_delta <= 0.000_001 {
+        return Ok(settled.reported_total);
     }
-    let vision_delta = (row.usage.vision_usd - row.vision_charged).clamp(0.0, delta);
-    let voice_delta = delta - vision_delta;
-    let reference = format!("call:{call_id}");
-    if voice_delta > 0.000_001 {
-        crate::credits::charge(state, payer, voice_delta, "voice", Some(&reference));
+    for (usd, charge) in settled.charges {
+        crate::credits::note_postfact_charge(state, payer, usd, "voice", charge);
     }
-    if vision_delta > 0.000_001 {
-        let vision_ref = format!("{reference}#vision");
-        crate::credits::charge(state, payer, vision_delta, "voice", Some(&vision_ref));
-    }
-    let _ = state
-        .db
-        .voice_charged(call_id, project_id, delta, vision_delta);
     let _ = state.db.record_usage(
         project_id,
         "voice",
@@ -1277,11 +1273,11 @@ fn charge_report(
         usage.audio_out_tokens + usage.text_out_tokens,
         usage.cached_tokens,
         0,
-        delta,
+        settled.reported_delta,
         (usage.seconds * 1000.0) as i64,
         usage.ttfa_ms_p50,
     );
-    Ok(row.usd_charged + delta)
+    Ok(settled.reported_total)
 }
 
 /// `POST /voice/calls/{id}/usage` — cumulative usage for this agent in this call. Debits the
@@ -1939,5 +1935,648 @@ mod inbox_tests {
             .0
             .is_empty());
         let _ = json!({});
+    }
+}
+
+#[cfg(test)]
+mod charge_receipt_regressions {
+    use crate::credits::SpendLimit;
+    use crate::db_voice::VoiceUsage;
+    use crate::state::test_support::test_state;
+    use crate::state::{AppState, AuthMode};
+
+    const USER: &str = "fixture-voice-payer";
+    const CALL: &str = "fixture-voice-call";
+    const PROJECT: &str = "fixture-voice-project";
+
+    fn fixture() -> AppState {
+        let state = test_state(AuthMode::Github);
+        state.db.set_kill_switch(&Default::default()).unwrap();
+        state
+            .db
+            .grant_credits(USER, 100.0, "synthetic grant", "fixture")
+            .unwrap();
+        state
+            .db
+            .set_user_limits(USER, Some(SpendLimit::Unlimited.stored()), None)
+            .unwrap();
+        state
+    }
+
+    fn report(usd: f64, vision_usd: f64) -> VoiceUsage {
+        VoiceUsage {
+            seconds: usd * 30.0,
+            usd,
+            vision_usd,
+            ..Default::default()
+        }
+    }
+
+    fn charge(state: &AppState, usage: &VoiceUsage) -> Result<f64, String> {
+        super::charge_report(state, CALL, PROJECT, USER, 0, usage, "synthetic-model")
+    }
+
+    fn spent(state: &AppState) -> f64 {
+        state
+            .db
+            .credits(USER, 0)
+            .unwrap()
+            .today_by_kind
+            .iter()
+            .find(|row| row.kind == "voice")
+            .map_or(0.0, |row| row.usd)
+    }
+
+    fn skipped_legacy_metadata_remains_retryable(trigger_clause: &str) {
+        let mut state = test_state(AuthMode::Github);
+        let cfg = std::sync::Arc::get_mut(&mut state.cfg).unwrap();
+        cfg.default_account_limit = SpendLimit::Daily(0.5);
+        cfg.default_grant_usd = 100.0;
+        state
+            .db
+            .with(|connection| {
+                connection.execute_batch(&format!(
+                    "CREATE TRIGGER skip_legacy_metadata {trigger_clause} ON users
+                 BEGIN SELECT RAISE(IGNORE); END;"
+                ))
+            })
+            .unwrap();
+        let first = charge(&state, &report(1.0, 0.0));
+        let user_after_failure = state.db.user(USER).unwrap();
+        let spent_after_failure = spent(&state);
+        let row_after_failure = state.db.voice_call(CALL, PROJECT).unwrap();
+        state
+            .db
+            .with(|connection| connection.execute_batch("DROP TRIGGER skip_legacy_metadata"))
+            .unwrap();
+        assert_eq!(charge(&state, &report(1.0, 0.0)).unwrap(), 1.0);
+        assert_eq!(charge(&state, &report(2.0, 0.0)).unwrap(), 2.0);
+        assert!(
+            first.is_err(),
+            "skipped required legacy metadata must fail settlement"
+        );
+        assert!(
+            user_after_failure.is_none(),
+            "legacy initialization must roll back"
+        );
+        assert!(
+            row_after_failure.is_none(),
+            "unsettled observation must roll back"
+        );
+        assert_eq!(spent_after_failure, 0.0);
+        assert_eq!(
+            state.db.user(USER).unwrap().unwrap().daily_cap_usd,
+            Some(0.5)
+        );
+        assert_eq!(
+            spent(&state),
+            1.0,
+            "preserve the daily soft cap after successful retry"
+        );
+        assert_eq!(state.db.credits(USER, 0).unwrap().granted_usd, 100.0);
+    }
+
+    #[test]
+    fn skipped_legacy_cap_update_cannot_commit_a_charge() {
+        skipped_legacy_metadata_remains_retryable("BEFORE UPDATE OF spend_cap_usd");
+    }
+
+    #[test]
+    fn skipped_legacy_user_insert_cannot_commit_a_charge() {
+        skipped_legacy_metadata_remains_retryable("BEFORE INSERT");
+    }
+
+    #[test]
+    fn a_failed_charge_receipt_cannot_double_debit_a_replayed_report() {
+        let state = fixture();
+        state
+            .db
+            .with(|connection| {
+                connection.execute_batch(
+                    "CREATE TRIGGER fail_voice_receipt BEFORE UPDATE OF usd_charged ON voice_calls
+             BEGIN SELECT RAISE(ABORT, 'synthetic receipt failure'); END;",
+                )
+            })
+            .unwrap();
+        let first = charge(&state, &report(1.0, 0.0));
+        let after_failure = spent(&state);
+        state
+            .db
+            .with(|connection| connection.execute_batch("DROP TRIGGER fail_voice_receipt"))
+            .unwrap();
+        let retry = charge(&state, &report(1.0, 0.0)).unwrap();
+        assert_eq!(
+            spent(&state),
+            1.0,
+            "replaying one cumulative dollar must debit one dollar total"
+        );
+        assert_eq!(retry, 1.0);
+        assert!(first.is_err(), "failed durable settlement must be reported");
+        assert_eq!(
+            after_failure, 0.0,
+            "failed settlement must roll back its ledger debit"
+        );
+    }
+
+    #[test]
+    fn a_failed_ledger_write_cannot_mark_an_unpaid_report_settled() {
+        let state = fixture();
+        state
+            .db
+            .with(|connection| {
+                connection.execute_batch(
+                    "CREATE TRIGGER fail_voice_debit BEFORE INSERT ON credit_ledger
+             WHEN NEW.kind = 'voice' AND NEW.usd < 0
+             BEGIN SELECT RAISE(ABORT, 'synthetic ledger failure'); END;",
+                )
+            })
+            .unwrap();
+        let first = charge(&state, &report(1.0, 0.0));
+        state
+            .db
+            .with(|connection| connection.execute_batch("DROP TRIGGER fail_voice_debit"))
+            .unwrap();
+        let retry = charge(&state, &report(1.0, 0.0)).unwrap();
+        assert_eq!(
+            spent(&state),
+            1.0,
+            "a retry must settle a report whose ledger debit failed"
+        );
+        assert_eq!(retry, 1.0);
+        assert!(
+            first.is_err(),
+            "ledger failure must not look like a settled report"
+        );
+    }
+
+    #[test]
+    fn replayed_and_reordered_cumulative_reports_keep_voice_vision_totals() {
+        let state = fixture();
+        for usage in [
+            report(1.0, 0.25),
+            report(1.0, 0.25),
+            report(0.5, 0.1),
+            report(2.0, 0.5),
+        ] {
+            charge(&state, &usage).unwrap();
+        }
+        let row = state.db.voice_call(CALL, PROJECT).unwrap().unwrap();
+        assert_eq!(spent(&state), 2.0);
+        assert_eq!(row.usd_charged, 2.0);
+        assert_eq!(row.vision_charged, 0.5);
+        let credits = state.db.credits(USER, 0).unwrap();
+        assert_eq!(
+            credits
+                .today_by_kind
+                .iter()
+                .find(|row| row.kind == "voice")
+                .unwrap()
+                .calls,
+            4
+        );
+    }
+
+    #[test]
+    fn the_existing_balance_clamp_keeps_reported_and_debited_amounts_distinct() {
+        let state = fixture();
+        assert_eq!(charge(&state, &report(150.0, 0.0)).unwrap(), 150.0);
+        assert_eq!(charge(&state, &report(150.0, 0.0)).unwrap(), 150.0);
+        assert_eq!(spent(&state), 100.0);
+        assert_eq!(
+            state
+                .db
+                .voice_call(CALL, PROJECT)
+                .unwrap()
+                .unwrap()
+                .usd_charged,
+            150.0
+        );
+        assert_eq!(state.db.credits(USER, 0).unwrap().balance_usd, 0.0);
+    }
+    #[test]
+    fn preserved_zero_delta_does_not_initialize_a_legacy_account() {
+        let state = test_state(AuthMode::Github);
+        assert!(state.db.user(USER).unwrap().is_none());
+        assert_eq!(charge(&state, &report(0.0, 0.0)).unwrap(), 0.0);
+        assert!(state.db.user(USER).unwrap().is_none());
+        assert_eq!(spent(&state), 0.0);
+    }
+
+    #[test]
+    fn preserved_unmetered_reports_settle_without_a_grant_or_ledger_debit() {
+        let state = test_state(AuthMode::Paircode);
+        assert_eq!(charge(&state, &report(1.0, 0.25)).unwrap(), 1.0);
+        assert!(state.db.user(USER).unwrap().is_none());
+        assert_eq!(spent(&state), 0.0);
+        let row = state.db.voice_call(CALL, PROJECT).unwrap().unwrap();
+        assert_eq!((row.usd_charged, row.vision_charged), (1.0, 0.25));
+    }
+
+    #[test]
+    fn preserved_total_and_per_part_thresholds_initialize_only_chargeable_usage() {
+        for (usd, vision_usd, settled, chargeable) in [
+            (0.9e-6, 0.0, 0.0, false),
+            (1e-6, 0.0, 0.0, false),
+            (1.2e-6, 0.6e-6, 1.2e-6, false),
+            (2e-6, 1e-6, 2e-6, false),
+            (2.2e-6, 1.1e-6, 2.2e-6, true),
+        ] {
+            let state = test_state(AuthMode::Github);
+            assert_eq!(charge(&state, &report(usd, vision_usd)).unwrap(), settled);
+            assert_eq!(state.db.user(USER).unwrap().is_some(), chargeable);
+            assert_eq!(spent(&state), if chargeable { usd } else { 0.0 });
+        }
+    }
+
+    #[test]
+    fn preserved_first_metered_part_grants_a_legacy_account_only_once() {
+        let state = test_state(AuthMode::Github);
+        assert!(state.db.user(USER).unwrap().is_none());
+        assert_eq!(charge(&state, &report(1.0, 0.25)).unwrap(), 1.0);
+        assert_eq!(charge(&state, &report(1.0, 0.25)).unwrap(), 1.0);
+        let credits = state.db.credits(USER, 0).unwrap();
+        assert_eq!(credits.granted_usd, state.cfg.default_grant_usd);
+        assert_eq!(credits.balance_usd, state.cfg.default_grant_usd - 1.0);
+        assert_eq!(spent(&state), 1.0);
+    }
+
+    #[test]
+    fn preserved_zero_default_grant_creates_an_unfunded_legacy_account() {
+        let mut state = test_state(AuthMode::Github);
+        std::sync::Arc::get_mut(&mut state.cfg)
+            .unwrap()
+            .default_grant_usd = 0.0;
+        assert_eq!(charge(&state, &report(1.0, 0.0)).unwrap(), 1.0);
+        assert!(state.db.user(USER).unwrap().is_some());
+        let credits = state.db.credits(USER, 0).unwrap();
+        assert_eq!(
+            (credits.granted_usd, credits.balance_usd, spent(&state)),
+            (0.0, 0.0, 0.0)
+        );
+        assert_eq!(
+            state
+                .db
+                .voice_call(CALL, PROJECT)
+                .unwrap()
+                .unwrap()
+                .usd_charged,
+            1.0
+        );
+    }
+
+    #[test]
+    fn preserved_voice_part_precedes_vision_at_the_daily_cap_boundary() {
+        let state = fixture();
+        state
+            .db
+            .set_user_limits(USER, Some(SpendLimit::Daily(1.0).stored()), None)
+            .unwrap();
+        assert_eq!(charge(&state, &report(1.25, 0.25)).unwrap(), 1.25);
+        // Voice reaches the soft cap first; vision is a policy refusal, not a failed Tx.
+        assert_eq!(spent(&state), 1.0);
+        let row = state.db.voice_call(CALL, PROJECT).unwrap().unwrap();
+        assert_eq!((row.usd_charged, row.vision_charged), (1.25, 0.25));
+        assert_eq!(charge(&state, &report(1.25, 0.25)).unwrap(), 1.25);
+        assert_eq!(spent(&state), 1.0);
+    }
+
+    #[test]
+    fn concurrent_cumulative_reports_have_one_durable_settlement() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::{Arc, Barrier, Condvar, Mutex};
+
+        struct Snapshots {
+            arrivals: Mutex<usize>,
+            ready: Condvar,
+            outside_reads: AtomicUsize,
+            timed_out: AtomicBool,
+        }
+        impl Snapshots {
+            fn meet(&self) {
+                let Ok(mut arrived) = self.arrivals.lock() else {
+                    self.timed_out.store(true, Ordering::Relaxed);
+                    return;
+                };
+                *arrived += 1;
+                if *arrived >= 2 {
+                    self.ready.notify_all();
+                    return;
+                }
+                match self.ready.wait_timeout_while(
+                    arrived,
+                    std::time::Duration::from_secs(2),
+                    |count| *count < 2,
+                ) {
+                    Ok((count, _)) if *count >= 2 => {}
+                    _ => self.timed_out.store(true, Ordering::Relaxed),
+                }
+            }
+        }
+
+        // SAFETY: SQLite owns the statement for this callback; registered Arc contexts
+        // stay alive until unregistered under their connection lock. No panic or write
+        // occurs in the callback. The rendezvous is bounded and only applies outside Tx.
+        unsafe extern "C" fn pause_unsettled_snapshot(
+            kind: u32,
+            context: *mut std::ffi::c_void,
+            statement: *mut std::ffi::c_void,
+            _elapsed: *mut std::ffi::c_void,
+        ) -> i32 {
+            if kind != rusqlite::ffi::SQLITE_TRACE_PROFILE as u32
+                || context.is_null()
+                || statement.is_null()
+            {
+                return 0;
+            }
+            // SAFETY: PROFILE supplies its live sqlite3_stmt; context has Arc ownership below.
+            let (snapshot, statement) = unsafe {
+                (
+                    &*context.cast::<Snapshots>(),
+                    statement.cast::<rusqlite::ffi::sqlite3_stmt>(),
+                )
+            };
+            // SAFETY: querying the owning handle/autocommit and static SQL does not step or mutate it.
+            let (connection, sql) = unsafe {
+                (
+                    rusqlite::ffi::sqlite3_db_handle(statement),
+                    rusqlite::ffi::sqlite3_sql(statement),
+                )
+            };
+            if connection.is_null() || sql.is_null() {
+                return 0;
+            }
+            let needle = b"FROM voice_calls WHERE call_id = ?1 AND project_id = ?2";
+            // SAFETY: SQLite's returned SQL is NUL-terminated for the live statement.
+            let selected = unsafe { std::ffi::CStr::from_ptr(sql) }
+                .to_bytes()
+                .windows(needle.len())
+                .any(|part| part == needle);
+            // SAFETY: this is the callback's still-owned connection, not a new DB operation.
+            if selected
+                && unsafe { rusqlite::ffi::sqlite3_get_autocommit(connection) } != 0
+                && snapshot.outside_reads.fetch_add(1, Ordering::Relaxed) < 2
+            {
+                snapshot.meet();
+            }
+            0
+        }
+
+        struct Registration {
+            db: crate::db::Db,
+            _context: Arc<Snapshots>,
+        }
+        impl Registration {
+            fn install(db: &crate::db::Db, context: &Arc<Snapshots>) -> Self {
+                db.with(|connection| {
+                    connection.busy_timeout(std::time::Duration::from_secs(2))?;
+                    // SAFETY: Registration retains both Db and Arc; Drop unregisters before either is released.
+                    let code = unsafe {
+                        rusqlite::ffi::sqlite3_trace_v2(
+                            connection.handle(),
+                            rusqlite::ffi::SQLITE_TRACE_PROFILE as u32,
+                            Some(pause_unsettled_snapshot),
+                            Arc::as_ptr(context).cast_mut().cast(),
+                        )
+                    };
+                    assert_eq!(code, rusqlite::ffi::SQLITE_OK);
+                    Ok(())
+                })
+                .unwrap();
+                Self {
+                    db: db.clone(),
+                    _context: context.clone(),
+                }
+            }
+        }
+        impl Drop for Registration {
+            fn drop(&mut self) {
+                let _ = self.db.with(|connection| {
+                    // SAFETY: Db lock waits for active callbacks; unregister before dropping Arc context.
+                    unsafe {
+                        rusqlite::ffi::sqlite3_trace_v2(
+                            connection.handle(),
+                            0,
+                            None,
+                            std::ptr::null_mut(),
+                        )
+                    };
+                    Ok(())
+                });
+            }
+        }
+
+        for legacy in [false, true] {
+            let first = if legacy {
+                test_state(AuthMode::Github)
+            } else {
+                fixture()
+            };
+            let mut second = first.clone();
+            second.db = crate::db::Db::open(&first.cfg.data_dir.join("relay.db")).unwrap();
+            let snapshots = Arc::new(Snapshots {
+                arrivals: Mutex::new(0),
+                ready: Condvar::new(),
+                outside_reads: AtomicUsize::new(0),
+                timed_out: AtomicBool::new(false),
+            });
+            let registrations = [
+                Registration::install(&first.db, &snapshots),
+                Registration::install(&second.db, &snapshots),
+            ];
+            let start = Arc::new(Barrier::new(2));
+            let workers: Vec<_> = [first.clone(), second]
+                .into_iter()
+                .map(|state| {
+                    let start = start.clone();
+                    std::thread::spawn(move || {
+                        start.wait();
+                        charge(&state, &report(1.0, 0.0))
+                    })
+                })
+                .collect();
+            let outcomes: Vec<_> = workers
+                .into_iter()
+                .map(|worker| worker.join().unwrap().unwrap())
+                .collect();
+            drop(registrations);
+            assert!(
+                !snapshots.timed_out.load(Ordering::Relaxed),
+                "native snapshot rendezvous timed out"
+            );
+            assert_eq!(outcomes, vec![1.0, 1.0]);
+            assert_eq!(
+                spent(&first),
+                1.0,
+                "one cumulative report, outside-Tx snapshots={}",
+                snapshots.outside_reads.load(Ordering::Relaxed)
+            );
+            assert_eq!(
+                first
+                    .db
+                    .voice_call(CALL, PROJECT)
+                    .unwrap()
+                    .unwrap()
+                    .usd_charged,
+                1.0
+            );
+            assert_eq!(charge(&first, &report(1.0, 0.0)).unwrap(), 1.0);
+            assert_eq!(spent(&first), 1.0);
+            assert_eq!(
+                first.db.credits(USER, 0).unwrap().granted_usd,
+                first.cfg.default_grant_usd,
+                "legacy grant must occur once"
+            );
+        }
+    }
+
+    #[test]
+    fn ignored_receipt_write_cannot_double_debit_a_replayed_report() {
+        let state = fixture();
+        state
+            .db
+            .with(|connection| {
+                connection.execute_batch(
+                    "CREATE TRIGGER fail_voice_receipt BEFORE UPDATE OF usd_charged ON voice_calls
+             BEGIN SELECT RAISE(IGNORE); END;",
+                )
+            })
+            .unwrap();
+        let first = charge(&state, &report(1.0, 0.0));
+        let after_failure = spent(&state);
+        state
+            .db
+            .with(|connection| connection.execute_batch("DROP TRIGGER fail_voice_receipt"))
+            .unwrap();
+        let retry = charge(&state, &report(1.0, 0.0)).unwrap();
+        assert_eq!(
+            spent(&state),
+            1.0,
+            "replaying one cumulative dollar must debit one dollar total"
+        );
+        assert_eq!(retry, 1.0);
+        assert!(first.is_err(), "failed durable settlement must be reported");
+        assert_eq!(
+            after_failure, 0.0,
+            "failed settlement must roll back its ledger debit"
+        );
+    }
+
+    #[test]
+    fn ignored_ledger_write_cannot_mark_an_unpaid_report_settled() {
+        let state = fixture();
+        state
+            .db
+            .with(|connection| {
+                connection.execute_batch(
+                    "CREATE TRIGGER fail_voice_debit BEFORE INSERT ON credit_ledger
+             WHEN NEW.kind = 'voice' AND NEW.usd < 0
+             BEGIN SELECT RAISE(IGNORE); END;",
+                )
+            })
+            .unwrap();
+        let first = charge(&state, &report(1.0, 0.0));
+        state
+            .db
+            .with(|connection| connection.execute_batch("DROP TRIGGER fail_voice_debit"))
+            .unwrap();
+        let retry = charge(&state, &report(1.0, 0.0)).unwrap();
+        assert_eq!(
+            spent(&state),
+            1.0,
+            "a retry must settle a report whose ledger debit failed"
+        );
+        assert_eq!(retry, 1.0);
+        assert!(
+            first.is_err(),
+            "ledger failure must not look like a settled report"
+        );
+    }
+    /// Finite generated execution of the actual transaction/helpers, not a policy model.
+    #[test]
+    fn generated_atomic_settlement_and_replay_laws() {
+        let mut seed = 0x5eed_5110_u64;
+        for case in 0..32 {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let clamped = case % 2 == 0;
+            let usd = if clamped {
+                101.0 + ((seed >> 8) % 64) as f64
+            } else {
+                0.25 * (1 + (seed >> 8) % 32) as f64
+            };
+            let usage = report(usd, usd * 0.25);
+            let state = fixture();
+            let trigger = match case % 4 {
+                0 => "CREATE TRIGGER fixture_fault BEFORE INSERT ON credit_ledger WHEN NEW.kind='voice' AND NEW.usd<0 BEGIN SELECT RAISE(ABORT,'synthetic ledger'); END",
+                1 => "CREATE TRIGGER fixture_fault BEFORE UPDATE OF usd_charged ON voice_calls BEGIN SELECT RAISE(ABORT,'synthetic receipt'); END",
+                2 => "CREATE TRIGGER fixture_fault BEFORE INSERT ON credit_ledger WHEN NEW.kind='voice' AND NEW.usd<0 BEGIN SELECT RAISE(IGNORE); END",
+                _ => "CREATE TRIGGER fixture_fault BEFORE UPDATE OF usd_charged ON voice_calls BEGIN SELECT RAISE(IGNORE); END",
+            };
+            state
+                .db
+                .with(|connection| connection.execute_batch(trigger))
+                .unwrap();
+            assert!(
+                charge(&state, &usage).is_err(),
+                "fault must not produce a receipt, case={case} seed={seed}"
+            );
+            assert_eq!(
+                spent(&state),
+                0.0,
+                "ledger rollback, case={case} seed={seed}"
+            );
+            assert!(
+                state.db.voice_call(CALL, PROJECT).unwrap().is_none(),
+                "observation/cursor rollback, case={case} seed={seed}"
+            );
+            state
+                .db
+                .with(|connection| connection.execute_batch("DROP TRIGGER fixture_fault"))
+                .unwrap();
+            assert_eq!(charge(&state, &usage).unwrap(), usd);
+            assert_eq!(
+                charge(&state, &report(usd * 0.5, usd * 0.125)).unwrap(),
+                usd
+            );
+            assert_eq!(charge(&state, &usage).unwrap(), usd);
+            assert_eq!(
+                spent(&state),
+                if clamped { 100.0 } else { usd },
+                "retry/replay conservation, case={case} seed={seed}"
+            );
+            let row = state.db.voice_call(CALL, PROJECT).unwrap().unwrap();
+            assert_eq!((row.usd_charged, row.vision_charged), (usd, usd * 0.25));
+            assert_eq!(state.db.credits(USER, 0).unwrap().granted_usd, 100.0);
+        }
+    }
+
+    #[test]
+    fn actual_usage_protocol_rejects_wrong_shapes_without_creating_credit_authority() {
+        for raw in [
+            r#"{"usd":[]}"#,
+            r#"{"usd":{}}"#,
+            r#"{"usd":"NaN"}"#,
+            r#"{"usd":null}"#,
+            r#"{"usd":1e400}"#,
+            r#"{"project_id":[]}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<super::UsageBody>(raw).is_err(),
+                "malformed synthetic usage accepted"
+            );
+        }
+        let state = test_state(AuthMode::Github);
+        let empty = serde_json::from_str::<super::UsageBody>("{}").unwrap();
+        assert_eq!(charge(&state, &empty.usage).unwrap(), 0.0);
+        // Negative cumulative input remains the existing MAX-at-zero observation policy.
+        let negative = serde_json::from_str::<super::UsageBody>(r#"{"usd":-1}"#).unwrap();
+        assert_eq!(charge(&state, &negative.usage).unwrap(), 0.0);
+        for amount in [f64::NAN, f64::INFINITY, -1.0] {
+            crate::credits::charge(&state, USER, amount, "voice", Some("synthetic-invalid"));
+            assert!(state.db.debit(USER, amount, "voice", None, 0).is_err());
+        }
+        assert!(state.db.user(USER).unwrap().is_none());
+        assert_eq!(spent(&state), 0.0);
     }
 }

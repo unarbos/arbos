@@ -28,8 +28,11 @@ use arbos_core::ids::now_ms;
 use arbos_core::wire::BoxState;
 
 use crate::auth::Principal;
-use crate::db_accounts::{DebitRefused, KillSwitch};
-use crate::proxy::start_of_utc_day_ms;
+use crate::db_accounts::{
+    DebitRefused, KillSwitch, LegacyCreditDefaults, LegacyCreditInit, PostfactCharge, PostfactDebit,
+};
+// One UTC implementation is shared by ledger admission and the existing credit reads.
+pub(crate) use crate::proxy::start_of_utc_day_ms;
 use crate::signin::api_error;
 use crate::state::{AppState, AuthMode};
 
@@ -192,28 +195,48 @@ pub fn ensure_account(state: &AppState, user_id: &str) {
     if user_id.is_empty() {
         return;
     }
-    let known = matches!(state.db.user(user_id), Ok(Some(_)));
-    if known {
-        return;
+    let defaults = LegacyCreditDefaults {
+        limit: state.cfg.default_account_limit,
+        grant_usd: state.cfg.default_grant_usd,
+    };
+    match state.db.ensure_legacy_credit(user_id, &defaults) {
+        Ok(initialized) => note_legacy_credit(state, user_id, initialized),
+        Err(error) => tracing::warn!(%error, user = %user_id, "legacy account grant"),
     }
-    if let Err(e) = state.db.set_user_limits(
-        user_id,
-        Some(state.cfg.default_account_limit.stored()),
-        None,
-    ) {
-        tracing::warn!(error = %e, user = %user_id, "legacy account row");
-        return;
-    }
-    match state.db.grant_credits(
-        user_id,
-        state.cfg.default_grant_usd,
-        "legacy account grant (device-token user)",
-        "relay",
-    ) {
-        Ok(()) => {
+}
+
+fn note_legacy_credit(state: &AppState, user_id: &str, initialized: LegacyCreditInit) {
+    match initialized {
+        LegacyCreditInit::Existing => {}
+        LegacyCreditInit::Granted => {
             tracing::info!(user = %user_id, usd = state.cfg.default_grant_usd, "legacy user got the default grant")
         }
-        Err(e) => tracing::warn!(error = %e, user = %user_id, "legacy grant"),
+        LegacyCreditInit::Unfunded => {
+            tracing::warn!(error = "grant must be a positive amount", user = %user_id, "legacy grant")
+        }
+    }
+}
+
+pub(crate) fn chargeable_amount(usd: f64) -> bool {
+    usd.is_finite() && usd >= MIN_DEBIT_USD
+}
+
+pub(crate) fn note_postfact_charge(
+    state: &AppState,
+    user_id: &str,
+    usd: f64,
+    kind: &str,
+    charge: PostfactCharge,
+) {
+    note_legacy_credit(state, user_id, charge.legacy);
+    match charge.debit {
+        PostfactDebit::Paid => {}
+        PostfactDebit::Clamped { balance_usd } => {
+            tracing::info!(user = %user_id, usd, balance_usd, "debit clamped at the remaining balance")
+        }
+        PostfactDebit::Refused(r) => {
+            tracing::info!(user = %user_id, usd, kind, %r, "debit refused")
+        }
     }
 }
 
@@ -296,21 +319,20 @@ pub fn check_call(
 /// The pre-check kept the balance positive; if the final cost overshoots what is left, the debit
 /// is clamped at the balance so the ledger never goes negative without the admin override.
 pub fn charge(state: &AppState, user_id: &str, usd: f64, kind: &str, reference: Option<&str>) {
-    if !metered(state) || !usd.is_finite() || usd < MIN_DEBIT_USD {
+    if !metered(state) || !chargeable_amount(usd) {
         return;
     }
-    ensure_account(state, user_id);
-    let day = start_of_utc_day_ms();
-    match state.db.debit(user_id, usd, kind, reference, day) {
-        Ok(Ok(_)) => {}
-        Ok(Err(DebitRefused::Insufficient { balance_usd, .. })) if balance_usd > 0.0 => {
-            tracing::info!(user = %user_id, usd, balance_usd, "debit clamped at the remaining balance");
-            let _ = state.db.debit(user_id, balance_usd, kind, reference, day);
-        }
-        Ok(Err(r)) => {
-            tracing::info!(user = %user_id, usd, kind, %r, "debit refused");
-        }
-        Err(e) => tracing::warn!(error = %e, user = %user_id, "debit"),
+    let defaults = LegacyCreditDefaults {
+        limit: state.cfg.default_account_limit,
+        grant_usd: state.cfg.default_grant_usd,
+    };
+    match state
+        .db
+        .charge_postfact(user_id, usd, kind, reference, &defaults)
+    {
+        Ok(Some(charge)) => note_postfact_charge(state, user_id, usd, kind, charge),
+        Ok(None) => {}
+        Err(error) => tracing::warn!(%error, user = %user_id, "debit"),
     }
 }
 

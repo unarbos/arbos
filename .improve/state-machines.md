@@ -829,3 +829,17 @@ mutant drivers pass their unmodified256-case control and falsify/shrink/replay
 their mutant. Relay production build also passes48.604s. Portable commands and
 normalized evidence are in state-machine-checks/RELAY_HARNESS_GATES.json and
 RELAY_BUILD_GATES.json.
+
+### H11 billed usage settlement — verified implementation
+
+One Immediate transaction owns observation, existing ordered debit policy and
+settlement receipt; only committed typed facts reach effects. Actual storage
+faults and concurrent reports previously allowed duplicated or lost debits.
+Five original failures plus eight policy controls pin that behavior. Two extra
+required-metadata SQL-ignore faults failed against the initial candidate and
+now roll back with the settlement. Final voice24 +credits8 +accounts9 gives
+41distinct native passes; an actual finite32-trace law is included. Thresholds,
+legacy defaults, soft cap/clamp, UTC placement and voice-before-vision remain.
+[Financial receipt evidence](state-machine-checks/voice-settlement/README.md)
+records exact counts, hashes and owner review before merge. Informational machine
+metering remains separate; this does not claim all H11 catalog entries complete.
