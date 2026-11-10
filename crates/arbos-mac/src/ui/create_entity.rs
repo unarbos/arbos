@@ -1,63 +1,53 @@
 //! The one Create screen (D93: one style, parameterised by entity) for a new
-//! agent, group or server — Grok Bot's "Create New Bot" layout: header with a
-//! close ×, the preview, a centred name field, the picture options, and a
-//! footer with Cancel + the action (disabled until named). Agents create from
-//! here; groups go on to the existing member picker as step two ("Next");
-//! servers keep their one-line explainer under the field.
+//! agent, group or server — Grok Bot's **Edit-page hierarchy** as a modal sheet
+//! ([feedback iphone-create-entity-edit-style-2026-11-10]): header with close ×
+//! and a Create/Next Done pill, centred avatar with a pencil affordance, then
+//! section headers + grouped cards (Name, Appearance with Upload | Generate,
+//! Connection for connect / an explainer for server). Agents create from here;
+//! groups go on to the existing member picker as step two ("Next"); servers keep
+//! their one-line explainer under the name field. Mac keeps the modal sheet
+//! idiom (not an iOS push).
 //!
 //! **Picture (Jacob, 2026-10-25, [feedback create-sheet-avatar-upload-generate-mac-2026-10-25]):
-//! the sixteen-shape grid and the ten pastel swatches are gone. Under the name field sit the
-//! agent avatar picker's own two options — `Upload | Generate` (`avatar_picker::tab_pill`,
-//! `upload_body`, `generate_body` on a draft [`avatar_picker::Picker`]) — and the preview
-//! above the field shows the chosen file, the generated picture, or, when neither was picked,
-//! the sheet's own placeholder: the name's first letter on a grey disc
-//! (`avatars::neutral_element`). That grey is sheet chrome, not a default avatar — the entity
-//! has no id yet, so no colour can be derived. The entity is stored with no colour at all
-//! (`stored_disc()` → `None`), and the disc follows from the id the relay assigns.**
-//!
-//! Header, preview and field keep Grok's sizes, measured on the 2x reference
-//! (`media/agent-avatars/create-sheet/ref-grok-create-new-bot.png`) and written here in
-//! points; the option rows start where Grok's first icon row did.
+//! the sixteen-shape grid and the ten pastel swatches are gone. Appearance offers
+//! `Upload | Generate` (`avatar_picker::tab_pill`, `upload_body`, `generate_body`
+//! on a draft [`avatar_picker::Picker`]) — and the preview shows the chosen file,
+//! the generated picture, or, when neither was picked, the sheet's own placeholder:
+//! the name's first letter on a grey disc (`avatars::neutral_element`). That grey
+//! is sheet chrome, not a default avatar — the entity has no id yet, so no colour
+//! can be derived. The entity is stored with no colour at all (`stored_disc()` →
+//! `None`), and the disc follows from the id the relay assigns.**
 
-use gpui::{div, prelude::*, px, Context, Div, FontWeight, Hsla, MouseButton};
+use gpui::{
+    div, prelude::*, px, Context, Div, ElementId, FontWeight, Hsla, MouseButton, SharedString,
+};
 
 use crate::ui::avatar_picker::{self, Picker, Tab};
 use crate::ui::avatars;
 use crate::ui::frost::{frosted, PANEL_BLUR};
 use crate::ui::highlight;
+use crate::ui::profiles::kit;
 use crate::ui::sf_symbols;
 use crate::ui::shell::Shell;
-use crate::ui::theme::{Appearance, Theme};
+use crate::ui::theme::{Appearance, Theme, TEXT_TINY};
 
 pub(crate) const WIDTH: f32 = 440.0;
 const RADIUS: f32 = 16.0;
 const HEADER: f32 = 54.5;
 pub(crate) const PREVIEW: f32 = 114.0;
-const PREVIEW_TOP: f32 = 62.0;
-const FIELD_TOP: f32 = 183.0;
 const FIELD_H: f32 = 35.0;
 const FIELD_INSET: f32 = 16.5;
-/// The `Upload | Generate` capsules: a 28 pt row whose top is where Grok's first icon row
-/// began (its 36 pt rings centred on 264).
-pub(crate) const OPTIONS_TOP: f32 = 246.0;
 const OPTIONS_H: f32 = 28.0;
-/// The chosen option's body starts 16 under the capsules.
+/// Upload body height inside the Appearance card (pill + hint).
+const UPLOAD_BODY_H: f32 = 28.0 + 12.0 + 16.0;
+/// Generate body height (prompt + pill + status).
+const GENERATE_BODY_H: f32 = 35.0 + 12.0 + 28.0 + 12.0 + 16.0;
+/// Kept for tests / callers that measured the old absolute layout: the option
+/// capsules once sat where Grok's first icon row began.
+pub(crate) const OPTIONS_TOP: f32 = 246.0;
 pub(crate) const BODY_TOP: f32 = OPTIONS_TOP + OPTIONS_H + 16.0;
-/// Upload: the "Choose a photo…" pill (28) then its hint 12 under.
-const UPLOAD_HINT_TOP: f32 = BODY_TOP + 28.0 + 12.0;
-/// Generate: the prompt field (35), the Generate pill 12 under (28), the status 12 under that.
-const GENERATE_STATUS_TOP: f32 = BODY_TOP + 35.0 + 12.0 + 28.0 + 12.0;
-/// The footer sits 12 under the Generate status line's 16 pt box, the taller of the two bodies,
-/// so the sheet does not jump when the option changes.
-pub(crate) const FOOTER_TOP: f32 = GENERATE_STATUS_TOP + 16.0 + 12.0;
-const FOOTER_H: f32 = 56.5;
-const PILL_H: f32 = 27.0;
-pub(crate) const HEIGHT: f32 = FOOTER_TOP + FOOTER_H;
-/// The server explainer (13 pt, two lines at this width) plus its gap: everything under the
-/// field moves down by this much.
-const EXPLAINER_SHIFT: f32 = 40.0;
-/// Connect an agent (#2141): the transport capsules under the explainer (28 pt row + gap).
-const TRANSPORT_SHIFT: f32 = 40.0;
+pub(crate) const FOOTER_TOP: f32 = BODY_TOP + GENERATE_BODY_H + 12.0;
+pub(crate) const HEIGHT: f32 = FOOTER_TOP + 56.5;
 
 /// What the sheet creates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -156,17 +146,6 @@ impl Kind {
             Kind::Agent | Kind::Group => None,
         }
     }
-
-    fn shift(self) -> f32 {
-        let mut shift = 0.0;
-        if self.explainer().is_some() {
-            shift += EXPLAINER_SHIFT;
-        }
-        if self == Kind::Connect {
-            shift += TRANSPORT_SHIFT;
-        }
-        shift
-    }
 }
 
 /// Grok's dark sheet palette (approved as is); the light theme keeps its own.
@@ -237,6 +216,23 @@ pub(crate) fn preview(picker: &Picker, name: &str, shell: &Shell, cx: &Context<S
         .unwrap_or_else(|| avatars::neutral_element(name, PREVIEW, theme))
 }
 
+/// Pencil badge on the create / edit hero avatar (Grok Edit Bot).
+fn pencil_badge(theme: &Theme) -> Div {
+    div()
+        .absolute()
+        .right(px(2.0))
+        .bottom(px(2.0))
+        .size(px(28.0))
+        .rounded_full()
+        .bg(theme.control_fill())
+        .border_1()
+        .border_color(theme.border)
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(sf_symbols::glyph("pencil", 12.0, theme.text))
+}
+
 pub fn sheet(shell: &Shell, kind: Kind, cx: &mut Context<Shell>) -> Div {
     let theme = Theme::of(cx).clone();
     let p = palette(&theme);
@@ -252,8 +248,13 @@ pub fn sheet(shell: &Shell, kind: Kind, cx: &mut Context<Shell>) -> Div {
         Kind::Agent | Kind::Group => false,
     };
     let can_go = !typed.is_empty() && !busy && !picker.generating;
-    let shift = kind.shift();
+    let option_label = match picker.tab {
+        Tab::Upload => "Upload",
+        Tab::Generate => "Generate",
+        Tab::Bot => "Bot",
+    };
 
+    // ----- header: × · title · Create/Next Done pill ---------------------------------
     let header = div()
         .relative()
         .flex_none()
@@ -261,23 +262,12 @@ pub fn sheet(shell: &Shell, kind: Kind, cx: &mut Context<Shell>) -> Div {
         .h(px(HEADER))
         .border_b_1()
         .border_color(p.line)
-        .child(
-            div()
-                .absolute()
-                .left(px(17.5))
-                .top(px(16.0))
-                .text_size(px(14.2))
-                .line_height(px(20.0))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(p.title)
-                .child(kind.title()),
-        )
+        .flex()
+        .items_center()
+        .px(px(16.0))
         .child(
             div()
                 .id("create-entity-close")
-                .absolute()
-                .right(px(16.5))
-                .top(px(15.0))
                 .size(px(22.0))
                 .flex()
                 .items_center()
@@ -289,121 +279,94 @@ pub fn sheet(shell: &Shell, kind: Kind, cx: &mut Context<Shell>) -> Div {
                 .on_click(
                     cx.listener(move |this, _, window, cx| this.cancel_create(kind, window, cx)),
                 ),
-        );
+        )
+        .child(
+            div()
+                .flex_1()
+                .px(px(12.0))
+                .text_size(px(14.2))
+                .line_height(px(20.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(p.title)
+                .text_center()
+                .child(kind.title()),
+        )
+        .child({
+            let label = if busy { "Creating…" } else { kind.action() };
+            let pill = kit::done_pill("create-entity-go", label, can_go, &theme);
+            if can_go {
+                pill.on_click(
+                    cx.listener(move |this, _, window, cx| this.submit_create(kind, window, cx)),
+                )
+            } else {
+                pill
+            }
+        });
 
-    let preview = div()
+    // ----- hero avatar with pencil ---------------------------------------------------
+    let hero = div()
         .id("create-entity-preview")
         .debug_selector(|| "create-entity-preview".into())
-        .absolute()
-        .left_0()
-        .right_0()
-        .top(px(PREVIEW_TOP - HEADER))
+        .w_full()
         .flex()
         .justify_center()
-        .child(preview(&picker, &typed, shell, cx));
+        .pt(px(18.0))
+        .pb(px(8.0))
+        .child(
+            div()
+                .relative()
+                .size(px(PREVIEW))
+                .child(preview(&picker, &typed, shell, cx))
+                .child(pencil_badge(&theme)),
+        );
 
-    let field = div()
-        .absolute()
-        .left(px(FIELD_INSET))
-        .right(px(FIELD_INSET))
-        .top(px(FIELD_TOP - HEADER))
-        .h(px(FIELD_H))
-        .rounded(px(8.0))
-        .border_1()
-        .border_color(p.line)
+    // ----- Name section --------------------------------------------------------------
+    let name_section = div()
+        .w_full()
         .flex()
-        .items_center()
-        .px(px(12.0))
-        .text_size(px(15.5))
-        .text_color(if typed.is_empty() {
-            p.placeholder
-        } else {
-            p.title
-        })
-        .child(input);
-    let explainer = kind.explainer().map(|text| {
-        div()
-            .absolute()
-            .left(px(FIELD_INSET))
-            .right(px(FIELD_INSET))
-            .top(px(FIELD_TOP + FIELD_H + 8.0 - HEADER))
-            .text_size(px(13.0))
-            .line_height(px(16.0))
-            .text_center()
-            .text_color(p.placeholder)
-            .child(text)
-    });
-    // Connect an agent: the transport capsules (the approved type picker's three rows) under
-    // the explainer, where the explainer's gap ends.
-    let transport_row = (kind == Kind::Connect).then(|| {
-        let selected = shell.connect_transport;
-        let label_muted = match theme.appearance {
-            Appearance::Dark => hex(0x9A9A9A),
-            Appearance::Light => theme.text_muted,
-        };
-        let mut row = div().h(px(OPTIONS_H)).flex().items_center().gap(px(2.0));
-        for t in Transport::ALL {
-            let on = t == selected;
-            row = row.child(
+        .flex_col()
+        .child(kit::edit_section_header("Name", &theme))
+        .child(
+            kit::card(&theme).child(
                 div()
-                    .id(gpui::ElementId::Name(gpui::SharedString::from(format!(
-                        "connect-transport-{}",
-                        t.wire()
-                    ))))
-                    .debug_selector(move || format!("connect-transport-{}", t.wire()))
-                    .h(px(OPTIONS_H))
-                    .px(px(11.0))
-                    .rounded_full()
+                    .id("create-entity-name")
+                    .debug_selector(|| "create-entity-name".into())
+                    .h(px(FIELD_H + 6.0))
+                    .px(px(FIELD_INSET))
                     .flex()
                     .items_center()
-                    .text_size(px(13.0))
-                    .font_weight(FontWeight::MEDIUM)
-                    .when(on, |d| d.bg(p.cancel_bg).text_color(p.title))
-                    .when(!on, |d| d.text_color(label_muted))
-                    .cursor_pointer()
-                    .hover(|s| s.opacity(0.85))
-                    .child(t.label())
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.connect_transport = t;
-                        cx.notify();
-                    })),
-            );
-        }
-        div()
-            .id("connect-transports")
-            .debug_selector(|| "connect-transports".into())
-            .absolute()
-            .left_0()
-            .right_0()
-            .top(px(FIELD_TOP + FIELD_H + 8.0 + EXPLAINER_SHIFT - HEADER))
-            .flex()
-            .justify_center()
-            .child(row)
-    });
+                    .text_size(px(15.5))
+                    .text_color(if typed.is_empty() {
+                        p.placeholder
+                    } else {
+                        p.title
+                    })
+                    .child(input),
+            ),
+        )
+        .children(kind.explainer().map(|text| {
+            div()
+                .px(px(kit::INSET + kit::SECTION_TITLE_INDENT))
+                .mt(px(-6.0))
+                .mb(px(8.0))
+                .text_size(px(TEXT_TINY))
+                .line_height(px(16.0))
+                .text_color(p.placeholder)
+                .child(text)
+        }));
 
-    // ----- the two options: Upload | Generate, then the chosen one's body ------------------
-    let options = div()
-        .id("create-entity-options")
-        .debug_selector(|| "create-entity-options".into())
-        .absolute()
-        .left_0()
-        .right_0()
-        .top(px(OPTIONS_TOP + shift - HEADER))
-        .flex()
-        .justify_center()
-        .child(avatar_picker::tab_pill(
-            &options(),
-            picker.tab,
-            &p,
-            &theme,
-            cx,
-        ));
-    let body: Vec<gpui::AnyElement> = match picker.tab {
+    // ----- Appearance: Avatar row + Upload | Generate --------------------------------
+    let body_h = match picker.tab {
+        Tab::Generate => GENERATE_BODY_H,
+        Tab::Upload | Tab::Bot => UPLOAD_BODY_H,
+    };
+    let appearance_inner_h = OPTIONS_H + 16.0 + body_h;
+    let appearance_body: Vec<gpui::AnyElement> = match picker.tab {
         Tab::Upload => avatar_picker::upload_body(
             &picker,
             avatar_picker::Slots {
-                top: BODY_TOP + shift - HEADER,
-                status_top: UPLOAD_HINT_TOP + shift - HEADER,
+                top: OPTIONS_H + 16.0,
+                status_top: OPTIONS_H + 16.0 + 28.0 + 12.0,
             },
             None,
             &p,
@@ -413,80 +376,104 @@ pub fn sheet(shell: &Shell, kind: Kind, cx: &mut Context<Shell>) -> Div {
             shell,
             &picker,
             avatar_picker::Slots {
-                top: BODY_TOP + shift - HEADER,
-                status_top: GENERATE_STATUS_TOP + shift - HEADER,
+                top: OPTIONS_H + 16.0,
+                status_top: OPTIONS_H + 16.0 + 35.0 + 12.0 + 28.0 + 12.0,
             },
             None,
             &p,
             &theme,
             cx,
         ),
-        // Never offered on a draft (`options()`); nothing to draw.
         Tab::Bot => Vec::new(),
     };
-
-    let pill = |id: &'static str, label: &'static str, w: f32, bg: Hsla, fg: Hsla| {
-        div()
-            .id(id)
-            .absolute()
-            .top(px(15.0))
-            .w(px(w))
-            .h(px(PILL_H))
-            .rounded_full()
-            .bg(bg)
-            .flex()
-            .items_center()
-            .justify_center()
-            .text_size(px(14.2))
-            .font_weight(FontWeight::MEDIUM)
-            .text_color(fg)
-            .child(label)
-    };
-    let footer = div()
-        .id("create-entity-footer")
-        .debug_selector(|| "create-entity-footer".into())
-        .absolute()
-        .left_0()
-        .right_0()
-        .top(px(FOOTER_TOP + shift - HEADER))
-        .h(px(FOOTER_H))
-        .border_t_1()
-        .border_color(p.line)
+    let appearance_section = div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .child(kit::edit_section_header("Appearance", &theme))
         .child(
-            pill("create-entity-cancel", "Cancel", 68.5, p.cancel_bg, p.title)
-                .right(px(12.5 + 67.0 + 8.0))
-                .cursor_pointer()
-                .hover(|s| s.opacity(0.85))
-                .on_click(
-                    cx.listener(move |this, _, window, cx| this.cancel_create(kind, window, cx)),
+            kit::card(&theme)
+                .child(
+                    kit::row(
+                        "create-avatar-row",
+                        kit::Leading::None,
+                        "Avatar",
+                        None,
+                        Some(option_label.into()),
+                        None,
+                        true,
+                        &theme,
+                    )
+                    .into_any_element(),
+                )
+                .child(
+                    div()
+                        .id("create-entity-options")
+                        .debug_selector(|| "create-entity-options".into())
+                        .relative()
+                        .w_full()
+                        .h(px(appearance_inner_h))
+                        .child(
+                            div()
+                                .absolute()
+                                .left_0()
+                                .right_0()
+                                .top(px(0.0))
+                                .h(px(OPTIONS_H))
+                                .flex()
+                                .justify_center()
+                                .child(avatar_picker::tab_pill(
+                                    &options(),
+                                    picker.tab,
+                                    &p,
+                                    &theme,
+                                    cx,
+                                )),
+                        )
+                        .children(appearance_body),
                 ),
-        )
-        .child(if can_go {
-            pill(
-                "create-entity-go",
-                kind.action(),
-                67.0,
-                theme.primary,
-                theme.on_primary,
-            )
-            .right(px(12.5))
-            .cursor_pointer()
-            .hover(|s| s.opacity(0.88))
-            .on_click(cx.listener(move |this, _, window, cx| this.submit_create(kind, window, cx)))
-        } else {
-            pill(
-                "create-entity-go",
-                if busy { "Creating…" } else { kind.action() },
-                67.0,
-                p.create_bg,
-                p.create_text,
-            )
-            .right(px(12.5))
-        });
+        );
 
-    // A column: header · the note (a failed generation, Jacob 2026-10-26) · the body's fixed
-    // box with everything else in its absolute slots · (the footer is the box's last slot).
-    // Without a note the card is exactly `HEIGHT + shift`; a note grows it by itself.
+    // ----- Connection (connect an agent) ---------------------------------------------
+    let connection = (kind == Kind::Connect).then(|| {
+        let selected = shell.connect_transport;
+        let mut rows: Vec<gpui::AnyElement> = Vec::new();
+        for t in Transport::ALL {
+            let on = t == selected;
+            let wire = t.wire();
+            let check = on.then(|| sf_symbols::glyph("checkmark", 14.0, p.title).into_any_element());
+            let id = format!("connect-transport-{wire}");
+            rows.push(
+                kit::row(
+                    ElementId::Name(SharedString::from(id.clone())),
+                    kit::Leading::None,
+                    t.label(),
+                    None,
+                    None,
+                    check,
+                    false,
+                    &theme,
+                )
+                .debug_selector(move || id.clone())
+                .cursor_pointer()
+                .group(kit::HOT)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.connect_transport = t;
+                    cx.notify();
+                }))
+                .into_any_element(),
+            );
+        }
+        div()
+            .id("connect-transports")
+            .debug_selector(|| "connect-transports".into())
+            .w_full()
+            .flex()
+            .flex_col()
+            .child(kit::edit_section_header("Connection", &theme))
+            .child(kit::section(rows, &theme))
+    });
+
     let note = avatar_picker::error_slot(&picker, &theme, cx);
     let card = div()
         .id("create-entity-card")
@@ -507,17 +494,18 @@ pub fn sheet(shell: &Shell, kind: Kind, cx: &mut Context<Shell>) -> Div {
         .children(note)
         .child(
             div()
-                .relative()
-                .flex_none()
+                .id("create-entity-body")
+                .debug_selector(|| "create-entity-body".into())
+                .flex()
+                .flex_col()
+                .flex_1()
                 .w_full()
-                .h(px(HEIGHT + shift - HEADER))
-                .child(preview)
-                .child(field)
-                .children(explainer)
-                .children(transport_row)
-                .child(options)
-                .children(body)
-                .child(footer),
+                .overflow_y_scroll()
+                .pb(px(24.0))
+                .child(hero)
+                .child(name_section)
+                .child(appearance_section)
+                .children(connection),
         );
     // The same modal backdrop as the New Message sheet: a click outside closes.
     div()
@@ -563,23 +551,20 @@ mod tests {
     }
 
     #[test]
-    fn the_option_rows_sit_where_the_shape_grid_was_and_the_sheet_got_shorter() {
-        // Grok's first icon row: 36 pt rings centred on 264 → top 246. The rows read top to
-        // bottom in order, and the old sheet's footer sat at 546 (602.5 tall): without the
-        // grid the card is shorter.
-        let rows = std::hint::black_box([
-            OPTIONS_TOP,
-            OPTIONS_TOP + OPTIONS_H,
-            BODY_TOP,
-            UPLOAD_HINT_TOP,
-            GENERATE_STATUS_TOP,
-            GENERATE_STATUS_TOP + 16.0,
-            FOOTER_TOP,
-            HEIGHT,
-        ]);
-        assert_eq!(rows[0], 246.0);
-        assert!(rows.windows(2).all(|w| w[0] < w[1]), "{rows:?}");
-        assert!(rows[7] < 546.0, "{rows:?}");
+    fn create_kinds_keep_grok_titles_and_actions() {
+        assert_eq!(Kind::Agent.title(), "Create New Agent");
+        assert_eq!(Kind::Group.title(), "Create New Group");
+        assert_eq!(Kind::Server.title(), "Create New Server");
+        assert_eq!(Kind::Connect.title(), "Connect an Agent");
+        assert_eq!(Kind::Agent.action(), "Create");
+        assert_eq!(Kind::Group.action(), "Next");
+        assert_eq!(Kind::Server.action(), "Create");
+    }
+
+    #[test]
+    fn appearance_body_heights_keep_upload_shorter_than_generate() {
+        assert!(UPLOAD_BODY_H < GENERATE_BODY_H);
+        assert!(OPTIONS_H + 16.0 + GENERATE_BODY_H < HEIGHT);
     }
 }
 
@@ -587,7 +572,7 @@ mod tests {
 mod render_tests {
     //! Headless render of the Create New Agent and Create New Group sheets (the shell's own
     //! `create_entity::sheet` on an idle app state): no shape grid, no swatch, the two options,
-    //! and the neutral initial in the preview when nothing was picked.
+    //! Edit-page sections, and the neutral initial in the preview when nothing was picked.
 
     use futures::future::BoxFuture;
     use gpui::{Entity, TestAppContext, VisualTestContext};
@@ -690,13 +675,17 @@ mod render_tests {
     }
 
     #[gpui::test]
-    fn both_create_sheets_show_two_options_and_no_shape_grid(cx: &mut TestAppContext) {
+    fn both_create_sheets_show_edit_hierarchy_and_two_options(cx: &mut TestAppContext) {
         let (_rt, state, shell, vcx) = mount(cx);
         for kind in [Kind::Agent, Kind::Group] {
             open(kind, "Field notes", &state, &shell, vcx);
             assert!(
                 drawn(vcx, "create-entity-card"),
                 "{kind:?}: the sheet is up"
+            );
+            assert!(
+                drawn(vcx, "create-entity-preview"),
+                "{kind:?}: the hero avatar is drawn"
             );
             assert!(
                 drawn(vcx, "create-entity-options"),
@@ -715,21 +704,10 @@ mod render_tests {
                 drawn(vcx, "avatar-upload-choose"),
                 "{kind:?}: Upload is the first option"
             );
-            let card = vcx.debug_bounds("create-entity-card").expect("card");
-            let footer = vcx.debug_bounds("create-entity-footer").expect("footer");
-            let preview = vcx.debug_bounds("create-entity-preview").expect("preview");
-            // Children are placed inside the card's 1 pt border.
-            let footer_top: f32 = (footer.origin.y - card.origin.y).into();
             assert!(
-                (footer_top - FOOTER_TOP - 1.0).abs() < 0.5,
-                "{kind:?}: footer at {footer_top}, expected {FOOTER_TOP} + the border"
+                drawn(vcx, "create-entity-go"),
+                "{kind:?}: Create/Next Done pill"
             );
-            let card_h: f32 = card.size.height.into();
-            assert!(
-                (card_h - HEIGHT).abs() < 2.5,
-                "{kind:?}: card {card_h} tall"
-            );
-            assert!(f32::from(preview.size.height) >= PREVIEW - 0.5);
             // Nothing picked → the create carries no picture and the neutral pair.
             let picked = shell.read_with(vcx, |this, _| this.create_picker.draft_picture());
             assert_eq!(picked, None, "{kind:?}");
@@ -739,23 +717,23 @@ mod render_tests {
         }
     }
 
-    /// Connect an agent (#2141): the same Create screen with the three transport capsules under
-    /// the explainer, the ACP one selected first; Cancel closes it.
+    /// Connect an agent (#2141): the same Create screen with the three transport rows under
+    /// Connection, the ACP one selected first; Cancel closes it.
     #[gpui::test]
-    fn the_connect_sheet_shows_the_transport_capsules(cx: &mut TestAppContext) {
+    fn the_connect_sheet_shows_the_transport_rows(cx: &mut TestAppContext) {
         let (_rt, state, shell, vcx) = mount(cx);
         open(Kind::Connect, "Grok Bot", &state, &shell, vcx);
         assert!(drawn(vcx, "create-entity-card"), "the sheet is up");
         assert!(
             drawn(vcx, "connect-transports"),
-            "the transport row is drawn"
+            "the transport section is drawn"
         );
         for id in [
             "connect-transport-acp",
             "connect-transport-grok",
             "connect-transport-custom",
         ] {
-            assert!(drawn(vcx, id), "{id} capsule");
+            assert!(drawn(vcx, id), "{id} row");
         }
         assert_eq!(
             shell.read_with(vcx, |this, _| this.connect_transport),
