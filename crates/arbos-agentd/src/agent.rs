@@ -2094,6 +2094,22 @@ pub(crate) struct WorkspaceMemory {
 }
 
 /// Owns every child removed/spawned by an uncommitted main-Pi boot.
+/// Authority to commit metadata for one admitted main-child lifetime.
+pub(crate) struct CurrentPi {
+    pub(crate) child: Arc<RpcChild>,
+    ticket: BootTicket,
+}
+
+impl CurrentPi {
+    fn matches(&self, slot: &PiSlot<Arc<RpcChild>>) -> bool {
+        slot.is_ready()
+            && slot.ticket() == Some(self.ticket)
+            && slot
+                .as_ref()
+                .is_some_and(|child| Arc::ptr_eq(child, &self.child))
+    }
+}
+
 struct MainPiBoot {
     agent: Arc<Agent>,
     ticket: BootTicket,
@@ -2311,7 +2327,7 @@ pub struct Agent {
     /// owns its model between spawns, so this is what lets a turn tell "pi already has the
     /// agent's model" from "the one push that would have given it to pi was lost"; see
     /// [`Agent::sync_pi_model`].
-    pub(crate) pi_model: Mutex<Option<String>>,
+    pi_model: Mutex<Option<String>>,
     /// D91 soft-compaction hysteresis per chat: `None` right after a compaction (the floor is
     /// not known yet), then the window observed on the first turn after it.
     compaction_floor: std::sync::Mutex<HashMap<String, Option<i64>>>,
@@ -2879,6 +2895,10 @@ impl Agent {
             let mut slot = self.pi.lock().await;
             self.transition_pi(&mut slot, PiEvent::Begin)
         };
+        self.owned_pi_boot(action)
+    }
+
+    fn owned_pi_boot(self: &Arc<Self>, action: PiAction<Arc<RpcChild>>) -> Result<MainPiBoot> {
         match action {
             PiAction::Started { ticket, retired } => Ok(MainPiBoot {
                 agent: self.clone(),
@@ -3130,6 +3150,26 @@ impl Agent {
     pub(crate) async fn respawn_pi_current(self: &Arc<Self>) -> Result<()> {
         let chat = self.current_chat.lock().await.clone().unwrap_or_default();
         self.respawn_pi(&chat).await
+    }
+
+    /// A refused request can retire only the child which answered it, not its successor.
+    pub(crate) async fn respawn_pi_current_for(
+        self: &Arc<Self>,
+        owner: &CurrentPi,
+    ) -> Result<Option<CurrentPi>> {
+        let (chat, boot) = {
+            let chat = self.current_chat.lock().await;
+            let mut slot = self.pi.lock().await;
+            if !owner.matches(&slot) {
+                return Ok(None);
+            }
+            let action = self.transition_pi(&mut slot, PiEvent::Begin);
+            (
+                chat.clone().unwrap_or_default(),
+                self.owned_pi_boot(action)?,
+            )
+        };
+        self.respawn_pi_owned(&chat, boot).await.map(Some)
     }
 
     /// An agent whose main pi was not used for this long gives its process back; the next use
@@ -3706,7 +3746,15 @@ impl Agent {
     }
 
     async fn respawn_pi(self: &Arc<Self>, chat_id: &str) -> Result<()> {
-        let mut boot = self.begin_pi_boot().await?;
+        let boot = self.begin_pi_boot().await?;
+        self.respawn_pi_owned(chat_id, boot).await.map(|_| ())
+    }
+
+    async fn respawn_pi_owned(
+        self: &Arc<Self>,
+        chat_id: &str,
+        mut boot: MainPiBoot,
+    ) -> Result<CurrentPi> {
         boot.close_owned().await;
         // The code-mode flag is read again here (D86): toggling it needs a pi respawn, not a box restart.
         self.write_system_prompt()?;
@@ -3769,7 +3817,10 @@ impl Agent {
             boot.retire().await;
             return Err(anyhow!("pi main agent is stopping"));
         }
-        Ok(())
+        Ok(CurrentPi {
+            child,
+            ticket: boot.ticket,
+        })
     }
 
     /// How long a send whose pi child went away waits for a live one before giving up (bug V).
@@ -3845,6 +3896,10 @@ impl Agent {
     /// Wait briefly for the supervisor to respawn pi (it polls every 2 s). A send that
     /// lands between death and respawn must not permanently Fail with no assistant bubble.
     async fn pi(&self) -> Result<Arc<RpcChild>> {
+        Ok(self.current_pi().await?.child)
+    }
+
+    pub(crate) async fn current_pi(&self) -> Result<CurrentPi> {
         self.pi_last_use_ms
             .store(arbos_core::ids::now_ms() as u64, Ordering::SeqCst);
         if self.pi_parked.load(Ordering::SeqCst) {
@@ -3852,14 +3907,37 @@ impl Agent {
         }
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
-            if let Some(c) = self.pi.lock().await.current() {
-                return Ok(c);
+            {
+                let slot = self.pi.lock().await;
+                if let (Some(child), Some(ticket)) = (slot.current(), slot.ticket()) {
+                    return Ok(CurrentPi { child, ticket });
+                }
             }
             if self.shutting_down.load(Ordering::SeqCst) || Instant::now() >= deadline {
                 return Err(anyhow!("pi main agent not running"));
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
+    }
+
+    pub(crate) async fn pi_model_snapshot(&self) -> Option<String> {
+        self.pi_model.lock().await.clone()
+    }
+
+    pub(crate) async fn pi_is_current(&self, owner: &CurrentPi) -> bool {
+        let slot = self.pi.lock().await;
+        owner.matches(&slot)
+    }
+
+    /// Check and commit under the same slot lock as replacement/shutdown admission.
+    pub(crate) async fn commit_pi_model(&self, owner: &CurrentPi, model: Option<String>) -> bool {
+        let mut current = self.pi_model.lock().await;
+        let slot = self.pi.lock().await;
+        if !owner.matches(&slot) {
+            return false;
+        }
+        *current = model;
+        true
     }
 
     async fn ensure_chat_session(self: &Arc<Self>, chat_id: &str) -> Result<()> {
@@ -3930,7 +4008,8 @@ impl Agent {
         chat_id: &str,
         path: &std::path::Path,
     ) -> Result<()> {
-        let pi = self.pi().await?;
+        let owner = self.current_pi().await?;
+        let pi = &owner.child;
         let t0 = Instant::now();
         // Read the answer, not just the transport (bug Y, phase two). This call runs before the
         // router, so a child that answers it with `success: false` fails the turn with no route
@@ -3955,7 +4034,7 @@ impl Agent {
                 if crate::disk::is_enospc(&why) {
                     return Err(anyhow!("switch_session: {why}"));
                 }
-                self.retire_unserviceable_pi_child(&pi, &format!("switch_session refused: {why}"))
+                self.retire_unserviceable_pi_child(pi, &format!("switch_session refused: {why}"))
                     .await;
                 return Err(anyhow!("{PI_RETIRED_ERR} switch_session refused: {why}"));
             }
@@ -3966,8 +4045,14 @@ impl Agent {
             ms = t0.elapsed().as_millis() as i64,
             "switched pi session"
         );
-        *self.current_chat.lock().await = Some(chat_id.to_owned());
         let (talking_model, _) = self.live_models().await;
+        let _model = self.pi_model.lock().await;
+        let mut current_chat = self.current_chat.lock().await;
+        let slot = self.pi.lock().await;
+        if !owner.matches(&slot) {
+            return Err(anyhow!("pi session was replaced while switching chats"));
+        }
+        *current_chat = Some(chat_id.to_owned());
         self.store.upsert_session(
             chat_id,
             None,
@@ -11955,9 +12040,10 @@ impl Agent {
         if on && target == talking {
             return false;
         }
-        let Ok(pi) = self.pi().await else {
+        let Ok(owner) = self.current_pi().await else {
             return false;
         };
+        let pi = &owner.child;
         match pi
             .call_timeout(
                 RpcCommand::SetModel {
@@ -11974,17 +12060,22 @@ impl Agent {
                 // a deliberate choice alone. A restore that fails leaves pi on the fallback and
                 // says so, so the reconcile corrects it rather than trusting a switch that did
                 // not happen.
-                *self.pi_model.lock().await = if on { None } else { Some(target.clone()) };
+                if !self
+                    .commit_pi_model(&owner, if on { None } else { Some(target.clone()) })
+                    .await
+                {
+                    return false;
+                }
                 tracing::warn!(model = %target, fallback = on, "talking model switched for a retry");
                 true
             }
             Ok(r) => {
-                self.note_failed_restore(on, &subagent).await;
+                self.note_failed_restore(&owner, on, &subagent).await;
                 tracing::warn!(model = %target, error = ?r.error, "fallback model refused by pi");
                 false
             }
             Err(e) => {
-                self.note_failed_restore(on, &subagent).await;
+                self.note_failed_restore(&owner, on, &subagent).await;
                 tracing::warn!(model = %target, error = %e, "fallback model switch failed");
                 false
             }
@@ -11993,9 +12084,9 @@ impl Agent {
 
     /// A failed *restore* means pi is still on the fallback model; record that so the next
     /// turn's reconcile moves it back. A failed switch *to* the fallback moved nothing.
-    async fn note_failed_restore(&self, on: bool, fallback: &str) {
+    async fn note_failed_restore(&self, owner: &CurrentPi, on: bool, fallback: &str) {
         if !on {
-            *self.pi_model.lock().await = Some(fallback.to_owned());
+            self.commit_pi_model(owner, Some(fallback.to_owned())).await;
         }
     }
 
@@ -19012,5 +19103,310 @@ finally:
             closed,
             "the captured child survived its no-current-runtime cleanup"
         );
+    }
+}
+
+#[cfg(test)]
+mod metadata_owner_regressions {
+    use super::*;
+    use crate::status::tests::test_agent_with_pi;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+
+    const A: &str = "01RPCMETADATAORIGINAL00000";
+    const B: &str = "01RPCMETADATANEWER00000000";
+    const SWITCHED: &str = "01RPCMETADATASWITCH0000000";
+    const STUB: &str = r#"#!/usr/bin/env python3
+import json, sys, time
+from pathlib import Path
+marker, release, sent = Path(@MARKER@), Path(@RELEASE@), Path(@SENT@)
+paused = False
+log = marker.parent / "commands"
+for line in sys.stdin:
+    command = json.loads(line)
+    kind = command.get("type")
+    with log.open("a") as output:
+        output.write(json.dumps(command) + "\n")
+    success = True
+    if kind == @COMMAND@ and not paused:
+        paused = True
+        marker.write_text("waiting")
+        while not release.exists():
+            time.sleep(0.005)
+        success = @SUCCESS@
+    print(json.dumps({"type":"response", "command":kind, "id":command.get("id"), "success":success, "error":None if success else "fixture refusal", "data":{}}), flush=True)
+    if paused and kind == @COMMAND@:
+        sent.write_text("response flushed")
+"#;
+
+    struct Stub {
+        root: PathBuf,
+        script: PathBuf,
+        marker: PathBuf,
+        release: PathBuf,
+        sent: PathBuf,
+    }
+    impl Stub {
+        fn new(command: &str, success: bool) -> Self {
+            let root = std::env::temp_dir().join(format!("arbos-rpc-metadata-{}", ulid()));
+            std::fs::create_dir_all(&root).unwrap();
+            let stub = Self {
+                script: root.join("pi.py"),
+                marker: root.join("marker"),
+                release: root.join("release"),
+                sent: root.join("sent"),
+                root,
+            };
+            let text = STUB
+                .replace("@MARKER@", &format!("{:?}", stub.marker))
+                .replace("@RELEASE@", &format!("{:?}", stub.release))
+                .replace("@SENT@", &format!("{:?}", stub.sent))
+                .replace("@COMMAND@", &format!("{command:?}"))
+                .replace("@SUCCESS@", if success { "True" } else { "False" });
+            std::fs::write(&stub.script, text).unwrap();
+            std::fs::set_permissions(&stub.script, std::fs::Permissions::from_mode(0o700)).unwrap();
+            stub
+        }
+        async fn wait(&self, path: &Path) {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !path.exists() {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("owned RPC fixture did not reach barrier");
+        }
+        fn release(&self) {
+            std::fs::write(&self.release, "release").unwrap();
+        }
+    }
+    impl Drop for Stub {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum Operation {
+        Session,
+        Fallback,
+        FailedRestore,
+        Apply,
+        Sync,
+        ApplyThinking,
+        ApplyRefusedThinking,
+        ApplyRefused,
+        SyncRefused,
+    }
+    async fn exercise(operation: Operation, replace: bool) {
+        let command = if matches!(operation, Operation::Session) {
+            "switch_session"
+        } else {
+            "set_model"
+        };
+        let stub = Stub::new(
+            command,
+            !matches!(
+                operation,
+                Operation::FailedRestore
+                    | Operation::ApplyRefused
+                    | Operation::SyncRefused
+                    | Operation::ApplyRefusedThinking
+            ),
+        );
+        let replacement = Stub::new("never", true);
+        let (agent, root) = test_agent_with_pi(stub.script.to_str().unwrap()).await;
+        for chat in [A, B, SWITCHED] {
+            agent.store.upsert_chat(chat, "Fixture", true, 0).unwrap();
+        }
+        agent.start_pi(A).await.unwrap();
+        let old_child = agent.pi().await.unwrap();
+        let mut requested = agent.settings.models.read().await.clone();
+        requested.talking.id = "mock-requested".into();
+        if matches!(
+            operation,
+            Operation::ApplyThinking | Operation::ApplyRefusedThinking
+        ) {
+            requested.talking.effort = "high".into();
+        }
+        if matches!(operation, Operation::Sync | Operation::SyncRefused) {
+            agent.settings.models.set(requested.clone()).await;
+        }
+        let path = root.join("session.jsonl");
+        let future = async {
+            match operation {
+                Operation::Session => agent.switch_session_to(SWITCHED, &path).await.is_ok(),
+                Operation::Fallback => agent.switch_talking_model(true).await,
+                Operation::FailedRestore => agent.switch_talking_model(false).await,
+                Operation::Apply
+                | Operation::ApplyRefused
+                | Operation::ApplyThinking
+                | Operation::ApplyRefusedThinking => agent.apply_models(&requested).await.is_ok(),
+                Operation::Sync | Operation::SyncRefused => {
+                    agent.sync_pi_model().await;
+                    true
+                }
+            }
+        };
+        tokio::pin!(future);
+        tokio::select! {
+            result = &mut future => panic!("operation completed before owned response barrier: {result}"),
+            _ = stub.wait(&stub.marker) => {}
+        }
+        // The real reader may buffer its response while the request's continuation is not polled.
+        // This is an ordinary scheduler delay, not a fabricated production callback.
+        stub.release();
+        stub.wait(&stub.sent).await;
+        if replace {
+            let mut newer = agent.settings.models.read().await.clone();
+            newer.talking.id = "mock-newer".into();
+            agent.settings.models.set(newer).await;
+            std::fs::copy(&replacement.script, &stub.script).unwrap();
+            agent.respawn_pi(B).await.unwrap();
+            assert!(!Arc::ptr_eq(&old_child, &agent.pi().await.unwrap()));
+        }
+        let replacement_child = agent.pi().await.unwrap();
+        let succeeded = tokio::time::timeout(Duration::from_secs(5), &mut future)
+            .await
+            .unwrap();
+        let retained_replacement = Arc::ptr_eq(&replacement_child, &agent.pi().await.unwrap());
+        let current_chat = agent.current_chat.lock().await.clone();
+        let current_model = agent.pi_model.lock().await.clone();
+        let switched_session = agent.store.session_model(SWITCHED).unwrap();
+        let active_commands = std::fs::read_to_string(if replace {
+            replacement.root.join("commands")
+        } else {
+            stub.root.join("commands")
+        })
+        .unwrap();
+        agent.shutdown().await;
+        let _ = std::fs::remove_dir_all(root);
+        if replace {
+            assert!(
+                !active_commands.contains("set_thinking_level"),
+                "a stale settings continuation must not send its old effort to B"
+            );
+            assert!(
+                retained_replacement,
+                "a retired model refusal must not respawn the replacement child"
+            );
+            assert_eq!(
+                current_chat.as_deref(),
+                Some(B),
+                "old RPC completion must not replace the newer child's chat"
+            );
+            assert_eq!(
+                current_model.as_deref(),
+                Some("mock-newer"),
+                "old RPC completion must not describe the newer child's model"
+            );
+            if matches!(operation, Operation::Session) {
+                assert!(
+                    !succeeded,
+                    "a retired child's session switch is not a current switch"
+                );
+                assert!(
+                    switched_session.is_none(),
+                    "retired completion must not persist a stale session"
+                );
+            }
+        } else {
+            match operation {
+                Operation::Session => {
+                    assert!(succeeded);
+                    assert_eq!(current_chat.as_deref(), Some(SWITCHED));
+                    assert!(switched_session.is_some());
+                }
+                Operation::Fallback => {
+                    assert!(succeeded);
+                    assert!(current_model.is_none());
+                }
+                Operation::FailedRestore => {
+                    assert!(!succeeded);
+                    assert_eq!(current_model.as_deref(), Some("mock-sub"));
+                }
+                Operation::ApplyThinking | Operation::ApplyRefusedThinking => {
+                    assert!(succeeded);
+                    assert_eq!(current_model.as_deref(), Some("mock-requested"));
+                    assert!(active_commands.contains("set_thinking_level"));
+                }
+                Operation::Apply
+                | Operation::Sync
+                | Operation::ApplyRefused
+                | Operation::SyncRefused => {
+                    assert!(succeeded);
+                    assert_eq!(current_model.as_deref(), Some("mock-requested"));
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn retired_session_response_cannot_commit_metadata() {
+        exercise(Operation::Session, true).await;
+    }
+    #[tokio::test]
+    async fn retired_fallback_response_cannot_commit_metadata() {
+        exercise(Operation::Fallback, true).await;
+    }
+    #[tokio::test]
+    async fn retired_restore_refusal_cannot_commit_metadata() {
+        exercise(Operation::FailedRestore, true).await;
+    }
+    #[tokio::test]
+    async fn retired_settings_response_cannot_commit_metadata() {
+        exercise(Operation::Apply, true).await;
+    }
+    #[tokio::test]
+    async fn retired_reconcile_response_cannot_commit_metadata() {
+        exercise(Operation::Sync, true).await;
+    }
+    #[tokio::test]
+    async fn retired_settings_refusal_cannot_respawn_replacement() {
+        exercise(Operation::ApplyRefused, true).await;
+    }
+    #[tokio::test]
+    async fn retired_reconcile_refusal_cannot_respawn_replacement() {
+        exercise(Operation::SyncRefused, true).await;
+    }
+    #[tokio::test]
+    async fn current_settings_refusal_recovers() {
+        exercise(Operation::ApplyRefused, false).await;
+    }
+    #[tokio::test]
+    async fn current_reconcile_refusal_recovers() {
+        exercise(Operation::SyncRefused, false).await;
+    }
+    #[tokio::test]
+    async fn retired_settings_continuation_cannot_change_replacement_effort() {
+        exercise(Operation::ApplyThinking, true).await;
+    }
+    #[tokio::test]
+    async fn own_settings_recovery_updates_replacement_effort() {
+        exercise(Operation::ApplyRefusedThinking, false).await;
+    }
+    #[tokio::test]
+    async fn current_settings_continuation_updates_effort() {
+        exercise(Operation::ApplyThinking, false).await;
+    }
+    #[tokio::test]
+    async fn current_session_response_commits_metadata() {
+        exercise(Operation::Session, false).await;
+    }
+    #[tokio::test]
+    async fn current_fallback_response_commits_metadata() {
+        exercise(Operation::Fallback, false).await;
+    }
+    #[tokio::test]
+    async fn current_restore_refusal_keeps_reconcile_pending() {
+        exercise(Operation::FailedRestore, false).await;
+    }
+    #[tokio::test]
+    async fn current_settings_response_commits_metadata() {
+        exercise(Operation::Apply, false).await;
+    }
+    #[tokio::test]
+    async fn current_reconcile_response_commits_metadata() {
+        exercise(Operation::Sync, false).await;
     }
 }

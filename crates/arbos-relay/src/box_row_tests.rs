@@ -75,7 +75,15 @@ async fn restart_mid_create(state: &mut AppState, user: &str) {
     state.db.upsert_box(&live_row(user)).expect("live row");
     let (st, u) = (state.clone(), user.to_owned());
     let task = tokio::spawn(async move {
-        boxes::create_box(&st, &u, Provider::Daytona, Some("arbos-agent-0.1.181")).await
+        let mut permit = st.restart.admit_creation(&u).await;
+        boxes::create_box(
+            &st,
+            &mut permit,
+            Provider::Daytona,
+            Some("arbos-agent-0.1.181"),
+            true,
+        )
+        .await
     });
     tokio::time::timeout(Duration::from_secs(10), created.notified())
         .await
@@ -228,7 +236,8 @@ async fn a_planned_restart_waits_for_box_work() {
 
     state.upgrading.lock().await.clear();
     {
-        let _creating = crate::state::CreatingGuard::new(&state.restart, "gh_b");
+        let mut permit = state.restart.admit_creation("gh_b").await;
+        let _creating = crate::state::CreatingGuard::new(&mut permit);
         let work = crate::restart::box_work_in_flight(&state).await;
         assert_eq!(work.len(), 1);
         assert_eq!(work[0]["kind"], "create");
@@ -269,4 +278,371 @@ async fn the_check_reports_live_rows_without_a_sandbox() {
         .unwrap()
         .sandbox_id
         .is_none());
+}
+
+mod create_admission_regressions {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const USER_A: &str = "gh_fixture_create_a";
+    const USER_B: &str = "gh_fixture_create_b";
+    #[derive(Default)]
+    struct Progress {
+        reads: AtomicUsize,
+        writes: AtomicUsize,
+    }
+    struct Trace {
+        db: crate::db::Db,
+        pointer: *const Progress,
+        progress: Arc<Progress>,
+    }
+    impl Trace {
+        fn install(db: &crate::db::Db) -> Self {
+            unsafe extern "C" fn observed(
+                event: u32,
+                context: *mut std::ffi::c_void,
+                statement: *mut std::ffi::c_void,
+                _: *mut std::ffi::c_void,
+            ) -> i32 {
+                if event != rusqlite::ffi::SQLITE_TRACE_PROFILE as u32 {
+                    return 0;
+                }
+                let sql = unsafe { rusqlite::ffi::sqlite3_sql(statement.cast()) };
+                if sql.is_null() {
+                    return 0;
+                }
+                let sql = unsafe { std::ffi::CStr::from_ptr(sql) }.to_bytes();
+                let progress = unsafe { &*context.cast::<Progress>() };
+                if sql
+                    .windows(b"FROM boxes WHERE user_id".len())
+                    .any(|s| s == b"FROM boxes WHERE user_id")
+                {
+                    progress.reads.fetch_add(1, Ordering::SeqCst);
+                }
+                if sql
+                    .windows(b"INSERT INTO boxes(".len())
+                    .any(|s| s == b"INSERT INTO boxes(")
+                {
+                    progress.writes.fetch_add(1, Ordering::SeqCst);
+                }
+                0
+            }
+            let progress = Arc::new(Progress::default());
+            let pointer = Arc::into_raw(progress.clone());
+            db.with(|c| {
+                let rc = unsafe {
+                    rusqlite::ffi::sqlite3_trace_v2(
+                        c.handle(),
+                        rusqlite::ffi::SQLITE_TRACE_PROFILE as u32,
+                        Some(observed),
+                        pointer.cast_mut().cast(),
+                    )
+                };
+                assert_eq!(rc, rusqlite::ffi::SQLITE_OK);
+                Ok(())
+            })
+            .unwrap();
+            Self {
+                db: db.clone(),
+                pointer,
+                progress,
+            }
+        }
+    }
+    impl Drop for Trace {
+        fn drop(&mut self) {
+            self.db
+                .with(|c| {
+                    unsafe {
+                        rusqlite::ffi::sqlite3_trace_v2(c.handle(), 0, None, std::ptr::null_mut());
+                    }
+                    Ok(())
+                })
+                .unwrap();
+            unsafe {
+                drop(Arc::from_raw(self.pointer));
+            }
+        }
+    }
+    async fn until(counter: &AtomicUsize, value: usize, seconds: u64) -> bool {
+        tokio::time::timeout(Duration::from_secs(seconds), async {
+            while counter.load(Ordering::SeqCst) < value {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .is_ok()
+    }
+    async fn concurrent_calls(same_user: bool, cancel_second: bool) -> (usize, bool, usize, usize) {
+        let mut state = test_state(AuthMode::Github);
+        for user in [USER_A, USER_B] {
+            state
+                .db
+                .set_user_limits(
+                    user,
+                    Some(crate::credits::SpendLimit::Unlimited.stored()),
+                    None,
+                )
+                .unwrap();
+        }
+        let posts = Arc::new(AtomicUsize::new(0));
+        let recorded = posts.clone();
+        let app = axum::Router::new()
+            .route(
+                "/sandbox",
+                axum::routing::post(move || {
+                    let recorded = recorded.clone();
+                    async move {
+                        recorded.fetch_add(1, Ordering::SeqCst);
+                        std::future::pending::<()>().await;
+                    }
+                }),
+            )
+            .fallback(|| async { (StatusCode::NOT_FOUND, "{}") });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        state.daytona = Some(Daytona::new("synthetic-key".into(), Some(base), None));
+        let trace = Trace::install(&state.db);
+        // Pause a real contended metadata lock before either first-use caller can install its
+        // placeholder. Holding it on a dedicated thread avoids async mutex-guard misuse.
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let restart = state.restart.clone();
+        let holder = std::thread::spawn(move || {
+            let _guard = restart.creating.lock().unwrap();
+            held_tx.send(()).unwrap();
+            let _ = release_rx.recv_timeout(Duration::from_secs(5));
+        });
+        held_rx.recv().unwrap();
+        let first = {
+            let state = state.clone();
+            tokio::spawn(
+                async move { boxes::ensure_user_box(&state, USER_A, Provider::Daytona).await },
+            )
+        };
+        let second_user = if same_user { USER_A } else { USER_B };
+        let second = {
+            let state = state.clone();
+            tokio::spawn(async move {
+                boxes::ensure_user_box(&state, second_user, Provider::Daytona).await
+            })
+        };
+        // Old code reaches four reads and two writes. Earlier serialized admission is allowed
+        // to leave the second caller waiting before its read; that is the intended repair.
+        let _ = until(&trace.progress.reads, 4, 1).await;
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+        assert!(
+            until(&posts, 1, 5).await,
+            "first actual provider request never arrived"
+        );
+        let both_wrote = until(&trace.progress.writes, 2, 1).await;
+        if both_wrote {
+            assert!(
+                until(&posts, 2, 5).await,
+                "both admitted creates must reach their local provider"
+            );
+        }
+        let reads = trace.progress.reads.load(Ordering::SeqCst);
+        let writes = trace.progress.writes.load(Ordering::SeqCst);
+        eprintln!(
+            "synthetic creation evidence: reads={reads} writes={writes} provider_posts={}",
+            posts.load(Ordering::SeqCst)
+        );
+        let protected = if cancel_second {
+            second.abort();
+            let _ = second.await;
+            let protected = state.restart.creating.lock().unwrap().contains_key(USER_A);
+            first.abort();
+            let _ = first.await;
+            protected
+        } else {
+            first.abort();
+            let _ = first.await;
+            let protected = state
+                .restart
+                .creating
+                .lock()
+                .unwrap()
+                .contains_key(second_user);
+            second.abort();
+            let _ = second.await;
+            protected
+        };
+        let count = posts.load(Ordering::SeqCst);
+        drop(trace);
+        (count, protected, reads, writes)
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn same_user_first_use_has_one_provider_creation() {
+        let (count, _, _, _) = concurrent_calls(true, true).await;
+        assert_eq!(
+            count, 1,
+            "two actual first-use callers allocated the same user's box concurrently"
+        );
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn cancelling_a_same_user_waiter_preserves_the_active_restart_guard() {
+        let (_, protected, _, _) = concurrent_calls(true, true).await;
+        assert!(
+            protected,
+            "a cancelled caller removed the other live creation's restart/orphan guard"
+        );
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn independent_users_still_create_in_parallel_and_keep_exact_guards() {
+        let (count, protected, reads, writes) = concurrent_calls(false, false).await;
+        assert_eq!((count, reads, writes), (2, 4, 2));
+        assert!(protected);
+    }
+    #[tokio::test]
+    async fn an_existing_first_use_row_returns_without_provider_creation() {
+        let state = test_state(AuthMode::Github);
+        let before = live_row(USER_A);
+        state.db.upsert_box(&before).unwrap();
+        let row = boxes::ensure_user_box(&state, USER_A, Provider::Daytona)
+            .await
+            .unwrap();
+        assert_eq!(row.sandbox_id, before.sandbox_id);
+        assert_eq!(row.box_token_hash, before.box_token_hash);
+        assert!(state.restart.creating.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn intentional_staged_replacement_still_reaches_provider_and_preserves_live_row() {
+        let mut state = test_state(AuthMode::Github);
+        state
+            .db
+            .set_user_limits(
+                USER_A,
+                Some(crate::credits::SpendLimit::Unlimited.stored()),
+                None,
+            )
+            .unwrap();
+        let before = live_row(USER_A);
+        state.db.upsert_box(&before).unwrap();
+        let (provider, created) = daytona_that_hangs_on_create().await;
+        state.daytona = Some(provider);
+        let task = {
+            let state = state.clone();
+            tokio::spawn(async move {
+                boxes::create_staged_box(&state, USER_A, Some("arbos-agent-fixture")).await
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(10), created.notified())
+            .await
+            .unwrap();
+        let protected = state.restart.creating.lock().unwrap().contains_key(USER_A);
+        let row = state.db.user_box(USER_A).unwrap().unwrap();
+        task.abort();
+        let _ = task.await;
+        assert!(protected);
+        assert_eq!(row.sandbox_id, before.sandbox_id);
+        assert_eq!(row.box_token_hash, before.box_token_hash);
+        assert_eq!(row.device_id, before.device_id);
+        assert!(state.restart.creating.lock().unwrap().is_empty());
+    }
+    #[tokio::test]
+    async fn direct_and_staged_builders_share_the_first_use_admission() {
+        for staged in [false, true] {
+            let mut state = test_state(AuthMode::Github);
+            state
+                .db
+                .set_user_limits(
+                    USER_A,
+                    Some(crate::credits::SpendLimit::Unlimited.stored()),
+                    None,
+                )
+                .unwrap();
+            let (provider, created) = daytona_that_hangs_on_create().await;
+            state.daytona = Some(provider);
+            let first = {
+                let state = state.clone();
+                tokio::spawn(async move {
+                    boxes::ensure_user_box(&state, USER_A, Provider::Daytona).await
+                })
+            };
+            tokio::time::timeout(Duration::from_secs(10), created.notified())
+                .await
+                .unwrap();
+            let before = state.db.unfinished_box_creates(now_ms() + 1).unwrap();
+            let waited = {
+                let waiter = async {
+                    if staged {
+                        boxes::create_staged_box(&state, USER_A, Some("fixture")).await
+                    } else {
+                        let mut permit = state.restart.admit_creation(USER_A).await;
+                        boxes::create_box(
+                            &state,
+                            &mut permit,
+                            Provider::Daytona,
+                            Some("fixture"),
+                            true,
+                        )
+                        .await
+                    }
+                };
+                tokio::pin!(waiter);
+                tokio::time::timeout(Duration::from_millis(50), &mut waiter)
+                    .await
+                    .is_err()
+            };
+            let unchanged_intent = state.db.unfinished_box_creates(now_ms() + 1).unwrap();
+            let protected = state.restart.creating.lock().unwrap().contains_key(USER_A);
+            first.abort();
+            let _ = first.await;
+            assert!(waited, "same-user builder bypassed the owned create lease");
+            assert_eq!(before.len(), 1);
+            assert_eq!(unchanged_intent.len(), 1);
+            assert_eq!(
+                unchanged_intent[0].sandbox_name, before[0].sandbox_name,
+                "a hung second provider must not masquerade as waiting for admission"
+            );
+            assert!(protected);
+            assert!(state.restart.creating.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_creation_retains_uncertain_intent_and_existing_placeholder() {
+        let mut state = test_state(AuthMode::Github);
+        state
+            .db
+            .set_user_limits(
+                USER_A,
+                Some(crate::credits::SpendLimit::Unlimited.stored()),
+                None,
+            )
+            .unwrap();
+        let (provider, created) = daytona_that_hangs_on_create().await;
+        state.daytona = Some(provider);
+        let task = {
+            let state = state.clone();
+            tokio::spawn(
+                async move { boxes::ensure_user_box(&state, USER_A, Provider::Daytona).await },
+            )
+        };
+        tokio::time::timeout(Duration::from_secs(10), created.notified())
+            .await
+            .unwrap();
+        let before = state.db.unfinished_box_creates(now_ms() + 1).unwrap();
+        task.abort();
+        let _ = task.await;
+        let row = tokio::time::timeout(
+            Duration::from_secs(1),
+            boxes::ensure_user_box(&state, USER_A, Provider::Daytona),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let after = state.db.unfinished_box_creates(now_ms() + 1).unwrap();
+        assert!(row.sandbox_id.is_none());
+        assert_eq!(before.len(), 1);
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].sandbox_name, before[0].sandbox_name);
+        assert!(state.restart.creating.lock().unwrap().is_empty());
+    }
 }

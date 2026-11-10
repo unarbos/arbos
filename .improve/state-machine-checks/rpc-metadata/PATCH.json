@@ -1,0 +1,21 @@
+{
+  "base": "frozen H3 rpc-owner candidate / parent integrated355ce5cac",
+  "required_patch_sha256": "b5de8ea8904d0cb542a227ea1c80cbe70e0524596634d02b6401516acd36f744",
+  "patch": "rpc-metadata.patch",
+  "bytes": 26297,
+  "sha256": "da05a88e3eb6b5e1656268ddac27d38cf4ab00793d9c06dbe0010e8bc434e8b6",
+  "files": [
+    {
+      "path": "crates/arbos-agentd/src/agent.rs",
+      "base_sha256": "3324182907db26f1ea4f4549c89b059ea85358b264e33e23d77d1f7d04f58e4a",
+      "candidate_sha256": "89c5c13e47f92db6287a1a3f545cf69e12e1436dc16d6b5c909cdb69abf2ef17"
+    },
+    {
+      "path": "crates/arbos-agentd/src/settings.rs",
+      "base_sha256": "0d8a7d336297d3d08f25cf2701277c375f277e448809f27a3f7c7cbda10fce98",
+      "candidate_sha256": "87699e743e29e90204bf65b1ca5cfe5e4dbfff49e2d17942e29d5619eaeb816b"
+    }
+  ],
+  "pi_slot_sha256": "7923dd3f2b2cd4feb68912eabd7e65ed948abd6f878278d609ca830a0e3565b0",
+  "no_live_apply_check": "root currently Phase7; apply on final Phase4 carrying frozen H3"
+}

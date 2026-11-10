@@ -230,6 +230,8 @@ pub struct RestartSignal {
     /// Users whose `create_box` is between its first row write and the new sandbox id landing
     /// in the row, with the start time (#2262: a restart in that window orphaned a sandbox).
     pub creating: std::sync::Mutex<HashMap<String, i64>>,
+    /// One admission lease per user; weak entries do not retain idle users.
+    creation_slots: std::sync::Mutex<HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>>,
 }
 
 impl Default for RestartSignal {
@@ -240,11 +242,32 @@ impl Default for RestartSignal {
             open_sockets: std::sync::atomic::AtomicUsize::new(0),
             box_work_frozen: std::sync::atomic::AtomicBool::new(false),
             creating: std::sync::Mutex::new(HashMap::new()),
+            creation_slots: std::sync::Mutex::new(HashMap::new()),
         }
     }
 }
 
 impl RestartSignal {
+    pub(crate) async fn admit_creation(self: &Arc<Self>, user_id: &str) -> CreationPermit {
+        let slot = {
+            let mut slots = self.creation_slots.lock().expect("creation admission lock");
+            slots.retain(|_, slot| slot.strong_count() != 0);
+            match slots.get(user_id).and_then(std::sync::Weak::upgrade) {
+                Some(slot) => slot,
+                None => {
+                    let slot = Arc::new(tokio::sync::Mutex::new(()));
+                    slots.insert(user_id.to_owned(), Arc::downgrade(&slot));
+                    slot
+                }
+            }
+        };
+        CreationPermit {
+            restart: self.clone(),
+            user_id: user_id.to_owned(),
+            _lease: slot.lock_owned().await,
+        }
+    }
+
     /// The guard owns cleanup before the first freeze/notice/drain await.
     pub(crate) fn begin_planned(self: &Arc<Self>) -> Option<PlannedRestart> {
         use crate::restart_lifetime::{transition, Event, State};
@@ -331,31 +354,41 @@ impl Drop for PlannedRestart {
     }
 }
 
-/// Marks one `create_box` as in flight for as long as it lives; dropped on every exit path,
-/// including a cancelled task.
-pub struct CreatingGuard {
+/// Serializes the existence check and complete create for one user. A guard borrows the
+/// permit, so cancelling a waiting caller cannot remove another creation's restart marker.
+pub(crate) struct CreationPermit {
     restart: Arc<RestartSignal>,
     user_id: String,
+    _lease: tokio::sync::OwnedMutexGuard<()>,
 }
 
-impl CreatingGuard {
-    pub fn new(restart: &Arc<RestartSignal>, user_id: &str) -> Self {
-        restart
-            .creating
-            .lock()
-            .expect("creating lock")
-            .insert(user_id.to_owned(), arbos_core::ids::now_ms());
-        Self {
-            restart: restart.clone(),
-            user_id: user_id.to_owned(),
-        }
+impl CreationPermit {
+    pub(crate) fn user_id(&self) -> &str {
+        &self.user_id
     }
 }
 
-impl Drop for CreatingGuard {
+/// Marks the admitted creation in flight, including cancellation, while its lease is held.
+pub(crate) struct CreatingGuard<'a> {
+    permit: &'a mut CreationPermit,
+}
+
+impl<'a> CreatingGuard<'a> {
+    pub(crate) fn new(permit: &'a mut CreationPermit) -> Self {
+        permit
+            .restart
+            .creating
+            .lock()
+            .expect("creating lock")
+            .insert(permit.user_id.clone(), arbos_core::ids::now_ms());
+        Self { permit }
+    }
+}
+
+impl Drop for CreatingGuard<'_> {
     fn drop(&mut self) {
-        if let Ok(mut m) = self.restart.creating.lock() {
-            m.remove(&self.user_id);
+        if let Ok(mut markers) = self.permit.restart.creating.lock() {
+            markers.remove(&self.permit.user_id);
         }
     }
 }

@@ -16,7 +16,7 @@ use arbos_core::wire::BoxState;
 
 use crate::daytona::{CreateSandbox, SandboxState};
 use crate::db::Sandbox;
-use crate::state::{AppState, CreatingGuard};
+use crate::state::{AppState, CreatingGuard, CreationPermit};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Provider {
@@ -118,17 +118,6 @@ pub(crate) fn box_env(
     env
 }
 
-/// Create the user's box (one Daytona computer per user; created with the user's first project,
-/// D32). `snapshot` overrides the relay default (per-user class).
-pub async fn create_box(
-    state: &AppState,
-    user_id: &str,
-    provider: Provider,
-    snapshot: Option<&str>,
-) -> Result<Sandbox> {
-    create_box_row(state, user_id, provider, snapshot, true).await
-}
-
 /// A Daytona sandbox for the user whose row is NOT written: the upgrade carries `/work` onto it
 /// while the row stays on the source, and writes the returned row itself once the carry is in.
 pub async fn create_staged_box(
@@ -136,16 +125,20 @@ pub async fn create_staged_box(
     user_id: &str,
     snapshot: Option<&str>,
 ) -> Result<Sandbox> {
-    create_box_row(state, user_id, Provider::Daytona, snapshot, false).await
+    let mut permit = state.restart.admit_creation(user_id).await;
+    create_box(state, &mut permit, Provider::Daytona, snapshot, false).await
 }
 
-async fn create_box_row(
+/// Create under an already admitted per-user lease; never reacquire it inside the pipeline.
+pub(crate) async fn create_box(
     state: &AppState,
-    user_id: &str,
+    permit: &mut CreationPermit,
     provider: Provider,
     snapshot: Option<&str>,
     write_row: bool,
 ) -> Result<Sandbox> {
+    let user = permit.user_id().to_owned();
+    let user_id = user.as_str();
     if !write_row && provider != Provider::Daytona {
         return Err(anyhow!("only a Daytona box can be created staged"));
     }
@@ -155,7 +148,7 @@ async fn create_box_row(
     let box_token = mint(TokenKind::Box);
     let mcp_token = mint(TokenKind::Mcp);
     let replacing = state.db.user_box(user_id)?.and_then(|r| r.sandbox_id);
-    let _creating = CreatingGuard::new(&state.restart, user_id);
+    let _creating = CreatingGuard::new(permit);
     let mut sb = Sandbox {
         user_id: user_id.to_owned(),
         provider: provider.as_str().to_owned(),
@@ -968,6 +961,7 @@ pub async fn ensure_user_box(
     user_id: &str,
     provider: Provider,
 ) -> Result<Sandbox> {
+    let mut permit = state.restart.admit_creation(user_id).await;
     if let Some(sb) = state.db.user_box(user_id)? {
         return Ok(sb);
     }
@@ -975,7 +969,7 @@ pub async fn ensure_user_box(
         return Err(anyhow!(crate::fleet::WAITLISTED));
     }
     let snapshot = state.db.user_snapshot(user_id)?;
-    create_box(state, user_id, provider, snapshot.as_deref()).await
+    create_box(state, &mut permit, provider, snapshot.as_deref(), true).await
 }
 
 pub async fn ensure_awake(state: &AppState, user_id: &str, reason: &str) {
