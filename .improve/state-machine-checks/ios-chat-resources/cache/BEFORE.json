@@ -1,0 +1,8 @@
+{
+  "source_sha256": "3d869eaff2f4baa09f83c2bebd6dc8994fbeb6b9c8d3b443cca0e415b6472a90",
+  "fixture_sha256": "3ab2bb3e32e48f353481f0e86ed5f85b0c6aa23b98cbce81310db9e219d505e0",
+  "compile_exit": 1,
+  "scope": "Actual Foundation NSCache and size methods +actual WorkLifetime; UIImage size/identity collaborator; excludes decoder/UIKit/UI runtime, no model/network/userdata",
+  "seconds": 1.0868995419004932,
+  "source_unchanged": true
+}

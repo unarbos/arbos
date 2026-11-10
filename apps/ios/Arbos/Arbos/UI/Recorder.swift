@@ -12,16 +12,21 @@ final class MemoRecorder: ObservableObject {
     @Published private(set) var levels: [Float] = Array(repeating: 0.05, count: 28)
     @Published var permissionDenied = false
 
+    private var permissionWork = WorkLifetime()
     private var recorder: AVAudioRecorder?
     private var timer: Timer?
     private var startedAt: Date?
     private var url: URL?
 
-    func start() {
+    func start(isCurrent: @escaping @MainActor () -> Bool = { true }) {
+        guard !Task.isCancelled, isCurrent() else { return }
+        let request = permissionWork.reopen()
         let session = AVAudioSession.sharedInstance()
         session.requestRecordPermission { [weak self] granted in
             Task { @MainActor in
-                guard let self else { return }
+                guard let self, !Task.isCancelled,
+                      self.permissionWork.accepts(request), isCurrent() else { return }
+                self.permissionWork.close()
                 if !granted { self.permissionDenied = true; return }
                 self.begin()
             }
@@ -32,7 +37,7 @@ final class MemoRecorder: ObservableObject {
         let session = AVAudioSession.sharedInstance()
         try? session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker])
         try? session.setActive(true)
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent("memo-\(Int(Date().timeIntervalSince1970)).m4a")
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("memo-\(UUID().uuidString).m4a")
         // 16 kHz mono is enough for speech and keeps the upload/STT payload small.
         let settings: [String: Any] = [
             AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
@@ -40,9 +45,16 @@ final class MemoRecorder: ObservableObject {
             AVNumberOfChannelsKey: 1,
             AVEncoderAudioQualityKey: AVAudioQuality.medium.rawValue,
         ]
-        guard let rec = try? AVAudioRecorder(url: url, settings: settings) else { return }
+        guard let rec = try? AVAudioRecorder(url: url, settings: settings) else {
+            try? FileManager.default.removeItem(at: url)
+            return
+        }
         rec.isMeteringEnabled = true
-        rec.record()
+        guard rec.record() else {
+            rec.stop()
+            try? FileManager.default.removeItem(at: url)
+            return
+        }
         recorder = rec
         self.url = url
         startedAt = Date()
@@ -65,12 +77,18 @@ final class MemoRecorder: ObservableObject {
 
     /// Stops and returns the file data when the memo lasted at least a second.
     func stop() -> (name: String, data: Data)? {
+        permissionWork.close()
         timer?.invalidate()
         timer = nil
         recorder?.stop()
         recording = false
-        defer { recorder = nil; url = nil }
-        guard let url, seconds >= 1, let data = try? Data(contentsOf: url) else { return nil }
+        let finishedURL = url
+        defer {
+            recorder = nil
+            url = nil
+            if let finishedURL { try? FileManager.default.removeItem(at: finishedURL) }
+        }
+        guard let finishedURL, seconds >= 1, let data = try? Data(contentsOf: finishedURL) else { return nil }
         // POSIX stamp (ASCII only) — same idea as photo names; relay blob keys reject locale letters.
         let stamp = Self.memoStamp.string(from: Date())
         return ("Voice memo \(stamp).m4a", data)
@@ -84,6 +102,7 @@ final class MemoRecorder: ObservableObject {
     }()
 
     func cancel() {
+        permissionWork.close()
         timer?.invalidate()
         timer = nil
         recorder?.stop()

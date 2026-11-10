@@ -1,0 +1,10 @@
+{
+  "cache_decoder_unchanged": true,
+  "cache_cost_limit_bytes": 50331648,
+  "cache_before_sha256": "3d869eaff2f4baa09f83c2bebd6dc8994fbeb6b9c8d3b443cca0e415b6472a90",
+  "cache_after_sha256": "61081338404342b8302f45289ab486476125e7b5f6689031d53a4c163e4639a9",
+  "recorder_before_sha256": "306ef5fdbd9ea16fd06056b0ea32cfed6263e86e2769bfc73e68377c28849303",
+  "recorder_after_sha256": "2997fe2a227cda188380d7bbb4b359d3ef2586baf05b4e21041afb1a8c0a1aa0",
+  "recorder_settings_meter_display_stamp_unchanged": true,
+  "scope": "literal source and fake resource collaborators; no physical audio/device/UI claim"
+}
