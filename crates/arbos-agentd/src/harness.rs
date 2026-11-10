@@ -2,7 +2,6 @@
 //! `PiAdapter` (fallback), `ClaudeCodeAdapter` (long coding tasks). Everything above
 //! this module sees only `AgentEvent`s.
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -1410,17 +1409,337 @@ impl HarnessAdapter for PiAdapter {
 /// Headless `claude -p --output-format stream-json --input-format stream-json` child per session
 /// (design §4.4.2; sandbox-image.md §2.3). Provider = the relay's Anthropic passthrough through the
 /// loopback stub (`ANTHROPIC_BASE_URL`), so no Anthropic key enters the box.
-type ClaudeChild = (
-    Arc<Mutex<tokio::process::Child>>,
-    Arc<Mutex<tokio::process::ChildStdin>>,
-);
+/// Claude has a different wire protocol and immediate-kill policy, but uses the same
+/// actual ticket/state transition boundary as the RPC adapters.
+struct ClaudeWorker {
+    child: Mutex<Option<tokio::process::Child>>,
+    stdin: Mutex<Option<tokio::process::ChildStdin>>,
+    stream: broadcast::Sender<AgentEvent>,
+}
+impl ClaudeWorker {
+    async fn close(&self) {
+        // A backpressured write owns stdin: kill must never wait for that writer.
+        if let Some(mut child) = self.child.lock().await.take() {
+            let _ = child.kill().await;
+        }
+        self.stdin.lock().await.take();
+    }
+    fn retire_owned(self: Arc<Self>) {
+        struct Cleanup(Option<Arc<ClaudeWorker>>);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                if let Some(resource) = self.0.take() {
+                    if let Ok(mut child) = resource.child.try_lock() {
+                        if let Some(mut child) = child.take() {
+                            let _ = child.start_kill();
+                        }
+                    };
+                    if let Ok(mut stdin) = resource.stdin.try_lock() {
+                        stdin.take();
+                    };
+                }
+            }
+        }
+        let cleanup = Cleanup(Some(self));
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                let mut cleanup = cleanup;
+                if let Some(resource) = &cleanup.0 {
+                    resource.close().await;
+                }
+                cleanup.0.take();
+            });
+        }
+        // With no runtime, Cleanup uses only the captured handle. Reaping after runtime
+        // teardown remains best effort; no ambient PID is turned into authority.
+    }
+}
+#[derive(Default)]
+struct OwnedClaudeWorkers(Vec<Arc<ClaudeWorker>>);
+impl OwnedClaudeWorkers {
+    fn own(&mut self, resource: Arc<ClaudeWorker>) {
+        if !self.0.iter().any(|held| Arc::ptr_eq(held, &resource)) {
+            self.0.push(resource);
+        }
+    }
+    async fn close(&mut self) {
+        while let Some(resource) = self.0.last().cloned() {
+            resource.close().await;
+            self.0.pop();
+        }
+    }
+}
+impl Drop for OwnedClaudeWorkers {
+    fn drop(&mut self) {
+        for resource in self.0.drain(..) {
+            resource.retire_owned();
+        }
+    }
+}
+struct ClaudeSessions {
+    state: Mutex<crate::worker_lifetime::State<Arc<ClaudeWorker>>>,
+    changed: tokio::sync::Notify,
+}
+struct ClaudeBoot {
+    sessions: Arc<ClaudeSessions>,
+    id: String,
+    ticket: crate::worker_lifetime::Ticket,
+    owned: OwnedClaudeWorkers,
+    armed: bool,
+}
+impl Drop for ClaudeBoot {
+    fn drop(&mut self) {
+        use crate::worker_lifetime::{Action, Event};
+        if !self.armed {
+            return;
+        }
+        if let Ok(mut state) = self.sessions.state.try_lock() {
+            if let Action::Retired(resource) = state.transition(Event::Abort {
+                id: self.id.clone(),
+                ticket: self.ticket,
+            }) {
+                drop(resource);
+            }
+            self.sessions.changed.notify_waiters();
+        } else if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let sessions = self.sessions.clone();
+            let id = self.id.clone();
+            let ticket = self.ticket;
+            runtime.spawn(async move {
+                if let Action::Retired(resource) = sessions
+                    .state
+                    .lock()
+                    .await
+                    .transition(Event::Abort { id, ticket })
+                {
+                    drop(resource);
+                }
+                sessions.changed.notify_waiters();
+            });
+        }
+    }
+}
+struct ClaudeStop {
+    sessions: Arc<ClaudeSessions>,
+    id: String,
+    ticket: crate::worker_lifetime::Ticket,
+    owned: Option<OwnedClaudeWorkers>,
+}
+impl ClaudeStop {
+    async fn finish(mut self) {
+        if let Some(owned) = &mut self.owned {
+            owned.close().await;
+        }
+        self.sessions.stopped(&self.id, self.ticket).await;
+        self.owned.take();
+    }
+}
+impl Drop for ClaudeStop {
+    fn drop(&mut self) {
+        let Some(mut owned) = self.owned.take() else {
+            return;
+        };
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let sessions = self.sessions.clone();
+            let id = self.id.clone();
+            let ticket = self.ticket;
+            runtime.spawn(async move {
+                owned.close().await;
+                sessions.stopped(&id, ticket).await;
+            });
+        }
+    }
+}
+impl ClaudeSessions {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(Default::default()),
+            changed: tokio::sync::Notify::new(),
+        })
+    }
+    async fn begin(self: &Arc<Self>, id: &str) -> Result<ClaudeBoot> {
+        use crate::worker_lifetime::{Action, Event};
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let action = self
+                .state
+                .lock()
+                .await
+                .transition(Event::Begin(id.to_owned()));
+            match action {
+                Action::Begun { ticket, retired } => {
+                    let mut owned = OwnedClaudeWorkers::default();
+                    if let Some(resource) = retired {
+                        owned.own(resource);
+                    }
+                    return Ok(ClaudeBoot {
+                        sessions: self.clone(),
+                        id: id.to_owned(),
+                        ticket,
+                        owned,
+                        armed: true,
+                    });
+                }
+                Action::Wait => changed.await,
+                Action::Closed(resources) => {
+                    for resource in resources {
+                        resource.retire_owned();
+                    }
+                    return Err(anyhow!("worker adapter is shut down"));
+                }
+                _ => unreachable!("Begin returns admission, wait or terminal refusal"),
+            }
+        }
+    }
+    async fn capture(&self, boot: &mut ClaudeBoot, resource: Arc<ClaudeWorker>) -> Result<()> {
+        use crate::worker_lifetime::{Action, Event};
+        boot.owned.own(resource.clone());
+        match self.state.lock().await.transition(Event::Capture {
+            id: boot.id.clone(),
+            ticket: boot.ticket,
+            resource,
+        }) {
+            Action::Accepted => Ok(()),
+            Action::Rejected(resource) => {
+                drop(resource);
+                Err(anyhow!("worker admission was retired"))
+            }
+            _ => Err(anyhow!("worker admission was retired")),
+        }
+    }
+    async fn publish(
+        &self,
+        boot: &mut ClaudeBoot,
+        record: impl FnOnce() -> Result<()>,
+    ) -> Result<Arc<ClaudeWorker>> {
+        use crate::worker_lifetime::{Action, Event};
+        let mut state = self.state.lock().await;
+        if !state
+            .entry(&boot.id)
+            .is_some_and(|entry| entry.starting(boot.ticket))
+        {
+            return Err(anyhow!("worker admission was retired"));
+        }
+        record()?;
+        if !matches!(
+            state.transition(Event::Publish {
+                id: boot.id.clone(),
+                ticket: boot.ticket
+            }),
+            Action::Accepted
+        ) {
+            return Err(anyhow!("worker admission was retired"));
+        }
+        let resource = state
+            .entry(&boot.id)
+            .and_then(|entry| entry.ready())
+            .expect("accepted Publish has a resource")
+            .clone();
+        boot.owned.0.clear();
+        boot.armed = false;
+        Ok(resource)
+    }
+    async fn resource(&self, id: &str) -> Result<Arc<ClaudeWorker>> {
+        self.state
+            .lock()
+            .await
+            .entry(id)
+            .and_then(|entry| entry.ready())
+            .cloned()
+            .ok_or_else(|| anyhow!("session {id} is not open"))
+    }
+    fn stream(&self, id: &str) -> Option<broadcast::Receiver<AgentEvent>> {
+        self.state
+            .try_lock()
+            .ok()?
+            .entry(id)?
+            .ready()
+            .map(|resource| resource.stream.subscribe())
+    }
+    fn is_open(&self, id: &str) -> Option<bool> {
+        let state = self.state.try_lock().ok()?;
+        if state.entry(id).is_some_and(|entry| entry.stopping()) {
+            return None;
+        }
+        Some(state.entry(id).and_then(|entry| entry.ready()).is_some())
+    }
+    async fn stopped(&self, id: &str, ticket: crate::worker_lifetime::Ticket) {
+        let _ = self
+            .state
+            .lock()
+            .await
+            .transition(crate::worker_lifetime::Event::Stopped {
+                id: id.to_owned(),
+                ticket,
+            });
+        self.changed.notify_waiters();
+    }
+    async fn stop(self: &Arc<Self>, id: &str) {
+        use crate::worker_lifetime::{Action, Entry, Event};
+        let mut waiting_for = None;
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let action = {
+                let mut state = self.state.lock().await;
+                if let Some(waited) = waiting_for {
+                    if !matches!(state.entry(id),Some(Entry::Stopping{ticket,..})if *ticket==waited)
+                    {
+                        return;
+                    }
+                }
+                if let Some(Entry::Stopping { ticket, .. }) = state.entry(id) {
+                    waiting_for = Some(*ticket);
+                }
+                state.transition(Event::Stop(id.to_owned()))
+            };
+            match action {
+                Action::Stopping { ticket, resource } => {
+                    let mut owned = OwnedClaudeWorkers::default();
+                    if let Some(resource) = resource {
+                        owned.own(resource);
+                    }
+                    ClaudeStop {
+                        sessions: self.clone(),
+                        id: id.to_owned(),
+                        ticket,
+                        owned: Some(owned),
+                    }
+                    .finish()
+                    .await;
+                    return;
+                }
+                Action::Wait => changed.await,
+                Action::Missing | Action::Closed(_) => return,
+                _ => unreachable!("Stop returns cleanup, wait or absence"),
+            }
+        }
+    }
+    async fn shutdown(&self) {
+        let action = self
+            .state
+            .lock()
+            .await
+            .transition(crate::worker_lifetime::Event::Shutdown);
+        self.changed.notify_waiters();
+        let mut owned = OwnedClaudeWorkers::default();
+        if let crate::worker_lifetime::Action::Closed(resources) = action {
+            for resource in resources {
+                owned.own(resource);
+            }
+        }
+        owned.close().await;
+    }
+}
 
 pub struct ClaudeCodeAdapter {
     cfg: Arc<Config>,
     store: Store,
     models: LiveModels,
-    children: Mutex<HashMap<String, ClaudeChild>>,
-    streams: Mutex<HashMap<String, broadcast::Sender<AgentEvent>>>,
+    sessions: Arc<ClaudeSessions>,
 }
 
 impl ClaudeCodeAdapter {
@@ -1429,8 +1748,7 @@ impl ClaudeCodeAdapter {
             cfg,
             store,
             models,
-            children: Mutex::new(HashMap::new()),
-            streams: Mutex::new(HashMap::new()),
+            sessions: ClaudeSessions::new(),
         }
     }
 
@@ -1443,6 +1761,8 @@ impl ClaudeCodeAdapter {
     ) -> Result<()> {
         use std::process::Stdio;
         use tokio::io::{AsyncBufReadExt, BufReader};
+        let mut boot = self.sessions.begin(session_id).await?;
+        boot.owned.close().await;
         // No `--bare`: the seed settings (PreToolUse deny/audit hook, bypassPermissions) must load.
         let mut args: Vec<String> = vec![
             "-p".into(),
@@ -1496,6 +1816,7 @@ impl ClaudeCodeAdapter {
             .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
             .envs(crate::vault::shell_envs(&self.cfg))
             .envs(self.cfg.browser_env())
+            .kill_on_drop(true)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::from(std::fs::File::create(&log)?));
@@ -1513,23 +1834,28 @@ impl ClaudeCodeAdapter {
         let stdin = child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?;
         let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
         let (tx, _) = broadcast::channel(4096);
-        self.streams
-            .lock()
-            .await
-            .insert(session_id.to_owned(), tx.clone());
-        self.children.lock().await.insert(
-            session_id.to_owned(),
-            (Arc::new(Mutex::new(child)), Arc::new(Mutex::new(stdin))),
-        );
-        self.store.upsert_session(
-            session_id,
-            Some(session_id),
-            None,
-            &cwd.display().to_string(),
-            &model,
-            "claude_code",
-            "subagent",
-        )?;
+        let resource = Arc::new(ClaudeWorker {
+            child: Mutex::new(Some(child)),
+            stdin: Mutex::new(Some(stdin)),
+            stream: tx,
+        });
+        self.sessions.capture(&mut boot, resource).await?;
+        let resource = self
+            .sessions
+            .publish(&mut boot, || {
+                self.store.upsert_session(
+                    session_id,
+                    Some(session_id),
+                    None,
+                    &cwd.display().to_string(),
+                    &model,
+                    "claude_code",
+                    "subagent",
+                )?;
+                Ok(())
+            })
+            .await?;
+        let tx = resource.stream.clone();
         tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
             while let Ok(Some(line)) = lines.next_line().await {
@@ -1550,15 +1876,12 @@ impl ClaudeCodeAdapter {
 
     async fn write_user(&self, session_id: &str, text: &str) -> Result<()> {
         use tokio::io::AsyncWriteExt;
-        let (_, stdin) = self
-            .children
-            .lock()
-            .await
-            .get(session_id)
-            .cloned()
-            .ok_or_else(|| anyhow!("session {session_id} is not open"))?;
+        let resource = self.sessions.resource(session_id).await?;
         let msg = serde_json::json!({ "type": "user", "message": { "role": "user", "content": [{ "type": "text", "text": text }] } });
-        let mut s = stdin.lock().await;
+        let mut stdin = resource.stdin.lock().await;
+        let s = stdin
+            .as_mut()
+            .ok_or_else(|| anyhow!("session {session_id} is not open"))?;
         s.write_all(format!("{msg}\n").as_bytes()).await?;
         s.flush().await?;
         Ok(())
@@ -1709,10 +2032,7 @@ impl HarnessAdapter for ClaudeCodeAdapter {
     }
 
     fn stream(&self, session_id: &str) -> Option<broadcast::Receiver<AgentEvent>> {
-        self.streams
-            .try_lock()
-            .ok()
-            .and_then(|s| s.get(session_id).map(|tx| tx.subscribe()))
+        self.sessions.stream(session_id)
     }
 
     async fn read_history(
@@ -1727,28 +2047,16 @@ impl HarnessAdapter for ClaudeCodeAdapter {
     }
 
     async fn stop(&self, session_id: &str) -> Result<()> {
-        if let Some((child, _)) = self.children.lock().await.remove(session_id) {
-            let _ = child.lock().await.kill().await;
-        }
+        self.sessions.stop(session_id).await;
         Ok(())
     }
 
     async fn shutdown_all(&self) {
-        let children: Vec<_> = self
-            .children
-            .lock()
-            .await
-            .drain()
-            .map(|(_, (c, _))| c)
-            .collect();
-        for c in children {
-            let _ = c.lock().await.kill().await;
-        }
+        self.sessions.shutdown().await;
     }
 
     fn is_open(&self, session_id: &str) -> Option<bool> {
-        let children = self.children.try_lock().ok()?;
-        Some(children.contains_key(session_id))
+        self.sessions.is_open(session_id)
     }
 }
 
@@ -2231,5 +2539,608 @@ finally:
     #[tokio::test]
     async fn old_stop_waiter_cannot_retire_resumed_pi() {
         old_stop_waiter_preserves_resumed_owner(false).await;
+    }
+    async fn sibling_stop_keeps_ready_observable(prime: bool) {
+        let f = Fixture::new(prime).await;
+        f.release();
+        f.start().await.unwrap().unwrap();
+        let sibling = arbos_core::ids::ulid();
+        f.adapter
+            .start(StartRequest {
+                session_id: sibling.clone(),
+                cwd: f.root.clone(),
+                system_prompt: "synthetic sibling".into(),
+                model: "mock-sub".into(),
+                thinking: "off".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(f.adapter.is_open(&sibling), Some(true));
+        std::fs::write(f.root.join("pause-close"), "pause").unwrap();
+        let stopping = {
+            let adapter = f.adapter.clone();
+            tokio::spawn(async move { adapter.stop(SESSION).await })
+        };
+        assert!(Fixture::wait(&f.root.join("closing"), Duration::from_secs(5)).await);
+        let own = f.adapter.is_open(SESSION);
+        let observed = f.adapter.is_open(&sibling);
+        std::fs::remove_file(f.root.join("pause-close")).unwrap();
+        std::fs::write(f.root.join("close-release"), "release").unwrap();
+        stopping.await.unwrap().unwrap();
+        f.cleanup().await;
+        assert_eq!(own, None, "the actual retiring owner remains unknown");
+        assert_eq!(
+            observed,
+            Some(true),
+            "an independently readable Ready sibling remains observable and protected"
+        );
+    }
+    #[tokio::test]
+    async fn stopping_one_rpc_session_keeps_ready_sibling_observable_prime() {
+        sibling_stop_keeps_ready_observable(true).await;
+    }
+    #[tokio::test]
+    async fn stopping_one_rpc_session_keeps_ready_sibling_observable_pi() {
+        sibling_stop_keeps_ready_observable(false).await;
+    }
+}
+
+#[cfg(test)]
+mod claude_worker_owner_regressions {
+    use super::*;
+    use std::future::Future;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    struct ReadPause {
+        reached: AtomicBool,
+        armed: AtomicBool,
+        release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+    struct Trace {
+        store: Store,
+        pointer: *const ReadPause,
+        data: Arc<ReadPause>,
+        release: std::sync::mpsc::Sender<()>,
+    }
+    impl Trace {
+        fn install(store: &Store) -> Self {
+            unsafe extern "C" fn observed(
+                event: u32,
+                context: *mut std::ffi::c_void,
+                statement: *mut std::ffi::c_void,
+                _: *mut std::ffi::c_void,
+            ) -> i32 {
+                if event != rusqlite::ffi::SQLITE_TRACE_PROFILE as u32 {
+                    return 0;
+                }
+                let sql = unsafe { rusqlite::ffi::sqlite3_sql(statement.cast()) };
+                if sql.is_null() {
+                    return 0;
+                }
+                let sql = unsafe { std::ffi::CStr::from_ptr(sql) }.to_bytes();
+                if !sql
+                    .windows(b"SELECT model FROM sessions".len())
+                    .any(|s| s == b"SELECT model FROM sessions")
+                {
+                    return 0;
+                }
+                let pause = unsafe { &*context.cast::<ReadPause>() };
+                if pause.armed.swap(false, Ordering::SeqCst) {
+                    pause.reached.store(true, Ordering::SeqCst);
+                    let _ = pause
+                        .release
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(5));
+                }
+                0
+            }
+            let (release, receiver) = std::sync::mpsc::channel();
+            let data = Arc::new(ReadPause {
+                reached: AtomicBool::new(false),
+                armed: AtomicBool::new(true),
+                release: std::sync::Mutex::new(receiver),
+            });
+            let pointer = Arc::into_raw(data.clone());
+            store
+                .with(|c| {
+                    let rc = unsafe {
+                        rusqlite::ffi::sqlite3_trace_v2(
+                            c.handle(),
+                            rusqlite::ffi::SQLITE_TRACE_PROFILE as u32,
+                            Some(observed),
+                            pointer.cast_mut().cast(),
+                        )
+                    };
+                    assert_eq!(rc, rusqlite::ffi::SQLITE_OK);
+                    Ok(())
+                })
+                .unwrap();
+            Self {
+                store: store.clone(),
+                pointer,
+                data,
+                release,
+            }
+        }
+        async fn reached(&self) {
+            assert!(tokio::time::timeout(Duration::from_secs(5), async {
+                while !self.data.reached.load(Ordering::SeqCst) {
+                    tokio::time::sleep(Duration::from_millis(2)).await;
+                }
+            })
+            .await
+            .is_ok());
+        }
+        fn release(&self) {
+            let _ = self.release.send(());
+        }
+    }
+    impl Drop for Trace {
+        fn drop(&mut self) {
+            self.release();
+            self.store
+                .with(|c| {
+                    unsafe {
+                        rusqlite::ffi::sqlite3_trace_v2(c.handle(), 0, None, std::ptr::null_mut());
+                    }
+                    Ok(())
+                })
+                .unwrap();
+            unsafe {
+                drop(Arc::from_raw(self.pointer));
+            }
+        }
+    }
+
+    const STUB: &str = r#"#!/usr/bin/env python3
+import json,os,select,sys,time
+from pathlib import Path
+root=Path(@ROOT@)
+(root/'pid').write_text(str(os.getpid()))
+while not (root/'finish').exists():
+    if (root/'no-read').exists():
+        time.sleep(0.01)
+        continue
+    if select.select([sys.stdin],[],[],0.01)[0]:
+        line=sys.stdin.readline()
+        if line:
+            with (root/'commands').open('a') as out:out.write(line)
+            print(json.dumps({'type':'stream_event','event':{'type':'content_block_delta','delta':{'type':'text_delta','text':'fixture output'}}}),flush=True)
+        else:
+            (root/'stdin-closed').write_text('closed')
+            time.sleep(0.01)
+"#;
+    struct Fixture {
+        adapter: Arc<ClaudeCodeAdapter>,
+        store: Store,
+        root: PathBuf,
+        agent_root: PathBuf,
+        id: String,
+    }
+    impl Fixture {
+        async fn new() -> Self {
+            let root = std::env::temp_dir()
+                .join(format!("arbos-claude-owned-{}", arbos_core::ids::ulid()));
+            std::fs::create_dir_all(&root).unwrap();
+            let script = root.join("cli.py");
+            std::fs::write(&script, STUB.replace("@ROOT@", &format!("{root:?}"))).unwrap();
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let (agent, agent_root) = crate::status::tests::test_agent().await;
+            let mut cfg = (*agent.cfg).clone();
+            cfg.claude_bin = script.display().to_string();
+            std::fs::create_dir_all(&cfg.work_dir).unwrap();
+            let models = LiveModels::new(&cfg);
+            let store = agent.store.clone();
+            let adapter = Arc::new(ClaudeCodeAdapter::new(Arc::new(cfg), store.clone(), models));
+            Self {
+                adapter,
+                store,
+                root,
+                agent_root,
+                id: arbos_core::ids::ulid(),
+            }
+        }
+        fn start(&self) -> tokio::task::JoinHandle<Result<()>> {
+            let adapter = self.adapter.clone();
+            let id = self.id.clone();
+            let cwd = self.root.clone();
+            tokio::spawn(async move {
+                adapter
+                    .start(StartRequest {
+                        session_id: id,
+                        cwd,
+                        system_prompt: "synthetic fixture".into(),
+                        model: "mock-sub".into(),
+                        thinking: "off".into(),
+                    })
+                    .await
+            })
+        }
+        async fn reached(&self) {
+            assert!(
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while !self.root.join("pid").exists() {
+                        tokio::time::sleep(Duration::from_millis(2)).await;
+                    }
+                })
+                .await
+                .is_ok(),
+                "owned fake CLI never spawned"
+            );
+        }
+        fn pid(&self) -> i32 {
+            std::fs::read_to_string(self.root.join("pid"))
+                .unwrap()
+                .parse()
+                .unwrap()
+        }
+        fn alive(pid: i32) -> bool {
+            nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok()
+        }
+        async fn gone(pid: i32) -> bool {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while Self::alive(pid) {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .is_ok()
+        }
+        async fn cleanup(&self) {
+            self.adapter.shutdown_all().await;
+            std::fs::write(self.root.join("finish"), "finish").unwrap();
+            if self.root.join("pid").exists() {
+                assert!(
+                    Self::gone(self.pid()).await,
+                    "owned fake CLI was not reaped during cleanup"
+                );
+            }
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+            let _ = std::fs::remove_dir_all(&self.agent_root);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn cancelled_claude_publication_retires_its_spawned_child() {
+        let f = Fixture::new().await;
+        let trace = Trace::install(&f.store);
+        let task = f.start();
+        trace.reached().await;
+        let held = f.adapter.sessions.state.lock().await;
+        trace.release();
+        f.reached().await;
+        let pid = f.pid();
+        assert!(Fixture::alive(pid));
+        task.abort();
+        let _ = task.await;
+        drop(held);
+        let cleaned = Fixture::gone(pid).await;
+        f.cleanup().await;
+        assert!(
+            cleaned,
+            "cancelling actual Claude publication leaked its owned child"
+        );
+    }
+    async fn retired_publication(all: bool) {
+        let f = Fixture::new().await;
+        let trace = Trace::install(&f.store);
+        let task = f.start();
+        trace.reached().await;
+        let held = f.adapter.sessions.state.lock().await;
+        trace.release();
+        f.reached().await;
+        let retire = async {
+            if all {
+                f.adapter.shutdown_all().await;
+                Ok(())
+            } else {
+                f.adapter.stop(&f.id).await
+            }
+        };
+        tokio::pin!(retire);
+        let completed = std::future::poll_fn(|cx| {
+            std::task::Poll::Ready(matches!(
+                retire.as_mut().poll(cx),
+                std::task::Poll::Ready(_)
+            ))
+        })
+        .await;
+        drop(held);
+        if !completed {
+            retire.await.unwrap();
+        }
+        let result = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap();
+        let open = f.adapter.is_open(&f.id);
+        f.cleanup().await;
+        assert!(
+            result.is_err(),
+            "retired Claude admission published a late successful child"
+        );
+        assert_eq!(open, Some(false));
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn shutdown_refuses_late_claude_publication() {
+        retired_publication(true).await;
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn stop_refuses_late_claude_publication() {
+        retired_publication(false).await;
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn terminal_shutdown_refuses_new_claude_start() {
+        let f = Fixture::new().await;
+        f.adapter.shutdown_all().await;
+        let result = f.start().await.unwrap();
+        if result.is_ok() {
+            f.reached().await;
+        }
+        let open = f.adapter.is_open(&f.id);
+        f.cleanup().await;
+        assert!(result.is_err());
+        assert_eq!(open, Some(false));
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn ordinary_claude_start_stream_stop_and_resume_remain_usable() {
+        let f = Fixture::new().await;
+        f.start().await.unwrap().unwrap();
+        f.reached().await;
+        let first = f.pid();
+        assert!(Fixture::alive(first));
+        assert!(f.adapter.stream(&f.id).is_some());
+        f.adapter.stop(&f.id).await.unwrap();
+        assert!(Fixture::gone(first).await);
+        assert_eq!(f.adapter.is_open(&f.id), Some(false));
+        std::fs::remove_file(f.root.join("pid")).unwrap();
+        f.adapter.resume(&f.id).await.unwrap();
+        f.reached().await;
+        assert_ne!(f.pid(), first);
+        assert!(Fixture::alive(f.pid()));
+        f.cleanup().await;
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn claude_session_record_error_retires_captured_child() {
+        let f = Fixture::new().await;
+        f.store.with(|c|c.execute_batch("CREATE TRIGGER fixture_session_failure BEFORE INSERT ON sessions BEGIN SELECT RAISE(ABORT,'synthetic session failure'); END")).unwrap();
+        let trace = Trace::install(&f.store);
+        let task = f.start();
+        trace.reached().await;
+        let held = f.adapter.sessions.state.lock().await;
+        trace.release();
+        f.reached().await;
+        let pid = f.pid();
+        assert!(Fixture::alive(pid));
+        drop(held);
+        let result = task.await.unwrap();
+        let cleaned = Fixture::gone(pid).await;
+        let open = f.adapter.is_open(&f.id);
+        f.cleanup().await;
+        assert!(result.is_err());
+        assert!(cleaned);
+        assert_eq!(open, Some(false));
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn old_claude_stop_waiter_cannot_retire_resumed_owner() {
+        let f = Fixture::new().await;
+        f.start().await.unwrap().unwrap();
+        f.reached().await;
+        let original = f.adapter.sessions.resource(&f.id).await.unwrap();
+        let held = original.child.lock().await;
+        let first = {
+            let adapter = f.adapter.clone();
+            let id = f.id.clone();
+            tokio::spawn(async move { adapter.stop(&id).await })
+        };
+        assert!(tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let stopping = matches!(
+                    f.adapter.sessions.state.lock().await.entry(&f.id),
+                    Some(crate::worker_lifetime::Entry::Stopping { .. })
+                );
+                if stopping {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .is_ok());
+        assert_eq!(f.adapter.is_open(&f.id), None);
+        let second = f.adapter.stop(&f.id);
+        tokio::pin!(second);
+        std::future::poll_fn(|cx| {
+            assert!(second.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        drop(held);
+        first.await.unwrap().unwrap();
+        std::fs::remove_file(f.root.join("pid")).unwrap();
+        f.adapter.resume(&f.id).await.unwrap();
+        f.reached().await;
+        let replacement = f.adapter.sessions.resource(&f.id).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), &mut second)
+            .await
+            .unwrap()
+            .unwrap();
+        let retained = f.adapter.sessions.resource(&f.id).await.unwrap();
+        let alive = Fixture::alive(f.pid());
+        f.cleanup().await;
+        assert!(Arc::ptr_eq(&replacement, &retained));
+        assert!(alive);
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn current_claude_resource_preserves_actual_stdin_stdout_protocol() {
+        let f = Fixture::new().await;
+        f.start().await.unwrap().unwrap();
+        f.reached().await;
+        let mut stream = f.adapter.stream(&f.id).unwrap();
+        f.adapter.prompt(&f.id, "synthetic hello").await.unwrap();
+        let output = tokio::time::timeout(Duration::from_secs(2), stream.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let command: Value = serde_json::from_str(
+            std::fs::read_to_string(f.root.join("commands"))
+                .unwrap()
+                .lines()
+                .next()
+                .unwrap(),
+        )
+        .unwrap();
+        f.cleanup().await;
+        assert!(matches!(output,AgentEvent::TextDelta(text)if text=="fixture output"));
+        assert_eq!(
+            command,
+            serde_json::json!({"type":"user","message":{"role":"user","content":[{"type":"text","text":"synthetic hello"}]}})
+        );
+    }
+    async fn blocked_writer_does_not_prevent_immediate_kill(all: bool) {
+        let f = Fixture::new().await;
+        std::fs::write(f.root.join("no-read"), "pause stdin reads").unwrap();
+        f.start().await.unwrap().unwrap();
+        f.reached().await;
+        let pid = f.pid();
+        assert!(Fixture::alive(pid));
+        let blocked = Arc::new(AtomicBool::new(false));
+        let observed = blocked.clone();
+        let adapter = f.adapter.clone();
+        let id = f.id.clone();
+        let writer = tokio::spawn(async move {
+            let payload = "x".repeat(2 * 1024 * 1024);
+            let future = adapter.prompt(&id, &payload);
+            tokio::pin!(future);
+            std::future::poll_fn(|cx| {
+                let result = future.as_mut().poll(cx);
+                if result.is_pending() {
+                    observed.store(true, Ordering::SeqCst);
+                }
+                result
+            })
+            .await
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !blocked.load(Ordering::SeqCst) {
+                    tokio::time::sleep(Duration::from_millis(2)).await;
+                }
+            })
+            .await
+            .is_ok(),
+            "actual write did not reach pipe backpressure"
+        );
+        assert!(
+            !writer.is_finished(),
+            "the no-read fixture must leave a real blocked writer"
+        );
+        let completed = tokio::time::timeout(Duration::from_secs(5), async {
+            if all {
+                f.adapter.shutdown_all().await;
+            } else {
+                f.adapter.stop(&f.id).await.unwrap();
+            }
+        })
+        .await
+        .is_ok();
+        // Observe the kill before manually releasing/cancelling the writer during cleanup.
+        let killed_before_cleanup = !Fixture::alive(pid);
+        writer.abort();
+        let _ = writer.await;
+        f.cleanup().await;
+        assert!(
+            completed,
+            "immediate child kill waited for a backpressured stdin writer"
+        );
+        assert!(
+            killed_before_cleanup,
+            "retirement did not kill its captured child before writer cleanup"
+        );
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn blocked_claude_writer_cannot_block_stop_kill() {
+        blocked_writer_does_not_prevent_immediate_kill(false).await;
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn blocked_claude_writer_cannot_block_shutdown_kill() {
+        blocked_writer_does_not_prevent_immediate_kill(true).await;
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn cancelled_claude_retirement_keeps_kill_ownership_with_a_blocked_writer() {
+        let f = Fixture::new().await;
+        std::fs::write(f.root.join("no-read"), "pause stdin reads").unwrap();
+        f.start().await.unwrap().unwrap();
+        f.reached().await;
+        let pid = f.pid();
+        let blocked = Arc::new(AtomicBool::new(false));
+        let observed = blocked.clone();
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let resume = gate.clone();
+        let adapter = f.adapter.clone();
+        let id = f.id.clone();
+        let writer = tokio::spawn(async move {
+            let payload = "x".repeat(2 * 1024 * 1024);
+            let mut future = Box::pin(adapter.prompt(&id, &payload));
+            std::future::poll_fn(|cx| {
+                assert!(future.as_mut().poll(cx).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+            observed.store(true, Ordering::SeqCst);
+            resume.notified().await;
+            future.await
+        });
+        assert!(tokio::time::timeout(Duration::from_secs(5), async {
+            while !blocked.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .is_ok());
+        let stopping = {
+            let adapter = f.adapter.clone();
+            let id = f.id.clone();
+            tokio::spawn(async move { adapter.stop(&id).await })
+        };
+        let killed = Fixture::gone(pid).await;
+        let pending = !stopping.is_finished();
+        stopping.abort();
+        let _ = stopping.await;
+        gate.notify_one();
+        if killed {
+            assert!(tokio::time::timeout(Duration::from_secs(5), writer)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_err());
+            std::fs::remove_file(f.root.join("pid")).unwrap();
+            tokio::time::timeout(Duration::from_secs(5), f.adapter.resume(&f.id))
+                .await
+                .unwrap()
+                .unwrap();
+            f.reached().await;
+        } else {
+            writer.abort();
+            let _ = writer.await;
+        }
+        let reusable = f.adapter.is_open(&f.id);
+        f.cleanup().await;
+        assert!(
+            killed,
+            "cleanup must kill its captured child before waiting for the writer"
+        );
+        assert!(
+            pending,
+            "the controlled writer must keep the actual cleanup future pending before cancellation"
+        );
+        assert_eq!(reusable, Some(true));
     }
 }
