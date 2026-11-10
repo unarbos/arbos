@@ -2,7 +2,8 @@ import SwiftUI
 import UIKit
 
 /// Grok's touch-and-hold tell: resting a finger on a text box brightens the box under the
-/// finger while the system's Paste / AutoFill menu comes up (Jacob, 2026-11-09, shot 5 in
+/// finger while the system's Paste / AutoFill menu comes up ([feedback
+/// composer-hold-highlight-2026-11-09]; Jacob, 2026-11-09, shot 5 in
 /// `jacob-composer-parity-2026-11-09`). Ours lit nothing at all, and the reason it lit nothing
 /// is worth recording, because it had been asked for once already and went quiet:
 /// `ControlSurface` has taken a `pressed` flag the whole time and `Theme.controlPill` has

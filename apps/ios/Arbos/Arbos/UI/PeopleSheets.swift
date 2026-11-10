@@ -24,12 +24,12 @@ enum SheetRow {
     static var textLeading: CGFloat { cardInset + textInset }
 }
 
-/// "+" on home — Telegram's "New Message" sheet in Grok's dark skin: rises
-/// from the bottom, search on top, then New agent / New group, then your
-/// agents, then every other Arbos user. Typing filters agents, servers and the
-/// directory and also asks `GET /users/search` and `GET /servers/search`, so a
-/// GitHub handle not on Arbos yet can be invited and an open server can be joined
-/// without an invite link.
+/// "+" on home — Telegram's "New Message" panel in Grok's dark skin. Pushed onto
+/// Home's stack from the right ([feedback iphone-compose-nav-push-2026-11-10]),
+/// search on top, then New agent / New group, then your agents, then every other
+/// Arbos user. Typing filters agents, servers and the directory and also asks
+/// `GET /users/search` and `GET /servers/search`, so a GitHub handle not on Arbos
+/// yet can be invited and an open server can be joined without an invite link.
 struct NewChatSheet: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
@@ -53,6 +53,9 @@ struct NewChatSheet: View {
     }()
     @State private var showGroupPicker = DebugHooks.show == "newgroup2"
     @FocusState private var focused: Bool
+
+    /// Close the whole compose push (Create's Cancel / Close), not only the Create page.
+    private var closeCompose: () -> Void { { model.dismissNewMessage() } }
 
     private var trimmed: String {
         query.trimmingCharacters(in: .whitespaces).trimmingCharacters(in: CharacterSet(charactersIn: "@"))
@@ -90,9 +93,14 @@ struct NewChatSheet: View {
     }
 
     var body: some View {
-        NavigationStack {
+        // Pushed onto Home's stack (`AppModel.Route.newMessage`): no NavigationStack of
+        // its own, so Create screens push onto the same stack and the edge swipe pops
+        // one level — the same structure Settings and chats use.
+        ZStack(alignment: .top) {
+            theme.bg.ignoresSafeArea()
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
+                    Color.clear.frame(height: HomeChrome.barOnlyListTop)
                     searchField
                         .padding(.horizontal, SheetSearchField.inset)
                         .padding(.top, 6)
@@ -100,25 +108,37 @@ struct NewChatSheet: View {
 
                     if trimmed.isEmpty {
                         card {
-                            NavigationLink { CreateEntityView(kind: .agent, onDone: { dismiss() }) } label: {
+                            NavigationLink {
+                                CreateEntityView(kind: .agent, onDone: closeCompose)
+                                    .backSwipeToPop()
+                            } label: {
                                 actionRow(icon: "sparkles", title: "New agent", subtitle: "Its own workspace on your machine")
                             }
                             .buttonStyle(.plain)
                             rowDivider
                             // Connect an agent (#2142): an agent that runs elsewhere joins as a member.
-                            NavigationLink { CreateEntityView(kind: .connect, onDone: { dismiss() }) } label: {
+                            NavigationLink {
+                                CreateEntityView(kind: .connect, onDone: closeCompose)
+                                    .backSwipeToPop()
+                            } label: {
                                 actionRow(icon: "link", title: "Connect an agent", subtitle: "Claude Code, Grok or your own bot, with a key")
                             }
                             .buttonStyle(.plain)
                             rowDivider
-                            NavigationLink { CreateEntityView(kind: .group, onDone: { dismiss() }) } label: {
+                            NavigationLink {
+                                CreateEntityView(kind: .group, onDone: closeCompose)
+                                    .backSwipeToPop()
+                            } label: {
                                 actionRow(icon: "person.2.fill", title: "New group", subtitle: "People and agents in one chat")
                             }
                             .buttonStyle(.plain)
                             if model.serversAvailable {
                                 // D88 rule 8: a server of your own, or one you were invited to.
                                 rowDivider
-                                NavigationLink { CreateEntityView(kind: .server, onDone: { dismiss() }) } label: {
+                                NavigationLink {
+                                    CreateEntityView(kind: .server, onDone: closeCompose)
+                                        .backSwipeToPop()
+                                } label: {
                                     actionRow(icon: "number", title: "New server", subtitle: "Channels for a group of people")
                                 }
                                 .buttonStyle(.plain)
@@ -179,33 +199,55 @@ struct NewChatSheet: View {
             }
             .scrollIndicators(.visible)
             .scrollDismissesKeyboard(.interactively)
-            .background(theme.bg)
-            .navigationTitle("New Message")
-            .navigationBarTitleDisplayMode(.inline)
-            .navigationDestination(isPresented: Binding(get: { showCreate != nil }, set: { if !$0 { showCreate = nil } })) {
-                CreateEntityView(kind: showCreate ?? .agent, onDone: { dismiss() })
-            }
-            .navigationDestination(isPresented: $showGroupPicker) {
-                NewGroupView(onDone: { dismiss() }, draft: GroupDraft(title: "Launch week", discColor: DiscArt.pick(seed: "rig")))
-            }
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) { Button("Cancel") { dismiss() }.foregroundStyle(theme.text) }
-            }
-            .toolbarBackground(theme.bg, for: .navigationBar)
-            .toolbarBackground(.visible, for: .navigationBar)
-            .task {
-                loadingDirectory = model.directory.isEmpty
-                await model.loadDirectory()
-                loadingDirectory = false
-            }
-            .onChange(of: query) { _, _ in search() }
+            topBar
         }
+        .toolbar(.hidden, for: .navigationBar)
+        .navigationBarBackButtonHidden(true)
+        .navigationDestination(isPresented: Binding(get: { showCreate != nil }, set: { if !$0 { showCreate = nil } })) {
+            CreateEntityView(kind: showCreate ?? .agent, onDone: closeCompose)
+                .backSwipeToPop()
+        }
+        .navigationDestination(isPresented: $showGroupPicker) {
+            NewGroupView(onDone: closeCompose, draft: GroupDraft(title: "Launch week", discColor: DiscArt.pick(seed: "rig")))
+                .backSwipeToPop()
+        }
+        .task {
+            loadingDirectory = model.directory.isEmpty
+            await model.loadDirectory()
+            loadingDirectory = false
+        }
+        .onChange(of: query) { _, _ in search() }
         .tint(theme.text)
-        .presentationDetents([.large])
-        .presentationDragIndicator(.visible)
-        .presentationBackground(theme.bg)
-        .presentationCornerRadius(28)
         .preferredColorScheme(theme.isDark ? .dark : .light)
+        .accessibilityIdentifier("new-message")
+    }
+
+    /// Glass back chevron + centred title — same chrome as Settings / profile pages.
+    private var topBar: some View {
+        ZStack(alignment: .top) {
+            ListTopFade(screen: .newMessage)
+            HStack {
+                Button { dismiss() } label: {
+                    GlassCircle {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 17, weight: .semibold))
+                            .foregroundStyle(theme.text)
+                    }
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Back")
+                .accessibilityIdentifier("new-message-back")
+                Spacer()
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 16)
+            .overlay {
+                Text("New Message")
+                    .font(.system(size: Theme.body, weight: .semibold))
+                    .foregroundStyle(theme.text)
+                    .padding(.top, 16)
+            }
+        }
     }
 
     // MARK: Pieces
@@ -645,10 +687,12 @@ struct CreateEntityView: View {
         .toolbar(.hidden, for: .navigationBar)
         .navigationDestination(isPresented: $next) {
             NewGroupView(onDone: onDone, draft: GroupDraft(title: clean, discColor: Self.storedDisc, picture: source.draftPicture(for: option)))
+                .backSwipeToPop()
         }
         .navigationDestination(isPresented: Binding(get: { reveal != nil }, set: { if !$0 { reveal = nil } })) {
             if let reveal {
                 ConnectRevealView(reveal: reveal, onDone: onDone)
+                    .backSwipeToPop()
             }
         }
         // The rig shoots the sheet without the keyboard (`ARBOS_SHOW=new…`); users get the caret.
