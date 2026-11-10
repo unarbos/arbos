@@ -1469,6 +1469,7 @@ struct RowView: View, Equatable {
     /// bubble. ChatView still observes the model and rebuilds rows when the
     /// transcript changes; actions call through this reference.
     let model: AppModel
+    let account: ChatAccountContext
     /// Plain inputs, not `@Environment`: an environment read made every bubble's body
     /// re-run on each AppModel publish even when the value was equal (SwiftUI marks the
     /// environment dependency changed per write) — the open-time freeze on long groups
@@ -1512,7 +1513,8 @@ struct RowView: View, Equatable {
     /// (composer keystrokes, presence ticks). Closures are not compared — they
     /// stay valid for the open chat.
     static func == (lhs: RowView, rhs: RowView) -> Bool {
-        let same = lhs.row == rhs.row
+        let same = lhs.account == rhs.account
+            && lhs.row == rhs.row
             && lhs.chatId == rhs.chatId
             && lhs.width == rhs.width
             && lhs.timeReveal == rhs.timeReveal
@@ -1540,7 +1542,7 @@ struct RowView: View, Equatable {
     /// would not re-run the body when the filter opens or closes.
     private func openProfile(_ target: ProfileTarget) -> () -> Void {
         return {
-            guard !ChatSearchClose.rowOwnsInnerTap(resultRow: searchHit) else { return }
+            guard account.accepts(model), !ChatSearchClose.rowOwnsInnerTap(resultRow: searchHit) else { return }
             model.toggleProfile(target)
         }
     }
@@ -1631,7 +1633,7 @@ struct RowView: View, Equatable {
                 Spacer(minLength: 0)
                 if delivery == .failed {
                     Button {
-                        model.resendFailed(chatId: chatId, messageId: row.messageId)
+                        guard account.accepts(model) else { return }; model.resendFailed(chatId: chatId, messageId: row.messageId)
                     } label: {
                         Image(systemName: "exclamationmark.circle.fill")
                             .font(.system(size: 16))
@@ -1791,8 +1793,8 @@ struct RowView: View, Equatable {
                     if reportsGreetingFrame {
                         GeometryReader { g in
                             Color.clear
-                                .onAppear { model.greetingBubbleFrame = g.frame(in: .global) }
-                                .onChange(of: g.frame(in: .global)) { _, f in model.greetingBubbleFrame = f }
+                                .onAppear { guard account.accepts(model) else { return }; model.greetingBubbleFrame = g.frame(in: .global) }
+                                .onChange(of: g.frame(in: .global)) { _, f in guard account.accepts(model) else { return }; model.greetingBubbleFrame = f }
                         }
                     }
                 }
@@ -1819,6 +1821,7 @@ struct RowView: View, Equatable {
                 Text(BlockedState.hiddenLine(count: count, who: who))
                 Text("·")
                 Button(BlockedState.unblock) {
+                    guard account.accepts(model) else { return }
                     model.openPersonProfile(handle: handle, avatarUrl: nil, chatId: chatId)
                 }
                 .buttonStyle(.plain)
@@ -1870,7 +1873,7 @@ struct RowView: View, Equatable {
             // lane in a people chat) and the same cap width as an incoming bubble.
             HStack(spacing: 0) {
                 if lane { Color.clear.frame(width: Theme.memberLane(composerInset: composerInset), height: 1) }
-                QuestionCard(rowId: row.id, chatId: chatId, questionId: questionId, title: text, options: options,
+                QuestionCard(account: account, rowId: row.id, chatId: chatId, questionId: questionId, title: text, options: options,
                              multi: multi, picked: picked, open: open, shellCard: shellCard, offer: offer)
                     .frame(maxWidth: lane ? maxBubble - Theme.memberLane(composerInset: composerInset) : maxBubble, alignment: .leading)
                 Spacer(minLength: 0)
@@ -1878,7 +1881,7 @@ struct RowView: View, Equatable {
         case .file(let item, let subtitle, let caption, let forwardedFrom, let sender, let named, let quote):
             if let sender {
                 mediaRow(sender: sender, named: named) {
-                    FileCard(item: item, subtitle: subtitle, chatId: chatId, fromUser: false, caption: caption,
+                    FileCard(account: account, item: item, subtitle: subtitle, chatId: chatId, fromUser: false, caption: caption,
                              forwardedFrom: forwardedFrom, quote: quote, onQuoteTap: onQuoteTap)
                         .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: false) }
                         .frame(maxWidth: maxBubble - Theme.memberLane(composerInset: composerInset), alignment: .leading)
@@ -1886,7 +1889,7 @@ struct RowView: View, Equatable {
             } else {
                 HStack {
                     if row.role == .user { Spacer(minLength: 0) }
-                    FileCard(item: item, subtitle: subtitle, chatId: chatId, fromUser: row.role == .user, caption: caption,
+                    FileCard(account: account, item: item, subtitle: subtitle, chatId: chatId, fromUser: row.role == .user, caption: caption,
                              forwardedFrom: forwardedFrom, quote: quote, onQuoteTap: onQuoteTap)
                         .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: row.role == .user) }
                         .frame(maxWidth: maxBubble, alignment: row.role == .user ? .trailing : .leading)
@@ -1903,7 +1906,7 @@ struct RowView: View, Equatable {
         case .voiceMemo(let name, let projectId, let ref, let fromUser):
             HStack {
                 if fromUser { Spacer(minLength: 0) }
-                VoiceMemoBubble(name: name, projectId: projectId, blobRef: ref, fromUser: fromUser)
+                VoiceMemoBubble(account: account, name: name, projectId: projectId, blobRef: ref, fromUser: fromUser)
                     .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: fromUser) }
                     .frame(maxWidth: maxBubble, alignment: fromUser ? .trailing : .leading)
                 if !fromUser { Spacer(minLength: 0) }
@@ -1913,14 +1916,14 @@ struct RowView: View, Equatable {
             // Telegram / iMessage stickers; same lane rules as a picture.
             if let sender {
                 mediaRow(sender: sender, named: named) {
-                    StickerBubble(item: item, chatId: chatId)
+                    StickerBubble(account: account, item: item, chatId: chatId)
                         .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: false) }
                 }
             } else {
                 HStack(spacing: 0) {
                     if fromUser { Spacer(minLength: 0) }
                     if lane { Color.clear.frame(width: Theme.memberLane(composerInset: composerInset), height: 1) }
-                    StickerBubble(item: item, chatId: chatId)
+                    StickerBubble(account: account, item: item, chatId: chatId)
                         .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: fromUser) }
                     if !fromUser { Spacer(minLength: 0) }
                 }
@@ -1931,7 +1934,7 @@ struct RowView: View, Equatable {
             // the sender's avatar in that lane and the name above the first card.
             if let sender {
                 mediaRow(sender: sender, named: named) {
-                    ImageBubble(item: item, chatId: chatId, fromUser: false,
+                    ImageBubble(account: account, item: item, chatId: chatId, fromUser: false,
                                 maxWidth: maxBubble - Theme.memberLane(composerInset: composerInset),
                                 caption: caption, mentions: mentions, source: source, forwardedFrom: forwardedFrom,
                                 quote: quote, onQuoteTap: onQuoteTap)
@@ -1941,7 +1944,7 @@ struct RowView: View, Equatable {
                 HStack(spacing: 0) {
                     if fromUser { Spacer(minLength: 0) }
                     if lane { Color.clear.frame(width: Theme.memberLane(composerInset: composerInset), height: 1) }
-                    ImageBubble(item: item, chatId: chatId, fromUser: fromUser,
+                    ImageBubble(account: account, item: item, chatId: chatId, fromUser: fromUser,
                                 maxWidth: lane ? maxBubble - Theme.memberLane(composerInset: composerInset) : maxBubble,
                                 caption: caption, mentions: mentions, source: source, forwardedFrom: forwardedFrom,
                                 quote: quote, onQuoteTap: onQuoteTap)
@@ -1956,7 +1959,7 @@ struct RowView: View, Equatable {
                       error: UserError(verb: "", class: message.trimmingCharacters(in: .whitespaces).isEmpty ? .unknown : .refused(message: message),
                                        raw: code),
                       detailsOpen: $errorDetailsOpen,
-                      onTryAgain: { model.retry(chatId: chatId, messageId: row.messageId) })
+                      onTryAgain: { guard account.accepts(model) else { return }; model.retry(chatId: chatId, messageId: row.messageId) })
         }
     }
 
@@ -2005,6 +2008,7 @@ struct RowView: View, Equatable {
                 )
                 .contentShape(Capsule(style: .continuous))
                 .onTapGesture {
+                    guard account.accepts(model) else { return }
                     model.toggleReaction(chatId: chatId, messageId: row.messageId, emoji: reaction.emoji)
                 }
                 // High-priority so the row's bubble long-press (capsule + menu)
@@ -2216,7 +2220,7 @@ struct RowView: View, Equatable {
     }
 
     private func replyQuoteHeader(_ quote: Quote, color: Color) -> some View {
-        ReplyQuoteHeader(quote: quote, color: color, onTap: onQuoteTap)
+        ReplyQuoteHeader(account: account, quote: quote, color: color, onTap: onQuoteTap)
     }
 
     /// "Messaged \u{FFFC}Affine" / "6 messages with \u{FFFC}A, \u{FFFC}B and \u{FFFC}C":
@@ -3089,6 +3093,7 @@ struct AvatarCluster: View {
 struct ReplyQuoteHeader: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
+    let account: ChatAccountContext
     let quote: Quote
     let color: Color
     var onTap: ((Quote) -> Void)? = nil
@@ -3098,7 +3103,7 @@ struct ReplyQuoteHeader: View {
         // can open that chat (a member), else just the words.
         let linkable = quote.source.map { model.isMember(ofChat: $0.chatId) } ?? true
         return Button {
-            guard linkable else { return }
+            guard account.accepts(model), linkable else { return }
             onTap?(quote)
         } label: {
             VStack(alignment: .leading, spacing: 2) {
@@ -3167,6 +3172,7 @@ struct ImageBubble: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
     @Environment(\.displayScale) private var displayScale
+    let account: ChatAccountContext
     let item: MediaItem
     let chatId: Id
     let fromUser: Bool
@@ -3199,6 +3205,11 @@ struct ImageBubble: View {
     static let pictureInset: CGFloat = 8
     static let pictureRadius: CGFloat = Theme.bubbleRadius - pictureInset
 
+    private var cacheKey: ChatImageCache.Key? {
+        guard let owner = account.owner, let ref = item.cacheKey else { return nil }
+        return ChatImageCache.Key(owner: owner, slot: item.slot, ref: ref)
+    }
+
     private var bubbleWidth: CGFloat { min(280, maxWidth) }
     private var fill: Color { fromUser ? theme.bubbleUser : theme.bubbleAssistant }
     private var captionText: String? { Self.captionText(caption) }
@@ -3216,7 +3227,7 @@ struct ImageBubble: View {
         }
         // Not decoded yet (a lazily re-realised row, or the bitmap evicted): the remembered
         // natural size keeps the row's height steady while the picture comes back.
-        if let ref = item.cacheKey, let known = ChatImageCache.naturalSize(for: ref), known.width > 0, known.height > 0 {
+        if let cacheKey, let known = ChatImageCache.naturalSize(for: cacheKey), known.width > 0, known.height > 0 {
             return Self.fit(known, maxWidth: bubbleWidth)
         }
         return Self.placeholder
@@ -3244,7 +3255,7 @@ struct ImageBubble: View {
                     .padding(.top, Theme.bubbleVPad)
                     .padding(.bottom, 6)
             } else if let quote {
-                ReplyQuoteHeader(quote: quote, color: fromUser ? theme.userText : theme.text, onTap: onQuoteTap)
+                ReplyQuoteHeader(account: account, quote: quote, color: fromUser ? theme.userText : theme.text, onTap: onQuoteTap)
                     .padding(.horizontal, Theme.bubbleHPad)
                     .padding(.top, Theme.bubbleVPad)
                     .padding(.bottom, 6)
@@ -3331,28 +3342,34 @@ struct ImageBubble: View {
 
     /// Open the full-screen viewer for this picture.
     private func openViewer() {
+        guard account.accepts(model) else { return }
         viewer = MediaOpen.state(for: item, chatId: chatId, model: model)
     }
 
     private func load() async {
+        guard account.accepts(model) else { return }
         // Decoded before (this row realised again, or the same picture elsewhere): no bytes,
         // no decode, no placeholder flash.
-        if let ref = item.cacheKey, let hit = ChatImageCache.decoded(for: ref) {
+        if let cacheKey, let hit = ChatImageCache.decoded(for: cacheKey) {
             show(hit)
             return
         }
-        guard let (data, _) = await MediaFetch.bytes(for: item, model: model) else {
+        guard let (data, _) = await MediaFetch.bytes(for: item, model: model, isCurrent: { account.accepts(model) }) else {
+            guard account.accepts(model) else { return }
             failed = true
             return
         }
+        guard account.accepts(model) else { return }
         // Decode + trim off the main actor (`ChatImageCache.decode`); animated GIF / WebP keep
         // every frame, no ImageTrim (feedback app-01M5TGH18WV3QCK5KZT6XKG7FG).
         let maxPixels = CGSize(width: 280 * displayScale, height: Self.maxHeight * displayScale)
         guard let decoded = await ChatImageCache.decode(data, maxPixels: maxPixels) else {
+            guard account.accepts(model) else { return }
             failed = true
             return
         }
-        if let ref = item.cacheKey { ChatImageCache.store(decoded, for: ref) }
+        guard account.accepts(model) else { return }
+        if let cacheKey { ChatImageCache.store(decoded, for: cacheKey) }
         show(decoded)
     }
 
@@ -3639,6 +3656,7 @@ enum ImageTrim {
 struct ReplyThumb: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
+    let account: ChatAccountContext
     let projectId: Id
     let blobRef: String
 
@@ -3660,11 +3678,13 @@ struct ReplyThumb: View {
     }
 
     private func load() async {
+        guard account.accepts(model) else { return }
         guard let url = model.blobURL(projectId: projectId, key: blobRef) else { return }
         var req = URLRequest(url: url)
         for (k, v) in model.authHeaders { req.setValue(v, forHTTPHeaderField: k) }
         guard let (data, response) = try? await URLSession.shared.data(for: req),
               let http = response as? HTTPURLResponse, (200..<400).contains(http.statusCode) else { return }
+        guard account.accepts(model) else { return }
         image = UIImage(data: data)
     }
 }
@@ -3691,6 +3711,7 @@ enum MediaOpen {
 struct FileCard: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
+    let account: ChatAccountContext
     let item: MediaItem
     let subtitle: String
     let chatId: Id
@@ -3720,11 +3741,12 @@ struct FileCard: View {
                     .padding(.horizontal, Theme.bubbleHPad)
                     .padding(.top, Theme.bubbleVPad)
             } else if let quote {
-                ReplyQuoteHeader(quote: quote, color: fromUser ? theme.userText : theme.text, onTap: onQuoteTap)
+                ReplyQuoteHeader(account: account, quote: quote, color: fromUser ? theme.userText : theme.text, onTap: onQuoteTap)
                     .padding(.horizontal, Theme.bubbleHPad)
                     .padding(.top, Theme.bubbleVPad)
             }
             Button {
+                guard account.accepts(model) else { return }
                 viewer = MediaOpen.state(for: item, chatId: chatId, model: model)
             } label: {
                 // Grok's file card (web-08, measured): 61 pt tall, 20×27 icon at 15 pt,
@@ -3790,6 +3812,7 @@ struct FileCard: View {
 struct VoiceMemoBubble: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
+    let account: ChatAccountContext
     let name: String
     let projectId: Id
     let blobRef: String?
@@ -3798,8 +3821,8 @@ struct VoiceMemoBubble: View {
 
     var body: some View {
         Button {
-            guard let ref = blobRef, let url = model.blobURL(projectId: projectId, key: ref) else { return }
-            player.toggle(url: url, headers: model.authHeaders)
+            guard account.accepts(model), let ref = blobRef, let url = model.blobURL(projectId: projectId, key: ref) else { return }
+            player.toggle(url: url, headers: model.authHeaders, isCurrent: { account.accepts(model) })
         } label: {
             HStack(spacing: 10) {
                 Circle().fill(theme.primary).frame(width: 32, height: 32)
@@ -3824,9 +3847,23 @@ struct VoiceMemoBubble: View {
         .buttonStyle(.plain)
         .disabled(blobRef == nil)
         .onAppear {
+            guard account.accepts(model) else { return }
             if let ref = blobRef, let url = model.blobURL(projectId: projectId, key: ref) {
-                player.loadDuration(url: url, headers: model.authHeaders)
+                player.loadDuration(url: url, headers: model.authHeaders, isCurrent: { account.accepts(model) })
             }
+        }
+        .onDisappear {
+            // A normal scroll keeps the existing playback policy; account retirement does not.
+            let ownsLifetime: Bool
+            switch account {
+            case .account(let work):
+                ownsLifetime = !model.isFixture && model.accountLifetime.accepts(work.owner)
+            case .fixture(let owner):
+                ownsLifetime = model.isFixture && model.accountLifetime.accepts(owner)
+            case .unavailable:
+                ownsLifetime = false
+            }
+            if !ownsLifetime { player.retire() }
         }
     }
 }
@@ -3845,13 +3882,15 @@ final class MemoPlayer: ObservableObject {
     /// Resolve the memo length as soon as the bubble appears (not only on play).
     /// Remote `AVURLAsset` often returns no duration for m4a until the whole file is
     /// buffered (moov at the end), so download then probe with `AVAudioPlayer`.
-    func loadDuration(url: URL, headers: [String: String]) {
+    func loadDuration(url: URL, headers: [String: String], isCurrent: @escaping @MainActor () -> Bool) {
+        guard isCurrent() else { return }
         guard totalSeconds <= 0, localData == nil else { return }
         fetchTask?.cancel()
-        fetchTask = Task { _ = await ensureLocal(url: url, headers: headers) }
+        fetchTask = Task { _ = await ensureLocal(url: url, headers: headers, isCurrent: isCurrent) }
     }
 
-    func toggle(url: URL, headers: [String: String]) {
+    func toggle(url: URL, headers: [String: String], isCurrent: @escaping @MainActor () -> Bool) {
+        guard isCurrent() else { return }
         if let audio {
             if audio.isPlaying {
                 audio.pause()
@@ -3869,11 +3908,11 @@ final class MemoPlayer: ObservableObject {
         playing = true
         fetchTask?.cancel()
         fetchTask = Task {
-            guard await ensureLocal(url: url, headers: headers) else {
+            guard await ensureLocal(url: url, headers: headers, isCurrent: isCurrent) else {
                 playing = false
                 return
             }
-            guard !Task.isCancelled else {
+            guard !Task.isCancelled, isCurrent() else {
                 playing = false
                 return
             }
@@ -3881,22 +3920,33 @@ final class MemoPlayer: ObservableObject {
         }
     }
 
+    func retire() {
+        fetchTask?.cancel()
+        fetchTask = nil
+        audio?.stop()
+        audio = nil
+        playing = false
+        stopTick()
+        localData = nil
+    }
+
     /// Download the blob (Bearer / `?token=`) so duration and playback do not
     /// depend on `AVPlayer` streaming authenticated URLs.
-    private func ensureLocal(url: URL, headers: [String: String]) async -> Bool {
+    private func ensureLocal(url: URL, headers: [String: String], isCurrent: @MainActor () -> Bool) async -> Bool {
+        guard isCurrent() else { return false }
         if localData != nil, totalSeconds > 0 { return true }
         do {
             var req = URLRequest(url: url)
             for (k, v) in headers { req.setValue(v, forHTTPHeaderField: k) }
             let (data, response) = try await URLSession.shared.data(for: req)
-            guard !Task.isCancelled else { return false }
+            guard !Task.isCancelled, isCurrent() else { return false }
             guard let http = response as? HTTPURLResponse, (200..<400).contains(http.statusCode), !data.isEmpty else {
                 return false
             }
             let probe = try AVAudioPlayer(data: data)
             let d = probe.duration
             guard d.isFinite, d > 0 else { return false }
-            guard !Task.isCancelled else { return false }
+            guard !Task.isCancelled, isCurrent() else { return false }
             localData = data
             totalSeconds = d
             if !playing { durationLabel = Self.format(d) }

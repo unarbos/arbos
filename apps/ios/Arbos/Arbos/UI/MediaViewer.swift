@@ -1031,7 +1031,8 @@ enum MediaFetch {
     /// The bytes of a viewer item: the relay blob with the device bearer, or —
     /// in the simulator fixture — a generated picture / PDF for `fixture-*` keys.
     @MainActor
-    static func bytes(for item: MediaItem, model: AppModel) async -> (Data, String)? {
+    static func bytes(for item: MediaItem, model: AppModel, isCurrent: @MainActor () -> Bool = { true }) async -> (Data, String)? {
+        guard isCurrent() else { return nil }
         // A profile picture: its public URL (the relay's `/avatars/…`, GitHub's CDN, or a
         // tokened blob URL) — never with the device bearer, which must not reach another host.
         if let picture = item.pictureURL {

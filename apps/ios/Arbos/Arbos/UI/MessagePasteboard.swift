@@ -261,12 +261,13 @@ extension AppModel {
     /// bytes, never a thumbnail) and the pasteboard is written when they are in.
     /// `slot` is where the chat's blobs live (`<project id>` or `people:<chat id>`).
     @MainActor
-    func copyMessage(_ message: Message, slot: String) async {
+    func copyMessage(_ message: Message, slot: String, isCurrent: @MainActor () -> Bool = { true }) async {
+        guard isCurrent() else { return }
         guard let body = message.body else {
             notice = Notice(text: message.hasUploadingAttachment ? "Still uploading — try again in a moment" : "Nothing to copy")
             return
         }
-        await copy(text: body.text, attachments: body.attachments, slot: slot)
+        await copy(text: body.text, attachments: body.attachments, slot: slot, isCurrent: isCurrent)
     }
 
     /// Copy of one attachment on its own — the media viewer's pill, the Library row:
@@ -283,20 +284,27 @@ extension AppModel {
 
     @MainActor
     @discardableResult
-    private func copy(text: String, attachments: [Attachment], slot: String) async -> Bool {
+    private func copy(text: String, attachments: [Attachment], slot: String, isCurrent: @MainActor () -> Bool = { true }) async -> Bool {
+        guard isCurrent() else { return false }
         if attachments.isEmpty {
             MessagePasteboard.write(MessagePasteboard.items(text: text, fetched: []))
             return true
         }
         var fetched: [MessagePasteboard.Fetched] = []
         for a in attachments {
+            guard isCurrent() else { return false }
             let kind = MediaAlbum.kind(of: a) ?? .file
             let item = MediaItem(id: "copy#\(a.blobRef ?? a.name)", name: a.name, mime: a.mime, kind: kind,
                                  blobRef: a.blobRef, slot: slot, by: "", at: 0)
-            guard let (data, mime) = await MediaFetch.bytes(for: item, model: self) else { continue }
+            guard let (data, mime) = await MediaFetch.bytes(for: item, model: self, isCurrent: isCurrent) else {
+                guard isCurrent() else { return false }
+                continue
+            }
+            guard isCurrent() else { return false }
             let generic = mime.isEmpty || mime.hasPrefix("application/octet-stream")
             fetched.append(.init(name: a.name, mime: generic ? a.mime : mime, data: data))
         }
+        guard isCurrent() else { return false }
         let items = MessagePasteboard.items(text: text, fetched: fetched)
         guard !items.isEmpty else {
             notice = Notice(text: "Couldn't copy — the picture didn't download. Try again.")

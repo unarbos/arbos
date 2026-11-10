@@ -11,6 +11,66 @@ import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
 
+/// Authority captured once for a rendered chat and shared by its rows and callbacks.
+enum ChatAccountContext: Hashable {
+    case account(AccountWork)
+    case fixture(WorkLifetime.Ticket)
+    case unavailable
+
+    @MainActor
+    init(_ model: AppModel) {
+        guard !Task.isCancelled else { self = .unavailable; return }
+        if model.isFixture {
+            if let owner = model.accountLifetime.ticket { self = .fixture(owner) }
+            else { self = .unavailable }
+        } else if let work = model.accountWork() {
+            self = .account(work)
+        } else {
+            self = .unavailable
+        }
+    }
+
+    var work: AccountWork? {
+        if case .account(let work) = self { return work }
+        return nil
+    }
+
+    var owner: WorkLifetime.Ticket? {
+        switch self {
+        case .account(let work): return work.owner
+        case .fixture(let owner): return owner
+        case .unavailable: return nil
+        }
+    }
+
+    @MainActor
+    func accepts(_ model: AppModel) -> Bool {
+        guard !Task.isCancelled else { return false }
+        switch self {
+        case .account(let work): return model.acceptsAccountWork(work)
+        case .fixture(let owner): return model.isFixture && model.accountLifetime.accepts(owner)
+        case .unavailable: return false
+        }
+    }
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        switch (lhs, rhs) {
+        case (.account(let a), .account(let b)): return a.owner == b.owner
+        case (.fixture(let a), .fixture(let b)): return a == b
+        case (.unavailable, .unavailable): return true
+        default: return false
+        }
+    }
+
+    func hash(into hasher: inout Hasher) {
+        switch self {
+        case .account(let work): hasher.combine(0); hasher.combine(work.owner)
+        case .fixture(let owner): hasher.combine(1); hasher.combine(owner)
+        case .unavailable: hasher.combine(2)
+        }
+    }
+}
+
 /// Long-press → Forward payload for the chat picker sheet: the message (its text, its
 /// pictures / files / videos and its charts all travel) and who wrote it
 /// ([feedback forward-attachments-ios-2026-10-27]).
@@ -87,10 +147,12 @@ private struct ChatSessionHost: View {
     @State private var shownCaughtUp = false
 
     var body: some View {
+        let account = ChatAccountContext(model)
         #if DEBUG
         let _ = SendTrace.recent ? SendTrace.mark("host-body", detail: "tick=\(tick)", once: false) : ()
         #endif
-        ChatSession(model: model, chatId: chatId, projectId: projectId, tick: tick)
+        ChatSession(model: model, chatId: chatId, projectId: projectId, tick: tick, account: account)
+            .id(account)
             // This chat's list only: `messagesVersion[chatId]` moves on every replacement of
             // `messages[chatId]` or `channelRows[chatId]` (`AppModel.bumpVersions`), so a send
             // still re-runs the session at once (#1720) and another chat's stream does not.
@@ -142,6 +204,7 @@ struct ChatSession: View {
     /// publish changes this view's inputs and SwiftUI evaluates the body (and its
     /// `onChange` modifiers) again — see `ChatSessionHost`.
     let tick: Int
+    var account: ChatAccountContext = .unavailable
 
     /// The composer text lives in its own observable so a keystroke re-renders the
     /// field, not this screen. Read it as `composerDraft.text` for actions; the
@@ -519,6 +582,7 @@ struct ChatSession: View {
     /// Never inside the caller's animation: an animated change to the row list makes
     /// SwiftUI diff the whole window per frame.
     private func growWindow() {
+        guard account.accepts(model) else { return }
         let all = visibleRows
         let available = all.count - windowSkipEnd
         guard windowCount < available else { return }
@@ -538,13 +602,14 @@ struct ChatSession: View {
         if windowCount + step > Self.windowMax, let firstShown, let proxy = scroller {
             // Rows left below the viewport and the bottom anchor would shift what is on
             // screen; put the row that was at the top back where it was.
-            DispatchQueue.main.async { proxy.scrollTo(firstShown, anchor: .top) }
+            DispatchQueue.main.async { guard account.accepts(model) else { return }; proxy.scrollTo(firstShown, anchor: .top) }
         }
     }
 
     /// Back at the tail (a send, the new-messages pill, settle): the window is the
     /// newest rows again.
     private func resetWindowToTail() {
+        guard account.accepts(model) else { return }
         guard windowSkipEnd > 0 || windowCount > Self.windowMax else { return }
         var t = Transaction()
         t.disablesAnimations = true
@@ -629,6 +694,7 @@ struct ChatSession: View {
     /// Header tap: DM → the other person; group / shared project → the group page; own agent → its page;
     /// server channel → the channel's page (#1317; the server's page is the channel list's header).
     private func openHeaderProfile() {
+        guard account.accepts(model) else { return }
         model.toggleProfile(headerTarget)
     }
 
@@ -664,6 +730,7 @@ struct ChatSession: View {
     /// Hardware ⌘F toggles the bar ([feedback iphone-chat-search-cmd-f-toggle-2026-10-27]):
     /// closed → open and focus the field; open → close it like ✕ / Esc.
     private func openSearchFromKeyboard() {
+        guard account.accepts(model) else { return }
         let effect = ChatSearchShortcut.apply(open: showSearch)
         if !effect.open {
             closeSearch()
@@ -675,7 +742,7 @@ struct ChatSession: View {
             showSearch = effect.open
         }
         if effect.focus {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { searchFocused = true }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { guard account.accepts(model) else { return }; searchFocused = true }
         }
     }
 
@@ -684,6 +751,7 @@ struct ChatSession: View {
     /// back where a fresh open would show them (a window that slid while the filter was on
     /// was measured against the filtered list; [feedback iphone-search-close-2026-10-28]).
     private func closeSearch(scrollToTail: Bool = true) {
+        guard account.accepts(model) else { return }
         guard showSearch || !searchText.isEmpty || searchFocused else { return }
         var t = Transaction()
         t.disablesAnimations = true
@@ -698,7 +766,7 @@ struct ChatSession: View {
         pinnedToBottom = true
         // After a zero-hit filter the stack was empty; let the unfiltered rows lay out
         // before the jump to the tail, or the view stays parked at the top of nothing.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { guard account.accepts(model) else { return };
             withTransaction(Transaction(animation: nil)) { scroller?.scrollTo("bottom", anchor: .bottom) }
         }
     }
@@ -707,6 +775,7 @@ struct ChatSession: View {
     /// the filter go, then the full transcript scrolls to that message and highlights it
     /// (the quote-tap path, `revealQuoted`), once the unfiltered rows have laid out.
     private func openSearchResult(_ messageId: Id) {
+        guard account.accepts(model) else { return }
         guard ChatSearchClose.resultTapReveals(open: showSearch, query: searchText) else { return }
         // Where the result list was standing when the reader tapped. A reveal animates from
         // wherever the scroll view already is, so this is the one number that says which
@@ -719,7 +788,7 @@ struct ChatSession: View {
         traceOffsetsUntil = Date().addingTimeInterval(Self.revealTraceWindow)
         searchResultTapped = messageId
         closeSearch(scrollToTail: false)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { revealQuoted(messageId) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { guard account.accepts(model) else { return }; revealQuoted(messageId) }
     }
 
     /// Hardware-keyboard keys for the bar ([feedback iphone-chat-search-cmd-f-2026-10-26]).
@@ -741,14 +810,16 @@ struct ChatSession: View {
 
     /// Profile "search" tile: raise the in-chat search bar once for this chat.
     private func openPendingSearchIfNeeded() {
+        guard account.accepts(model) else { return }
         guard model.pendingSearchChat == chatId else { return }
         model.pendingSearchChat = nil
         showSearch = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { searchFocused = true }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { guard account.accepts(model) else { return }; searchFocused = true }
     }
 
     /// Reply in DM landed here: arm the composer with the cross-chat reply (#1836).
     private func takePendingDMReplyIfNeeded() {
+        guard account.accepts(model) else { return }
         guard let p = model.pendingDMReply, p.chatId == chatId else { return }
         model.pendingDMReply = nil
         replyTo = nil
@@ -760,6 +831,7 @@ struct ChatSession: View {
     /// Forward landed here: put the text in the composer and remember who it was
     /// forwarded from for the next send (feedback app-01M5YF7JWEZXPD1JSKBH9TMCES).
     private func takePendingForwardDraftIfNeeded() {
+        guard account.accepts(model) else { return }
         guard let p = model.pendingForwardDraft, p.chatId == chatId else { return }
         model.pendingForwardDraft = nil
         replyTo = nil
@@ -780,10 +852,11 @@ struct ChatSession: View {
     /// (the quote-tap path, `revealQuoted`). The appear settle scrolls to the end first;
     /// the jump follows a beat later.
     private func revealPendingIfNeeded() {
+        guard account.accepts(model) else { return }
         guard let reveal = model.pendingReveal, reveal.chatId == chatId,
               rows.contains(where: { $0.messageId == reveal.messageId && $0.role != .system }) else { return }
         model.pendingReveal = nil
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { guard account.accepts(model) else { return };
             pinnedToBottom = false
             revealQuoted(reveal.messageId)
         }
@@ -810,15 +883,17 @@ struct ChatSession: View {
     private var showsMemberChips: Bool { false }
 
     private func startCall(_ kind: CallKind, ring: [String]? = nil) {
+        guard account.accepts(model) else { return }
         if AppModel.isDraftDM(chatId) {
             model.fail(UserError.refused("start the call", "Say hi first, then call."))
             return
         }
-        Task { await calls.start(chatId: chatId, projectId: isPeople ? nil : projectId, kind: kind, title: callTitle, ring: ring) }
+        Task { guard account.accepts(model) else { return }; await calls.start(chatId: chatId, projectId: isPeople ? nil : projectId, kind: kind, title: callTitle, ring: ring) }
     }
 
     /// Groups open the picker; DMs and agent chats start at once.
     private func requestCall(_ kind: CallKind) {
+        guard account.accepts(model) else { return }
         if people?.isGroup == true {
             showGroupCallPicker = true
         } else {
@@ -1012,6 +1087,7 @@ struct ChatSession: View {
     /// Streaming deltas and single appends rebuild only the tail (feedback
     /// app-01M5NNJ001NHHYBHXTASM5NXBZ); everything else still does a full pass.
     private func refreshRows() {
+        guard account.accepts(model) else { return }
         // A channel is a people-style transcript: my lines right, everyone else by name.
         let slot = isPeople ? "\(peopleSlot):\(chatId)" : isChannel ? "\(channelSlot):\(chatId)" : projectId
         var agentNames: [String: String] = [:]
@@ -1175,6 +1251,7 @@ struct ChatSession: View {
                     // A tap on a mention chip (`arbos://mention/<kind>/<id>`, MentionChips.swift)
                     // opens that entity's page; every other link goes to the system.
                     .environment(\.openURL, OpenURLAction { url in
+                        guard account.accepts(model) else { return .handled }
                         // Inside a search result the row owns the tap: the reveal is what the
                         // reader asked for, so the chip and the spoiler stand down while a
                         // keyword filters the list (`ChatSearchClose.rowOwnsInnerTap`). A link
@@ -1254,7 +1331,7 @@ struct ChatSession: View {
                 }
                 if hasCallBar, let active = calls.activeByChat[chatId] {
                     CallBar(call: active) {
-                        Task { await calls.join(active, title: callTitle) }
+                        Task { guard account.accepts(model) else { return }; await calls.join(active, title: callTitle) }
                     }
                     .padding(.horizontal, 16)
                 }
@@ -1312,8 +1389,8 @@ struct ChatSession: View {
                 if let error = model.sendErrors[chatId] {
                     ErrorNote(id: "composer-error", error: error,
                               detailsOpen: Binding(get: { model.sendErrorDetailsOpen.contains(chatId) },
-                                                   set: { if $0 { model.sendErrorDetailsOpen.insert(chatId) } else { model.sendErrorDetailsOpen.remove(chatId) } }),
-                              onTryAgain: { model.retrySendError(chatId) })
+                                                   set: { guard account.accepts(model) else { return }; if $0 { model.sendErrorDetailsOpen.insert(chatId) } else { model.sendErrorDetailsOpen.remove(chatId) } }),
+                              onTryAgain: { guard account.accepts(model) else { return }; model.retrySendError(chatId) })
                         .padding(.horizontal, composerSideInset)
                         .padding(.bottom, 10)
                 }
@@ -1399,6 +1476,7 @@ struct ChatSession: View {
                             // again while the overlay fades) would undo the reaction.
                             guard actionsRow != nil else { return }
                             closeActions()
+                            guard account.accepts(model) else { return }
                             model.toggleReaction(chatId: chatId, messageId: row.messageId, emoji: emoji)
                         },
                         onMenu: { item in
@@ -1410,7 +1488,7 @@ struct ChatSession: View {
                             // showReactionSenders: holding the message lists who
                             // used each emoji under the held bubble (chip hold
                             // does the same one-emoji list in the transcript).
-                            RowView(model: model, theme: theme, composerInset: composerSideInset, row: row, chatId: chatId, width: geo.size.width,
+                            RowView(model: model, account: account, theme: theme, composerInset: composerSideInset, row: row, chatId: chatId, width: geo.size.width,
                                     people: isPeople || isChannel, timeReveal: 0,
                                     mentions: MentionTable.Cache.shared.table(model: model, theme: theme),
                                     showReactionSenders: !row.reactions.isEmpty)
@@ -1451,7 +1529,7 @@ struct ChatSession: View {
         }
         .sheet(isPresented: $showModelPicker, onDismiss: demoDismissed) {
             if let project {
-                ModelPickerView(project: project).environmentObject(model).environment(\.theme, theme)
+                ModelPickerView(project: project, account: account).environmentObject(model).environment(\.theme, theme)
             }
         }
         .sheet(isPresented: $showAgentSecrets) {
@@ -1472,6 +1550,7 @@ struct ChatSession: View {
             }
         }
         .confirm(BlockedState.unblockConfirm(handle: blockedPeer?.handle ?? counterpart?.handle ?? ""), isPresented: $confirmUnblock) {
+            guard account.accepts(model) else { return }
             if let peer = blockedPeer, let entry = BlockRow.entry(in: model.blocked, id: peer.id, handle: peer.handle) { model.unblock(entry) }
         }
     }
@@ -1485,6 +1564,7 @@ struct ChatSession: View {
         }
         .sheet(item: $pendingForward) { pending in
             ForwardSheet(fromName: pending.from, attachmentNote: pending.message.body?.hasMedia == true) { target in
+                guard account.accepts(model) else { return }
                 pendingForward = nil
                 // Text-only: opens the target chat with the text drafted; the user
                 // taps Send (feedback app-01M5YF7JWEZXPD1JSKBH9TMCES). Media /
@@ -1507,9 +1587,9 @@ struct ChatSession: View {
         .sheet(isPresented: $showTasks) {
             TasksSheet(jobs: model.openJobs(chatId),
                        onSteer: { job in steerJob(job) },
-                       onStop: { job in model.stopJob(chatId: chatId, jobId: job.id) },
-                       onStopAll: { showTasks = false; stop() },
-                       onOpen: { job in showTasks = false; model.openJobTab(job.id) })
+                       onStop: { job in guard account.accepts(model) else { return }; model.stopJob(chatId: chatId, jobId: job.id) },
+                       onStopAll: { guard account.accepts(model) else { return }; showTasks = false; stop() },
+                       onOpen: { job in guard account.accepts(model) else { return }; showTasks = false; model.openJobTab(job.id) })
                 .environment(\.theme, theme)
                 .presentationDetents([.medium, .large])
                 .presentationDragIndicator(.visible)
@@ -1530,11 +1610,11 @@ struct ChatSession: View {
         sessionRootDemoTasks
             .task(id: calls.activeByChat[chatId]?.callId) {
                 // While the Join bar is up, re-check the relay so an ended call does not stick.
-                guard !isChannel, calls.activeByChat[chatId] != nil else { return }
+                guard account.accepts(model), !isChannel, calls.activeByChat[chatId] != nil else { return }
                 while !Task.isCancelled {
                     try? await Task.sleep(nanoseconds: 4_000_000_000)
-                    guard !Task.isCancelled, calls.activeByChat[chatId] != nil else { return }
-                    await model.refreshActiveCall(chatId: chatId, projectId: isPeople ? nil : projectId)
+                    guard account.accepts(model), !Task.isCancelled, calls.activeByChat[chatId] != nil else { return }
+                    await model.refreshActiveCall(chatId: chatId, projectId: isPeople ? nil : projectId, expectedOwner: account.work?.owner)
                 }
             }
             // Timed group mute: sleep until `silencedUntil`, then clear local silenced state and
@@ -1542,14 +1622,14 @@ struct ChatSession: View {
             // ([feedback app-01M61GZ5B66VCSKF40458KH3DP]). Lives here (not on the muted line) so
             // the sleep is not cancelled when `isSilencedNow` flips false a tick early.
             .task(id: people?.silencedUntil) {
-                guard isPeople, let people, people.silenced, let until = people.silencedUntil else { return }
+                guard account.accepts(model), isPeople, let people, people.silenced, let until = people.silencedUntil else { return }
                 let end = Date(timeIntervalSince1970: TimeInterval(until) / 1000)
                 let delay = end.timeIntervalSinceNow
                 if delay > 0 {
                     try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
                 }
-                guard !Task.isCancelled else { return }
-                await MainActor.run { model.clearExpiredSilence(chatId: chatId) }
+                guard account.accepts(model), !Task.isCancelled else { return }
+                await MainActor.run { guard account.accepts(model) else { return }; model.clearExpiredSilence(chatId: chatId) }
             }
     }
 
@@ -1561,19 +1641,20 @@ struct ChatSession: View {
             // Polls the open chat's jobs while one is live (`AppModel.pollJobsIfNeeded`);
             // cancelled with the view. The sheet lists live work only: nothing open → it
             // closes itself.
+            guard account.accepts(model) else { return }
             if isJobTab { model.pollRolloutIfNeeded(chatId: chatId, force: true) }
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(AppModel.jobsPollMs))
-                guard !Task.isCancelled else { break }
+                guard account.accepts(model), !Task.isCancelled else { break }
                 model.pollJobsIfNeeded(chatId: chatId)
                 if isJobTab { model.pollRolloutIfNeeded(chatId: chatId) }
                 if showTasks, model.openJobs(chatId).isEmpty { showTasks = false }
             }
         }
         .task {
-            guard DebugHooks.liveDemo, !model.demoStarted, DebugHooks.openChat == chatId || DebugHooks.openChat == nil, let text = DebugHooks.autoSend else { return }
+            guard account.accepts(model), DebugHooks.liveDemo, !model.demoStarted, DebugHooks.openChat == chatId || DebugHooks.openChat == nil, let text = DebugHooks.autoSend else { return }
             model.demoStarted = true
-            while !model.caughtUp.contains(chatId) { try? await Task.sleep(nanoseconds: 200_000_000) }
+            while account.accepts(model) && !model.caughtUp.contains(chatId) { try? await Task.sleep(nanoseconds: 200_000_000) }
             try? await Task.sleep(nanoseconds: 2_000_000_000)
             composerFocused = true
             try? await Task.sleep(nanoseconds: 800_000_000)
@@ -1597,7 +1678,7 @@ struct ChatSession: View {
             demoPresentNext()
         }
         .task {
-            guard DebugHooks.demo, model.isFixture, !model.demoStarted else { return }
+            guard account.accepts(model), DebugHooks.demo, model.isFixture, !model.demoStarted else { return }
             model.demoStarted = true
             try? await Task.sleep(nanoseconds: 1_800_000_000)
             composerFocused = true
@@ -1655,6 +1736,7 @@ struct ChatSession: View {
         }
         .onChange(of: model.user?.name) { _, _ in refreshRows() }
         .onChange(of: model.caughtUp.contains(chatId), initial: true) { _, ready in
+            guard account.accepts(model) else { return }
             model.repaintIfBlank(chatId)
             handleCaughtUpAutoSend(ready)
         }
@@ -1662,6 +1744,7 @@ struct ChatSession: View {
 
     /// Chat appear: mark-read, restore draft, open channel / refresh call, rig hooks.
     private func handleSessionAppear() {
+        guard account.accepts(model) else { return }
         appearedAt = Date()
         LaunchClock.mark("chat-appear", detail: "messages=\(messages.count)")
         #if DEBUG
@@ -1674,6 +1757,7 @@ struct ChatSession: View {
         // Restore unsent text left when the user backed out of this thread.
         let saved = DebugHooks.composerDraft ?? model.composerDraft(for: chatId)
         composerDraft.onChange = { [chatId] d in
+            guard account.accepts(model) else { return }
             // Keep the draft while the view is still up so a process kill mid-type
             // is not required — leaving the thread saves on disappear too.
             model.setComposerDraft(d, for: chatId)
@@ -1694,7 +1778,7 @@ struct ChatSession: View {
             }
             updateMentionQuery()
         }
-        composerDraft.onCaretOrMentions = { updateMentionQuery() }
+        composerDraft.onCaretOrMentions = { guard account.accepts(model) else { return }; updateMentionQuery() }
         if composerDraft.text.isEmpty, !saved.isEmpty {
             composerDraft.text = saved
             composerDraft.caret = (saved as NSString).length
@@ -1706,7 +1790,7 @@ struct ChatSession: View {
             // The newest page now, live rows through the listener from here on.
             model.openChannel(chatId)
         } else {
-            Task { await model.refreshActiveCall(chatId: chatId, projectId: isPeople ? nil : projectId) }
+            Task { guard account.accepts(model) else { return }; await model.refreshActiveCall(chatId: chatId, projectId: isPeople ? nil : projectId, expectedOwner: account.work?.owner) }
         }
         openPendingSearchIfNeeded()
         takePendingDMReplyIfNeeded()
@@ -1717,16 +1801,16 @@ struct ChatSession: View {
         if let link = DebugHooks.link {
             model.setRoomLink(chatId, link)
             if let ms = DebugHooks.linkClearsMs {
-                DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(ms)) { model.setRoomLink(chatId, .live) }
+                DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(ms)) { guard account.accepts(model) else { return }; model.setRoomLink(chatId, .live) }
             }
         }
         #if DEBUG
         let drive = DebugHooks.perfDrive
-        if !drive.isEmpty { Task { @MainActor in await runPerfDrive(drive) } }
+        if !drive.isEmpty { Task { @MainActor in guard account.accepts(model) else { return }; await runPerfDrive(drive) } }
         #endif
         if let show = DebugHooks.show, !model.showHookDone {
             model.showHookDone = true
-            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(DebugHooks.showDelayMs)) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(DebugHooks.showDelayMs)) { guard account.accepts(model) else { return };
                 self.handleDebugShowHook(show)
             }
         }
@@ -1734,6 +1818,10 @@ struct ChatSession: View {
 
     /// Chat disappear: keep draft, mark-read once more, clear visibleChatId.
     private func handleSessionDisappear() {
+        recorder.cancel()
+        composerDraft.onChange = nil
+        composerDraft.onCaretOrMentions = nil
+        guard account.accepts(model) else { return }
         // Keep the typed draft so coming back to this thread restores it.
         model.setComposerDraft(composerDraft.text, for: chatId)
         // The two callbacks capture this view, whose `@State` owns the draft: left set, the
@@ -1749,6 +1837,7 @@ struct ChatSession: View {
 
     /// Refresh rows when `messagesVersion` moves; mark-read on a new last row.
     private func handleMessagesVersionChange(_ new: Int) {
+        guard account.accepts(model) else { return }
         #if DEBUG
         if SendTrace.traces(chatId) { SendTrace.mark("version-onchange", detail: "version=\(new)", once: false) }
         #endif
@@ -1770,6 +1859,7 @@ struct ChatSession: View {
 
     /// Rig auto-send once the chat is caught up (`ARBOS_AUTO_SEND`).
     private func handleCaughtUpAutoSend(_ ready: Bool) {
+        guard account.accepts(model) else { return }
         guard ready, !sentOnce, !DebugHooks.liveDemo, let text = DebugHooks.autoSend, DebugHooks.openChat == chatId else { return }
         // Several messages separated by " ||| " go out a few seconds apart
         // (multitasking checks: the composer never waits for a reply).
@@ -1777,7 +1867,7 @@ struct ChatSession: View {
         composerDraft.text = parts.first ?? text
         send()
         if parts.count > 1 {
-            Task {
+            Task { guard account.accepts(model) else { return };
                 for p in parts.dropFirst() {
                     try? await Task.sleep(nanoseconds: 3_000_000_000)
                     composerDraft.text = p
@@ -1790,6 +1880,7 @@ struct ChatSession: View {
     /// Rig / DebugHooks `ARBOS_SHOW=…` cases for chat appear (kept out of the
     /// view builder so the type-checker can finish).
     private func handleDebugShowHook(_ show: String) {
+        guard account.accepts(model) else { return }
         switch show {
                     case "keyboard": composerFocused = true
                     case "settings": showSettings = true
@@ -1814,7 +1905,7 @@ struct ChatSession: View {
                         // The group page, then its first other member pushed over it (rig).
                         openHeaderProfile()
                         if let other = people?.humans.first(where: { $0.id != model.user?.id }) {
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { model.showProfile(.user(ProfilePerson(other))) }
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { guard account.accepts(model) else { return }; model.showProfile(.user(ProfilePerson(other))) }
                         }
                     case "members", "addperson": openHeaderProfile()
                     case "foreignagent", "foreignagent-owner":
@@ -1824,7 +1915,7 @@ struct ChatSession: View {
                         if let agent = people?.agents.first(where: { $0.ownerId != model.user?.id }), let foreign = model.foreignAgent(agent.id) {
                             model.showProfile(.agent(projectId: foreign.id))
                             if show == "foreignagent-owner", let owner = agent.ownerHandle {
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { guard account.accepts(model) else { return };
                                     model.showProfile(.user(ProfilePerson(id: agent.ownerId ?? owner, handle: owner, name: foreign.ownerName, avatarUrl: foreign.ownerAvatarUrl)))
                                 }
                             }
@@ -1836,7 +1927,7 @@ struct ChatSession: View {
                     case "call":
                         #if DEBUG
                         if let url = DebugHooks.callUrl, let token = DebugHooks.callToken {
-                            Task { await calls.debugJoin(url: url, token: token, kind: DebugHooks.callKind == "video" ? .video : .voice,
+                            Task { guard account.accepts(model) else { return }; await calls.debugJoin(url: url, token: token, kind: DebugHooks.callKind == "video" ? .video : .voice,
                                                          chatId: chatId, projectId: isPeople ? peopleSlot : projectId) }
                         } else {
                             startCall(DebugHooks.callKind == "video" ? .video : .voice)
@@ -1844,7 +1935,7 @@ struct ChatSession: View {
                         #else
                         startCall(.voice)
                         #endif
-                    case "recording": recorder.start()
+                    case "recording": recorder.start(isCurrent: { account.accepts(model) })
                     // `copy[:<n>]` (Debug, [feedback copy-image-messages-ios-2026-10-27] rig): Copy of
                     // the n-th newest message row (0 = newest) through the menu's own path, the
                     // pasteboard printed to the console, then the composer's paste 2 s later.
@@ -1855,7 +1946,7 @@ struct ChatSession: View {
                         if n < candidates.count {
                             let row = candidates[candidates.count - 1 - n]
                             runMessageMenu(.copy, row: row)
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { guard account.accepts(model) else { return };
                                 MessagePasteboard.debugDump()
                                 let media = MessagePasteboard.pendingAttachments()
                                 if !media.isEmpty { pending.append(contentsOf: media); composerFocused = true }
@@ -1962,7 +2053,7 @@ struct ChatSession: View {
                         // Rig (iphone-bubble-menu-keyboard): the composer keyboard is up, then the
                         // newest bubble is long-pressed — the overlay must clear the keyboard.
                         composerFocused = true
-                        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(1200)) {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(1200)) { guard account.accepts(model) else { return };
                             if let row = rows.last(where: { isMessageRow($0) }) { openActions(row) }
                         }
                     case "reply-dm":
@@ -1987,6 +2078,7 @@ struct ChatSession: View {
     /// Demo tour: present the next sheet; each one auto-dismisses and its
     /// onDismiss schedules the next, so presentations never overlap.
     private func demoPresentNext() {
+        guard account.accepts(model) else { return }
         guard !demoQueue.isEmpty else { return }
         let step = demoQueue.removeFirst()
         let hold: Double = step == "voice" ? 3.5 : 3.0
@@ -1998,7 +2090,7 @@ struct ChatSession: View {
         default: break
         }
         guard step != "settings" else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + hold) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + hold) { guard account.accepts(model) else { return };
             switch step {
             case "model": showModelPicker = false
             case "attach": showAttach = false
@@ -2009,8 +2101,9 @@ struct ChatSession: View {
     }
 
     private func demoDismissed() {
-        guard DebugHooks.liveDemo, !demoQueue.isEmpty else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { demoPresentNext() }
+        guard account.accepts(model) else { return }
+        guard account.accepts(model), DebugHooks.liveDemo, !demoQueue.isEmpty else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { guard account.accepts(model) else { return }; demoPresentNext() }
     }
 
     // MARK: Header (floating glass)
@@ -2149,7 +2242,7 @@ struct ChatSession: View {
                     closeSearch()
                 } else {
                     withAnimation(.easeOut(duration: 0.18)) { showSearch = true }
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { searchFocused = true }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { guard account.accepts(model) else { return }; searchFocused = true }
                 }
             } label: {
                 GlassCircle(material: headerMaterial) {
@@ -2226,6 +2319,7 @@ struct ChatSession: View {
     /// ↓ after a quote tap: return to the reply we came from. Otherwise jump to
     /// the latest row ([feedback app-01M5WDFMAZX82JNSEVZ94BM90D]).
     private func jumpBackOrLatest() {
+        guard account.accepts(model) else { return }
         if let back = jumpBackTo {
             jumpBackTo = nil
             revealQuoted(back)
@@ -2243,6 +2337,7 @@ struct ChatSession: View {
     /// group ([feedback jump-to-latest-instant-ios-2026-10-25]; the Mac's ↓ had the
     /// same shape of bug). Within the tail window the short animated hop stays.
     private func jumpToLatest() {
+        guard account.accepts(model) else { return }
         jumpBackTo = nil
         pinnedToBottom = true
         awayFromBottom = false
@@ -2260,7 +2355,7 @@ struct ChatSession: View {
         }
         // The first scrollTo runs before layout knows the re-cut content's size.
         scroller?.scrollTo("bottom", anchor: .bottom)
-        DispatchQueue.main.async { scroller?.scrollTo("bottom", anchor: .bottom) }
+        DispatchQueue.main.async { guard account.accepts(model) else { return }; scroller?.scrollTo("bottom", anchor: .bottom) }
     }
 
     /// The window ↓ lands on. Unchanged while the window still ends at the tail
@@ -2273,9 +2368,10 @@ struct ChatSession: View {
 
     /// After a send: stick to the end now and again once the optimistic row has height.
     private func scrollAfterSend() {
+        guard account.accepts(model) else { return }
         scroller?.scrollTo("bottom", anchor: .bottom)
-        DispatchQueue.main.async { scroller?.scrollTo("bottom", anchor: .bottom) }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+        DispatchQueue.main.async { guard account.accepts(model) else { return }; scroller?.scrollTo("bottom", anchor: .bottom) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { guard account.accepts(model) else { return };
             withAnimation(.easeOut(duration: 0.2)) { scroller?.scrollTo("bottom", anchor: .bottom) }
         }
     }
@@ -2330,6 +2426,7 @@ struct ChatSession: View {
     /// decided on the first points so a vertical pan is the scroll view's alone. A nested
     /// table scrolling sideways undoes a peek in progress ([feedback ACQD4mUCTPxH7z3Y7YO8Vjw]).
     private func handleTranscriptSwipe(_ event: TranscriptSwipeEvent) {
+        guard account.accepts(model) else { return }
         var still = Transaction()
         still.disablesAnimations = true
         switch event {
@@ -2488,7 +2585,7 @@ struct ChatSession: View {
             .simultaneousGesture(
                 TapGesture().onEnded {
                     guard ChatSearchClose.tapOutsideCloses(open: showSearch) else { return }
-                    DispatchQueue.main.async {
+                    DispatchQueue.main.async { guard account.accepts(model) else { return };
                         if searchResultTapped == nil { closeSearch() }
                         searchResultTapped = nil
                     }
@@ -2569,7 +2666,7 @@ struct ChatSession: View {
                 pinnedToBottom = true
                 awayFromBottom = false
                 newBelowCount = 0
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { guard account.accepts(model) else { return };
                     withAnimation(.easeOut(duration: 0.25)) { proxy.scrollTo("bottom", anchor: .bottom) }
                 }
             }
@@ -2600,6 +2697,7 @@ struct ChatSession: View {
     /// `ARBOS_PERF_DRIVE` (perf rig): scripted scroll / typing / typing-row load so the
     /// frame log can be read per phase (`phase … begin/end` lines in the `perf` log).
     private func runPerfDrive(_ drive: Set<String>) async {
+        guard account.accepts(model) else { return }
         try? await Task.sleep(for: .seconds(4))
         if drive.contains("scroll") {
             PerfLog.mark("phase scroll begin", ms: 0)
@@ -2738,13 +2836,14 @@ struct ChatSession: View {
     /// `scrollTo` runs before layout knows the content size, so repeat after
     /// the next runloop turn and once more after the rows settle.
     private func settleToBottom(_ proxy: ScrollViewProxy) {
+        guard account.accepts(model) else { return }
         pinnedToBottom = true
         awayFromBottom = false
         newBelowCount = 0
         resetWindowToTail()
         proxy.scrollTo("bottom", anchor: .bottom)
-        DispatchQueue.main.async { proxy.scrollTo("bottom", anchor: .bottom) }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { proxy.scrollTo("bottom", anchor: .bottom) }
+        DispatchQueue.main.async { guard account.accepts(model) else { return }; proxy.scrollTo("bottom", anchor: .bottom) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { guard account.accepts(model) else { return }; proxy.scrollTo("bottom", anchor: .bottom) }
     }
 
     /// Put the rebuilt filtered stack back on its end after a keyword re-keys it.
@@ -2767,14 +2866,15 @@ struct ChatSession: View {
     /// closes search in order to land on its own message — hence the identity re-check before
     /// each deferred hop, so a tap taken mid-ladder is not dragged back to the tail.
     private func pinFilteredStackToEnd(_ proxy: ScrollViewProxy) {
+        guard account.accepts(model) else { return }
         guard searchHitsActive else { return }
         let key = transcriptStackIdentity
         proxy.scrollTo("bottom", anchor: .bottom)
-        DispatchQueue.main.async {
+        DispatchQueue.main.async { guard account.accepts(model) else { return };
             guard transcriptStackIdentity == key else { return }
             proxy.scrollTo("bottom", anchor: .bottom)
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { guard account.accepts(model) else { return };
             guard transcriptStackIdentity == key else { return }
             proxy.scrollTo("bottom", anchor: .bottom)
         }
@@ -2797,6 +2897,7 @@ struct ChatSession: View {
     /// (Reply in DM) opens the source chat on the original instead; the header is not
     /// tappable when the viewer is not in that chat.
     private func revealQuoted(_ quote: Quote, from replyId: Id) {
+        guard account.accepts(model) else { return }
         if let src = quote.source {
             if src.chatId == chatId {
                 jumpBackTo = replyId
@@ -2812,6 +2913,7 @@ struct ChatSession: View {
     }
 
     private func revealQuoted(_ messageId: Id) {
+        guard account.accepts(model) else { return }
         guard let target = rows.first(where: { $0.messageId == messageId && $0.role != .system }) else { return }
         // `scrollTo` can only move to a row the stack has actually built, so whether the
         // target is in `windowedRows` decides whether the reveal can do anything at all.
@@ -2846,11 +2948,11 @@ struct ChatSession: View {
             // no animation worth keeping, and an animated scroll over a window that changed
             // in the same frame makes SwiftUI diff the whole stack per frame. Let the moved
             // window lay out first.
-            DispatchQueue.main.async { settleOnRevealed(target.id, messageId: messageId, animated: false) }
+            DispatchQueue.main.async { guard account.accepts(model) else { return }; settleOnRevealed(target.id, messageId: messageId, animated: false) }
         } else {
             settleOnRevealed(target.id, messageId: messageId, animated: true)
         }
-        Task { @MainActor in
+        Task { @MainActor in guard account.accepts(model) else { return };
             try? await Task.sleep(for: .milliseconds(1600))
             if highlightedMessage == messageId { highlightedMessage = nil }
         }
@@ -2901,6 +3003,7 @@ struct ChatSession: View {
     /// be fighting the reader's own scroll, and `settleToBottom` corrects the tail the same
     /// way and for the same reason.
     private func settleOnRevealed(_ rowId: String, messageId: Id, animated: Bool) {
+        guard account.accepts(model) else { return }
         if animated {
             withAnimation(.easeInOut(duration: Self.revealHop)) { scroller?.scrollTo(rowId, anchor: .center) }
         } else {
@@ -2915,7 +3018,7 @@ struct ChatSession: View {
         // cancel the animation the reader is watching.
         let first = (animated ? Self.revealHop : 0) + Self.revealSettleGap
         let giveUpAt = Date().addingTimeInterval(first + Self.revealCorrectFor)
-        DispatchQueue.main.asyncAfter(deadline: .now() + first) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + first) { guard account.accepts(model) else { return };
             correctReveal(rowId, messageId: messageId, pass: 0, unstuck: 0,
                           lastOffset: .infinity, giveUpAt: giveUpAt)
         }
@@ -2929,6 +3032,7 @@ struct ChatSession: View {
     /// than stored because it belongs to this reveal and nothing outside the loop reads it.
     private func correctReveal(_ rowId: String, messageId: Id, pass: Int, unstuck: Int,
                                lastOffset: CGFloat, giveUpAt: Date) {
+        guard account.accepts(model) else { return }
         // A second reveal has taken over, or the reader has been handed the scroll back.
         guard revealingRow == RevealTarget(rowId: rowId, messageId: messageId) else { return }
         let offset = scrollProbe.last
@@ -2961,7 +3065,7 @@ struct ChatSession: View {
         } else {
             withTransaction(Transaction(animation: nil)) { scroller?.scrollTo(rowId, anchor: .center) }
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.revealSettleGap) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.revealSettleGap) { guard account.accepts(model) else { return };
             correctReveal(rowId, messageId: messageId, pass: pass + 1,
                           unstuck: unstuck + (stuck ? 1 : 0),
                           lastOffset: offset, giveUpAt: giveUpAt)
@@ -2989,6 +3093,7 @@ struct ChatSession: View {
     /// a proof: the same row against `.top` and `.bottom`, which asks for a destination most
     /// of a viewport away without changing which row is being asked for.
     private func unstick(_ rowId: String, messageId: Id, pass: Int, tried: Int) {
+        guard account.accepts(model) else { return }
         if tried == 0, let tail = windowedRows.last?.id, tail != rowId {
             revealTrace("settle-unstick", "id=\(messageId) pass=\(pass) windowEnd=\(tail)")
             withTransaction(Transaction(animation: nil)) { scroller?.scrollTo(tail, anchor: .bottom) }
@@ -3022,6 +3127,7 @@ struct ChatSession: View {
     /// Stop correcting: drop the row's frame reporting and, for the rig, publish what the
     /// loop did where a UI test can read it.
     private func finishReveal(messageId: Id, passes: Int, arrived: Bool, offset: CGFloat) {
+        guard account.accepts(model) else { return }
         revealingRow = nil
         let samplesAtStop = scrollProbe.samples
         if DebugHooks.traceReveal {
@@ -3029,7 +3135,7 @@ struct ChatSession: View {
             // `moved` cannot be read at the moment the loop stops — it is the count of scroll
             // samples *after* it. One short wait, well inside the three seconds the UI test
             // waits before reading the probe.
-            DispatchQueue.main.asyncAfter(deadline: .now() + Self.revealMovedAfter) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.revealMovedAfter) { guard account.accepts(model) else { return };
                 guard lastRevealedMessage == messageId else { return }
                 revealOutcome = "passes=\(passes) arrived=\(arrived) "
                     + "offset=\(Self.offsetText(scrollProbe.last)) "
@@ -3058,7 +3164,7 @@ struct ChatSession: View {
     /// It is a count and a scroll offset: no row content, no sender, nothing a reader typed.
     private func traceAtRest(messageId: Id, after samplesAtLastRung: Int) {
         guard DebugHooks.traceReveal else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.revealAtRestAfter) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.revealAtRestAfter) { guard account.accepts(model) else { return };
             // The highlight clears on its own well before this fires, so nil is the normal
             // case. A *different* id means a second reveal has taken over and this line
             // would be reporting its scroll position under the first one's name.
@@ -3091,6 +3197,7 @@ struct ChatSession: View {
     /// iphone-bubble-menu-keyboard-2026-10-25) — the typed draft stays in `composerDraft`,
     /// only focus moves, and `closeActions` gives it back.
     private func openActions(_ row: Row) {
+        guard account.accepts(model) else { return }
         Haptics.pick()
         actionsRestoresKeyboard = composerFocused
         composerFocused = false
@@ -3103,6 +3210,7 @@ struct ChatSession: View {
     /// reaction). The composer is focused again only if it was before the press and the
     /// action leaves the chat on screen (`MessageActionsKeyboard.restoresFocus`).
     private func closeActions(after item: MessageMenuItem? = nil) {
+        guard account.accepts(model) else { return }
         let restore = MessageActionsKeyboard.restoresFocus(wasFocused: actionsRestoresKeyboard, after: item)
         actionsRestoresKeyboard = false
         withAnimation(.easeOut(duration: 0.15)) { actionsRow = nil }
@@ -3140,6 +3248,7 @@ struct ChatSession: View {
     /// Reply in DM (open a private chat with the human who wrote it), Edit
     /// (own text), Delete for everyone.
     private func runMessageMenu(_ item: MessageMenuItem, row: Row) {
+        guard account.accepts(model) else { return }
         switch item {
         case .copy:
             // The whole message — words and pictures / files — through the one copy path
@@ -3147,7 +3256,7 @@ struct ChatSession: View {
             // and a picture message copied nothing).
             guard let m = messageById[row.messageId] else { return }
             let slot = isPeople ? "\(peopleSlot):\(chatId)" : isChannel ? "\(channelSlot):\(chatId)" : projectId
-            Task { await model.copyMessage(m, slot: slot) }
+            Task { guard account.accepts(model) else { return }; await model.copyMessage(m, slot: slot, isCurrent: { account.accepts(model) }) }
         case .reply:
             beginReply(to: row)
         case .viewThread:
@@ -3173,6 +3282,7 @@ struct ChatSession: View {
 
     /// Long-press → View thread: open the held message and every reply in its chain.
     private func openThread(for row: Row) {
+        guard account.accepts(model) else { return }
         guard let root = messageById[row.messageId] else { return }
         let replies = Transcript.threadReplies(rootId: root.id, in: messages)
         guard !replies.isEmpty else { return }
@@ -3199,6 +3309,7 @@ struct ChatSession: View {
     /// pictures, files, charts, any of them is enough
     /// ([feedback forward-attachments-ios-2026-10-27]: only the words used to travel).
     private func beginForward(_ row: Row) {
+        guard account.accepts(model) else { return }
         guard let m = messageById[row.messageId] else { return }
         guard m.body != nil else {
             if m.hasUploadingAttachment {
@@ -3220,6 +3331,7 @@ struct ChatSession: View {
     /// Reply to this row: composer preview + focus (people chats also address the agent).
     /// Long-press → Reply on the bubble, and the actions menu.
     private func beginReply(to row: Row) {
+        guard account.accepts(model) else { return }
         guard let m = messageById[row.messageId] else { return }
         editing = nil
         forwardedFrom = nil
@@ -3232,6 +3344,7 @@ struct ChatSession: View {
 
     /// Edit this own message: put its text in the composer with an Editing bar.
     private func beginEdit(_ row: Row) {
+        guard account.accepts(model) else { return }
         guard let m = messageById[row.messageId] else { return }
         let text = m.plainText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, isOwnMessage(m) else { return }
@@ -3280,7 +3393,7 @@ struct ChatSession: View {
             ErrorNote(id: model.pushRefused.contains(chatId) ? "delivery-error" : "machine-error",
                       error: error,
                       detailsOpen: $chatNoteDetailsOpen,
-                      onTryAgain: model.pushRefused.contains(chatId) ? nil : { model.startMachine() })
+                      onTryAgain: model.pushRefused.contains(chatId) ? nil : { guard account.accepts(model) else { return }; model.startMachine() })
         }
     }
 
@@ -3419,14 +3532,14 @@ struct ChatSession: View {
                 let jobs = model.openJobs(chatId)
                 let openTasks: (() -> Void)? = jobs.isEmpty ? nil : { showTasks = true }
                 // The words link to the newest job's tab (not inside a job tab); the chip opens the list.
-                let openNewest: (() -> Void)? = (jobs.isEmpty || isJobTab) ? nil : { model.openNewestJobTab(from: chatId) }
+                let openNewest: (() -> Void)? = (jobs.isEmpty || isJobTab) ? nil : { guard account.accepts(model) else { return }; model.openNewestJobTab(from: chatId) }
                 PresenceRow(participants: participants,
                             detail: model.currentActivity(chatId),
                             queued: false,
                             taskCount: jobs.count,
                             onTasks: openTasks,
                             onWords: openNewest,
-                            onPicture: { model.toggleProfile($0) },
+                            onPicture: { guard account.accepts(model) else { return }; model.toggleProfile($0) },
                             pictureShowing: { model.profileShows($0) })
                     .padding(.horizontal, 16)
                     // Grok: 68 px from the picture's bottom to the composer's top.
@@ -3443,6 +3556,7 @@ struct ChatSession: View {
     /// the job's ask and the user types the correction; the agent binds a correction
     /// that quotes the ask to that job.
     private func steerJob(_ job: Job) {
+        guard account.accepts(model) else { return }
         guard let askId = job.askMessageId, let ask = messageById[askId] ?? messages.first(where: { $0.id == askId }) else {
             model.failRefused("steer the task", "That task's request is not in this chat any more.")
             return
@@ -3466,7 +3580,7 @@ struct ChatSession: View {
             Text("Replying to \(replyLabel(for: r))").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
                 .lineLimit(1).fixedSize()
             if let ref = quotedImageRef(r) {
-                ReplyThumb(projectId: projectId, blobRef: ref)
+                ReplyThumb(account: account, projectId: projectId, blobRef: ref)
             }
             Text(Quote.line(of: r, maxChars: Theme.replyPreviewChars))
                 .font(theme.font(Theme.tiny)).foregroundStyle(theme.text)
@@ -3622,12 +3736,14 @@ struct ChatSession: View {
 
     /// The chip's ✕: that one goes, the others and the draft stay.
     private func removePending(_ id: UUID) {
+        guard account.accepts(model) else { return }
         pending = Self.removingPending(id, from: pending)
     }
 
     /// ⌫ on an empty draft (`MentionTextView.onDeleteBackwardEmpty`): the last
     /// pending attachment goes; with text in the draft the key edits text only.
     private func removeLastPending() {
+        guard account.accepts(model) else { return }
         pending = Self.removingLastPending(from: pending, draftEmpty: composerDraft.text.isEmpty)
     }
 
@@ -3642,7 +3758,7 @@ struct ChatSession: View {
 
     /// The "+" inside the field: photos and files. Channels send text only (C1), so none there.
     private var attachButton: some View {
-        Button { showAttach = true } label: {
+        Button { guard account.accepts(model) else { return }; showAttach = true } label: {
             ZStack {
                 ControlSurface(shape: Circle())
                 Image(systemName: "plus")
@@ -3656,22 +3772,27 @@ struct ChatSession: View {
         .buttonStyle(.plain)
         .sheet(isPresented: $showAttach, onDismiss: demoDismissed) {
             AttachSheet {
+                guard account.accepts(model) else { return }
                 showAttach = false
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showPhotos = true }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { guard account.accepts(model) else { return }; showPhotos = true }
             } onFile: {
+                guard account.accepts(model) else { return }
                 showAttach = false
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showFiles = true }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { guard account.accepts(model) else { return }; showFiles = true }
             } onFun: {
+                guard account.accepts(model) else { return }
                 showAttach = false
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showFun = true }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { guard account.accepts(model) else { return }; showFun = true }
             }
             .environment(\.theme, theme)
         }
         .sheet(isPresented: $showFun) {
             FunPickerSheet(chatId: chatId, onEmoji: { glyph in
+                guard account.accepts(model) else { return }
                 // Into the draft like typed text; the field keeps the caret at the end.
                 composerDraft.text += glyph
             }, onSend: { pick in
+                guard account.accepts(model) else { return }
                 Haptics.send()
                 jumpBackTo = nil
                 pinnedToBottom = true
@@ -3686,6 +3807,7 @@ struct ChatSession: View {
         }
         .photosPicker(isPresented: $showPhotos, selection: $photoItem, matching: .any(of: [.images, .videos]))
         .fileImporter(isPresented: $showFiles, allowedContentTypes: [.item], allowsMultipleSelection: false) { result in
+            guard account.accepts(model) else { return }
             if case .success(let urls) = result, let url = urls.first {
                 let ok = url.startAccessingSecurityScopedResource()
                 defer { if ok { url.stopAccessingSecurityScopedResource() } }
@@ -3699,9 +3821,11 @@ struct ChatSession: View {
             }
         }
         .onChange(of: photoItem) { _, item in
+            guard account.accepts(model) else { return }
             guard let item else { return }
-            Task {
+            Task { guard account.accepts(model) else { return };
                 if let data = try? await item.loadTransferable(type: Data.self) {
+                    guard account.accepts(model) else { return }
                     let type = item.supportedContentTypes.first
                     let picked = ChatView.imageForUpload(data, type: type)
                     // POSIX stamp (no locale letters, no `:` — voice memos use the same idea).
@@ -3709,6 +3833,7 @@ struct ChatSession: View {
                     pending.append(.init(name: "Photo \(stamp).\(picked.ext)", mime: picked.mime, data: picked.data))
                     composerFocused = true
                 }
+                guard account.accepts(model) else { return }
                 photoItem = nil
             }
         }
@@ -3722,11 +3847,12 @@ struct ChatSession: View {
 
     /// Open a staged picture/video in Quick Look so the description can still be written after.
     private func openPendingPreview(_ a: AppModel.PendingAttachment) {
+        guard account.accepts(model) else { return }
         guard Self.isCaptionablePending(a), let file = MediaFetch.tempFile(a.data, name: a.name) else { return }
         // `.quickLookPreview` only presents when the binding becomes non-nil.
         if pendingPreviewURL == file {
             pendingPreviewURL = nil
-            Task { @MainActor in pendingPreviewURL = file }
+            Task { @MainActor in guard account.accepts(model) else { return }; pendingPreviewURL = file }
             return
         }
         pendingPreviewURL = file
@@ -3755,6 +3881,7 @@ struct ChatSession: View {
             // native type kept — GIF/WebP bytes included); no second handler here.
             onCancelRecording: cancelMemoRecording,
             onMicDrag: { value in
+                guard account.accepts(model) else { return }
                 if !memoHoldActive {
                     memoHoldActive = true
                     memoPressStartedAt = Date()
@@ -3767,7 +3894,7 @@ struct ChatSession: View {
                     } else {
                         memoIgnoreRelease = false
                         Haptics.recordStart()
-                        recorder.start()
+                        recorder.start(isCurrent: { account.accepts(model) })
                     }
                 }
                 // Slide left while holding to arm cancel (hold-to-talk).
@@ -3781,6 +3908,7 @@ struct ChatSession: View {
                 }
             },
             onMicEnd: { value in
+                guard account.accepts(model) else { return }
                 let held = Date().timeIntervalSince(memoPressStartedAt ?? Date())
                 let cancel = memoCancelArmed || value.translation.width < -Self.memoCancelDistance
                 memoHoldActive = false
@@ -3809,6 +3937,7 @@ struct ChatSession: View {
                 // Short tap: leave recording on (click-to-toggle).
             },
             onPrimary: {
+                guard account.accepts(model) else { return }
                 if recorder.recording {
                     memoHoldActive = false
                     memoIgnoreRelease = false
@@ -3824,6 +3953,7 @@ struct ChatSession: View {
                 }
             },
             onPasteMedia: { media in
+                guard account.accepts(model) else { return }
                 // A copied picture / file pastes back as an attachment chip
                 // ([feedback copy-image-messages-ios-2026-10-27]).
                 pending.append(contentsOf: media)
@@ -3843,7 +3973,7 @@ struct ChatSession: View {
         // Hold released before permission returned: finish once recording starts.
         // A short tap leaves recording on (click-to-toggle), so do not auto-finish then.
         .onChange(of: recorder.recording) { _, isOn in
-            guard isOn, memoFinishWhenPermission else { return }
+            guard account.accepts(model), isOn, memoFinishWhenPermission else { return }
             memoFinishWhenPermission = false
             finishMemoHold()
         }
@@ -3851,6 +3981,7 @@ struct ChatSession: View {
 
     /// Stop the hold-to-talk memo and send its transcript (no-op if too short).
     private func finishMemoHold() {
+        guard account.accepts(model) else { return }
         guard recorder.recording else { return }
         Haptics.send()
         if let memo = recorder.stop() {
@@ -3871,6 +4002,7 @@ struct ChatSession: View {
 
     /// Empty the field after a send (text, chips, caret, the saved draft).
     private func clearDraft() {
+        guard account.accepts(model) else { return }
         composerDraft.text = ""
         composerDraft.mentions = []
         composerDraft.caret = 0
@@ -3885,6 +4017,7 @@ struct ChatSession: View {
 
     /// `@` completion: the `@token` the caret sits at the end of (nil closes the picker).
     private func updateMentionQuery() {
+        guard account.accepts(model) else { return }
         // Set only on change: this runs per keystroke from the draft hook, and the
         // screen must not re-render for a value that did not move.
         let next: String? = isPeople ? MentionDraft.openToken(text: composerDraft.text, caret: composerDraft.caret, mentions: composerDraft.mentions)?.query : nil
@@ -3971,11 +4104,13 @@ struct ChatSession: View {
 
     /// The picked row becomes one chip over the open `@token` (behaviour 4).
     private func completeMention(_ m: ChatMember) {
+        guard account.accepts(model) else { return }
         completeMention(.member(m))
     }
 
     /// A collective chip addresses everyone: no sticky conversation chip.
     private func completeMention(_ target: ComposerMentionTarget) {
+        guard account.accepts(model) else { return }
         ensureMention(target)
         switch target {
         case .member(let m): talkTo = [m.member]
@@ -3985,12 +4120,14 @@ struct ChatSession: View {
     }
 
     private func ensureMention(_ m: ChatMember) {
+        guard account.accepts(model) else { return }
         ensureMention(.member(m))
     }
 
     /// Put the chip in the draft: over the open `@token` when there is one,
     /// else at the end — unless the chip is already there (conversation chips).
     private func ensureMention(_ target: ComposerMentionTarget) {
+        guard account.accepts(model) else { return }
         let probe = ComposerMention(range: 0..<0, target: target)
         let handle = probe.handle.lowercased()
         if composerDraft.mentions.contains(where: { $0.memberId == probe.memberId }) { return }
@@ -4103,6 +4240,7 @@ struct ChatSession: View {
     /// who replies (an explicit chip tap still addresses that send). Always clear everyone /
     /// multi-agent combinations.
     private func pinTalkTo(afterSending address: String?, chipMentions: [String]) {
+        guard account.accepts(model) else { return }
         if address == "everyone" || people?.kind == "group" || chipMentions.count > 1 {
             talkTo = []
         } else if let address, address.hasPrefix("agent:") {
@@ -4116,6 +4254,7 @@ struct ChatSession: View {
     }
 
     private func send() {
+        guard account.accepts(model) else { return }
         let text = composerDraft.text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty || !pending.isEmpty else { return }
         #if DEBUG
@@ -4185,6 +4324,7 @@ struct ChatSession: View {
     }
 
     private func stop() {
+        guard account.accepts(model) else { return }
         model.stop(chatId: chatId)
     }
 }
@@ -4332,6 +4472,7 @@ struct ModelPickerView: View {
     @Environment(\.theme) private var theme
     @Environment(\.dismiss) private var dismiss
     let project: Project
+    var account: ChatAccountContext? = nil
     @State private var query = ""
     @State private var effort: Effort = .low
 
@@ -4346,6 +4487,7 @@ struct ModelPickerView: View {
     }
 
     var body: some View {
+        let account = self.account ?? ChatAccountContext(model)
         NavigationStack {
             List {
                 Section {
@@ -4373,6 +4515,7 @@ struct ModelPickerView: View {
                     }
                     .pickerStyle(.segmented)
                     .onChange(of: effort) { _, new in
+                        guard account.accepts(model) else { return }
                         model.setModel(projectId: project.id, model: current.model, effort: new)
                     }
                 }
@@ -4382,6 +4525,7 @@ struct ModelPickerView: View {
                     }
                     ForEach(ids, id: \.self) { id in
                         Button {
+                            guard account.accepts(model) else { return }
                             model.setModel(projectId: project.id, model: id, effort: effort)
                             dismiss()
                         } label: {
@@ -4414,9 +4558,9 @@ struct ModelPickerView: View {
             .navigationTitle("Model")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } }
+                ToolbarItem(placement: .topBarTrailing) { Button("Done") { guard account.accepts(model) else { return }; dismiss() } }
             }
-            .onAppear { effort = current.effort }
+            .onAppear { guard account.accepts(model) else { return }; effort = current.effort }
         }
         .presentationDetents([.medium, .large])
     }
@@ -4440,7 +4584,7 @@ extension ChatSession {
         let lastId = shown.last?.id
         ForEach(shown) { row in
             let reply = isMessageRow(row)
-            RowView(model: model, theme: theme, composerInset: composerInset, row: row, chatId: chatId, width: width,
+            RowView(model: model, account: account, theme: theme, composerInset: composerInset, row: row, chatId: chatId, width: width,
                     people: people, timeReveal: timeReveal,
                     onQuoteTap: { quote in revealQuoted(quote, from: row.messageId) },
                     highlighted: highlightedMessage == row.messageId,
@@ -4448,6 +4592,7 @@ extension ChatSession {
                     isMessage: reply,
                     mentions: mentions)
                 .equatable()
+                .id(account)
                 // Search result rows take a tap (simultaneous, so a link still reaches the
                 // system; `searchHit` above stands the inner routes down for the same rows).
                 .modifier(SearchResultTap(active: searchHitsActive && Self.isMessageBubble(row)) {
@@ -4484,6 +4629,7 @@ extension ChatSession {
                 }
                 .messageRowGestures(isMessage: reply, onLongPress: { openActions(row) },
                                     onDoubleTap: {
+                                        guard account.accepts(model) else { return }
                                         model.toggleReaction(chatId: chatId, messageId: row.messageId, emoji: "❤️")
                                     },
                                     onCopyMenu: { runMessageMenu($0, row: row) })

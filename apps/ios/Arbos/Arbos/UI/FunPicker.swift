@@ -204,6 +204,7 @@ enum StarterPack {
 struct StickerBubble: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
+    let account: ChatAccountContext
     let item: MediaItem
     let chatId: Id
 
@@ -213,8 +214,12 @@ struct StickerBubble: View {
     @State private var failed = false
     @State private var viewer: MediaViewerState?
 
+    private var cacheKey: ChatImageCache.Key? {
+        guard let owner = account.owner, let ref = item.cacheKey else { return nil }
+        return ChatImageCache.Key(owner: owner, slot: item.slot, ref: ref)
+    }
+
     var body: some View {
-        let work = model.accountWork()
         ZStack {
             if let image {
                 Image(uiImage: image).resizable().scaledToFit()
@@ -231,12 +236,12 @@ struct StickerBubble: View {
         // A plain tap, no drag gesture of its own: the system's interactive edge pop
         // (#2239) owns horizontal swipes, same as `ImageBubble`.
         .onTapGesture {
-            guard model.acceptsAccountWork(work) else { return }
+            guard account.accepts(model) else { return }
             viewer = MediaOpen.state(for: item, chatId: chatId, model: model)
         }
         .accessibilityIdentifier("sticker-bubble")
         .accessibilityLabel("Sticker")
-        .task(id: item.cacheKey) { await load(work: work) }
+        .task(id: item.cacheKey) { await load() }
         .fullScreenCover(item: $viewer) { v in
             MediaViewer(album: v.items, index: v.index, onClose: { viewer = nil })
                 .environmentObject(model)
@@ -244,20 +249,25 @@ struct StickerBubble: View {
         }
     }
 
-    private func load(work: AccountWork?) async {
-        guard model.acceptsAccountWork(work) else { return }
-        if let ref = item.cacheKey, let hit = ChatImageCache.decoded(for: ref) {
+    private func load() async {
+        guard account.accepts(model) else { return }
+        if let cacheKey, let hit = ChatImageCache.decoded(for: cacheKey) {
             image = hit.image
             return
         }
-        guard let (data, _) = await MediaFetch.bytes(for: item, model: model),
-              let decoded = await ChatImageCache.decode(data, maxPixels: CGSize(width: 512, height: 512)) else {
-            guard model.acceptsAccountWork(work) else { return }
+        guard let (data, _) = await MediaFetch.bytes(for: item, model: model, isCurrent: { account.accepts(model) }) else {
+            guard account.accepts(model) else { return }
             failed = true
             return
         }
-        guard model.acceptsAccountWork(work) else { return }
-        if let ref = item.cacheKey { ChatImageCache.store(decoded, for: ref) }
+        guard account.accepts(model) else { return }
+        guard let decoded = await ChatImageCache.decode(data, maxPixels: CGSize(width: 512, height: 512)) else {
+            guard account.accepts(model) else { return }
+            failed = true
+            return
+        }
+        guard account.accepts(model) else { return }
+        if let cacheKey { ChatImageCache.store(decoded, for: cacheKey) }
         image = decoded.image
     }
 }
