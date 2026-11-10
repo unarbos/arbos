@@ -5207,7 +5207,7 @@ private struct ComposerField<Leading: View>: View {
                             onDeleteBackwardEmpty: onDeleteBackwardEmpty,
                             onPasteImage: onPasteImage,
                             onLines: { lines = $0 },
-                            leftInset: (stacked || isChannel) ? Theme.composerTextInset : 0)
+                            leftInset: (stacked || isChannel) ? Theme.composerTextInset : Theme.composerTextInsetBesidePlus)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }

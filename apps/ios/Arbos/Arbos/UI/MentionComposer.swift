@@ -309,17 +309,22 @@ struct MentionTextView: UIViewRepresentable {
     var onLines: ((Int) -> Void)? = nil
     /// Left pad inside the text view. Full-width rows (channel, or stacked above the controls)
     /// keep Grok's 17 pt from the pill's edge; when the `+` sits on the same row the HStack
-    /// spacing is already the gap, so this is 0 — otherwise "Ask …" reads centred
-    /// ([feedback AJuVf-Tv2c-WhHzsKiVmi9U]).
+    /// spacing is already the gap, so this is `Theme.composerTextInsetBesidePlus` — otherwise
+    /// "Ask …" reads centred ([feedback AJuVf-Tv2c-WhHzsKiVmi9U]).
     var leftInset: CGFloat = Theme.composerTextInset
 
     /// Grok: one 22 pt line centred in 48; left is the full-width caret (17 pt from the edge).
-    /// Callers that put the `+` beside the text pass `leftInset: 0` instead.
-    static let insets = UIEdgeInsets(top: Theme.composerTextPadY, left: Theme.composerTextInset, bottom: Theme.composerTextPadY, right: 0)
+    /// Callers that put the `+` beside the text pass `leftInset: Theme.composerTextInsetBesidePlus`.
+    static let insets = textInsets(left: Theme.composerTextInset)
 
-    private var textInsets: UIEdgeInsets {
-        UIEdgeInsets(top: Self.insets.top, left: leftInset, bottom: Self.insets.bottom, right: Self.insets.right)
+    /// Text-container insets for a chosen left pad. Pure, so the beside-`+` vs full-width
+    /// choice is assertable without mounting the representable
+    /// ([feedback AJuVf-Tv2c-WhHzsKiVmi9U]).
+    static func textInsets(left: CGFloat) -> UIEdgeInsets {
+        UIEdgeInsets(top: Theme.composerTextPadY, left: left, bottom: Theme.composerTextPadY, right: 0)
     }
+
+    private var textInsets: UIEdgeInsets { Self.textInsets(left: leftInset) }
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 

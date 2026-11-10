@@ -43,14 +43,25 @@ final class ComposerMetricsTests: XCTestCase {
     }
 
     func testFieldTextStartsAtGroksCaret() {
-        // Full-width caret centre 51 px from the pill's outer edge; one 22 pt line centred
-        // in 48. When the `+` is on the same row the field passes leftInset 0 so the
-        // placeholder sits against the HStack gap instead of a second 17 pt pad
-        // ([feedback AJuVf-Tv2c-WhHzsKiVmi9U]).
+        // Full-width caret centre 51 px from the pill's outer edge; one 22 pt line centred in 48.
         XCTAssertEqual(Theme.composerTextInset, 17)
         XCTAssertEqual(Theme.composerTextPadY, 13)
         XCTAssertEqual(MentionTextView.insets.left, Theme.composerTextInset)
         XCTAssertEqual(MentionTextView.insets.top + 22 + MentionTextView.insets.bottom, Theme.composerHeight)
+    }
+
+    func testAskPlaceholderSitsBesideThePlus() {
+        // When the `+` shares the row, a second 17 pt pad made "Ask …" read centred
+        // ([feedback AJuVf-Tv2c-WhHzsKiVmi9U], Jacob 2026-11-10: "Ask Bob should be left
+        // aligned here in the chat bar"). The HStack gap is the only left space; full-width
+        // rows (channel / stacked) still keep Grok's 17.
+        XCTAssertEqual(Theme.composerTextInsetBesidePlus, 0)
+        XCTAssertEqual(MentionTextView.textInsets(left: Theme.composerTextInsetBesidePlus).left, 0)
+        XCTAssertEqual(MentionTextView.textInsets(left: Theme.composerTextInset).left, Theme.composerTextInset)
+        XCTAssertEqual(MentionTextView.textInsets(left: Theme.composerTextInsetBesidePlus).top,
+                       MentionTextView.insets.top)
+        XCTAssertEqual(MentionTextView.textInsets(left: Theme.composerTextInsetBesidePlus).bottom,
+                       MentionTextView.insets.bottom)
     }
 
     func testActionIsAWhiteCircleNotACapsule() {
@@ -248,7 +259,9 @@ final class ComposerMetricsTests: XCTestCase {
         for (name, value) in [
             ("plusButton", Theme.plusButton), ("composerHeight", Theme.composerHeight),
             ("plusFieldGap", Theme.plusFieldGap), ("composerInsetKeyboard", Theme.composerInsetKeyboard),
-            ("composerTextInset", Theme.composerTextInset), ("composerTextPadY", Theme.composerTextPadY),
+            ("composerTextInset", Theme.composerTextInset),
+            ("composerTextInsetBesidePlus", Theme.composerTextInsetBesidePlus),
+            ("composerTextPadY", Theme.composerTextPadY),
             ("actionPillWidth", Theme.actionPillWidth), ("actionPillHeight", Theme.actionPillHeight),
             ("actionPillTrailing", Theme.actionPillTrailing),
             ("composerTrailingWidth", Theme.composerTrailingWidth),
