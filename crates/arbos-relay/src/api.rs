@@ -1142,6 +1142,14 @@ pub(crate) async fn project_dto(state: &AppState, p: &Project) -> ProjectDto {
 pub(crate) fn project_owner_dto(state: &AppState, user_id: &str) -> ProjectOwnerDto {
     let s = crate::notify::Sender::user(state, user_id);
     let seen = state.db.user_last_seen(user_id).ok().flatten();
+    project_owner_from_sender(user_id, s, seen)
+}
+
+pub(crate) fn project_owner_from_sender(
+    user_id: &str,
+    s: crate::notify::Sender,
+    seen: Option<i64>,
+) -> ProjectOwnerDto {
     ProjectOwnerDto {
         kind: s.kind.to_owned(),
         id: s.id,

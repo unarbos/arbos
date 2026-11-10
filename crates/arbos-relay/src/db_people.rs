@@ -2,6 +2,8 @@
 //! per-user notification queue, and the rate-limit event log. Same SQLite file; created from
 //! `Db::open` through `PEOPLE_SCHEMA`.
 
+use std::collections::{HashMap, HashSet};
+
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -11,6 +13,51 @@ use arbos_core::api::{PushEventDto, UserCardDto};
 use arbos_core::ids::now_ms;
 
 use crate::db::Db;
+
+/// Public project data used by people rosters; excludes instructions and runtime state.
+#[derive(Clone)]
+#[cfg_attr(test, derive(Serialize))]
+pub(crate) struct MemberProject {
+    pub id: String,
+    pub name: String,
+    pub icon: String,
+    pub models: Value,
+    pub color: String,
+    pub user_id: String,
+    pub avatar: Option<String>,
+    pub avatar_color: Option<String>,
+    pub description: String,
+    pub avatar_color_index: Option<i64>,
+    pub avatar_leaf_color: Option<i64>,
+    pub image_key: Option<String>,
+    pub avatar_version: i64,
+}
+
+impl From<crate::db::Project> for MemberProject {
+    fn from(p: crate::db::Project) -> Self {
+        Self {
+            id: p.id,
+            name: p.name,
+            icon: p.icon,
+            models: p.models,
+            color: p.color,
+            user_id: p.user_id,
+            avatar: p.avatar,
+            avatar_color: p.avatar_color,
+            description: p.description,
+            avatar_color_index: p.avatar_color_index,
+            avatar_leaf_color: p.avatar_leaf_color,
+            image_key: p.image_key,
+            avatar_version: p.avatar_version,
+        }
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct UserPresence {
+    pub card: Option<UserCardDto>,
+    pub seen: Option<i64>,
+}
 
 pub const PEOPLE_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS people_chats (
@@ -1369,6 +1416,122 @@ impl Db {
         })
     }
 
+    /// Resolve the same id/name precedence as `project`, once for each distinct roster key.
+    pub(crate) fn member_projects(&self, ids: &[String]) -> Result<HashMap<String, MemberProject>> {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        self.with(|c| {
+            let mut statement = c.prepare(
+                "SELECT wanted.value, p.id, p.name, p.icon, p.models, p.color, p.user_id,
+                        p.avatar, p.avatar_color, p.description, p.avatar_color_index,
+                        p.avatar_leaf_color, p.image_key, p.avatar_version
+                 FROM json_each(?1) wanted JOIN projects p ON p.id = COALESCE(
+                    (SELECT id FROM projects WHERE id = wanted.value AND deleted_at IS NULL),
+                    (SELECT id FROM projects WHERE name = wanted.value AND deleted_at IS NULL
+                     ORDER BY last_active_at DESC LIMIT 1)
+                 )",
+            )?;
+            let rows = statement.query_map(params![serde_json::to_string(ids).unwrap()], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    MemberProject {
+                        id: r.get(1)?,
+                        name: r.get(2)?,
+                        icon: r.get(3)?,
+                        models: serde_json::from_str(&r.get::<_, String>(4)?).unwrap_or_default(),
+                        color: r.get(5)?,
+                        user_id: r.get(6)?,
+                        avatar: r.get(7)?,
+                        avatar_color: r.get(8)?,
+                        description: r.get::<_, Option<String>>(9)?.unwrap_or_default(),
+                        avatar_color_index: r.get(10)?,
+                        avatar_leaf_color: r.get(11)?,
+                        image_key: r.get(12)?,
+                        avatar_version: r.get::<_, Option<i64>>(13)?.unwrap_or(0),
+                    },
+                ))
+            })?;
+            // As with individual profile lookups, one unreadable row does not hide its peers.
+            Ok(rows.filter_map(Result::ok).collect())
+        })
+    }
+
+    /// Public cards and presence for only the requested people, including legacy device names.
+    pub(crate) fn user_presence(&self, ids: &[String]) -> Result<HashMap<String, UserPresence>> {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        self.with(|c| {
+            let mut statement = c.prepare(
+                "SELECT wanted.value, u.id, u.login, u.avatar_url, u.name, u.status, u.created_at,
+                   CASE WHEN COALESCE(u.login, '') = '' THEN (
+                     SELECT name FROM devices WHERE user_id = wanted.value AND revoked_at IS NULL
+                     ORDER BY COALESCE(last_seen_at, created_at) DESC LIMIT 1
+                   ) END,
+                   (SELECT MAX(last_seen_at) FROM devices
+                    WHERE user_id = wanted.value AND revoked_at IS NULL)
+                 FROM json_each(?1) wanted LEFT JOIN users u ON u.id = wanted.value",
+            )?;
+            let rows = statement.query_map(params![serde_json::to_string(ids).unwrap()], |r| {
+                let id: String = r.get(0)?;
+                // Card and presence decode failures are independent in the public profile API.
+                let card = (|| -> rusqlite::Result<Option<UserCardDto>> {
+                    Ok(if let Some(user_id) = r.get::<_, Option<String>>(1)? {
+                        Some(legacy_card(
+                            UserCardDto {
+                                id: user_id,
+                                handle: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                                avatar_url: r.get(3)?,
+                                name: r.get(4)?,
+                                status: r.get(5)?,
+                                created_at: Some(r.get(6)?),
+                                test: None,
+                                last_seen_at: None,
+                                online: None,
+                                avatar_color_index_effective: None,
+                            },
+                            r.get(7)?,
+                        ))
+                    } else {
+                        None
+                    })
+                })()
+                .ok()
+                .flatten();
+                Ok((
+                    id,
+                    UserPresence {
+                        card,
+                        seen: r.get::<_, Option<i64>>(8).ok().flatten(),
+                    },
+                ))
+            })?;
+            Ok(rows.filter_map(Result::ok).collect())
+        })
+    }
+
+    pub(crate) fn blocked_roster_users(
+        &self,
+        viewer: &str,
+        ids: &[String],
+    ) -> Result<HashSet<String>> {
+        if ids.is_empty() {
+            return Ok(HashSet::new());
+        }
+        self.with(|c| {
+            let mut statement = c.prepare(
+                "SELECT blocked FROM blocks JOIN json_each(?2) wanted ON wanted.value = blocked
+                 WHERE blocker = ?1",
+            )?;
+            let rows = statement
+                .query_map(params![viewer, serde_json::to_string(ids).unwrap()], |r| {
+                    r.get(0)
+                })?;
+            rows.collect()
+        })
+    }
+
     /// Public profile fields for a user id (for member lists).
     pub fn user_card(&self, user_id: &str) -> Result<Option<UserCardDto>> {
         self.with(|c| {
@@ -1392,31 +1555,31 @@ impl Db {
                     },
                 )
                 .optional()?;
-            let Some(mut card) = card else {
-                return Ok(None);
-            };
-            // Legacy device-token accounts have no GitHub login: show them by the name of the
-            // device they used most recently (stable, and what their owner recognises).
-            if card.handle.is_empty() {
-                let device_name: Option<String> = c
-                    .query_row(
-                        "SELECT name FROM devices WHERE user_id = ?1 AND revoked_at IS NULL
-                         ORDER BY COALESCE(last_seen_at, created_at) DESC LIMIT 1",
-                        params![user_id],
-                        |r| r.get(0),
-                    )
-                    .optional()?
-                    .filter(|n: &String| !n.trim().is_empty());
-                let fallback_name = device_name
-                    .unwrap_or_else(|| user_id.trim_start_matches("u_").to_owned());
-                card.handle = legacy_handle(&fallback_name);
-                if card.name.as_deref().is_none_or(str::is_empty) {
-                    card.name = Some(fallback_name);
-                }
-            }
+            let Some(card) = card else { return Ok(None); };
+            let device_name = if card.handle.is_empty() {
+                c.query_row(
+                    "SELECT name FROM devices WHERE user_id = ?1 AND revoked_at IS NULL
+                     ORDER BY COALESCE(last_seen_at, created_at) DESC LIMIT 1",
+                    params![user_id], |r| r.get::<_, String>(0),
+                ).optional()?
+            } else { None };
+            let card = legacy_card(card, device_name);
             Ok(Some(card))
         })
     }
+}
+
+fn legacy_card(mut card: UserCardDto, device_name: Option<String>) -> UserCardDto {
+    if card.handle.is_empty() {
+        let fallback = device_name
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| card.id.trim_start_matches("u_").to_owned());
+        card.handle = legacy_handle(&fallback);
+        if card.name.as_deref().is_none_or(str::is_empty) {
+            card.name = Some(fallback);
+        }
+    }
+    card
 }
 
 /// A handle-shaped slug for an account without a login: `"Jacob's Mac"` → `jacobs-mac`.
@@ -1821,5 +1984,197 @@ impl Db {
             })?;
             rows.collect()
         })
+    }
+}
+
+#[cfg(test)]
+mod profile_batch_tests {
+    use super::*;
+    use crate::people::tests_support::{person, project_of};
+    use crate::state::{test_support::test_state, AuthMode};
+
+    #[test]
+    fn batched_cards_keep_legacy_names_missing_users_and_revoked_device_presence() {
+        let state = test_state(AuthMode::Github);
+        let (legacy, _) = person(&state, 8001);
+        let (github, _) = person(&state, 8002);
+        state.db.with(|c| {
+            c.execute("UPDATE users SET login=NULL, name='' WHERE id=?1", params![legacy])?;
+            c.execute("UPDATE devices SET name='Jacob’s Mac', last_seen_at=123456 WHERE user_id=?1", params![legacy])?;
+            c.execute("INSERT INTO devices(id,name,token_hash,user_id,kind,created_at,last_seen_at,revoked_at) VALUES ('revoked-profile','Wrong name','profile-fixture-token',?1,'github',999999,999999,1)", params![legacy])?;
+            c.execute("UPDATE devices SET user_id='missing-profile-user',last_seen_at=123 WHERE user_id=?1", params![github])?;
+            Ok(())
+        }).unwrap();
+        let ids = vec![
+            legacy.clone(),
+            github.clone(),
+            "missing-profile-user".into(),
+            "absent".into(),
+        ];
+        let batch = state.db.user_presence(&ids).unwrap();
+        for id in &ids {
+            assert_eq!(
+                serde_json::to_value(&batch[id].card).unwrap(),
+                serde_json::to_value(state.db.user_card(id).unwrap()).unwrap()
+            );
+            assert_eq!(batch[id].seen, state.db.user_last_seen(id).unwrap());
+        }
+        let card = batch[&legacy].card.as_ref().unwrap();
+        assert_eq!(card.handle, "jacobs-mac");
+        assert_eq!(card.name.as_deref(), Some("Jacob’s Mac"));
+        assert_eq!(batch[&legacy].seen, Some(123456));
+        assert!(batch["missing-profile-user"].card.is_none());
+        assert_eq!(batch["missing-profile-user"].seen, Some(123));
+        assert_eq!(batch.len(), ids.len());
+    }
+
+    #[test]
+    fn projected_projects_keep_id_precedence_name_aliases_and_json_fallback() {
+        let state = test_state(AuthMode::Github);
+        let (owner, _) = person(&state, 8003);
+        let first = project_of(&state, &owner, "older alias");
+        let (other_owner, _) = person(&state, 8004);
+        let second = project_of(&state, &other_owner, "newer alias");
+        let deleted = project_of(&state, &owner, "deleted alias");
+        state.db.with(|c| {
+            c.execute("UPDATE projects SET name='shared alias',last_active_at=1,models='invalid JSON' WHERE id=?1", params![first])?;
+            c.execute("UPDATE projects SET name='shared alias',last_active_at=2,models='{\"talking_model\":{\"id\":\"first\",\"id\":\"last\"}}',description='',avatar_version=0 WHERE id=?1", params![second])?;
+            c.execute("UPDATE projects SET deleted_at=1 WHERE id=?1", params![deleted])?;
+            Ok(())
+        }).unwrap();
+        let ids = vec![
+            first.clone(),
+            second.clone(),
+            "shared alias".into(),
+            deleted.clone(),
+            "unknown".into(),
+        ];
+        let batch = state.db.member_projects(&ids).unwrap();
+        for id in &ids {
+            match state.db.project(id).unwrap() {
+                Some(expected) => assert_eq!(
+                    serde_json::to_value(&batch[id]).unwrap(),
+                    serde_json::to_value(MemberProject::from(expected)).unwrap()
+                ),
+                None => assert!(!batch.contains_key(id)),
+            }
+        }
+        assert_eq!(batch["shared alias"].id, second);
+        assert_eq!(batch[&first].models, Value::Null);
+        assert_eq!(batch["shared alias"].models["talking_model"]["id"], "last");
+        assert!(state.db.member_projects(&[]).unwrap().is_empty());
+    }
+    #[test]
+    fn live_device_profile_reads_skip_unrelated_accounts_and_keep_tie_order() {
+        use std::cell::Cell;
+        thread_local! { static SCANS: Cell<u64> = const { Cell::new(0) }; }
+        unsafe extern "C" fn profile(
+            _kind: u32,
+            _ctx: *mut std::ffi::c_void,
+            st: *mut std::ffi::c_void,
+            _extra: *mut std::ffi::c_void,
+        ) -> i32 {
+            let steps = unsafe {
+                rusqlite::ffi::sqlite3_stmt_status(
+                    st.cast(),
+                    rusqlite::ffi::SQLITE_STMTSTATUS_FULLSCAN_STEP,
+                    1,
+                )
+            };
+            let _ = SCANS.try_with(|v| v.set(v.get().saturating_add(steps.max(0) as u64)));
+            0
+        }
+        let state = test_state(AuthMode::Github);
+        let (legacy, _) = person(&state, 8011);
+        state.db.with(|c|{
+            let tx=rusqlite::Transaction::new_unchecked(c,rusqlite::TransactionBehavior::Immediate)?;
+            tx.execute("UPDATE users SET login=NULL,name=NULL WHERE id=?1",params![legacy])?;
+            tx.execute("UPDATE devices SET name='First tied device',last_seen_at=100,created_at=0 WHERE user_id=?1",params![legacy])?;
+            tx.execute("INSERT INTO devices(id,name,token_hash,user_id,kind,created_at,last_seen_at) VALUES ('tie-profile','Later tied device','tie-token',?1,'github',100,NULL)",params![legacy])?;
+            for n in 0..2500 {tx.execute("INSERT INTO devices(id,name,token_hash,user_id,kind,created_at,last_seen_at) VALUES (?1,'Unrelated',?2,?3,'github',100,100)",params![format!("other-{n}"),format!("other-token-{n}"),format!("other-user-{n}")])?;}
+            tx.commit()
+        }).unwrap();
+        SCANS.with(|v| v.set(0));
+        state
+            .db
+            .with(|c| {
+                unsafe {
+                    rusqlite::ffi::sqlite3_trace_v2(
+                        c.handle(),
+                        rusqlite::ffi::SQLITE_TRACE_PROFILE as u32,
+                        Some(profile),
+                        std::ptr::null_mut(),
+                    );
+                }
+                Ok(())
+            })
+            .unwrap();
+        let card = state.db.user_card(&legacy).unwrap();
+        let seen = state.db.user_last_seen(&legacy).unwrap();
+        state
+            .db
+            .with(|c| {
+                unsafe {
+                    rusqlite::ffi::sqlite3_trace_v2(c.handle(), 0, None, std::ptr::null_mut());
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(card.unwrap().name.as_deref(), Some("First tied device"));
+        assert_eq!(seen, Some(100));
+        let scans = SCANS.with(Cell::get);
+        assert!(
+            scans < 16,
+            "Profile lookup scanned {scans} unrelated device rows"
+        );
+    }
+    #[test]
+    fn card_decode_failure_does_not_erase_valid_presence() {
+        let state = test_state(AuthMode::Github);
+        let (uid, _) = person(&state, 8021);
+        state
+            .db
+            .with(|c| {
+                c.execute(
+                    "UPDATE users SET created_at='bad' WHERE id=?1",
+                    params![uid],
+                )?;
+                c.execute(
+                    "UPDATE devices SET last_seen_at=123456 WHERE user_id=?1",
+                    params![uid],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(state.db.user_card(&uid).is_err());
+        let expected = state.db.user_last_seen(&uid).unwrap();
+        assert_eq!(expected, Some(123456));
+        let batch = state.db.user_presence(std::slice::from_ref(&uid)).unwrap();
+        assert!(batch[&uid].card.is_none());
+        assert_eq!(batch[&uid].seen, expected);
+    }
+
+    #[test]
+    fn presence_decode_failure_does_not_erase_valid_card() {
+        let state = test_state(AuthMode::Github);
+        let (uid, _) = person(&state, 8022);
+        state
+            .db
+            .with(|c| {
+                c.execute(
+                    "UPDATE devices SET last_seen_at='bad' WHERE user_id=?1",
+                    params![uid],
+                )
+            })
+            .unwrap();
+        assert!(state.db.user_last_seen(&uid).is_err());
+        let expected = state.db.user_card(&uid).unwrap();
+        assert!(expected.is_some());
+        let batch = state.db.user_presence(std::slice::from_ref(&uid)).unwrap();
+        assert_eq!(
+            serde_json::to_value(&batch[&uid].card).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
+        assert_eq!(batch[&uid].seen, None);
     }
 }
