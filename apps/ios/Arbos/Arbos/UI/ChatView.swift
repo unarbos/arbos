@@ -166,6 +166,7 @@ struct ChatSession: View {
     @State private var refreshIds: [Id] = []
     /// `messagesVersion` that `rows`, `messageById` and `refreshIds` were built from.
     @State private var refreshVersion: (chat: Id, version: Int?)?
+    @State private var refreshLinkPreviews: Bool?
     /// id → message for the rows on screen (menus, search, replies); rebuilt with `rows`.
     @State private var messageById: [Id: Message] = [:]
     /// How many of the newest rows are in the view tree. The transcript is a plain
@@ -1014,6 +1015,9 @@ struct ChatSession: View {
     /// Streaming deltas and single appends rebuild only the tail (feedback
     /// app-01M5NNJ001NHHYBHXTASM5NXBZ); everything else still does a full pass.
     private func refreshRows() {
+        let linkPreviews = model.linkPreviews
+        let policyChanged = refreshLinkPreviews != linkPreviews
+        defer { refreshLinkPreviews = linkPreviews }
         // A channel is a people-style transcript: my lines right, everyone else by name.
         let slot = isPeople ? "\(peopleSlot):\(chatId)" : isChannel ? "\(channelSlot):\(chatId)" : projectId
         var agentNames: [String: String] = [:]
@@ -1060,7 +1064,7 @@ struct ChatSession: View {
         // A token that lands one version after these rows skips the history compare.
         let tailEdit = version != nil && version == model.tailEditVersion[chatId]
             && shown.map { $0 &+ 1 } == version && list.count == refreshIds.count
-        if list.count == refreshIds.count, list.count > 0,
+        if !policyChanged, list.count == refreshIds.count, list.count > 0,
            tailEdit || zip(list, refreshIds).allSatisfy({ $0.id == $1 }) {
             let last = list[list.count - 1]
             let prefixSame = tailEdit || list.dropLast().allSatisfy { messageById[$0.id] == $0 }
@@ -1079,7 +1083,7 @@ struct ChatSession: View {
                 let prev = list.count >= 2 ? list[list.count - 2] : nil
                 let slice = prev.map { [$0, last] } ?? [last]
                 let rebuilt = Transcript.rows(slice, byId: byId, projectId: slot, me: me,
-                                              people: peopleFlag, agentNames: agentNames, multiParty: multiParty, memberNames: memberNames, hiddenSenders: hiddenSenders)
+                                              people: peopleFlag, agentNames: agentNames, multiParty: multiParty, memberNames: memberNames, hiddenSenders: hiddenSenders, linkPreviews: linkPreviews)
                 let newTail: [Row]
                 if let prev {
                     let start = rebuilt.firstIndex(where: { $0.messageId == last.id }).map { ix -> Int in
@@ -1098,7 +1102,7 @@ struct ChatSession: View {
         }
 
         // Incremental append: one new message at the end.
-        if list.count == refreshIds.count + 1, list.count > 0,
+        if !policyChanged, list.count == refreshIds.count + 1, list.count > 0,
            zip(list.dropLast(), refreshIds).allSatisfy({ $0.id == $1 }) {
             rowsPath = .append
             let last = list[list.count - 1]
@@ -1107,7 +1111,7 @@ struct ChatSession: View {
             let prev = list.count >= 2 ? list[list.count - 2] : nil
             let slice = prev.map { [$0, last] } ?? [last]
             let rebuilt = Transcript.rows(slice, byId: byId, projectId: slot, me: me,
-                                          people: peopleFlag, agentNames: agentNames, multiParty: multiParty, memberNames: memberNames, hiddenSenders: hiddenSenders)
+                                          people: peopleFlag, agentNames: agentNames, multiParty: multiParty, memberNames: memberNames, hiddenSenders: hiddenSenders, linkPreviews: linkPreviews)
             let newTail: [Row]
             if let prev {
                 let start = rebuilt.firstIndex(where: { $0.messageId == last.id }).map { ix -> Int in
@@ -1132,7 +1136,7 @@ struct ChatSession: View {
 
         let byId = Transcript.index(list)
         let next = Transcript.rows(list, byId: byId, projectId: slot, me: me,
-                                   people: peopleFlag, agentNames: agentNames, multiParty: multiParty, memberNames: memberNames, hiddenSenders: hiddenSenders)
+                                   people: peopleFlag, agentNames: agentNames, multiParty: multiParty, memberNames: memberNames, hiddenSenders: hiddenSenders, linkPreviews: linkPreviews)
         // Rows appended after the last one we had (new messages) join the window, so the
         // oldest row on screen does not fall out of the view tree when a new one lands.
         // History that arrives above it — the first snapshot, a backfill, an older
@@ -1388,7 +1392,7 @@ struct ChatSession: View {
                                                 canEdit: canEditMessage(row),
                                                 canDelete: canDelete(row),
                                                 hasReplies: row.replyCount > 0,
-                                                hasPreview: Transcript.linkPreviewsEnabled && messageById[row.messageId]?.linkPreview != nil,
+                                                hasPreview: model.linkPreviews && messageById[row.messageId]?.linkPreview != nil,
                                                 // Reply in DM only in people groups — not in a
                                                 // DM or 1:1 agent chat you're already in (#1871).
                                                 inPrivateChat: people?.isGroup != true),
@@ -1653,6 +1657,7 @@ struct ChatSession: View {
             refreshRows()
         }
         .onChange(of: model.user?.name) { _, _ in refreshRows() }
+        .onChange(of: model.linkPreviews) { _, _ in refreshRows() }
         .onChange(of: model.caughtUp.contains(chatId), initial: true) { _, ready in
             model.repaintIfBlank(chatId)
             handleCaughtUpAutoSend(ready)

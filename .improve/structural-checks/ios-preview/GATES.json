@@ -1,0 +1,106 @@
+{
+  "base": "43b83964838150ae2cd1b68464214dcbcdd59524",
+  "before_sources": {
+    "apps/ios/Arbos/Arbos/UI/Transcript.swift": "bf14629157d1d230e3dc4fbf69234e39c259b871b72b47b9dc2dfe9dd7630f3d",
+    "apps/ios/Arbos/Arbos/UI/ChatView.swift": "3b8f1353a2923126ca736137dc1266c1edc52dc5bfe241e38ac03e7ea974db86",
+    "apps/ios/Arbos/Arbos/UI/MediaViewer.swift": "7a838a6d8f2e0699138b360910e16e5289338398b39540ee6c74e61f513e9432",
+    "apps/ios/Arbos/Arbos/Model/Model.swift": "4746b737c4def0355bfa73c70c7abbdbc7935a7be8237a39dcf4893a93ec6eba",
+    "apps/ios/Arbos/Arbos/Store/AppModel.swift": "e1451629c609367c1585653c119f7b5268141ea834d77689b06f04c057c28fd6",
+    "apps/ios/Arbos/ArbosTests/LinkPreviewCardTests.swift": "54546e659437f8718ff88b2006325da41c08c45d1584fdc6fb7ab9c98ff76793"
+  },
+  "after_sources": {
+    "apps/ios/Arbos/Arbos/UI/Transcript.swift": "5f80688e067eb288761319c5bb18e54258ebf32529af4d9a5b11f0dda9b74210",
+    "apps/ios/Arbos/Arbos/UI/ChatView.swift": "6f86791ddb2fa962799a43119937bbb3a711512f189293d9f92aa3a4dda85a04",
+    "apps/ios/Arbos/Arbos/UI/MediaViewer.swift": "7a838a6d8f2e0699138b360910e16e5289338398b39540ee6c74e61f513e9432",
+    "apps/ios/Arbos/Arbos/Model/Model.swift": "4746b737c4def0355bfa73c70c7abbdbc7935a7be8237a39dcf4893a93ec6eba",
+    "apps/ios/Arbos/Arbos/Store/AppModel.swift": "f221b41a48363a7f5248bd484350fbf2f57b87fe41461577bcaaaa41cc7244f1",
+    "apps/ios/Arbos/ArbosTests/LinkPreviewCardTests.swift": "7884ca7d324820da9948a6c49b769fba5f44e89961d934f07c4ddd2858cd3db2"
+  },
+  "selected_items": {
+    "enum Role:": "a67b0ea02955b7df1b04b9d262e704beda2852795ad6d0803f6603d24ac84beb",
+    "enum MessageStatus:": "1844f0145fe33d225efe0a73758e3535b8d2f5d1ad523a5f56f0d42e98edf4f5",
+    "enum TurnKind:": "483ba8777a8cb54557b7250f33f0c5f85a26c4c6d965809d2d38a7411e8352f6",
+    "enum StatusKind:": "5aa0a62c1910bd304376c485ba44b14427f67d46516783d8535fb0f67fc044b5",
+    "struct ToolCall:": "dc75176660d540f3fb87d212f0691b67c44988f872838674614ddcaa5d4a3bf2",
+    "struct AttachmentSource:": "a94e73a62de14e0c034f39ad03c77ef41a9fb68e4922984e76ed160adade87c2",
+    "struct Attachment:": "32479b60e20012dbb7398ff6ca51140afbfa28e5f2fe0a9210eff92164c198f0",
+    "struct ChoiceOption:": "5b740eb5aa84ccf22ff729ba60762bb05535ffd73c6af5e8028f799e037db50c",
+    "struct Question:": "062864542a08da4081fb73c2270f4d6fefb693937d3f2c6630f3b4eac663eda9",
+    "struct SecretOffer:": "b86891fb5a2de77b02e6c72f69e592edf65ada31ef117081a6846b338d1c039f",
+    "enum Part:": "f3ce3db89fba7c52527b32c402855e19e3b04cd4a7f2b55883a176d0bceb76ae",
+    "struct MessageReaction:": "76f18408cb6d2d52f139105a9fe9215d3e72a85dd436224f64ea2b01dfa60fa3",
+    "struct JobRef:": "b551f89c0ae08379c01f4250d994961c561842f7de608ed79f6eb089819ebe0e",
+    "struct ReplyRef:": "9558b7b4873caee8fc7f8d34b079d980f528bd9e224f991c8f19879388a65058",
+    "struct MembershipNotice:": "f4afa24d8e1d1aad1dd6da6e6cbe769366e47d59b098a62a81c3fe92812d4355",
+    "struct MessageBody:": "40d2f58579d10c0a20c58354882ecc2e69c0541406fac627b83cf1108a7a8e7a",
+    "struct ChartBody:": "4158edd98c4f1d6ad3f958901a8bbe6f3829acb3663d8a4b6e96b8df8abdd01a",
+    "struct Message:": "a3113ef1d83db3981529d4df9a857253cac6f1caeebf13dd01d93d5bc6d87653",
+    "struct LinkPreview:": "e4a8bd7702984120a37a7c9795e2fbcc0df96603a2bb170f52c15e853c517620",
+    "struct MediaItem:": "de77bafc82ce86c4bdcf0f85bb96f06cd519080a7b339f9096030bd6635b3561",
+    "enum MediaAlbum {": "a3964af7d18523bd762c68a9dcdb895a74fd8f8f6d58951963b75f6ace21354a",
+    "enum Block:": "ba7aec967adbf0e4c4e326679181361f68437a457ff5167b1e8db1401a403b0e",
+    "struct Quote:": "032b186425ee7bbb6993546451521df11457011dbc0a16676e8e8e341948aa8b",
+    "enum RowKind:": "5f791bb2cdc64a159f1a1d2d03f06b22cd028d49a60742b1f18514a2530be76f",
+    "enum MediaSender:": "bc70632114335b8ac0645e4667c7aacdd6b9efcf67792f3cc01c5bbf997c6b83",
+    "struct Row:": "4575e6ec6561f9b5ed1723c90f1af4167cfc3d89e4b8b076a8cae756fe87b69f",
+    "enum Transcript {": "30aaf8c6377b71d203e084c5658440315219ade9dd66d4b18b98d8137fc02132",
+    "enum Delivery:": "da38dffd2457c5e8c1bcdae036cfb8768a07ae5882f3aac933934dc779d2dee3",
+    "private func refreshRows()": "ac4233f388eabb40d8c85a4e3c8ae33b6d917deec5a37de7a7b724279bdd79bc"
+  },
+  "before": {
+    "row_scenarios": 12,
+    "pass": 7,
+    "semantic_failures": 5,
+    "compile_seconds": 4.466442417004146,
+    "run_seconds": 0.24549770797602832,
+    "mandatory_helper_tests": 2,
+    "mandatory_helper_pass": 1,
+    "mandatory_helper_fail": 1,
+    "helper_compile_seconds": 3.488937249989249,
+    "helper_run_seconds": 0.5612312080338597
+  },
+  "after": {
+    "row_scenarios": 12,
+    "pass": 12,
+    "fail": 0,
+    "compile_seconds": 2.091148707899265,
+    "run_seconds": 0.20427670795470476,
+    "mandatory_helper": {
+      "failures": 0,
+      "succeeded": true,
+      "tests": 2
+    },
+    "helper_compile_seconds": 1.8652946669608355,
+    "helper_run_seconds": 0.24376083293464035,
+    "all_four_changed_files_parse_seconds": 0.30489445792045444
+  },
+  "mutants": [
+    {
+      "name": "ignore-user-policy",
+      "row_failures": 6,
+      "helper_failures": 0,
+      "detected": true
+    },
+    {
+      "name": "ignore-cache-policy",
+      "row_failures": 3,
+      "helper_failures": 0,
+      "detected": true
+    },
+    {
+      "name": "mandatory-row-skips",
+      "row_failures": 0,
+      "helper_failures": 1,
+      "detected": true
+    }
+  ],
+  "source_unchanged_during_checks": true,
+  "scope": "actual Foundation DTOs, Transcript.rows, ChatView.refreshRows and real XCTest helper; observer/other-domain collaborators only; no UI layout, FFI date/markdown, full app or simulator claim",
+  "no_production_services_or_app_launch": true,
+  "limitations": [
+    "host Foundation/real XCTest observations, not full UIKit app or simulator",
+    "date divider fixed no-divider; parser/math/group/system collaborators fail if called",
+    "SwiftUI onChange wiring inspected; full SDK/native UI gate separate",
+    "two original cache-method unused-prev warnings retained"
+  ]
+}
