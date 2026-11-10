@@ -131,7 +131,7 @@ state machines.
 | AUX-H3 Voice call lifetime, charged work and shutdown — implemented | Startup, running, finishing, cleanup-failed and closed phases own tasks and retry only failed local cleanup while preserving one best-effort final usage report. | High | `voice/arbos_voice/call_state.py`; `voice/arbos_voice/worker.py`; `voice/tests/test_worker_lifecycle.py`; `voice/tests/test_usage_loop.py` |
 | AUX-H4 Voice audio mode and mute application — implemented | Separate application lanes distinguish unapplied, applying, applied and failed effects; mode commits its participant identity atomically. | High | `voice/arbos_voice/call_state.py`; `voice/arbos_voice/worker.py`; `voice/arbos_voice/listener.py`; `voice/tests/test_worker_lifecycle.py` |
 | AUX-H5 Vision consent, tracks and frame delivery — implemented | Enabled/disabled/closed generations and owned stream/session leases reject revoked frames and retain cleanup ownership. | High | `voice/arbos_voice/vision_state.py`; `voice/arbos_voice/vision.py`; `voice/tests/test_vision_consent.py`; `voice/tests/state_bridge.py` |
-| AUX-H6 Feedback fix approval/gating/shipping | Mutable JSON status, approval flags and several commit identities coordinate whether a fix may merge and be called shipped. | High | `scripts/feedback/feedback_poller.py`; `scripts/feedback/rust-gate.sh`; `scripts/feedback/ios-gate.sh`; `docs/process-rules.md` |
+| AUX-H6 Feedback commit admission and delivery — implemented | Shared typed admission gates every normal/prepared merge; delivery phase and prerequisite evidence persist together. | High | `scripts/feedback/feedback_state.py`; `scripts/feedback/feedback_poller.py`; `scripts/feedback/test_feedback_state.py`; `harness/arbos-pi-ext/feedback-state-laws.test.ts` |
 | AUX-H7 Deployment lanes and image rollout | Queue files, canary/restart markers, holds and per-box outcomes determine whether a release starts, pauses, retries or finishes. | High | `scripts/deploy/arbos-deploy-worker`; `scripts/deploy/arbos-deploy-hook`; `scripts/feedback/deploy-relay.sh`; `docs/process-rules.md` |
 | AUX-H8 Release-object publication — implemented | Tagged observed/creating/uploading/finalizing/completed/refused/failed states preserve draft intent and require actual publication before success. Stateless merge reports and existing atomic receipts are excluded. | High | `scripts/release/publication.py`; `scripts/release/publish-release.sh`; `scripts/release/test_publication.py`; `harness/arbos-pi-ext/publication-state-laws.test.ts` |
 | AUX-H9 Shared Mac heavy-slot ownership — implemented | Explicit request/lease/GUI/boot states and an OS-backed permanent mutex serialize grants, reclaim and cancellation without changing calibrated scheduling policy. | High | `scripts/runner/arbos-heavy-slot.sh`; `scripts/runner/xcrun-slot-guard.sh`; `scripts/runner/gui-lock.sh`; `scripts/runner/tests/test_slot_lifecycle.py` |
@@ -772,3 +772,32 @@ loopback test-plan fence is carried identically here before native-source pushes
 its 12 helper/DSL contract groups pass. Broader native ownership fixes and the
 catalog's blanket blocked wording are under active reassessment; missing tests,
 old SDK availability and code size are not external blockers.
+
+
+## Feedback and generated operational laws
+
+The [feedback inventory](state-machine-checks/feedback-admission.md) and
+[verification](state-machine-checks/FEEDBACK_VERIFICATION.md) close a prepared-tree
+approval bypass and interrupted shipping-state writes. Actual original Loop/Store
+fixtures had 6 positive passes and 14 overlapping semantic failures; the applied
+controller passes all 20 (root repeat 0.031 s test time), without live merge,
+feedback messages, key/JWT operations or deployment. Human approval remains
+per-item, while gate coverage and current branch identity are SHA-bound. All
+members must pass before the single prepared-tree merge effect. Delivery phase,
+pending work and device evidence use the existing atomic record write. Both
+installers include the new stdlib runtime module; neither installer was executed.
+
+Five feedback laws cover 1,280 generated cases with an actual-function mutant
+shrunk/replayed. Four runner laws cover 1,024 cases plus bounded protocol recovery;
+two actual-function mutants are detected, shrunk and replayed. The public runner
+mutant adapter was corrected to accept an explicit repository/new output directory,
+copy only its four required sources, and rerun its unmodified control, avoiding a
+private-layout dependency. That adapter passes its control and both negative
+controls. No controller source is mutated in place.
+
+The complete applied harness passes **59 tests / 0 failed/skipped** in 23.294 s,
+with TypeScript passing in 3.309 s. This includes the earlier approval/voice cases
+and new publication/runner/feedback laws; do not add overlapping counts as separate
+coverage. [OPS_HARNESS_GATES.json](state-machine-checks/OPS_HARNESS_GATES.json)
+retains commands and summaries. Native account/call/snapshot ownership and remaining
+backend classification are still active work, not blanket external blockers.
