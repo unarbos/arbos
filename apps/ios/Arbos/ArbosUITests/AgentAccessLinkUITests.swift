@@ -31,13 +31,29 @@ final class AgentAccessLinkUITests: XCTestCase {
         app.descendants(matching: .any)[id].firstMatch
     }
 
+    /// Tap even when XCTest says the control is not hittable (a Settings row under the
+    /// sheet chrome, a Revoke below the fold).
+    private func tap(_ el: XCUIElement) {
+        if el.isHittable {
+            el.tap()
+        } else {
+            el.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        }
+    }
+
     /// The Settings list carries an Agent access link row that opens the page.
     func testSettingsShowsTheAgentAccessLinkRow() {
         let app = launch(page: nil)
         let row = any(app, "settings-agent-links")
         XCTAssertTrue(row.waitForExistence(timeout: appear),
                       "Settings lists Agent access link")
-        row.tap()
+        // Scroll it into the band under the profile header if the sheet opened tall.
+        var spins = 0
+        while !row.isHittable, spins < 5 {
+            app.swipeUp()
+            spins += 1
+        }
+        tap(row)
         XCTAssertTrue(any(app, "agent-link-create").waitForExistence(timeout: appear),
                       "the row opens the Agent access link page")
         XCTAssertTrue(any(app, "agent-link-scope-read").exists)
@@ -45,28 +61,39 @@ final class AgentAccessLinkUITests: XCTestCase {
                       "fixture active links are listed")
     }
 
-    /// Create → copy sheet → Copy → Done, then Revoke removes a row. No real key values.
+    /// Create → copy screen → Copy → Done, then Revoke removes a row. No real key values.
     func testCreateCopyAndRevokeALink() {
         let app = launch()
         let create = any(app, "agent-link-create")
         XCTAssertTrue(create.waitForExistence(timeout: appear), "the create control is on screen")
         XCTAssertTrue(any(app, "agent-link-row-lnk-fx-codex").exists)
 
-        create.tap()
+        tap(create)
         let copy = any(app, "agent-link-copy")
-        XCTAssertTrue(copy.waitForExistence(timeout: appear), "the copy sheet opens with the link")
-        XCTAssertTrue(any(app, "agent-link-share").exists, "Share hands the open URL (the llms.txt path) to the agent")
-        // The sheet shows a shortened host/tail only — never a bearer prefix.
+        XCTAssertTrue(copy.waitForExistence(timeout: appear), "the copy screen opens with the link")
+        XCTAssertTrue(any(app, "agent-link-share").exists,
+                      "Share hands the open URL (the llms.txt path) to the agent")
+        // The screen shows a shortened host/tail only — never a bearer prefix.
         XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'arbl_'")).firstMatch.exists)
-        copy.tap()
+        tap(copy)
         let done = any(app, "agent-link-done")
         XCTAssertTrue(done.waitForExistence(timeout: 5))
         XCTAssertTrue(done.isEnabled, "Done waits for Copy, then is live")
-        done.tap()
+        tap(done)
+
+        // Back on the Agent access link page (not Settings root, not Home).
+        XCTAssertTrue(create.waitForExistence(timeout: appear), "Done returns to the page")
+        XCTAssertFalse(copy.exists, "the copy screen is gone")
 
         let revoke = any(app, "agent-link-revoke-lnk-fx-codex")
         XCTAssertTrue(revoke.waitForExistence(timeout: appear), "active links are back after Done")
-        revoke.tap()
+        // The new link sits above; scroll the fixture row into reach if needed.
+        var spins = 0
+        while !revoke.isHittable, spins < 5 {
+            app.swipeUp()
+            spins += 1
+        }
+        tap(revoke)
         let gone = any(app, "agent-link-row-lnk-fx-codex")
         let deadline = Date().addingTimeInterval(10)
         while gone.exists, Date() < deadline { usleep(100_000) }

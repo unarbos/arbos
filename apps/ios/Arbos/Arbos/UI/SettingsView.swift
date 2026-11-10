@@ -210,8 +210,8 @@ struct SettingsView: View {
             // that used to show under Devices.
             account.append(AnyView(NavigationLink { AgentAccessLinkPage() } label: {
                 SettingsRow(icon: "link", title: "Agent access link", value: agentLinksSummary)
-            }
-            .accessibilityIdentifier("settings-agent-links")))
+                    .accessibilityIdentifier("settings-agent-links")
+            }))
             // Devices (Oct 23): every GitHub sign-in is one; sign another out here.
             account.append(AnyView(NavigationLink { DevicesPage() } label: {
                 SettingsRow(icon: "laptopcomputer", title: "Devices", value: devicesSummary)

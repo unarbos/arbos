@@ -52,10 +52,20 @@ struct AgentAccessLinkPage: View {
                                      expiry: .standard,
                                      url: "https://relay.arbos.life/agent-link/open/fxOpen1")
         }
-        .sheet(item: $reveal) { made in
-            AgentLinkCopySheet(reveal: made, startCopied: landing == "agent-links-copied") { reveal = nil }
+        // Push, not `.sheet`: a sheet presented from a `navigationDestination` page can
+        // pop that page when it comes down (Connect uses the same push). The copy screen
+        // is the only place the URL exists, so losing the page under it loses the list.
+        .navigationDestination(isPresented: Binding(
+            get: { reveal != nil },
+            set: { if !$0 { reveal = nil } }
+        )) {
+            if let reveal {
+                AgentLinkCopySheet(reveal: reveal, startCopied: landing == "agent-links-copied") {
+                    self.reveal = nil
+                }
                 .environmentObject(model)
                 .environment(\.theme, theme)
+            }
         }
     }
 
@@ -245,13 +255,14 @@ struct AgentAccessLinkPage: View {
     }
 }
 
-/// The copy sheet, shown once. It is the only screen the URL exists on, which sets every rule
-/// here: a fitted height so there is no empty page under it, no drag indicator and no swipe-down
-/// before the copy, and a Done that waits for Copy. The × is always a way out.
+/// The copy screen, shown once. It is the only place the URL exists on: a Done that waits
+/// for Copy, and a × that is always a way out. Pushed on the Settings stack (same job as
+/// `ConnectRevealView`), not presented as a sheet, so dismissing it cannot take the Agent
+/// access link page with it.
 ///
 /// The geometry is `ConnectRevealView`'s, to the point. `AvatarSheetPalette` is a fixed dark
-/// palette, so this sheet does not follow the Glass / Matte setting — neither does any other
-/// sheet in that family, and changing that is work inside the shared component.
+/// palette, so this screen does not follow the Glass / Matte setting — neither does any other
+/// screen in that family, and changing that is work inside the shared component.
 struct AgentLinkCopySheet: View {
     @Environment(\.theme) private var theme
     let reveal: AgentLinkReveal
@@ -267,10 +278,6 @@ struct AgentLinkCopySheet: View {
     private let cardBg = AvatarSheetPalette.pillBg
     private let tileBg = AvatarSheetPalette.ring
     private let ink = AvatarSheetPalette.title
-
-    /// The content's own height, so the sheet is fitted: header 54.5, two section titles at 46,
-    /// two 60 pt cards, footnotes of two and three lines, and the 104 pt footer.
-    static let height: CGFloat = 54.5 + 46 + 60 + 46 + 65 + 46 + 60 + 4 + 104
 
     var body: some View {
         VStack(spacing: 0) {
@@ -289,11 +296,9 @@ struct AgentLinkCopySheet: View {
             footer
         }
         .background(sheetBg.ignoresSafeArea())
+        .toolbar(.hidden, for: .navigationBar)
+        .navigationBarBackButtonHidden(true)
         .onAppear { copied = startCopied }
-        .presentationDetents([.height(Self.height)])
-        .presentationDragIndicator(.hidden)
-        .presentationBackground(sheetBg)
-        .interactiveDismissDisabled(!copied)
     }
 
     private var header: some View {
