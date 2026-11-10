@@ -871,3 +871,15 @@ full approval40P on identical space-free source, with a separate test fixture pa
 quoting cleanup pending. See `state-machine-checks/approval-delivery/`. Committed
 Approved delivery loss is deliberately spent/abandoned; owner review is required
 for that fail-closed behavior, and no external exactly-once guarantee is asserted.
+
+
+### H3 main Pi slot ownership
+
+The real child slot is now a tagged resource owner, transitioned through one
+function at boot, readiness, watcher, retirement, park, shutdown and test admission.
+Original actual Agent6-case suite1P/5semanticF becomes green; scoped native30P,
+all-target check/Clippy/build and three actual-slot Effect laws768 traces pass.
+See `state-machine-checks/rpc-owner/`. The unchanged Linux-only RSS test remains
+mandatory in final Linux CI; Darwin's11P/1F is explained, not hidden. Late child
+session/model metadata publication is a related reviewer lead still being pinned;
+this checkpoint does not claim H3's entire caller audit finished.

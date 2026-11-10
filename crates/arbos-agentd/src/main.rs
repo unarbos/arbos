@@ -88,6 +88,7 @@ mod model_switch_tests;
 mod people;
 #[cfg(test)]
 mod pi_crash_loop_tests;
+mod pi_slot;
 #[cfg(test)]
 mod refusal_line_and_window_notice_tests;
 #[cfg(test)]

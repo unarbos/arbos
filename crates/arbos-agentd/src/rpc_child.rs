@@ -260,6 +260,38 @@ impl RpcChild {
         self.exited.store(true, Ordering::SeqCst);
     }
 
+    /// Retire only this captured child. If the runtime drops the cleanup task, use its owned
+    /// Child handle as a last resort; never reconstruct authority from a pid or process name.
+    pub(crate) fn retire_owned(self: Arc<Self>) {
+        struct Cleanup(Option<Arc<RpcChild>>);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                if let Some(child) = &self.0 {
+                    if let Ok(mut input) = child.stdin.try_lock() {
+                        input.take();
+                    }
+                    if let Ok(mut held) = child.child.try_lock() {
+                        if let Some(process) = held.as_mut() {
+                            let _ = process.start_kill();
+                            let _ = process.try_wait();
+                        }
+                    }
+                }
+            }
+        }
+        let mut cleanup = Cleanup(Some(self));
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                if let Some(child) = &cleanup.0 {
+                    child.shutdown().await;
+                }
+                cleanup.0.take();
+            });
+        }
+        // Without a runtime, Cleanup drops here. If a shutdown future held either mutex,
+        // its own Child kill_on_drop and eventual RpcChild drop remain the final fallback.
+    }
+
     pub fn is_alive(&self) -> bool {
         !self.exited.load(Ordering::SeqCst)
     }

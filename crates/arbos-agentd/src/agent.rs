@@ -29,6 +29,7 @@ use crate::harness::{
 use crate::isolation::{Evidence, ProcessTree, Sweep};
 use crate::llm::{extract_return_contract, Llm};
 use crate::memory::Memory;
+use crate::pi_slot::{Action as PiAction, BootTicket, Event as PiEvent, PiSlot};
 use crate::rpc_child::{ChildExit, RpcChild};
 use crate::skills::{self, SkillsIndex};
 use crate::store::Store;
@@ -2092,6 +2093,60 @@ pub(crate) struct WorkspaceMemory {
     pub pids: Option<u64>,
 }
 
+/// Owns every child removed/spawned by an uncommitted main-Pi boot.
+struct MainPiBoot {
+    agent: Arc<Agent>,
+    ticket: BootTicket,
+    children: Vec<Arc<RpcChild>>,
+    armed: bool,
+}
+
+impl MainPiBoot {
+    fn own(&mut self, child: Arc<RpcChild>) {
+        if !self.children.iter().any(|owned| Arc::ptr_eq(owned, &child)) {
+            self.children.push(child);
+        }
+    }
+    async fn close_owned(&mut self) {
+        while let Some(child) = self.children.last().cloned() {
+            child.shutdown().await;
+            self.children.pop();
+        }
+    }
+    async fn retire(mut self) {
+        let mut slot = self.agent.pi.lock().await;
+        let _ = self
+            .agent
+            .transition_pi(&mut slot, PiEvent::Abort(self.ticket));
+        drop(slot);
+        self.close_owned().await;
+        self.armed = false;
+    }
+}
+
+impl Drop for MainPiBoot {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        if let Ok(mut slot) = self.agent.pi.try_lock() {
+            let _ = self
+                .agent
+                .transition_pi(&mut slot, PiEvent::Abort(self.ticket));
+        } else if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let agent = self.agent.clone();
+            let ticket = self.ticket;
+            runtime.spawn(async move {
+                let mut slot = agent.pi.lock().await;
+                let _ = agent.transition_pi(&mut slot, PiEvent::Abort(ticket));
+            });
+        }
+        for child in self.children.drain(..) {
+            child.retire_owned();
+        }
+    }
+}
+
 pub struct Agent {
     pub cfg: Arc<Config>,
     pub store: Store,
@@ -2100,7 +2155,7 @@ pub struct Agent {
     pub memory: Arc<Memory>,
     /// Memory tree (D77): read-only side index over T3, walked by the decision model per turn.
     pub tree: Arc<crate::tree::Tree>,
-    pi: Mutex<Option<Arc<RpcChild>>>,
+    pi: Mutex<PiSlot<Arc<RpcChild>>>,
     current_chat: Mutex<Option<String>>,
     pub turn: Arc<Mutex<Option<TurnState>>>,
     adapters: HashMap<Harness, Arc<dyn HarnessAdapter>>,
@@ -2412,7 +2467,7 @@ impl Agent {
             llm,
             memory,
             tree,
-            pi: Mutex::new(None),
+            pi: Mutex::new(PiSlot::default()),
             current_chat: Mutex::new(None),
             turn: Arc::new(Mutex::new(None)),
             adapters,
@@ -2798,7 +2853,95 @@ impl Agent {
         Ok(path)
     }
 
+    fn transition_pi(
+        &self,
+        slot: &mut PiSlot<Arc<RpcChild>>,
+        event: PiEvent<Arc<RpcChild>>,
+    ) -> PiAction<Arc<RpcChild>> {
+        let was_ready = slot.is_ready();
+        let action = slot.transition(event);
+        if slot.is_ready() && !was_ready {
+            self.note_pi_ready();
+        } else if !slot.is_ready() {
+            self.note_pi_not_ready();
+        }
+        self.pi_respawning
+            .store(slot.is_booting(), Ordering::SeqCst);
+        self.pi_parked.store(slot.is_parked(), Ordering::SeqCst);
+        if slot.is_stopped() {
+            self.shutting_down.store(true, Ordering::SeqCst);
+        }
+        action
+    }
+
+    async fn begin_pi_boot(self: &Arc<Self>) -> Result<MainPiBoot> {
+        let action = {
+            let mut slot = self.pi.lock().await;
+            self.transition_pi(&mut slot, PiEvent::Begin)
+        };
+        match action {
+            PiAction::Started { ticket, retired } => Ok(MainPiBoot {
+                agent: self.clone(),
+                ticket,
+                children: retired.into_iter().collect(),
+                armed: true,
+            }),
+            PiAction::Rejected(retired) => {
+                if let Some(child) = retired {
+                    child.retire_owned();
+                }
+                Err(anyhow!("pi main agent is stopping"))
+            }
+            _ => unreachable!("Begin returns an owned ticket or refusal"),
+        }
+    }
+
+    async fn attach_pi_boot(&self, boot: &MainPiBoot, child: Arc<RpcChild>) -> bool {
+        let mut slot = self.pi.lock().await;
+        matches!(
+            self.transition_pi(
+                &mut slot,
+                PiEvent::Attach {
+                    ticket: boot.ticket,
+                    child
+                }
+            ),
+            PiAction::Accepted
+        )
+    }
+
+    async fn publish_pi_boot(
+        self: &Arc<Self>,
+        boot: &mut MainPiBoot,
+        child: &Arc<RpcChild>,
+        model: String,
+        chat: &str,
+    ) -> bool {
+        // Acquire metadata locks before Ready: no later cancellable await can publish half a boot.
+        let mut current_model = self.pi_model.lock().await;
+        let mut current_chat = self.current_chat.lock().await;
+        let mut slot = self.pi.lock().await;
+        if !matches!(
+            self.transition_pi(&mut slot, PiEvent::Ready(boot.ticket)),
+            PiAction::Accepted
+        ) {
+            return false;
+        }
+        *current_model = Some(model);
+        *current_chat = Some(chat.to_owned());
+        boot.children.clear();
+        boot.armed = false;
+        drop(slot);
+        drop(current_chat);
+        drop(current_model);
+        self.watch_pi_child(child, boot.ticket);
+        self.sample_pi_rss(child.pid());
+        true
+    }
+
     pub async fn start_pi(self: &Arc<Self>, initial_chat: &str) -> Result<()> {
+        let mut boot = self.begin_pi_boot().await?;
+        boot.close_owned().await;
         self.write_system_prompt()?;
         let session = self.session_file_for(initial_chat)?;
         let (talking_model, _) = self.live_models().await;
@@ -2823,6 +2966,11 @@ impl Agent {
             self.cfg.run_as.as_ref(),
         )
         .await?;
+        boot.own(child.clone());
+        if !self.attach_pi_boot(&boot, child.clone()).await {
+            boot.retire().await;
+            return Err(anyhow!("pi main agent is stopping"));
+        }
         let state = child
             .call_timeout(
                 RpcCommand::GetState {
@@ -2842,12 +2990,13 @@ impl Agent {
         };
         if boot_failed.is_none() {
             tracing::info!(ms = t0.elapsed().as_millis() as i64, "pi main agent ready");
-            self.watch_pi_child(&child);
-            self.sample_pi_rss(child.pid());
-            *self.pi.lock().await = Some(child.clone());
-            *self.pi_model.lock().await = Some(talking_model.clone());
-            *self.current_chat.lock().await = Some(initial_chat.to_owned());
-            self.note_pi_ready();
+            if !self
+                .publish_pi_boot(&mut boot, &child, talking_model.clone(), initial_chat)
+                .await
+            {
+                boot.retire().await;
+                return Err(anyhow!("pi main agent is stopping"));
+            }
             self.store.upsert_session(
                 initial_chat,
                 None,
@@ -2910,7 +3059,6 @@ impl Agent {
                     let chat = me.current_chat.lock().await.clone().unwrap_or_default();
                     match me.respawn_pi(&chat).await {
                         Ok(()) => {
-                            me.pi_parked.store(false, Ordering::SeqCst);
                             tracing::info!("pi main woken from park");
                         }
                         Err(e) => {
@@ -2933,9 +3081,13 @@ impl Agent {
                         if me.any_turn_running() || me.pi_idle_ms() < Self::PI_PARK_IDLE_MS {
                             continue;
                         }
-                        me.pi_parked.store(true, Ordering::SeqCst);
-                        me.note_pi_not_ready();
-                        slot.take()
+                        let Some(ticket) = slot.ticket() else {
+                            continue;
+                        };
+                        match me.transition_pi(&mut slot, PiEvent::Park(ticket)) {
+                            PiAction::Retired(child) => child,
+                            _ => None,
+                        }
                     };
                     if let Some(old) = old {
                         old.shutdown().await;
@@ -2965,8 +3117,7 @@ impl Agent {
             // Said, then handed to the loop above: the slot stays empty, so its respawn branch
             // picks this up with the backoff and the five-death escalation.
             self.report_pi_child_exit(&child, "boot").await;
-            child.shutdown().await;
-            self.note_pi_not_ready();
+            boot.retire().await;
             self.pi_wake.notify_one();
             return Err(anyhow!("{why}"));
         }
@@ -3338,7 +3489,7 @@ impl Agent {
     /// ever dated to the poll that noticed it. `RpcChild`'s reader already knows: it sets
     /// `exited` and sends a last event at EOF. Waking the supervisor on that makes the
     /// `ready_ms` in [`Agent::report_pi_child_exit`] the child's real lifetime.
-    fn watch_pi_child(self: &Arc<Self>, child: &Arc<RpcChild>) {
+    fn watch_pi_child(self: &Arc<Self>, child: &Arc<RpcChild>, ticket: BootTicket) {
         let me = self.clone();
         let child = child.clone();
         let mut events = child.subscribe();
@@ -3348,19 +3499,14 @@ impl Agent {
                     break;
                 }
             }
-            // Only for the child that is still the current one: a respawn shuts the old child
-            // down after the new one is in the slot, and the old one's watcher must not clear
-            // the new one's readiness behind it.
-            if me.pi.lock().await.as_ref().and_then(|c| c.pid()) != child.pid() {
+            let mut slot = me.pi.lock().await;
+            if slot.ticket() != Some(ticket) {
                 return;
             }
-            // `pi_ready` has to go now rather than when the supervisor next looks, or a child
-            // that is already gone reads as ready for as long as the loop takes to notice —
-            // which is the flicker bug Y's box showed and the reason its own lifetime was never
-            // measured. This is also where that lifetime is taken.
             me.pi_last_ready_ms
                 .store(me.pi_ready_for_ms(), Ordering::SeqCst);
-            me.note_pi_not_ready();
+            let _ = me.transition_pi(&mut slot, PiEvent::Exited(ticket));
+            drop(slot);
             me.pi_wake.notify_one();
         });
     }
@@ -3373,11 +3519,16 @@ impl Agent {
     /// start, nothing was ever logged as a failure, and the box did this about four thousand
     /// times in two hours and thirty-nine minutes without telling anybody.
     async fn replace_dead_pi_child(self: &Arc<Self>) {
-        self.note_pi_not_ready();
+        {
+            let mut slot = self.pi.lock().await;
+            if let Some(ticket) = slot.ticket() {
+                let _ = self.transition_pi(&mut slot, PiEvent::Exited(ticket));
+            }
+        }
         let chat = self.current_chat.lock().await.clone().unwrap_or_default();
         // The status is only readable while the dead child's handle is still in the slot, so
         // this comes before the respawn that takes it.
-        if let Some(dead) = self.pi.lock().await.clone() {
+        if let Some(dead) = self.pi.lock().await.current() {
             self.report_pi_child_exit(&dead, "ready").await;
         }
         let deaths = self.pi_deaths.fetch_add(1, Ordering::SeqCst) + 1;
@@ -3555,17 +3706,8 @@ impl Agent {
     }
 
     async fn respawn_pi(self: &Arc<Self>, chat_id: &str) -> Result<()> {
-        struct Respawning<'a>(&'a AtomicBool);
-        impl Drop for Respawning<'_> {
-            fn drop(&mut self) {
-                self.0.store(false, Ordering::SeqCst);
-            }
-        }
-        self.pi_respawning.store(true, Ordering::SeqCst);
-        let _respawning = Respawning(&self.pi_respawning);
-        if let Some(old) = self.pi.lock().await.take() {
-            old.shutdown().await;
-        }
+        let mut boot = self.begin_pi_boot().await?;
+        boot.close_owned().await;
         // The code-mode flag is read again here (D86): toggling it needs a pi respawn, not a box restart.
         self.write_system_prompt()?;
         let session = self.session_file_for(chat_id)?;
@@ -3588,6 +3730,11 @@ impl Agent {
             self.cfg.run_as.as_ref(),
         )
         .await?;
+        boot.own(child.clone());
+        if !self.attach_pi_boot(&boot, child.clone()).await {
+            boot.retire().await;
+            return Err(anyhow!("pi main agent is stopping"));
+        }
         // The check `start_pi` has always made, which this path did not: it read only whether a
         // response came back, so a child answering "no" was stored as ready and `pi_ready` was
         // set true. A respawn that reports success is the box's own claim that it has an agent
@@ -3612,14 +3759,16 @@ impl Agent {
         };
         if let Some(why) = failed {
             self.report_pi_child_exit(&child, "boot").await;
+            boot.retire().await;
             return Err(anyhow!("{why}"));
         }
-        self.watch_pi_child(&child);
-        self.sample_pi_rss(child.pid());
-        *self.pi.lock().await = Some(child);
-        *self.pi_model.lock().await = Some(talking_model);
-        *self.current_chat.lock().await = Some(chat_id.to_owned());
-        self.note_pi_ready();
+        if !self
+            .publish_pi_boot(&mut boot, &child, talking_model, chat_id)
+            .await
+        {
+            boot.retire().await;
+            return Err(anyhow!("pi main agent is stopping"));
+        }
         Ok(())
     }
 
@@ -3703,7 +3852,7 @@ impl Agent {
         }
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
-            if let Some(c) = self.pi.lock().await.clone() {
+            if let Some(c) = self.pi.lock().await.current() {
                 return Ok(c);
             }
             if self.shutting_down.load(Ordering::SeqCst) || Instant::now() >= deadline {
@@ -3910,7 +4059,7 @@ impl Agent {
     /// The probe is `get_state`, which is what every boot already uses, and the bar is the one
     /// `start_pi` sets and `respawn_pi` used not to: the answer has to say `success: true`.
     async fn verify_pi_serves(self: &Arc<Self>, chat_id: &str) {
-        let Some(pi) = self.pi.lock().await.clone() else {
+        let Some(pi) = self.pi.lock().await.current() else {
             return;
         };
         if !pi.is_alive() {
@@ -3951,9 +4100,19 @@ impl Agent {
     async fn retire_unserviceable_pi_child(self: &Arc<Self>, pi: &Arc<RpcChild>, why: &str) {
         let retired = {
             let mut slot = self.pi.lock().await;
-            match slot.as_ref().map(|c| c.pid()) == Some(pi.pid()) {
-                true => slot.take(),
-                false => None,
+            if slot
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, pi))
+            {
+                match slot
+                    .ticket()
+                    .map(|ticket| self.transition_pi(&mut slot, PiEvent::Retire(ticket)))
+                {
+                    Some(PiAction::Retired(child)) => child,
+                    _ => None,
+                }
+            } else {
+                None
             }
         };
         let Some(child) = retired else {
@@ -3969,7 +4128,6 @@ impl Agent {
             "pi_child_unserviceable",
             json!({ "pid": child.pid(), "why": why }),
         );
-        self.note_pi_not_ready();
         child.shutdown().await;
         self.pi_wake.notify_one();
     }
@@ -14203,14 +14361,29 @@ impl Agent {
 
     /// Stop every child in order (subagents, then pi) so session files and kernel snapshots land.
     pub async fn shutdown(&self) {
-        self.shutting_down.store(true, Ordering::SeqCst);
-        self.pi_ready.store(false, Ordering::SeqCst);
+        let child = {
+            let mut slot = self.pi.lock().await;
+            match self.transition_pi(&mut slot, PiEvent::Shutdown) {
+                PiAction::Retired(child) => child,
+                _ => None,
+            }
+        };
+        struct Retiring(Option<Arc<RpcChild>>);
+        impl Drop for Retiring {
+            fn drop(&mut self) {
+                if let Some(child) = self.0.take() {
+                    child.retire_owned();
+                }
+            }
+        }
+        let mut retiring = Retiring(child);
         for a in self.adapters.values() {
             a.shutdown_all().await;
         }
-        if let Some(pi) = self.pi.lock().await.take() {
-            pi.shutdown().await;
+        if let Some(child) = &retiring.0 {
+            child.shutdown().await;
         }
+        retiring.0.take();
     }
 
     /// True while the main agent or any subagent is mid-turn.
@@ -16233,11 +16406,30 @@ impl Agent {
     /// supervisor do. A box with no pi binary cannot start one for itself, so bug V's tests
     /// stand a scripted child in for it.
     pub(crate) async fn test_set_pi(&self, child: Option<Arc<RpcChild>>, chat_id: &str) {
-        self.pi_ready.store(
-            child.as_ref().is_some_and(|c| c.is_alive()),
-            Ordering::SeqCst,
-        );
-        *self.pi.lock().await = child;
+        let mut slot = self.pi.lock().await;
+        match child {
+            Some(child) => {
+                if let PiAction::Started { ticket, retired } =
+                    self.transition_pi(&mut slot, PiEvent::Begin)
+                {
+                    if let Some(old) = retired {
+                        old.retire_owned();
+                    }
+                    let _ = self.transition_pi(&mut slot, PiEvent::Attach { ticket, child });
+                    let _ = self.transition_pi(&mut slot, PiEvent::Ready(ticket));
+                }
+            }
+            None => {
+                if let Some(ticket) = slot.ticket() {
+                    if let PiAction::Retired(Some(old)) =
+                        self.transition_pi(&mut slot, PiEvent::Retire(ticket))
+                    {
+                        old.retire_owned();
+                    }
+                }
+            }
+        }
+        drop(slot);
         *self.current_chat.lock().await = Some(chat_id.to_owned());
     }
 
@@ -18209,8 +18401,7 @@ mod tests {
             .unwrap();
         let (refused_window, before) = poisoned_window(&agent, chat_id, 69_368);
         let (pi, log) = fake_pi_refusing_compact(&root, COMPACT_REFUSAL).await;
-        *agent.pi.lock().await = Some(pi.clone());
-        *agent.current_chat.lock().await = Some(chat_id.to_owned());
+        agent.test_set_pi(Some(pi.clone()), chat_id).await;
 
         // The window as the last turn left it: over the 64k soft threshold, as the report found it.
         agent
@@ -18292,8 +18483,7 @@ mod tests {
             .unwrap();
         let (refused_window, _) = poisoned_window(&agent, chat_id, 69_368);
         let (pi, log) = fake_pi_refusing_compact(&root, "compaction failed: internal error").await;
-        *agent.pi.lock().await = Some(pi.clone());
-        *agent.current_chat.lock().await = Some(chat_id.to_owned());
+        agent.test_set_pi(Some(pi.clone()), chat_id).await;
         let usage = json!({ "totalTokens": 69_368 });
 
         agent.maybe_soft_compact(chat_id, Some(&usage)).await;
@@ -18496,6 +18686,331 @@ mod tests {
         assert!(
             ext.contains(&format!("const STEER_PREFIX = \"{STEER_PREFIX}\";")),
             "arbos-pi-ext must skip the route reminder for exactly this prefix"
+        );
+    }
+}
+
+#[cfg(test)]
+mod shutdown_boot_regressions {
+    use super::*;
+    use crate::status::tests::test_agent_with_pi;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+
+    const CHAT: &str = "01TESTRPCOWNERCHAT0000000";
+    const STUB: &str = r#"#!/usr/bin/env python3
+import json, os, select, sys, time
+from pathlib import Path
+marker = Path(@MARKER@)
+release = Path(@RELEASE@)
+exited = Path(@EXITED@)
+Path(@PID@).write_text(str(os.getpid()))
+try:
+    for line in sys.stdin:
+        cmd = json.loads(line)
+        if cmd.get("type") == "get_state":
+            marker.write_text("waiting")
+            while not release.exists():
+                if select.select([sys.stdin], [], [], 0.01)[0]:
+                    if not sys.stdin.readline():
+                        sys.exit(0)
+            print(json.dumps({"type":"response", "command":"get_state", "id":cmd["id"], "success":True, "data":{}}), flush=True)
+            if @EXIT_AFTER@:
+                break
+finally:
+    exited.write_text("exited")
+"#;
+
+    struct Stub {
+        root: PathBuf,
+        script: PathBuf,
+        marker: PathBuf,
+        release: PathBuf,
+        exited: PathBuf,
+        pid: PathBuf,
+    }
+    impl Stub {
+        fn new(exit_after: bool) -> Self {
+            let root = std::env::temp_dir().join(format!("arbos-rpc-owned-{}", ulid()));
+            std::fs::create_dir_all(&root).unwrap();
+            let stub = Self {
+                script: root.join("pi.py"),
+                marker: root.join("waiting"),
+                release: root.join("release"),
+                exited: root.join("exited"),
+                pid: root.join("pid"),
+                root,
+            };
+            let text = STUB
+                .replace("@MARKER@", &format!("{:?}", stub.marker))
+                .replace("@RELEASE@", &format!("{:?}", stub.release))
+                .replace("@EXITED@", &format!("{:?}", stub.exited))
+                .replace("@PID@", &format!("{:?}", stub.pid))
+                .replace("@EXIT_AFTER@", if exit_after { "True" } else { "False" });
+            std::fs::write(&stub.script, text).unwrap();
+            std::fs::set_permissions(&stub.script, std::fs::Permissions::from_mode(0o700)).unwrap();
+            stub
+        }
+        async fn wait_for(&self, path: &Path) {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !path.exists() {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("owned stub did not reach its barrier");
+        }
+        fn alive(&self) -> bool {
+            let pid: i32 = std::fs::read_to_string(&self.pid).unwrap().parse().unwrap();
+            nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok()
+        }
+        fn release(&self) {
+            std::fs::write(&self.release, "release").unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_paused_respawn_cannot_publish_after_terminal_shutdown() {
+        let stub = Stub::new(false);
+        let (agent, root) = test_agent_with_pi(stub.script.to_str().unwrap()).await;
+        // A real respawn follows start_pi, which creates these before its first spawn.
+        std::fs::create_dir_all(agent.cfg.state_dir.join("logs")).unwrap();
+        std::fs::create_dir_all(&agent.cfg.work_dir).unwrap();
+        agent.store.upsert_chat(CHAT, "Fixture", true, 0).unwrap();
+        let boot = {
+            let agent = agent.clone();
+            tokio::spawn(async move { agent.respawn_pi(CHAT).await })
+        };
+        stub.wait_for(&stub.marker).await;
+        agent.shutdown().await;
+        stub.release();
+        let _ = tokio::time::timeout(Duration::from_secs(5), boot)
+            .await
+            .unwrap()
+            .unwrap();
+        let published = agent.pi.lock().await.is_some();
+        let ready = agent.pi_ready.load(Ordering::SeqCst);
+        // Clean the actual owned child even when the assertion below fails.
+        agent.shutdown().await;
+        stub.wait_for(&stub.exited).await;
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(&stub.root);
+        assert!(
+            !published && !ready,
+            "a boot completed after shutdown and republished a live ready child"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_aborted_boot_retires_the_child_it_has_not_published() {
+        let stub = Stub::new(true);
+        let (agent, root) = test_agent_with_pi(stub.script.to_str().unwrap()).await;
+        // A real respawn follows start_pi, which creates these before its first spawn.
+        std::fs::create_dir_all(agent.cfg.state_dir.join("logs")).unwrap();
+        std::fs::create_dir_all(&agent.cfg.work_dir).unwrap();
+        agent.store.upsert_chat(CHAT, "Fixture", true, 0).unwrap();
+        let boot = {
+            let agent = agent.clone();
+            tokio::spawn(async move { agent.respawn_pi(CHAT).await })
+        };
+        stub.wait_for(&stub.marker).await;
+        boot.abort();
+        assert!(boot.await.unwrap_err().is_cancelled());
+        let retired = tokio::time::timeout(Duration::from_secs(1), async {
+            while stub.alive() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .is_ok();
+        // The old implementation leaves the reader Arc/child alive; release our own stub so
+        // this regression never leaves an unmanaged process behind on failure.
+        stub.release();
+        stub.wait_for(&stub.exited).await;
+        agent.shutdown().await;
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(&stub.root);
+        assert!(
+            retired,
+            "cancelling a boot left its uncommitted RPC child alive"
+        );
+    }
+    #[tokio::test]
+    async fn a_paused_initial_start_cannot_publish_after_terminal_shutdown() {
+        let stub = Stub::new(false);
+        let (agent, root) = test_agent_with_pi(stub.script.to_str().unwrap()).await;
+        // A real respawn follows start_pi, which creates these before its first spawn.
+        std::fs::create_dir_all(agent.cfg.state_dir.join("logs")).unwrap();
+        std::fs::create_dir_all(&agent.cfg.work_dir).unwrap();
+        agent.store.upsert_chat(CHAT, "Fixture", true, 0).unwrap();
+        let boot = {
+            let agent = agent.clone();
+            tokio::spawn(async move { agent.start_pi(CHAT).await })
+        };
+        stub.wait_for(&stub.marker).await;
+        agent.shutdown().await;
+        stub.release();
+        let _ = tokio::time::timeout(Duration::from_secs(5), boot)
+            .await
+            .unwrap()
+            .unwrap();
+        let published = agent.pi.lock().await.is_some();
+        let ready = agent.pi_ready.load(Ordering::SeqCst);
+        // Clean the actual owned child even when the assertion below fails.
+        agent.shutdown().await;
+        stub.wait_for(&stub.exited).await;
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(&stub.root);
+        assert!(
+            !published && !ready,
+            "a boot completed after shutdown and republished a live ready child"
+        );
+    }
+
+    #[tokio::test]
+    async fn current_initial_and_replacement_boots_still_publish_and_shutdown_cleanly() {
+        for initial in [true, false] {
+            let stub = Stub::new(false);
+            let (agent, root) = test_agent_with_pi(stub.script.to_str().unwrap()).await;
+            std::fs::create_dir_all(agent.cfg.state_dir.join("logs")).unwrap();
+            std::fs::create_dir_all(&agent.cfg.work_dir).unwrap();
+            agent.store.upsert_chat(CHAT, "Fixture", true, 0).unwrap();
+            let boot = {
+                let agent = agent.clone();
+                tokio::spawn(async move {
+                    if initial {
+                        agent.start_pi(CHAT).await
+                    } else {
+                        agent.respawn_pi(CHAT).await
+                    }
+                })
+            };
+            stub.wait_for(&stub.marker).await;
+            stub.release();
+            tokio::time::timeout(Duration::from_secs(5), boot)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert!(agent
+                .pi
+                .lock()
+                .await
+                .as_ref()
+                .is_some_and(|child| child.is_alive()));
+            assert!(agent.pi_ready.load(Ordering::SeqCst));
+            assert_eq!(agent.current_chat.lock().await.as_deref(), Some(CHAT));
+            agent.shutdown().await;
+            stub.wait_for(&stub.exited).await;
+            assert!(agent.pi.lock().await.is_none());
+            assert!(!agent.pi_ready.load(Ordering::SeqCst));
+            let _ = std::fs::remove_dir_all(root);
+            let _ = std::fs::remove_dir_all(&stub.root);
+        }
+    }
+
+    async fn overlapping_boots(cancel_old: bool) {
+        let old_stub = Stub::new(false);
+        let new_stub = Stub::new(false);
+        let (agent, root) = test_agent_with_pi(old_stub.script.to_str().unwrap()).await;
+        std::fs::create_dir_all(agent.cfg.state_dir.join("logs")).unwrap();
+        std::fs::create_dir_all(&agent.cfg.work_dir).unwrap();
+        agent.store.upsert_chat(CHAT, "Fixture", true, 0).unwrap();
+        let old = {
+            let agent = agent.clone();
+            tokio::spawn(async move { agent.respawn_pi(CHAT).await })
+        };
+        old_stub.wait_for(&old_stub.marker).await;
+        // Python has parsed the first script before publishing its marker. Only the next
+        // process reads these replaced fixture bytes; no executable/config outside this test.
+        std::fs::copy(&new_stub.script, &old_stub.script).unwrap();
+        let new = {
+            let agent = agent.clone();
+            tokio::spawn(async move { agent.respawn_pi(CHAT).await })
+        };
+        new_stub.wait_for(&new_stub.marker).await;
+        let old = if cancel_old {
+            old.abort();
+            let _ = old.await;
+            None
+        } else {
+            Some(old)
+        };
+        let replacement_still_booting = agent.pi_respawning.load(Ordering::SeqCst);
+        new_stub.release();
+        tokio::time::timeout(Duration::from_secs(5), new)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let replacement = agent.pi.lock().await.as_ref().cloned().unwrap();
+        let want_pid = replacement.pid();
+        old_stub.release();
+        if let Some(old) = old {
+            let _ = tokio::time::timeout(Duration::from_secs(5), old)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        let got_pid = agent.pi.lock().await.as_ref().and_then(|child| child.pid());
+        let ready = agent.pi_ready.load(Ordering::SeqCst);
+        agent.shutdown().await;
+        replacement.shutdown().await;
+        old_stub.wait_for(&old_stub.exited).await;
+        new_stub.wait_for(&new_stub.exited).await;
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(&old_stub.root);
+        let _ = std::fs::remove_dir_all(&new_stub.root);
+        assert_eq!(got_pid, want_pid, "an older boot overwrote its replacement");
+        assert!(ready);
+        assert!(
+            replacement_still_booting,
+            "old boot completion/Drop cleared the newer owner's boot admission"
+        );
+    }
+    #[tokio::test]
+    async fn replacement_ready_is_not_overwritten_by_an_older_boot() {
+        overlapping_boots(false).await;
+    }
+    #[tokio::test]
+    async fn replacement_boot_admission_survives_an_older_abort() {
+        overlapping_boots(true).await;
+    }
+    #[tokio::test]
+    async fn owned_retirement_without_a_current_runtime_closes_only_its_child() {
+        let stub = Stub::new(false);
+        let child = RpcChild::spawn(
+            "owned-no-runtime",
+            stub.script.to_str().unwrap(),
+            &[],
+            &[],
+            &stub.root,
+            &stub.root.join("child.log"),
+            None,
+        )
+        .await
+        .unwrap();
+        stub.wait_for(&stub.pid).await;
+        let owned = child.clone();
+        std::thread::spawn(move || {
+            assert!(tokio::runtime::Handle::try_current().is_err());
+            owned.retire_owned();
+        })
+        .join()
+        .unwrap();
+        let closed = tokio::time::timeout(Duration::from_secs(2), async {
+            while child.is_alive() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .is_ok();
+        // Normal runtime reap still uses the captured Child handle after this fallback probe.
+        child.shutdown().await;
+        let _ = std::fs::remove_dir_all(&stub.root);
+        assert!(
+            closed,
+            "the captured child survived its no-current-runtime cleanup"
         );
     }
 }

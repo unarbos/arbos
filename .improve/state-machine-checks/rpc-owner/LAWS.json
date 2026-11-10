@@ -1,0 +1,89 @@
+{
+  "unmodified_tests": 4,
+  "generated_cases": 768,
+  "seeds": [
+    91001,
+    91002,
+    91003
+  ],
+  "seconds": 1.17614625,
+  "strict_typescript_exit": 0,
+  "mutations": {
+    "unmodified_tests_passed": 4,
+    "generated_law_cases": 768,
+    "protocol_test": 1,
+    "original_sources": {
+      "crates/arbos-agentd/src/pi_slot.rs": "7923dd3f2b2cd4feb68912eabd7e65ed948abd6f878278d609ca830a0e3565b0",
+      "harness/arbos-pi-ext/rpc-owner-laws.test.ts": "3f22745ede51edb1cf1b1a69bb67857782d9441acc2b505e3c9a81c0afcdaedb",
+      ".improve/state-machine-checks/pi_slot_bridge.rs": "d52cbc721cabb4fd6d39e5e28079bf20ed1b52fd9a1ab26a25579fa887838493",
+      "harness/arbos-pi-ext/package.json": "46c8db9d787d1903f8e3d9cef74d52312bec0900028746afdf6284987e5cddef"
+    },
+    "source_unchanged": true,
+    "results": [
+      {
+        "name": "stale-abort-retires-replacement",
+        "seed": 91001,
+        "original_sha256": "7923dd3f2b2cd4feb68912eabd7e65ed948abd6f878278d609ca830a0e3565b0",
+        "mutant_sha256": "b0816d5dd7a6350471324e87ec38222b5feddf83e22fdb7e34ceabc0bb4d6170",
+        "generated": {
+          "exit_code": 1,
+          "seconds": 0.5890207920456305,
+          "detected": true,
+          "accepted_shrinks": 0
+        },
+        "shrunk_input": {
+          "tail": []
+        },
+        "replay": {
+          "exit_code": 1,
+          "seconds": 0.5408552080625668,
+          "detected": true
+        }
+      },
+      {
+        "name": "shutdown-can-reopen",
+        "seed": 91002,
+        "original_sha256": "7923dd3f2b2cd4feb68912eabd7e65ed948abd6f878278d609ca830a0e3565b0",
+        "mutant_sha256": "13900f132a492d412af906c7cae05935f6bd09e5439c4ae317800612fcde73f5",
+        "generated": {
+          "exit_code": 1,
+          "seconds": 0.6258501670090482,
+          "detected": true,
+          "accepted_shrinks": 0
+        },
+        "shrunk_input": {
+          "tail": []
+        },
+        "replay": {
+          "exit_code": 1,
+          "seconds": 0.5595571669982746,
+          "detected": true
+        }
+      },
+      {
+        "name": "ready-resource-is-lost",
+        "seed": 91003,
+        "original_sha256": "7923dd3f2b2cd4feb68912eabd7e65ed948abd6f878278d609ca830a0e3565b0",
+        "mutant_sha256": "bc53be47d46e393b3d5ae0d24cb620fbb983e1070190a779a7d70d9488870a47",
+        "generated": {
+          "exit_code": 1,
+          "seconds": 0.6381171670509502,
+          "detected": true,
+          "accepted_shrinks": 0
+        },
+        "shrunk_input": {
+          "tail": []
+        },
+        "replay": {
+          "exit_code": 1,
+          "seconds": 0.7060604590224102,
+          "detected": true
+        }
+      }
+    ]
+  },
+  "limits": [
+    "Finite sampled traces over actual generic resource slot; no process/provider effects in bridge.",
+    "All three first counterexamples were canonical empty noise tails; zero accepted shrinks, exact replay fails."
+  ]
+}
