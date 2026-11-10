@@ -1,13 +1,14 @@
-"""Two actual-function negative controls; disposable sources and deny-network Swift checks."""
+"""Three actual-function negative controls; disposable sources and deny-network Swift checks."""
 from pathlib import Path
 import argparse,difflib,hashlib,json,shutil,subprocess,sys,tempfile,time
 HERE=Path(__file__).resolve().parent;P='apps/ios/Arbos/Arbos/'
 MUTANTS=[
  ('copy-predicate-discarded','UI/MessagePasteboard.swift','return await copy(text: "", attachments: [attachment], slot: slot, isCurrent: isCurrent)','return await copy(text: "", attachments: [attachment], slot: slot, isCurrent: { true })','check_copy.py',8),
  ('photos-permission-owner-check-removed','UI/MediaViewer.swift','let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)\n            guard origin.allowsPrivate(model) else { return }','let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)','check_media.py',20),
+ ('link-icon-publication-check-removed','UI/LinkPreviewCard.swift','let bytes = await MediaFetch.bytes(for: item, model: model, isCurrent: { origin.allowsPrivate(model) })\n            guard origin.allowsPrivate(model) else { return }','let bytes = await MediaFetch.bytes(for: item, model: model, isCurrent: { origin.allowsPrivate(model) })','check_link.py',8),
 ]
 def main():
- p=argparse.ArgumentParser();p.add_argument('--tree',type=Path,required=True);p.add_argument('--out',type=Path,required=True);a=p.parse_args();tree=a.tree.resolve();out=a.out.resolve();out.mkdir(parents=True,exist_ok=False);names=['UI/MediaViewer.swift','UI/MessagePasteboard.swift','UI/LibraryList.swift','UI/ChatView.swift','Sync/WorkLifetime.swift','Store/AppModel.swift'];hashes={P+n:hashlib.sha256((tree/(P+n)).read_bytes()).hexdigest()for n in names};rows=[];tick=time.monotonic()
+ p=argparse.ArgumentParser();p.add_argument('--tree',type=Path,required=True);p.add_argument('--out',type=Path,required=True);a=p.parse_args();tree=a.tree.resolve();out=a.out.resolve();out.mkdir(parents=True,exist_ok=False);names=['UI/MediaViewer.swift','UI/MessagePasteboard.swift','UI/LibraryList.swift','UI/ChatView.swift','UI/LinkPreviewCard.swift','Sync/WorkLifetime.swift','Store/AppModel.swift'];hashes={P+n:hashlib.sha256((tree/(P+n)).read_bytes()).hexdigest()for n in names};rows=[];tick=time.monotonic()
  for name,file,old,new,driver,total in MUTANTS:
   with tempfile.TemporaryDirectory(prefix='arbos-media-mutant-')as raw:
    tmp=Path(raw)

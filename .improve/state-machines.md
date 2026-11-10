@@ -8,12 +8,12 @@ are distinguished from an undeclared collection of mutually exclusive modes.
 The original broad inventory incorrectly grouped several of those together;
 the reassessment below gives the source-level reason for each correction.
 
-**Current checkpoint:** backend and operational ownership fixes are committed and
-have scoped native/controller gates. The iOS AccountWork/UI successor is still
-being integrated and SDK typechecked. Generated approval/provisioning laws and
-final whole-workspace gates remain in progress. This document does not declare
-Phase4 complete, confuse component totals with distinct full-suite coverage, or
-claim physical-device, provider or deployment verification.
+**Implementation and bounded review:** the backend, operational and iOS
+account/media boundaries below are explicit and exercised by actual-source
+regressions and generated laws. Mac compilation/linking and iOS SDK app/test-
+source gates are retained separately from runtime tests. The finish report records
+the exact combined-source Linux/Swift verdicts and explained red rows. Component
+totals overlap; no provider, deployment or physical-device result is claimed.
 
 Native languages keep their existing runtime and use Rust ownership/RAII and
 Swift tagged tickets at effect edges. Effect Schema arbitraries drive the
@@ -75,7 +75,7 @@ For paths shortened to filenames in a row, the directory is that row's first pat
 
 | Machine | Effective behavior and risk | 2–5 key files |
 | --- | --- | --- |
-| Account-session ownership | Explicit account/control/task/cache ownership rejects stale publications and actions; final iOS UI composition is being verified. **High** | I/Store/AppModel.swift; I/Sync/Auth.swift; I/Sync/RelayAPI.swift; M/sync/relay.rs; M/sync/credentials.rs |
+| Account-session ownership | Explicit account/control/task/cache ownership rejects stale publications and actions; iOS callbacks, snapshots and nested media retain their rendered origin. **High** | I/Store/AppModel.swift; I/Sync/Auth.swift; I/Sync/RelayAPI.swift; M/sync/relay.rs; M/sync/credentials.rs |
 | iOS transport-attempt lifecycle | Socket/task/generation flags coordinate idle, dialing, active, retrying and permanently stopped hosts around an already explicit room protocol. **High** | I/Sync/SessionRoom.swift; I/Store/AppModel.swift; F/lib.rs |
 | Mac pending delivery ownership | User-message pending sets change on enqueue, failure and room ACK, but room ownership currently disappears in one global set. **High** | M/sync/relay.rs; M/sync/mod.rs; M/app.rs; M/sync/chat_send_queue.rs |
 | Call-attempt ownership | REST call creation/join, UI cancellation and LiveKit/CallKit completion must belong to one current attempt. **High** | I/Store/CallManager.swift; I/Model/Call.swift; M/app.rs; M/calls.rs; M/ui/callview.rs |
@@ -83,7 +83,7 @@ For paths shortened to filenames in a row, the directory is that row's first pat
 | Snapshot publication lifetime | A detached doc read may complete after room/account cleanup and must not republish obsolete private messages. **High** | I/Store/AppModel.swift; I/Sync/CoreChatDoc.swift; I/UI/ChatView.swift |
 | Attachment-send lifecycle | Picked/uploading/committing/pending/failed attachment sends use transient tasks and multiple collections rather than one send state. **Medium** | I/Store/AppModel.swift; I/UI/ChatView.swift; M/sync/relay.rs; M/app.rs |
 | Per-chat FIFO worker lifetime | No-worker/active/queued/timed-out/cleared state is encoded by channel/task entries and timeout callbacks. **Medium** | M/sync/chat_send_queue.rs; M/sync/relay.rs |
-| Draft-DM creation | A per-draft/account queue owns creation and FIFO sends; the reproduced wrong-recipient interleaving makes this **High**, now implemented in the pending iOS successor. | I/Store/AppModel.swift; M/draft_dm.rs; M/app.rs; M/sync/relay.rs |
+| Draft-DM creation | A per-draft/account queue owns creation and FIFO sends; the reproduced wrong-recipient interleaving makes this **High**, now implemented with a retained per-draft owner and FIFO queue. | I/Store/AppModel.swift; M/draft_dm.rs; M/app.rs; M/sync/relay.rs |
 | Cache flush lifecycle | Dirty/coalescing/exporting/persisted/evicted state spans doc/cursor snapshots, dirty sets and timers. **Medium** | I/Store/AppModel.swift; I/Store/DeviceStore.swift; M/sync/relay.rs; M/sync/store.rs |
 | Read-mark coalescing | Unsent/in-flight/throttled/latest-queued read cursor is tracked through maps and per-chat tasks. **Medium** | I/Store/AppModel.swift; I/Sync/SessionRoom.swift; M/sync/relay.rs; M/sync/dto.rs |
 | Composer operation mode | Plain send, same-chat reply, cross-chat reply and edit are mutually exclusive semantic modes stored as independent nullable fields. **Medium** | I/UI/ChatView.swift; I/Store/AppModel.swift; M/app.rs; M/ui/composer.rs |
@@ -193,8 +193,20 @@ final kill-first adapter. No new grace/duration, CLI argument, model policy or
 process isolation was introduced. The latest independent Root checkpoint passes
 78 selected native tests plus all-target Clippy; its overlapping totals and exact
 source are in `worker-lifetime/CLAUDE-ROOT-COMPOSITION.json`. See `rpc-owner/`,
-`rpc-metadata/` and `worker-lifetime/`. Linux-only sweep expectations are handled
-in Tests last; full Linux and final combined source gates are still required.
+`rpc-metadata/` and `worker-lifetime/`.
+
+A separate actual RPC defect was then reproduced: an outstanding large Prompt
+holds stdin while a child stops reading; shutdown waited for that mutex before
+starting its grace. The existing five-second grace now covers the whole EOF path.
+The exact child handle is captured outside the timed future; timeout kills/reaps
+it before waiting on stdin. Original stop/shutdown regressions fail with the
+normal-EOF control passing; final four cases pass, including cancellation after
+capture. Related harness33 includes those four; all-target Clippy/check and package
+build pass. The Linux sweep fixture uses a test-only exact-child barrier instead
+of an invalid400ms/obsolete-EOF premise, retaining all four physical-writer cases
+and their existing writer budget. See `rpc-cleanup/`; fresh Linux replay is
+recorded separately. RPC graceful EOF and Claude immediate-kill policies remain
+distinct. Protocol/request deadlines and process isolation are unchanged.
 
 **H4 — approval delivery.** Durable ApprovalState/Outcome and first-decision CAS
 already existed. The repaired submachine is `WaitDelivery::Inline(sender) |
@@ -332,18 +344,38 @@ implementation;7 Effect Schema laws run1792 generated cases and8 actual-function
 mutants falsify/replay. SDK/native controller checks have different scope; see
 `native-ownership/`, `session-owner/`, and `session-owner/NATIVE-GATES.json`.
 
-**iOS async/callback origin and draft queue (High, integration pending).** The
-private successor's AccountWork captures one owner plus bound API before optimism,
-Task creation and awaited chains; accepted-owner guards protect effects, late
-UI/error/busy publication and return values. Secrets/devices/server/profile and
-onboarding/people/creation/picker callbacks carry the same origin. Account-ticket
-view identity retires private @State across atomic A→B adoption without resetting
-same-account refresh state. DraftSendQueue owns per-draft/account FIFO creation,
-callbacks and close/retire transitions, preventing a B draft from flushing to
-A's newly created DM. Actual source-derived failures/positive controls and
-Schema-derived queue laws are retained by the pending iOS handoff. Settings,
-shared confirmation and ChatView caller review, full SDK typecheck and final
-combined tests remain required; no “all callers verified” claim at this checkpoint.
+**iOS async/callback origin and draft queue (High).** AccountWork captures one
+owner plus bound API before optimism, Task creation and awaited chains; accepted-
+owner guards protect effects, late UI/error/busy publication and return values.
+Secrets/devices/server/profile and onboarding/people/creation/picker callbacks
+carry the same origin. Account-ticket view identity retires private @State across
+atomic A→B adoption without resetting same-account refresh. DraftSendQueue owns
+per-draft/account FIFO creation, callbacks and close/retire transitions, preventing
+a B draft from flushing to A's newly created DM.
+
+Chat, card, microphone, player, image/cache and clipboard callers preserve the
+rendered context. MediaOrigin carries the existing opaque ticket through viewer/
+Library copy, save, page fetch, permission and publication; it creates no epoch or
+API per row. Supplied stale/unavailable origins cannot fall back to B. Anonymous
+profile pictures keep zero-bearer read/Close/zoom behavior. An already issued HTTP
+or Photos effect cannot be recalled; later admission, UI and clipboard publication
+are fenced. The shared private link-preview blob caller is covered by the final
+successor proof rather than relying only on SwiftUI task cancellation.
+
+Source-derived before-failing regressions, positive controls and actual-function
+mutants are retained in `ios-account-work/`, `ios-chat/`, `ios-media/` and `ios-chat-resources/`; Schema-derived queue laws execute actual Swift. The selected
+method gates do not render SwiftUI or exercise devices. Full SDK source compilation
+and canonical XCTest execution are distinct final layers, recorded in the finish
+report. Persistent unknown legacy cache ownership remains owner work.
+
+Final scoped iOS method/caller gates pass296 account-work cases (38groups),122
+chat cases (12groups), and80 media/preview cases. The suites overlap and use
+synthetic effects. Media original copy/save failures and preview8load/6tap controls
+are distinguished from new receipt predicates and constructor propagation.
+Three actual media-function mutations are detected and replayed. All10 actual
+MediaFetch and both attachment-copy producers supply an origin predicate; the
+bounded constructor review includes all3 link-card paths. These checks do not
+claim every UI callback or every possible interleaving is proven.
 
 **Transport and snapshot lifetime (High).** SessionRoom terminal403/404 retires
 generation before cancelling tasks/socket and emits terminal failure once. The
@@ -427,10 +459,10 @@ the High boundary rather than duplicated per presentation mode.
 Verification is layered: finite before-failing native/SQL/Swift controller tests;
 Schema-derived laws against actual Rust/Swift/Python boundaries with bounded
 transports; actual-function mutants with replay; then whole-source compiler and
-unfiltered isolated CI gates. Component totals overlap. The successful safe
+unfiltered isolated CI gates with their distinct verdicts. Component totals overlap. The successful safe
 baseline CI (2373 Rust passes and606 Swift/UI passes) precedes these new sources;
-it is not a final combined-source verdict. Final Linux/Swift composition remains
-required. The existing search-reveal UI rig is red on two independent phase heads
+it is not a final combined-source verdict. Final Linux/Swift source pins, outcomes and explained red rows are recorded
+in the finish report. The existing search-reveal UI rig is red on two independent phase heads
 and overlaps upstream PR2539; it is not reported as green or as a proven app bug.
 Bend2 is absent and remains an optional owner follow-up. Broader observability is
 explicitly deferred for the owner's discussion with Jacob (const); it does not

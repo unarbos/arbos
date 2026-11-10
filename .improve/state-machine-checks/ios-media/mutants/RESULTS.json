@@ -4,6 +4,7 @@
     "apps/ios/Arbos/Arbos/UI/MessagePasteboard.swift": "600dfd856ca217e852d1b5c38b1035dceaff3bd56d20cc9d0ab6df0efe0d464e",
     "apps/ios/Arbos/Arbos/UI/LibraryList.swift": "b56c88fefcb51654b14c04d9c7cb4e35161c73057d5757f446f7af319647fd69",
     "apps/ios/Arbos/Arbos/UI/ChatView.swift": "cebc573edc37875a5740cef582ad2ecace19551b1852e22bb66e30b525c7cccc",
+    "apps/ios/Arbos/Arbos/UI/LinkPreviewCard.swift": "af175a27584ff0a90200206cd4f6909a46c0dae42853611092350c2d58461a11",
     "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f",
     "apps/ios/Arbos/Arbos/Store/AppModel.swift": "7c944e04f8483f0d5e0c19a26d9414f8a50cba79462b08bdae3c704af91e2b0c"
   },
@@ -61,9 +62,30 @@
         "passed": 19,
         "total": 20
       }
+    },
+    {
+      "name": "link-icon-publication-check-removed",
+      "mutation_count": 1,
+      "detected": true,
+      "same_deterministic_replay": true,
+      "results": {
+        "cases": {
+          "brand-skips-icon-control": true,
+          "cancelled-before-admission-no-fetch": true,
+          "current-icon-failure-still-loads-image": true,
+          "current-sequential-icon-and-image-control": true,
+          "empty-slot-no-private-fetch-control": true,
+          "queued-old-card-cannot-admit-B-icon-or-image": true,
+          "retired-icon-no-paint-or-second-B-image": false,
+          "retired-image-no-late-paint": true
+        },
+        "failed": 1,
+        "passed": 7,
+        "total": 8
+      }
     }
   ],
-  "detected": 2,
-  "total": 2,
-  "seconds": 4.574660792015493
+  "detected": 3,
+  "total": 3,
+  "seconds": 5.363291208981536
 }

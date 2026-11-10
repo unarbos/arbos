@@ -9,5 +9,7 @@
   "LibraryList_numeric_literal_multiset_unchanged": true,
   "ChatView_numeric_literal_multiset_unchanged": true,
   "Transcript_numeric_literal_multiset_unchanged": true,
-  "FunPicker_numeric_literal_multiset_unchanged": true
+  "FunPicker_numeric_literal_multiset_unchanged": true,
+  "LinkPreviewCard_link_delta_numeric_literal_multiset_unchanged": true,
+  "Transcript_link_delta_numeric_literal_multiset_unchanged": true
 }
