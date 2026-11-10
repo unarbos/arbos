@@ -68,7 +68,7 @@ window's top edge.
 | Strip height | **60** (`HEADER_HEIGHT` = 2 × `CONTROL_LINE`); the chat header and the right pane's header are the same band |
 | Traffic lights | macOS's own, at `TRAFFIC_LIGHT_POSITION` 15 / 15: 14 pt discs centred **22** from the top (position + 7, measured), 23 apart — Grok's spot (was 14 / 21) |
 | Discs' line | centred **30** (`CONTROL_LINE`): disc top 12, bottom 48 — Grok's; 8 pt under the lights' line (they are not one line in Grok either; Jacob's "too high" was the discs centred at 21 in a 44 band) |
-| Under the strip | the filter capsules start at **64** (`FILTER_TOP` 4 after the 60 strip) — where Grok's first chat card starts, 16 under the discs; the capsule row ends at 104 (`FILTER_BOTTOM` 8) |
+| Under the strip | the chat list starts under the strip (no All · Agents · People · Servers filter); Grok's first chat card at **64** (16 under the discs) is the next-content reference for list top padding |
 | Buttons, left to right | search · + · collapse — three round discs, right-aligned |
 | Disc | **36** (`STRIP_BUTTON` = `theme::CONTROL`), fill `surface_2`, glyph in `text` |
 | Glyphs | `CONTROL_GLYPH` 19 for search and + (visible marks 14.3 / 12.7 at a 1.6 stroke); `CONTROL_GLYPH_WIDE` 17 for the collapse rect (visible box 14.2) |
@@ -86,7 +86,7 @@ Grok Bot's size: all `theme::CONTROL` = 36 tall (`header::metrics::PILL_HEIGHT`
 centred on the same line, `PILL_TOP` = 12 = Grok's disc top). Pinned by
 `sidebar::strip_tests::the_three_discs_are_groks_size`,
 `sidebar::strip_tests::the_strip_is_groks_height_and_the_discs_sit_on_groks_line`,
-`sidebar::strip_tests::the_discs_and_the_filter_land_on_groks_pixels` and
+`sidebar::strip_tests::the_discs_land_on_groks_pixels_with_no_filter_band` and
 `header::tests::every_kind_has_the_same_bar_height_and_pill_position`.
 
 Measured on `media/feedback/search-palette/ref-grok-round-search-plus.png`
@@ -110,17 +110,19 @@ same header, pins servers too and migrates its device-local pins into the synced
 | Item | Rule | Code |
 |---|---|---|
 | Pin / Unpin | the **first item** of every row menu (agent, person, group, server), above today's items, which do not move; SF `pin` / `pin.slash`, the iPhone's names. A new pin lands at the **top**; Unpin returns the row to its place by activity. At the cap the click answers with the shared error element ("You can pin up to 5 chats.") | `sidebar::row_menu` (`row-menu-pin`), `AppState::set_pinned` |
-| Pinned section | "Pinned" `TEXT_SMALL` 13 medium `text_muted` at the rows' text inset (list 8 + row 12 = **20**) in a **26** pt band (`PINNED_HEADER_H`) under the filter row; the pinned rows **in the user's order only** — never re-sorted by unread or activity, unread stays the count pill / bold name; then a 1 pt `border` hairline inset 12 in a 9 pt band (`PINNED_DIVIDER_H` = `glass::MENU_DIVIDER_HEIGHT`); then the rest in today's order, no second header | `sidebar::list_sections`, `pinned_header`, `pinned_divider` |
+| Pinned section | "Pinned" `TEXT_SMALL` 13 medium `text_muted` at the rows' text inset (list 8 + row 12 = **20**) in a **26** pt band (`PINNED_HEADER_H`) under the strip; the pinned rows **in the user's order only** — never re-sorted by unread or activity, unread stays the count pill / bold name; then a 1 pt `border` hairline inset 12 in a 9 pt band (`PINNED_DIVIDER_H` = `glass::MENU_DIVIDER_HEIGHT`); then the rest in today's order, no second header | `sidebar::list_sections`, `pinned_header`, `pinned_divider` |
 | Pinned row | a normal row plus **`pin.fill` 11 pt semibold** in `text_muted` before the time (`row-pin-<id>`). No colour, no dot | `pin_mark` |
 | Zero pins | **nothing is drawn** — no header, hairline or marks; the list is exactly as before | pinned by `pin_tests::zero_pins_draws_no_section` |
-| Filter | All · Agents · People · Servers: the section shows only the pins the segment admits; header and hairline hide when none passes | `list_sections` over the filtered rows; `pin_tests::the_filter_shows_only_the_pins_it_admits` |
-| Reorder | **drag** a pinned row within the section: the row lifts (the highlight token's pressed step, `highlight::lifted`), the others slide to open the slot under the pointer, the drop — or a mouse-up anywhere — saves the shown order; pins the filter hid keep their places (`AppState::reorder_pins`). No drag across the hairline; pin / unpin is the menu | `PinDrag` / `pin_draggable` / `pin_drop_target`, `Shell::{begin_pin_drag, pin_slot_at, finish_pin_drag}` |
+| List | one linear list of agents, people, and servers together — no All · Agents · People · Servers filter; agent and server pins both show when present | `pin_tests::pinned_agent_and_server_both_show_with_no_filter`, `pin_tests::the_list_shows_agents_people_and_servers_together_with_no_filter` |
+| Reorder | **drag** a pinned row within the section: the row lifts (the highlight token's pressed step, `highlight::lifted`), the others slide to open the slot under the pointer, the drop — or a mouse-up anywhere — saves the shown order. No drag across the hairline; pin / unpin is the menu | `PinDrag` / `pin_draggable` / `pin_drop_target`, `Shell::{begin_pin_drag, pin_slot_at, finish_pin_drag}` |
 | Rail | the collapsed rail draws the same order (pins first); its metrics are unchanged — no hairline tile | `rail` reads `sidebar::list_entries` |
 | Archive / delete | unpin (a pin is a row you see); pinning an archived row unarchives it first | `set_space_archived`, `delete_project`, `delete_people_chat`, `leave_group` |
 | Data | one relay list per user, top first: row keys `agent:<project id>` / `chat:<people chat id>` / `server:<server id>` (`AppState::pins`, `pin_key`); `GET /me/pins` at launch after the cached copy (`store::KEY_PINS`), `PUT /me/pins {pins}` replaces the whole list (`ClientCommand::SetPins`; the relay's answer is the truth, a refusal re-reads), `pins_changed` from another device replaces it (`SyncEvent::Pins`). Cap from the relay (`pin_cap`, default 5) | `sync/relay.rs` `refresh_pins` / `apply_pins`, `fixture.rs` `ARBOS_RIG_PINS=<name>[,…]` |
 
 Pinned by `sidebar::pin_tests::{zero_pins_draws_no_section,
-pinned_rows_lead_in_the_users_order_under_a_header, the_filter_shows_only_the_pins_it_admits,
+pinned_rows_lead_in_the_users_order_under_a_header,
+pinned_agent_and_server_both_show_with_no_filter,
+the_list_shows_agents_people_and_servers_together_with_no_filter,
 the_row_menu_leads_with_pin_then_unpin, pins_land_on_top_stop_at_the_cap_and_go_to_the_relay,
 reordering_keeps_hidden_pins_in_place, a_pin_drag_previews_the_order_and_commits_on_drop}`;
 relay `pins::tests`.
@@ -147,19 +149,19 @@ the chat area (not the window). Points from the window's edges.
 | Lights' slot | the top **44** pt of the rail (`LIGHTS_SLOT` = `theme::TRAFFIC_LIGHT_SLOT` = button 14 + 2 × `TRAFFIC_LIGHT_POSITION` 15): the title-bar container GPUI sizes around AppKit's three buttons (x 15–75, y 15–29, centred at 22 = Grok's line, hover tracking areas inside it; re-laid out by GPUI on resize, full-screen exit, activation, screen change — `gpui_macos::window::move_traffic_light`). Reserved: none of our controls inside it; all window drag. As the expanded strip, the rail moves nothing in native full screen: macOS hides the buttons, the slot stays. Pinned by `rail::tests::no_control_shares_the_traffic_lights_frame_in_any_state` (window, full screen, morph path, key / non-key) |
 | Toggle | **inside the rail**, the first disc under the lights' slot: x **24**, top **52** (`TOGGLE_TOP` = `LIGHTS_SLOT` 44 + `STRIP_GAP` 8), the same 36 pt `control_disc` and column as + and Search, in a window and in full screen alike (Jacob 2026-10-27, [feedback sidebar-toggle-in-rail-2026-10-27]: "The tab button should also be in the side bar here" — supersedes the 2026-10-26 rule that a plain window kept the toggle in the chat header at x 96 and that full screen put it on the lights' line at top 12, where a window state read as full screen left it half hidden under the buttons; `rail::toggle_spot` is gone). The chat header draws a toggle only for the narrow band's hidden sidebar (`header_toggle_shown`) |
 | + and Search | stacked under the toggle, `STRIP_GAP` 8 apart: + top **96**, Search top **140** (36 pt `control_disc`s, the strip's own handlers) — the strip's search · + · collapse read top-down from the toggle |
-| Pictures | every chat the current filter admits — agents, people, groups, servers (rounded squares, `SERVER_PICTURE_CORNER`) — in the list's order, **36** pt on a **58** pitch, first tile top **192** (16 under Search; picture top 201, centre 219; was 152/161/179 before the toggle joined the column); the same `ListEntry::picture` builders as the rows (one avatar resolver, #1912). Selected = **54** tile, radius **12**, the highlight token's selected step; hover = its hover step + a name tip 8 right of the rail (`pane_card`, `border_strong`, 13 pt) |
+| Pictures | every chat — agents, people, groups, servers (rounded squares, `SERVER_PICTURE_CORNER`) — in the list's order, **36** pt on a **58** pitch, first tile top **192** (16 under Search; picture top 201, centre 219; was 152/161/179 before the toggle joined the column); the same `ListEntry::picture` builders as the rows (one avatar resolver, #1912). Selected = **54** tile, radius **12**, the highlight token's selected step; hover = its hover step + a name tip 8 right of the rail (`pane_card`, `border_strong`, 13 pt) |
 | Badges | one spot at the picture's bottom-right corner (never a coloured dot, 2026-10-27): **working** = the braille spinner in the 13 pt ring of the rail's colour, else **unread** = the count pill (`marks::unread_pill`, a 2 pt rim in the rail's colour); the selected chat shows no unread pill; nothing for a person typing |
 | My picture | alone at the bottom: 36 at x 24, **12** above the bottom (centre 30 = `CONTROL_LINE` mirrored; Grok 31), with the machine dot; opens Settings like the footer row |
 | Scrolling | the pictures scroll (`LIST_FADE_BAND` edge fade) when more fit than the window holds (`capacity`: 14 in a 1079 pt window, 8 in a 760 one) |
-| Filter | the rail follows All · Agents · People · Servers; the segment persists in `<config>/sidebar_filter` and the collapsed state in `<config>/sidebar_collapsed` (`SidebarCollapsed`), so the app reopens as it was left |
+| List | one linear list of agents, people, and servers together (no All · Agents · People · Servers filter); the collapsed state persists in `<config>/sidebar_collapsed` (`SidebarCollapsed`) |
 | Servers | a server's picture opens its **newest channel** (`#general` when none has spoken) and marks the server open, so expanding shows its channel list |
-| Expanded sidebar | **unchanged** — strip, filter, rows, footer exactly as above |
+| Expanded sidebar | **unchanged** — strip, rows, footer exactly as above (no filter band) |
 | Composer / column | the pill's cap is Grok's **960** (`COMPOSER_WIDTH` 904 + 2 × 28; was 876), the transcript column shares it (`COLUMN_MAX_WIDTH`); both centred in the chat area right of the rail / sidebar, as before |
-| Collapse / open | a **morph**, not a clip, on the pane-slide curves (170 ms ease-out quad closing, 200 ms ease-out cubic opening): the three discs glide from the strip into the rail column (the toggle with them, into its slot under the lights), the rows' pictures shrink into their rail slots as the text and filter fade out by half-way, the selected card shrinks into its tile, my footer picture slides to the centre, the chat column re-centres. The travelling pictures keep the lists' `LIST_FADE_BAND` top and bottom fade the whole way, in a list frame that moves from the expanded list's to the rail's with them (`rail::morph_list_top`), so the rail's edge fade comes in with the fold and goes with the unfold — never added the frame the fold ends or dropped the frame an unfold begins ([feedback mac-sidebar-slide-jank-2026-10-29], Scout: "the second it is folded in it just overlays the blur"; `rail::tests::the_morph_fades_its_pictures_in_a_frame_that_moves_with_them`). `rail::render_morph` (the column) + `rail::render_overlay` (the travelling pieces, from the resting bounds the expanded sidebar records each frame — `Shell::morph`). The selected chat **holds its appearance the whole way**: the travelling card wears the highlight token's selected step (`rail::morph_card_fill`), the one fill its expanded row rests in and its rail tile lands on — it was the opaque `surface_2`, which on the Glass sidebar read as a dark grey slab for the length of the animation, folding and unfolding alike ([feedback mac-sidebar-selected-blink-2026-11-05], Scout: "the selected chat blinks dark grey once"; `rail::tests::the_selected_chat_keeps_one_fill_across_the_collapse`). Reduce Motion snaps |
+| Collapse / open | a **morph**, not a clip, on the pane-slide curves (170 ms ease-out quad closing, 200 ms ease-out cubic opening): the three discs glide from the strip into the rail column (the toggle with them, into its slot under the lights), the rows' pictures shrink into their rail slots as the text fades out by half-way, the selected card shrinks into its tile, my footer picture slides to the centre, the chat column re-centres. The travelling pictures keep the lists' `LIST_FADE_BAND` top and bottom fade the whole way, in a list frame that moves from the expanded list's (under the strip) to the rail's with them (`rail::morph_list_top`), so the rail's edge fade comes in with the fold and goes with the unfold — never added the frame the fold ends or dropped the frame an unfold begins ([feedback mac-sidebar-slide-jank-2026-10-29], Scout: "the second it is folded in it just overlays the blur"; `rail::tests::the_morph_fades_its_pictures_in_a_frame_that_moves_with_them`). `rail::render_morph` (the column) + `rail::render_overlay` (the travelling pieces, from the resting bounds the expanded sidebar records each frame — `Shell::morph`). The selected chat **holds its appearance the whole way**: the travelling card wears the highlight token's selected step (`rail::morph_card_fill`), the one fill its expanded row rests in and its rail tile lands on — it was the opaque `surface_2`, which on the Glass sidebar read as a dark grey slab for the length of the animation, folding and unfolding alike ([feedback mac-sidebar-selected-blink-2026-11-05], Scout: "the selected chat blinks dark grey once"; `rail::tests::the_selected_chat_keeps_one_fill_across_the_collapse`). Reduce Motion snaps |
 | Narrow band | below `NARROW_WINDOW` the sidebar still hides and the header toggle floats it as an overlay (Q7 b); the rail is for the docked widths |
 | iPhone | no equivalent (no sidebar; the home list + the single bottom search bar) |
 
-Rig: `ARBOS_SIDEBAR_COLLAPSED=1|0` (start collapsed), `ARBOS_SIDEBAR_FILTER=…`,
+Rig: `ARBOS_SIDEBAR_COLLAPSED=1|0` (start collapsed),
 `ARBOS_RIG_FULLSCREEN=1` (lay out as full screen where the platform cannot say;
 since [feedback sidebar-toggle-in-rail-2026-10-27] full screen changes no
 layout), `ARBOS_RIG_RAIL_T=0.4` (freeze the morph at a progress for still
@@ -176,9 +178,8 @@ restore) and `sidebar::strip_tests::the_filter_is_restored_from_the_config_dir`.
 
 **Dragging the chat list narrower never draws a broken middle state.** Jacob
 (v0.6.296): "fix wrap for when closing the side bar with the slider" — at 200 pt
-the filter capsules overflowed (one clipped on the left, "Servers" off the
-right), rows read "Arbo… 10:35 AM" with the dot crowding the name, and the
-strip's discs no longer fit beside the lights. Rules (`ui/sidebar_fit.rs`):
+rows read "Arbo… 10:35 AM" with the dot crowding the name, and the strip's
+discs no longer fit beside the lights. Rules (`ui/sidebar_fit.rs`):
 
 | Width (pt) | Rule |
 |---|---|
@@ -190,8 +191,7 @@ strip's discs no longer fit beside the lights. Rules (`ui/sidebar_fit.rs`):
 | < 204 (`SNAP_WIDTH − SNAP_HYSTERESIS`) | **snaps to the icon rail** (the rail morph, as the toggle) and keeps the width the gesture started from as the column's saved width (`EdgeTarget::Rail { keep }`) |
 | rail → out past 220 | **restores that width** (`NSSplitView` collapse behaviour): the column re-expands at it, the handle holds until the pointer passes it, then follows (`EdgeTarget::Hold` → `Expanded`). The rail's right edge is the same handle (`rail-resize`) |
 | rail → out, short of 220 | **the rail morph follows the pointer** (`EdgeDrag::track` → `slide::Want::sidebar_track`), the mirror of the fold following it down to 220. Crossing 220 settles at the restored width on the open curve from where the hand is; letting go short of it settles back into the rail on the close curve; a width change under a running slide retargets it, never drops it. Drag open and drag close are symmetric with each other and with the toggle (Jacob 2026-10-29, [feedback mac-sidebar-drag-open-2026-10-29]) |
-| Filter capsules | never clipped: the row scrolls horizontally under a 12 pt side fade (`FILTER_FADE_BAND`, `Shell::filter_scroll`) when the four do not fit — Grok Bot's iPhone home filter row — and is centred when they do (first / last capsule carry `auto` side margins); the selected capsule is scrolled into view. No icons, no overflow menu |
-| Strip | unchanged at every width ≥ 220 |
+| Strip | unchanged at every width ≥ 220; the chat list under it shows agents, people, and servers together with no filter band |
 
 Breakpoints derive from `ROW_CHROME` 86 (8 + 8 list, 12 + 12 row, 36 picture,
 10 gap) + `NAME_MIN` 96 + the time's footprint (56 full / 44 small) + the
@@ -521,21 +521,13 @@ Pinned by `ui::composer::format_tests` (wrap / unwrap / hug / strip / empty pair
 / nesting / ⌘Z / blurred, all through the real keymap; `live_styles` run by
 run) and `keymap_tests::format_chords_are_the_focused_composers_and_cmd_b_toggles_the_rail_outside`.
 
-## Chat-list filter (the iPhone home's `PaneTabs`)
+## Chat list (no filter)
 
-Directly under the strip: **All · Agents · People · Servers** — the iPhone
-`HomeListFilter` with the same labels and order. Bare labels, the selected one
-on a capsule, centred; no track, no border. The list is no longer narrowed by
-typed text (search is the palette); the segment alone scopes it.
-
-| Item | Mac | iPhone |
-|---|---|---|
-| Capsule height / gap | 32 / 4 | 32 / 4 |
-| Label | `TEXT_BODY` 15, semibold when selected | `Theme.body` 17, semibold when selected |
-| Side padding | **10** (`FILTER_PAD_X`; four segments at 16 overflow the 296 pt default sidebar) | 16 |
-| Selected fill / text | `bubble_assistant` / `text` | `bubbleAssistant` / `text` |
-| Other labels | `text_muted` | `muted` |
-| Scope | All: everything · Agents: my agents (not shared-in) · People: DMs + groups · Servers: servers only | same (`HomeView.homeRows`) |
+The Mac sidebar has **no** All · Agents · People · Servers filter under the
+strip ([feedback chat-list-no-filter-mac-2026-11-10]). Strip then one linear
+list of every chat kind — agents, people (DMs and groups), and servers —
+together. Search stays the command palette; it does not narrow the sidebar
+list. Stale `<config>/sidebar_filter` prefs are cleared on Shell init.
 
 Server rows draw their picture as a rounded square (corner 11/36 of the size,
 `SERVER_PICTURE_CORNER`) so servers read apart from the agent and people discs.
@@ -1281,7 +1273,6 @@ wash; **Matte returns the old tokens untouched.**
 | --- | --- | --- | --- | --- |
 | Grouped card (`kit::card`: members, settings, Connection / Key cards, Library lists) | `pane_card` | white 8 % + 1 pt rim white 10 % (inset shadow: no layout cost) | white 55 % + rim black 6 % | `Theme::pane_card_fill` / `pane_card_rim`, `PANE_CARD_GLASS_*` |
 | Small controls: the round-button family — the pane's share / close / back discs, the sidebar strip's search · + · collapse and the collapsed rail's discs (Jacob 2026-10-28 16:58: "they should be glass"; hover and pressed stay `ui::highlight`'s two wash steps over the fill, the glyph the text colour) — the tab capsule, glyph tiles, Library thumbnails, hero glyph tile, Message pill, tag chips | `surface_2` | white 14 % | black 7 % | `Theme::control_fill` |
-| Sidebar filter's selected capsule (All · Agents · People · Servers) | `bubble_assistant` | white 14 % | black 7 % | `Theme::filter_on_fill` |
 | Fields in the pane (description / label / name editors, the handle field, Unarchive) | `field` | white 6 % | white 60 % | `Theme::field_fill` |
 | Settings icon tile | `#5c5c60` / `#6e6e73` | white 22 % | black 42 % (white glyph ≥ 3:1) | `Theme::tile_fill` |
 | Selected On / Off / Dark / Light segment | `bubble` | white 16 % | black 72 % | `Theme::segment_on_fill` |
