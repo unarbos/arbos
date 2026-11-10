@@ -195,6 +195,19 @@ struct Theme: Equatable {
     /// How small the mic and the leaving glyph get as they go, and start from
     /// as they return.
     static let composerSwapScale: CGFloat = 0.8
+    /// The touch-down flash on the field, copied from Grok's composer (Jacob,
+    /// 2026-11-04): the first touch brightens the bar for one beat and the
+    /// brightening then fades, so the touch is acknowledged before the keyboard
+    /// has finished arriving. `text` at this alpha over the #181818 field reads
+    /// 47 luminance — the rim's middle pixel, and below its brightest 58, so the
+    /// edge still reads as the edge. On light it darkens the white field to #E7,
+    /// the same press weight the control family's pills use.
+    static let composerFlashAlpha: Double = 0.10
+    /// Up in four frames (visible as feedback, not as an animation), then down
+    /// over the longer fall a release reads as a flash rather than a blink. The
+    /// field is at full brightness while a tap is still under the finger.
+    static let composerFlashRise: Double = 0.06
+    static let composerFlashFall: Double = 0.22
     /// Pending-attachment chip: the remove ✕'s hit frame (the glyph is 10 pt; the
     /// target is ≥ 20 pt, [feedback composer-attachment-removal-ios-2026-10-27]).
     /// The chip's trailing inset shrinks by the frame's overhang so the glyph
@@ -671,6 +684,21 @@ struct ComposerRim<S: InsettableShape>: View {
         } else {
             shape.strokeBorder(theme.fieldBorder, lineWidth: 1)
         }
+    }
+}
+
+/// The composer field's press flash: `text` at `Theme.composerFlashAlpha` on the field's
+/// own shape, drawn over its surface and under its rim, so the bar brightens as a whole
+/// and its edge is still the brightest thing on it. `on` is a pulse the owner times
+/// (`Theme.composerFlashRise` / `Fall`), not the finger's state: a tap lifts sooner than
+/// the eye can read a highlight that only lasts as long as the touch.
+struct ComposerPressFlash<S: InsettableShape>: View {
+    @Environment(\.theme) private var theme
+    let shape: S
+    let on: Bool
+
+    var body: some View {
+        shape.fill(theme.text.opacity(on ? Theme.composerFlashAlpha : 0))
     }
 }
 

@@ -302,6 +302,10 @@ struct MentionTextView: UIViewRepresentable {
     /// Paste menu → image / GIF from the pasteboard (feedback
     /// app-01M5TGH18WV3QCK5KZT6XKG7FG). `mime` stays image/gif or image/webp.
     var onPasteImage: ((Data, String, String) -> Void)? = nil
+    /// The touch that opens the keyboard, at touch-down — the chat composer answers it
+    /// with its press flash. Taps that only move the caret in a field already being
+    /// typed in do not call it.
+    var onFirstTouchDown: (() -> Void)? = nil
 
     /// Grok: the caret 17 pt in from the field's edge, one 22 pt line centred in 48.
     static let insets = UIEdgeInsets(top: Theme.composerTextPadY, left: Theme.composerTextInset, bottom: Theme.composerTextPadY, right: 0)
@@ -330,6 +334,7 @@ struct MentionTextView: UIViewRepresentable {
         view.onPasteMedia = onPasteMedia
         view.onDeleteBackwardEmpty = onDeleteBackwardEmpty
         view.onPasteImage = onPasteImage
+        view.onFirstTouchDown = onFirstTouchDown
         return view
     }
 
@@ -340,6 +345,7 @@ struct MentionTextView: UIViewRepresentable {
         c.apply(theme: theme, to: view)
         view.onDeleteBackwardEmpty = onDeleteBackwardEmpty
         view.onPasteImage = onPasteImage
+        view.onFirstTouchDown = onFirstTouchDown
         view.placeholderLabel.text = placeholder
         view.placeholderLabel.isHidden = !text.isEmpty
         view.placeholderLabel.font = c.font
@@ -630,6 +636,19 @@ final class MentionUITextView: UITextView {
     var onDeleteBackwardEmpty: (() -> Void)?
     /// Paste of an image / GIF / WebP from the pasteboard.
     var onPasteImage: ((Data, String, String) -> Void)?
+    /// The touch that opens the keyboard: a touch landing while this field is not yet
+    /// first responder.
+    var onFirstTouchDown: (() -> Void)?
+
+    /// Read the touch, never take it, and change nothing about how it is delivered: the
+    /// field's own recognisers still place the caret and raise the keyboard exactly as they
+    /// did. `touchesBegan` is the earliest this field hears about a finger — before
+    /// `becomeFirstResponder`, which is what makes the flash read as an answer to the touch
+    /// rather than to the keyboard.
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        if !isFirstResponder { onFirstTouchDown?() }
+        super.touchesBegan(touches, with: event)
+    }
 
     override func becomeFirstResponder() -> Bool {
         if !isFirstResponder { PerfSignpost.composerAskedForFocus() }
