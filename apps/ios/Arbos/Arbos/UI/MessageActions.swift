@@ -92,10 +92,17 @@ struct MessageActionsOverlay<Bubble: View>: View {
     private var menuWidth: CGFloat { 250 }
     /// The menu's height is its rows' (the same geometry `menu` draws and hit-tests).
     private var menuHeight: CGFloat { MessageActionsMenuRows.compute(items: items, width: menuWidth).height }
+    /// The held bubble lists who used each emoji under the chips; that tail is not in
+    /// the transcript row's measured frame, so the layout reserves it so the menu
+    /// does not cover the names ([feedback AFQuMFvDG3ye2C3TEfPnmXA]).
+    private var reactionSendersBelow: CGFloat {
+        MessageActionsLayout.reactionSendersBelow(reactionCount: row.reactions.count)
+    }
 
     var body: some View {
         GeometryReader { geo in
             let bubbleFrame = pressedFrame ?? frame
+            let contentHeight = bubbleFrame.height + reactionSendersBelow
             let layout = MessageActionsLayout.compute(.init(
                 bubble: bubbleFrame,
                 capsuleHeight: ReactionCapsule.height,
@@ -104,7 +111,8 @@ struct MessageActionsOverlay<Bubble: View>: View {
                 height: height,
                 safeTop: safeTop,
                 safeBottom: safeBottom,
-                keyboardInset: keyboard.inset(overlayFrame: geo.frame(in: .global))
+                keyboardInset: keyboard.inset(overlayFrame: geo.frame(in: .global)),
+                belowBubble: reactionSendersBelow
             ))
             ZStack(alignment: .topLeading) {
                 Rectangle()
@@ -119,7 +127,9 @@ struct MessageActionsOverlay<Bubble: View>: View {
                 bubble()
                     .frame(width: width)
                     // Only a bubble taller than the visible area is cut (layout rule 5).
-                    .frame(height: layout.bubbleHeight < bubbleFrame.height ? layout.bubbleHeight : nil, alignment: .top)
+                    // Compare against the chips-plus-sender-names height so a clip
+                    // still leaves the menu below the names when they fit.
+                    .frame(height: layout.bubbleHeight < contentHeight ? layout.bubbleHeight : nil, alignment: .top)
                     .clipped()
                     .offset(y: layout.bubbleY)
                 menu

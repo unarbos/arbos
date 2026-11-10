@@ -40,6 +40,19 @@ struct MessageActionsLayout: Equatable {
         var keyboardInset: CGFloat = 0
         /// Breathing room kept from the visible edges.
         var margin: CGFloat = 8
+        /// Extra content drawn under the measured bubble — the "who reacted" name lines
+        /// when a message long-press lists every reaction's senders (`showReactionSenders`).
+        /// The menu sits below this so it does not cover the names
+        /// ([feedback AFQuMFvDG3ye2C3TEfPnmXA]).
+        var belowBubble: CGFloat = 0
+    }
+
+    /// Room under the chips for one name line per reaction (12 pt text + the VStack's
+    /// 4 pt spacing before/between lines). Used as `Input.belowBubble` when the held
+    /// overlay shows reaction senders.
+    static func reactionSendersBelow(reactionCount: Int) -> CGFloat {
+        guard reactionCount > 0 else { return 0 }
+        return CGFloat(reactionCount) * 20
     }
 
     let placement: Placement
@@ -59,23 +72,26 @@ struct MessageActionsLayout: Equatable {
     static func compute(_ i: Input) -> MessageActionsLayout {
         let top = i.safeTop + i.margin
         let bottom = i.height - max(i.safeBottom, i.keyboardInset) - i.margin
-        let bubbleH = i.bubble.height
+        // Measured bubble plus the sender-name tail drawn under it in the overlay.
+        let bubbleH = i.bubble.height + max(0, i.belowBubble)
+        let bubbleMinY = i.bubble.minY
+        let bubbleMaxY = bubbleMinY + bubbleH
         let gap = i.gap
 
         // Rule 2: the bubble stays put, capsule above, menu below.
-        let capsuleBelowTop = i.bubble.minY - gap - i.capsuleHeight
-        let menuBelowEnd = i.bubble.maxY + gap + i.menuHeight
+        let capsuleBelowTop = bubbleMinY - gap - i.capsuleHeight
+        let menuBelowEnd = bubbleMaxY + gap + i.menuHeight
         if capsuleBelowTop >= top, menuBelowEnd <= bottom {
-            return MessageActionsLayout(placement: .menuBelow, capsuleY: capsuleBelowTop, bubbleY: i.bubble.minY,
-                                        menuY: i.bubble.maxY + gap, bubbleHeight: bubbleH,
+            return MessageActionsLayout(placement: .menuBelow, capsuleY: capsuleBelowTop, bubbleY: bubbleMinY,
+                                        menuY: bubbleMaxY + gap, bubbleHeight: bubbleH,
                                         visibleTop: top, visibleBottom: bottom)
         }
 
         // Rule 3: flip the menu above the bubble (capsule on top of it); the bubble must be fully visible.
-        let menuAboveTop = i.bubble.minY - gap - i.menuHeight
+        let menuAboveTop = bubbleMinY - gap - i.menuHeight
         let capsuleAboveTop = menuAboveTop - gap - i.capsuleHeight
-        if capsuleAboveTop >= top, i.bubble.maxY <= bottom, i.bubble.minY >= top {
-            return MessageActionsLayout(placement: .menuAbove, capsuleY: capsuleAboveTop, bubbleY: i.bubble.minY,
+        if capsuleAboveTop >= top, bubbleMaxY <= bottom, bubbleMinY >= top {
+            return MessageActionsLayout(placement: .menuAbove, capsuleY: capsuleAboveTop, bubbleY: bubbleMinY,
                                         menuY: menuAboveTop, bubbleHeight: bubbleH,
                                         visibleTop: top, visibleBottom: bottom)
         }
