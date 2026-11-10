@@ -15,6 +15,7 @@ use tokio::sync::mpsc;
 use crate::auth;
 use crate::calls::{self, CallCmd, CallEvent};
 use crate::chat_search;
+use crate::chat_title::title_from;
 use crate::model::SpaceKind;
 use crate::model::{
     add_members_plan, added_line, call_ended_line, created_group, reachable_line,
@@ -12562,19 +12563,6 @@ pub fn fnv1a64(s: &str) -> u64 {
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
     }
     h
-}
-
-pub fn title_from(text: &str) -> String {
-    let line = text.lines().next().unwrap_or("").trim();
-    let mut out: String = line.chars().take(34).collect();
-    if line.chars().count() > 34 {
-        out.push('…');
-    }
-    if out.is_empty() {
-        "New chat".into()
-    } else {
-        out
-    }
 }
 
 /// MIME from a local path's extension (optimistic echo before the relay replies).

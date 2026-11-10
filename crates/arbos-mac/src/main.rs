@@ -5,6 +5,7 @@ mod audio;
 mod auth;
 mod calls;
 mod chat_search;
+mod chat_title;
 mod draft_dm;
 mod image_picker;
 mod jobtabs;
