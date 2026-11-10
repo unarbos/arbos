@@ -5,7 +5,9 @@ These checks supplement the existing 41 native caller/concurrency regressions. F
 checks the bounded native transport. A property may run several fresh fixtures, so the
 input count is not a count of SQL statements or distinct integration tests.
 
-`extract.py` compiles 34 literal actual definitions from six fixed production files:
+`extract.py` compiles the original34 literal actual definitions from six fixed
+production files, plus the actual device-owner bootstrap migration required by
+the current accounts index (35 source items). See [bootstrap repair](bootstrap/README.md):
 `Db::settle_voice_usage`, its shared debit/grant/legacy helpers including the required
 configured-cap affected-row guard, actual SpendLimit/threshold/UTC helpers, row readers,
 schema DDL and migrations. The reviewed block reader in sibling `pending-owners/extract.py`

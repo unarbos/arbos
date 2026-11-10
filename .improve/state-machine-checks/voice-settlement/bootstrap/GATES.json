@@ -1,0 +1,117 @@
+{
+  "verdict": "PASS \u2014 fixture-only regression repair",
+  "canonical_before": {
+    "canonical_sha": "a4d22466f894ec9dc0afc9624eb55996a8fb1e3c",
+    "command": [
+      "sandbox-exec",
+      "deny network*",
+      "node",
+      "--test",
+      "harness/arbos-pi-ext/voice-settlement-laws.test.ts"
+    ],
+    "exit_code": 1,
+    "wall_seconds": 2.160081082955003,
+    "counts": {
+      "tests": 5,
+      "pass": 0,
+      "fail": 5,
+      "cancelled": 0,
+      "skipped": 0,
+      "todo": 0
+    },
+    "hashes_before": {
+      ".improve/state-machine-checks/voice-settlement/extract.py": "2e14bf88f5c753bdba1f926530080ea8c611fb90af8fb0381958f0954049fae9",
+      ".improve/state-machine-checks/voice-settlement/native/src/main.rs": "6e52392c36f532acb34bf07b30a6c84f8ea0bccde77cdd15a6d17cec778f2bd0",
+      "harness/arbos-pi-ext/voice-settlement-laws.test.ts": "56863aa05e7a261cd690494d494a61e88a1216369a7b881b2e347da634e86f45"
+    },
+    "hashes_after": {
+      ".improve/state-machine-checks/voice-settlement/extract.py": "2e14bf88f5c753bdba1f926530080ea8c611fb90af8fb0381958f0954049fae9",
+      ".improve/state-machine-checks/voice-settlement/native/src/main.rs": "6e52392c36f532acb34bf07b30a6c84f8ea0bccde77cdd15a6d17cec778f2bd0",
+      "harness/arbos-pi-ext/voice-settlement-laws.test.ts": "56863aa05e7a261cd690494d494a61e88a1216369a7b881b2e347da634e86f45"
+    },
+    "unchanged": true,
+    "network": "OS sandbox denies all network; no app/provider/service launched"
+  },
+  "canonical_after": {
+    "canonical_sha": "a4d22466f894ec9dc0afc9624eb55996a8fb1e3c",
+    "command": [
+      "sandbox-exec",
+      "deny network*",
+      "node",
+      "--test",
+      "harness/arbos-pi-ext/voice-settlement-laws.test.ts"
+    ],
+    "exit_code": 0,
+    "wall_seconds": 31.68426799995359,
+    "counts": {
+      "tests": 5,
+      "pass": 5,
+      "fail": 0,
+      "cancelled": 0,
+      "skipped": 0,
+      "todo": 0
+    },
+    "hashes_before": {
+      ".improve/state-machine-checks/voice-settlement/extract.py": "ae376e68761f0706dff3c78acba41bc04d460c957a6a04c146202919d4643125",
+      ".improve/state-machine-checks/voice-settlement/native/src/main.rs": "6e52392c36f532acb34bf07b30a6c84f8ea0bccde77cdd15a6d17cec778f2bd0",
+      "harness/arbos-pi-ext/voice-settlement-laws.test.ts": "56863aa05e7a261cd690494d494a61e88a1216369a7b881b2e347da634e86f45"
+    },
+    "hashes_after": {
+      ".improve/state-machine-checks/voice-settlement/extract.py": "ae376e68761f0706dff3c78acba41bc04d460c957a6a04c146202919d4643125",
+      ".improve/state-machine-checks/voice-settlement/native/src/main.rs": "6e52392c36f532acb34bf07b30a6c84f8ea0bccde77cdd15a6d17cec778f2bd0",
+      "harness/arbos-pi-ext/voice-settlement-laws.test.ts": "56863aa05e7a261cd690494d494a61e88a1216369a7b881b2e347da634e86f45"
+    },
+    "unchanged": true,
+    "network": "OS sandbox denies all network; no app/provider/service launched"
+  },
+  "standalone_phase4_after": {
+    "source_commit": "9e50073163c844bd6a4f6393e742e37a37d8d3b6",
+    "command": [
+      "sandbox-exec",
+      "deny network*",
+      "node",
+      "--test",
+      "harness/arbos-pi-ext/voice-settlement-laws.test.ts"
+    ],
+    "exit_code": 0,
+    "wall_seconds": 33.96374554198701,
+    "counts": {
+      "tests": 5,
+      "pass": 5,
+      "fail": 0,
+      "cancelled": 0,
+      "skipped": 0,
+      "todo": 0
+    },
+    "hashes_before": {
+      ".improve/state-machine-checks/voice-settlement/extract.py": "ae376e68761f0706dff3c78acba41bc04d460c957a6a04c146202919d4643125",
+      ".improve/state-machine-checks/voice-settlement/native/src/main.rs": "6e52392c36f532acb34bf07b30a6c84f8ea0bccde77cdd15a6d17cec778f2bd0",
+      "harness/arbos-pi-ext/voice-settlement-laws.test.ts": "56863aa05e7a261cd690494d494a61e88a1216369a7b881b2e347da634e86f45"
+    },
+    "hashes_after": {
+      ".improve/state-machine-checks/voice-settlement/extract.py": "ae376e68761f0706dff3c78acba41bc04d460c957a6a04c146202919d4643125",
+      ".improve/state-machine-checks/voice-settlement/native/src/main.rs": "6e52392c36f532acb34bf07b30a6c84f8ea0bccde77cdd15a6d17cec778f2bd0",
+      "harness/arbos-pi-ext/voice-settlement-laws.test.ts": "56863aa05e7a261cd690494d494a61e88a1216369a7b881b2e347da634e86f45"
+    },
+    "unchanged": true,
+    "network": "OS sandbox denies all network; no app/provider/service launched"
+  },
+  "per_successful_suite": {
+    "tests": 5,
+    "generated_laws": 4,
+    "runs_per_law": 256,
+    "generated_traces": 1024,
+    "protocol_invalid_frames": 9,
+    "protocol_valid_recovery": 1
+  },
+  "actual_bootstrap_diagnostic_before": {
+    "exit_code": 1,
+    "cause": "no such column: user_id in CREATE INDEX IF NOT EXISTS devices_user_live ON devices(user_id) WHERE revoked_at IS NULL",
+    "generated_Db_fresh": "actual original extractor output"
+  },
+  "preparation": "Each private snapshot owns a target cloned from completed dependencies; unchanged TS runner cleans voice-settlement-bridge before compilation. Initial local launch discovery error started no process and is not counted as a test.",
+  "limitations": [
+    "Local macOS fixture check; final combined Linux CI still required.",
+    "No production database, application, provider or deployment execution."
+  ]
+}

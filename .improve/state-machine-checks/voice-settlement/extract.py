@@ -14,6 +14,8 @@ def main():
  def literal(key,pattern):
   matches=re.findall(pattern,data[key]);assert len(matches)==1;result=matches[0];pieces[key+':'+pattern]=hashlib.sha256(result.encode()).hexdigest();return result
  schema=literal('db',r'(const SCHEMA: &str = r#"[\s\S]*?"#;)')
+ # Match Db::from_conn: the accounts index requires this earlier devices migration.
+ devices_user_migration=literal('db',r"(let _ = c\.execute\(\s*\"ALTER TABLE devices ADD COLUMN user_id TEXT NOT NULL DEFAULT 'u_default'\",\s*\[\],\s*\);)")
  tuple_=literal('db',r'(#\[derive\(Clone\)\]\s*pub struct Db\(Arc<Mutex<Connection>>\);)')
  accounts_schema=literal('accounts',r'(pub const ACCOUNTS_SCHEMA: &str = r#"[\s\S]*?"#;)')
  voice_schema=literal('voice',r'(pub const VOICE_SCHEMA: &str = r#"[\s\S]*?"#;)')
@@ -21,7 +23,7 @@ def main():
  generated+='pub mod ids {\n'+take('ids','pub fn now_ms()')+'\n}\n'
  generated+='pub mod proxy {\n'+take('proxy','pub(crate) fn start_of_utc_day_ms()')+'\n}\n'
  generated+='pub mod credits { pub(crate) use crate::proxy::start_of_utc_day_ms;\n'+literal('credits',r'(const MIN_DEBIT_USD: f64 = [^;]+;)')+'\n'+literal('credits',r'(const UNLIMITED_WORDS: &\[&str\] = &[\s\S]*?];)')+'\n'+take('credits','pub enum SpendLimit',True)+'\n'+take('credits','impl SpendLimit {')+'\n'+take('credits','pub(crate) fn chargeable_amount(')+'\n}\n'
- generated+='pub mod db { use std::sync::{Arc,Mutex}; use anyhow::Result; use rusqlite::Connection;\n'+tuple_+'\n'+schema+'\nimpl Db {\n'+take('db','pub(crate) fn with<T>')+'\npub fn fresh()->Result<Self>{let c=Connection::open_in_memory()?; c.execute_batch(SCHEMA)?; crate::db_accounts::migrate_accounts(&c); c.execute_batch(crate::db_accounts::ACCOUNTS_SCHEMA)?; c.execute_batch(crate::db_voice::VOICE_SCHEMA)?; crate::db_voice::migrate_voice(&c); Ok(Self(Arc::new(Mutex::new(c))))}\n}\n}\n'
+ generated+='pub mod db { use std::sync::{Arc,Mutex}; use anyhow::Result; use rusqlite::Connection;\n'+tuple_+'\n'+schema+'\nimpl Db {\n'+take('db','pub(crate) fn with<T>')+'\npub fn fresh()->Result<Self>{let c=Connection::open_in_memory()?; c.execute_batch(SCHEMA)?;\n'+devices_user_migration+'\n crate::db_accounts::migrate_accounts(&c); c.execute_batch(crate::db_accounts::ACCOUNTS_SCHEMA)?; c.execute_batch(crate::db_voice::VOICE_SCHEMA)?; crate::db_voice::migrate_voice(&c); Ok(Self(Arc::new(Mutex::new(c))))}\n}\n}\n'
  generated+='pub mod db_accounts {use rusqlite::{params,Connection,OptionalExtension}; use crate::ids::now_ms;\n'+accounts_schema+'\n'
  for anchor,derive in [('pub fn migrate_accounts(',False),('pub enum DebitRefused',True),('pub(crate) struct LegacyCreditDefaults',False),('pub(crate) enum LegacyCreditInit',False),('pub(crate) enum PostfactDebit',False),('pub(crate) struct PostfactCharge',False),('fn ensure_legacy_credit_on(',False),('pub(crate) fn charge_postfact_on(',False),('fn set_user_limits_on(',False),('fn grant_credits_on(',False),('fn debit_on(',False)]:generated+=take('accounts',anchor,derive)+'\n'
  generated+='}\npub mod db_voice { use anyhow::Result; use rusqlite::{params,OptionalExtension};use serde::{Serialize,Deserialize};use crate::ids::now_ms;use crate::db::Db;\n'+voice_schema+'\n'

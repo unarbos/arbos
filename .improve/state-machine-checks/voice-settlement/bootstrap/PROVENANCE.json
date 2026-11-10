@@ -1,0 +1,24 @@
+{
+  "canonical_sha": "a4d22466f894ec9dc0afc9624eb55996a8fb1e3c",
+  "all_original_selected_items_identical": true,
+  "new_selected_items": {
+    "db:(let _ = c\\.execute\\(\\s*\\\"ALTER TABLE devices ADD COLUMN user_id TEXT NOT NULL DEFAULT 'u_default'\\\",\\s*\\[\\],\\s*\\);)": "164a9d9bc6c9a1f2cb5691a189735c9b8c6094e1f2a4d336369144a69033212c"
+  },
+  "generated_change_only_actual_migration_statement_at_bootstrap": true,
+  "all_materialized_source_changes": [
+    ".improve/state-machine-checks/voice-settlement/extract.py"
+  ],
+  "migration_sha256": "164a9d9bc6c9a1f2cb5691a189735c9b8c6094e1f2a4d336369144a69033212c",
+  "migration_lines": [
+    692,
+    695
+  ],
+  "schema_and_money_algorithms_unchanged": true,
+  "bridge_main_and_laws_unchanged": true,
+  "strict_reply_schema_unchanged": true,
+  "after_extractor_sha256": "ae376e68761f0706dff3c78acba41bc04d460c957a6a04c146202919d4643125",
+  "patch_sha256": "788a34be338095e8d1b7bfc8ad2e177adc427294c8cef78b5e533b38b73f8e08",
+  "standalone_all_materialized_source_changes": [
+    ".improve/state-machine-checks/voice-settlement/extract.py"
+  ]
+}
