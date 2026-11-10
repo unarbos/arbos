@@ -19,6 +19,22 @@ name: Release
 #           (target ≤ 15 min tag→published; v0.6.93 took 30).
 #           Set the repository variable ARBOS_AUTO_STABLE=0 to go back to edge
 #           builds per push.
+#   agent   The sandbox image alone. A range that moved only what the
+#           `arbos-agent` image is built from (scripts/release/agent-paths.sh:
+#           crates/arbos-agentd, crates/arbos-core, image/, Cargo.lock) used to
+#           release nothing at all: `mac-change.sh` said "no Mac path changed",
+#           the plan said `channel=none`, and every job here is gated on that —
+#           so an agentd fix cut no tag, built no image and uploaded no
+#           artifact until an unrelated Mac merge carried it into a Mac cut.
+#           This channel cuts `image-v0.1.N` on the target commit and starts
+#           .github/workflows/image.yml on it. No dmg, no notarization, no
+#           appcast: a signed Mac build has nothing to do with an agentd fix
+#           and costs about fourteen minutes of a shared Mac runner.
+#           Why `image-v0.1.N` and not `vX.Y.Z`: a `v*` tag is the Mac app's
+#           released identity — the appcast, the dmg, and the answer to "which
+#           version shipped my fix". A `v0.6.x` with no Mac artifact behind it
+#           would name a version no Mac user can install. See
+#           scripts/release/release-channel.sh for the whole reasoning.
 #   edge    workflow_dispatch channel=edge (or ARBOS_AUTO_STABLE=0 per push).
 #           Version = Cargo.toml version + "." + commit count (0.1.0.212).
 #           Release `edge-0.1.0.212` (pre-release) holds the payloads; the
@@ -127,6 +143,7 @@ jobs:
       version: ${{ steps.plan.outputs.version }}
       build: ${{ steps.plan.outputs.build }}
       notes: ${{ steps.plan.outputs.notes }}
+      tag: ${{ steps.plan.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -200,8 +217,10 @@ jobs:
               publish=true
               ;;
           esac
+          tag=
           if $auto; then
-            # Continuous delivery: bump + tag when the Mac app changed; see the script header.
+            # Continuous delivery: bump + tag when the Mac app changed, `image-v0.1.N` when only
+            # the sandbox image did; see the script header.
             plan="$(scripts/release/auto-stable.sh)"
             echo "$plan"
             channel="$(sed -n 's/^channel=//p' <<< "$plan")"
@@ -210,6 +229,7 @@ jobs:
             build="$(sed -n 's/^build=//p' <<< "$plan")"
             notes="$(sed -n 's/^notes=//p' <<< "$plan")"
             sha="$(sed -n 's/^sha=//p' <<< "$plan")"
+            tag="$(sed -n 's/^tag=//p' <<< "$plan")"
             if [[ "$channel" == none ]]; then
               echo "::notice::no release: $notes"
             fi
@@ -224,16 +244,36 @@ jobs:
             echo "sha=$sha"
             echo "version=$version"
             echo "build=$build"
+            echo "tag=$tag"
             echo "notes<<ARBOS_EOF"
             echo "$notes"
             echo "ARBOS_EOF"
           } >> "$GITHUB_OUTPUT"
-          echo "Arbos $version ($channel), publish=$publish" >> "$GITHUB_STEP_SUMMARY"
+          # Why this run is or is not cutting, on the summary page rather than only in the log.
+          # `channel=none` used to look identical whether it was a healthy skip or a range nothing
+          # would ever release; auto-stable.sh now says which, and this is where that is read.
+          {
+            echo "### Release plan"
+            echo
+            echo "Arbos $version — channel \`$channel\`, publish=$publish${tag:+, tag \`$tag\`}."
+            echo
+            echo '```'
+            echo "$notes"
+            echo '```'
+            case "$channel" in
+              none)   echo "No artifact is cut by this run." ;;
+              agent)  echo "The sandbox image alone: no dmg, no notarization and no appcast." ;;
+              stable) echo "A signed, notarized Mac release, marked latest." ;;
+            esac
+          } >> "$GITHUB_STEP_SUMMARY"
 
   macos:
     name: Mac app (sign, notarize, dmg)
     needs: plan
-    if: needs.plan.outputs.channel != 'none'
+    # Not on the `agent` channel. Signing, notarizing and stapling takes about fourteen minutes of
+    # a shared Mac runner, and an agentd fix is not in the Mac binary — nothing it changes could
+    # reach a dmg. The whole point of that channel is to stop making an agentd fix wait for one.
+    if: needs.plan.outputs.channel != 'none' && needs.plan.outputs.channel != 'agent'
     runs-on: ${{ inputs.runner || vars.ARBOS_MAC_RUNNER || 'macos-15' }}
     timeout-minutes: 150
     outputs:
@@ -448,9 +488,16 @@ jobs:
           done
           cp target/x86_64-unknown-linux-musl/release/arbos-agentd dist/arbos-agentd
           ls -la dist
+      # Not on the `agent` channel: there the image is image.yml's, built from the `image-v0.1.N`
+      # tag by the `agent-image` job below. Two reasons it must not be built here instead. The
+      # buildx cache scope is one — image.yml keeps its own because this job's `scope=release`
+      # served stale arbos-pi-ext seed layers to images 0.1.121–0.1.123 (2026-10-25, #1700/#1702),
+      # and an image the deploy worker's seed check rejects holds the agentd lane. The smoke test
+      # and the Daytona snapshot are the other: image.yml has both and this job has neither.
       - uses: docker/setup-buildx-action@v3
+        if: needs.plan.outputs.channel != 'agent'
       - uses: docker/login-action@v3
-        if: needs.plan.outputs.publish == 'true'
+        if: needs.plan.outputs.publish == 'true' && needs.plan.outputs.channel != 'agent'
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -460,6 +507,7 @@ jobs:
       # (D43): boxes pin an image version per Project (D44), so a push to main
       # must not move what running Projects use.
       - uses: docker/build-push-action@v6
+        if: needs.plan.outputs.channel != 'agent'
         env:
           # No *.dockerbuild artifact: publish downloads the payload-* ones only.
           DOCKER_BUILD_RECORD_UPLOAD: "false"
@@ -481,10 +529,55 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
+  agent-image:
+    name: Agent image (image.yml)
+    needs: plan
+    if: needs.plan.outputs.channel == 'agent'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start image.yml on ${{ needs.plan.outputs.tag }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.plan.outputs.tag }}
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          # auto-stable.sh pushed the tag with GITHUB_TOKEN, and a push made with that token
+          # starts no workflow — so image.yml, whose trigger is `push: tags: ["image-v*"]`, would
+          # never see it. `workflow_dispatch` is the one event GitHub does deliver for that token,
+          # and image.yml already offers it with the same `version` input, so the dispatched run
+          # does exactly what a tag push would have done.
+          gh workflow run image.yml --ref "$TAG" -f version="$VERSION"
+          runs="https://github.com/$GITHUB_REPOSITORY/actions/workflows/image.yml"
+          {
+            echo "### Agent image"
+            echo
+            echo "Started \`image.yml\` on \`$TAG\` to build, push and smoke-test"
+            echo "\`ghcr.io/$GITHUB_REPOSITORY/arbos-agent:$VERSION\`. [Its runs]($runs)."
+            echo
+            echo "This run does not wait for it, and must not: image.yml's last step registers"
+            echo "the Daytona snapshot, which needs \`DAYTONA_API_KEY\` and therefore fails in"
+            echo "CI, so its run conclusion is red even when the build and the smoke pass."
+            echo "\`scripts/deploy/arbos-deploy-worker\` reads those two steps rather than the"
+            echo "conclusion, and registers the snapshot itself when it rolls the boxes."
+          } >> "$GITHUB_STEP_SUMMARY"
+
   publish:
     name: Appcast and release
     needs: [plan, macos, linux]
-    if: needs.plan.outputs.publish == 'true' && needs.plan.outputs.channel != 'none'
+    # This job is the Mac app's: it signs the payload with the updater key, writes appcast.xml and
+    # tells every installed Mac to check it. The `agent` channel has no payload for it — `macos`
+    # is skipped there, so this would be skipped anyway, and saying so is clearer than leaving it
+    # to be inferred from a `needs:` edge.
+    if: >-
+      needs.plan.outputs.publish == 'true' &&
+      needs.plan.outputs.channel != 'none' &&
+      needs.plan.outputs.channel != 'agent'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:

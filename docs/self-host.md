@@ -117,6 +117,8 @@ With `DAYTONA_API_KEY` set, `project create` (without `--local-box`) creates a s
 
 `.github/workflows/image.yml` builds `image/Dockerfile` on an image tag (`image-v<version>`) or by hand (`workflow_dispatch` with a version), pushes it to GHCR as `ghcr.io/unarbos/arbos/arbos-agent:<version>` (public), smoke-tests it, and registers the Daytona snapshot `arbos-agent-<version>` with `image/register-snapshot.sh` (needs the `DAYTONA_API_KEY` repository secret; otherwise run the script by hand). The image bakes in `arbos-agentd`, so every agentd change needs an image rebuild; machines do not update it at boot.
 
+Two sides cut `image-v<version>` tags, and they share the namespace so that neither cuts a range the other already did. `scripts/deploy/arbos-deploy-worker` tags one when it rolls the boxes. `.github/workflows/release.yml` tags one on its `agent` channel — a green range of main that moved what the image is built from (`scripts/release/agent-paths.sh`) and nothing the Mac app is built from — and starts `image.yml` on it by `workflow_dispatch`, because a tag pushed with `GITHUB_TOKEN` starts no workflow of its own. An agentd fix therefore gets an image of its own rather than waiting for an unrelated Mac release to carry it.
+
 Without CI, the same build runs on any Docker host and goes to Daytona's transient registry (tags are immutable: bump the version for every rebuild):
 
 ```bash
