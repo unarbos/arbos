@@ -346,6 +346,10 @@ enum Transcript {
     static let turnGap: CGFloat = 13
     /// Space around a centred system line (dates, hand-offs, membership notices).
     static let systemGap: CGFloat = 20
+    /// Extra air above a centred stamp inside its row. `systemGap` alone was landing
+    /// "Today …" on the bubble above it ([feedback AGgL7fykRs0BE9uiHscNCvk] / #2962).
+    /// The Mac already pads the stamp itself (`STAMP_PAD_TOP`); this is the iPhone match.
+    static let systemStampTopPad: CGFloat = 16
 
     /// Whether a message from `sender` at `at` continues the run that ended with
     /// `prevSender` at `prevAt`: the same sender, within `runWindowMs` of the run's last
@@ -1505,8 +1509,10 @@ struct RowView: View, Equatable {
     /// The agent-error note's Details disclosure.
     @State private var errorDetailsOpen = false
 
-    /// Trailing column width for swipe-revealed times (fits "12:59 PM").
-    static let timeRevealWidth: CGFloat = 56
+    /// Trailing column width for swipe-revealed times: fits "12:59 PM" at the design size and
+    /// grows with the Text Size slider (the 11 pt label is 57 pt wide at Larger, 64 at Largest).
+    /// Fixed 56 pt wrapped at Largest ([feedback scaled-timestamp-clip-mac-2026-10-29] / #2310).
+    static func timeRevealWidth(_ theme: Theme) -> CGFloat { theme.pt(56) }
 
     /// Skip re-drawing when the parent re-evaluates for an unrelated reason
     /// (composer keystrokes, presence ticks). Closures are not compared — they
@@ -1606,12 +1612,15 @@ struct RowView: View, Equatable {
         .offset(x: -timeReveal)
         .overlay(alignment: .trailing) {
             if let time = swipeTimeLabel, timeReveal > 0.5 {
+                let column = Self.timeRevealWidth(theme)
                 Text(time)
                     .font(theme.font(11))
                     .foregroundStyle(theme.muted)
-                    .frame(width: Self.timeRevealWidth, alignment: .trailing)
-                    .offset(x: Self.timeRevealWidth - timeReveal)
-                    .opacity(Double(min(1, timeReveal / (Self.timeRevealWidth * 0.55))))
+                    .lineLimit(1)
+                    .fixedSize()
+                    .frame(width: column, alignment: .trailing)
+                    .offset(x: column - timeReveal)
+                    .opacity(Double(min(1, timeReveal / (column * 0.55))))
                     .allowsHitTesting(false)
                     .accessibilityHidden(timeReveal < 12)
             }
@@ -1800,6 +1809,8 @@ struct RowView: View, Equatable {
                 Spacer(minLength: 0)
             }
         case .system(let icon, let text, let avatarProject):
+            // Extra air above the stamp: `systemGap` alone was landing "Today …"
+            // on the bubble above it ([feedback AGgL7fykRs0BE9uiHscNCvk] / #2962).
             HStack(spacing: 5) {
                 if let icon {
                     Image(systemName: icon).font(.system(size: 13, weight: .regular))
@@ -1810,6 +1821,7 @@ struct RowView: View, Equatable {
             .foregroundStyle(theme.muted)
             .frame(maxWidth: .infinity)
             .multilineTextAlignment(.center)
+            .padding(.top, Transcript.systemStampTopPad)
         case .hidden(let count, _, let handle, let name):
             // The blocker's folded line ([feedback blocked-state-ios-2026-10-26]); Unblock
             // opens the person's sheet (its Unblock asks first).

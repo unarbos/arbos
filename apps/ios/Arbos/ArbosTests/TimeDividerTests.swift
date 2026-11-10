@@ -102,4 +102,22 @@ final class TimeDividerTests: XCTestCase {
         ]
         XCTAssertEqual(dateLines(messages), ["m1"])
     }
+
+    /// #2047 asked for "Today" only above the first message of the day. Jacob's later rule
+    /// ([feedback time-dividers-2026-11-05] / #2794) keeps an hour-gap stamp mid-day too, and
+    /// its words still say "Today …". So a second same-day stamp after an hour of silence is
+    /// intentional — not a placement bug.
+    func testASameDayHourGapStillDrawsTodayAboveTheLaterMessage() {
+        let hour = timeDividerGapMs()
+        let first = midday
+        let later = midday + hour
+        let messages = [
+            person("m1", "earlier today", at: first),
+            person("m2", "after an hour", at: later),
+        ]
+        XCTAssertEqual(dateLines(messages), ["m1", "m2"])
+        let stamp = Transcript.dateLabel(later)
+        XCTAssertTrue(stamp.hasPrefix("Today ") || stamp.contains(":"),
+                      "the hour-gap stamp still names the later message's clock: \(stamp)")
+    }
 }
