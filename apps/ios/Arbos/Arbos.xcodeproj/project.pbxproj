@@ -63,6 +63,8 @@
 		A1BB00000000000000000033 /* HomeFilterTabsUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000032 /* HomeFilterTabsUITests.swift */; };
 		A1BB00000000000000000035 /* ReactionPickerUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000034 /* ReactionPickerUITests.swift */; };
 		A1BB00000000000000000037 /* ChatSearchCloseUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000036 /* ChatSearchCloseUITests.swift */; };
+		A1BB00000000000000000043 /* PresenceAnchorUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000042 /* PresenceAnchorUITests.swift */; };
+		A1BB00000000000000000047 /* TranscriptEndAnchorUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000046 /* TranscriptEndAnchorUITests.swift */; };
 		A1BB00000000000000000039 /* ChatSearchRevealLandingUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000038 /* ChatSearchRevealLandingUITests.swift */; };
 		A1BB0000000000000000003B /* ChatSearchResultJumpUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB0000000000000000003A /* ChatSearchResultJumpUITests.swift */; };
 		A1BB0000000000000000003D /* TranscriptSpacingUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB0000000000000000003C /* TranscriptSpacingUITests.swift */; };
@@ -154,6 +156,7 @@
 		A1D100000000000000000012 /* OptimisticSendTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D100000000000000000011 /* OptimisticSendTests.swift */; };
 		A1D100000000000000000082 /* OptimisticNoticeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D100000000000000000081 /* OptimisticNoticeTests.swift */; };
 		A1D100000000000000000112 /* JumpToLatestWindowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D100000000000000000111 /* JumpToLatestWindowTests.swift */; };
+		A1BB00000000000000000045 /* TranscriptScrollLatchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000044 /* TranscriptScrollLatchTests.swift */; };
 		A1F300000000000000000002 /* ImageCaptionBubbleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F300000000000000000001 /* ImageCaptionBubbleTests.swift */; };
 		A1F900000000000000000002 /* PictureReplyQuoteTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F900000000000000000001 /* PictureReplyQuoteTests.swift */; };
 		A1E100000000000000000002 /* HiddenWorkerRowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1E100000000000000000001 /* HiddenWorkerRowTests.swift */; };
@@ -320,6 +323,8 @@
 		A1BB00000000000000000032 /* HomeFilterTabsUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeFilterTabsUITests.swift; sourceTree = "<group>"; };
 		A1BB00000000000000000034 /* ReactionPickerUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReactionPickerUITests.swift; sourceTree = "<group>"; };
 		A1BB00000000000000000036 /* ChatSearchCloseUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatSearchCloseUITests.swift; sourceTree = "<group>"; };
+		A1BB00000000000000000042 /* PresenceAnchorUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PresenceAnchorUITests.swift; sourceTree = "<group>"; };
+		A1BB00000000000000000046 /* TranscriptEndAnchorUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptEndAnchorUITests.swift; sourceTree = "<group>"; };
 		A1BB00000000000000000038 /* ChatSearchRevealLandingUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatSearchRevealLandingUITests.swift; sourceTree = "<group>"; };
 		A1BB0000000000000000003A /* ChatSearchResultJumpUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatSearchResultJumpUITests.swift; sourceTree = "<group>"; };
 		A1BB0000000000000000003C /* TranscriptSpacingUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptSpacingUITests.swift; sourceTree = "<group>"; };
@@ -412,6 +417,7 @@
 		A1D100000000000000000011 /* OptimisticSendTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OptimisticSendTests.swift; sourceTree = "<group>"; };
 		A1D100000000000000000081 /* OptimisticNoticeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OptimisticNoticeTests.swift; sourceTree = "<group>"; };
 		A1D100000000000000000111 /* JumpToLatestWindowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JumpToLatestWindowTests.swift; sourceTree = "<group>"; };
+		A1BB00000000000000000044 /* TranscriptScrollLatchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptScrollLatchTests.swift; sourceTree = "<group>"; };
 		A1F300000000000000000001 /* ImageCaptionBubbleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageCaptionBubbleTests.swift; sourceTree = "<group>"; };
 		A1F900000000000000000001 /* PictureReplyQuoteTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PictureReplyQuoteTests.swift; sourceTree = "<group>"; };
 		A1E100000000000000000001 /* HiddenWorkerRowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HiddenWorkerRowTests.swift; sourceTree = "<group>"; };
@@ -759,6 +765,7 @@
 				A1D100000000000000000011 /* OptimisticSendTests.swift */,
 				A1D100000000000000000081 /* OptimisticNoticeTests.swift */,
 				A1D100000000000000000111 /* JumpToLatestWindowTests.swift */,
+				A1BB00000000000000000044 /* TranscriptScrollLatchTests.swift */,
 				A1F300000000000000000001 /* ImageCaptionBubbleTests.swift */,
 				A1F900000000000000000001 /* PictureReplyQuoteTests.swift */,
 				A1E100000000000000000001 /* HiddenWorkerRowTests.swift */,
@@ -796,6 +803,8 @@
 				A1BB00000000000000000032 /* HomeFilterTabsUITests.swift */,
 				A1BB00000000000000000034 /* ReactionPickerUITests.swift */,
 				A1BB00000000000000000036 /* ChatSearchCloseUITests.swift */,
+				A1BB00000000000000000042 /* PresenceAnchorUITests.swift */,
+				A1BB00000000000000000046 /* TranscriptEndAnchorUITests.swift */,
 				A1BB00000000000000000038 /* ChatSearchRevealLandingUITests.swift */,
 				A1BB0000000000000000003A /* ChatSearchResultJumpUITests.swift */,
 				A1BB0000000000000000003C /* TranscriptSpacingUITests.swift */,
@@ -1153,6 +1162,7 @@
 				A1D100000000000000000012 /* OptimisticSendTests.swift in Sources */,
 				A1D100000000000000000082 /* OptimisticNoticeTests.swift in Sources */,
 				A1D100000000000000000112 /* JumpToLatestWindowTests.swift in Sources */,
+				A1BB00000000000000000045 /* TranscriptScrollLatchTests.swift in Sources */,
 				A1F300000000000000000002 /* ImageCaptionBubbleTests.swift in Sources */,
 				A1F900000000000000000002 /* PictureReplyQuoteTests.swift in Sources */,
 				A1E100000000000000000002 /* HiddenWorkerRowTests.swift in Sources */,
@@ -1190,6 +1200,8 @@
 				A1BB00000000000000000033 /* HomeFilterTabsUITests.swift in Sources */,
 				A1BB00000000000000000035 /* ReactionPickerUITests.swift in Sources */,
 				A1BB00000000000000000037 /* ChatSearchCloseUITests.swift in Sources */,
+				A1BB00000000000000000043 /* PresenceAnchorUITests.swift in Sources */,
+				A1BB00000000000000000047 /* TranscriptEndAnchorUITests.swift in Sources */,
 				A1BB00000000000000000039 /* ChatSearchRevealLandingUITests.swift in Sources */,
 				A1BB0000000000000000003B /* ChatSearchResultJumpUITests.swift in Sources */,
 				A1BB0000000000000000003D /* TranscriptSpacingUITests.swift in Sources */,
