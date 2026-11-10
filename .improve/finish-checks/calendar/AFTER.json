@@ -1,0 +1,19 @@
+{
+  "sources": {
+    "0:apps/ios/Arbos/Arbos/UI/LibraryList.swift": "3ca6ed63e266188795806fe9c30d1c31d9cd9be822c054309b407009247711fe",
+    "1:apps/ios/Arbos/Arbos/UI/BlockedState.swift": "0847f399fd699ad3740a79482af3e725fc26e99efa2feb5fc957771721a5f79f",
+    "2:apps/ios/Arbos/ArbosTests/LibraryListTests.swift": "b3a4f65b6ad45de2e72f83c7112f66d049a684fd4a34285a9b74da0585c518fa",
+    "3:apps/ios/Arbos/ArbosTests/BlockedStateTests.swift": "52009f8b80f8060e5c5f2e13865bd70b07c56e592800701d2d965ff2c20e49dd"
+  },
+  "fixture_sha256": "6fc67c1a1e5df79c5a5044a050e1787e6203f71ced8ffda867a964e579eaf9c1",
+  "compile_exit": 0,
+  "exit_code": 0,
+  "results": {
+    "assertions": 29,
+    "current_zone": "America/Denver",
+    "failed": 0,
+    "failures": [],
+    "passed": 29
+  },
+  "seconds": 1.6781723339809105
+}

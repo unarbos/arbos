@@ -45,6 +45,23 @@ final class LibraryListTests: XCTestCase {
         XCTAssertEqual(LibraryList.stamp(Int64(date(2026, 10, 3, 11).timeIntervalSince1970 * 1000), now: today, calendar: cal), "Oct 3, 11:00 AM")
     }
 
+    /// Grouping and displayed words/clock use the same injected calendar, even
+    /// on opposite sides of midnight. These zones cannot both equal the host zone.
+    func testInjectedCalendarOwnsDayBoundariesAndClock() {
+        for offset in [9 * 3600, -12 * 3600] {
+            var calendar = Calendar(identifier: .gregorian)
+            calendar.timeZone = TimeZone(secondsFromGMT: offset)!
+            func date(_ year: Int, _ month: Int, _ day: Int, _ hour: Int, _ minute: Int = 0) -> Date {
+                calendar.date(from: DateComponents(year: year, month: month, day: day, hour: hour, minute: minute))!
+            }
+            let today = date(2026, 10, 25, 12)
+            XCTAssertEqual(LibraryList.dayLabel(date(2026, 10, 23, 0, 30), today: today, calendar: calendar), "Friday")
+            XCTAssertEqual(LibraryList.dayLabel(date(2025, 12, 31, 0, 30), today: today, calendar: calendar), "Dec 31, 2025")
+            XCTAssertEqual(LibraryList.stamp(Int64(date(2026, 10, 24, 22).timeIntervalSince1970 * 1000), now: today, calendar: calendar), "Yesterday 10:00 PM")
+            XCTAssertEqual(LibraryList.stamp(Int64(date(2025, 12, 31, 0, 30).timeIntervalSince1970 * 1000), now: today, calendar: calendar), "Dec 31, 2025, 12:30 AM")
+        }
+    }
+
     func testOneListByDayFiveRowsThenShowMore() {
         let today = date(2026, 10, 25, 15)
         var items: [ChatItem] = []

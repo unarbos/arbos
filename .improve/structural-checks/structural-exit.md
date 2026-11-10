@@ -28,6 +28,40 @@ scheduler-model tests were removed only after seven production-module tests
 caught three real-function mutations. No runtime test or assertion was dropped
 to hide a product regression.
 
+## Native test-contract follow-up
+
+Actual native execution exposed a pre-existing mismatch between an injected
+calendar and DateFormatter's ambient timezone. LibraryList's two date formatters
+now explicitly use that calendar's timezone; default `.current` behavior, locale
+and format words remain. One new XCTest case covers opposite timezones and day/
+year boundaries. BlockedState's public sentence remains local-time behavior; its
+14:30 test input is now constructed in that same local calendar rather than UTC.
+The retained selected-source calendar gate has29 assertions, including eight
+original-method `.current` parity controls. See
+[calendar checks](../finish-checks/calendar/README.md).
+
+The P3 preview argument also exposed one brittle closing-parenthesis source count.
+Its replacement compiles all three actual tail/append/full rows calls against a
+required hiddenSenders argument and checks nonempty/empty input values (six
+checks). P4 extends the same CI command with23 actual callback checks, migrating
+three more formatting literals without dropping native/UI test methods or other
+assertions. Missing row input, result suppression, delayed ownership, picture
+admission and close-before-reveal mutations are detected. See
+[source-consumer checks](../finish-checks/source-consumers/README.md).
+
+A separate P4 UI follow-up removed only the redundant inner `.id(account)` from
+repeated RowView values. Host account identity, row IDs, owner equality and
+interaction calibration remain. The same five existing avatar/back-swipe cases
+changed from three sender-route failures plus two header controls to five passes.
+That isolated causal class is not a whole-suite verdict. A later global composer
+live-count failure (0 versus an earlier baseline1) did not identify a retained
+hosted object. The DEBUG-only weak-instance observer and deterministic unrelated-
+release controls pass in the actual integrated native successor: all559 unit
+cases are accepted (one intentional expected-failure control), and all five
+unchanged avatar cases pass. The separate preceding full UI run passes55 cases
+with13 existing opt-in skips. These source versions and finite scopes remain
+distinct in the finish report; no final-source unfiltered full-UI pass is claimed.
+
 ## Retained requirements and limits
 
 Per-room synchronization remains because Loro documents contain interior mutable

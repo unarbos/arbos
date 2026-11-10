@@ -1,0 +1,25 @@
+{
+  "sources": {
+    "0:apps/ios/Arbos/Arbos/UI/LibraryList.swift": "3ca6ed63e266188795806fe9c30d1c31d9cd9be822c054309b407009247711fe",
+    "1:apps/ios/Arbos/Arbos/UI/BlockedState.swift": "0847f399fd699ad3740a79482af3e725fc26e99efa2feb5fc957771721a5f79f",
+    "2:apps/ios/Arbos/ArbosTests/LibraryListTests.swift": "b3a4f65b6ad45de2e72f83c7112f66d049a684fd4a34285a9b74da0585c518fa",
+    "3:apps/ios/Arbos/ArbosTests/BlockedStateTests.swift": "2bed3b75c43979d8af823711590ed0304b0c3ff22b940da62caa4882223e2984"
+  },
+  "fixture_sha256": "b55e31b036566daabb8282ec61b8d3a9aafa39f23cdfabe484b13977de2fb0a5",
+  "compile_exit": 0,
+  "exit_code": 1,
+  "results": {
+    "assertions": 29,
+    "current_zone": "America/Denver",
+    "failed": 1,
+    "failures": [
+      {
+        "actual": "Muted until 08:30. Your messages aren't being delivered.",
+        "expected": "Muted until 14:30. Your messages aren't being delivered.",
+        "group": "blocked-sentence-fixture"
+      }
+    ],
+    "passed": 28
+  },
+  "seconds": 1.234808708075434
+}
