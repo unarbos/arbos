@@ -250,8 +250,12 @@ struct AgentProfileView: View {
     @State private var wakeFilledFor: Id?
     /// Session log card → View all ([feedback sidecar-sessions-ios-2026-10-28]).
     @State private var showLog = false
+    /// Auto-delete / self-destruct duration picker for this agent's primary chat.
+    @State private var showAutoDeleteOptions = false
 
     private var project: Project? { model.project(projectId) ?? fallback }
+    /// The chat the auto-delete setting applies to (the agent's main thread).
+    private var autoDeleteChatId: Id? { model.primaryChat(of: projectId)?.id }
     /// A connected (outside) agent: no Computer tab; Connection + Key under Details (#2142).
     private var outside: OutsideAgentInfo? { model.outsideInfo[projectId] }
     private var isMine: Bool { model.project(projectId) != nil && project?.shared != true }
@@ -779,7 +783,7 @@ struct AgentProfileView: View {
         ))
     }
 
-    /// Model · Reasoning · Voice (Model alone on someone else's agent).
+    /// Model · Reasoning · Voice · Auto-delete (Model alone on someone else's agent).
     private func settingsRows(_ project: Project) -> [AnyView] {
         var rows: [AnyView] = [
             AnyView(
@@ -803,6 +807,33 @@ struct AgentProfileView: View {
             }
             .buttonStyle(.plain)
         ))
+        if let chatId = autoDeleteChatId {
+            let duration = model.chatAutoDeleteDuration(for: chatId)
+            rows.append(AnyView(
+                Button { showAutoDeleteOptions = true } label: {
+                    PaneRow(
+                        title: "Auto-delete messages",
+                        subtitle: duration == .off
+                            ? "Remove messages in this chat after a time you pick"
+                            : "Messages older than \(duration.shortTitle) leave this chat",
+                        value: duration.shortTitle,
+                        chevron: true
+                    )
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("agent-auto-delete")
+                .confirmationDialog("Auto-delete messages", isPresented: $showAutoDeleteOptions, titleVisibility: .visible) {
+                    ForEach(ChatAutoDeleteDuration.allCases) { pick in
+                        Button(pick.title) {
+                            model.setChatAutoDelete(chatId, pick, projectId: projectId)
+                        }
+                    }
+                    Button("Cancel", role: .cancel) {}
+                } message: {
+                    Text("Messages older than the time you pick are removed from this chat.")
+                }
+            ))
+        }
         return rows
     }
 

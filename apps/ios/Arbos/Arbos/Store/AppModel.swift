@@ -465,6 +465,11 @@ final class AppModel: ObservableObject {
     @Published var peopleMutedUntil: [String: Date] = AppModel.loadPeopleMutedUntil() {
         didSet { AppModel.savePeopleMutedUntil(peopleMutedUntil) }
     }
+    /// Per-chat auto-delete (self-destruct): chat id → `ChatAutoDeleteDuration.rawValue`.
+    /// Local to this phone; expired messages are hidden here and deleted on the relay when allowed.
+    @Published var chatAutoDelete: [String: String] = AppModel.loadChatAutoDelete() {
+        didSet { AppModel.saveChatAutoDelete(chatAutoDelete) }
+    }
     /// The shared Matrix client (crates/arbos-matrix through ArbosFFI): the rooms' data plane.
     var matrixClient: ArbosFFI.MatrixClient?
     /// Retains the UniFFI foreign listener for the client's lifetime.
@@ -4791,6 +4796,93 @@ final class AppModel: ObservableObject {
         return "Muted until you turn it back on"
     }
 
+    private static let chatAutoDeleteKey = "chatAutoDelete"
+
+    private static func loadChatAutoDelete() -> [String: String] {
+        (UserDefaults.standard.dictionary(forKey: chatAutoDeleteKey) as? [String: String]) ?? [:]
+    }
+
+    private static func saveChatAutoDelete(_ map: [String: String]) {
+        UserDefaults.standard.set(map, forKey: chatAutoDeleteKey)
+    }
+
+    /// The auto-delete pick for a chat (`Off` when unset).
+    func chatAutoDeleteDuration(for chatId: String) -> ChatAutoDeleteDuration {
+        guard let raw = chatAutoDelete[chatId],
+              let value = ChatAutoDeleteDuration(rawValue: raw) else { return .off }
+        return value
+    }
+
+    /// Set how long messages stay in this chat before they are removed (self-destruct).
+    func setChatAutoDelete(_ chatId: String, _ duration: ChatAutoDeleteDuration, projectId: Id? = nil) {
+        if duration == .off {
+            chatAutoDelete.removeValue(forKey: chatId)
+        } else {
+            chatAutoDelete[chatId] = duration.rawValue
+        }
+        pruneAutoDeletedMessages(chatId: chatId, projectId: projectId)
+    }
+
+    /// Created-at cutoff (ms) under the chat's auto-delete pick; `nil` when Off.
+    func autoDeleteCutoffMs(for chatId: String, nowMs: Int64 = Int64(Date().timeIntervalSince1970 * 1000)) -> Int64? {
+        guard let seconds = chatAutoDeleteDuration(for: chatId).retentionSeconds else { return nil }
+        return nowMs - Int64(seconds * 1000)
+    }
+
+    /// Hide messages past the chat's auto-delete age (streaming rows always stay).
+    func messagesVisibleUnderAutoDelete(_ list: [Message], chatId: String) -> [Message] {
+        guard let cutoff = autoDeleteCutoffMs(for: chatId) else { return list }
+        return list.filter { $0.isStreaming || $0.createdAt <= 0 || $0.createdAt >= cutoff }
+    }
+
+    /// Drop expired rows from the local list, and delete them on the relay for agent chats
+    /// (people chats stay local-only so a group Activity feed is not flooded with deletes).
+    func pruneAutoDeletedMessages(chatId: String, projectId: Id? = nil) {
+        guard let cutoff = autoDeleteCutoffMs(for: chatId) else { return }
+        let list = messages[chatId] ?? []
+        guard !list.isEmpty else { return }
+        let expired = list.filter { message in
+            !message.isStreaming && message.createdAt > 0 && message.createdAt < cutoff
+        }
+        guard !expired.isEmpty else { return }
+        // Cap one pass so a long history does not flood the relay; later opens finish the rest.
+        let batch = Array(expired.prefix(40))
+        let drop = Set(batch.map(\.id))
+        messages[chatId] = list.filter { !drop.contains($0.id) }
+        // Agent / project chats: delete for everyone when this account may. People chats: hide here only.
+        guard peopleChat(chatId) == nil else { return }
+        let meId = user?.id
+        let (moderates, agentOwners) = autoDeleteAuthority(chatId: chatId, projectId: projectId)
+        for message in batch where MessageDeleteRule.mayDelete(
+            sender: message.sender, meId: meId, moderates: moderates, agentOwnerIds: agentOwners
+        ) {
+            deleteMessage(chatId: chatId, messageId: message.id, projectId: projectId)
+        }
+    }
+
+    /// Who may delete in this chat for auto-delete: same rule as the long-press menu.
+    private func autoDeleteAuthority(chatId: String, projectId: Id?) -> (Bool, [String: String]) {
+        var agentOwners: [String: String] = [:]
+        if let people = peopleChat(chatId) {
+            let moderates = people.myRole == "owner" || people.myRole == "admin"
+            for a in people.agents { if let owner = a.ownerId { agentOwners[a.id] = owner } }
+            return (moderates, agentOwners)
+        }
+        if let projectId, let project = project(projectId) {
+            if let owner = project.ownerId ?? (project.shared ? nil : user?.id) {
+                agentOwners[projectId] = owner
+            }
+            return (!project.shared, agentOwners)
+        }
+        if let project = projects.first(where: { chats(of: $0.id).contains(where: { $0.id == chatId }) }) {
+            if let owner = project.ownerId ?? (project.shared ? nil : user?.id) {
+                agentOwners[project.id] = owner
+            }
+            return (!project.shared, agentOwners)
+        }
+        return (false, agentOwners)
+    }
+
     /// `GET /users/{id}` for a fresh presence line on a profile page.
     func fetchUser(_ id: String) async -> Person? {
         guard credentials != nil, !isFixture else { return nil }
@@ -5170,7 +5262,10 @@ final class AppModel: ObservableObject {
     func chats(of projectId: Id) -> [Chat] { chats[projectId] ?? [] }
 
     /// Room docs first; a server channel (D88) reads its Matrix timeline.
-    func messages(of chatId: Id) -> [Message] { messages[chatId] ?? channelRows[chatId] ?? [] }
+    func messages(of chatId: Id) -> [Message] {
+        let list = messages[chatId] ?? channelRows[chatId] ?? []
+        return messagesVisibleUnderAutoDelete(list, chatId: chatId)
+    }
 
     /// Add or remove an emoji reaction on a message. Multiple different emojis
     /// can be active on the same message; tapping the same emoji again clears it.

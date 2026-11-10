@@ -232,6 +232,46 @@ enum ChatMuteDuration: CaseIterable, Identifiable {
     }
 }
 
+/// How long messages stay in a chat before this phone removes them (self-destruct).
+/// Off keeps everything; the other picks delete messages older than that age.
+enum ChatAutoDeleteDuration: String, CaseIterable, Identifiable {
+    case off
+    case after24Hours
+    case after7Days
+    case after30Days
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .off: return "Off"
+        case .after24Hours: return "After 24 hours"
+        case .after7Days: return "After 7 days"
+        case .after30Days: return "After 30 days"
+        }
+    }
+
+    /// Short label for a settings value cell.
+    var shortTitle: String {
+        switch self {
+        case .off: return "Off"
+        case .after24Hours: return "24 hours"
+        case .after7Days: return "7 days"
+        case .after30Days: return "30 days"
+        }
+    }
+
+    /// Seconds a message may stay; `nil` means keep forever.
+    var retentionSeconds: TimeInterval? {
+        switch self {
+        case .off: return nil
+        case .after24Hours: return 24 * 60 * 60
+        case .after7Days: return 7 * 24 * 60 * 60
+        case .after30Days: return 30 * 24 * 60 * 60
+        }
+    }
+}
+
 struct PeopleChat: Identifiable, Equatable {
     var id: String
     var kind: String

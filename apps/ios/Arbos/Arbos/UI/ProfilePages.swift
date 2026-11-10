@@ -955,6 +955,8 @@ struct UserProfileView: View {
     @State private var confirmBlock = false
     /// Unblock asks first ([feedback blocked-state-ios-2026-10-26]).
     @State private var confirmUnblock = false
+    /// Auto-delete / self-destruct duration picker for the DM with this person.
+    @State private var showAutoDeleteOptions = false
 
     /// Stable user id: prefer a fresh card, then a handle lookup (agent-owner rows
     /// sometimes open this page with `id == handle`), then the value we were given.
@@ -1009,7 +1011,7 @@ struct UserProfileView: View {
                         body: tab == "Links"
                             ? [.custom(AnyView(ChatItemsList(items: items, kind: .link, empty: dm == nil ? "No chat with \(person.displayName) yet." : "No links shared yet.")))]
                             : groupsSections,
-                        footer: isMe ? [] : [.card([AnyView(blockRow)])]
+                        footer: personFooterSections
                     )
                     Color.clear.frame(height: 40)
                 }
@@ -1072,6 +1074,40 @@ struct UserProfileView: View {
         } else {
             PaneDangerRow(title: BlockRow.title(blocked: false)) { confirmBlock = true }
         }
+    }
+
+    /// Auto-delete for the DM (when we have one) above Block / Unblock.
+    private var personFooterSections: [PaneSection] {
+        var out: [PaneSection] = []
+        if let dm, !isMe {
+            let duration = model.chatAutoDeleteDuration(for: dm.id)
+            out.append(.card([AnyView(
+                Button { showAutoDeleteOptions = true } label: {
+                    PaneRow(
+                        leading: .tile("timer"),
+                        title: "Auto-delete messages",
+                        subtitle: duration == .off
+                            ? "Remove messages in this chat after a time you pick"
+                            : "Messages older than \(duration.shortTitle) leave this chat",
+                        value: duration.shortTitle
+                    )
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("dm-auto-delete")
+                .confirmationDialog("Auto-delete messages", isPresented: $showAutoDeleteOptions, titleVisibility: .visible) {
+                    ForEach(ChatAutoDeleteDuration.allCases) { pick in
+                        Button(pick.title) { model.setChatAutoDelete(dm.id, pick) }
+                    }
+                    Button("Cancel", role: .cancel) {}
+                } message: {
+                    Text("Messages older than the time you pick are removed from this chat on this phone.")
+                }
+            )], separatorInset: PaneKit.separatorInset(.tile(""))))
+        }
+        if !isMe {
+            out.append(.card([AnyView(blockRow)]))
+        }
+        return out
     }
 
     private var groupsSections: [PaneSection] {
@@ -1159,6 +1195,8 @@ struct GroupProfileView: View {
     @State private var confirmDelete = false
     /// Mute notifications for 1 hour / 8 hours / until unmuted.
     @State private var showMuteOptions = false
+    /// Auto-delete / self-destruct duration picker for this chat.
+    @State private var showAutoDeleteOptions = false
     /// People-group invite links (create / copy / share / revoke), same shape as server invites.
     @State private var groupInvites: [ServerInviteLink] = []
     @State private var inviteExpires = false
@@ -1292,6 +1330,32 @@ struct GroupProfileView: View {
         return [.card([row], separatorInset: PaneKit.separatorInset(.tile("")))]
     }
 
+    /// Auto-delete / self-destruct for this chat (people group or shared project chat).
+    private var autoDeleteFooter: [PaneSection] {
+        let duration = model.chatAutoDeleteDuration(for: chatId)
+        let row = AnyView(Button { showAutoDeleteOptions = true } label: {
+            PaneRow(
+                leading: .tile("timer"),
+                title: "Auto-delete messages",
+                subtitle: duration == .off
+                    ? "Remove messages in this chat after a time you pick"
+                    : "Messages older than \(duration.shortTitle) leave this chat",
+                value: duration.shortTitle
+            )
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("group-auto-delete")
+        .confirmationDialog("Auto-delete messages", isPresented: $showAutoDeleteOptions, titleVisibility: .visible) {
+            ForEach(ChatAutoDeleteDuration.allCases) { pick in
+                Button(pick.title) { model.setChatAutoDelete(chatId, pick, projectId: projectId) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Messages older than the time you pick are removed from this chat on this phone.")
+        })
+        return [.card([row], separatorInset: PaneKit.separatorInset(.tile("")))]
+    }
+
     /// Footer on every tab for a people group: Leave group chat for members,
     /// Delete group chat for the owner (same rule as the chat list).
     private var leaveFooter: [PaneSection] {
@@ -1311,7 +1375,7 @@ struct GroupProfileView: View {
         tab == "Members" ? membersSections + groupInviteSections : librarySections
     }
 
-    private var paneFooterSections: [PaneSection] { muteFooter + leaveFooter }
+    private var paneFooterSections: [PaneSection] { muteFooter + autoDeleteFooter + leaveFooter }
 
     private var memberSubtitle: String {
         "\(memberCount) member\(memberCount == 1 ? "" : "s")"

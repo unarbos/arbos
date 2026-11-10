@@ -1550,6 +1550,15 @@ struct ChatSession: View {
                 guard !Task.isCancelled else { return }
                 await MainActor.run { model.clearExpiredSilence(chatId: chatId) }
             }
+            // Self-destruct: while this chat is open, prune once a minute when auto-delete is on.
+            .task(id: "\(chatId)-\(model.chatAutoDelete[chatId] ?? "")") {
+                guard !isChannel, model.chatAutoDeleteDuration(for: chatId) != .off else { return }
+                while !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 60_000_000_000)
+                    guard !Task.isCancelled else { return }
+                    model.pruneAutoDeletedMessages(chatId: chatId, projectId: isPeople ? nil : projectId)
+                }
+            }
     }
 
     /// Jobs poll + live/fixture demo tasks.
@@ -1666,6 +1675,10 @@ struct ChatSession: View {
         #if DEBUG
         PerfLog.mark("chat-open appear \(chatId) messages=\(messages.count)", ms: 0)
         #endif
+        // Self-destruct: drop messages past the chat's auto-delete age.
+        if !isChannel {
+            model.pruneAutoDeletedMessages(chatId: chatId, projectId: isPeople ? nil : projectId)
+        }
         // Force: re-PUT even if the cursor is unchanged so the relay clears
         // unread events recorded after the last PUT (other apps / badge).
         model.markRead(chatId: chatId, force: true)
