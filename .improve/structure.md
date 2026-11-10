@@ -82,7 +82,9 @@ runners. The following changes use actual source and local failure fixtures.
 - **Replayable sidecar page receipt.** Complete mirror application precedes local
   wake handoff, and the cursor is installed only after persistence succeeds.
   Errors now propagate. A matching already-mirrored uncommitted event can recover
-  its wake, while completed-page/history/missing-ID dedup remains. This is local
+  its wake, while completed-page/history/missing-ID dedup remains. Page-local
+  dedup uses complete chat/event/message identity: two distinct messages must not
+  collapse when event positions are missing or shared. This is local
   channel acceptance, **not** durable agent delivery or an end-to-end exactly-once/
   at-least-once guarantee; crash windows remain documented.
 - **Room-owned pending indicators.** A production `PendingMessages` module makes
@@ -118,8 +120,8 @@ relay URLs before test execution, and has no unfenced fallback.
 | Append transaction |1positive/2atomicity failures; failed insert advanced room position |3pass; rollback and retry numbering pinned |
 | Privacy actual handlers |6controls pass/5new refusals fail with200/201 |11pass; opaque403 and no partial writes |
 | Relay broader filters | Original source controls retained |33DBpass/1pre-existing live E2E ignored;48peoplepass; filters overlap |
-| Relay/native combined gates | Earlier local capacity blocked broad build; later shared-target records superseded | Fresh isolated core/client/relay/sidecar all-target Clippy19.673s and exact33regressions pass; broader isolated controls retained |
-| Sidecar page receipt | Isolated same12case set7pass/5fail,4.462s | Isolated13daemonpass2.291s+4mirrorpass.102s; check.920s/clippyalltargets2.525s/build1.761s pass |
+| Relay/native combined gates | Earlier local capacity blocked broad build; later shared-target records superseded | Fresh isolated core/client/relay/sidecar all-target Clippy19.673s and exact35regressions pass; broader isolated controls retained |
+| Sidecar page receipt | Isolated same12case set7pass/5fail,4.462s; later two identity-preservation cases fail against the intermediate refactor | Final15daemonpass2.780s+4mirrorpass.292s; isolated package checks pass |
 | Room pending |4fail/1same-room control on extracted production module,.236s | Same5pass,.185s; strict std compile pass |
 | Snapshot scheduling |4checks of test-only copies |7actual-source checks pass,.184s;3broken production decisions detected |
 | Mention/expiry policies | Identical original3+2checks pass | Same5checks pass; token copies2→1; two expiry transport→UI edges removed |

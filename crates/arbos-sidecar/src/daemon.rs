@@ -77,7 +77,13 @@ pub fn apply_page(
             .with_context(|| format!("mirroring inbox event {id}"))?
         {
             // Recovery must not turn duplicate copies inside one page into new wakes.
-            if c.reason != "message" || message_wakes.insert((c.chat.id.clone(), c.event_id)) {
+            if c.reason != "message"
+                || message_wakes.insert((
+                    c.chat.id.clone(),
+                    c.event_id,
+                    e["message"]["id"].as_str(),
+                ))
+            {
                 wakes.push(c);
             }
         }
@@ -974,6 +980,39 @@ mod tests {
         apply_page(&m, &mut State::default(), &p, &tx).unwrap();
         assert_eq!(m.rows("c1").len(), 1);
         assert!(rx.try_recv().is_err());
+    }
+
+    fn assert_distinct_messages_wake(event_id: Option<i64>) {
+        let (_d, m) = temp_mirror();
+        let mut events = vec![
+            received(event_id.unwrap_or(0), "c1", "m1", "@bot first", true),
+            received(event_id.unwrap_or(0), "c1", "m2", "@bot second", true),
+        ];
+        if event_id.is_none() {
+            for event in &mut events {
+                event.as_object_mut().unwrap().remove("id");
+            }
+        }
+        let p = InboxPage { events, next: 1 };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut state = State::default();
+        apply_page(&m, &mut state, &p, &tx).unwrap();
+        assert_eq!(m.rows("c1").len(), 2);
+        assert!(matches!(rx.try_recv(), Ok(Signal::Event(_))));
+        assert!(matches!(rx.try_recv(), Ok(Signal::Event(_))));
+        assert!(rx.try_recv().is_err());
+        apply_page(&m, &mut state, &p, &tx).unwrap();
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn distinct_unpositioned_messages_in_one_page_each_wake() {
+        assert_distinct_messages_wake(None);
+    }
+
+    #[test]
+    fn distinct_messages_sharing_a_position_each_wake() {
+        assert_distinct_messages_wake(Some(1));
     }
 
     #[test]
