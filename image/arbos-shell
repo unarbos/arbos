@@ -15,9 +15,21 @@ if [ "${1:-}" = "-c" ] && [ $# -ge 2 ]; then
   cmd="$2"
 fi
 
+audit() {
+  local input_hash
+  mkdir -p "$(dirname "$AUDIT")" 2>/dev/null || return 0
+  input_hash="$(printf '%s' "$cmd" | sha256sum 2>/dev/null)" || return 0
+  input_hash="${input_hash%% *}"
+  jq -cn --arg session "$SESSION" --arg trace_id "$TRACE" --arg cwd "$PWD" \
+    --arg denied "$1" --arg input_hash "$input_hash" \
+    '{ts: (now * 1000 | floor), kind: "tool_call", tool: "bash", role: "subagent", harness: "prime",
+      session: $session, trace_id: $trace_id, cwd: $cwd,
+      denied: (if $denied == "" then null else $denied end), input_hash: $input_hash}' \
+    2>/dev/null >> "$AUDIT" || true
+}
+
 deny() {
-  printf '{"ts":%s,"kind":"tool_call","tool":"bash","role":"subagent","harness":"prime","session":"%s","trace_id":"%s","cwd":"%s","denied":"%s","input_preview":%s}\n' \
-    "$(date +%s%3N)" "$SESSION" "$TRACE" "$PWD" "$1" "$(printf '%s' "${cmd:0:200}" | jq -Rs .)" >> "$AUDIT" 2>/dev/null
+  audit "$1"
   echo "arbos: blocked by the deny-list ($1): $2" >&2
   exit 126
 }
@@ -32,9 +44,7 @@ if [ -n "$cmd" ]; then
   if printf '%s' "$cmd" | grep -Eq '(^|[[:space:]]|["'"'"'])/work(/[^/[:space:]]+)?/\.arbos/(agentd|audit\.jsonl)'; then
     deny arbos-state-tamper "agentd state and the audit log are not writable by the model"
   fi
-  mkdir -p "$(dirname "$AUDIT")" 2>/dev/null
-  printf '{"ts":%s,"kind":"tool_call","tool":"bash","role":"subagent","harness":"prime","session":"%s","trace_id":"%s","cwd":"%s","denied":null,"input_preview":%s}\n' \
-    "$(date +%s%3N)" "$SESSION" "$TRACE" "$PWD" "$(printf '%s' "${cmd:0:200}" | jq -Rs .)" >> "$AUDIT" 2>/dev/null
+  audit ""
 fi
 
 exec /bin/bash "$@"
