@@ -4429,6 +4429,17 @@ fn blob_request_url(shared: &Shared, id: &str, key: &str) -> String {
 
 /// `GET /blob/{slot}/{key}` → (mime, bytes); `id` is a project id or a people chat id.
 async fn fetch_blob_bytes(shared: &Arc<Shared>, id: &str, key: &str) -> Result<(String, Vec<u8>)> {
+    let response = fetch_blob_response(shared, id, key).await?;
+    let mime = response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+    Ok((mime, response.bytes().await?.to_vec()))
+}
+
+async fn fetch_blob_response(shared: &Arc<Shared>, id: &str, key: &str) -> Result<reqwest::Response> {
     // Same refresh-once path as `get_json`: an expired access token must not leave
     // thumbnails / downloads stuck on "No preview" and a weekly `mac:thumbnail:* http 401`
     // diagnostic while the JSON APIs quietly rotate and succeed.
@@ -4452,13 +4463,7 @@ async fn fetch_blob_bytes(shared: &Arc<Shared>, id: &str, key: &str) -> Result<(
             }
             return Err(err.into());
         }
-        let mime = r
-            .headers()
-            .get("content-type")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("application/octet-stream")
-            .to_string();
-        return Ok((mime, r.bytes().await?.to_vec()));
+        return Ok(r);
     }
 }
 
@@ -4679,7 +4684,7 @@ async fn upload_outgoing(
     outgoing: Outgoing,
 ) -> UserAttachment {
     let mut source = None;
-    let (name, mime, kind, bytes) = match outgoing {
+    let (name, mime, kind, body) = match outgoing {
         Outgoing::Gif {
             name,
             mime,
@@ -4706,7 +4711,7 @@ async fn upload_outgoing(
                 name,
                 mime,
                 Some("sticker".to_owned()),
-                Ok::<Vec<u8>, String>(bytes.as_ref().clone()),
+                Ok::<reqwest::Body, String>(Arc::unwrap_or_clone(bytes).into()),
             )
         }
         Outgoing::Path(path) => {
@@ -4716,39 +4721,44 @@ async fn upload_outgoing(
                 .unwrap_or("attachment")
                 .to_string();
             let mime = mime_for(&path).to_string();
-            let bytes = tokio::fs::read(&path)
+            let body = tokio::fs::read(&path)
                 .await
+                .map(reqwest::Body::from)
                 .map_err(|err| format!("Could not read {}: {err}", path.display()));
-            (name, mime, None, bytes)
+            (name, mime, None, body)
         }
         Outgoing::Copy {
             from_slot,
             attachment,
         } => {
-            let bytes = match attachment.blob_ref.as_deref() {
-                Some(key) => fetch_blob_bytes(shared, &from_slot, key)
-                    .await
-                    .map(|(_, b)| b)
-                    .map_err(|err| format!("Could not read {}: {err}", attachment.name)),
+            let body = match attachment.blob_ref.as_deref() {
+                // Keep the response's reusable Bytes body; converting it to Vec
+                // first would duplicate the complete forwarded attachment.
+                Some(key) => async {
+                    let response = fetch_blob_response(shared, &from_slot, key).await?;
+                    Ok::<_, anyhow::Error>(reqwest::Body::from(response.bytes().await?))
+                }
+                .await
+                .map_err(|err| format!("Could not read {}: {err}", attachment.name)),
                 None => Err(format!("{} has no file on the relay", attachment.name)),
             };
             (
                 attachment.name,
                 attachment.mime,
                 attachment.kind.map(attachment_kind_str),
-                bytes,
+                body,
             )
         }
     };
     let key = format!("att-{}-{}", new_id().to_lowercase(), safe_name(&name));
-    let blob_ref = match bytes {
-        Ok(bytes) => {
+    let blob_ref = match body {
+        Ok(body) => {
             let put = shared
                 .http
                 .put(format!("{}/blob/{}/{}", shared.http_url, blob_slot, key))
                 .bearer_auth(shared.token())
                 .header("content-type", mime.clone())
-                .body(bytes)
+                .body(body)
                 .send()
                 .await;
             match put {
@@ -5075,7 +5085,7 @@ async fn upload_voice_memo(shared: &Shared, blob_slot: &str, wav: Arc<Vec<u8>>) 
         .put(format!("{}/blob/{}/{}", shared.http_url, blob_slot, key))
         .bearer_auth(shared.token())
         .header("content-type", "audio/wav")
-        .body(wav.as_ref().clone())
+        .body(Arc::unwrap_or_clone(wav))
         .send()
         .await;
     let blob_ref = match put {
