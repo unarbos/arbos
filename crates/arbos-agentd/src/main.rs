@@ -2,6 +2,7 @@
 mod ack_is_not_an_answer_tests;
 mod activity;
 mod agent;
+mod app;
 mod agent_messages;
 mod approval;
 mod attachments;
