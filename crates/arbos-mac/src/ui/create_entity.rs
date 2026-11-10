@@ -42,12 +42,17 @@ const OPTIONS_H: f32 = 28.0;
 const UPLOAD_BODY_H: f32 = 28.0 + 12.0 + 16.0;
 /// Generate body height (prompt + pill + status).
 const GENERATE_BODY_H: f32 = 35.0 + 12.0 + 28.0 + 12.0 + 16.0;
-/// Kept for tests / callers that measured the old absolute layout: the option
-/// capsules once sat where Grok's first icon row began.
-pub(crate) const OPTIONS_TOP: f32 = 246.0;
-pub(crate) const BODY_TOP: f32 = OPTIONS_TOP + OPTIONS_H + 16.0;
-pub(crate) const FOOTER_TOP: f32 = BODY_TOP + GENERATE_BODY_H + 12.0;
-pub(crate) const HEIGHT: f32 = FOOTER_TOP + 56.5;
+/// Kept for tests that pin Appearance body height under the old absolute
+/// layout landmarks (option capsules once sat where Grok's first icon row
+/// began). The live sheet sizes from content, not these constants.
+#[cfg(test)]
+const OPTIONS_TOP: f32 = 246.0;
+#[cfg(test)]
+const BODY_TOP: f32 = OPTIONS_TOP + OPTIONS_H + 16.0;
+#[cfg(test)]
+const FOOTER_TOP: f32 = BODY_TOP + GENERATE_BODY_H + 12.0;
+#[cfg(test)]
+const HEIGHT: f32 = FOOTER_TOP + 56.5;
 
 /// What the sheet creates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -564,8 +569,10 @@ mod tests {
 
     #[test]
     fn appearance_body_heights_keep_upload_shorter_than_generate() {
-        assert!(UPLOAD_BODY_H < GENERATE_BODY_H);
-        assert!(OPTIONS_H + 16.0 + GENERATE_BODY_H < HEIGHT);
+        const {
+            assert!(UPLOAD_BODY_H < GENERATE_BODY_H);
+            assert!(OPTIONS_H + 16.0 + GENERATE_BODY_H < HEIGHT);
+        }
     }
 }
 

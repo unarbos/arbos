@@ -62,7 +62,9 @@ pub(crate) const TAB_COMPUTER: usize = 3;
 /// Outside overview: Library · Connection.
 pub(crate) const OUTSIDE_TAB_LIBRARY: usize = 0;
 pub(crate) const OUTSIDE_TAB_CONNECTION: usize = 1;
-/// Grok's subtitle while a bot has no label.
+/// Grok's subtitle while a bot has no label (Edit page / tests; overview
+/// no longer shows a label line on mine).
+#[allow(dead_code)]
 pub(crate) const LABEL_PLACEHOLDER: &str = "Add a label";
 /// Grok's Coding-row spinner: 15 pt (rows 613–642 px at 2 px/pt).
 pub(crate) const CODING_SPINNER: f32 = 15.0;
@@ -137,11 +139,10 @@ pub(super) fn page(
     let subpage = state.profile_subpage;
     let pid: Id = project.id.clone();
     // Library drill-in: what the agent's chats hold (read while `state` is borrowed).
-    let on_library = match (outside.is_some(), subpage) {
-        (true, Some(OUTSIDE_TAB_LIBRARY)) => true,
-        (false, Some(TAB_LIBRARY)) => true,
-        _ => false,
-    };
+    let on_library = matches!(
+        (outside.is_some(), subpage),
+        (true, Some(OUTSIDE_TAB_LIBRARY)) | (false, Some(TAB_LIBRARY))
+    );
     let content = on_library.then(|| {
         let chats: Vec<&crate::model::Chat> = chats_of(state, &project.id);
         collect(state, &chats)
@@ -456,6 +457,7 @@ fn run_by_link_element(
 
 /// Overview landing rows — Coding · Routines · Library · Computer (or Library ·
 /// Connection for an outside agent). Each row sets `profile_subpage`.
+#[allow(clippy::too_many_arguments)] // mirrors DetailsLive + machine flags at one call site
 fn overview_sections(
     project: &Project,
     mine: bool,
@@ -472,7 +474,7 @@ fn overview_sections(
         rows.push(overview_row(
             "agent-overview-library",
             "books.vertical",
-            "Library",
+            OUTSIDE_TABS[OUTSIDE_TAB_LIBRARY],
             None,
             OUTSIDE_TAB_LIBRARY,
             theme,
@@ -486,7 +488,7 @@ fn overview_sections(
         rows.push(overview_row(
             "agent-overview-connection",
             "link",
-            "Connection",
+            OUTSIDE_TABS[OUTSIDE_TAB_CONNECTION],
             Some(status),
             OUTSIDE_TAB_CONNECTION,
             theme,
@@ -502,7 +504,7 @@ fn overview_sections(
         rows.push(overview_row(
             "agent-overview-coding",
             "chevron.left.forwardslash.chevron.right",
-            "Coding",
+            TABS[TAB_CODING],
             Some(coding),
             TAB_CODING,
             theme,
@@ -514,7 +516,7 @@ fn overview_sections(
             rows.push(overview_row(
                 "agent-overview-routines",
                 "clock",
-                "Routines",
+                TABS[TAB_ROUTINES],
                 routines_value,
                 TAB_ROUTINES,
                 theme,
@@ -524,7 +526,7 @@ fn overview_sections(
         rows.push(overview_row(
             "agent-overview-library",
             "books.vertical",
-            "Library",
+            TABS[TAB_LIBRARY],
             None,
             TAB_LIBRARY,
             theme,
@@ -534,7 +536,7 @@ fn overview_sections(
         rows.push(overview_row(
             "agent-overview-computer",
             "desktopcomputer",
-            "Computer",
+            TABS[TAB_COMPUTER],
             Some(computer_status),
             TAB_COMPUTER,
             theme,
@@ -1553,7 +1555,9 @@ mod tests {
         assert_eq!(TABS[TAB_ROUTINES], "Routines");
         assert_eq!(TABS[TAB_LIBRARY], "Library");
         assert_eq!(TABS[TAB_COMPUTER], "Computer");
-        assert!(AGENT_DETAILS_SHOW_CODING_ROUTINES);
+        const {
+            assert!(AGENT_DETAILS_SHOW_CODING_ROUTINES);
+        }
         assert_eq!(LABEL_PLACEHOLDER, "Add a label");
         assert_eq!(CODING_SPINNER, 15.0, "Grok's spinner: 30 px at 2 px/pt");
     }

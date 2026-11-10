@@ -141,9 +141,9 @@ pub(super) fn page(
         )
     };
     let name = if let Some(title) = match subpage {
-        Some(TAB_CHANNELS) => Some("Channels"),
-        Some(TAB_MEMBERS) => Some("Members"),
-        Some(TAB_SETTINGS) => Some("Settings"),
+        Some(TAB_CHANNELS) => Some(TABS[TAB_CHANNELS]),
+        Some(TAB_MEMBERS) => Some(TABS[TAB_MEMBERS]),
+        Some(TAB_SETTINGS) => Some(TABS[TAB_SETTINGS]),
         _ => None,
     } {
         pane::name(title, &theme)
@@ -177,7 +177,7 @@ pub(super) fn page(
                 kit::nav_row(
                     "server-overview-channels",
                     "number",
-                    "Channels",
+                    TABS[TAB_CHANNELS],
                     Some(channels_n.to_string()),
                     &theme,
                 )
@@ -189,7 +189,7 @@ pub(super) fn page(
                 kit::nav_row(
                     "server-overview-members",
                     "person.2",
-                    "Members",
+                    TABS[TAB_MEMBERS],
                     Some(count.to_string()),
                     &theme,
                 )
@@ -201,7 +201,7 @@ pub(super) fn page(
                 kit::nav_row(
                     "server-overview-settings",
                     "gearshape",
-                    "Settings",
+                    TABS[TAB_SETTINGS],
                     None,
                     &theme,
                 )

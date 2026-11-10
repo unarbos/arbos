@@ -191,8 +191,8 @@ pub(super) fn page(
         format!("{count} member{}", if count == 1 { "" } else { "s" })
     };
     let name = if let Some(title) = match subpage {
-        Some(TAB_MEMBERS) => Some("Members"),
-        Some(TAB_LIBRARY) => Some("Library"),
+        Some(TAB_MEMBERS) => Some(TABS[TAB_MEMBERS]),
+        Some(TAB_LIBRARY) => Some(TABS[TAB_LIBRARY]),
         _ => None,
     } {
         pane::name(title, &theme)
@@ -228,7 +228,7 @@ pub(super) fn page(
             let mut rows = vec![kit::nav_row(
                 "group-overview-members",
                 "person.2",
-                "Members",
+                TABS[TAB_MEMBERS],
                 Some(count.to_string()),
                 &theme,
             )
@@ -241,7 +241,7 @@ pub(super) fn page(
                 kit::nav_row(
                     "group-overview-library",
                     "books.vertical",
-                    "Library",
+                    TABS[TAB_LIBRARY],
                     None,
                     &theme,
                 )
