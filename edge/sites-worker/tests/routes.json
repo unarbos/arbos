@@ -1,0 +1,409 @@
+{
+  "reserved": [
+    "about",
+    "account",
+    "accounts",
+    "acme",
+    "admin",
+    "api",
+    "app",
+    "apple-touch-icon.png",
+    "arbos",
+    "assets",
+    "auth",
+    "autoconfig",
+    "autodiscover",
+    "beta",
+    "billing",
+    "blob",
+    "blog",
+    "cdn",
+    "ci",
+    "demo",
+    "dev",
+    "dkim",
+    "dmarc",
+    "docs",
+    "download",
+    "downloads",
+    "edge",
+    "email",
+    "favicon.ico",
+    "favicon.svg",
+    "ftp",
+    "g",
+    "git",
+    "headless-engine",
+    "help",
+    "hub",
+    "hub-api",
+    "i",
+    "imap",
+    "img",
+    "index.html",
+    "internal",
+    "livekit",
+    "local",
+    "localhost",
+    "login",
+    "m",
+    "mail",
+    "main.js",
+    "media",
+    "mta",
+    "mx",
+    "news",
+    "ns",
+    "ns1",
+    "ns2",
+    "ns3",
+    "ns4",
+    "oauth",
+    "ops",
+    "pay",
+    "pop",
+    "pop3",
+    "preview",
+    "privacy",
+    "proxy",
+    "r2",
+    "relay",
+    "release",
+    "releases",
+    "robots.txt",
+    "root",
+    "s",
+    "sftp",
+    "shop",
+    "site",
+    "sitemap.xml",
+    "sites",
+    "smtp",
+    "sn120",
+    "spf",
+    "sso",
+    "staging",
+    "static",
+    "status",
+    "store",
+    "style.css",
+    "support",
+    "terms",
+    "test",
+    "turn",
+    "u",
+    "update",
+    "updates",
+    "voice",
+    "voice-api",
+    "vpn",
+    "webmail",
+    "welcome",
+    "worker",
+    "workers",
+    "www"
+  ],
+  "routes": [
+    {
+      "name": "site-root",
+      "scheme": "subdomain",
+      "labels": "alice",
+      "path": "/notes/",
+      "resolved": {
+        "prefix": "alice",
+        "app": "notes",
+        "rest": ""
+      }
+    },
+    {
+      "name": "missing-final-slash",
+      "scheme": "subdomain",
+      "labels": "alice",
+      "path": "/notes",
+      "resolved": {
+        "prefix": "alice",
+        "app": "notes",
+        "rest": ""
+      }
+    },
+    {
+      "name": "nested-path",
+      "scheme": "subdomain",
+      "labels": "alice",
+      "path": "/notes/css/main.css",
+      "resolved": {
+        "prefix": "alice",
+        "app": "notes",
+        "rest": "css/main.css"
+      }
+    },
+    {
+      "name": "literal-percent-path",
+      "scheme": "subdomain",
+      "labels": "alice",
+      "path": "/notes/a%20b.txt",
+      "resolved": {
+        "prefix": "alice",
+        "app": "notes",
+        "rest": "a%20b.txt"
+      }
+    },
+    {
+      "name": "leading-slashes",
+      "scheme": "subdomain",
+      "labels": "alice",
+      "path": "///notes//a",
+      "resolved": {
+        "prefix": "alice",
+        "app": "notes",
+        "rest": "/a"
+      }
+    },
+    {
+      "name": "unicode-rest",
+      "scheme": "subdomain",
+      "labels": "alice",
+      "path": "/notes/日本/🙂.html",
+      "resolved": {
+        "prefix": "alice",
+        "app": "notes",
+        "rest": "日本/🙂.html"
+      }
+    },
+    {
+      "name": "user-landing",
+      "scheme": "subdomain",
+      "labels": "alice",
+      "path": "/",
+      "resolved": null
+    },
+    {
+      "name": "invalid-subdomain-depth",
+      "scheme": "subdomain",
+      "labels": "notes.alice",
+      "path": "/notes/",
+      "resolved": null
+    },
+    {
+      "name": "invalid-subdomain-leading-dash",
+      "scheme": "subdomain",
+      "labels": "-alice",
+      "path": "/notes/",
+      "resolved": null
+    },
+    {
+      "name": "invalid-subdomain-trailing-dash",
+      "scheme": "subdomain",
+      "labels": "alice-",
+      "path": "/notes/",
+      "resolved": null
+    },
+    {
+      "name": "invalid-subdomain-underscore",
+      "scheme": "subdomain",
+      "labels": "al_ice",
+      "path": "/notes/",
+      "resolved": null
+    },
+    {
+      "name": "invalid-subdomain-punycode",
+      "scheme": "subdomain",
+      "labels": "xn--alice",
+      "path": "/notes/",
+      "resolved": null
+    },
+    {
+      "name": "valid-inner-double-dash-subdomain",
+      "scheme": "subdomain",
+      "labels": "al--ice",
+      "path": "/notes/",
+      "resolved": {
+        "prefix": "al--ice",
+        "app": "notes",
+        "rest": ""
+      }
+    },
+    {
+      "name": "maximum-subdomain",
+      "scheme": "subdomain",
+      "labels": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "path": "/notes/",
+      "resolved": {
+        "prefix": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "app": "notes",
+        "rest": ""
+      }
+    },
+    {
+      "name": "overlong-subdomain",
+      "scheme": "subdomain",
+      "labels": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "path": "/notes/",
+      "resolved": null
+    },
+    {
+      "name": "uppercase-subdomain",
+      "scheme": "subdomain",
+      "labels": "ALICE",
+      "path": "/notes/",
+      "resolved": {
+        "prefix": "alice",
+        "app": "notes",
+        "rest": ""
+      }
+    },
+    {
+      "name": "invalid-app-double-dash",
+      "scheme": "subdomain",
+      "labels": "alice",
+      "path": "/a--b/",
+      "resolved": null
+    },
+    {
+      "name": "invalid-app-uppercase",
+      "scheme": "subdomain",
+      "labels": "alice",
+      "path": "/Notes/",
+      "resolved": null
+    },
+    {
+      "name": "invalid-app-dot",
+      "scheme": "subdomain",
+      "labels": "alice",
+      "path": "/a.b/",
+      "resolved": null
+    },
+    {
+      "name": "invalid-app-leading-dash",
+      "scheme": "subdomain",
+      "labels": "alice",
+      "path": "/-a/",
+      "resolved": null
+    },
+    {
+      "name": "invalid-app-trailing-dash",
+      "scheme": "subdomain",
+      "labels": "alice",
+      "path": "/a-/",
+      "resolved": null
+    },
+    {
+      "name": "valid-one-char-app",
+      "scheme": "subdomain",
+      "labels": "alice",
+      "path": "/a/",
+      "resolved": {
+        "prefix": "alice",
+        "app": "a",
+        "rest": ""
+      }
+    },
+    {
+      "name": "maximum-app",
+      "scheme": "subdomain",
+      "labels": "alice",
+      "path": "/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/",
+      "resolved": {
+        "prefix": "alice",
+        "app": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "rest": ""
+      }
+    },
+    {
+      "name": "overlong-app",
+      "scheme": "subdomain",
+      "labels": "alice",
+      "path": "/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/",
+      "resolved": null
+    },
+    {
+      "name": "two-level-root",
+      "scheme": "two-level",
+      "labels": "notes.alice",
+      "path": "/",
+      "resolved": {
+        "prefix": "alice",
+        "app": "notes",
+        "rest": ""
+      }
+    },
+    {
+      "name": "two-level-nested",
+      "scheme": "two-level",
+      "labels": "notes.alice",
+      "path": "/css/main.css",
+      "resolved": {
+        "prefix": "alice",
+        "app": "notes",
+        "rest": "css/main.css"
+      }
+    },
+    {
+      "name": "two-level-leading-slashes",
+      "scheme": "two-level",
+      "labels": "notes.alice",
+      "path": "///a//b",
+      "resolved": {
+        "prefix": "alice",
+        "app": "notes",
+        "rest": "a//b"
+      }
+    },
+    {
+      "name": "two-level-punycode",
+      "scheme": "two-level",
+      "labels": "notes.xn--alice",
+      "path": "/",
+      "resolved": null
+    },
+    {
+      "name": "two-level-app-double-dash",
+      "scheme": "two-level",
+      "labels": "a--b.alice",
+      "path": "/",
+      "resolved": null
+    },
+    {
+      "name": "two-level-too-many-labels",
+      "scheme": "two-level",
+      "labels": "notes.other.alice",
+      "path": "/",
+      "resolved": null
+    },
+    {
+      "name": "two-level-no-prefix",
+      "scheme": "two-level",
+      "labels": "alice",
+      "path": "/",
+      "resolved": null
+    },
+    {
+      "name": "reserved-about-subdomain",
+      "scheme": "subdomain",
+      "labels": "about",
+      "path": "/notes/",
+      "resolved": null
+    },
+    {
+      "name": "reserved-about-two-level",
+      "scheme": "two-level",
+      "labels": "notes.about",
+      "path": "/notes/",
+      "resolved": null
+    },
+    {
+      "name": "reserved-terms-subdomain",
+      "scheme": "subdomain",
+      "labels": "terms",
+      "path": "/notes/",
+      "resolved": null
+    },
+    {
+      "name": "reserved-terms-two-level",
+      "scheme": "two-level",
+      "labels": "notes.terms",
+      "path": "/notes/",
+      "resolved": null
+    }
+  ]
+}

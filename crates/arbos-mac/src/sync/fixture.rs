@@ -4,6 +4,8 @@
 //! appended in 120 ms frames, a final status. The UI cannot tell it apart from
 //! the relay path.
 
+use crate::mentions::text_has_at_token;
+
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -2356,7 +2358,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     url: "https://relay.arbos.life/agent-link/open/Kq2vB7xZ9kT2vQ".into(),
                     label,
                     scope: scope.to_owned(),
-                    expires_in: crate::ui::agent_links::expiry_label(ttl_hours).to_owned(),
+                    expires_in: crate::agent_link_expiry::expiry_label(ttl_hours).to_owned(),
                     copied: false,
                 },
             )));
@@ -7746,15 +7748,6 @@ fn seed_people_chat_docs() -> Vec<ChatDoc> {
         out.push(group);
     }
     out
-}
-
-/// True when `lower` has `@token` as a whole mention (not a longer `@token…` handle).
-fn text_has_at_token(lower: &str, token: &str) -> bool {
-    let t = format!("@{token}");
-    lower.match_indices(&t).any(|(i, _)| {
-        let after = lower[i + t.len()..].chars().next();
-        after.is_none_or(|c| !(c.is_alphanumeric() || c == '-' || c == '_'))
-    })
 }
 
 /// `@slug` / `@handle` tokens in the text, resolved to member ids.

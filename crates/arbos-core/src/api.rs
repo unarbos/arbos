@@ -127,7 +127,7 @@ pub struct ProjectDto {
     pub message_grants: Vec<MessageGrantDto>,
 }
 
-/// Project chat (`chat_json` / `chat_json_for`).
+/// Project chat (`chat_dto` / `chat_dto_for`).
 #[typeshare]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChatDto {

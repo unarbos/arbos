@@ -1,0 +1,74 @@
+{
+  "status": "scoped PASS; unique targets rebuilt; shared-target proof superseded",
+  "base_commit": "084f86bb79f070b1d23d54f565b33a221d443bf5",
+  "patches": {
+    "wrappers.patch": {
+      "sha256": "b5b2f2d8e03abe25f3773e24691401929e8a039eaab9848d32b4081fc87d1d1b",
+      "bytes": 7184,
+      "files": [
+        "crates/arbos-relay/src/unfurl.rs",
+        "crates/arbos-relay/src/vaults.rs",
+        "crates/arbos-relay/src/people.rs",
+        "crates/arbos-relay/src/api.rs",
+        "crates/arbos-relay/src/signin.rs",
+        "crates/arbos-relay/src/features.rs",
+        "crates/arbos-relay/src/site_icons.rs",
+        "crates/arbos-core/src/api.rs"
+      ]
+    },
+    "sites-parity.patch": {
+      "sha256": "7e45ddb16e34a7e0ad94e754a34b32244981adacccf525d3d9c267f5f4c4f7f9",
+      "bytes": 16517,
+      "files": [
+        "crates/arbos-core/tests/sites_routes.rs",
+        "edge/sites-worker/src/index.js",
+        "edge/sites-worker/package.json",
+        "edge/sites-worker/tests/routes.json",
+        "edge/sites-worker/tests/routes.test.js",
+        "edge/sites-worker/README.md"
+      ]
+    }
+  },
+  "removed_wrappers": 9,
+  "native_tests": {
+    "passed": 44,
+    "failed": 0,
+    "ignored": 0,
+    "relay": 42,
+    "core_shared_fixture": 2
+  },
+  "node_tests": {
+    "before": {
+      "passed": 28,
+      "failed": 9
+    },
+    "after": {
+      "passed": 37,
+      "failed": 0,
+      "skipped": 0
+    }
+  },
+  "fixtures": {
+    "route_vectors": 35,
+    "reserved_names": 102,
+    "reserved_routes_per_runtime": 204
+  },
+  "post_change_gates": 14,
+  "all_gates_pass": true,
+  "core_sites_policy_unchanged": true,
+  "scope_limits": [
+    "Full workspace/native app integration is separate",
+    "Three loopback icon/unfurl tests explicitly filtered under all-network-denied local runtime",
+    "No Wrangler/R2/network/deployment execution",
+    "Current Phase3 ref requires reviewed Swift isolation before push because new core test triggers that gate"
+  ],
+  "native_verification_withdrawn": false,
+  "native_verification_method": "Two private APFSclone targets; all12workspacepackages cleaned in clone before compilation; exact selectedcounts asserted; external dependency cache only reused",
+  "before_native_tests": {
+    "passed": 44,
+    "failed": 0,
+    "ignored": 0
+  },
+  "before_native_gates": 12,
+  "historical_evidence": "shared-target-withdrawn/ and GATES.shared-target-withdrawn.json; these native rows are not source verification"
+}

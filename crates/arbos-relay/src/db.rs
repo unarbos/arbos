@@ -1877,17 +1877,19 @@ impl Db {
     /// bookkeeping is keyed on seq, so it cannot recognise bytes arriving at a seq it has never
     /// seen. Relaxing this check corrupts another component's state machine.
     pub fn row_seq_for_batch(&self, room: &str, batch_id: &str) -> Result<Option<i64>> {
-        self.with(|c| {
-            c.query_row(
-                "SELECT seq FROM rows WHERE room = ?1 AND batch_id = ?2
+        self.with(|c| Self::batch_seq_on(c, room, batch_id))
+    }
+
+    fn batch_seq_on(c: &Connection, room: &str, batch_id: &str) -> rusqlite::Result<Option<i64>> {
+        c.query_row(
+            "SELECT seq FROM rows WHERE room = ?1 AND batch_id = ?2
                  UNION ALL
                  SELECT seq FROM quarantine WHERE room = ?1 AND batch_id = ?2
                  LIMIT 1",
-                params![room, batch_id],
-                |r| r.get(0),
-            )
-            .optional()
-        })
+            params![room, batch_id],
+            |r| r.get(0),
+        )
+        .optional()
     }
 
     /// Append a row. Returns `(seq, dup)`; a duplicate batch id returns the existing seq (idempotent push).
@@ -1900,29 +1902,21 @@ impl Db {
     ) -> Result<(i64, bool)> {
         let now = now_ms();
         self.with(|c| {
-            // Both tables, for the reason given on `row_seq_for_batch`: a quarantined row is no
-            // longer covered by the `rows_batch` unique index, so this query is all that stands
-            // between a replayed batch and a second seq for bytes the room already took.
-            let existing: Option<i64> = c
-                .query_row(
-                    "SELECT seq FROM rows WHERE room = ?1 AND batch_id = ?2
-                     UNION ALL
-                     SELECT seq FROM quarantine WHERE room = ?1 AND batch_id = ?2
-                     LIMIT 1",
-                    params![room, batch_id],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            if let Some(seq) = existing {
+            // The room position and its row commit together; an insert failure must not
+            // leave a head that promises bytes the relay never stored.
+            let tx = c.unchecked_transaction()?;
+            if let Some(seq) = Self::batch_seq_on(&tx, room, batch_id)? {
+                tx.commit()?;
                 return Ok((seq, true));
             }
-            c.execute("INSERT INTO room_seq(room, head, floor) VALUES (?1, 0, 0) ON CONFLICT(room) DO NOTHING", params![room])?;
-            c.execute("UPDATE room_seq SET head = head + 1 WHERE room = ?1", params![room])?;
-            let seq: i64 = c.query_row("SELECT head FROM room_seq WHERE room = ?1", params![room], |r| r.get(0))?;
-            c.execute(
+            tx.execute("INSERT INTO room_seq(room, head, floor) VALUES (?1, 0, 0) ON CONFLICT(room) DO NOTHING", params![room])?;
+            tx.execute("UPDATE room_seq SET head = head + 1 WHERE room = ?1", params![room])?;
+            let seq: i64 = tx.query_row("SELECT head FROM room_seq WHERE room = ?1", params![room], |r| r.get(0))?;
+            tx.execute(
                 "INSERT INTO rows(room, seq, device, batch_id, bytes, created_at) VALUES (?1,?2,?3,?4,?5,?6)",
                 params![room, seq, device, batch_id, bytes, now],
             )?;
+            tx.commit()?;
             Ok((seq, false))
         })
     }
@@ -3835,6 +3829,141 @@ impl Db {
             let rows = st.query_map(params![project_id, item_id], Self::row_to_vault_request)?;
             rows.collect()
         })
+    }
+}
+
+#[cfg(test)]
+mod append_row_tests {
+    use super::*;
+
+    fn with_db(f: impl FnOnce(&Db)) {
+        let dir = std::env::temp_dir().join(format!(
+            "arbos-append-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let db = Db::open(&dir.join("relay.db")).unwrap();
+        f(&db);
+        drop(db);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn reject_next_row(db: &Db) {
+        db.with(|c| {
+            c.execute_batch(
+                "CREATE TRIGGER reject_row BEFORE INSERT ON rows
+             WHEN NEW.batch_id = 'reject'
+             BEGIN SELECT RAISE(ABORT, 'synthetic insert failure'); END;",
+            )
+        })
+        .unwrap();
+    }
+
+    fn allow_rows(db: &Db) {
+        db.with(|c| c.execute_batch("DROP TRIGGER reject_row"))
+            .unwrap();
+    }
+
+    #[test]
+    fn duplicates_keep_original_seq_bytes_and_room_scope_after_quarantine() {
+        with_db(|db| {
+            assert_eq!(
+                db.append_row("a", "device", "batch", b"original").unwrap(),
+                (1, false)
+            );
+            assert_eq!(
+                db.append_row("a", "other", "batch", b"changed").unwrap(),
+                (1, true)
+            );
+            let rows = db.rows_after("a", 0, None, 10).unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].device, "device");
+            assert_eq!(rows[0].bytes, b"original");
+            assert!(db.quarantine_row("a", 1).unwrap());
+            assert_eq!(db.row_seq_for_batch("a", "batch").unwrap(), Some(1));
+            assert_eq!(
+                db.append_row("a", "other", "batch", b"changed").unwrap(),
+                (1, true)
+            );
+            assert_eq!(db.room_state("a").unwrap().head, 1);
+            assert!(db.rows_after("a", 0, None, 10).unwrap().is_empty());
+            assert_eq!(db.quarantined_rows("a").unwrap()[0].bytes, b"original");
+            assert_eq!(
+                db.append_row("b", "other", "batch", b"independent")
+                    .unwrap(),
+                (1, false)
+            );
+        });
+    }
+
+    #[test]
+    fn failed_first_append_leaves_no_room_position_and_can_retry() {
+        with_db(|db| {
+            reject_next_row(db);
+            assert!(db.append_row("new", "device", "reject", b"bytes").is_err());
+            let (positions, rows, autocommit): (i64, i64, bool) = db
+                .with(|c| {
+                    Ok((
+                        c.query_row(
+                            "SELECT COUNT(*) FROM room_seq WHERE room = 'new'",
+                            [],
+                            |r| r.get(0),
+                        )?,
+                        c.query_row("SELECT COUNT(*) FROM rows WHERE room = 'new'", [], |r| {
+                            r.get(0)
+                        })?,
+                        c.is_autocommit(),
+                    ))
+                })
+                .unwrap();
+            assert_eq!((positions, rows, autocommit), (0, 0, true));
+            assert_eq!(db.row_seq_for_batch("new", "reject").unwrap(), None);
+            allow_rows(db);
+            assert_eq!(
+                db.append_row("new", "device", "reject", b"bytes").unwrap(),
+                (1, false)
+            );
+        });
+    }
+
+    #[test]
+    fn failed_append_preserves_existing_room_position_and_rows() {
+        with_db(|db| {
+            db.append_row("room", "first", "first", b"original")
+                .unwrap();
+            db.append_row("other", "other", "other", b"untouched")
+                .unwrap();
+            let before = db.room_state("room").unwrap();
+            reject_next_row(db);
+            assert!(db.append_row("room", "second", "reject", b"new").is_err());
+            let after = db.room_state("room").unwrap();
+            assert_eq!(
+                (after.head, after.floor, after.row_count, after.row_bytes),
+                (
+                    before.head,
+                    before.floor,
+                    before.row_count,
+                    before.row_bytes
+                )
+            );
+            let rows = db.rows_after("room", 0, None, 10).unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(
+                (rows[0].seq, rows[0].bytes.as_slice()),
+                (1, b"original".as_slice())
+            );
+            assert_eq!(db.room_state("other").unwrap().head, 1);
+            assert_eq!(db.row_seq_for_batch("room", "reject").unwrap(), None);
+            assert!(db.with(|c| Ok(c.is_autocommit())).unwrap());
+            allow_rows(db);
+            assert_eq!(
+                db.append_row("room", "second", "reject", b"new").unwrap(),
+                (2, false)
+            );
+        });
     }
 }
 

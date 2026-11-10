@@ -1,5 +1,9 @@
 # Phase 3 auxiliary-domain structural audit
 
+Historical audit snapshot: later implementation, corrected native artifact isolation
+and current prerequisites are recorded in [the phase report](../structure.md).
+The original disk/fork-approval observations below are not current blanket blockers.
+
 Scope: harness, voice, edge, scripts, image, evals. Source inventory/skeleton records 166 files / 36,192 lines in `structure-auxiliary-index.json` (6 harness, 17 voice, 1 edge, 111 scripts, 9 image, 22 evals). All selected source files were indexed for definitions/imports/special-case locations; detailed bodies were inspected at the seams below. Historical scoreboards, generated media, dependencies, secrets and runtime state were excluded. This is a targeted whole-domain audit, not a claim that every statement was individually reviewed. No source edits, branch changes, production calls, deployments, or test removals.
 
 ## Redesign 1: one pure cancellation-result presentation module
