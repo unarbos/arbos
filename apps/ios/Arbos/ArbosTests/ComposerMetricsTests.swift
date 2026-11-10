@@ -43,7 +43,10 @@ final class ComposerMetricsTests: XCTestCase {
     }
 
     func testFieldTextStartsAtGroksCaret() {
-        // Caret centre 51 px from the field's outer edge; one 22 pt line centred in 48.
+        // Full-width caret centre 51 px from the pill's outer edge; one 22 pt line centred
+        // in 48. When the `+` is on the same row the field passes leftInset 0 so the
+        // placeholder sits against the HStack gap instead of a second 17 pt pad
+        // ([feedback AJuVf-Tv2c-WhHzsKiVmi9U]).
         XCTAssertEqual(Theme.composerTextInset, 17)
         XCTAssertEqual(Theme.composerTextPadY, 13)
         XCTAssertEqual(MentionTextView.insets.left, Theme.composerTextInset)

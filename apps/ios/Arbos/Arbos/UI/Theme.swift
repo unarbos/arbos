@@ -157,7 +157,10 @@ struct Theme: Equatable {
     static let plusGlyph: CGFloat = 22.5
     /// `+` disc → field: 30 px (= `Controls.gap`).
     static let plusFieldGap: CGFloat = Controls.gap
-    /// The field's text starts 51 px in from its outer edge (the caret's centre; = `Controls.textInset`).
+    /// Full-width caret inset: 51 px from the pill's outer edge (`Controls.textInset`).
+    /// Used when the text runs the pill's width (channel, or stacked above the controls).
+    /// When the `+` sits on the same row the text view's left inset is 0 instead — the
+    /// HStack spacing is the gap ([feedback AJuVf-Tv2c-WhHzsKiVmi9U]).
     static let composerTextInset: CGFloat = Controls.textInset
     /// One 22 pt body line centred in the 48 pt field.
     static let composerTextPadY: CGFloat = (composerHeight - 22) / 2
