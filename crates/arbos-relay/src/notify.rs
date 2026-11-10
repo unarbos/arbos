@@ -1107,9 +1107,9 @@ pub async fn notify_people_chat(
         &b.mentions,
     )
     .await;
-    if out.is_some() {
-        crate::voice::call_update(&state, &chat, &sender, &b).await;
-    }
+    // Voice wake is independent of push dedupe: a live call must hear the bubble even when
+    // `chat_events` already had this message_id (announce returns None). CallUpdates dedupes.
+    crate::voice::call_update(&state, &chat, &sender, &b).await;
     notify_response(out)
 }
 
@@ -1145,9 +1145,9 @@ pub async fn notify_project_chat(
         &b.mentions,
     )
     .await;
-    if out.is_some() {
-        crate::voice::call_update(&state, &chat, &sender, &b).await;
-    }
+    // Voice wake is independent of push dedupe: a live call must hear the bubble even when
+    // `chat_events` already had this message_id (announce returns None). CallUpdates dedupes.
+    crate::voice::call_update(&state, &chat, &sender, &b).await;
     notify_response(out)
 }
 
