@@ -168,27 +168,26 @@ struct ChatSession: View {
     @State private var refreshVersion: (chat: Id, version: Int?)?
     /// id → message for the rows on screen (menus, search, replies); rebuilt with `rows`.
     @State private var messageById: [Id: Message] = [:]
-    /// How many of the newest rows are in the view tree. The transcript is a plain
-    /// VStack (see `transcript`), so every row it holds is built and laid out at once;
-    /// a long group chat put thousands in it and the open took seconds (long-chat-perf,
-    /// 2026-10-23). Cap stays modest so finger-scrolling stays smooth; older rows join
-    /// as the user nears the top (`growWindow`).
-    @State private var windowCount = ChatSession.windowInitial
-    /// Same initial window on iOS 17 — PreferenceKey geometry near the top grows it
-    /// (feedback app-01M5NNJ001NHHYBHXTASM5NXBZ). iOS 18+ uses onScrollGeometryChange.
-    static let windowInitial: Int = 80
-    /// Rows added per step. Small on purpose: a step builds and lays out this many
-    /// bubbles in one frame (≈4 ms each in a Debug simulator build).
-    static let windowStep = 30
-    /// Most rows the view tree holds while reading history. Past this, each step
-    /// that adds older rows at the top also drops the same number of newest rows
-    /// below the viewport, and the first row on screen is re-pinned, so the cost
-    /// of a page of history stays flat however far back the reader goes
-    /// (arbonites-chat-lag: 0.3–0.8 s frames and 600 MB at 600+ rows).
-    static let windowMax = 360
-    /// Newest rows dropped below the viewport while reading history; 0 when the
-    /// window is the tail of the transcript.
+    /// Newest rows left out of the view tree after a reveal slid onto an older message; 0
+    /// otherwise. Every other row is in the lazy stack from the open on: scrolling never
+    /// changes the row set. A change to it is one frame of 90–150 ms whatever its size —
+    /// the stack re-measures its estimates and commits every layer (iphone-chat-perf,
+    /// simulator) — and the row window that used to grow and slide as the reader scrolled
+    /// cost one such frame per quarter second of history. The lazy stack keeps none of
+    /// that memory: all 2 224 rows of the long fixture group peak at 122 MB, the old
+    /// 80–360-row window at 137 MB.
     @State private var windowSkipEnd = 0
+    /// Rows that have appeared since the stack last landed on the tail. A reference box like
+    /// `scrollProbe`: every row's `onAppear` writes it, and nothing redraws on it.
+    @State private var reached = RowsReached()
+    /// How far from the tail a reveal reaches with a plain animated hop, in rows, when the
+    /// reader has not scrolled there: the slice a chat used to open on.
+    static let revealHopRows = 80
+    /// Rows a reveal keeps below the message it slides onto.
+    static let revealRowsBelow = 15
+    /// How many rows may be below the reader before ↓ lands at once instead of animating
+    /// over them ([feedback jump-to-latest-instant-ios-2026-10-25]).
+    static let jumpHopRows = 360
     /// The animated hop a reveal makes to a row the stack has already built.
     static let revealHop: Double = 0.35
     /// How long `settleOnRevealed` waits between its corrections.
@@ -274,12 +273,12 @@ struct ChatSession: View {
     /// Follow the end as rows stream / grow. Cleared when the user scrolls up;
     /// restored when they return near the end or tap the chevron / pill (Mac stick pin).
     @State private var pinnedToBottom = true
-    /// When this chat screen appeared (the history window does not grow in its first second).
+    /// When this chat screen appeared (no older channel page is asked for in its first second).
     @State private var appearedAt = Date()
     /// `chat-first-row` has been marked for this open (lazy rows re-appear when scrolled back to).
     @State private var firstRowMarked = false
-    /// When the history window last grew (the near-top reporter fires per scroll sample).
-    @State private var lastGrowAt = Date.distantPast
+    /// When a channel last asked for an older page (the near-top reporter fires per scroll sample).
+    @State private var lastOlderPageAt = Date.distantPast
     /// Rig (#2404): while this is in the future the trace reports every scroll offset sample.
     /// Outside it they are left alone — a chat scroll samples per frame, and a `print` on each
     /// one changes the thing being measured.
@@ -482,18 +481,10 @@ struct ChatSession: View {
         searchHitsActive ? "filtered:\(transcriptStackShape)" : "all:\(transcriptStackShape)"
     }
 
-    static func shownStamp(_ rowsVersion: Int, _ windowCount: Int, _ windowSkipEnd: Int, _ query: String, _ searching: Bool) -> Int {
-        var h = Hasher()
-        h.combine(rowsVersion); h.combine(windowCount); h.combine(windowSkipEnd)
-        if searching { h.combine(query) }
-        return h.finalize()
-    }
-
-    /// The newest `windowCount` of `visibleRows`: what the VStack actually holds.
+    /// What the lazy stack holds: `visibleRows`, less the newest `windowSkipEnd`.
     private var windowedRows: [Row] {
         let all = visibleRows
-        let kept = windowSkipEnd > 0 && windowSkipEnd < all.count ? all.dropLast(windowSkipEnd) : all[...]
-        return kept.count > windowCount ? Array(kept.suffix(windowCount)) : Array(kept)
+        return windowSkipEnd > 0 && windowSkipEnd < all.count ? Array(all.dropLast(windowSkipEnd)) : all
     }
 
     /// Rig (`ARBOS_TRACE_REVEAL=1`, #2404): one line per thing that moves the transcript.
@@ -514,56 +505,27 @@ struct ChatSession: View {
         v.isFinite ? String(Int(v)) : "inf"
     }
 
-    /// Nearing the top: bring the next older slice into the view tree. The scroll view is
-    /// anchored at the bottom, so the rows on screen stay put while the content grows above.
-    /// Never inside the caller's animation: an animated change to the row list makes
-    /// SwiftUI diff the whole window per frame.
-    private func growWindow() {
-        let all = visibleRows
-        let available = all.count - windowSkipEnd
-        guard windowCount < available else { return }
-        let step = min(Self.windowStep, available - windowCount)
-        let firstShown = windowedRows.first?.id
-        revealTrace("grow", "step=\(step) window=\(windowCount)->\(windowCount + step) skipEnd=\(windowSkipEnd) firstShown=\(firstShown ?? "-")")
-        var t = Transaction()
-        t.disablesAnimations = true
-        withTransaction(t) {
-            if windowCount + step > Self.windowMax {
-                // Slide: the oldest shown rows stay, the same number of newest rows leave.
-                windowSkipEnd += step
-            } else {
-                windowCount += step
-            }
-        }
-        if windowCount + step > Self.windowMax, let firstShown, let proxy = scroller {
-            // Rows left below the viewport and the bottom anchor would shift what is on
-            // screen; put the row that was at the top back where it was.
-            DispatchQueue.main.async { proxy.scrollTo(firstShown, anchor: .top) }
-        }
-    }
-
-    /// Back at the tail (a send, the new-messages pill, settle): the window is the
-    /// newest rows again.
+    /// Back at the tail (a send, the new-messages pill, settle): the stack holds every row
+    /// again.
     private func resetWindowToTail() {
-        guard windowSkipEnd > 0 || windowCount > Self.windowMax else { return }
+        reached.reset()
+        guard windowSkipEnd > 0 else { return }
         var t = Transaction()
         t.disablesAnimations = true
-        withTransaction(t) {
-            windowSkipEnd = 0
-            windowCount = min(windowCount, Self.windowMax)
-        }
+        withTransaction(t) { windowSkipEnd = 0 }
     }
 
-    /// Make sure the row for `messageId` is in the window (quote taps into older history).
-    /// Returns true when the window had to move (the caller scrolls after the next layout).
+    /// Make sure the row for `messageId` can be scrolled onto accurately (quote taps into
+    /// older history). Returns true when the window had to move (the caller scrolls after
+    /// the next layout).
     ///
-    /// The window SLIDES onto the target; it does not stretch back to it from the tail
-    /// (#2404). Stretching is what a reveal into older history used to do, and it put every
-    /// row between the tail and the target into the stack at once — 107 of them in the
-    /// measured case — so the scroll that followed had 172 rows of estimated height between
-    /// it and where it was going, and came to rest 18 to 35 rows away. A slice that ends
-    /// just after the target is one page instead, whatever the distance, and the scroll that
-    /// follows it starts from the bottom anchor a dozen rows away.
+    /// A row the reader has scrolled past, or one near the tail, is a plain hop. Any other
+    /// row is far behind rows of estimated height, so the window SLIDES onto it: the newest
+    /// rows leave the stack until it ends just after the target (#2404). Scrolling across the
+    /// estimates instead is what a reveal into older history used to do — 172 rows of them in
+    /// the measured case — and it came to rest 18 to 35 rows away; from a stack that ends
+    /// just after the target, the scroll starts from the bottom anchor a dozen rows away.
+    /// The older rows all stay, so reading up from the revealed row never changes the stack.
     ///
     /// Sliding bounds the error; it does not remove it, and the measured landing after this
     /// change alone was still 13 rows out. `settleOnRevealed` is the other half.
@@ -571,30 +533,25 @@ struct ChatSession: View {
         let all = visibleRows
         guard let ix = all.firstIndex(where: { $0.messageId == messageId }) else { return false }
         if DebugHooks.revealPreFix { return stretchWindowToTail(all: all, ix: ix, messageId: messageId) }
-        // Nothing to do when the stack has already built the row: `scrollTo` can reach it and
-        // the window is the reader's, not this function's, to change.
-        guard !windowedRows.contains(where: { $0.messageId == messageId }) else {
-            revealTrace("include-in-window", "id=\(messageId) already shown; window untouched")
+        let inStack = windowSkipEnd == 0 || ix < all.count - windowSkipEnd
+        let nearTail = windowSkipEnd == 0 && all.count - ix <= Self.revealHopRows
+        guard !inStack || !(nearTail || reached.contains(all[ix].id)) else {
+            revealTrace("include-in-window", "id=\(messageId) already reached; window untouched")
             return false
         }
-        // Rows kept below the target. Half a step is a comfortable margin either way: enough
-        // that the end of the window is well clear of the viewport, so `AwayFromBottomReporter`
-        // does not read the landing as "back at the end" and settle the reader to the real
-        // tail; few enough that the scroll from the bottom anchor up to the target crosses
-        // rows the stack has just built.
-        let below = Self.windowStep / 2
-        let skip = max(0, all.count - ix - 1 - below)
-        let count = min(all.count - skip, Self.windowInitial)
+        // Enough rows below that the end of the stack is well clear of the viewport, so
+        // `AwayFromBottomReporter` does not read the landing as "back at the end" and settle
+        // the reader to the real tail; few enough that the scroll from the bottom anchor up to
+        // the target crosses rows the stack has just built.
+        let skip = max(0, all.count - ix - 1 - Self.revealRowsBelow)
         revealTrace("include-in-window",
                     "id=\(messageId) ix=\(ix)/\(all.count) fromTail=\(all.count - ix) "
-                    + "window=\(windowCount)->\(count) skipEnd=\(windowSkipEnd)->\(skip)")
-        guard count != windowCount || skip != windowSkipEnd else { return false }
+                    + "reached=\(reached.count) skipEnd=\(windowSkipEnd)->\(skip)")
+        guard skip != windowSkipEnd else { return false }
+        reached.reset()
         var t = Transaction()
         t.disablesAnimations = true
-        withTransaction(t) {
-            windowSkipEnd = skip
-            windowCount = count
-        }
+        withTransaction(t) { windowSkipEnd = skip }
         return true
     }
 
@@ -602,18 +559,13 @@ struct ChatSession: View {
     /// every row between the tail and the target joins the stack at once. Kept so one build
     /// can measure the symptom beside the fix; it goes away with the rig.
     private func stretchWindowToTail(all: [Row], ix: Int, messageId: Id) -> Bool {
-        let needed = all.count - ix + Self.windowStep / 2
         revealTrace("include-in-window",
-                    "stretch id=\(messageId) ix=\(ix)/\(all.count) fromTail=\(all.count - ix) needed=\(needed) "
-                    + "window=\(windowCount) skipEnd=\(windowSkipEnd) "
-                    + "grows=\(needed > windowCount || windowSkipEnd > 0)")
-        guard needed > windowCount || windowSkipEnd > 0 else { return false }
+                    "stretch id=\(messageId) ix=\(ix)/\(all.count) fromTail=\(all.count - ix) "
+                    + "skipEnd=\(windowSkipEnd) grows=\(windowSkipEnd > 0)")
+        guard windowSkipEnd > 0 else { return false }
         var t = Transaction()
         t.disablesAnimations = true
-        withTransaction(t) {
-            windowSkipEnd = 0
-            windowCount = min(all.count, max(windowCount, needed))
-        }
+        withTransaction(t) { windowSkipEnd = 0 }
         return true
     }
 
@@ -691,8 +643,8 @@ struct ChatSession: View {
             showSearch = false
             searchText = ""
             windowSkipEnd = 0
-            windowCount = min(max(windowCount, Self.windowInitial), Self.windowMax)
         }
+        reached.reset()
         searchFocused = false
         guard scrollToTail else { return }
         pinnedToBottom = true
@@ -711,7 +663,7 @@ struct ChatSession: View {
         // Where the result list was standing when the reader tapped. A reveal animates from
         // wherever the scroll view already is, so this is the one number that says which
         // reveal was asked for, and it is not recoverable afterwards.
-        revealTrace("result-tap", "id=\(messageId) hits=\(visibleRows.count) window=\(windowCount) "
+        revealTrace("result-tap", "id=\(messageId) hits=\(visibleRows.count) reached=\(reached.count) "
                     + "skipEnd=\(windowSkipEnd) offset=\(Self.offsetText(scrollProbe.last))")
         // The reveal lands inside a second. The window is far longer than that because the
         // interesting part is the silence after it: whether anything moves the transcript
@@ -1035,13 +987,13 @@ struct ChatSession: View {
         defer { refreshVersion = (chatId, version) }
         let rowsMark = PerfSignpost.rowsBegin()
         var rowsPath = PerfSignpost.RowsPath.full
-        defer { PerfSignpost.rowsEnd(rowsMark, path: rowsPath, messages: list.count, rows: rows.count, window: windowCount) }
+        defer { PerfSignpost.rowsEnd(rowsMark, path: rowsPath, messages: list.count, rows: rows.count, window: rows.count - windowSkipEnd) }
         #if DEBUG
         let refreshStarted = Date()
         defer {
             PerfCounters.time("rows()", ms: Date().timeIntervalSince(refreshStarted) * 1000)
             if SendTrace.traces(chatId) {
-                SendTrace.markIfPresent("rows-has-row", ids: rows.map(\.messageId), detail: "rows=\(rows.count) window=\(windowCount) skipEnd=\(windowSkipEnd)")
+                SendTrace.markIfPresent("rows-has-row", ids: rows.map(\.messageId), detail: "rows=\(rows.count) reached=\(reached.count) skipEnd=\(windowSkipEnd)")
             }
         }
         #endif
@@ -1116,11 +1068,7 @@ struct ChatSession: View {
             } else {
                 newTail = rebuilt
             }
-            if windowSkipEnd == 0, windowCount < rows.count + newTail.count {
-                windowCount = min(rows.count + newTail.count, windowCount + newTail.count)
-            } else if windowSkipEnd > 0 {
-                windowSkipEnd += newTail.count
-            }
+            if windowSkipEnd > 0 { windowSkipEnd += newTail.count }
             rows = rows + newTail
             messageById = byId
             refreshIds = list.map(\.id)
@@ -1131,15 +1079,7 @@ struct ChatSession: View {
         let byId = Transcript.index(list)
         let next = Transcript.rows(list, byId: byId, projectId: slot, me: me,
                                    people: peopleFlag, agentNames: agentNames, multiParty: multiParty, memberNames: memberNames, hiddenSenders: hiddenSenders)
-        // Rows appended after the last one we had (new messages) join the window, so the
-        // oldest row on screen does not fall out of the view tree when a new one lands.
-        // History that arrives above it — the first snapshot, a backfill, an older
-        // channel page — does not widen the window.
-        if windowSkipEnd == 0, windowCount < next.count, let lastId = rows.last?.id,
-           let j = next.lastIndex(where: { $0.id == lastId }) {
-            let appended = next.count - 1 - j
-            if appended > 0 { windowCount = min(next.count, windowCount + appended) }
-        } else if windowSkipEnd > 0, next.count > rows.count {
+        if windowSkipEnd > 0, next.count > rows.count {
             // Reading history: rows that arrive below stay outside the window (the pill
             // counts them) and must not push the shown slice.
             windowSkipEnd += next.count - rows.count
@@ -2233,39 +2173,35 @@ struct ChatSession: View {
 
     /// Jump to the latest row and resume stick-to-bottom.
     ///
-    /// From deep in history — the window slid past the tail (`windowSkipEnd > 0`) —
-    /// the window is re-cut to the newest `windowInitial` rows, the slice a chat
-    /// opens on, and the scroll lands at once: rebuilding the full 360-row window
-    /// and then animating through it took ~0.75 s (Debug simulator) on a 1 700-row
-    /// group ([feedback jump-to-latest-instant-ios-2026-10-25]; the Mac's ↓ had the
-    /// same shape of bug). Within the tail window the short animated hop stays.
+    /// From deep in history — a reveal slid the window off the tail, or more than
+    /// `jumpHopRows` rows are below the reader — the scroll lands at once: animating
+    /// through 360 rows took ~0.75 s (Debug simulator) on a 1 700-row group
+    /// ([feedback jump-to-latest-instant-ios-2026-10-25]; the Mac's ↓ had the same shape of
+    /// bug). Nearer the tail the short animated hop stays.
     private func jumpToLatest() {
         jumpBackTo = nil
         pinnedToBottom = true
         awayFromBottom = false
         newBelowCount = 0
-        let landing = Self.windowAfterJump(count: windowCount, skipEnd: windowSkipEnd)
-        if landing.count == windowCount, landing.skipEnd == windowSkipEnd {
+        let shown = visibleRows.count - windowSkipEnd
+        let share = scrollProbe.contentHeight > 0 ? scrollProbe.below / scrollProbe.contentHeight : 0
+        let rowsBelow = share.isFinite ? Int(max(0, min(1, share)) * CGFloat(shown)) : 0
+        guard Self.jumpLandsAtOnce(rowsBelow: max(rowsBelow, reached.count), skipEnd: windowSkipEnd) else {
             withAnimation(.easeOut(duration: 0.3)) { scroller?.scrollTo("bottom", anchor: .bottom) }
             return
         }
-        var t = Transaction()
-        t.disablesAnimations = true
-        withTransaction(t) {
-            windowSkipEnd = landing.skipEnd
-            windowCount = landing.count
-        }
-        // The first scrollTo runs before layout knows the re-cut content's size.
+        resetWindowToTail()
+        // The first scrollTo runs before layout knows the restored content's size.
         scroller?.scrollTo("bottom", anchor: .bottom)
         DispatchQueue.main.async { scroller?.scrollTo("bottom", anchor: .bottom) }
     }
 
-    /// The window ↓ lands on. Unchanged while the window still ends at the tail
-    /// (a short animated hop over rows that are already built); once it has slid
-    /// into history, the newest `windowInitial` rows — one opening page to build,
-    /// not `windowMax` bubbles — and the reader grows it again by scrolling up.
-    static func windowAfterJump(count: Int, skipEnd: Int) -> (count: Int, skipEnd: Int) {
-        skipEnd > 0 ? (windowInitial, 0) : (min(count, windowMax), 0)
+    /// Whether ↓ lands at once rather than animating: once a reveal has slid the window into
+    /// history, or once more rows are below the reader than a short hop covers. `rowsBelow`
+    /// is the share of the content height below the viewport in rows, or the rows the reader
+    /// has scrolled through where that is larger (iOS 17 reports no geometry).
+    static func jumpLandsAtOnce(rowsBelow: Int, skipEnd: Int) -> Bool {
+        skipEnd > 0 || rowsBelow > jumpHopRows
     }
 
     /// After a send: stick to the end now and again once the optimistic row has height.
@@ -2511,32 +2447,28 @@ struct ChatSession: View {
                 // each delta glides with layout instead of fighting a scroll animation.
                 proxy.scrollTo("bottom", anchor: .bottom)
             })
-            // Nearing the top: the next older slice of rows joins the view tree; a channel
-            // also asks the server for one older page.
+            // Nearing the top: a channel asks the server for one older page.
             .modifier(NearTopReporter(enabled: true, onNear: { offset in
-                revealTrace("near-top", "offset=\(Self.offsetText(offset)) window=\(windowCount) skipEnd=\(windowSkipEnd) "
+                revealTrace("near-top", "offset=\(Self.offsetText(offset)) reached=\(reached.count) skipEnd=\(windowSkipEnd) "
                             + "sinceAppear=\(Int(Date().timeIntervalSince(appearedAt) * 1000))ms "
-                            + "sinceGrow=\(Int(Date().timeIntervalSince(lastGrowAt) * 1000))ms")
-                // The first layout reports offset 0 before the bottom anchor applies; a
-                // grow step there (30 more bubbles) landed inside the open and cost a
-                // 200–300 ms frame on a long group. History waits a beat after appear.
-                guard Date().timeIntervalSince(appearedAt) > 1.0 else { return }
-                // One step per quarter second at most: the reporter now fires per scroll sample
-                // inside the top band (lazy rows), and a flick's deceleration there should bring
-                // a few slices in, not run away through the whole history.
-                guard Date().timeIntervalSince(lastGrowAt) > 0.25 else { return }
-                lastGrowAt = Date()
-                if windowCount + windowSkipEnd < visibleRows.count {
-                    growWindow()
-                } else if isChannel {
-                    model.loadOlderChannel(chatId)
-                }
+                            + "sincePage=\(Int(Date().timeIntervalSince(lastOlderPageAt) * 1000))ms")
+                // The first layout reports offset 0 before the bottom anchor applies, which
+                // is not the reader at the top. History waits a beat after appear.
+                guard isChannel, Date().timeIntervalSince(appearedAt) > 1.0 else { return }
+                // One page per quarter second at most: the reporter fires per scroll sample
+                // inside the top band, and a flick's deceleration there should ask for a
+                // page or two, not run away through the whole history.
+                guard Date().timeIntervalSince(lastOlderPageAt) > 0.25 else { return }
+                lastOlderPageAt = Date()
+                model.loadOlderChannel(chatId)
             }, onSample: { old, new in
-                scrollProbe.last = new
+                scrollProbe.last = new.offset
+                scrollProbe.below = new.below
+                scrollProbe.contentHeight = new.contentHeight
                 scrollProbe.samples += 1
                 guard Date() < traceOffsetsUntil else { return }
-                revealTrace("offset", "\(Self.offsetText(old))->\(Self.offsetText(new)) "
-                            + "window=\(windowCount) skipEnd=\(windowSkipEnd) shown=\(windowedRows.count)")
+                revealTrace("offset", "\(Self.offsetText(old))->\(Self.offsetText(new.offset)) "
+                            + "reached=\(reached.count) skipEnd=\(windowSkipEnd) shown=\(windowedRows.count)")
             }))
             // Top fade is `headerBlur` over the transcript — a ScrollView `.mask`
             // forced an offscreen pass of every row on each scroll frame and made
@@ -2595,7 +2527,10 @@ struct ChatSession: View {
                     if windowSkipEnd > 0 { settleToBottom(proxy) }
                 }
             }
-            .onChange(of: transcriptStackIdentity) { _, _ in pinFilteredStackToEnd(proxy) }
+            .onChange(of: transcriptStackIdentity) { _, _ in
+                reached.reset()
+                pinFilteredStackToEnd(proxy)
+            }
             // A rebuilt stack has no measured child heights either way, so the one a lead child
             // or the banner rebuilds needs the same ladder the filtered one does — otherwise an
             // open whose rows land late comes to rest on estimates, with the newest row short of
@@ -2615,8 +2550,7 @@ struct ChatSession: View {
         try? await Task.sleep(for: .seconds(4))
         if drive.contains("scroll") {
             PerfLog.mark("phase scroll begin", ms: 0)
-            // Page up ~12 rows at a time to the oldest shown row (growing the window on
-            // the way), then page back down. Each hop is an animated scrollTo, so the
+            // Page up ~12 rows at a time towards the oldest row, then page back down. Each hop is an animated scrollTo, so the
             // rows between are laid out and drawn like a flick.
             var hops = 0
             while hops < 60 {
@@ -2627,7 +2561,7 @@ struct ChatSession: View {
                 withAnimation(.easeInOut(duration: 0.35)) { proxy.scrollTo(target, anchor: .top) }
                 try? await Task.sleep(for: .milliseconds(500))
                 hops += 1
-                if target == topId, windowCount + windowSkipEnd >= visibleRows.count { break }
+                if target == topId { break }
             }
             PerfLog.mark("phase scroll top", ms: 0)
             try? await Task.sleep(for: .seconds(1))
@@ -2636,7 +2570,7 @@ struct ChatSession: View {
             PerfLog.mark("phase scroll end", ms: 0)
         }
         if drive.contains("jump") {
-            // Deep into history (the window has slid past its cap, or the top is
+            // Deep into history (past what a short hop covers, or the top is
             // reached), then the ↓ button's own action; "stable" = at the bottom
             // and the scroll geometry quiet for 250 ms. Bubble bodies built on the
             // way come out of the counters (`rowBody`).
@@ -2652,23 +2586,17 @@ struct ChatSession: View {
                 withAnimation(.easeInOut(duration: 0.35)) { proxy.scrollTo(target, anchor: .top) }
                 try? await Task.sleep(for: .milliseconds(500))
                 hops += 1
-                if windowSkipEnd >= 300 || (target == topId && windowCount + windowSkipEnd >= visibleRows.count) { break }
+                if reached.count > Self.jumpHopRows || target == topId { break }
             }
-            if DebugHooks.perfDrive.contains("deep"), windowSkipEnd < 300 {
-                // A reader 600 rows into history after the window slid: the state
-                // `growWindow` leaves behind, set directly so a run stays short.
-                var t = Transaction()
-                t.disablesAnimations = true
-                withTransaction(t) {
-                    windowSkipEnd = min(600, max(0, visibleRows.count - Self.windowMax - 1))
-                    windowCount = Self.windowMax
-                }
+            if DebugHooks.perfDrive.contains("deep") {
+                // A reader 600 rows into history, set directly so a run stays short.
+                let shown = windowedRows
+                if !shown.isEmpty { scroller?.scrollTo(shown[max(0, shown.count - 600)].id, anchor: .top) }
                 try? await Task.sleep(for: .milliseconds(600))
-                if let first = windowedRows.first?.id { scroller?.scrollTo(first, anchor: .top) }
             }
             try? await Task.sleep(for: .milliseconds(1500))
             _ = PerfCounters.drain()
-            PerfLog.mark("jump tap skipEnd=\(windowSkipEnd) window=\(windowCount) rows=\(rows.count) away=\(awayFromBottom)", ms: 0)
+            PerfLog.mark("jump tap skipEnd=\(windowSkipEnd) reached=\(reached.count) rows=\(rows.count) away=\(awayFromBottom)", ms: 0)
             let t0 = Date()
             PerfDriveProbe.lastScrollGeometry = t0
             jumpToLatest()
@@ -2682,7 +2610,7 @@ struct ChatSession: View {
                 }
             }
             let ms = (stableAt ?? Date()).timeIntervalSince(t0) * 1000
-            PerfLog.mark("jump stable\(stableAt == nil ? " (timeout)" : "") skipEnd=\(windowSkipEnd) window=\(windowCount) \(PerfCounters.drain())", ms: ms)
+            PerfLog.mark("jump stable\(stableAt == nil ? " (timeout)" : "") skipEnd=\(windowSkipEnd) reached=\(reached.count) \(PerfCounters.drain())", ms: ms)
         }
         if drive.contains("type") {
             PerfLog.mark("phase type begin", ms: 0)
@@ -2829,7 +2757,7 @@ struct ChatSession: View {
         // target is in `windowedRows` decides whether the reveal can do anything at all.
         revealTrace("reveal-begin",
                     "id=\(messageId) row=\(target.id) rows=\(rows.count) visible=\(visibleRows.count) "
-                    + "window=\(windowCount) skipEnd=\(windowSkipEnd) shown=\(windowedRows.count) "
+                    + "reached=\(reached.count) skipEnd=\(windowSkipEnd) shown=\(windowedRows.count) "
                     + "windowTop=\(windowedRows.first?.id ?? "-") windowBottom=\(windowedRows.last?.id ?? "-") "
                     + "targetShown=\(windowedRows.contains { $0.id == target.id }) "
                     + "offset=\(Self.offsetText(scrollProbe.last)) "
@@ -3078,7 +3006,7 @@ struct ChatSession: View {
             revealTrace("at-rest", "id=\(messageId) "
                         + "offset=\(Self.offsetText(scrollProbe.last)) "
                         + "moved=\(scrollProbe.samples - samplesAtLastRung) "
-                        + "window=\(windowCount) skipEnd=\(windowSkipEnd) "
+                        + "reached=\(reached.count) skipEnd=\(windowSkipEnd) "
                         + "shown=\(windowedRows.count) stack=\(stackIdentityForTrace)")
         }
     }
@@ -4471,6 +4399,7 @@ extension ChatSession {
                 .padding(.top, row.id == firstId ? 0 : row.gapBefore)
                 .id(row.id)
                 .onAppear {
+                    reached.insert(row.id)
                     #if DEBUG
                     if SendTrace.traces(chatId) {
                         SendTrace.markIfPresent("row-in-tree", ids: [row.messageId], detail: "row=\(row.id)")
@@ -4516,13 +4445,26 @@ extension ChatSession {
     }
 }
 
-/// Rig (#2404): the last scroll offset, held by reference so writing it per sample does not
-/// invalidate the transcript.
+/// The last scroll sample, held by reference so writing it per sample does not invalidate
+/// the transcript.
 private final class ScrollProbe {
     var last: CGFloat = .infinity
+    /// `ScrollSample.below` and `.contentHeight`: how far ↓ has to go (`jumpToLatest`).
+    var below: CGFloat = 0
+    var contentHeight: CGFloat = 0
     /// Scroll samples seen, so a reveal can say whether the transcript moved after its
     /// correction rather than leaving that to be read out of an absence of trace lines.
     var samples = 0
+}
+
+/// Row ids the lazy stack has realized since it last landed on the tail (`ChatSession.reached`):
+/// the rows the reader has scrolled past, whose heights are measured rather than estimated.
+private final class RowsReached {
+    private var ids = Set<String>()
+    var count: Int { ids.count }
+    func insert(_ id: String) { ids.insert(id) }
+    func contains(_ id: String) -> Bool { ids.contains(id) }
+    func reset() { ids.removeAll(keepingCapacity: true) }
 }
 
 /// The row a reveal is correcting onto. Its own type rather than a bare row id because both
@@ -4563,46 +4505,55 @@ private final class RevealFrameProbe {
     }
 }
 
-/// Fires when the scroll view comes near its top (channel older page / grow window).
+/// Fires when the scroll view comes near its top (channel older page).
 /// iOS 18+ uses scroll geometry; iOS 17 watches a top-of-content frame in a named
-/// coordinate space so the row window can grow (feedback app-01M5NNJ001NHHYBHXTASM5NXBZ).
+/// coordinate space (feedback app-01M5NNJ001NHHYBHXTASM5NXBZ).
 private struct NearTopReporter: ViewModifier {
     let enabled: Bool
     /// The scroll offset that looked near the top, for the rig to report; nothing reads it
     /// to decide anything.
     let onNear: (CGFloat) -> Void
-    /// Rig (`ARBOS_TRACE_REVEAL=1`, #2404): every offset sample, in the band or not, so a
-    /// run shows the whole trajectory of a reveal and where it came to rest — not only the
-    /// samples that happened to ask for a grow.
-    let onSample: (CGFloat, CGFloat) -> Void
+    /// Every sample, in the band or not, with the offset it came from: `ScrollProbe` keeps
+    /// it, and the rig (`ARBOS_TRACE_REVEAL=1`, #2404) traces the whole trajectory of a
+    /// reveal and where it came to rest.
+    let onSample: (CGFloat, ScrollSample) -> Void
 
     func body(content: Content) -> some View {
         if #available(iOS 18, *), enabled {
-            content.onScrollGeometryChange(for: CGFloat.self) { g in
-                g.contentSize.height > g.containerSize.height ? g.contentOffset.y : .infinity
-            } action: { old, new in
+            content.onScrollGeometryChange(for: ScrollSample.self) { g in
+                ScrollSample(offset: g.contentSize.height > g.containerSize.height ? g.contentOffset.y : .infinity,
+                             below: g.contentSize.height - g.contentOffset.y - g.containerSize.height,
+                             contentHeight: g.contentSize.height)
+            } action: { oldSample, new in
+                let old = oldSample.offset
                 onSample(old, new)
-                // About a screen ahead of the top edge, so the next slice is in place before
+                // About a screen ahead of the top edge, so the next page is asked for before
                 // the reader reaches it. Fires on every sample inside the band while the offset
-                // is still falling: with lazy rows (#2149) the rows a grow step prepends have
-                // no height until they are measured, so the offset can stay inside the band
-                // across the step — a one-shot "near" flag never re-armed and the window
-                // stopped at its cap (rig: 90 flicks into history stuck after ~90 s). The
-                // caller rate-limits the steps.
-                if new < 900, new < old || old == .infinity { onNear(new) }
+                // is still falling: with lazy rows (#2149) the rows a page prepends have no
+                // height until they are measured, so the offset can stay inside the band
+                // across a page. The caller rate-limits the pages.
+                if new.offset < 900, new.offset < old || old == .infinity { onNear(new.offset) }
             }
         } else if enabled {
             content
                 .coordinateSpace(name: "arbosChatScroll")
                 .onPreferenceChange(ChatScrollTopKey.self) { minY in
-                    onSample(.infinity, minY)
-                    // Content top near the scroll view's top → grow the row window.
+                    onSample(.infinity, ScrollSample(offset: minY))
                     if minY > -40 && minY < 900 { onNear(minY) }
                 }
         } else {
             content
         }
     }
+}
+
+/// One scroll-geometry sample: the offset from the top (`.infinity` while the content fits),
+/// and how far the end of the content is below the viewport, out of how much content (iOS
+/// 18+; 0 on iOS 17).
+private struct ScrollSample: Equatable {
+    var offset: CGFloat
+    var below: CGFloat = 0
+    var contentHeight: CGFloat = 0
 }
 
 private struct ChatScrollTopKey: PreferenceKey {
