@@ -112,7 +112,7 @@ GUI, Keychain or real HTTP behavior. Per-chat send order is unaffected.
 | Workspace formatting | pass, baseline 3.016 s | pass, 2.567 s |
 | Registry actual-code adapter | 2scenarios + cancellation + delayed bound/order pass | same typed outputs; bound5 verified, locked/offline builds32.136/31.402s |
 | Swift test-plan fence | old plan allowed default endpoint | 12contracts pass1.515s; exact shared fence carried before future push |
-| Full changed native composition | earlier constraints superseded | final integration pending; source adapters do not replace it |
+| Mac all-target Clippy, actual SDK composed tree | native ownership snapshot previously passed | metadata composition passes21.500s, all12workspace packages cleaned in its private cloned target; final successor/runtime/full CI remain separate |
 
 Compiler/test wall durations include cache/scheduling differences and are not
 speedup measurements. No tests were removed. The new source regression checks
