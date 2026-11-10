@@ -373,7 +373,9 @@ chat cases (12groups), and80 media/preview cases. The suites overlap and use
 synthetic effects. Media original copy/save failures and preview8load/6tap controls
 are distinguished from new receipt predicates and constructor propagation.
 Three actual media-function mutations are detected and replayed. All10 actual
-MediaFetch and both attachment-copy producers supply an origin predicate; the
+MediaFetch and both attachment-copy producers supply an origin predicate. Four
+shared signatures require that argument; five compiler controls show explicit
+calls compile and omitted predicates refuse. Runtime bodies stay unchanged. The
 bounded constructor review includes all3 link-card paths. These checks do not
 claim every UI callback or every possible interleaving is proven.
 

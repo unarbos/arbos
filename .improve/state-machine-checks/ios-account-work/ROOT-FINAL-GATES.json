@@ -67,13 +67,13 @@
     "apps/ios/Arbos/Arbos/UI/LinkPreviewCard.swift": "af175a27584ff0a90200206cd4f6909a46c0dae42853611092350c2d58461a11",
     "apps/ios/Arbos/Arbos/UI/LinkTile.swift": "d4be057b6a182fd589aefcc2607fefc652dd0a456b2cce261b893b8b141cf507",
     "apps/ios/Arbos/Arbos/UI/MathText.swift": "83d753d7d13befa3bec355b0ea01e644d2bd2c7155fafd1d82c5e3598028b96f",
-    "apps/ios/Arbos/Arbos/UI/MediaViewer.swift": "42b6f4483036bf1763e54e8f7396f16648977e28e3eda2bde9ce2aad90217768",
+    "apps/ios/Arbos/Arbos/UI/MediaViewer.swift": "dc0e592f995b1855817b27f20fda5cf234bffd0730df4f60a62f0cde0bf5e66d",
     "apps/ios/Arbos/Arbos/UI/MentionChips.swift": "d02653f965fe1c3ede09907b22cc1964c48f600506dcbe7b4a8d1b7b150c354c",
     "apps/ios/Arbos/Arbos/UI/MentionComposer.swift": "379953e2eaa9f4b42ec73a27d113d6a1429a8f2145d40b007a55157956159234",
     "apps/ios/Arbos/Arbos/UI/MessageActions.swift": "d0bff5784924f6e4643b6385ef133e43f6a93797495b083aee4aad3dc51c9ca4",
     "apps/ios/Arbos/Arbos/UI/MessageActionsLayout.swift": "0f3303f5c3657be447471cc80cd4ee917c6187952c758b3130e8d02997d1213d",
     "apps/ios/Arbos/Arbos/UI/MessageMenu.swift": "bfe84542b234321301e134e13913c3ead1048f481b97942f3e2629b1f9bc0e26",
-    "apps/ios/Arbos/Arbos/UI/MessagePasteboard.swift": "600dfd856ca217e852d1b5c38b1035dceaff3bd56d20cc9d0ab6df0efe0d464e",
+    "apps/ios/Arbos/Arbos/UI/MessagePasteboard.swift": "ef9a34f53b369046f44e76134641f13ecc2ba1100baab7f8dde00224318459e2",
     "apps/ios/Arbos/Arbos/UI/NotificationsPrimerView.swift": "ac90d49c2969ed4dd78ff1f7c4e132a4893f76f0d6fa511dc46b5fd95fbe9224",
     "apps/ios/Arbos/Arbos/UI/PeopleSheets.swift": "a3de3c740086f6ac3640c9741d37d6743b19c960a27c0220ae8d14c9797968a6",
     "apps/ios/Arbos/Arbos/UI/PresenceRow.swift": "77989fe94ee4669283fb196a899e903bae6a510f80d6f6332afd9e266b6e800a",
@@ -203,7 +203,7 @@
       "failed": 0,
       "expected": 5,
       "ok": true,
-      "seconds": 1.5800876250723377,
+      "seconds": 1.8203267080243677,
       "evidence": "directory/GATES.json"
     },
     {
@@ -212,7 +212,7 @@
       "failed": 0,
       "expected": 6,
       "ok": true,
-      "seconds": 1.017295500030741,
+      "seconds": 1.0217421669512987,
       "evidence": "registry/GATES.json"
     },
     {
@@ -221,7 +221,7 @@
       "failed": 0,
       "expected": 6,
       "ok": true,
-      "seconds": 0.7714562499895692,
+      "seconds": 0.9822722909739241,
       "evidence": "machine/GATES.json"
     },
     {
@@ -230,7 +230,7 @@
       "failed": 0,
       "expected": 6,
       "ok": true,
-      "seconds": 0.8054175829747692,
+      "seconds": 0.8406602499308065,
       "evidence": "pins/GATES.json"
     },
     {
@@ -239,7 +239,7 @@
       "failed": 0,
       "expected": 9,
       "ok": true,
-      "seconds": 1.027460915967822,
+      "seconds": 1.0237225000746548,
       "evidence": "poll_data/GATES.json"
     },
     {
@@ -248,7 +248,7 @@
       "failed": 0,
       "expected": 5,
       "ok": true,
-      "seconds": 0.7962149160448462,
+      "seconds": 0.8410544589860365,
       "evidence": "people/GATES.json"
     },
     {
@@ -257,7 +257,7 @@
       "failed": 0,
       "expected": 8,
       "ok": true,
-      "seconds": 0.8164897500537336,
+      "seconds": 0.922269916976802,
       "evidence": "servers/GATES.json"
     },
     {
@@ -266,7 +266,7 @@
       "failed": 0,
       "expected": 4,
       "ok": true,
-      "seconds": 0.7563719160389155,
+      "seconds": 0.7992130839265883,
       "evidence": "store_docs/GATES.json"
     },
     {
@@ -275,7 +275,7 @@
       "failed": 0,
       "expected": 4,
       "ok": true,
-      "seconds": 0.965394499944523,
+      "seconds": 0.790002541965805,
       "evidence": "matrix_entry/GATES.json"
     },
     {
@@ -284,7 +284,7 @@
       "failed": 0,
       "expected": 9,
       "ok": true,
-      "seconds": 0.737403417006135,
+      "seconds": 0.7486938330112025,
       "evidence": "secrets/GATES.json"
     },
     {
@@ -293,7 +293,7 @@
       "failed": 0,
       "expected": 5,
       "ok": true,
-      "seconds": 0.6923777080373839,
+      "seconds": 0.7073079170659184,
       "evidence": "push_admission/GATES.json"
     },
     {
@@ -302,7 +302,7 @@
       "failed": 0,
       "expected": 5,
       "ok": true,
-      "seconds": 0.7957879999885336,
+      "seconds": 0.8776613749796525,
       "evidence": "feedback_capture/GATES.json"
     },
     {
@@ -311,7 +311,7 @@
       "failed": 0,
       "expected": 6,
       "ok": true,
-      "seconds": 0.7912010409636423,
+      "seconds": 0.8136340839555487,
       "evidence": "startup/GATES.json"
     },
     {
@@ -320,7 +320,7 @@
       "failed": 0,
       "expected": 6,
       "ok": true,
-      "seconds": 0.6491285000229254,
+      "seconds": 0.6177506659878418,
       "evidence": "notification/GATES.json"
     },
     {
@@ -329,7 +329,7 @@
       "failed": 0,
       "expected": 6,
       "ok": true,
-      "seconds": 0.7500154169974849,
+      "seconds": 0.7805455420166254,
       "evidence": "push_registration/GATES.json"
     },
     {
@@ -338,7 +338,7 @@
       "failed": 0,
       "expected": 9,
       "ok": true,
-      "seconds": 0.9404934160411358,
+      "seconds": 0.9523368750233203,
       "evidence": "draft_sends/GATES.json"
     },
     {
@@ -347,7 +347,7 @@
       "failed": 0,
       "expected": 9,
       "ok": true,
-      "seconds": 0.8540847919648513,
+      "seconds": 0.885265541030094,
       "evidence": "reset/GATES.json"
     },
     {
@@ -356,7 +356,7 @@
       "failed": 0,
       "expected": 11,
       "ok": true,
-      "seconds": 0.8149881670251489,
+      "seconds": 0.8483812080230564,
       "evidence": "uploads/GATES.json"
     },
     {
@@ -365,7 +365,7 @@
       "failed": 0,
       "expected": 6,
       "ok": true,
-      "seconds": 0.6327253329800442,
+      "seconds": 0.6800426250556484,
       "evidence": "identity/GATES.json"
     },
     {
@@ -374,7 +374,7 @@
       "failed": 0,
       "expected": 8,
       "ok": true,
-      "seconds": 0.8087716250447556,
+      "seconds": 0.8398812919622287,
       "evidence": "media/GATES.json"
     },
     {
@@ -383,7 +383,7 @@
       "failed": 0,
       "expected": 5,
       "ok": true,
-      "seconds": 0.7955178340198472,
+      "seconds": 0.7613130840472877,
       "evidence": "memo/GATES.json"
     },
     {
@@ -392,7 +392,7 @@
       "failed": 0,
       "expected": 6,
       "ok": true,
-      "seconds": 0.9137851250125095,
+      "seconds": 0.8188906669383869,
       "evidence": "forward/GATES.json"
     },
     {
@@ -401,7 +401,7 @@
       "failed": 0,
       "expected": 19,
       "ok": true,
-      "seconds": 0.877506708027795,
+      "seconds": 0.8534368330147117,
       "evidence": "actions/GATES.json"
     },
     {
@@ -410,7 +410,7 @@
       "failed": 0,
       "expected": 6,
       "ok": true,
-      "seconds": 0.827960041933693,
+      "seconds": 0.9032580840867013,
       "evidence": "connectors/GATES.json"
     },
     {
@@ -419,7 +419,7 @@
       "failed": 0,
       "expected": 4,
       "ok": true,
-      "seconds": 0.5866251660045236,
+      "seconds": 0.6221729581011459,
       "evidence": "ui_identity/GATES.json"
     },
     {
@@ -428,7 +428,7 @@
       "failed": 0,
       "expected": 5,
       "ok": true,
-      "seconds": 0.6654797079972923,
+      "seconds": 0.7007182500092313,
       "evidence": "firstlogin/GATES.json"
     },
     {
@@ -437,7 +437,7 @@
       "failed": 0,
       "expected": 12,
       "ok": true,
-      "seconds": 0.7039869170403108,
+      "seconds": 0.6755747079150751,
       "evidence": "people_actions/GATES.json"
     },
     {
@@ -446,7 +446,7 @@
       "failed": 0,
       "expected": 5,
       "ok": true,
-      "seconds": 0.7011119170347229,
+      "seconds": 0.704571958980523,
       "evidence": "avatar_state/GATES.json"
     },
     {
@@ -455,7 +455,7 @@
       "failed": 0,
       "expected": 5,
       "ok": true,
-      "seconds": 0.8110437500290573,
+      "seconds": 0.8286590420175344,
       "evidence": "feedback_send/GATES.json"
     },
     {
@@ -464,7 +464,7 @@
       "failed": 0,
       "expected": 7,
       "ok": true,
-      "seconds": 0.7583525839727372,
+      "seconds": 0.781386541086249,
       "evidence": "fun_picker/GATES.json"
     },
     {
@@ -473,7 +473,7 @@
       "failed": 0,
       "expected": 7,
       "ok": true,
-      "seconds": 0.7521278749918565,
+      "seconds": 0.7497427500784397,
       "evidence": "final_edges/GATES.json"
     },
     {
@@ -482,7 +482,7 @@
       "failed": 0,
       "expected": 3,
       "ok": true,
-      "seconds": 0.639406125061214,
+      "seconds": 0.6394914590055123,
       "evidence": "connect_reveal/GATES.json"
     },
     {
@@ -491,7 +491,7 @@
       "failed": 0,
       "expected": 16,
       "ok": true,
-      "seconds": 0.9459152090130374,
+      "seconds": 0.8032826250419021,
       "evidence": "raw_api/GATES.json"
     },
     {
@@ -500,7 +500,7 @@
       "failed": 0,
       "expected": 19,
       "ok": true,
-      "seconds": 1.1905133749824017,
+      "seconds": 1.2577750419732183,
       "evidence": "settings-actions/GATES.json"
     },
     {
@@ -509,7 +509,7 @@
       "failed": 0,
       "expected": 10,
       "ok": true,
-      "seconds": 1.1633748329477385,
+      "seconds": 1.218186542042531,
       "evidence": "settings-views/GATES.json"
     },
     {
@@ -518,7 +518,7 @@
       "failed": 0,
       "expected": 18,
       "ok": true,
-      "seconds": 1.1686690419446677,
+      "seconds": 1.2946666249772534,
       "evidence": "server-actions/GATES.json"
     },
     {
@@ -527,7 +527,7 @@
       "failed": 0,
       "expected": 9,
       "ok": true,
-      "seconds": 1.8383175840135664,
+      "seconds": 1.9034983329474926,
       "evidence": "server-views/GATES.json"
     },
     {
@@ -536,11 +536,11 @@
       "failed": 0,
       "expected": 7,
       "ok": true,
-      "seconds": 0.718005417031236,
+      "seconds": 0.8494918750366196,
       "evidence": "profile/GATES.json"
     }
   ],
   "passed": 296,
   "failed": 0,
-  "seconds": 33.090831957990304
+  "seconds": 34.19550187489949
 }

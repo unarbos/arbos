@@ -20,3 +20,11 @@ Three actual-function mutants are retained and detected with identical determini
 Public profile pictures keep their existing behavior: `pictureURL` fetches have no bearer; the original viewer exposes Close/read/zoom only for pictures, and has no Copy/Download/Forward affordance. Private blobs require an account or explicit fixture receipt. Numeric calibration, gesture code, media URLs/headers/status handling, fixture painting, MIME/file naming and platform helpers remain unchanged. An already-issued HTTP or Photos effect cannot be recalled; retirement prevents later admission/publication and notices. These selected-source checks do not render SwiftUI or exercise real Photos, playback or devices; the full application and XCTest SDK compile is a separate gate.
 
 See `SOURCE-INVENTORY.md`, `GATES.json`, `PARITY.json` and `mutants/RESULTS.json` for exact scope and evidence.
+
+The final signature-only follow-up makes `isCurrent` mandatory on `MediaFetch.bytes`, `copyMessage`, `copyAttachment` and their private copy helper. All 10 fetch, 2 attachment, 1 message and 2 internal helper calls already supplied it; method bodies are unchanged. Historical `GATES.json`, `SOURCE-FROZEN.json`, and complete-enum parity refer to the preceding functional checkpoint. `CONTRACT.json` pins the subsequent two-file signature change and caller inventory; the functional runner still contains 80 checks.
+
+The separate compiler contract checks one explicit-call control and four omitted-argument refusals using the exact production signatures with inert bodies; no body executes and no SDK behavior is inferred:
+
+```sh
+python3 -I -B .improve/state-machine-checks/ios-media/check_required.py --tree . --expect-required --out /tmp/arbos-required-origins
+```
