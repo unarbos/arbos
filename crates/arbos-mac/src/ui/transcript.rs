@@ -2363,6 +2363,41 @@ impl Transcript {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        self.agent_line_inner(lead, names, None, theme, cx)
+    }
+
+    /// Hand-off line: same glyphs as [`Self::agent_line`], whole row tappable when the
+    /// destination is one of my agents (`open_handoff` + brief highlight).
+    fn handoff_line(
+        &self,
+        lead: &str,
+        names: &[String],
+        message_id: &Id,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let chat_id = self.chat_id.clone().unwrap_or_default();
+        let openable = self
+            .state
+            .read(cx)
+            .can_open_handoff(&chat_id, message_id);
+        self.agent_line_inner(
+            lead,
+            names,
+            openable.then(|| (chat_id, message_id.clone())),
+            theme,
+            cx,
+        )
+    }
+
+    fn agent_line_inner(
+        &self,
+        lead: &str,
+        names: &[String],
+        handoff: Option<(Id, Id)>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let state = self.state.read(cx);
         let mut line = div()
             .flex()
@@ -2372,6 +2407,7 @@ impl Transcript {
             .text_color(theme.text_muted)
             .child(lead.to_owned());
         let n = names.len();
+        let name_links = handoff.is_none();
         for (i, name) in names.iter().enumerate() {
             let mine = state
                 .projects
@@ -2393,16 +2429,18 @@ impl Transcript {
                 .gap(px(5.0))
                 .child(glyph)
                 .child(div().child(name.clone()));
-            if let Some(space) = mine {
-                let pid = space.id.clone();
-                let state_entity = self.state.clone();
-                who = who
-                    .cursor_pointer()
-                    .hover(|el| el.text_color(theme.text))
-                    .on_click(move |_, _, cx| {
-                        let pid = pid.clone();
-                        state_entity.update(cx, |s, cx| s.select_project(pid, cx));
-                    });
+            if name_links {
+                if let Some(space) = mine {
+                    let pid = space.id.clone();
+                    let state_entity = self.state.clone();
+                    who = who
+                        .cursor_pointer()
+                        .hover(|el| el.text_color(theme.text))
+                        .on_click(move |_, _, cx| {
+                            let pid = pid.clone();
+                            state_entity.update(cx, |s, cx| s.select_project(pid, cx));
+                        });
+                }
             }
             line = line.child(who);
             if n >= 2 && i + 2 == n {
@@ -2411,14 +2449,40 @@ impl Transcript {
                 line = line.child(div().ml(px(-5.0)).child(","));
             }
         }
-        div()
-            .w_full()
-            .flex()
-            .justify_center()
-            .pt(px(10.0))
-            .pb(px(6.0))
-            .child(line)
-            .into_any_element()
+        if handoff.is_some() {
+            line = line
+                .hover(|el| el.text_color(theme.text))
+                .child(sf_symbols::glyph("chevron.right", 11.0, theme.text_faint));
+        }
+        match handoff {
+            Some((chat_id, message_id)) => {
+                let state_entity = self.state.clone();
+                let selector = format!("handoff-notice-{message_id}");
+                div()
+                    .id(SharedString::from(format!("handoff-{message_id}")))
+                    .debug_selector(move || selector.clone())
+                    .w_full()
+                    .flex()
+                    .justify_center()
+                    .pt(px(10.0))
+                    .pb(px(6.0))
+                    .cursor_pointer()
+                    .on_click(move |_, _, cx| {
+                        let (chat_id, message_id) = (chat_id.clone(), message_id.clone());
+                        state_entity.update(cx, |s, cx| s.open_handoff(&chat_id, &message_id, cx));
+                    })
+                    .child(line)
+                    .into_any_element()
+            }
+            None => div()
+                .w_full()
+                .flex()
+                .justify_center()
+                .pt(px(10.0))
+                .pb(px(6.0))
+                .child(line)
+                .into_any_element(),
+        }
     }
 
     /// The disc and (when `named`) the name label for someone else's attachment row —
@@ -3339,7 +3403,7 @@ impl Transcript {
                 } else {
                     format!("{total} messages with")
                 };
-                self.agent_line(&lead, &names, &theme, cx)
+                self.handoff_line(&lead, &names, &row.message_id, &theme, cx)
             }
             RowKind::RepliedTo { name } => self.agent_line("Replied to", &[name], &theme, cx),
             RowKind::Attachment {
@@ -4279,6 +4343,7 @@ fn message_render_version(
     message.reply_to.hash(&mut h);
     message.forwarded_from.hash(&mut h);
     message.agent_reply_to.hash(&mut h);
+    format!("{:?}", message.agent_message).hash(&mut h);
     message.asked_by_handle.hash(&mut h);
     message.owner_handle.hash(&mut h);
     message.routine_name.hash(&mut h);
