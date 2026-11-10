@@ -10,6 +10,7 @@ from render_people_dto import table
 HERE=Path(__file__).resolve().parent
 
 def render():
+    plt.rcParams.update({"svg.fonttype":"none", "svg.hashsalt":"arbos-scale-v1"})
     data=json.loads((HERE/'ACTIVITY_RESULTS.json').read_text());experiments=data['experiments'];x=[r['fixture']['rows_per_room']for r in experiments]
     fig,axes=plt.subplots(1,3,figsize=(15,5),layout='constrained');colors={'before':'#b45f24','after':'#197f77'}
     for arm,color in colors.items():
@@ -24,7 +25,7 @@ def render():
     axes[2].bar(list(colors),median,color=list(colors.values()),yerr=[[0,0],upper],capsize=5)
     axes[2].set(ylabel='Microseconds per synthetic SQL row append',title='Write cost · p50 bars / p95 whiskers');axes[2].grid(axis='y',alpha=.2)
     fig.suptitle('Room activity index: faster history reads, added writes/storage\n31 randomized read pairs/scale ·21 write pairs ×500 row transactions',fontsize=13)
-    text=StringIO();fig.savefig(text,format='svg',bbox_inches='tight',pad_inches=.15);fig.savefig(HERE/'activity-index.png',dpi=160,bbox_inches='tight',pad_inches=.15);plt.close(fig)
+    text=StringIO();fig.savefig(text,format='svg',metadata={'Date':None},bbox_inches='tight',pad_inches=.15);fig.savefig(HERE/'activity-index.png',dpi=160,bbox_inches='tight',pad_inches=.15);plt.close(fig)
     svg=text.getvalue();svg=svg[svg.index('<svg'):].replace('<svg ','<svg role="img" aria-label="Activity read latency and logical visits fall with the index; SQL append cost rises" ',1)
     rows=[]
     for r in experiments:
