@@ -1378,6 +1378,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     title: None,
                     chart_part: None,
                     url: None,
+
+                    poster: None,
                 },
                 MediaPick::Gif(gif) => {
                     let gif = *gif;
@@ -1395,6 +1397,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                             id: gif.id,
                             page_url: gif.page_url,
                         })),
+
+                        poster: None,
                     }
                 }
             };

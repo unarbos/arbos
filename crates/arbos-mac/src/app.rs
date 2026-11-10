@@ -4561,6 +4561,8 @@ impl AppState {
                         id: format!("{}/{}", pack.id, item.id),
                         page_url: pack.page_url.clone(),
                     })),
+
+                    poster: None,
                 }
             }
             MediaPick::Gif(gif) => {
@@ -4578,6 +4580,8 @@ impl AppState {
                         id: gif.id.clone(),
                         page_url: gif.page_url.clone(),
                     })),
+
+                    poster: None,
                 };
                 if let Some(key) = attachment.preview_key() {
                     self.request_fun_thumbnail(key);

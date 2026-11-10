@@ -3058,6 +3058,8 @@ mod tests {
                         blob_ref: Some("abc123".into()),
                         url: None,
                         source: None,
+
+                        poster: None,
                     }],
                     sender: Some(format!("user:{o2}")),
                     ..Default::default()
@@ -3104,6 +3106,8 @@ mod tests {
                             blob_ref: Some("g1".into()),
                             url: None,
                             source: None,
+
+                            poster: None,
                         },
                         UserAttachment {
                             name: "memo.m4a".into(),
@@ -3112,6 +3116,8 @@ mod tests {
                             blob_ref: Some("a1".into()),
                             url: None,
                             source: None,
+
+                            poster: None,
                         },
                         UserAttachment {
                             name: "deck.pdf".into(),
@@ -3120,6 +3126,8 @@ mod tests {
                             blob_ref: Some("p1".into()),
                             url: None,
                             source: None,
+
+                            poster: None,
                         },
                         UserAttachment {
                             name: "clip.mp4".into(),
@@ -3128,6 +3136,8 @@ mod tests {
                             blob_ref: Some("v1".into()),
                             url: None,
                             source: None,
+
+                            poster: None,
                         },
                     ],
                     sender: Some(format!("user:{o4}")),
@@ -3260,6 +3270,8 @@ mod tests {
                 blob_ref: Some("att-shot".into()),
                 url: None,
                 source: None,
+
+                poster: None,
             }],
             sender: Some(format!("user:{sender}")),
             ..Default::default()

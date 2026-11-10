@@ -209,6 +209,8 @@ mod core_writer_tests {
                         blob_ref: Some("blob-42".into()),
                         url: None,
                         source: None,
+
+                        poster: None,
                     }],
                     reply_to: Some("original".into()),
                     ..UserMessageOpts::default()
