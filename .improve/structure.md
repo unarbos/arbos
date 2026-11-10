@@ -1,11 +1,12 @@
 # Phase 3: structural refactoring
 
-**Status: implementation and verification in progress; the global exit does not
-pass yet.** The original two extractions were followed by native durability,
-authorization, pending-room ownership and policy cleanup once targeted package
-builds became feasible. The public contributor fork now runs its own isolated
-CI; upstream approval is not a blanket native blocker. Local build headroom and the pinned media SDK are now available. Actual full Mac
-all-target compiler/Clippy passes with warnings denied. Outstanding work is below.
+**Status: structural implementation and the finite Comments/Tests repeat are
+complete; final combined runtime verification is recorded in the finish report.**
+The original pure extractions were followed by actual native durability,
+authorization, room ownership and render-policy fixes. Full Mac all-target Clippy
+and application linking pass in the reviewed composition. The final iOS app and
+test-source SDK gates are separate from simulator execution and device acceptance.
+Historical capacity/SDK/approval blockers in earlier reviews are superseded.
 
 Scope and all findings are in [backend review](reviews/structure-backend.md),
 [client review](reviews/structure-clients.md) and
@@ -33,8 +34,8 @@ generated TypeScript laws, without converting stable runtime code.
 
 ## Comments and Tests
 
-Both additions are applied at completed seams, with test cleanup last; the final
-whole-repository pass follows the remaining implementation:
+Both additions were applied at the implemented seams and repeated after the
+structural changes, with Tests last:
 
 | Addition | Requested description | Result |
 | --- | --- | --- |
@@ -54,15 +55,15 @@ make comparisons unsuitable for application performance claims.
 | Mac title behavior | 8 passed, 0 failed/ignored; original function | 8 passed, 0 failed/ignored; actual shared module |
 | Title test compilation / execution | 0.664 / 0.249 s | 0.114 / 0.210 s |
 | Workspace formatting | baseline pass, 3.016 s | pass, 2.607 s |
-| Full native clippy/check/test/build | unmeasured at initial extraction | Later targeted package checks and fork baseline gates below; complete combined GUI gate still pending |
+| Full native clippy/check/test/build | unmeasured at initial extraction | Actual full Mac all-target Clippy and app linking pass in composition; runtime CI is recorded in the finish report |
 | Title definitions / UI dependency | 2 copies; sync → app | 1 shared definition; sync → pure helper |
 | Cancellation renderer runtime imports | bundled in environment-loaded extension | 0 in the pure module |
 | Intended behavior | baseline | unchanged |
 
 The dependency direction is improved at these two seams. It is not reasonable
 to claim every import or special case across the entire repository is resolved.
-Independent review must distinguish these verified extractions from the blocked
-whole-repository exit condition.
+Independent review distinguishes the original extraction gates, the later finite
+whole-repository structural repeat, and final runtime CI; none proves every line.
 
 ## Subsequent regression-driven structural work
 
@@ -143,22 +144,38 @@ overlap. The first broad fork CI run covers the independent finish/baseline head
 not all these new changes; combined native integration is still required. Compact
 commands/hashes and the portable runner are in [structural checks](structural-checks/README.md).
 
-## Remaining structural exit
+## Structural exit and retained requirements
 
-The global doc-map lock/room handle lifetime is addressed below. Stale identity/native
-callbacks and bounded hydration/upload work remain real follow-up work. The concrete
-ambient preview-policy/cache mismatch is fixed below. They are not all externally blocked merely because tests must be
-written. The measured roster N+1 is addressed by Phase7 roster batching. Voice ownership is
-superseded by the independently verified Phase4 implementation. Existing protocol
-host adapters, signed verification, quarantine/legacy compatibility and physical
-OS/media workarounds are requirements, not arbitrary surplus to delete.
+The finite second pass covered all12 Rust crates plus iOS/FFI, harness, voice,
+edge/site, image, operational scripts, evals and CI. It reviewed825 Phase3 and868
+Phase4 selected source/config files, with dependency edges and scoped flow reads.
+Raw marker/comment matches were navigation aids, not defect counts or permission
+to delete compatibility behavior. The summary and exact historical source pins
+are retained in [structural-exit.md](structural-checks/structural-exit.md).
 
-The approval-notification hook has no established producer. Keep the declared
-security-adjacent surface while pinning stable request identity, replay/decision
-races, safe summary, account lifetime and existing visibility/mute/coalescing/click
-rules; deleting the hook would not establish a replacement alert. Full source
-reviews and calibrated native/GUI checks remain necessary. No whole-codebase
-“nothing worth fixing left” claim is made.
+All three concrete findings from that repeat are implemented: the last transport
+imports of UI-only OS-open helpers now use shared `external_open.rs`; iOS preview
+policy is explicit and part of cache identity; and a missing mandatory synthetic
+row fails its test instead of becoming a skip. Full Mac compilation caught one
+missed chart-export caller; it was corrected and the complete caller set rebuilt.
+The two actual Mac preview-builder runtime cases now pass as well.
+
+Account/callback ownership and bounded hydration/uploads are implemented by
+Phases4/6 at the same shared boundaries. Phase7 addresses the measured roster N+1.
+The reviewed final media delta keeps account origin through nested viewer/library
+operations. No further concrete worthwhile structural fix remained in the finite
+review; this is a bounded engineering review, not exhaustive certification.
+Existing protocol host adapters, signed verification, quarantine/legacy
+compatibility, physical timing and OS/media workarounds remain requirements.
+
+The approval-notification hook has no established producer. Its declared
+security-adjacent surface is retained with stable identity, replay/decision races,
+safe summary, account lifetime and current visibility/mute/coalescing/click rules;
+deleting it would not establish a replacement alert. Unknown persistent legacy
+cache ownership remains explicitly owner work. The finish report distinguishes
+local compiler/controller proof, final CI and device acceptance. Broader telemetry
+is deferred for the owner's discussion with Jacob (const), without blocking this
+structural work.
 
 ## Needs the owner
 
@@ -190,15 +207,14 @@ forced package cleanup prevent cross-snapshot artifact reuse.
 
 Two retained native builder tests cover on→off→on through a warm cache, unchanged
 policy cache hits, plain-link restoration, and independent transcript settings.
-They compile in the actual full Mac all-target gate; runtime execution remains
-pending the combined native suite. The extraction does not prove the complete renderer. See
+They compile in the actual full Mac all-target gate; both actual builder cases execute successfully in the native composition. The extraction does not prove the complete renderer. See
 [render-policy.json](structural-checks/render-policy.json). No performance claim
 is made for this settings correctness fix.
 
 Independent read-only review confirms policy propagation at every caller and
 cache lookup, unchanged row-version comparison, and removal of all global-switch
 readers. Workspace formatting and whitespace checks pass. Full native caller compilation
-now passes; builder runtime execution remains pending.
+and both actual builder runtime cases now pass in the composition.
 
 ## Owned room documents
 
