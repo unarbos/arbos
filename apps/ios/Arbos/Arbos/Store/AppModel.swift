@@ -142,11 +142,10 @@ final class AppModel: ObservableObject {
         didSet { UserDefaults.standard.set(appearanceSetting, forKey: "appearance") }
     }
     /// Settings → Appearance → Link previews ([feedback link-embeds-ios-2026-10-27]): on unless
-    /// switched off; off leaves every link plain. Mirrored into the row builder's static.
+    /// switched off; off leaves every link plain.
     @Published var linkPreviews: Bool = (UserDefaults.standard.object(forKey: "linkPreviews") as? Bool) ?? true {
         didSet {
             UserDefaults.standard.set(linkPreviews, forKey: "linkPreviews")
-            Transcript.linkPreviewsEnabled = linkPreviews
         }
     }
     /// Sum of SessionRoom reconnect / state_timeout counters (About page),
@@ -993,9 +992,6 @@ final class AppModel: ObservableObject {
     private(set) weak static var current: AppModel?
 
     init() {
-        // The row builder's switch mirrors the saved setting from the first row on (no `self`
-        // here: stored properties are still initialising).
-        Transcript.linkPreviewsEnabled = (UserDefaults.standard.object(forKey: "linkPreviews") as? Bool) ?? true
         LaunchClock.mark("app-init")
         // Drop the retired SessionRoom TestFlight switch so it does not linger.
         UserDefaults.standard.removeObject(forKey: "sharedRoomSession")
