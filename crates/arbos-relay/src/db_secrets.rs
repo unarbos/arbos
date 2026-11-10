@@ -253,7 +253,7 @@ pub struct Access {
     pub last_used_at: Option<i64>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SecretRequest {
     pub id: String,
     pub user_id: String,
@@ -285,6 +285,13 @@ impl SecretRequest {
             "allowed_once" | "allowed_chat" | "allowed_always"
         )
     }
+}
+
+/// Proof that this caller atomically spent one exact one-use authorization.
+/// It cannot be cloned or constructed outside this storage boundary. Dropping it
+/// never restores a grant: an admitted sensitive effect may have an uncertain outcome.
+pub(crate) struct OneUseReceipt {
+    _private: (),
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -982,14 +989,57 @@ impl Db {
         })
     }
 
-    /// An `allowed_once` grant is spent by its one use.
-    pub fn consume_allowed_once(&self, id: &str) -> Result<()> {
+    /// Atomically spend a unique set of exact observed authorizations for one operation.
+    /// A changed, expired, spent or duplicate grant rolls the whole set back.
+    pub(crate) fn claim_allowed_once_batch(
+        &self,
+        requests: &[&SecretRequest],
+    ) -> Result<Option<Vec<OneUseReceipt>>> {
+        if requests.is_empty() {
+            return Ok(Some(Vec::new()));
+        }
+        let mut ids = std::collections::HashSet::new();
+        if requests
+            .iter()
+            .any(|request| request.status != "allowed_once" || !ids.insert(&request.id))
+        {
+            return Ok(None);
+        }
         self.with(|c| {
-            c.execute(
-                "UPDATE secret_requests SET status = 'expired' WHERE id = ?1 AND status = 'allowed_once'",
-                params![id],
-            )
-            .map(|_| ())
+            let transaction = c.unchecked_transaction()?;
+            let mut receipts = Vec::with_capacity(requests.len());
+            for request in requests {
+                let n = transaction.execute(
+                    "UPDATE secret_requests SET status = 'expired'
+                 WHERE id = ?1 AND user_id = ?2 AND project_id = ?3 AND chat_id = ?4
+                   AND target_kind = ?5 AND target_id IS ?6 AND target_ref = ?7
+                   AND use_kind = ?8 AND host IS ?9 AND asked_by IS ?10
+                   AND decided_by IS ?11 AND decided_at IS ?12 AND expires_at = ?13
+                   AND status = 'allowed_once' AND expires_at >= ?14",
+                    params![
+                        request.id,
+                        request.user_id,
+                        request.project_id,
+                        request.chat_id,
+                        request.target_kind,
+                        request.target_id,
+                        request.target_ref,
+                        request.use_kind,
+                        request.host,
+                        request.asked_by,
+                        request.decided_by,
+                        request.decided_at,
+                        request.expires_at,
+                        now_ms()
+                    ],
+                )?;
+                if n != 1 {
+                    return Ok(None); // the transaction's drop rolls earlier claims back
+                }
+                receipts.push(OneUseReceipt { _private: () });
+            }
+            transaction.commit()?;
+            Ok(Some(receipts))
         })
     }
 
@@ -1505,7 +1555,7 @@ mod tests {
             .allowed_once_for("p1", "s1", Some("evil.example"), "header")
             .unwrap()
             .is_none());
-        db.consume_allowed_once("r1").unwrap();
+        assert!(db.claim_allowed_once_batch(&[&decided]).unwrap().is_some());
         assert!(db
             .allowed_once_for("p1", "s1", Some("api.stripe.com"), "header")
             .unwrap()

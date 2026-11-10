@@ -310,29 +310,6 @@ pub async fn egress(
         let t = substitute(t, &host, &plan.items, &mut sub);
         swap_refs(&t, &mut sub)
     });
-    for (s, allowed) in &plan.used {
-        if sub
-            .substituted
-            .iter()
-            .any(|k| k.starts_with(&format!("{}/", s.env)))
-        {
-            secrets::after_use(
-                &state,
-                s,
-                &project_id,
-                &host,
-                "header",
-                chat_id,
-                asked_by,
-                allowed,
-            );
-        }
-    }
-    for (r, allowed) in &op_plan.used {
-        if sub.substituted.contains(r) {
-            crate::vaults::after_op_use(&state, r, &project_id, &host, "header", chat_id, allowed);
-        }
-    }
     let mut redact = plan.redact;
     for v in &sub.secrets {
         if !redact.contains(v) {
@@ -358,13 +335,69 @@ pub async fn egress(
     if let Some(body) = body_out {
         req = req.body(body);
     }
-    let resp = match req.send().await {
-        Ok(r) => r,
-        Err(e) => {
-            let mut v = json!({ "ok": false, "error": format!("{host}: {e}"), "substituted": sub.substituted, "refused": refused });
-            redact_value(&mut v, &redact);
-            return Ok((StatusCode::BAD_GATEWAY, Json(v)).into_response());
+    let failed = |error: reqwest::Error| {
+        let mut value = json!({ "ok": false, "error": format!("{host}: {error}"), "substituted": sub.substituted, "refused": refused });
+        redact_value(&mut value, &redact);
+        (StatusCode::BAD_GATEWAY, Json(value)).into_response()
+    };
+    // Finish local header/body validation before spending any authorization.
+    let request = match req.build() {
+        Ok(request) => request,
+        Err(error) => return Ok(failed(error)),
+    };
+    let grants = plan
+        .used
+        .iter()
+        .filter(|(secret, _)| {
+            sub.substituted
+                .iter()
+                .any(|key| key.starts_with(&format!("{}/", secret.env)))
+        })
+        .filter_map(|(_, allowed)| allowed.once.as_ref())
+        .chain(
+            op_plan
+                .used
+                .iter()
+                .filter(|(reference, _)| sub.substituted.contains(reference))
+                .filter_map(|(_, allowed)| allowed.once.as_ref()),
+        );
+    let receipt = secrets::claim_uses(&state, grants)?;
+    for (s, allowed) in &plan.used {
+        if sub
+            .substituted
+            .iter()
+            .any(|k| k.starts_with(&format!("{}/", s.env)))
+        {
+            secrets::note_use(
+                &state,
+                s,
+                &project_id,
+                &host,
+                "header",
+                chat_id,
+                asked_by,
+                allowed,
+                &receipt,
+            )?;
         }
+    }
+    for (r, allowed) in &op_plan.used {
+        if sub.substituted.contains(r) {
+            crate::vaults::note_op_use(
+                &state,
+                r,
+                &project_id,
+                &host,
+                "header",
+                chat_id,
+                allowed,
+                &receipt,
+            )?;
+        }
+    }
+    let resp = match state.http.execute(request).await {
+        Ok(response) => response,
+        Err(error) => return Ok(failed(error)),
     };
     let status = resp.status();
     let mut resp_headers = BTreeMap::new();

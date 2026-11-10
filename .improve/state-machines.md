@@ -11,8 +11,8 @@ consent controllers (AUX-H2–H5) now use explicit tagged states and pure
 transitions, with effects at their edges. The guarded SDK suite passes 84 tests;
 six generated voice laws exercise 1,536 cases separately from the existing 256
 approval cases. Remaining High native and operational migrations still require
-their stated regression gates. Full native CI awaits maintainer approval and
-local build disk is inadequate. Pure state laws do not verify native callbacks,
+their stated regression gates. Safe fork native CI and local build capacity are now available; exact combined
+integration is still required. Pure state laws do not verify native callbacks,
 live SDK behavior, billing or deployment orchestration.
 
 Base: `2865cb29b806121d4a90f55ba6ce151a150279a0`. Coverage includes all backend
@@ -33,12 +33,12 @@ the entry count is not a count of independent mathematical machines.
 | H5 Agent room synchronization | Cold/open/catchup/live/refused/oversize-parked/closed modes interact with pending dependency cursors, inflight batches and persisted snapshots. | High | `arbos-agentd/src/sync.rs`, `store.rs`, `workspace.rs`, `arbos-core/src/wire.rs` |
 | H6 Box provisioning/wake/liveness | A per-user box can be missing/creating/waking/awake/stale/stopping/held/failed while provider and local connection evidence arrive independently. | High | `arbos-relay/src/boxes.rs`, `state.rs`, `db.rs`, `db_accounts.rs`, `fleet.rs` |
 | H7 Upgrade/repair and retained sandboxes | Measuring/carrying/staged/swapped/verifying/rollback/retained/deleted states span current row, staging booleans, provider effects and history. | High | `arbos-relay/src/upgrade.rs`, `upgrade_carry.rs`, `db_accounts.rs`, `upgrade_rollback_tests.rs`, `upgrade_room_tests.rs` |
-| H8 Planned relay restart | Running/frozen/announced/draining/stopped combines closing signal, work-freeze bit, in-progress creates and socket count. | High | `arbos-relay/src/restart.rs`, `state.rs`, `boxes.rs`, `rooms.rs` |
+| H8 Planned relay restart — implemented | Running/frozen/announced/draining/stopped combines closing signal, work-freeze bit, in-progress creates and socket count. | High | `arbos-relay/src/restart.rs`, `state.rs`, `boxes.rs`, `rooms.rs` |
 | H9 Sign-in, refresh rotation and device revocation | One-time OAuth grant, live/rotated/revoked/expired refresh state and session shutdown are coordinated across SQL, Matrix and live sockets. | High | `arbos-relay/src/signin.rs`, `auth.rs`, `db_accounts.rs`, `matrix/client.rs`, `rooms.rs` |
-| H10 Secret/vault approval and access | Pending/allowed-once/standing/denied/expired/revoked grants combine expiry, source version, pause flags, directors and external vault access. | High | `arbos-relay/src/db_secrets.rs`, `secrets.rs`, `vault.rs`, `vaults.rs`, `shell_grants.rs` |
+| H10 Secret/vault approval and access — receipt boundary implemented | Pending/allowed-once/standing/denied/expired/revoked grants combine expiry, source version, pause flags, directors and external vault access. | High | `arbos-relay/src/db_secrets.rs`, `secrets.rs`, `vault.rs`, `vaults.rs`, `shell_grants.rs` |
 | H11 Spend admission, kill switch and metering | Allowed/daily-blocked/credit-blocked/read-only and auto/manual kill modes interact with ledger debits and persisted meter cursor. | High | `arbos-relay/src/credits.rs`, `db_accounts.rs`, `proxy.rs`, `db_voice.rs`, `arbos-agentd/src/budget.rs` |
 | H12 Sidecar page receipt | Fetched/mirrored/wake-accepted/checkpointed stages govern whether replay can safely pass an ASP event. | High | `arbos-sidecar/src/daemon.rs`, `mirror.rs`, `waker.rs`, `relay.rs` |
-| H13 Relay speculative document cache | Cold/rebuilt/advanced/push-imported/authorized/refused states decide whether cached Loro state can be reused after a speculative push. | High | `arbos-relay/src/rooms.rs`, `state.rs`, `push_guard.rs`, `db.rs` |
+| H13 Relay speculative document cache — implemented | Cold/rebuilt/advanced/push-imported/authorized/refused states decide whether cached Loro state can be reused after a speculative push. | High | `arbos-relay/src/rooms.rs`, `state.rs`, `push_guard.rs`, `db.rs` |
 | M1 Room socket delivery | Catchup/live/held/timeout-released modes share a boolean, last seq, held broadcast list and heal counter. | Medium | `arbos-relay/src/rooms.rs`, `room_health.rs`, `state.rs` |
 | M2 App session orthogonal substates | Existing explicit Phase coexists with heal, refusal, resend, checkpoint and pending-dependency state; audit the product of these fields rather than replacing Phase. | Medium | `arbos-client/src/room.rs`, `arbos-ffi/src/lib.rs`, `arbos-core/src/wire.rs` |
 | M3 CLI room/send | HELLO/checkpoint/catchup/send/ACK/answer/timeout depends on local booleans and nullable pending push/message ID. | Medium | `arbosctl/src/room.rs`, `client.rs`, `arbos-core/src/wire.rs` |
@@ -801,3 +801,31 @@ and new publication/runner/feedback laws; do not add overlapping counts as separ
 coverage. [OPS_HARNESS_GATES.json](state-machine-checks/OPS_HARNESS_GATES.json)
 retains commands and summaries. Native account/call/snapshot ownership and remaining
 backend classification are still active work, not blanket external blockers.
+
+## Additional relay ownership boundaries
+
+H8 now owns each planned restart with an exact-generation guard and the actual
+Serving/Freezing/Notifying/Draining/Ready/Shutdown reducer. H10 requires operation-
+owned one-use receipts from one exact observed-set transaction. H13 moves Loro
+speculation into a private PendingRoomPush held by one per-room admission owner;
+only the successful durable path publishes it. Their original actual-handler/
+socket failures, limits, laws and owner-review decisions are documented in
+[state-machine-checks/authorization-receipts.md](state-machine-checks/authorization-receipts.md),
+[restart ownership](state-machine-checks/restart-ownership.md) and
+[room-cache ownership](state-machine-checks/room-cache-ownership.md).
+
+The root's combined relay gate passes65distinct selected native tests (42secret/
+vault,10restart,13covered-push) and all-target Clippy with warnings denied22.033s.
+Counts overlap the authors' focused regressions and must not be added twice.
+The complete catalog reassessment/native-client/financial follow-up remains in
+progress; these scoped results do not declare every original High entry resolved.
+
+The complete harness run now covers all9test files:69passed/0failed/skipped,
+plus strict TypeScript3.321s. On macOS,64tests run under the validated loopback
+fence and5lease-law tests use their own stricter child sandbox because nested
+Seatbelt is rejected. No test is omitted or source isolation weakened; the final
+Linux namespace gate runs the complete normal suite. Both new actual transition
+mutant drivers pass their unmodified256-case control and falsify/shrink/replay
+their mutant. Relay production build also passes48.604s. Portable commands and
+normalized evidence are in state-machine-checks/RELAY_HARNESS_GATES.json and
+RELAY_BUILD_GATES.json.

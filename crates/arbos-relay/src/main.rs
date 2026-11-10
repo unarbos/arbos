@@ -77,6 +77,7 @@ mod push;
 mod push_guard;
 mod releases;
 mod restart;
+mod restart_lifetime;
 mod room_health;
 mod rooms;
 mod routines;

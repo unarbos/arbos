@@ -1,0 +1,192 @@
+{
+  "source_sha256": {
+    "crates/arbos-relay/src/db_secrets.rs": "0693c2a2ca2a25491bf9a0661344579b6b12538ca364f1fad33dbc3ab3e07295",
+    "crates/arbos-relay/src/main.rs": "a9da373badede6fdf239c6dcbc977056d0a253368a25c26ad70865904a194dfd",
+    "crates/arbos-relay/src/restart.rs": "1bff1d6e56e330d237d1ea375c6c57b45ff671d92d8fa9668f51f2af62421806",
+    "crates/arbos-relay/src/restart_lifetime.rs": "a4b24da84e70d504e68af1f64893899f81f6f3492b79cfae27a13baed0c31c1a",
+    "crates/arbos-relay/src/rooms.rs": "f448cf6d2c79460156ccd869a7f7703f46108fe4c927d9c600b86530ee8aa7a5",
+    "crates/arbos-relay/src/secrets.rs": "d6684752a2c624624955b5942e0b6c2fa9b4b660fd7051ad70c11e95fbce0f7c",
+    "crates/arbos-relay/src/state.rs": "39e02e880e041898bb6282c22d79363f485dc4847baaf1589de802a42cc5c23a",
+    "crates/arbos-relay/src/vault.rs": "aa417adefe9110e9d586eb85f209c1c08c87553face1515fb916062f56d5253e",
+    "crates/arbos-relay/src/vaults.rs": "f7c390fb48bbb27e02278f27f3cfa787b28b78f437aba9eb011873f514302891"
+  },
+  "workspace_packages_cleaned": 12,
+  "network": "validated loopback-only Seatbelt; private synthetic fixtures; no inherited service env",
+  "gates": [
+    {
+      "name": "secrets",
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-f",
+        "<checkout>/.improve/evidence/cache-receipt/loopback-only.sb",
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-relay",
+        "secrets::tests::",
+        "--",
+        "--test-threads=2"
+      ],
+      "exit_code": 0,
+      "seconds": 35.60656729200855,
+      "counts": [
+        [
+          39,
+          0,
+          0
+        ]
+      ],
+      "expected": 39,
+      "log_sha256": "35465629e7396488b72045ec9ae1a505f31d21747775dcc4f35870e32f914d9b",
+      "source_unchanged": true,
+      "count_matches": true
+    },
+    {
+      "name": "vaults",
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-f",
+        "<checkout>/.improve/evidence/cache-receipt/loopback-only.sb",
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-relay",
+        "vaults::tests::",
+        "--",
+        "--test-threads=2"
+      ],
+      "exit_code": 0,
+      "seconds": 0.7809047499904409,
+      "counts": [
+        [
+          3,
+          0,
+          0
+        ]
+      ],
+      "expected": 3,
+      "log_sha256": "8522045c354515453d34c3289734be5b922c57e407037c61c002593e42bcf587",
+      "source_unchanged": true,
+      "count_matches": true
+    },
+    {
+      "name": "restart",
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-f",
+        "<checkout>/.improve/evidence/cache-receipt/loopback-only.sb",
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-relay",
+        "restart::ownership_regressions::",
+        "--",
+        "--test-threads=2"
+      ],
+      "exit_code": 0,
+      "seconds": 0.5072855000616983,
+      "counts": [
+        [
+          9,
+          0,
+          0
+        ]
+      ],
+      "expected": 9,
+      "log_sha256": "fa3d75215aceb38f452b0cafd9c9254086a4486e72df215a51548b87a0535357",
+      "source_unchanged": true,
+      "count_matches": true
+    },
+    {
+      "name": "restart-box",
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-f",
+        "<checkout>/.improve/evidence/cache-receipt/loopback-only.sb",
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-relay",
+        "a_planned_restart_waits_for_box_work",
+        "--",
+        "--test-threads=2"
+      ],
+      "exit_code": 0,
+      "seconds": 0.28571475006174296,
+      "counts": [
+        [
+          1,
+          0,
+          0
+        ]
+      ],
+      "expected": 1,
+      "log_sha256": "a02e0494b125693910347f3c20933f8eedfedf48657846828101a697b3b10ce8",
+      "source_unchanged": true,
+      "count_matches": true
+    },
+    {
+      "name": "cache",
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-f",
+        "<checkout>/.improve/evidence/cache-receipt/loopback-only.sb",
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-relay",
+        "rooms::covered_push_tests::",
+        "--",
+        "--test-threads=2"
+      ],
+      "exit_code": 0,
+      "seconds": 1.587289083050564,
+      "counts": [
+        [
+          13,
+          0,
+          0
+        ]
+      ],
+      "expected": 13,
+      "log_sha256": "801d53efb95931cf067b2b765a8cc2fcde7133433c01fc086299f1a92b7e7248",
+      "source_unchanged": true,
+      "count_matches": true
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-f",
+        "<checkout>/.improve/evidence/cache-receipt/loopback-only.sb",
+        "cargo",
+        "clippy",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-relay",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": 0,
+      "seconds": 22.032942582969554,
+      "counts": [],
+      "expected": null,
+      "log_sha256": "2dbbd9e249014eb56174751033ac4b3f6cd333f5b2a9ef25452da227b7d64360",
+      "source_unchanged": true
+    }
+  ],
+  "scope": "Combined phase4 H10/restart/cache source only;65distinctselectednative tests and alltarget relayClippy, not fullworkspace/nativeclient/realprovider."
+}

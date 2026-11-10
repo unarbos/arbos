@@ -182,6 +182,8 @@ pub struct Room {
     /// Rebuilt chat doc for covered-push checks and ROWS_DONE's version vector. Dropped when the
     /// room has no sockets left.
     pub doc_cache: std::sync::Mutex<Option<RoomDocCache>>,
+    /// One speculative push owns the message preimage through durable admission.
+    pub(crate) push_admission: tokio::sync::Mutex<()>,
     /// Box users (owners) with a live socket on this room: a row from a person reaches their
     /// agent live only through such a socket; without one the box is told to open the room
     /// (`boxes::after_person_row`, #2120).
@@ -219,6 +221,7 @@ impl Room {
 /// sends a 1012 Service Restart close and ends, and `open_sockets` counts down so the restart
 /// can drain before the process exits. A socket that arrives while closing is closed at once.
 pub struct RestartSignal {
+    planned: std::sync::Mutex<crate::restart_lifetime::State>,
     pub closing: tokio::sync::watch::Sender<bool>,
     pub open_sockets: std::sync::atomic::AtomicUsize,
     /// A planned restart is under way: no box upgrade or repair may start (#2262). Set and read
@@ -232,6 +235,7 @@ pub struct RestartSignal {
 impl Default for RestartSignal {
     fn default() -> Self {
         Self {
+            planned: std::sync::Mutex::new(crate::restart_lifetime::State::Serving(0)),
             closing: tokio::sync::watch::Sender::new(false),
             open_sockets: std::sync::atomic::AtomicUsize::new(0),
             box_work_frozen: std::sync::atomic::AtomicBool::new(false),
@@ -241,6 +245,33 @@ impl Default for RestartSignal {
 }
 
 impl RestartSignal {
+    /// The guard owns cleanup before the first freeze/notice/drain await.
+    pub(crate) fn begin_planned(self: &Arc<Self>) -> Option<PlannedRestart> {
+        use crate::restart_lifetime::{transition, Event, State};
+        let mut state = self.planned.lock().expect("planned restart lock");
+        if self.is_closing() {
+            return None;
+        }
+        let next = transition(*state, Event::Plan);
+        if next == *state {
+            return None;
+        }
+        let State::Planned { generation, .. } = next else {
+            return None;
+        };
+        *state = next;
+        Some(PlannedRestart {
+            restart: self.clone(),
+            generation,
+        })
+    }
+
+    pub(crate) fn begin_shutdown(&self) {
+        use crate::restart_lifetime::{transition, Event};
+        let mut state = self.planned.lock().expect("planned restart lock");
+        *state = transition(*state, Event::Shutdown);
+    }
+
     pub fn is_closing(&self) -> bool {
         *self.closing.borrow()
     }
@@ -248,6 +279,55 @@ impl RestartSignal {
     pub fn box_work_frozen(&self) -> bool {
         self.box_work_frozen
             .load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// An exact planned owner; a stale task may never thaw a replacement or shutdown.
+pub(crate) struct PlannedRestart {
+    restart: Arc<RestartSignal>,
+    generation: u64,
+}
+
+impl PlannedRestart {
+    pub(crate) fn advance(&self, phase: crate::restart_lifetime::Phase) -> bool {
+        use crate::restart_lifetime::{transition, Event, State};
+        let mut state = self.restart.planned.lock().expect("planned restart lock");
+        let next = transition(
+            *state,
+            Event::Advance {
+                generation: self.generation,
+                phase,
+            },
+        );
+        let advanced = next != *state
+            && next
+                == State::Planned {
+                    generation: self.generation,
+                    phase,
+                };
+        *state = next;
+        advanced
+    }
+
+    pub(crate) fn release(&self) -> bool {
+        use crate::restart_lifetime::{transition, Event};
+        let mut state = self.restart.planned.lock().expect("planned restart lock");
+        let next = transition(*state, Event::Release(self.generation));
+        if next == *state {
+            return false;
+        }
+        *state = next;
+        self.restart.closing.send_replace(false);
+        self.restart
+            .box_work_frozen
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        true
+    }
+}
+
+impl Drop for PlannedRestart {
+    fn drop(&mut self) {
+        self.release();
     }
 }
 
@@ -451,6 +531,7 @@ impl AppState {
                     replicas: Default::default(),
                     health_cache: std::sync::Mutex::new(None),
                     doc_cache: std::sync::Mutex::new(None),
+                    push_admission: tokio::sync::Mutex::new(()),
                     boxes: std::sync::Mutex::new(HashMap::new()),
                 })
             })

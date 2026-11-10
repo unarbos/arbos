@@ -930,10 +930,65 @@ pub(crate) fn not_listed(s: &Secret) -> Refusal {
 /// A use the rule allowed, and what it was allowed by.
 pub struct Allowed {
     pub access: Option<Access>,
-    /// The `allowed_once` request spent by this use.
+    /// An observed request; authority requires an owned claim receipt at use.
     pub once: Option<SecretRequest>,
     /// No host was known yet: pin `host` on the access and tell the owner.
     pub pin_host: bool,
+}
+
+/// An owned admission receipt, either standing access or one atomically claimed grant.
+/// Holding it does not hold a database lock or permit automatic retry/restoration.
+pub(crate) struct UseReceipt {
+    claims: Vec<(SecretRequest, crate::db_secrets::OneUseReceipt)>,
+}
+
+impl UseReceipt {
+    pub(crate) fn permits(&self, once: Option<&SecretRequest>) -> bool {
+        once.is_none_or(|request| self.claims.iter().any(|(claimed, _)| claimed == request))
+    }
+}
+
+pub(crate) fn claim_uses<'a>(
+    state: &AppState,
+    requests: impl IntoIterator<Item = &'a SecretRequest>,
+) -> Result<UseReceipt, ApiErr> {
+    let unavailable = || {
+        err(
+            StatusCode::CONFLICT,
+            "not_allowed",
+            "one-time authorization is no longer available",
+        )
+    };
+    let mut unique = BTreeMap::new();
+    for request in requests {
+        if let Some(previous) = unique.insert(request.id.as_str(), request) {
+            if previous != request {
+                return Err(unavailable());
+            }
+        }
+    }
+    let requests: Vec<&SecretRequest> = unique.into_values().collect();
+    let receipts = state
+        .db
+        .claim_allowed_once_batch(&requests)
+        .map_err(|_| {
+            err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "authorization_unavailable",
+                "one-time authorization is unavailable",
+            )
+        })?
+        .ok_or_else(unavailable)?;
+    Ok(UseReceipt {
+        claims: requests.into_iter().cloned().zip(receipts).collect(),
+    })
+}
+
+pub(crate) fn claim_use(
+    state: &AppState,
+    once: Option<&SecretRequest>,
+) -> Result<UseReceipt, ApiErr> {
+    claim_uses(state, once)
 }
 
 /// Check one use of `s` by `project_id` at `host` in `chat_id`. `use_kind` is `header | env |
@@ -1006,11 +1061,11 @@ pub(crate) fn decide_use(
     })
 }
 
-/// After an allowed use: spend a one-time grant, pin a first host, touch timestamps, audit.
+/// Admit a prepared sensitive use before its effect: claim once, pin hosts, touch and audit.
 /// `asked_by` is the person whose ask this use served (None = the owner); it lands on the
 /// audit row and stamps their People row.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn after_use(
+pub(crate) fn admit_use(
     state: &AppState,
     s: &Secret,
     project_id: &str,
@@ -1019,15 +1074,39 @@ pub(crate) fn after_use(
     chat_id: Option<&str>,
     asked_by: Option<&str>,
     allowed: &Allowed,
-) {
+) -> Result<UseReceipt, ApiErr> {
+    let receipt = claim_use(state, allowed.once.as_ref())?;
+    note_use(
+        state, s, project_id, host, use_kind, chat_id, asked_by, allowed, &receipt,
+    )?;
+    Ok(receipt)
+}
+
+/// Metadata does not grant authority; an observed once request needs this operation's receipt.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn note_use(
+    state: &AppState,
+    s: &Secret,
+    project_id: &str,
+    host: &str,
+    use_kind: &str,
+    chat_id: Option<&str>,
+    asked_by: Option<&str>,
+    allowed: &Allowed,
+    receipt: &UseReceipt,
+) -> Result<(), ApiErr> {
+    if !receipt.permits(allowed.once.as_ref()) {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "not_allowed",
+            "operation has no matching one-time authorization",
+        ));
+    }
     let asked_by = asked_by
         .map(str::trim)
         .filter(|u| !u.is_empty() && *u != s.user_id);
     if let Some(uid) = asked_by {
         let _ = state.db.touch_secret_director(&s.id, uid);
-    }
-    if let Some(once) = &allowed.once {
-        let _ = state.db.consume_allowed_once(&once.id);
     }
     if allowed.pin_host {
         if let Some(a) = &allowed.access {
@@ -1078,6 +1157,7 @@ pub(crate) fn after_use(
             ..entry("used", s, &format!("agent:{project_id}"))
         },
     );
+    Ok(())
 }
 
 /// `{ asked_by, asked_by_handle }` for an audit row, or `{}` when the owner asked.
@@ -3190,7 +3270,7 @@ pub async fn box_request(
                     };
                     state.db.insert_secret_request(&rq).map_err(internal)?;
                     if allowed.pin_host {
-                        after_use(
+                        admit_use(
                             &state,
                             &s,
                             &project_id,
@@ -3203,7 +3283,7 @@ pub async fn box_request(
                                 once: None,
                                 pin_host: true,
                             },
-                        );
+                        )?;
                     }
                     return Ok(Json(json!({ "request": request_json(&state, &rq), "status": "allowed_always", "access_id": a.id, "item": box_item(&state, &s, Some(a)) }))
                         .into_response());
@@ -3366,7 +3446,7 @@ pub async fn box_request_values(
     let host = rq.host.clone().unwrap_or_default();
     // The standing rule still applies at the moment of use. The asker was already judged when
     // the owner answered the card (`asked_by` is not re-checked here).
-    let allowed = match decide_use(
+    let mut allowed = match decide_use(
         &state,
         &s,
         &project_id,
@@ -3406,9 +3486,15 @@ pub async fn box_request_values(
             ));
         }
     };
+    // This route releases this answered card, never another matching/newer card.
+    // The fallback above recognizes owner-approved card authority; it must still
+    // carry the exact one-time request into the atomic admission boundary.
+    if rq.status == "allowed_once" {
+        allowed.once = Some(rq.clone());
+    }
     let dek = user_dek(&state, &user_id).map_err(internal)?;
     let plain = plain_of(&state, &dek, &s).map_err(internal)?;
-    after_use(
+    admit_use(
         &state,
         &s,
         &project_id,
@@ -3417,7 +3503,7 @@ pub async fn box_request_values(
         Some(rq.chat_id.as_str()),
         rq.asked_by.as_deref(),
         &allowed,
-    );
+    )?;
     Ok(Json(
         json!({ "name": s.env, "kind": s.kind, "allowed_hosts": s.hosts, "fields": plain.current }),
     )
@@ -3432,7 +3518,7 @@ pub(crate) struct EgressPlan {
     pub items: Vec<crate::vault::Resolved>,
     pub refused: Vec<(String, String)>,
     pub redact: Vec<String>,
-    /// `(secret, allowed)` to settle after the request goes out.
+    /// `(secret, allowed)` to admit after local validation and before the request goes out.
     pub used: Vec<(Secret, Allowed)>,
 }
 
@@ -4481,7 +4567,7 @@ mod tests {
             TurnAuthor::default(),
         )
         .unwrap();
-        after_use(
+        admit_use(
             &state,
             &secret,
             "proj_people",
@@ -4490,7 +4576,8 @@ mod tests {
             Some("chat_arbonites"),
             Some(&sam),
             &allowed,
-        );
+        )
+        .unwrap();
         let rows = state
             .db
             .list_audit(
@@ -5277,5 +5364,603 @@ mod tests {
         let body: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body["secret"]["source"]["kind"], "settings");
         assert!(state.db.secret_by_name(&owner2, "OTHER").unwrap().is_some());
+    }
+
+    mod one_use_regressions {
+        use super::*;
+
+        fn fixture(asked_by: bool, standing: bool) -> (AppState, String, SecretRequest, Secret) {
+            let state = test_state(AuthMode::Github);
+            let (owner, _) = person(&state, 901);
+            let (asker, _) = person(&state, 902);
+            insert_project(&state, &owner, "proj_once", "Synthetic once-use fixture");
+            let secret = insert_login_secret(&state, &owner);
+            if standing {
+                state
+                    .db
+                    .upsert_access(&Access {
+                        id: "acc_once_fixture".into(),
+                        user_id: owner.clone(),
+                        project_id: "proj_once".into(),
+                        target_kind: "secret".into(),
+                        target_id: secret.id.clone(),
+                        note: String::new(),
+                        hosts: secret.hosts.clone(),
+                        scope_kind: "all".into(),
+                        scope_chat_id: None,
+                        enabled: true,
+                        created_from: "settings".into(),
+                        created_at: now_ms(),
+                        disabled_at: None,
+                        last_used_at: None,
+                    })
+                    .unwrap();
+            }
+            let now = now_ms();
+            let request = SecretRequest {
+                id: "once_browser_fixture".into(),
+                user_id: owner.clone(),
+                project_id: "proj_once".into(),
+                chat_id: "chat_proj_once".into(),
+                target_kind: "secret".into(),
+                target_id: Some(secret.id.clone()),
+                target_ref: secret.env.clone(),
+                purpose: "Synthetic authorized browser fill".into(),
+                use_kind: "browser_fill".into(),
+                host: Some("login.fixture.example".into()),
+                status: if standing {
+                    "allowed_always"
+                } else {
+                    "allowed_once"
+                }
+                .into(),
+                decided_by: Some("card:synthetic".into()),
+                created_at: now,
+                decided_at: Some(now),
+                expires_at: now + 60_000,
+                asked_by: asked_by.then_some(asker),
+            };
+            state.db.insert_secret_request(&request).unwrap();
+            (state, owner, request, secret)
+        }
+
+        async fn values(state: AppState, owner: String, id: String) -> ApiResult {
+            let mut headers = HeaderMap::new();
+            headers.insert("x-arbos-project", "proj_once".parse().unwrap());
+            box_request_values(
+                State(state),
+                Principal::Box { user_id: owner },
+                headers,
+                Path(id),
+            )
+            .await
+        }
+
+        fn grants_value(result: &ApiResult) -> bool {
+            result
+                .as_ref()
+                .is_ok_and(|response| response.status() == StatusCode::OK)
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn answered_once_card_with_an_asker_allows_only_one_concurrent_disclosure() {
+            let (state, owner, request, _) = fixture(true, false);
+            let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+            let mut attempts = Vec::new();
+            for _ in 0..2 {
+                let (state, owner, id, barrier) = (
+                    state.clone(),
+                    owner.clone(),
+                    request.id.clone(),
+                    barrier.clone(),
+                );
+                attempts.push(tokio::spawn(async move {
+                    barrier.wait().await;
+                    values(state, owner, id).await
+                }));
+            }
+            let mut disclosed = 0;
+            for attempt in attempts {
+                disclosed += usize::from(grants_value(&attempt.await.unwrap()));
+            }
+            assert_eq!(
+                disclosed, 1,
+                "one answered request admitted more than one sensitive return"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_failed_consume_cannot_return_plaintext() {
+            let (state, owner, request, _) = fixture(false, false);
+            state.db.with(|c| c.execute_batch(
+                "CREATE TRIGGER fail_once_consume BEFORE UPDATE OF status ON secret_requests
+                 WHEN OLD.id = 'once_browser_fixture' AND OLD.status = 'allowed_once' AND NEW.status = 'expired'
+                 BEGIN SELECT RAISE(ABORT, 'synthetic claim failure'); END;"
+            )).unwrap();
+            let result = values(state, owner, request.id).await;
+            assert!(
+                !grants_value(&result),
+                "database failure admitted a sensitive return"
+            );
+        }
+
+        #[tokio::test]
+        async fn browser_fill_consumes_the_exact_answered_request_not_a_newer_card() {
+            let (state, owner, request, _) = fixture(false, false);
+            let mut newer = request.clone();
+            newer.id = "newer_once_browser_fixture".into();
+            newer.decided_at = request.decided_at.map(|t| t + 1);
+            state.db.insert_secret_request(&newer).unwrap();
+            assert!(grants_value(
+                &values(state.clone(), owner, request.id.clone()).await
+            ));
+            assert_eq!(
+                state
+                    .db
+                    .secret_request(&request.id)
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                "expired"
+            );
+            assert_eq!(
+                state.db.secret_request(&newer.id).unwrap().unwrap().status,
+                "allowed_once"
+            );
+        }
+
+        #[tokio::test]
+        async fn local_preparation_failure_keeps_the_grant_retryable() {
+            let (state, owner, request, secret) = fixture(false, false);
+            state.db.with(|c| c.execute(
+                "UPDATE secret_versions SET fields_enc = 'synthetic-invalid-envelope' WHERE secret_id = ?1",
+                rusqlite::params![secret.id],
+            )).unwrap();
+            assert!(!grants_value(
+                &values(state.clone(), owner, request.id.clone()).await
+            ));
+            assert_eq!(
+                state
+                    .db
+                    .secret_request(&request.id)
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                "allowed_once"
+            );
+        }
+
+        #[tokio::test]
+        async fn ordinary_owner_once_card_still_discloses_once() {
+            let (state, owner, request, _) = fixture(false, false);
+            assert!(grants_value(
+                &values(state.clone(), owner.clone(), request.id.clone()).await
+            ));
+            assert!(!grants_value(&values(state, owner, request.id).await));
+        }
+
+        #[tokio::test]
+        async fn standing_access_remains_repeatable() {
+            let (state, owner, request, _) = fixture(false, true);
+            for _ in 0..2 {
+                assert!(grants_value(
+                    &values(state.clone(), owner.clone(), request.id.clone()).await
+                ));
+            }
+            assert_eq!(
+                state
+                    .db
+                    .secret_request(&request.id)
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                "allowed_always"
+            );
+        }
+
+        #[test]
+        fn prepared_permits_race_at_the_shared_admission_boundary() {
+            let (state, _, request, secret) = fixture(false, false);
+            let prepare = || {
+                decide_use(
+                    &state,
+                    &secret,
+                    "proj_once",
+                    "login.fixture.example",
+                    "browser_fill",
+                    Some("chat_proj_once"),
+                    None,
+                    TurnAuthor::card_already_answered(),
+                )
+                .unwrap()
+            };
+            let permits = [prepare(), prepare()];
+            let barrier = std::sync::Barrier::new(2);
+            let effects = std::sync::atomic::AtomicUsize::new(0);
+            std::thread::scope(|scope| {
+                for permit in permits {
+                    let (state, secret, id, barrier, effects) =
+                        (&state, &secret, &request.id, &barrier, &effects);
+                    scope.spawn(move || {
+                        barrier.wait();
+                        if let Ok(_receipt) = admit_use(
+                            state,
+                            secret,
+                            "proj_once",
+                            "login.fixture.example",
+                            "browser_fill",
+                            Some("chat_proj_once"),
+                            None,
+                            &permit,
+                        ) {
+                            // A fake effect can re-enter the DB: the claim retains no lock.
+                            assert_eq!(
+                                state.db.secret_request(id).unwrap().unwrap().status,
+                                "expired"
+                            );
+                            effects.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        }
+                    });
+                }
+            });
+            assert_eq!(effects.load(std::sync::atomic::Ordering::SeqCst), 1);
+        }
+
+        #[test]
+        fn a_claim_binds_every_observed_scope_field_and_current_expiry() {
+            let (state, _, request, _) = fixture(false, false);
+            type Change = fn(&mut SecretRequest);
+            let changes: [Change; 14] = [
+                |r| r.id.push_str("-other"),
+                |r| r.user_id.push_str("-other"),
+                |r| r.project_id.push_str("-other"),
+                |r| r.chat_id.push_str("-other"),
+                |r| r.target_kind = "vault".into(),
+                |r| r.target_id = None,
+                |r| r.target_ref.push_str("-other"),
+                |r| r.use_kind = "header".into(),
+                |r| r.host = None,
+                |r| r.asked_by = Some("other-fixture-asker".into()),
+                |r| r.decided_by = None,
+                |r| r.decided_at = None,
+                |r| r.expires_at += 1,
+                |r| r.status = "pending".into(),
+            ];
+            for change in changes {
+                let mut different = request.clone();
+                change(&mut different);
+                assert!(state
+                    .db
+                    .claim_allowed_once_batch(&[&different])
+                    .unwrap()
+                    .is_none());
+            }
+            let mut expired = request;
+            expired.expires_at = now_ms() - 1;
+            state
+                .db
+                .with(|c| {
+                    c.execute(
+                        "UPDATE secret_requests SET expires_at = ?2 WHERE id = ?1",
+                        rusqlite::params![expired.id, expired.expires_at],
+                    )
+                })
+                .unwrap();
+            assert!(state
+                .db
+                .claim_allowed_once_batch(&[&expired])
+                .unwrap()
+                .is_none());
+        }
+
+        #[test]
+        fn an_uncertain_admitted_effect_never_restores_or_retries_a_grant() {
+            let (state, _, request, secret) = fixture(false, false);
+            let permit = decide_use(
+                &state,
+                &secret,
+                "proj_once",
+                "login.fixture.example",
+                "browser_fill",
+                Some("chat_proj_once"),
+                None,
+                TurnAuthor::card_already_answered(),
+            )
+            .unwrap();
+            let receipt = admit_use(
+                &state,
+                &secret,
+                "proj_once",
+                "login.fixture.example",
+                "browser_fill",
+                Some("chat_proj_once"),
+                None,
+                &permit,
+            )
+            .unwrap();
+            let effects = std::sync::atomic::AtomicUsize::new(0);
+            let fake_effect = || {
+                effects.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Err::<(), ()>(()) // Uncertain whether a remote service accepted this effect.
+            };
+            assert!(fake_effect().is_err());
+            drop(receipt);
+            assert!(admit_use(
+                &state,
+                &secret,
+                "proj_once",
+                "login.fixture.example",
+                "browser_fill",
+                Some("chat_proj_once"),
+                None,
+                &permit
+            )
+            .is_err());
+            assert_eq!(effects.load(std::sync::atomic::Ordering::SeqCst), 1);
+            assert_eq!(
+                state
+                    .db
+                    .secret_request(&request.id)
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                "expired"
+            );
+        }
+
+        #[test]
+        fn vault_uses_require_the_same_one_use_claim_receipt() {
+            let (state, owner, mut request, _) = fixture(false, false);
+            let reference = "op://SyntheticVault/Item/password";
+            let vault = Vault {
+                id: "vault_once_fixture".into(),
+                user_id: owner.clone(),
+                provider: "onepassword".into(),
+                name: "SyntheticVault".into(),
+                token_enc: Some("synthetic-unusable-envelope".into()),
+                external_vaults: json!([{ "id": "synthetic", "name": "SyntheticVault" }]),
+                items: json!([]),
+                items_count: 0,
+                items_refreshed_at: None,
+                token_expires_at: None,
+                status: "ok".into(),
+                last_error: None,
+                last_refreshed_at: None,
+                created_at: now_ms(),
+                disconnected_at: None,
+            };
+            state.db.upsert_vault(&vault).unwrap();
+            state
+                .db
+                .with(|c| {
+                    c.execute(
+                        "DELETE FROM secret_requests WHERE id = ?1",
+                        rusqlite::params![request.id],
+                    )
+                })
+                .unwrap();
+            request.target_kind = "vault".into();
+            request.target_id = Some(vault.id.clone());
+            request.target_ref = reference.into();
+            state.db.insert_secret_request(&request).unwrap();
+            let Ok(first) = crate::vaults::decide_op_use(
+                &state,
+                &owner,
+                reference,
+                "proj_once",
+                "login.fixture.example",
+                "browser_fill",
+                Some("chat_proj_once"),
+            ) else {
+                panic!("synthetic vault authorization fixture")
+            };
+            let Ok(second) = crate::vaults::decide_op_use(
+                &state,
+                &owner,
+                reference,
+                "proj_once",
+                "login.fixture.example",
+                "browser_fill",
+                Some("chat_proj_once"),
+            ) else {
+                panic!("synthetic vault authorization fixture")
+            };
+            assert!(crate::vaults::admit_op_use(
+                &state,
+                reference,
+                "proj_once",
+                "login.fixture.example",
+                "browser_fill",
+                Some("chat_proj_once"),
+                &first
+            )
+            .is_ok());
+            assert!(crate::vaults::admit_op_use(
+                &state,
+                reference,
+                "proj_once",
+                "login.fixture.example",
+                "browser_fill",
+                Some("chat_proj_once"),
+                &second
+            )
+            .is_err());
+        }
+
+        #[tokio::test]
+        async fn local_request_validation_precedes_one_use_admission() {
+            let (state, owner, request, secret) = fixture(false, false);
+            state
+                .db
+                .with(|c| {
+                    c.execute(
+                        "UPDATE secret_requests SET use_kind = 'header' WHERE id = ?1",
+                        rusqlite::params![request.id],
+                    )
+                })
+                .unwrap();
+            let mut headers = HeaderMap::new();
+            headers.insert("x-arbos-project", "proj_once".parse().unwrap());
+            let body = crate::vault::EgressBody {
+                url: "https://login.fixture.example/never-sent".into(),
+                method: Some("POST".into()),
+                headers: BTreeMap::from([(
+                    "Authorization".into(),
+                    format!("Bearer {}\n", placeholder(&secret.env, "password")),
+                )]),
+                body: None,
+                placeholders: Vec::new(),
+                chat_id: Some("chat_proj_once".into()),
+                asked_by: None,
+                asked_by_message_id: None,
+                asked_by_own_work: false,
+            };
+            // Invalid header bytes are rejected by reqwest before DNS/socket work.
+            let result = crate::vault::egress(
+                State(state.clone()),
+                Principal::Box { user_id: owner },
+                headers,
+                Json(body),
+            )
+            .await
+            .unwrap();
+            assert_eq!(result.status(), StatusCode::BAD_GATEWAY);
+            let bytes = axum::body::to_bytes(result.into_body(), 64 * 1024)
+                .await
+                .unwrap();
+            let result: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(result["substituted"].as_array().unwrap().len(), 1);
+            assert_eq!(
+                state
+                    .db
+                    .secret_request(&request.id)
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                "allowed_once"
+            );
+        }
+
+        #[test]
+        fn batch_claim_deduplicates_one_grant_for_several_fields() {
+            let (state, _, request, _) = fixture(false, false);
+            let receipt = claim_uses(&state, [&request, &request]);
+            assert!(
+                receipt.is_ok(),
+                "one operation may use several fields of its one approved item"
+            );
+            assert_eq!(
+                state
+                    .db
+                    .secret_request(&request.id)
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                "expired"
+            );
+        }
+
+        #[test]
+        fn batch_claim_rolls_back_valid_grants_when_another_claim_was_lost() {
+            let (state, _, request, _) = fixture(false, false);
+            let mut lost = request.clone();
+            lost.id = "lost_once_fixture".into();
+            state.db.insert_secret_request(&lost).unwrap();
+            assert!(state
+                .db
+                .claim_allowed_once_batch(&[&lost])
+                .unwrap()
+                .is_some());
+            assert!(claim_uses(&state, [&request, &lost]).is_err());
+            assert_eq!(
+                state
+                    .db
+                    .secret_request(&request.id)
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                "allowed_once"
+            );
+        }
+
+        #[test]
+        fn batch_claim_rejects_conflicting_scope_for_one_id_without_spending_it() {
+            let (state, _, request, _) = fixture(false, false);
+            let mut different = request.clone();
+            different.host = Some("other.fixture.example".into());
+            assert!(claim_uses(&state, [&request, &different]).is_err());
+            assert_eq!(
+                state
+                    .db
+                    .secret_request(&request.id)
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                "allowed_once"
+            );
+        }
+
+        #[test]
+        fn standing_receipt_cannot_authorize_a_one_time_metadata_callback() {
+            let (state, _, request, secret) = fixture(false, false);
+            let allowed = decide_use(
+                &state,
+                &secret,
+                "proj_once",
+                "login.fixture.example",
+                "browser_fill",
+                Some("chat_proj_once"),
+                None,
+                TurnAuthor::card_already_answered(),
+            )
+            .unwrap();
+            let receipt = claim_use(&state, None).unwrap();
+            assert!(note_use(
+                &state,
+                &secret,
+                "proj_once",
+                "login.fixture.example",
+                "browser_fill",
+                Some("chat_proj_once"),
+                None,
+                &allowed,
+                &receipt
+            )
+            .is_err());
+            assert_eq!(
+                state
+                    .db
+                    .secret_request(&request.id)
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                "allowed_once"
+            );
+        }
+
+        #[test]
+        fn batch_sql_error_rolls_back_claims_before_any_operation_receipt() {
+            let (state, _, request, _) = fixture(false, false);
+            let mut second = request.clone();
+            second.id = "z_sql_error_fixture".into();
+            state.db.insert_secret_request(&second).unwrap();
+            state
+                .db
+                .with(|c| {
+                    c.execute_batch(
+                "CREATE TRIGGER fail_second_claim BEFORE UPDATE OF status ON secret_requests
+                 WHEN OLD.id = 'z_sql_error_fixture' AND NEW.status = 'expired'
+                 BEGIN SELECT RAISE(ABORT, 'synthetic second claim failure'); END;"
+            )
+                })
+                .unwrap();
+            assert!(claim_uses(&state, [&request, &second]).is_err());
+            for id in [&request.id, &second.id] {
+                assert_eq!(
+                    state.db.secret_request(id).unwrap().unwrap().status,
+                    "allowed_once"
+                );
+            }
+        }
     }
 }
