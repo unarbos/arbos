@@ -1814,6 +1814,14 @@ It ran as a real background job, not inline.";
             seen.starts_with("Queued: also add a plot of the results"),
             "{seen}"
         );
+        let row_id = agent
+            .turn
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .assistant_msg_id
+            .clone();
         assert_eq!(
             agent
                 .turn
@@ -1827,9 +1835,65 @@ It ran as a real background job, not inline.";
             Some(true),
             "the live turn's activity is the Queued line the apps read"
         );
+        // iOS `AppModel.currentActivity` reads the streaming message's `activity` field —
+        // not the relay POST alone — so the doc must carry the Queued line too.
+        assert!(
+            host.lock()
+                .await
+                .doc
+                .message(&row_id)
+                .as_ref()
+                .and_then(|m| m.rest.get("activity"))
+                .and_then(Value::as_str)
+                .is_some_and(|a| a.starts_with("Queued: also add a plot of the results")),
+            "the streaming row's activity is what the presence line shows"
+        );
+        // A later tool step of the socks work must not put the old label back while the new
+        // ask is still waiting for the lock.
+        assert!(
+            agent.sends_waiting() > 0,
+            "the new ask is still waiting — the pin applies"
+        );
+        assert!(Agent::should_keep_queued_ack(
+            Some(seen.as_str()),
+            Some("Finding sock stores in LA"),
+            agent.sends_waiting(),
+        ));
         waiting.abort();
         drop(busy);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The pin that keeps "Queued: …" visible: while a send waits, a tool step of the work
+    /// already running must not reclaim the working row ([feedback ACWckXaV2Ndc0uDYr0Xs8Fg]).
+    #[test]
+    fn queued_ack_holds_while_a_send_waits() {
+        assert!(Agent::should_keep_queued_ack(
+            Some("Queued: Find me the best sushi in la…"),
+            Some("Finding sock stores in LA"),
+            1,
+        ));
+        assert!(
+            !Agent::should_keep_queued_ack(
+                Some("Queued: Find me the best sushi in la…"),
+                Some("Finding sock stores in LA"),
+                0,
+            ),
+            "once the ask takes the lock, steps may move the row again"
+        );
+        assert!(
+            !Agent::should_keep_queued_ack(
+                Some("Queued: Find me the best sushi in la…"),
+                Some("Queued: something else…"),
+                1,
+            ),
+            "a newer Queued line may replace the older one"
+        );
+        assert!(!Agent::should_keep_queued_ack(
+            Some("Finding sock stores in LA"),
+            Some("Reading a menu"),
+            1,
+        ));
     }
 
     /// Jacob's screenshot (TestAgent, 2026-10-23 23:58 UTC): "On it." as a bubble above the

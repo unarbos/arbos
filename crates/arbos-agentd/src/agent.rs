@@ -10441,9 +10441,29 @@ impl Agent {
         t.row_closed = true;
     }
 
+    /// Keep "Queued: …" on the working row while a new ask waits for the turn lock
+    /// ([feedback ACWckXaV2Ndc0uDYr0Xs8Fg]): later tool steps of the work already running
+    /// must not put the old label back over the acknowledgement.
+    pub(crate) fn should_keep_queued_ack(
+        current: Option<&str>,
+        incoming: Option<&str>,
+        sends_waiting: usize,
+    ) -> bool {
+        sends_waiting > 0
+            && current.is_some_and(|a| a.starts_with("Queued:"))
+            && !incoming.is_some_and(|a| a.starts_with("Queued:") || a.starts_with("Steering:"))
+    }
+
     /// The working line's text (agent-flow contract §2): on the live row and mirrored to the relay.
     async fn set_activity(&self, host: &SharedHost, t: &mut TurnState, activity: Option<String>) {
         if t.activity == activity {
+            return;
+        }
+        if Self::should_keep_queued_ack(
+            t.activity.as_deref(),
+            activity.as_deref(),
+            self.sends_waiting(),
+        ) {
             return;
         }
         t.activity = activity.clone();
@@ -13135,14 +13155,31 @@ impl Agent {
                             }
                             None => live,
                         };
-                        {
+                        let keep_queued = {
                             let h = host.lock().await;
-                            h.doc.set_activity(&msg_id, Some(&shown));
-                        }
-                        if job.is_some() {
-                            self.refresh_job_activity(chat_id).await;
-                        } else {
-                            self.post_activity(chat_id, Some(shown));
+                            let current = h
+                                .doc
+                                .message(&msg_id)
+                                .as_ref()
+                                .and_then(|m| m.rest.get("activity"))
+                                .and_then(Value::as_str)
+                                .map(str::to_owned);
+                            Self::should_keep_queued_ack(
+                                current.as_deref(),
+                                Some(shown.as_str()),
+                                self.sends_waiting(),
+                            )
+                        };
+                        if !keep_queued {
+                            {
+                                let h = host.lock().await;
+                                h.doc.set_activity(&msg_id, Some(&shown));
+                            }
+                            if job.is_some() {
+                                self.refresh_job_activity(chat_id).await;
+                            } else {
+                                self.post_activity(chat_id, Some(shown));
+                            }
                         }
                     }
                     let _ = self.store.t3_append(
