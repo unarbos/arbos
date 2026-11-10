@@ -467,6 +467,42 @@ async fn start_process(
     Ok(())
 }
 
+/// The `docker run` argument list for a local Docker box (everything after `docker`).
+fn local_run_args(name: &str, env: &BTreeMap<String, String>, image: &str) -> Vec<String> {
+    let mut args: Vec<String> = [
+        "run",
+        "-d",
+        "--name",
+        name,
+        "--add-host",
+        "host.docker.internal:host-gateway",
+        "-p",
+        "127.0.0.1::7788",
+    ]
+    .iter()
+    .map(|a| (*a).to_owned())
+    .collect();
+    for (k, v) in env {
+        args.push("-e".to_owned());
+        args.push(format!("{k}={v}"));
+    }
+    args.push(image.to_owned());
+    args
+}
+
+/// What a failed `docker` call may say about itself, here and in [`crate::fleet`]. A box's run
+/// arguments carry its whole environment as `-e NAME=value`, so the command is only ever
+/// rendered through [`arbos_core::redact::redact_argv`] and docker's own stderr is scrubbed:
+/// a `docker run` that fails must not put the box token, the MCP token or a model-provider key
+/// into the journal (2026-11-09).
+pub(crate) fn docker_failure(args: &[String], detail: &str) -> anyhow::Error {
+    anyhow!(
+        "docker {} failed: {}",
+        arbos_core::redact::redact_argv(args),
+        arbos_core::redact::scrub(detail.trim())
+    )
+}
+
 async fn start_docker(
     state: &AppState,
     user_id: &str,
@@ -483,39 +519,30 @@ async fn start_docker(
             .replace("127.0.0.1", "host.docker.internal")
             .replace("localhost", "host.docker.internal");
         let env = box_env(state, user_id, box_token, mcp_token, &relay_url);
-        let mut cmd = tokio::process::Command::new("docker");
-        cmd.args([
-            "run",
-            "-d",
-            "--name",
-            &name,
-            "--add-host",
-            "host.docker.internal:host-gateway",
-            "-p",
-            "127.0.0.1::7788",
-        ]);
-        for (k, v) in env {
-            cmd.arg("-e").arg(format!("{k}={v}"));
-        }
-        cmd.arg(&state.cfg.local_box_image);
-        let out = cmd.output().await.context("docker run")?;
-        if !out.status.success() {
-            return Err(anyhow!(
-                "docker run failed: {}",
-                String::from_utf8_lossy(&out.stderr)
-            ));
-        }
-    } else {
-        let out = tokio::process::Command::new("docker")
-            .args(["start", &name])
+        let args = local_run_args(&name, &env, &state.cfg.local_box_image);
+        let out = match tokio::process::Command::new("docker")
+            .args(&args)
             .output()
             .await
-            .context("docker start")?;
+        {
+            Ok(out) => out,
+            Err(e) => return Err(docker_failure(&args, &e.to_string())),
+        };
         if !out.status.success() {
-            return Err(anyhow!(
-                "docker start failed: {}",
-                String::from_utf8_lossy(&out.stderr)
-            ));
+            return Err(docker_failure(&args, &String::from_utf8_lossy(&out.stderr)));
+        }
+    } else {
+        let args = vec!["start".to_owned(), name.clone()];
+        let out = match tokio::process::Command::new("docker")
+            .args(&args)
+            .output()
+            .await
+        {
+            Ok(out) => out,
+            Err(e) => return Err(docker_failure(&args, &e.to_string())),
+        };
+        if !out.status.success() {
+            return Err(docker_failure(&args, &String::from_utf8_lossy(&out.stderr)));
         }
     }
     let out = tokio::process::Command::new("docker")
