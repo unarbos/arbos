@@ -1,0 +1,22 @@
+{
+  "status": "Source/static candidate frozen before host compile/native execution",
+  "before_sources": {
+    "apps/ios/Arbos/Arbos/UI/ChatView.swift": "ce7e5c6b54cefdf25c47236e81652e63770a03dcf55eb6d22a44b2b349167240",
+    "apps/ios/Arbos/ArbosTests/ComposerMetricsTests.swift": "e146312184ac679467495dd3b1da485e0bfb0a4b5c967c5ed8f2d3375c0e2d12"
+  },
+  "candidate_sources": {
+    "apps/ios/Arbos/Arbos/UI/ChatView.swift": "9a1ef5c35bda8fefa417ce24114f1b56d1633f48d2b231f2ff34c1bd8caf5e57",
+    "apps/ios/Arbos/ArbosTests/ComposerMetricsTests.swift": "030d305d5f681669483e48b7df9ab1436d33dea2a71c9cd1c10f7379d50a5f4b"
+  },
+  "patch": {
+    "sha256": "450cef66984b9d608b6fa37c5a4459a4777fa12a21ad4e414339ae2e93e410ab",
+    "bytes": 6219
+  },
+  "release_behavior": "Weak registry entirely replaces unused unsafe DEBUG live counter; no Release code or lifetime changes.",
+  "test_contract": "Original public ChatView hosting/closing/0.3s settle sequence retained; only per-instance weak probes escape autoreleasepool. Pre-existing objects retained explicitly.",
+  "deterministic_controls": [
+    "Unrelated baseline release cannot turn a freed owned object into a failure.",
+    "Intentionally held owned draft remains detected after unrelated release; weak probe frees after actual strong hold drops."
+  ],
+  "version": "v3 adds explicit nonnil-before/nil-after unrelated-instance probes in both deterministic controls; v2 source packet unchanged"
+}
