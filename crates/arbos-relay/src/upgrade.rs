@@ -17,11 +17,13 @@
 //!             newest per user stay unarchived, older retained ones are Daytona-archived at once);
 //!   create  — a fresh box from the target snapshot, staged: new tokens, the `boxes` row still
 //!             names the source;
-//!   unpack  — stop the new agentd, confirm room on the box itself (bytes and inodes — the measure
+//!   unpack  — quiesce the new box the way the source is quiesced (agentd, `pi` and `prime-agent`,
+//!             so the bounce does not stop a container holding fresh orphans), confirm room on the box itself (bytes and inodes — the measure
 //!             step already applied the same arithmetic to the snapshot's disk size), upload / verify / extract part by
 //!             part, count the tree against the plan, reset the per-workspace owner markers;
 //!   start   — the swap: the carried `/work` is flushed, the row now names the new box, which is
-//!             bounced so the entrypoint starts agentd on the carried `/work` and must say hello.
+//!             bounced — stopped gracefully, forced only if that does not land — so the entrypoint
+//!             starts agentd on the carried `/work` and must say hello.
 //! Progress is in `GET /machine` (`upgrade.phase`, e.g. `pack 3/16`). Any failure after pack rolls
 //! back (see [`rollback`]): the row is back on the source first, then the new box is deleted when it
 //! holds nothing of `/work`, else kept stopped in `box_history` for the sweeper.
@@ -434,6 +436,14 @@ async fn pack(
 /// Put the carried `/work` onto the staged new box. The user's row still names the source.
 /// `holds_data` turns true before the first byte of `/work` is uploaded: from then on the new box
 /// may hold user data and rollback keeps it instead of deleting it.
+///
+/// The new box is quiesced exactly as the source is. It used to lose `arbos-agentd` alone, so
+/// `pi --mode rpc` and `prime-agent` — which the new box does run, because it says hello and
+/// `apply_listing` opens the user's workspaces on it before the unpack starts — were left alive
+/// and reparented onto the container's PID 1, which is Daytona's daemon and not agentd. The bounce
+/// then force-killed a container holding two fresh orphans, and in nine recorded failures Docker
+/// answered that the container's PID was a zombie it could not kill. The source, quiesced in full,
+/// has never been seen to wedge.
 async fn unpack(
     state: &AppState,
     dt: &crate::daytona::Daytona,
@@ -444,12 +454,7 @@ async fn unpack(
     holds_data: &mut bool,
 ) -> Result<()> {
     let tb = dt.toolbox(new_id).await;
-    let _ = tb
-        .exec(
-            "sudo -n pkill -TERM -x arbos-agentd 2>/dev/null; sleep 2; sudo -n pkill -KILL -x arbos-agentd 2>/dev/null; true",
-            60,
-        )
-        .await;
+    let _ = carry::quiesce(&tb).await;
     let (avail_mib, avail_inodes) = carry::destination_room(&tb).await?;
     carry::destination_fits(
         avail_mib,
@@ -487,19 +492,31 @@ async fn unpack(
 /// this is not going to make the bounce safer by being waited for.
 const SYNC_BEFORE_BOUNCE_S: u64 = 120;
 
-/// Flush the carried `/work` to disk before the bounce force-kills the container. The relay's own
-/// records say write-back is *not* what wedges the kill — in the four of nine recorded kill
-/// failures where Docker gave a reason it was a zombie PID 1 that cannot be signalled, and the
-/// failures span 129 MiB to 8 967 MiB of `/work` with no gradient — so this is not a fix for that.
-/// It is here so the next occurrence is diagnostic: a kill that still fails after a completed
-/// flush excludes write-back by construction. A failed or slow flush is not worth failing an
-/// upgrade over, so it is logged and the bounce goes ahead.
+/// Flush the carried `/work` to disk and count the box's process states, in the one round trip
+/// before the bounce.
+///
+/// The flush is not a fix: the relay's own records say write-back is *not* what wedges the kill —
+/// in the four of nine recorded kill failures where Docker gave a reason it was a zombie PID 1
+/// that cannot be signalled, and the failures span 129 MiB to 8 967 MiB of `/work` with no
+/// gradient. It is here so the next occurrence is diagnostic: a kill that still fails after a
+/// completed flush excludes write-back by construction.
+///
+/// `procs` is what says whether the full quiesce of the new box worked. A bounce that wedges at
+/// 0.46 % cannot be shown to be fixed by an absence of failures, so the state counts are recorded
+/// at the moment of the stop instead: if quiescing the new box the way the source is quiesced is
+/// the right mechanism, the `Z` and orphan counts here go quiet, and that is readable on every
+/// upgrade rather than only on the ones that fail.
+///
+/// A failed or slow probe is not worth failing an upgrade over, so it is logged and the bounce
+/// goes ahead.
 async fn flush_before_bounce(dt: &crate::daytona::Daytona, user_id: &str, new_id: &str) {
     let t0 = Instant::now();
-    match dt.toolbox_exec(new_id, "sync", SYNC_BEFORE_BOUNCE_S).await {
+    let probe = "sync; ps -eo stat= | sort | uniq -c | tr '\\n' ' '";
+    match dt.toolbox_exec(new_id, probe, SYNC_BEFORE_BOUNCE_S).await {
         Ok(out) => tracing::info!(
             user = %user_id, sandbox = %new_id, ms = t0.elapsed().as_millis() as u64,
             exit = out.get("exitCode").and_then(serde_json::Value::as_i64).unwrap_or(-1),
+            procs = out.get("result").and_then(serde_json::Value::as_str).unwrap_or("").trim(),
             "carried /work flushed before the bounce"
         ),
         Err(e) => tracing::warn!(
@@ -508,6 +525,57 @@ async fn flush_before_bounce(dt: &crate::daytona::Daytona, user_id: &str, new_id
             "the flush before the bounce did not complete; bouncing anyway"
         ),
     }
+}
+
+/// How long the graceful stop has to land the new box in `Stopped` before the bounce forces it.
+/// Generous against a carry that has already run for minutes, and short enough that a box whose
+/// shutdown is going nowhere still gets the forced stop it used to get immediately.
+const GRACEFUL_STOP_S: u64 = 45;
+
+/// How long the forced stop is then given, unchanged from when it was the only stop.
+const FORCED_STOP_S: u64 = 120;
+
+/// Stop the new box for the bounce: ask Daytona to shut it down, and force it only if that does
+/// not land.
+///
+/// Every recorded wedge is on a stop the relay made with `force=true`. That is one-sided rather
+/// than measured — the graceful stop of the source is `let _ = dt.stop(source_id, false)`, whose
+/// result is discarded and never waited for, so a graceful wedge would leave no row anywhere —
+/// but the graceful stop is the one with a track record on this exact container state: agentd
+/// dead, `/work` just rewritten, 4 195 completed carries. The forced stop still runs wherever the
+/// graceful one does not finish, so this can only add attempts, never remove them.
+///
+/// A sandbox Daytona has already marked `Error` is not forced: that is the state in which the
+/// stop answers 400, and the caller's rollback is the honest outcome.
+async fn stop_for_bounce(dt: &crate::daytona::Daytona, user_id: &str, new_id: &str) -> Result<()> {
+    let graceful = match dt.stop(new_id, false).await {
+        Ok(_) => dt
+            .wait_for(new_id, Duration::from_secs(GRACEFUL_STOP_S), |s| {
+                s.state == SandboxState::Stopped
+            })
+            .await
+            .map(|_| ()),
+        Err(e) => Err(e),
+    };
+    let Err(e) = graceful else {
+        return Ok(());
+    };
+    tracing::warn!(
+        user = %user_id, sandbox = %new_id, error = %format!("{e:#}"),
+        "the new box did not stop gracefully for the bounce; forcing"
+    );
+    let state = dt.get(new_id).await?.state;
+    if matches!(state, SandboxState::Error | SandboxState::BuildFailed) {
+        return Err(anyhow!(
+            "the new box is {state:?} after the graceful stop; forcing it would only be refused"
+        ));
+    }
+    dt.stop(new_id, true).await?;
+    dt.wait_for(new_id, Duration::from_secs(FORCED_STOP_S), |s| {
+        s.state == SandboxState::Stopped
+    })
+    .await?;
+    Ok(())
 }
 
 /// The swap: the carried new box becomes the user's row, then it is bounced so the entrypoint
@@ -521,11 +589,7 @@ async fn swap_and_start(
 ) -> Result<()> {
     set_phase(state, user_id, "start").await;
     flush_before_bounce(dt, user_id, new_id).await;
-    dt.stop(new_id, true).await?;
-    dt.wait_for(new_id, Duration::from_secs(120), |s| {
-        s.state == SandboxState::Stopped
-    })
-    .await?;
+    stop_for_bounce(dt, user_id, new_id).await?;
     let mut row = new.clone();
     row.daytona_state = Some("stopped".into());
     state.db.upsert_box(&row)?;
