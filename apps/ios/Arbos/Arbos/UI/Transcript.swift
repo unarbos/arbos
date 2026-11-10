@@ -1967,8 +1967,9 @@ struct RowView: View, Equatable {
             Text("\(row.replyCount)")
                 .font(theme.font(11, weight: .semibold))
                 .foregroundStyle(userBubble ? theme.userText.opacity(0.7) : theme.muted)
-                .padding(.top, 6)
-                .padding(.trailing, 8)
+                // Clear the continuous 20 pt corner — 6/8 sat in the curve.
+                .padding(.top, 10)
+                .padding(.trailing, 12)
                 .accessibilityLabel("\(row.replyCount) \(row.replyCount == 1 ? "reply" : "replies")")
         }
     }
