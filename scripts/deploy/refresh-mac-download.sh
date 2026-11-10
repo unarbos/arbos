@@ -22,6 +22,9 @@
 # the relay records a stable Mac release (POST /admin/release). Caddy is reloaded only when something
 # changed. Env: WWW_DIR (/home/const/arbos-www), WWW_USER (const), MIRROR_KEEP (2), MIRROR=0 to skip 2+3.
 set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/deploy/deploy-state.sh
+. "$HERE/deploy-state.sh"
 OUT=/etc/arbos/download.caddy
 UPDATES_SNIPPET=/etc/arbos/updates.d/mac.caddy
 WWW_USER="${WWW_USER:-const}"
@@ -38,22 +41,28 @@ RELOAD=1
 # agentd canary smoke mid-probe (0.1.180 at 00:12, 0.1.184 at 04:02).
 changed=0
 config_changed=0
-# Lane collision: while an agentd canary smoke (`agentd.canary`) or a relay deploy (`relay.deploying`)
-# is in flight, a needed reload is DEFERRED — `www.reload-pending` is written and the deploy worker's
-# tick (or the next run of this script) applies it once the lanes are clear. Markers older than
-# LANE_MARKER_MAX_S are stale. `www.reloading` marks the reload itself for the canary to wait on.
+# Lane collision: a needed reload is DEFERRED while another participant owns the shared OS lease.
+# Fresh markers also block admission for legacy participants. www.reload-pending is applied by the
+# worker or a later run once admission succeeds; marker expiry cannot release a live FD lease.
 DEPLOY_STATE="${ARBOS_DEPLOY_STATE:-/var/lib/arbos-deploy}"
 LANE_MARKER_MAX_S="${LANE_MARKER_MAX_S:-1800}"
 marker_fresh() { local f="$1" at; [[ -f "$f" ]] || return 1; at="$(stat -c %Y "$f" 2>/dev/null || echo 0)"; (( $(date +%s) - at < LANE_MARKER_MAX_S )); }
 lanes_busy() { marker_fresh "$DEPLOY_STATE/agentd.canary" || marker_fresh "$DEPLOY_STATE/relay.deploying"; }
-reload_www() { # the one place Caddy is reloaded; marked so a canary smoke starting now waits for it
-  systemctl is-active --quiet arbos-www.service || return 0
+reload_www() {
+  local rc
+  if (STATE="$DEPLOY_STATE"; deploy_lane_run www reload_www_now); then return 0; else rc=$?; fi
+  (( rc == 75 )) || return "$rc"
   mkdir -p "$DEPLOY_STATE"
-  printf 'by=%s\nat=%s\n' "arbos-refresh-mac-download" "$(date -u +%FT%TZ)" > "$DEPLOY_STATE/www.reloading"
+  printf 'at=%s\nreason=%s\n' "$(date -u +%FT%TZ)" "exclusive deploy lane busy" > "$DEPLOY_STATE/www.reload-pending"
+  echo "refresh-mac-download: arbos-www reload DEFERRED (exclusive deploy lane busy)"
+}
+reload_www_now() {
+  systemctl is-active --quiet arbos-www.service || return 0
   systemctl reload arbos-www.service || true
-  rm -f "$DEPLOY_STATE/www.reloading" "$DEPLOY_STATE/www.reload-pending"
+  rm -f "$DEPLOY_STATE/www.reload-pending"
   echo "refresh-mac-download: arbos-www reloaded"
 }
+
 # A reload deferred by an earlier run is applied first when the lanes are clear now.
 if [[ $RELOAD -eq 1 && -f "$DEPLOY_STATE/www.reload-pending" ]] && ! lanes_busy; then
   echo "refresh-mac-download: applying the reload deferred at $(sed -n 's/^at=//p' "$DEPLOY_STATE/www.reload-pending" | head -1)"

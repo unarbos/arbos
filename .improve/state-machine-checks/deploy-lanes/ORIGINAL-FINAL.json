@@ -1,0 +1,30 @@
+{
+  "exit_code": 1,
+  "test_groups": 11,
+  "positive_groups_passed": 3,
+  "failing_groups": 8,
+  "failing_assertions_including_subcases": 13,
+  "errors": 0,
+  "deliberate_policy_failures": 2,
+  "seconds": 0.8773382920771837,
+  "source_sha256": {
+    "arbos-deploy-worker": "d0fc83f991deb3afa0153ce350cf934e154dfa3b8baac5cdd43353f4299b6205",
+    "arbos-deploy-hook": "c298eb959bf37c76f96d793a07bc5763ff6998d150f3520662db111f41fa2eaa",
+    "refresh-mac-download.sh": "67e830c924e6755219494ccdaa1bc4c6cb08c3ac2e603bf23b64e9b0cd0c5a1b"
+  },
+  "source_unchanged": true,
+  "fixture_sha256": "085354b48596b01722fee01deda5259629e19e71f02659985f391cd81e511b27",
+  "selected_methods": [
+    "test_relay_ack_does_not_delete_new_request",
+    "test_voice_ack_does_not_delete_new_request",
+    "test_image_roll_ack_cannot_remove_a_newer_agentd_request",
+    "test_current_success_acknowledges_current_request",
+    "test_failure_retains_current_request",
+    "test_canary_and_relay_admission_are_exclusive",
+    "test_existing_canary_defers_relay",
+    "test_dry_tick_does_not_expire_real_markers",
+    "test_canary_deadline_defers_without_smoke",
+    "test_deferred_roll_retains_request_without_switch_or_hold",
+    "test_unexpected_smoke_exit_never_switches_default_or_holds_image"
+  ]
+}

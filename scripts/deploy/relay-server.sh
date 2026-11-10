@@ -431,6 +431,7 @@ UNIT
 systemctl daemon-reload
 systemctl enable --now arbos-site-sync.timer >/dev/null
 /usr/local/bin/arbos-site-sync || echo "WARNING: site sync failed; the seeded site stays"
+install -m 0644 "$REPO_DIR/scripts/deploy/deploy-state.sh" /usr/local/bin/deploy-state.sh
 install -m 0755 "$REPO_DIR/scripts/deploy/refresh-mac-download.sh" /usr/local/bin/arbos-refresh-mac-download
 /usr/local/bin/arbos-refresh-mac-download --no-reload || true
 if [[ -f "$WWW_DIR/Caddyfile" ]] && ! cmp -s "$REPO_DIR/scripts/deploy/Caddyfile" "$WWW_DIR/Caddyfile"; then

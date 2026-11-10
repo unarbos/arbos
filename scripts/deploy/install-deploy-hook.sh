@@ -7,6 +7,7 @@
 set -euo pipefail
 [[ $EUID -eq 0 ]] || { echo "run as root (sudo)" >&2; exit 1; }
 HERE="$(cd "$(dirname "$0")" && pwd)"
+install -m 0644 "$HERE/deploy-state.sh" /usr/local/bin/deploy-state.sh
 install -m 0755 "$HERE/arbos-deploy-hook" /usr/local/bin/arbos-deploy-hook
 bash -n "$HERE/arbos-deploy-worker"
 # A worker that cannot complete a tick is not installed (Oct 23 17:55-18:40; Oct 26 04:40-07:10, #1879:

@@ -1,0 +1,119 @@
+{
+  "source_unchanged": true,
+  "source_sha256": {
+    "scripts/deploy/deploy-state.sh": "b61a22696ff68d0f47fdd9926fa1e392041f32d1e53043f344514545403a299a",
+    "scripts/deploy/arbos-deploy-worker": "af33f30b8ca16937e71690f47b5d0ee62ad8b8f9704cb2d87fe48319b1cefd68",
+    "scripts/deploy/arbos-deploy-hook": "4f1164b7c135bb339b637378d1f156b85ca7681cbf2690d720ae2b722732c7fd",
+    "scripts/deploy/refresh-mac-download.sh": "6df9ed3cee876ef6285495bd0e5295124939098ba2783a405479b69cfcd3815b",
+    "scripts/deploy/install-deploy-hook.sh": "72ed346c312679b672c9d083045b358b4e96780283a1ba571e3009480292e8ac",
+    "scripts/deploy/relay-server.sh": "e66ac627ff03389f4e90c1a1616a93a403ab3597aa45f96861f1b5b51832f94c",
+    "scripts/deploy/test_deploy_lanes.py": "7312bf4ff07aa57c2a11caac9320a21a928e0b4c23ffe999741b209664f73c8f",
+    "scripts/deploy/tests/deploy_state_bridge.py": "c36db72506b9ab296a0a5a8f09c122771d399d56caa7a051440aa57e32317c3c",
+    "scripts/deploy/tests/check_state_mutants.py": "b46c1cc949e324df320da923d99c833c05bcec25d2aa8a6568c78fda97248a17",
+    "harness/arbos-pi-ext/deploy-state-laws.test.ts": "d9a224792f6c55144f61225be41a8ddf5bd42002a02ca9ce6d57ab72bb6d1914",
+    "docs/deployment-lanes.md": "3aa7f32d00f22e8859c1d482ed6a59d68e37caab27cec0327c7f4de68dca1756",
+    "docs/process-rules.md": "6bb4f954d9f12318fabc552447775cafbdc592f5b69ab6e7db82833471f28fcc"
+  },
+  "gates": [
+    {
+      "name": "adapters",
+      "exit_code": 0,
+      "seconds": 7.821263166028075,
+      "command": [
+        "/opt/homebrew/opt/python@3.14/bin/python3.14",
+        "-I",
+        "-B",
+        "scripts/deploy/test_deploy_lanes.py"
+      ]
+    },
+    {
+      "name": "syntax-deploy-state.sh",
+      "exit_code": 0,
+      "seconds": 0.0034124579979106784,
+      "command": [
+        "/bin/bash",
+        "-n",
+        "/Users/cister/arbos life/arbos-codex/.improve/evidence/deploy-lanes/tree/scripts/deploy/deploy-state.sh"
+      ]
+    },
+    {
+      "name": "syntax-arbos-deploy-worker",
+      "exit_code": 0,
+      "seconds": 0.0048787909327074885,
+      "command": [
+        "/bin/bash",
+        "-n",
+        "/Users/cister/arbos life/arbos-codex/.improve/evidence/deploy-lanes/tree/scripts/deploy/arbos-deploy-worker"
+      ]
+    },
+    {
+      "name": "syntax-arbos-deploy-hook",
+      "exit_code": 0,
+      "seconds": 0.0029200830031186342,
+      "command": [
+        "/bin/bash",
+        "-n",
+        "/Users/cister/arbos life/arbos-codex/.improve/evidence/deploy-lanes/tree/scripts/deploy/arbos-deploy-hook"
+      ]
+    },
+    {
+      "name": "syntax-refresh-mac-download.sh",
+      "exit_code": 0,
+      "seconds": 0.003105291980318725,
+      "command": [
+        "/bin/bash",
+        "-n",
+        "/Users/cister/arbos life/arbos-codex/.improve/evidence/deploy-lanes/tree/scripts/deploy/refresh-mac-download.sh"
+      ]
+    },
+    {
+      "name": "syntax-install-deploy-hook.sh",
+      "exit_code": 0,
+      "seconds": 0.0032330420799553394,
+      "command": [
+        "/bin/bash",
+        "-n",
+        "/Users/cister/arbos life/arbos-codex/.improve/evidence/deploy-lanes/tree/scripts/deploy/install-deploy-hook.sh"
+      ]
+    },
+    {
+      "name": "syntax-relay-server.sh",
+      "exit_code": 0,
+      "seconds": 0.0035778339952230453,
+      "command": [
+        "/bin/bash",
+        "-n",
+        "/Users/cister/arbos life/arbos-codex/.improve/evidence/deploy-lanes/tree/scripts/deploy/relay-server.sh"
+      ]
+    },
+    {
+      "name": "typecheck",
+      "exit_code": 0,
+      "seconds": 0.6263252919306979,
+      "command": [
+        "node",
+        "/Users/cister/arbos life/arbos-codex/harness/node_modules/.pnpm/typescript@5.9.3/node_modules/typescript/bin/tsc",
+        "--noEmit",
+        "--strict",
+        "--target",
+        "es2022",
+        "--module",
+        "NodeNext",
+        "--moduleResolution",
+        "NodeNext",
+        "--skipLibCheck",
+        "--types",
+        "node",
+        "deploy-state-laws.test.ts"
+      ]
+    }
+  ],
+  "adapters": 22,
+  "laws": 3,
+  "generated_cases": 768,
+  "protocol_tests": 1,
+  "mutants": 3,
+  "mutations": "mutants-final/RESULTS.json",
+  "limits": "macOS adapters use native kernel flock with stdlib CLI proxy; Linux CLI and original full worker selftest remain CI checks. No actual deployment/service invoked.",
+  "final_delta": "Add shared installed helper to relay change paths;22 adapters and worker syntax rerun, pure helper/TS/bridge unchanged from prior gates."
+}

@@ -26,32 +26,40 @@ if ! [[ "$sha" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
   exit 2
 fi
 sha="${sha,,}"
-mkdir -p "$QUEUE" 2>/dev/null || true
-if [[ ! -w "$QUEUE" ]]; then
-  echo "arbos-deploy-hook: cannot write $QUEUE" >&2
-  exit 1
-fi
-now="$(date -u +%s)"
-file="$QUEUE/$kind"
-first="$now"
-if [[ -f "$file" ]]; then
-  # Keep the first request time: the 5-minute cap counts from it.
-  prev_first="$(sed -n 's/^first_requested_at=//p' "$file" | head -1)"
-  if [[ "$prev_first" =~ ^[0-9]+$ ]]; then first="$prev_first"; fi
-  prev_sha="$(sed -n 's/^sha=//p' "$file" | head -1)"
-  if [[ "$prev_sha" == "$sha" ]]; then
-    echo "queued already: $kind $sha"
-    exit 0
-fi
-fi
-tmp="$(mktemp "$QUEUE/.$kind.XXXXXX")"
-{
-  echo "kind=$kind"
-  echo "sha=$sha"
-  echo "requested_at=$now"
-  echo "first_requested_at=$first"
-  echo "requested_by=$(id -un)"
-} > "$tmp"
-chmod 0644 "$tmp"
-mv -f "$tmp" "$file"
-echo "queued: $kind $sha"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/deploy/deploy-state.sh
+. "$HERE/deploy-state.sh"
+
+queue_request_locked() {
+  local kind="$1" sha="$2" now file first prev_first prev_sha tmp
+  mkdir -p "$QUEUE" 2>/dev/null || true
+  if [[ ! -w "$QUEUE" ]]; then
+    echo "arbos-deploy-hook: cannot write $QUEUE" >&2
+    return 1
+  fi
+  now="$(date -u +%s)"
+  file="$QUEUE/$kind"
+  first="$now"
+  if deploy_request_valid "$file" "$kind"; then
+    # Keep the first request time: the 5-minute cap counts from it.
+    prev_first="$(sed -n 's/^first_requested_at=//p' "$file" | head -1)"
+    if [[ "$prev_first" =~ ^[0-9]+$ ]]; then first="$prev_first"; fi
+    prev_sha="$(sed -n 's/^sha=//p' "$file" | head -1)"
+    if [[ "$prev_sha" == "$sha" ]]; then
+      echo "queued already: $kind $sha"
+      return 0
+  fi
+  fi
+  tmp="$(mktemp "$QUEUE/.$kind.XXXXXX")"
+  {
+    echo "kind=$kind"
+    echo "sha=$sha"
+    echo "requested_at=$now"
+    echo "first_requested_at=$first"
+    echo "requested_by=$(id -un)"
+  } > "$tmp"
+  chmod 0644 "$tmp"
+  mv -f "$tmp" "$file"
+  echo "queued: $kind $sha"
+}
+deploy_queue_transaction "$QUEUE" queue_request_locked "$kind" "$sha"

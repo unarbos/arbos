@@ -883,3 +883,13 @@ See `state-machine-checks/rpc-owner/`. The unchanged Linux-only RSS test remains
 mandatory in final Linux CI; Darwin's11P/1F is explained, not hidden. Late child
 session/model metadata publication is a related reviewer lead still being pinned;
 this checkpoint does not claim H3's entire caller audit finished.
+
+
+### AUX-H7 deployment core ownership checkpoint
+
+Shared request receipts and scoped kernel lane leases replace racy marker-only
+admission, with dry scratch ownership established first. Actual selected adapters
+22P and three generated laws768 cases plus protocol recovery pass; see
+`state-machine-checks/deploy-lanes/`. Two intentional fail-closed changes require
+owner review. Automatic publication ABA and a reviewer-found snapshot-switch
+restart lease bypass remain active follow-ups; this is not the final AUX-H7 exit.
