@@ -3394,6 +3394,53 @@ It ran as a real background job, not inline.";
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// #2964: a finished hidden job worker is not a bubble. Trimming the empty result when that
+    /// is the only sibling leaves the ask with neither an answer nor the stock "didn't answer"
+    /// line — the same blank chat Jacob saw for "Find me the best sushi in la".
+    #[tokio::test]
+    async fn a_sole_empty_result_stays_when_only_a_hidden_job_spoke() {
+        use crate::agent::trim_wordless_result_row;
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATQUICKREPLY0002964";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        let empty = {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            agent.test_open_row(&host, t).await;
+            t.assistant_msg_id.clone()
+        };
+        {
+            let h = host.lock().await;
+            let job_row = arbos_core::ids::ulid();
+            let part = h
+                .doc
+                .start_assistant_message(&job_row, "m-busy", &agent.cfg.device_id);
+            h.doc.set_message_fields(
+                &job_row,
+                &[
+                    (
+                        "job",
+                        json!({ "id": "01JOBSUSHI000000000000000", "title": "Finding sushi", "kind": "research" }),
+                    ),
+                    ("hidden", json!(true)),
+                    ("worker", json!(true)),
+                ],
+            );
+            h.doc.append_text(&job_row, &part, "Done.");
+            h.doc.finish_message(&job_row, MessageStatus::Done);
+            h.doc.finish_message(&empty, MessageStatus::Done);
+            assert_eq!(
+                trim_wordless_result_row(&h.doc, &empty),
+                "kept",
+                "a hidden job is not a visible answer; keep the empty result for the stock line"
+            );
+            let m = h.doc.message(&empty).expect("empty result stays");
+            assert_ne!(m.rest.get("hidden").and_then(Value::as_bool), Some(true));
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// Jacob, "run bubble sort" (Mac, 2026-10-25 18:08 UTC, image 0.1.132): the answer went out as
     /// a `send_message` bubble, the fresh result row it opened ended wordless, and the Mac drew
     /// "The agent didn't answer. Ask again." under the answer. The trailing wordless row is
