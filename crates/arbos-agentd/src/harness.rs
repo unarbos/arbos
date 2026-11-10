@@ -3192,7 +3192,7 @@ else:
 "#;
             let child = RpcChild::spawn(
                 "synthetic-rpc-cleanup",
-                "/usr/bin/python3",
+                "python3",
                 &["-I".into(), "-u".into(), "-c".into(), code.into()],
                 &[
                     ("FIXTURE_READY".into(), ready.to_string_lossy().into_owned()),

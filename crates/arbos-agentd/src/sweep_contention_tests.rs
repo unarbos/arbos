@@ -626,6 +626,12 @@ async fn a_cancel_and_timer_tick_keep_live_work_and_name_only_the_stopping_sessi
     // still send its RPC and reap its tree; owned cleanup then pauses without making
     // the independent Ready subject's registry receipt unreadable.
     let adapter = agent.adapter(Harness::Pi);
+    // A /proc mark appears at spawn, before GetState completes and publishes Ready.
+    // Capture only the actual admitted worker, rather than racing its boot receipt.
+    wait_for("the doomed worker publishes its Ready receipt", || {
+        adapter.is_open(&doomed) == Some(true)
+    })
+    .await;
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = tokio::sync::oneshot::channel();
     let held = adapter.clone();
