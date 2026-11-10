@@ -1,9 +1,11 @@
 # Phase 5: observability
 
-**Status: partial logging implementation; repository-wide tracing and wide-event
-migration blocked.** The shell audit changes below do not implement OTLP export,
-global definition coverage, a tracing lint, W3C propagation or all-service request
-completion events. No collector/account was created and nothing was deployed.
+**Status: scoped logging complete; broader observability deferred by the owner.**
+The owner will confirm the existing telemetry backend with the maintainer. Keep
+these logging fixes and finish the other phases independently. OTLP export,
+global definition coverage, a tracing lint, W3C propagation and all-service request
+completion events are explicitly deferred, not implemented by this PR. No
+collector/account was created and nothing was deployed.
 
 The required [Boris Tane article](https://loggingsucks.com/) was read. Its useful
 distinction here is between JSON records and a complete request history: collect
@@ -49,11 +51,11 @@ An admission record is not a completion event: after `exec`, this wrapper does
 not observe the command's final duration/outcome. No completion or tail-sampling
 coverage is claimed by this slice.
 
-## Blocked requirements and exact next boundary
+## Deferred requirements and exact next boundary
 
 | Required result | Current state / prerequisite |
 | --- | --- |
-| Environment-configured OTLP export | No repository backend contract; owner supplies/chooses existing collector and environment-managed auth. Native SDK/provider lifecycle must compile and pass loopback-export tests once native gates run. |
+| Environment-configured OTLP export | No repository backend contract; owner supplies/chooses existing collector and environment-managed auth. Provider lifecycle must compile and pass loopback-export tests when this deferred integration resumes. |
 | Trace every required function definition | Not implemented globally. Instrument native handlers/helpers/request makers at definitions, skip arguments, and preserve pure-core/FFI platform boundaries. |
 | Fail lint on untraced async exports and make it pass | Not implemented. Needs AST-backed feature-aware production inventory, genuine negative control, then verified instrumentation. Do not exclude whole domains or substitute an all-green regex check. |
 | Authenticated request context on spans | Not implemented globally. Carry authorized user/account/resource context through tasks, blocking work, streams and jobs; preserve ring isolation. |
@@ -62,18 +64,20 @@ coverage is claimed by this slice.
 | Tail retention of all errors/slow work | Not implemented. Requires completed-event and collector buffering/retention contract; head sampling cannot provide it. Retain security admission audit events. |
 | Secret-safe fields in every sink | Improved only at the scoped audit writers. Existing upstream error strings, text sinks, voice and other service logs need source-level schemas/redaction tests. |
 
-The native build/CI blockers prevent verifying the required cross-service
-migration. [Official Rust exporter documentation](https://opentelemetry.io/docs/languages/rust/exporters/)
-was checked; a design or dependency declaration is not presented as working
-OpenTelemetry. Test only against loopback collector/provider stubs when resumed.
+Earlier native disk/CI limitations were resolved for subsequent phases; they are
+not the reason to defer this work. The owner's telemetry/backend decision is the
+explicit remaining prerequisite. [Official Rust exporter documentation](https://opentelemetry.io/docs/languages/rust/exporters/)
+was checked; a design or dependency declaration is not working OpenTelemetry.
+Use loopback collector/provider stubs when the integration resumes.
 
 ## Needs the owner
 
 Confirm the operator's OTLP-compatible destination/auth contract, or choose an
 optional environment-configured collector on existing infrastructure. Recommended
 default: no new account or paid service; keep export disabled until configured.
-Approve native fork CI or provide build capacity before the global integration.
-Preserve anonymous client diagnostics and existing source-redaction boundaries.
+The owner will ask the maintainer what telemetry is already in use. No action on
+this decision is required to finish the other improvement phases. Preserve
+anonymous client diagnostics and existing source-redaction boundaries.
 
 ## Before / after verification
 
@@ -89,8 +93,8 @@ Preserve anonymous client diagnostics and existing source-redaction boundaries.
 | Claude admission median (10 per arm) | 31.46 ms | 31.23 ms |
 | Harness typecheck/build/tests | baseline pass / pass / 14 pass | source unchanged; baseline carried, not rerun here |
 | Rust formatting | baseline pass | Rust sources unchanged; baseline carried |
-| Full native typecheck/tests/build | blocked | blocked; no runtime counts claimed |
-| OTLP/global trace lint/propagation/wide completion | absent | still blocked; not implemented by audit fix |
+| Full native typecheck/tests/build | initially unmeasured here | Shell-only scope; complete combined native gates are recorded separately in Phase9 |
+| OTLP/global trace lint/propagation/wide completion | absent | Deferred by owner; not implemented by audit fix |
 
 Run `python3 -m unittest discover -s image/tests -p test_tool_audit.py -v`.
 Tests execute real scripts and benign local commands, with temporary audit paths
@@ -105,5 +109,5 @@ clock-format defect; ordinary metadata parses and quoted/newline metadata fails.
 The ten-sample admission timings are noisy process-level smoke measurements, not
 statistically significant speedups or application latency results. A baseline
 Claude outlier was about 698 ms. No performance benefit is claimed here.
-Independent scoped source/test review passes. Shellcheck/actionlint remain absent
-locally; no full Linux/image/native CI success is implied by these checks.
+Independent scoped source/test review passes. These local checks do not establish a full Linux/image/native CI verdict.
+Later CI/tool availability is recorded in Phase9, separately from this scoped run.

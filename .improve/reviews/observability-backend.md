@@ -1,3 +1,8 @@
+> Scope update: broader telemetry is explicitly deferred by the owner while the
+> maintainer confirms the existing backend. Completed admission logging stays.
+> Earlier SDK/disk/fork-CI limitations below are historical and no longer a blanket
+> blocker; they must not delay the other improvement phases.
+
 # Phase 5 — backend observability evidence and prerequisites
 
 **Status: full Rust/OpenTelemetry migration blocked, not implemented.** Read-only inspection covers all 283 Rust files in the 11 assigned backend/shared crates, focused tracing/context/network/redaction paths, workspace/crate manifests and checked-in deployment/docs. No secrets, environment files, account settings or production endpoints were read. Local native build disk and fork CI execution remain blocked. No generated global annotations or fake passing coverage lint added.
