@@ -1,0 +1,16 @@
+{
+  "sources": {
+    "apps/ios/Arbos/Arbos/Sync/RelayAPI.swift": "0d50ec56055a25ad6cb7f595a679a03e33b14b9aeb7eacb887008ac592ca2985",
+    "apps/ios/Arbos/Arbos/Store/ServerStore.swift": "44df2eeb3bbf93d8b9f65e597cf2feeffb79e342734ddfdd2e9f42735142c932",
+    "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f",
+    "apps/ios/Arbos/Arbos/Store/AppModel.swift": "f73b529139a3ba6d630740a6e22172a30fe66906e55260bf7943851593bcad38"
+  },
+  "compile_exit": 0,
+  "exit_code": 0,
+  "seconds": 0.7319892080267891,
+  "fixture_sha256": "1692dc4af3cf7a681e5b852d44a50bab59dcd72562cda1e94986013f4f41a44e",
+  "counts": {
+    "passed": 4,
+    "failed": 0
+  }
+}

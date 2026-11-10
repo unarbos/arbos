@@ -1,0 +1,20 @@
+{
+  "passed": 58,
+  "failed": 0,
+  "groups": 6,
+  "seconds": 5.150564834009856,
+  "source_before": {
+    "apps/ios/Arbos/Arbos/UI/SettingsView.swift": "8382795bb2f0b389cf9fff49c0d14927813a697f3bb95abec6874ead9a89d139",
+    "apps/ios/Arbos/Arbos/Store/AppModel.swift": "f73b529139a3ba6d630740a6e22172a30fe66906e55260bf7943851593bcad38",
+    "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f",
+    "apps/ios/Arbos/Arbos/UI/Confirm.swift": "403bead31c038e936be09378419cb9f50e6c0ffedb8bc9bf17287488cd0c44ee"
+  },
+  "source_after": {
+    "apps/ios/Arbos/Arbos/UI/SettingsView.swift": "8382795bb2f0b389cf9fff49c0d14927813a697f3bb95abec6874ead9a89d139",
+    "apps/ios/Arbos/Arbos/Store/AppModel.swift": "f73b529139a3ba6d630740a6e22172a30fe66906e55260bf7943851593bcad38",
+    "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f",
+    "apps/ios/Arbos/Arbos/UI/Confirm.swift": "403bead31c038e936be09378419cb9f50e6c0ffedb8bc9bf17287488cd0c44ee"
+  },
+  "source_unchanged": true,
+  "scope": "Actual selected save/open/token/anchored-dialog bodies plus real SettingsOrigin/WorkLifetime/account acceptance; fake profile/connector collaborators, no UI rendering or SDK proof. All execution uses clean environment and macOS sandbox deny network*."
+}

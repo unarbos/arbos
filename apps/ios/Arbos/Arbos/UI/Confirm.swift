@@ -39,14 +39,24 @@ extension View {
 
     /// The same for a confirm keyed on an item ("Remove @sam?"): shown while `item` is set,
     /// cleared on either button. `spec` builds the words from the item.
-    func confirm<T>(item: Binding<T?>, spec: @escaping (T) -> ConfirmSpec,
-                    perform: @escaping (T) -> Void) -> some View {
+    func confirm<T: Identifiable>(item: Binding<T?>, spec: @escaping (T) -> ConfirmSpec,
+                                  isCurrent: @escaping () -> Bool = { true },
+                                  perform: @escaping (T) -> Void) -> some View {
         let current = item.wrappedValue
-        let shown = Binding(get: { item.wrappedValue != nil }, set: { if !$0 { item.wrappedValue = nil } })
+        let matches = {
+            guard isCurrent(), let current else { return false }
+            return item.wrappedValue?.id == current.id
+        }
+        let clear = {
+            if matches() { item.wrappedValue = nil }
+        }
+        let shown = Binding(get: matches, set: { if !$0 { clear() } })
         return confirm(current.map(spec) ?? ConfirmSpec(title: "", action: ""), isPresented: shown,
-                       onCancel: { item.wrappedValue = nil }) {
-            if let value = item.wrappedValue { perform(value) }
+                       onCancel: clear) {
+            guard matches(), let current else { return }
+            // Clear the observed selection before its effect can publish another one.
             item.wrappedValue = nil
+            perform(current)
         }
     }
 }

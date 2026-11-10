@@ -1,0 +1,24 @@
+{
+  "sources": {
+    "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f",
+    "apps/ios/Arbos/Arbos/Sync/DraftSendQueue.swift": "0985e595fa179b2919fed2c5b401d8f15a956fed78ce9b9f6ed6d20ecebc9e94",
+    ".improve/state-machine-checks/ios-account-work/draft_oracle.swift": "e765f56716b522e56924635e09b721d0834465a01dc89ebc37c487c37075a7c4"
+  },
+  "outcomes": [
+    {
+      "seed": 90008,
+      "outcome": "Passed",
+      "runs": 256
+    },
+    {
+      "seed": 90009,
+      "outcome": "Passed",
+      "runs": 256
+    },
+    {
+      "seed": 90010,
+      "outcome": "Passed",
+      "runs": 256
+    }
+  ]
+}

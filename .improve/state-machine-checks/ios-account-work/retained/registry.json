@@ -1,0 +1,42 @@
+{
+  "sources": {
+    "apps/ios/Arbos/Arbos/Store/AppModel.swift": "f73b529139a3ba6d630740a6e22172a30fe66906e55260bf7943851593bcad38",
+    "apps/ios/Arbos/Arbos/Sync/RelayAPI.swift": "0d50ec56055a25ad6cb7f595a679a03e33b14b9aeb7eacb887008ac592ca2985",
+    "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f"
+  },
+  "fixture_sha256": "09c4c4d4fc97979dd3ebfaf15e005b95fd401475d431e80902061a60fee8fca1",
+  "compile_exit": 0,
+  "exit_code": 0,
+  "results": {
+    "failed": 0,
+    "passed": 6,
+    "results": [
+      {
+        "name": "late-registry-success-cannot-paint-save-or-create-B-rooms",
+        "pass": true
+      },
+      {
+        "name": "late-registry-refusal-cannot-unpair-B",
+        "pass": true
+      },
+      {
+        "name": "late-machine-followup-cannot-create-or-prune-B-rooms",
+        "pass": true
+      },
+      {
+        "name": "late-registry-poll-entry-cannot-admit-B",
+        "pass": true
+      },
+      {
+        "name": "current-registry-saves-and-creates-rooms",
+        "pass": true
+      },
+      {
+        "name": "skipped-incomplete-cache-fallback-control",
+        "pass": true
+      }
+    ],
+    "total": 6
+  },
+  "seconds": 0.833770208992064
+}

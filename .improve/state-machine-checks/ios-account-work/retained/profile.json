@@ -1,0 +1,46 @@
+{
+  "sources": {
+    "apps/ios/Arbos/Arbos/UI/ProfilePages.swift": "5abdc957ed6932d6c3b7e59200cd21e2737dcfd36fd005c9f77b7e9b3eefbab0",
+    "AppModel.swift": "f73b529139a3ba6d630740a6e22172a30fe66906e55260bf7943851593bcad38",
+    "WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f"
+  },
+  "fixture_sha256": "f7c3245e0a9f77e10b51b61823b6527f30c355ca2f27dc9cd144900cc24d488f",
+  "compile_exit": 0,
+  "exit_code": 0,
+  "results": {
+    "failed": 0,
+    "passed": 7,
+    "results": [
+      {
+        "name": "queued-group-edit-refuses-B",
+        "pass": true
+      },
+      {
+        "name": "late-group-edit-no-dismiss-or-busy-release",
+        "pass": true
+      },
+      {
+        "name": "current-group-edit-fields-control",
+        "pass": true
+      },
+      {
+        "name": "queued-invite-share-refuses-B",
+        "pass": true
+      },
+      {
+        "name": "late-invite-no-share-or-busy-release",
+        "pass": true
+      },
+      {
+        "name": "current-cached-share-control",
+        "pass": true
+      },
+      {
+        "name": "current-created-share-control",
+        "pass": true
+      }
+    ],
+    "total": 7
+  },
+  "seconds": 0.724297417094931
+}

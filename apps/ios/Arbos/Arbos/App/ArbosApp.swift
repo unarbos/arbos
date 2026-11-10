@@ -33,9 +33,11 @@ struct RootView: View {
     }
 
     var body: some View {
+        let work = model.accountWork()
         ZStack {
             if model.isPaired {
                 MainShellView()
+                    .id(model.accountLifetime.ticket)
             } else {
                 SignInView()
             }
@@ -44,6 +46,7 @@ struct RootView: View {
             // into the greeting bubble of the chat underneath.
             if model.isPaired, let firstLogin = model.firstLogin {
                 FirstLoginView(state: firstLogin)
+                    .id(model.accountLifetime.ticket)
                     .zIndex(10)
                     .transition(.asymmetric(insertion: .identity, removal: .opacity))
             }
@@ -82,8 +85,9 @@ struct RootView: View {
         // screen (D82) while the machine boots (8–11 s), as Telegram and Grok ask for
         // the name before the first chat; the notifications primer waits for both.
         .sheet(isPresented: Binding(get: { model.needsProfileSetup },
-                                    set: { model.needsProfileSetup = $0 })) {
+                                    set: { if model.acceptsAccountWork(work) { model.needsProfileSetup = $0 } })) {
             ProfileEditView(onboarding: true)
+                    .id(model.accountLifetime.ticket)
                 .environmentObject(model)
                 .environment(\.theme, theme)
                 .presentationDetents([.height(420), .large])
@@ -96,8 +100,9 @@ struct RootView: View {
         .sheet(isPresented: $showPrimer) {
             NotificationsPrimerView().environment(\.theme, theme)
         }
-        .sheet(item: $model.profile, onDismiss: { model.profilePath = [] }) { target in
+        .sheet(item: $model.profile, onDismiss: { if model.acceptsAccountWork(work) { model.profilePath = [] } }) { target in
             ProfileSheet(target: target)
+                    .id(model.accountLifetime.ticket)
                 .environmentObject(model)
                 .environment(\.theme, theme)
                 .presentationDetents([.large])
@@ -131,14 +136,15 @@ struct RootView: View {
                 .preferredColorScheme(theme.isDark ? .dark : .light)
         }
         .sheet(isPresented: $feedback.isPresented) {
-            FeedbackSheet().environmentObject(model).environment(\.theme, theme)
+            FeedbackSheet()
+                    .id(model.accountLifetime.ticket).environmentObject(model).environment(\.theme, theme)
         }
         // Shake or a system screenshot → Send feedback (TestFlight-style screenshot path).
         .onReceive(NotificationCenter.default.publisher(for: FeedbackCenter.shake)) { _ in
-            openFeedbackFromGesture()
+            openFeedbackFromGesture(work: work)
         }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.userDidTakeScreenshotNotification)) { _ in
-            openFeedbackFromGesture()
+            openFeedbackFromGesture(work: work)
         }
         .onChange(of: model.isPaired, initial: true) { _, paired in schedulePrimer(paired) }
         .onChange(of: model.firstLogin == nil) { _, _ in schedulePrimer(model.isPaired) }
@@ -157,13 +163,19 @@ struct RootView: View {
             // Invite links (D88): arbos://join/<code> — what arbos.life/s/<code> hands to the app.
             if url.scheme == "arbos", url.host == "join" {
                 let code = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-                Task { await model.joinFromLink(code: code) }
+                Task {
+                    guard model.acceptsAccountWork(work) else { return }
+                    await model.joinFromLink(code: code, expectedOwner: work?.owner)
+                }
                 return
             }
             // Group invite links: arbos://join-group/<code> — what arbos.life/g/<code> hands to the app.
             if url.scheme == "arbos", url.host == "join-group" {
                 let code = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-                Task { await model.joinGroupFromLink(code: code) }
+                Task {
+                    guard model.acceptsAccountWork(work) else { return }
+                    await model.joinGroupFromLink(code: code, expectedOwner: work?.owner)
+                }
                 return
             }
             guard AuthEndpoints.isConnectorCallback(url) else { return }
@@ -178,7 +190,8 @@ struct RootView: View {
     /// The chat is read from the topmost chat anywhere in the path, not from `path.last`,
     /// because a profile now pushes over the chat it was opened from: reading only the top
     /// would have named the screen a chat and carried no chat id at all.
-    private func openFeedbackFromGesture() {
+    private func openFeedbackFromGesture(work: AccountWork?) {
+        guard model.acceptsAccountWork(work) else { return }
         guard model.isPaired else { return }
         let screen: String
         switch model.path.last {
@@ -198,7 +211,9 @@ struct RootView: View {
     private func schedulePrimer(_ paired: Bool) {
         guard paired, !model.isFixture, !DebugHooks.liveDemo, DebugHooks.show == nil, push.shouldShowPrimer, !showPrimer,
               model.firstLogin == nil else { return }
+        let work = model.accountWork()
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+            guard model.acceptsAccountWork(work) else { return }
             // Never on top of another sheet (feedback, settings, profile setup…) or the first-login screen.
             if push.shouldShowPrimer, model.isPaired, !feedback.isPresented, !model.needsProfileSetup, model.firstLogin == nil { showPrimer = true }
         }

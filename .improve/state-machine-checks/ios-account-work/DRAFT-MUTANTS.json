@@ -1,0 +1,86 @@
+{
+  "sources": {
+    "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f",
+    "apps/ios/Arbos/Arbos/Sync/DraftSendQueue.swift": "0985e595fa179b2919fed2c5b401d8f15a956fed78ce9b9f6ed6d20ecebc9e94",
+    "harness/arbos-pi-ext/draft-send.laws.ts": "2f4dbe2a23e9d68daf3cb8f83253660d18854bad66daefd5302997af91df673d",
+    ".improve/state-machine-checks/ios-account-work/draft_bridge.py": "7973e63fa94ba338886fefa44e65d858c3b65746322814c99ea1c046231e80a0",
+    ".improve/state-machine-checks/ios-account-work/draft_oracle.swift": "e765f56716b522e56924635e09b721d0834465a01dc89ebc37c487c37075a7c4"
+  },
+  "mutants": [
+    {
+      "name": "stale-attempt",
+      "seed": 90009,
+      "result": {
+        "_tag": "Falsified",
+        "initialInput": {
+          "a": [
+            17
+          ],
+          "b": [
+            -3
+          ],
+          "noise": []
+        },
+        "shrunkInput": {
+          "a": [
+            0
+          ],
+          "b": [
+            1
+          ],
+          "noise": []
+        },
+        "failure": {
+          "_tag": "ReturnedFalse"
+        },
+        "runs": 1,
+        "discards": 0,
+        "shrinks": 1,
+        "replay": "[0,\"90009\",0,0,[0],\"ReturnedFalse\"]"
+      },
+      "replay_failed": true,
+      "mutation": {
+        "before": "current.ticket == ticket",
+        "after": "true"
+      }
+    },
+    {
+      "name": "closed-reopens",
+      "seed": 90010,
+      "result": {
+        "_tag": "Falsified",
+        "initialInput": {
+          "a": [
+            -3
+          ],
+          "b": [
+            1
+          ],
+          "noise": []
+        },
+        "shrunkInput": {
+          "a": [
+            0
+          ],
+          "b": [
+            1
+          ],
+          "noise": []
+        },
+        "failure": {
+          "_tag": "ReturnedFalse"
+        },
+        "runs": 1,
+        "discards": 0,
+        "shrinks": 1,
+        "replay": "[0,\"90010\",0,0,[0],\"ReturnedFalse\"]"
+      },
+      "replay_failed": true,
+      "mutation": {
+        "before": "case (.closed, .enqueue):\n            return (.closed, .enqueued(.refused))",
+        "after": "case (.closed, .enqueue(_, let account, _, _)):\n            return transition(.open(account, [:]), event)"
+      }
+    }
+  ],
+  "duration_seconds": 4.971437375061214
+}

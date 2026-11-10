@@ -141,7 +141,8 @@ final class PushManager: NSObject, ObservableObject, UNUserNotificationCenterDel
 
     /// A message notification with the sender's picture, built like the
     /// service extension builds remote ones.
-    func postMessage(id: String, info: [AnyHashable: Any]) async {
+    func postMessage(id: String, info: [AnyHashable: Any], isCurrent: @MainActor () -> Bool = { true }) async {
+        guard isCurrent(), !Task.isCancelled else { return }
         guard let push = MessagePush(userInfo: info) else { return }
         if isMutedChat(push.chatId) || isHiddenChat(push.chatId) { return }
         // APNs already showed a banner for this chat a moment ago — skip the twin.
@@ -154,6 +155,7 @@ final class PushManager: NSObject, ObservableObject, UNUserNotificationCenterDel
         base.userInfo = info
         base.threadIdentifier = push.chatId
         let content = await push.makeContent(base: base)
+        guard isCurrent(), !Task.isCancelled else { return }
         try? await UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: id, content: content, trigger: nil))
     }
 

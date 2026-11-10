@@ -3,7 +3,7 @@ import Foundation
 /// Local acceptance authority for asynchronous work. Closing an owner invalidates
 /// its tickets before resource cleanup awaits; reopening never revives an old ticket.
 struct WorkLifetime {
-    struct Ticket: Equatable, Sendable {
+    struct Ticket: Hashable, Sendable {
         fileprivate let owner: UUID
         fileprivate let generation: UInt64
     }

@@ -1324,11 +1324,16 @@ extension AppModel {
         }
         #endif
         guard let url = blobURL(projectId: item.slot, key: ref) else { return }
+        guard let work = accountWork() else { return }
+        let headers = authHeaders
         Task { @MainActor in
-            guard let (data, _) = await MediaFetch.data(url, headers: authHeaders) else {
+            guard accountLifetime.accepts(work.owner) else { return }
+            guard let (data, _) = await MediaFetch.data(url, headers: headers) else {
+                guard accountLifetime.accepts(work.owner) else { return }
                 fail(UserError.fromText("forward \(item.name)", "the file could not be fetched"))
                 return
             }
+            guard accountLifetime.accepts(work.owner) else { return }
             let pending = PendingAttachment(name: item.name, mime: item.mime, data: data)
             switch target.kind {
             case .people(let c):
@@ -1386,10 +1391,14 @@ extension AppModel {
             return
         }
         #endif
+        guard let work = accountWork() else { return }
         Task { @MainActor in
+            guard accountLifetime.accepts(work.owner) else { return }
             var pending: [PendingAttachment] = []
             for a in payload.attachments {
-                guard let data = await fetchForForward(a, slot: slot) else { continue }
+                let fetched = await fetchForForward(a, slot: slot, work: work)
+                guard accountLifetime.accepts(work.owner) else { return }
+                guard let data = fetched else { continue }
                 pending.append(PendingAttachment(name: a.name, mime: a.mime, data: data))
             }
             // A chart's fallback picture is written as its own part, linked to the chart,
@@ -1397,15 +1406,18 @@ extension AppModel {
             var extraParts: [[String: Any]] = []
             for c in payload.charts {
                 var fallbackRef: String?
-                if let a = c.fallback, let data = await fetchForForward(a, slot: slot) {
+                if let a = c.fallback, let data = await fetchForForward(a, slot: slot, work: work) {
                     do {
-                        fallbackRef = try await uploadBlob(slot: targetSlot, name: a.name, mime: a.mime, data: data)
+                        fallbackRef = try await uploadBlob(slot: targetSlot, name: a.name, mime: a.mime, data: data, work: work)
                     } catch {
+                        guard accountLifetime.accepts(work.owner) else { return }
                         fail("forward the chart's picture", error)
                     }
                 }
+                guard accountLifetime.accepts(work.owner) else { return }
                 extraParts.append(contentsOf: c.forwardParts(fallbackRef: fallbackRef))
             }
+            guard accountLifetime.accepts(work.owner) else { return }
             guard !payload.text.isEmpty || !pending.isEmpty || !extraParts.isEmpty else {
                 notice = Notice(text: "Couldn't forward the message")
                 return
@@ -1423,12 +1435,15 @@ extension AppModel {
 
     /// The bytes of one attachment being forwarded, from the source chat's slot; a
     /// miss is reported and the attachment is left out.
-    private func fetchForForward(_ a: Attachment, slot: String) async -> Data? {
+    private func fetchForForward(_ a: Attachment, slot: String, work: AccountWork) async -> Data? {
+        guard accountLifetime.accepts(work.owner) else { return nil }
         guard let ref = a.blobRef, let url = blobURL(projectId: slot, key: ref),
               let (data, _) = await MediaFetch.data(url, headers: authHeaders) else {
+            guard accountLifetime.accepts(work.owner) else { return nil }
             notice = Notice(text: "Couldn't forward \(a.name)")
             return nil
         }
+        guard accountLifetime.accepts(work.owner) else { return nil }
         return data
     }
 }

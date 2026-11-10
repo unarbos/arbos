@@ -23,6 +23,7 @@ struct FeedbackSheet: View {
     private var canSend: Bool { !sending && (center.screenshot != nil || !note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) }
 
     var body: some View {
+        let work = model.accountWork()
         NavigationStack {
             ScrollView {
                 VStack(spacing: 16) {
@@ -31,7 +32,7 @@ struct FeedbackSheet: View {
                     } else {
                         // The sheet's note: at the top of the body, under the title (Jacob 2026-10-26).
                         if let error {
-                            ErrorNote(id: "feedback-error", error: error, detailsOpen: $errorDetailsOpen, onTryAgain: send)
+                            ErrorNote(id: "feedback-error", error: error, detailsOpen: $errorDetailsOpen, onTryAgain: { send(work: work) })
                                 .padding(.horizontal, 16)
                         }
                         if let project {
@@ -48,7 +49,7 @@ struct FeedbackSheet: View {
                             .font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
                             .multilineTextAlignment(.center)
                             .padding(.horizontal, 28)
-                        Button(action: send) {
+                        Button(action: { send(work: work) }) {
                             HStack(spacing: 8) {
                                 if sending { ProgressView().tint(theme.onPrimary).controlSize(.small) }
                                 Text(sending ? "Sending…" : "Send feedback")
@@ -81,16 +82,19 @@ struct FeedbackSheet: View {
                 #if DEBUG
                 if let text = DebugHooks.autoFeedback, sent == nil, !sending {
                     note = text
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { send() }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { send(work: work) }
                 }
                 #endif
             }
             .onChange(of: photoItem) { _, item in
                 guard let item else { return }
                 Task {
+                    guard model.acceptsAccountWork(work) else { return }
                     if let data = try? await item.loadTransferable(type: Data.self), let img = UIImage(data: data) {
+                        guard model.acceptsAccountWork(work) else { return }
                         center.screenshot = img
                     }
+                    guard model.acceptsAccountWork(work) else { return }
                     photoItem = nil
                 }
             }
@@ -205,7 +209,8 @@ struct FeedbackSheet: View {
 
     // MARK: Send
 
-    private func send() {
+    private func send(work: AccountWork?) {
+        guard model.acceptsAccountWork(work) else { return }
         guard canSend else { return }
         sending = true
         error = nil
@@ -214,15 +219,19 @@ struct FeedbackSheet: View {
         let image = center.screenshot
         let projectId = center.context.projectId
         Task {
+            guard model.acceptsAccountWork(work) else { return }
             do {
-                let id = try await model.sendFeedback(note: text, image: image, projectId: projectId)
+                let id = try await model.sendFeedback(note: text, image: image, projectId: projectId, expectedOwner: work?.owner)
+                guard model.acceptsAccountWork(work) else { return }
                 sent = id ?? "ok"
             } catch {
+                guard model.acceptsAccountWork(work) else { return }
                 let e = error as? RelayError
                 self.error = (e?.status == 404 || e?.status == 405)
                     ? UserError.refused("send your feedback", "This relay cannot take feedback yet. Try again after the next relay update.")
                     : UserError.classify("send your feedback", error)
             }
+            guard model.acceptsAccountWork(work) else { return }
             sending = false
         }
     }

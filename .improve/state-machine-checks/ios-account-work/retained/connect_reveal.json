@@ -1,0 +1,21 @@
+{
+  "sources": {
+    "apps/ios/Arbos/Arbos/UI/PeopleSheets.swift": "a3de3c740086f6ac3640c9741d37d6743b19c960a27c0220ae8d14c9797968a6",
+    "apps/ios/Arbos/Arbos/Store/AppModel.swift": "f73b529139a3ba6d630740a6e22172a30fe66906e55260bf7943851593bcad38",
+    "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f"
+  },
+  "compile_exit": 0,
+  "fixture_sha256": "9c6438464bb4db26bb250bfc3b4e1b32a2a1e7a9216f74133794315ff339c576",
+  "exit_code": 0,
+  "results": {
+    "cases": {
+      "current-first-heartbeat-control": true,
+      "late-status-no-B-view-paint": true,
+      "retired-render-no-fresh-query": true
+    },
+    "failed": 0,
+    "passed": 3,
+    "total": 3
+  },
+  "seconds": 0.5760760409757495
+}

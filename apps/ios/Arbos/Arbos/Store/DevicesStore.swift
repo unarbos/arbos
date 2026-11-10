@@ -135,34 +135,43 @@ extension RelayAPI {
 
 extension AppModel {
     /// Settings → Devices opened: read the list (the fixture seeds three).
-    func refreshDevices() async {
+    func refreshDevices(expectedOwner: WorkLifetime.Ticket? = nil) async {
+        if let expectedOwner, !accountLifetime.accepts(expectedOwner) { return }
         if isFixture {
             devices = AuthDevice.visible(AuthDevice.fixture())
             devicesLoaded = true
             return
         }
-        guard credentials != nil else { return }
+        guard credentials != nil, let work = accountWork(expectedOwner: expectedOwner) else { return }
         do {
-            devices = try await AuthDevice.visible(relay.devices())
+            let value = try await AuthDevice.visible(work.api.devices())
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
+            devices = value
             devicesError = nil
         } catch {
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
             devicesError = UserError.classify("load your devices", error)
         }
+        guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
         devicesLoaded = true
     }
 
     /// Sign another device out. The current device never goes through here
     /// (its row offers Sign out instead), so you are never stranded.
     func revokeDevice(_ id: String) {
-        guard AuthDevice.removeOther(&devices, id: id) else { return }
-        guard !isFixture else { return }
+        if isFixture {
+            AuthDevice.removeOther(&devices, id: id)
+            return
+        }
+        guard let work = accountWork(), AuthDevice.removeOther(&devices, id: id) else { return }
         Task {
             do {
-                try await relay.revokeDevice(id)
+                try await work.api.revokeDevice(id)
             } catch {
+                guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
                 fail("sign out that device", error)
             }
-            await refreshDevices()
+            await refreshDevices(expectedOwner: work.owner)
         }
     }
 }

@@ -128,6 +128,7 @@ struct ServerChannelsView: View {
     private var server: Server? { model.server(serverId) }
 
     var body: some View {
+        let work = model.accountWork()
         ZStack(alignment: .top) {
             theme.bg.ignoresSafeArea()
             ScrollViewReader { proxy in
@@ -162,7 +163,8 @@ struct ServerChannelsView: View {
                         // owners/admins, never on #general; Delete asks first.
                         .contextMenu {
                             Button {
-                                Task { await model.archiveChannel(channel, true) }
+                                guard let work else { return }
+                                Task { await model.archiveChannel(channel, true, expectedOwner: work.owner) }
                             } label: { Label("Archive", systemImage: "archivebox") }
                             if server.isAdmin, channel.id != server.general?.id {
                                 Divider()
@@ -181,7 +183,7 @@ struct ServerChannelsView: View {
             .scrollContentBackground(.hidden)
             .background(theme.bg)
         .claimFailures("join-server", ["join the server"])
-            .refreshable { await model.refreshServers() }
+            .refreshable { if let work { await model.refreshServers(expectedOwner: work.owner) } }
             .rigListScroll(proxy, ids: server?.liveChannels.map(\.id) ?? [])
             }
             ListTopFade(screen: .serverChannels)
@@ -195,8 +197,9 @@ struct ServerChannelsView: View {
         }
         .confirm(item: $deletingChannel, spec: { c in
             ConfirmSpec(title: "Delete #\(c.name)?", message: "Deletes the channel and its messages for everyone in the server.", action: "Delete")
-        }) { c in
-            Task { _ = await model.deleteChannel(c) }
+        }, isCurrent: { model.acceptsAccountWork(work) }) {c in
+            guard let work else { return }
+            Task { _ = await model.deleteChannel(c, expectedOwner: work.owner) }
         }
         // `AppModel.forgetServer` empties the path when the server goes (deleted, left, removed).
     }
@@ -267,11 +270,12 @@ struct NewChannelSheet: View {
     private var slug: String { AppModel.channelSlug(name) }
 
     var body: some View {
+        let work = model.accountWork()
         NavigationStack {
             ScrollView {
                 VStack(spacing: 22) {
                     // The sheet's note: under the header, before the first field.
-                    SheetErrorNote(id: "new-channel-error", onTryAgain: create)
+                    SheetErrorNote(id: "new-channel-error", onTryAgain: { if let work { create(work: work) } })
                         .padding(.horizontal, 16)
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Channel name").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
@@ -284,7 +288,7 @@ struct NewChannelSheet: View {
                                 .autocorrectionDisabled()
                                 .focused($focused)
                                 .submitLabel(.done)
-                                .onSubmit { create() }
+                                .onSubmit { if let work { create(work: work) } }
                         }
                         .controlField()
                         if !name.isEmpty, slug != name {
@@ -307,7 +311,7 @@ struct NewChannelSheet: View {
             .background(theme.bg)
             .sheetHeader(title: "New channel", onLeading: { dismiss() },
                          action: creating ? "Creating…" : "Create", actionEnabled: !slug.isEmpty && !creating,
-                         onAction: { create() })
+                         onAction: { if let work { create(work: work) } })
             .onAppear { focused = true }
         }
         .tint(theme.text)
@@ -319,16 +323,19 @@ struct NewChannelSheet: View {
         .claimFailures("new-channel", ["create the channel"])
     }
 
-    private func create() {
-        guard !slug.isEmpty, !creating else { return }
+    private func create(work: AccountWork) {
+        guard model.accountLifetime.accepts(work.owner), !Task.isCancelled,
+              !slug.isEmpty, !creating else { return }
         creating = true
         Task {
-            if let c = await model.createChannel(serverId: serverId, name: slug, restricted: restricted) {
+            guard model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
+            defer { if model.accountLifetime.accepts(work.owner) { creating = false } }
+            let created = await model.createChannel(serverId: serverId, name: slug, restricted: restricted, expectedOwner: work.owner)
+            guard model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
+            if let c = created {
                 dismiss()
                 model.open(channel: c)
             }
-            // A refusal is the claimed failure, drawn by the note at the top of the sheet.
-            creating = false
         }
     }
 }
@@ -367,6 +374,7 @@ struct JoinServerView: View {
     }
 
     var body: some View {
+        let work = model.accountWork()
         VStack(spacing: 18) {
             GlassCircle(size: 92) { // control-size: exception illustrationDiscs
                 Image(systemName: "link").font(.system(size: 34, weight: .medium)).foregroundStyle(theme.text)
@@ -384,11 +392,11 @@ struct JoinServerView: View {
                 .keyboardType(.URL)
                 .focused($focused)
                 .submitLabel(.join)
-                .onSubmit(join)
-                .onChange(of: link) { _, _ in searchOpen() }
+                .onSubmit { if let work { join(work: work) } }
+                .onChange(of: link) { _, _ in if let work { searchOpen(work: work) } }
                 .controlField()
                 .padding(.horizontal, 24)
-            Button(action: join) {
+            Button(action: { if let work { join(work: work) } }) {
                 Text(joining ? "Joining…" : "Join")
                     .font(theme.font(Theme.body, weight: .semibold)).foregroundStyle(theme.onPrimary)
                     .frame(maxWidth: .infinity).frame(height: 50)
@@ -399,12 +407,12 @@ struct JoinServerView: View {
             .opacity(code.isEmpty || joining || (!looksLikeInvite && openHits.isEmpty) ? 0.45 : 1)
             .padding(.horizontal, 24)
             // The note: under the Join button, before the open-server list — the shared element.
-            SheetErrorNote(id: "join-server-error", onTryAgain: join)
+            SheetErrorNote(id: "join-server-error", onTryAgain: { if let work { join(work: work) } })
                 .padding(.horizontal, 24)
             if !openHits.isEmpty {
                 VStack(spacing: 0) {
                     ForEach(Array(openHits.enumerated()), id: \.element.id) { i, s in
-                        Button { joinOpen(s) } label: { ServerPickRow(server: s) }
+                        Button { if let work { joinOpen(s, work: work) } } label: { ServerPickRow(server: s) }
                             .buttonStyle(.plain)
                         if i < openHits.count - 1 {
                             Rectangle().fill(theme.separator).frame(height: 0.5).padding(.leading, 72)
@@ -426,42 +434,50 @@ struct JoinServerView: View {
         .onAppear { focused = true }
     }
 
-    private func searchOpen() {
+    private func searchOpen(work: AccountWork) {
+        guard model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
         let q = link.trimmingCharacters(in: .whitespacesAndNewlines)
         guard q.count >= 2, !looksLikeInvite else { openHits = []; searching = false; return }
         searching = true
         Task {
+            guard model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
             try? await Task.sleep(nanoseconds: 250_000_000)
-            guard q == link.trimmingCharacters(in: .whitespacesAndNewlines) else { return }
-            openHits = await model.searchOpenServers(q)
-            if q == link.trimmingCharacters(in: .whitespacesAndNewlines) { searching = false }
+            guard model.accountLifetime.accepts(work.owner), !Task.isCancelled,
+                  q == link.trimmingCharacters(in: .whitespacesAndNewlines) else { return }
+            let hits = await model.searchOpenServers(q, expectedOwner: work.owner)
+            guard model.accountLifetime.accepts(work.owner), !Task.isCancelled,
+                  q == link.trimmingCharacters(in: .whitespacesAndNewlines) else { return }
+            openHits = hits
+            searching = false
         }
     }
 
-    private func join() {
-        guard !joining else { return }
+    private func join(work: AccountWork) {
+        guard model.accountLifetime.accepts(work.owner), !Task.isCancelled, !joining else { return }
         if looksLikeInvite {
             guard !code.isEmpty else { return }
             joining = true
             Task {
-                if await model.joinServer(code: code) {
-                    onDone()
-                }
-                joining = false
+                guard model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
+                defer { if model.accountLifetime.accepts(work.owner) { joining = false } }
+                let joined = await model.joinServer(code: code, expectedOwner: work.owner)
+                guard model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
+                if joined { onDone() }
             }
             return
         }
-        if let first = openHits.first { joinOpen(first) }
+        if let first = openHits.first { joinOpen(first, work: work) }
     }
 
-    private func joinOpen(_ s: Server) {
-        guard !joining else { return }
+    private func joinOpen(_ s: Server, work: AccountWork) {
+        guard model.accountLifetime.accepts(work.owner), !Task.isCancelled, !joining else { return }
         joining = true
         Task {
-            if await model.joinOpenServer(s.id) {
-                onDone()
-            }
-            joining = false
+            guard model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
+            defer { if model.accountLifetime.accepts(work.owner) { joining = false } }
+            let joined = await model.joinOpenServer(s.id, expectedOwner: work.owner)
+            guard model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
+            if joined { onDone() }
         }
     }
 }

@@ -281,19 +281,21 @@ struct SecretsPage: View {
     private var pending: [SecretRequestItem] { overview?.requests.filter(\.isPending) ?? [] }
 
     var body: some View {
+        let work = model.accountWork()
         SettingsPage(title: "Secrets") {
             SettingsGroup(footer: paused
                           ? "Secrets are paused. Agents can't use any secret until you turn this off."
                           : "Agents can't use any secret while paused.") {
                 SecretToggleRow(icon: "pause.fill", title: "Pause all secrets", tint: theme.danger,
                                 // Flips at once (optimistic; a relay error puts it back) — no confirm (Jacob, Oct 21).
-                                isOn: Binding(get: { paused }, set: { on in model.setSecretsPaused(on) }),
+                                isOn: Binding(get: { paused }, set: { on in guard let work, model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }; model.setSecretsPaused(on) }),
                                 disabled: model.isFixture || overview == nil)
             }
             if !pending.isEmpty {
                 SettingsGroup(header: "Waiting for you") {
                     ForEach(pending) { r in
                         SecretRequestRow(request: r) { decision in
+                            guard let work, model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
                             model.secrets?.requests.removeAll { $0.id == r.id }
                             model.decideSecretRequest(r.id, decision: decision, projectId: r.projectId)
                         }
@@ -338,7 +340,9 @@ struct SecretsPage: View {
             }
         }
         .task {
-            await model.refreshSecrets()
+            guard let work else { return }
+            await model.refreshSecrets(expectedOwner: work.owner)
+            guard model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
             if let env = landing?.stripping(prefix: "secret:"),
                let s = model.secrets?.secrets.first(where: { $0.env == env }) {
                 rigSecretId = s.id
@@ -413,6 +417,7 @@ struct SecretPage: View {
     private var secret: SecretItem? { model.secrets?.secrets.first { $0.id == secretId } }
 
     var body: some View {
+        let work = model.accountWork()
         SettingsPage(title: secret?.env ?? "Secret") {
             if let s = secret {
                 if !s.note.isEmpty {
@@ -451,7 +456,7 @@ struct SecretPage: View {
                     HStack {
                         Text("Ask every time").font(theme.font(Theme.body)).foregroundStyle(theme.text)
                         Spacer()
-                        Toggle("", isOn: Binding(get: { s.askEveryTime }, set: { model.patchSecret(s.id, ["ask_every_time": $0]) }))
+                        Toggle("", isOn: Binding(get: { s.askEveryTime }, set: { guard let work, model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }; model.patchSecret(s.id, ["ask_every_time": $0]) }))
                             .labelsHidden().tint(theme.online).disabled(model.isFixture)
                     }
                     .padding(.horizontal, 16).frame(minHeight: SettingsRow.height)
@@ -461,7 +466,7 @@ struct SecretPage: View {
                               : "Off: agents get a placeholder and the relay fills the value in only through egress, for the allowed hosts. Turn this on only for keys you would hand to a CLI or SDK that must read $\(s.env) itself — once on, programs can act with it, including spending, without asking you.") {
                     SecretToggleRow(icon: "terminal.fill", title: "Real value in the environment",
                                     subtitle: s.injectEnv ? "On · agents with access see the value" : "Agents with access get \(SecretsText.realVarList(s)) itself",
-                                    isOn: Binding(get: { s.injectEnv }, set: { model.patchSecret(s.id, ["inject_env": $0]) }),
+                                    isOn: Binding(get: { s.injectEnv }, set: { guard let work, model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }; model.patchSecret(s.id, ["inject_env": $0]) }),
                                     disabled: model.isFixture)
                 }
                 SettingsGroup(header: "Agents") {
@@ -499,7 +504,7 @@ struct SecretPage: View {
                     HStack(spacing: 12) {
                         Text("Others who ask").font(theme.font(Theme.body)).foregroundStyle(theme.text)
                         Spacer(minLength: 8)
-                        OthersAskSegment(value: s.othersAsk) { model.patchSecret(s.id, ["others_ask": $0]) }
+                        OthersAskSegment(value: s.othersAsk) { guard let work, model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }; model.patchSecret(s.id, ["others_ask": $0]) }
                             .disabled(model.isFixture)
                     }
                     .padding(.horizontal, 16).frame(minHeight: SettingsRow.height)
@@ -541,29 +546,39 @@ struct SecretPage: View {
                     .disabled(model.isFixture)
             }
         }
-        .task { await load() }
+        .task { if let work { await load(work: work) } }
         .onAppear {
+            guard let work else { return }
             switch DebugHooks.secretSheet {
-            case "people": DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { showAddDirector = true }
-            case "person": DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { editingDirector = secret?.directors.first }
+            case "people": DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                guard model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
+                showAddDirector = true
+            }
+            case "person": DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                guard model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
+                editingDirector = secret?.directors.first
+            }
             default: break
             }
         }
         .confirm(ConfirmSpec(title: "Delete \(secret?.env ?? "secret")?", message: "Agents lose it immediately. Activity is kept.",
                              action: "Delete secret"), isPresented: $confirmDelete) {
+            guard let work, model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
             model.deleteSecret(secretId)
             dismiss()
         }
         .confirm(ConfirmSpec(title: "Remove from all agents?",
                              message: "Every agent loses \(secret?.env ?? "it") within seconds. You can turn them back on one by one.",
                              action: "Remove from all agents"), isPresented: $confirmRevoke) {
+            guard let work, model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
             model.revokeSecretEverywhere(secretId)
         }
         .confirm(ConfirmSpec(title: "Scrub \(secret?.env ?? "secret") from context?",
                              message: "Arbos looks for this value in chats, agent sessions and logs, and replaces every copy with a redaction.",
                              action: "Scrub from context"), isPresented: $confirmScrub) {
+            guard let work, model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
             model.scrubSecret(secretId)
-            Task { await load() }
+            Task { await load(work: work) }
         }
         .sheet(isPresented: $showEdit) {
             if let s = secret {
@@ -617,14 +632,15 @@ struct SecretPage: View {
 
     /// A People row: the mirror of an agent row — avatar, name, `@handle · note · asked 2 min ago`, switch.
     private func personRow(_ s: SecretItem, _ d: SecretDirector) -> some View {
-        HStack(spacing: 14) {
+        let work = model.accountWork()
+        return HStack(spacing: 14) {
             PersonAvatar(url: d.avatarUrl, handle: d.handle.isEmpty ? d.userId : d.handle, size: SettingsRow.tile, name: d.name, id: d.userId)
             VStack(alignment: .leading, spacing: 2) {
                 Text(d.displayName).font(theme.font(Theme.body)).foregroundStyle(theme.text)
                 Text(personSubtitle(d)).font(theme.font(Theme.tiny)).foregroundStyle(theme.muted).lineLimit(2)
             }
             Spacer(minLength: 8)
-            Toggle("", isOn: Binding(get: { d.enabled }, set: { model.setSecretPerson(secretId: s.id, userId: d.userId, enabled: $0) }))
+            Toggle("", isOn: Binding(get: { d.enabled }, set: { guard let work, model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }; model.setSecretPerson(secretId: s.id, userId: d.userId, enabled: $0) }))
                 .labelsHidden().tint(theme.online).disabled(model.isFixture)
                 .accessibilityLabel("\(d.displayName) may ask")
         }
@@ -643,7 +659,8 @@ struct SecretPage: View {
     }
 
     private func agentRow(_ s: SecretItem, _ a: SecretAgentAccess) -> some View {
-        HStack(spacing: 14) {
+        let work = model.accountWork()
+        return HStack(spacing: 14) {
             if let p = model.project(a.projectId) {
                 AgentAvatar(project: p, theme: theme, size: SettingsRow.tile)
             } else {
@@ -654,7 +671,7 @@ struct SecretPage: View {
                 Text(accessSubtitle(a)).font(theme.font(Theme.tiny)).foregroundStyle(theme.muted).lineLimit(2)
             }
             Spacer(minLength: 8)
-            Toggle("", isOn: Binding(get: { a.enabled }, set: { model.setSecretAccess(secretId: s.id, projectId: a.projectId, enabled: $0) }))
+            Toggle("", isOn: Binding(get: { a.enabled }, set: { guard let work, model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }; model.setSecretAccess(secretId: s.id, projectId: a.projectId, enabled: $0) }))
                 .labelsHidden().tint(theme.online).disabled(model.isFixture)
                 .accessibilityLabel("\(a.name) access")
         }
@@ -671,8 +688,10 @@ struct SecretPage: View {
         return parts.joined(separator: " · ")
     }
 
-    private func load() async {
-        if let (s, acts) = try? await model.relay.secret(secretId) {
+    private func load(work: AccountWork) async {
+        guard model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
+        if let (s, acts) = try? await work.api.secret(secretId) {
+            guard model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
             activity = acts
             if let i = model.secrets?.secrets.firstIndex(where: { $0.id == s.id }) {
                 model.secrets?.secrets[i] = s
@@ -747,7 +766,8 @@ struct NewSecretSheet: View {
     }
 
     var body: some View {
-        SheetFrame(title: "New secret", action: "Save", canSave: canSave, busy: busy, save: { Task { await save() } }, error: error) {
+        let work = model.accountWork()
+        SheetFrame(title: "New secret", action: "Save", canSave: canSave, busy: busy, save: { guard let work else { return }; Task { await save(work: work) } }, error: error) {
             Picker("Kind", selection: $kind) {
                 Text("Key").tag("key")
                 Text("Login").tag("login")
@@ -797,11 +817,12 @@ struct NewSecretSheet: View {
         }
     }
 
-    private func save() async {
+    private func save(work: AccountWork) async {
+        guard model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
         guard canSave, !busy else { return }
         busy = true
         error = nil
-        defer { busy = false }
+        defer { if model.accountLifetime.accepts(work.owner) { busy = false } }
         var body: [String: Any] = [
             "name": name.trimmingCharacters(in: .whitespaces),
             "kind": kind,
@@ -817,11 +838,14 @@ struct NewSecretSheet: View {
             body["value"] = value
         }
         do {
-            _ = try await model.relay.createSecret(body)
+            _ = try await work.api.createSecret(body)
+            guard model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
             value = ""; password = ""
-            await model.refreshSecrets()
+            await model.refreshSecrets(expectedOwner: work.owner)
+            guard model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
             dismiss()
         } catch {
+            guard model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
             self.error = UserError.classify("save the secret", error)
         }
     }
@@ -840,7 +864,8 @@ struct EditSecretSheet: View {
     @State private var error: UserError?
 
     var body: some View {
-        SheetFrame(title: secret.env, action: "Save", canSave: SecretsText.validName(name), busy: busy, save: { Task { await save() } }, error: error) {
+        let work = model.accountWork()
+        SheetFrame(title: secret.env, action: "Save", canSave: SecretsText.validName(name), busy: busy, save: { guard let work else { return }; Task { await save(work: work) } }, error: error) {
             SecretField(label: "Name", hint: "Agents see it as $\(SecretsText.envName(name)).") {
                 SecretTextField(placeholder: "STRIPE_KEY", text: $name, mono: true, capitalization: .characters)
             }
@@ -874,9 +899,10 @@ struct EditSecretSheet: View {
         }
     }
 
-    private func save() async {
+    private func save(work: AccountWork) async {
+        guard model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
         busy = true
-        defer { busy = false }
+        defer { if model.accountLifetime.accepts(work.owner) { busy = false } }
         var body: [String: Any] = [
             "name": name.trimmingCharacters(in: .whitespaces),
             "note": note.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -884,10 +910,14 @@ struct EditSecretSheet: View {
         ]
         body["expires_at"] = expires.map { Int64($0.timeIntervalSince1970 * 1000) } ?? NSNull()
         do {
-            _ = try await model.relay.patchSecret(secret.id, body)
-            await model.refreshSecrets()
+            _ = try await work.api.patchSecret(secret.id, body)
+            await model.refreshSecrets(expectedOwner: work.owner)
+            guard model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
             dismiss()
-        } catch { self.error = UserError.classify("save the secret", error) }
+        } catch {
+            guard model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
+            self.error = UserError.classify("save the secret", error)
+        }
     }
 }
 
@@ -906,7 +936,8 @@ struct ReplaceValueSheet: View {
     private var canSave: Bool { secret.kind == "login" ? !password.isEmpty : !value.isEmpty }
 
     var body: some View {
-        SheetFrame(title: "Replace value", action: "Replace", canSave: canSave, busy: busy, save: { Task { await save() } }, error: error) {
+        let work = model.accountWork()
+        SheetFrame(title: "Replace value", action: "Replace", canSave: canSave, busy: busy, save: { guard let work else { return }; Task { await save(work: work) } }, error: error) {
             Text("The old value keeps working for 24 hours while agents pick up the new one.")
                 .font(theme.font(Theme.small)).foregroundStyle(theme.muted)
             if secret.kind == "login" {
@@ -924,18 +955,24 @@ struct ReplaceValueSheet: View {
         .onAppear { username = secret.username ?? "" }
     }
 
-    private func save() async {
+    private func save(work: AccountWork) async {
+        guard model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
         busy = true
-        defer { busy = false }
+        defer { if model.accountLifetime.accepts(work.owner) { busy = false } }
         let body: [String: Any] = secret.kind == "login"
             ? ["fields": ["url": url, "username": username, "password": password]]
             : ["value": value]
         do {
-            _ = try await model.relay.replaceSecretValue(secret.id, body)
+            _ = try await work.api.replaceSecretValue(secret.id, body)
+            guard model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
             value = ""; password = ""
-            await model.refreshSecrets()
+            await model.refreshSecrets(expectedOwner: work.owner)
+            guard model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
             dismiss()
-        } catch { self.error = UserError.classify("replace the value", error) }
+        } catch {
+            guard model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
+            self.error = UserError.classify("replace the value", error)
+        }
     }
 }
 
@@ -982,7 +1019,8 @@ struct DirectorEditSheet: View {
     @State private var busy = false
 
     var body: some View {
-        SheetFrame(title: director.displayName, action: "Save", canSave: true, busy: busy, save: { Task { await save() } }) {
+        let work = model.accountWork()
+        SheetFrame(title: director.displayName, action: "Save", canSave: true, busy: busy, save: { guard let work else { return }; Task { await save(work: work) } }) {
             HStack(spacing: 12) {
                 PersonAvatar(url: director.avatarUrl, handle: director.handle.isEmpty ? director.userId : director.handle, size: 44, name: director.name, id: director.userId)
                 VStack(alignment: .leading, spacing: 2) {
@@ -997,6 +1035,7 @@ struct DirectorEditSheet: View {
                 SecretTextField(placeholder: "only 1k usd of credit usage per day", text: $note, capitalization: .sentences)
             }
             Button(role: .destructive) {
+                guard let work, model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
                 model.removeSecretDirector(secretId: secret.id, userId: director.userId)
                 dismiss()
             } label: {
@@ -1013,16 +1052,19 @@ struct DirectorEditSheet: View {
         .onAppear { note = director.note }
     }
 
-    private func save() async {
+    private func save(work: AccountWork) async {
+        guard model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
         busy = true
-        defer { busy = false }
+        defer { if model.accountLifetime.accepts(work.owner) { busy = false } }
         let text = note.trimmingCharacters(in: .whitespacesAndNewlines)
-        _ = await model.secretsAction("Save") {
-            let s = try await model.relay.setSecretDirector(secret.id, userId: director.userId, note: text)
+        _ = await model.secretsAction("Save", work: work) { api in
+            let s = try await api.setSecretDirector(secret.id, userId: director.userId, note: text)
+            guard model.accountLifetime.accepts(work.owner), !Task.isCancelled else { throw CancellationError() }
             if let i = model.secrets?.secrets.firstIndex(where: { $0.id == s.id }) {
                 model.secrets?.secrets[i] = s
             }
         }
+        guard model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
         dismiss()
     }
 }
@@ -1038,7 +1080,8 @@ struct GiveAccessSheet: View {
     @State private var busy = false
 
     var body: some View {
-        SheetFrame(title: "Give access", action: "Save", canSave: !picked.isEmpty, busy: busy, save: { Task { await save() } }) {
+        let work = model.accountWork()
+        SheetFrame(title: "Give access", action: "Save", canSave: !picked.isEmpty, busy: busy, save: { guard let work else { return }; Task { await save(work: work) } }) {
             Text("\(secret.env) will be usable by the agents you pick, without them ever seeing it.")
                 .font(theme.font(Theme.small)).foregroundStyle(theme.muted)
             SecretField(label: "Agents") { AgentPickerField(picked: $picked) }
@@ -1049,17 +1092,21 @@ struct GiveAccessSheet: View {
         }
     }
 
-    private func save() async {
+    private func save(work: AccountWork) async {
+        guard model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
         busy = true
-        defer { busy = false }
+        defer { if model.accountLifetime.accepts(work.owner) { busy = false } }
         let before = Set(secret.agents.filter(\.enabled).map(\.projectId))
         for pid in picked.subtracting(before) {
-            _ = try? await model.relay.setSecretAccess(secret.id, projectId: pid, enabled: true, note: note.isEmpty ? nil : note)
+            guard model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
+            _ = try? await work.api.setSecretAccess(secret.id, projectId: pid, enabled: true, note: note.isEmpty ? nil : note)
         }
         for pid in before.subtracting(picked) {
-            _ = try? await model.relay.setSecretAccess(secret.id, projectId: pid, enabled: false)
+            guard model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
+            _ = try? await work.api.setSecretAccess(secret.id, projectId: pid, enabled: false)
         }
-        await model.refreshSecrets()
+        await model.refreshSecrets(expectedOwner: work.owner)
+        guard model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
         dismiss()
     }
 }
@@ -1077,7 +1124,8 @@ struct AccessEditSheet: View {
     @State private var busy = false
 
     var body: some View {
-        SheetFrame(title: access.name, action: "Save", canSave: true, busy: busy, save: { Task { await save() } }) {
+        let work = model.accountWork()
+        SheetFrame(title: access.name, action: "Save", canSave: true, busy: busy, save: { guard let work else { return }; Task { await save(work: work) } }) {
             SecretField(label: "Note for the agent", hint: SecretsText.accessNoteHint) { SecretTextField(placeholder: "reports only · may spend up to $5 a day", text: $note, capitalization: .sentences) }
             SecretField(label: "Where it may be used (optional)", hint: secret.hosts.isEmpty ? "Leave empty to decide the first time \(access.name) uses it." : "Also allowed: \(secret.hosts.joined(separator: ", ")) (from the secret).") {
                 SecretTextField(placeholder: "api.stripe.com", text: $hosts, keyboard: .URL)
@@ -1094,6 +1142,7 @@ struct AccessEditSheet: View {
                 }
             }
             Button(role: .destructive) {
+                guard let work, model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
                 model.setSecretAccess(secretId: secret.id, projectId: access.projectId, enabled: !access.enabled)
                 dismiss()
             } label: {
@@ -1112,14 +1161,16 @@ struct AccessEditSheet: View {
         }
     }
 
-    private func save() async {
+    private func save(work: AccountWork) async {
+        guard model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
         busy = true
-        defer { busy = false }
+        defer { if model.accountLifetime.accepts(work.owner) { busy = false } }
         var scope: [String: Any] = ["kind": "all"]
         if !everywhere, let c = access.scopeChatId { scope = ["kind": "chat", "chat_id": c] }
-        _ = try? await model.relay.setSecretAccess(secret.id, projectId: access.projectId, enabled: access.enabled,
+        _ = try? await work.api.setSecretAccess(secret.id, projectId: access.projectId, enabled: access.enabled,
                                                    note: note, hosts: hosts.split(whereSeparator: { $0 == "," || $0 == " " }).map(String.init), scope: scope)
-        await model.refreshSecrets()
+        await model.refreshSecrets(expectedOwner: work.owner)
+        guard model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
         dismiss()
     }
 }
@@ -1138,6 +1189,7 @@ struct SecretsActivityPage: View {
     @State private var loading = false
 
     var body: some View {
+        let work = model.accountWork()
         SettingsPage(title: title) {
             SettingsGroup(footer: items.isEmpty && !loading ? "No activity in the last 30 days." : nil) {
                 if items.isEmpty && loading {
@@ -1145,17 +1197,19 @@ struct SecretsActivityPage: View {
                 }
                 ActivityRows(items: items)
                 if nextBefore != nil {
-                    SettingsActionRow(title: loading ? "Loading…" : "Load more", disabled: loading) { Task { await load(more: true) } }
+                    SettingsActionRow(title: loading ? "Loading…" : "Load more", disabled: loading) { Task { if let work { await load(more: true, work: work) } } }
                 }
             }
         }
-        .task { await load(more: false) }
+        .task { if let work { await load(more: false, work: work) } }
     }
 
-    private func load(more: Bool) async {
+    private func load(more: Bool, work: AccountWork) async {
+        guard model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
         loading = true
-        defer { loading = false }
-        if let r = try? await model.relay.secretsActivity(secretId: secretId, projectId: projectId, vaultId: vaultId, before: more ? nextBefore : nil, limit: 100) {
+        defer { if model.accountLifetime.accepts(work.owner) { loading = false } }
+        if let r = try? await work.api.secretsActivity(secretId: secretId, projectId: projectId, vaultId: vaultId, before: more ? nextBefore : nil, limit: 100) {
+            guard model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
             items = more ? items + r.items : r.items
             nextBefore = r.nextBefore
         }
@@ -1175,6 +1229,7 @@ struct AgentSecretsPage: View {
     private var name: String { project?.name ?? "Agent" }
 
     var body: some View {
+        let work = model.accountWork()
         SettingsPage(title: "\(name) · Secrets") {
             SettingsGroup(footer: agentFooter) {
                 if let d = data, d.paused {
@@ -1186,6 +1241,7 @@ struct AgentSecretsPage: View {
                 ForEach(data?.items ?? []) { item in
                     SecretRowLabel(icon: item.secret?.injectEnv == true ? "terminal.fill" : item.icon, title: item.title, subtitle: itemSubtitle(item), dim: data?.paused ?? false) {
                         Toggle("", isOn: Binding(get: { item.enabled }, set: { on in
+                            guard let work, model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
                             if let s = item.secret {
                                 model.setSecretAccess(secretId: s.id, projectId: projectId, enabled: on)
                             } else if let v = item.vault {
@@ -1205,6 +1261,7 @@ struct AgentSecretsPage: View {
                 SettingsGroup(header: "Waiting for you") {
                     ForEach(reqs) { r in
                         SecretRequestRow(request: r) { decision in
+                            guard let work, model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
                             model.projectSecrets[projectId]?.requests.removeAll { $0.id == r.id }
                             model.decideSecretRequest(r.id, decision: decision, projectId: projectId)
                         }
@@ -1228,8 +1285,9 @@ struct AgentSecretsPage: View {
             }
         }
         .task {
-            await model.refreshProjectSecrets(projectId)
-            if model.secrets == nil { await model.refreshSecrets() }
+            guard let work else { return }
+            await model.refreshProjectSecrets(projectId, expectedOwner: work.owner)
+            if model.secrets == nil { await model.refreshSecrets(expectedOwner: work.owner) }
         }
         .sheet(isPresented: $showGive) {
             NavigationStack { PickSecretsSheet(projectId: projectId) }
@@ -1277,7 +1335,8 @@ struct PickSecretsSheet: View {
     }
 
     var body: some View {
-        SheetFrame(title: "Give access", action: "Save", canSave: !picked.isEmpty, busy: busy, save: { Task { await save() } }) {
+        let work = model.accountWork()
+        SheetFrame(title: "Give access", action: "Save", canSave: !picked.isEmpty, busy: busy, save: { guard let work else { return }; Task { await save(work: work) } }) {
             if secrets.isEmpty {
                 Text("Add an API key or password in Settings → Secrets first.").font(theme.font(Theme.small)).foregroundStyle(theme.muted)
             }
@@ -1301,17 +1360,20 @@ struct PickSecretsSheet: View {
             .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(theme.bubbleAssistant))
             SecretField(label: "Note for the agent", hint: SecretsText.accessNoteHint) { SecretTextField(placeholder: "reports only · may spend up to $5 a day", text: $note, capitalization: .sentences) }
         }
-        .task { if model.secrets == nil { await model.refreshSecrets() } }
+        .task { if let work, model.secrets == nil { await model.refreshSecrets(expectedOwner: work.owner) } }
     }
 
-    private func save() async {
+    private func save(work: AccountWork) async {
+        guard model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
         busy = true
-        defer { busy = false }
+        defer { if model.accountLifetime.accepts(work.owner) { busy = false } }
         for id in picked {
-            _ = try? await model.relay.setSecretAccess(id, projectId: projectId, enabled: true, note: note.isEmpty ? nil : note)
+            guard model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
+            _ = try? await work.api.setSecretAccess(id, projectId: projectId, enabled: true, note: note.isEmpty ? nil : note)
         }
-        await model.refreshProjectSecrets(projectId)
-        await model.refreshSecrets()
+        await model.refreshProjectSecrets(projectId, expectedOwner: work.owner)
+        await model.refreshSecrets(expectedOwner: work.owner)
+        guard model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
         dismiss()
     }
 }
@@ -1329,7 +1391,8 @@ struct ConnectVaultSheet: View {
     @State private var error: UserError?
 
     var body: some View {
-        SheetFrame(title: "Connect 1Password", action: "Connect", canSave: token.trimmingCharacters(in: .whitespaces).count > 20, busy: busy, save: { Task { await connect() } }, error: error) {
+        let work = model.accountWork()
+        SheetFrame(title: "Connect 1Password", action: "Connect", canSave: token.trimmingCharacters(in: .whitespaces).count > 20, busy: busy, save: { guard let work else { return }; Task { await connect(work: work) } }, error: error) {
             step(1, "In 1Password, create a service account with read access to one vault, e.g. \"Arbos — Research\".") {
                 SwiftUI.Link("Open 1password.com", destination: URL(string: "https://my.1password.com/developer-tools/infrastructure-secrets/serviceaccount/")!)
                     .font(theme.font(Theme.small, weight: .medium)).foregroundStyle(Color(hex: "#1084FE")!)
@@ -1354,24 +1417,31 @@ struct ConnectVaultSheet: View {
         }
     }
 
-    private func connect() async {
+    private func connect(work: AccountWork) async {
+        guard model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
         busy = true
         error = nil
-        defer { busy = false }
+        defer { if model.accountLifetime.accepts(work.owner) { busy = false } }
         do {
-            _ = try await model.relay.connectVault(provider: "onepassword", token: token.trimmingCharacters(in: .whitespacesAndNewlines), name: nil,
+            _ = try await work.api.connectVault(provider: "onepassword", token: token.trimmingCharacters(in: .whitespacesAndNewlines), name: nil,
                                                    agents: picked.map { ["project_id": $0, "note": note] })
+            guard model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
             token = ""
-            await model.refreshSecrets()
+            await model.refreshSecrets(expectedOwner: work.owner)
+            guard model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
             dismiss()
         } catch let e as RelayError {
+            guard model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
             switch e.type {
             case "bad_token": error = UserError.refused("connect 1Password", "That token didn't work. Check it was copied whole.")
             case "no_vaults": error = UserError.refused("connect 1Password", "This token can read no vaults.")
             case "rate_limited": error = UserError.of("connect 1Password", .rateLimited, "HTTP \(e.status) rate_limited")
             default: error = UserError.fromRelay("connect 1Password", e)
             }
-        } catch { self.error = UserError.classify("connect 1Password", error) }
+        } catch {
+            guard model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
+            self.error = UserError.classify("connect 1Password", error)
+        }
     }
 }
 
@@ -1395,6 +1465,7 @@ struct VaultPage: View {
     }
 
     var body: some View {
+        let work = model.accountWork()
         SettingsPage(title: vault.map { "\($0.providerLabel) · \($0.name)" } ?? "Vault") {
             if let v = vault {
                 SettingsGroup {
@@ -1422,7 +1493,7 @@ struct VaultPage: View {
                                     .font(theme.font(Theme.tiny)).foregroundStyle(theme.muted).lineLimit(2)
                             }
                             Spacer(minLength: 8)
-                            Toggle("", isOn: Binding(get: { a.enabled }, set: { model.setVaultAccess(vaultId: v.id, projectId: a.projectId, enabled: $0) }))
+                            Toggle("", isOn: Binding(get: { a.enabled }, set: { guard let work, model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }; model.setVaultAccess(vaultId: v.id, projectId: a.projectId, enabled: $0) }))
                                 .labelsHidden().tint(theme.online).disabled(model.isFixture)
                                 .accessibilityLabel("\(a.name) access")
                         }
@@ -1446,7 +1517,7 @@ struct VaultPage: View {
                                     .font(theme.font(Theme.tiny)).foregroundStyle(theme.muted).lineLimit(2)
                             }
                             Spacer(minLength: 8)
-                            Toggle("", isOn: Binding(get: { on }, set: { setItemEnv(it, on: $0) }))
+                            Toggle("", isOn: Binding(get: { on }, set: { guard let work, model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }; setItemEnv(it, on: $0) }))
                                 .labelsHidden().tint(theme.online).disabled(model.isFixture || busy)
                                 .accessibilityLabel("Real value of \((it["title"] as? String) ?? "item") in the environment")
                         }
@@ -1476,17 +1547,19 @@ struct VaultPage: View {
                 }
             }
         }
-        .task { await load() }
+        .task { if let work { await load(work: work) } }
         .confirm(ConfirmSpec(title: "Disconnect this vault?",
                              message: "\(agentsLine) lose every item in it. Also revoke the service account in 1Password.",
                              action: "Disconnect"), isPresented: $confirmDisconnect) {
+            guard let work, model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
             model.deleteVault(vaultId); dismiss()
         }
         .alert("Replace token", isPresented: $showToken) {
             SecureField("ops_…", text: $token)
             Button("Replace") {
+                guard let work else { return }
                 let t = token; token = ""
-                Task { await model.secretsAction("Replace token") { try await model.relay.replaceVaultToken(vaultId, token: t) }; await load() }
+                Task { await model.secretsAction("Replace token", work: work) { api in try await api.replaceVaultToken(vaultId, token: t) }; await load(work: work) }
             }
             Button("Cancel", role: .cancel) { token = "" }
         } message: { Text("Stored encrypted. Arbos never shows it again.") }
@@ -1503,15 +1576,17 @@ struct VaultPage: View {
         return names.isEmpty ? "Agents" : names.joined(separator: " and ")
     }
 
-    private func load() async {
+    private func load(work: AccountWork) async {
+        guard model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
         if model.isFixture {
             items = model.fixtureVaultItems
             activity = model.secrets?.activity ?? []
             return
         }
         busy = true
-        defer { busy = false }
-        if let (v, list, acts) = try? await model.relay.vault(vaultId) {
+        defer { if model.accountLifetime.accepts(work.owner) { busy = false } }
+        if let (v, list, acts) = try? await work.api.vault(vaultId) {
+            guard model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
             items = list
             activity = acts
             if let i = model.secrets?.vaults.firstIndex(where: { $0.id == v.id }) { model.secrets?.vaults[i] = v }
@@ -1520,14 +1595,18 @@ struct VaultPage: View {
 
     /// One item's real value into (or out of) the environment of every agent with access.
     private func setItemEnv(_ it: [String: Any], on: Bool) {
-        guard let ref = it["ref"] as? String else { return }
+        guard let ref = it["ref"] as? String, let work = model.accountWork() else { return }
         Task {
+            guard model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
             busy = true
-            defer { busy = false }
+            defer { if model.accountLifetime.accepts(work.owner) { busy = false } }
             do {
-                items = try await model.relay.setVaultItemEnv(vaultId, ref: ref, on: on)
-                await model.refreshSecrets()
+                let value = try await work.api.setVaultItemEnv(vaultId, ref: ref, on: on)
+                guard model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
+                items = value
+                await model.refreshSecrets(expectedOwner: work.owner)
             } catch {
+                guard model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
                 model.fail("change the item's real-value setting", error)
             }
         }
@@ -1544,25 +1623,30 @@ struct GiveVaultAccessSheet: View {
     @State private var busy = false
 
     var body: some View {
-        SheetFrame(title: "Give access", action: "Save", canSave: !picked.isEmpty, busy: busy, save: { Task { await save() } }) {
+        let work = model.accountWork()
+        SheetFrame(title: "Give access", action: "Save", canSave: !picked.isEmpty, busy: busy, save: { guard let work else { return }; Task { await save(work: work) } }) {
             SecretField(label: "Agents") { AgentPickerField(picked: $picked) }
             SecretField(label: "Note", hint: SecretsText.vaultNoteHint) { SecretTextField(placeholder: "read-only · confirm before charging", text: $note, capitalization: .sentences) }
         }
         .onAppear { picked = Set(model.secrets?.vaults.first { $0.id == vaultId }?.agents.filter(\.enabled).map(\.projectId) ?? []) }
     }
 
-    private func save() async {
+    private func save(work: AccountWork) async {
+        guard model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
         busy = true
-        defer { busy = false }
+        defer { if model.accountLifetime.accepts(work.owner) { busy = false } }
         let before = Set(model.secrets?.vaults.first { $0.id == vaultId }?.agents.filter(\.enabled).map(\.projectId) ?? [])
         for pid in picked.subtracting(before) {
-            _ = try? await model.relay.setVaultAccess(vaultId, projectId: pid, enabled: true, note: note.isEmpty ? nil : note)
+            guard model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
+            _ = try? await work.api.setVaultAccess(vaultId, projectId: pid, enabled: true, note: note.isEmpty ? nil : note)
         }
         // A chip removed with × takes the agent's access away, as on the secret's sheet.
         for pid in before.subtracting(picked) {
-            _ = try? await model.relay.setVaultAccess(vaultId, projectId: pid, enabled: false, note: nil)
+            guard model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
+            _ = try? await work.api.setVaultAccess(vaultId, projectId: pid, enabled: false, note: nil)
         }
-        await model.refreshSecrets()
+        await model.refreshSecrets(expectedOwner: work.owner)
+        guard model.accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
         dismiss()
     }
 }

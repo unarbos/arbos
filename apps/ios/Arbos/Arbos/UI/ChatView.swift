@@ -4055,6 +4055,7 @@ struct ChatSession: View {
     /// Finish dictation and send: transcript (plus any typed draft) goes out as text.
     /// The audio is only used for STT — it is not attached to the chat.
     private func sendMemo(_ memo: AppModel.PendingAttachment) {
+        guard let work = model.accountWork() else { return }
         let typed = composerDraft.text.trimmingCharacters(in: .whitespacesAndNewlines)
         let extras = pending
         let reply = replyTo?.id
@@ -4072,9 +4073,11 @@ struct ChatSession: View {
         pinTalkTo(afterSending: address, chipMentions: chips)
         sentOnce = true
         transcribing = true
+        let sttProject: Id? = project?.id ?? (isPeople ? "\(peopleSlot):\(chatId)" : nil)
         Task {
-            let sttProject: Id? = project?.id ?? (isPeople ? "\(peopleSlot):\(chatId)" : nil)
-            let transcript = await model.transcribe(projectId: sttProject, memo: memo)
+            guard model.accountLifetime.accepts(work.owner) else { return }
+            let transcript = await model.transcribe(projectId: sttProject, memo: memo, work: work)
+            guard model.accountLifetime.accepts(work.owner) else { return }
             transcribing = false
             let text = [typed, transcript ?? ""].filter { !$0.isEmpty }.joined(separator: "\n\n")
             guard !text.isEmpty || !extras.isEmpty else { return }

@@ -1,0 +1,29 @@
+{
+  "sources": {
+    "apps/ios/Arbos/Arbos/UI/PeopleSheets.swift": "a3de3c740086f6ac3640c9741d37d6743b19c960a27c0220ae8d14c9797968a6",
+    "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f"
+  },
+  "compile_exit": 0,
+  "fixture_sha256": "15aeb7cfcdecc01479f749dded49a8f1d403b7d94331c29dfb20a8343debf366",
+  "exit_code": 0,
+  "results": {
+    "cases": {
+      "create-current-control": true,
+      "create-late-result-no-B-dismiss-or-cleanup": true,
+      "create-retired-render-no-B-action": true,
+      "group-current-control": true,
+      "group-late-result-no-B-dismiss-or-cleanup": true,
+      "group-retired-render-no-B-action": true,
+      "secret-current-control": true,
+      "secret-late-result-no-B-dismiss-or-cleanup": true,
+      "secret-retired-render-no-B-action": true,
+      "server-current-control": true,
+      "server-late-result-no-B-dismiss-or-cleanup": true,
+      "server-retired-render-no-B-action": true
+    },
+    "failed": 0,
+    "passed": 12,
+    "total": 12
+  },
+  "seconds": 0.6814923749770969
+}
