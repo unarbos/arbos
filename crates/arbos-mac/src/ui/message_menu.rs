@@ -100,12 +100,20 @@ pub fn can_edit_message(me_id: &str, message: &Message) -> bool {
 /// Delete only when the relay would let this user delete it
 /// (`model::may_delete_message`); Remove preview only on a message that
 /// shows a link card (`has_preview`) the user may delete.
+///
+/// An unsent message — one whose pictures never uploaded, so it is in no chat document —
+/// offers Copy and Delete only: there is no row for anyone else to be replied to,
+/// forwarded or edited ([feedback caption-sent-without-media]).
 pub fn items_for(
     can_delete: bool,
     can_dm: bool,
     can_edit: bool,
     has_preview: bool,
+    unsent: bool,
 ) -> Vec<MessageMenuItem> {
+    if unsent {
+        return vec![MessageMenuItem::Copy, MessageMenuItem::Delete];
+    }
     ITEMS
         .into_iter()
         .filter(|i| {
@@ -229,7 +237,8 @@ pub fn render(shell: &Shell, window: &Window, cx: &mut Context<Shell>) -> Option
             message.is_some_and(|m| crate::ui::transcript::link_preview_of(m).is_some()),
         )
     };
-    let items = items_for(can_delete, can_dm, can_edit, has_preview);
+    let unsent = shell.state.read(cx).is_unsent(&message_id);
+    let items = items_for(can_delete, can_dm, can_edit, has_preview, unsent);
     let origin = place(at, menu_size_for(items.len()), window.viewport_size());
     let mut body = div().flex().flex_col().gap(px(MENU_GAP));
     for item in items {
@@ -366,27 +375,27 @@ mod tests {
     fn delete_reply_in_dm_edit_and_remove_preview_are_offered_only_when_allowed() {
         let labels = |v: Vec<MessageMenuItem>| v.iter().map(|i| i.label()).collect::<Vec<_>>();
         assert_eq!(
-            labels(items_for(true, true, false, false)),
+            labels(items_for(true, true, false, false, false)),
             ["Copy", "Reply", "Forward", "Reply in DM", "Delete"]
         );
         assert_eq!(
-            labels(items_for(false, true, false, false)),
+            labels(items_for(false, true, false, false, false)),
             ["Copy", "Reply", "Forward", "Reply in DM"]
         );
         // My own row: Edit, no Reply in DM.
         assert_eq!(
-            labels(items_for(true, false, true, false)),
+            labels(items_for(true, false, true, false, false)),
             ["Copy", "Reply", "Forward", "Edit", "Delete"]
         );
         // An agent's: nobody to DM, nothing to edit.
         assert_eq!(
-            labels(items_for(false, false, false, false)),
+            labels(items_for(false, false, false, false, false)),
             ["Copy", "Reply", "Forward"]
         );
         // A message with a link card the user may edit offers Remove preview above Delete;
         // a card on someone else's message (no delete right) does not.
         assert_eq!(
-            labels(items_for(true, false, true, true)),
+            labels(items_for(true, false, true, true, false)),
             [
                 "Copy",
                 "Reply",
@@ -397,8 +406,15 @@ mod tests {
             ]
         );
         assert_eq!(
-            labels(items_for(false, true, false, true)),
+            labels(items_for(false, true, false, true, false)),
             ["Copy", "Reply", "Forward", "Reply in DM"]
+        );
+        // Unsent: nobody else has this message, so Copy and Delete are the whole menu —
+        // and Delete is there whatever the document would say about deleting a row that
+        // does not exist ([feedback caption-sent-without-media]).
+        assert_eq!(
+            labels(items_for(false, true, true, true, true)),
+            ["Copy", "Delete"]
         );
     }
 

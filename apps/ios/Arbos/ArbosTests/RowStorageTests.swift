@@ -16,11 +16,12 @@ final class RowStorageTests: XCTestCase {
         let gapBefore: CGFloat
         let runStart: Bool
         let showsAvatar: Bool
+        let delivery: Delivery?
 
         init(_ r: Row) {
             id = r.id; messageId = r.messageId; role = r.role; kind = r.kind; reactions = r.reactions
             replyCount = r.replyCount; createdAt = r.createdAt; gapBefore = r.gapBefore
-            runStart = r.runStart; showsAvatar = r.showsAvatar
+            runStart = r.runStart; showsAvatar = r.showsAvatar; delivery = r.delivery
         }
     }
 
@@ -173,6 +174,7 @@ final class RowStorageTests: XCTestCase {
             ("gapBefore", { $0.gapBefore += 1 }),
             ("runStart", { $0.runStart.toggle() }),
             ("showsAvatar", { $0.showsAvatar.toggle() }),
+            ("delivery", { $0.delivery = $0.delivery == .failed ? .delivered : .failed }),
         ]
         for (field, change) in changes {
             var copy = original
