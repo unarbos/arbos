@@ -1,0 +1,186 @@
+{
+  "scope": "Scoped integration validation of Phase3\u20138 patches in private relevant-source subset, no merge/deploy or full-workspace gate claim",
+  "base": "2865cb29b806121d4a90f55ba6ce151a150279a0",
+  "phase_commits": {
+    "improve/structure": "084f86bb79f070b1d23d54f565b33a221d443bf5",
+    "improve/state-machines": "89d1fb40a563cebe939b2f71ce6ff7348cb9acce",
+    "improve/observability": "508efafbcc6bcdb1b0cf37b731e050092c5043ae",
+    "improve/performance": "373c94b021e70ca0d1ae5049cd0e720b98aa103a",
+    "improve/database-scale": "586f37aa5708e88b91cd7dc45a10aad86eb36aa7",
+    "improve/laws": "e978f28d145d8674cbd5de5b1ecb02f3cc2f5d2d"
+  },
+  "canonical_redaction_sha256": "1919913639b72ba43ffcff9a51bd29fe3038f08701de5e390463613b2dbde3da",
+  "materialized_source_files": 127,
+  "initial_source_bytes": 3924235,
+  "source_hashes": {
+    "crates/arbos-core/src/redact.rs": "1919913639b72ba43ffcff9a51bd29fe3038f08701de5e390463613b2dbde3da",
+    "crates/arbos-mac/src/ui/urlwrap.rs": "4fbf136cd3e47c4fe946b59fe0378c2a106b35722c8e9f1dfbc488bea64b2f16",
+    "harness/arbos-pi-ext/index.ts": "bae6f73643c5e4978ab0131de60d85cb6c2691319f4ad9aeeac5e8d654d9e6df",
+    "harness/arbos-pi-ext/approval.ts": "5de41fa6a33a8d495644db2fbf4ce3a537460258ba4737a4f01ab6b7de6c0476",
+    "harness/arbos-pi-ext/package.json": "46c8db9d787d1903f8e3d9cef74d52312bec0900028746afdf6284987e5cddef",
+    "harness/pnpm-lock.yaml": "50ba0280191e05330b2c36759d3869fb5e9f96ea1ab53e911d92a509e5825986",
+    "crates/arbos-relay/src/db.rs": "11e5d8533bce86040f900e29726c9310295f63379f6a1e61b4f9417761c54c22",
+    "crates/arbos-relay/src/db_people.rs": "215d752611f892c3e41554b2c9636a8e86fdcac26fec12cea58e1b6c3b76b007",
+    "crates/arbos-relay/src/rooms.rs": "41f60806726ad5da2d42179f3f2754d450572f5b5c6cdd233ea062a6562b6d48",
+    "crates/arbos-agentd/src/store.rs": "da01afe8858a06141e3da1bc5f7e69c39923c5d4ea4aa4cdf440707b56cbf391",
+    "Cargo.lock": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435"
+  },
+  "patch_conflicts": [
+    {
+      "phase": "improve/laws",
+      "path": "crates/arbos-core/src/redact.rs",
+      "resolution": "Use reviewed canonical Phase6+8 redact.rs; apply every other Phase8 patch path unchanged"
+    }
+  ],
+  "gates_passed": 19,
+  "gates_failed": 0,
+  "checks": {
+    "harness-typecheck": {
+      "count": null,
+      "seconds": 2.647893041954376,
+      "skipped_or_ignored": null
+    },
+    "harness-build": {
+      "count": null,
+      "seconds": 2.220721875084564,
+      "skipped_or_ignored": null
+    },
+    "harness-tests": {
+      "count": 37,
+      "seconds": 0.8723037499003112,
+      "skipped_or_ignored": 0
+    },
+    "image-audit": {
+      "count": 15,
+      "seconds": 2.15161395794712,
+      "skipped_or_ignored": 0
+    },
+    "image-packaging": {
+      "count": 9,
+      "seconds": 2.974075709003955,
+      "skipped_or_ignored": 0
+    },
+    "title-compile": {
+      "count": null,
+      "seconds": 0.5735097080469131,
+      "skipped_or_ignored": null
+    },
+    "title-tests": {
+      "count": 8,
+      "seconds": 0.1896215840242803,
+      "skipped_or_ignored": 0
+    },
+    "native-fmt": {
+      "count": null,
+      "seconds": 0.21202904195524752,
+      "skipped_or_ignored": null
+    },
+    "native-check": {
+      "count": null,
+      "seconds": 1.561149041983299,
+      "skipped_or_ignored": null
+    },
+    "native-clippy": {
+      "count": null,
+      "seconds": 1.777903874986805,
+      "skipped_or_ignored": null
+    },
+    "native-tests": {
+      "count": 13,
+      "seconds": 1.6372690420830622,
+      "skipped_or_ignored": 0
+    },
+    "native-build": {
+      "count": null,
+      "seconds": 3.3356917910277843,
+      "skipped_or_ignored": null
+    },
+    "native-protocol": {
+      "count": 24,
+      "seconds": 0.23137929197400808,
+      "skipped_or_ignored": 0
+    },
+    "laws-typecheck": {
+      "count": null,
+      "seconds": 0.6589962920406833,
+      "skipped_or_ignored": null
+    },
+    "laws-tests": {
+      "count": 18,
+      "seconds": 1.5708880419842899,
+      "skipped_or_ignored": 0
+    },
+    "laws-record": {
+      "count": null,
+      "seconds": 0.9865795410005376,
+      "skipped_or_ignored": null
+    },
+    "sql-suite": {
+      "count": 8,
+      "seconds": 8.926929875044152,
+      "skipped_or_ignored": 0
+    },
+    "sql-coverage": {
+      "count": 6,
+      "seconds": 0.18413495901040733,
+      "skipped_or_ignored": 0
+    },
+    "sql-job-index": {
+      "count": 6,
+      "seconds": 0.10860799998044968,
+      "skipped_or_ignored": 0
+    }
+  },
+  "generated_law_trials": 1792,
+  "generated_law_groups": 7,
+  "generated_law_discards": 0,
+  "law_record_note": "The seven seeded256-case laws run in the18-test gate and again for the retained record;1792 describes one requested suite, not extra coverage from repeated seeds.",
+  "dependency_limit": "Frozen offline ignore-scripts install could not complete because ts-algebra2.0.0 tarball is absent from pnpm store. Downloaded0. Safe fallback APFS-cloned already-installed Codex cache into private tree and verified exact top versions/private links. This is not a fresh locked-install success.",
+  "fixed_policy_microbenchmark": {
+    "seconds": 13.821083249989897,
+    "pairs": 21,
+    "iterations_per_sample": 2000,
+    "corpus_cases": 130,
+    "same_exact_output_bytes": true,
+    "output_sha256": "289dc0cc6387f7a1db7538dee6390611d4fe8b110c47ea3941f104f65eb8b6e5",
+    "results": "bench/RESULTS.json",
+    "limits": "Fixed-policy cache comparison, not old versus corrected policy. One machine and one exclusive team timing window, no cross-device replication. JSON workload includes cloning the synthetic two-string-leaf fixture. Warm module microbenchmarks are not whole-app latency. All raw values/order retained; bootstrap intervals describe paired local samples, not production confidence bounds."
+  },
+  "artifact_footprint": {
+    "regular_file_logical_bytes": 228270806,
+    "regular_file_reported_block_bytes": 285450240,
+    "budget_bytes": 300000000,
+    "within_logical_and_reported_block_budget": true,
+    "regular_files": 19899,
+    "cache_cleanup": {
+      "path": "tree/.improve/laws/native/target/debug",
+      "reason": "Remove only completed private debug build cache; retain release bridge/benchmark binaries, allsource/locks/logs and rerunnable gates",
+      "seconds": 0.7239489170024171
+    },
+    "peak_observed_logical_bytes": 265337422,
+    "peak_observed_reported_block_bytes": 323252224,
+    "notes": "APFS clone shares cached dependency extents; reported block totals are not an exclusive physical-space measurement. Peaklogicalartifactbytes265.34MB stayed below300MB; completedprivate debugcache was removed so finalreportedblocks also staybelow300MB. Directorymetadata isnotincluded."
+  },
+  "limitations": [
+    "Full workspace native clippy/check/test/build and native room integration remain blocked by local disk/forkCI approval.",
+    "Portable Rust imports actual redaction/URL code, but does not compile GPUI visual tests or the full Mac/iOS apps.",
+    "Harness declared build is tsc --noEmit; no container image build/deployment.",
+    "SQLite checks execute exact extracted SQL with synthetic local fixtures, not native RustDb/CRDT/migration integration.",
+    "Bend2 proofs and required comprehensive OTel/native lifecycle work remain blocked as recorded by phase reports."
+  ],
+  "copy_method": "git show BASE:path and gitls-tree executable modes into127-file private source subset; apply six saved git diff --binary patches in phase order; replace only expected Phase8redact conflict by reviewed canonicalsource. No .env/config/credentials/appDB copied.",
+  "provenance_files": [
+    "baseline-files.json",
+    "application.json",
+    "sources-before-gates.json",
+    "sources-after-gates.json",
+    "dependency-copy.json",
+    "install.json",
+    "gates.json",
+    "laws-combined.json",
+    "bench/provenance.json",
+    "bench/raw-pairs.json",
+    "bench/RESULTS.json",
+    "footprint.json"
+  ]
+}

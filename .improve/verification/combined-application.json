@@ -1,0 +1,146 @@
+{
+  "base": "2865cb29b806121d4a90f55ba6ce151a150279a0",
+  "phases": [
+    {
+      "phase": "improve/structure",
+      "commit": "084f86bb79f070b1d23d54f565b33a221d443bf5",
+      "diff_base": "2865cb29b806121d4a90f55ba6ce151a150279a0",
+      "patch_sha256": "3ef044900503dbcb15422f06e27c3d00d4cad1dc5789d99356de2b78532566e8",
+      "check_command": [
+        "git",
+        "apply",
+        "--check",
+        "--directory=.improve/evidence/combined/tree",
+        "<repository>/.improve/evidence/combined/patches/structure.patch"
+      ],
+      "check_exit": 0,
+      "check_output": "",
+      "apply_command": [
+        "git",
+        "apply",
+        "--directory=.improve/evidence/combined/tree",
+        "<repository>/.improve/evidence/combined/patches/structure.patch"
+      ],
+      "apply_exit": 0,
+      "apply_output": ""
+    },
+    {
+      "phase": "improve/state-machines",
+      "commit": "89d1fb40a563cebe939b2f71ce6ff7348cb9acce",
+      "diff_base": "2865cb29b806121d4a90f55ba6ce151a150279a0",
+      "patch_sha256": "929e9264f37aeecec6706f15a1ea332a737914e61212ae0b8e516add63b4fbba",
+      "check_command": [
+        "git",
+        "apply",
+        "--check",
+        "--directory=.improve/evidence/combined/tree",
+        "<repository>/.improve/evidence/combined/patches/state-machines.patch"
+      ],
+      "check_exit": 0,
+      "check_output": "",
+      "apply_command": [
+        "git",
+        "apply",
+        "--directory=.improve/evidence/combined/tree",
+        "<repository>/.improve/evidence/combined/patches/state-machines.patch"
+      ],
+      "apply_exit": 0,
+      "apply_output": ""
+    },
+    {
+      "phase": "improve/observability",
+      "commit": "508efafbcc6bcdb1b0cf37b731e050092c5043ae",
+      "diff_base": "2865cb29b806121d4a90f55ba6ce151a150279a0",
+      "patch_sha256": "8a31de85bceea5732835ef9162086435a3448041841cee9fd74991324f588a2b",
+      "check_command": [
+        "git",
+        "apply",
+        "--check",
+        "--directory=.improve/evidence/combined/tree",
+        "<repository>/.improve/evidence/combined/patches/observability.patch"
+      ],
+      "check_exit": 0,
+      "check_output": "",
+      "apply_command": [
+        "git",
+        "apply",
+        "--directory=.improve/evidence/combined/tree",
+        "<repository>/.improve/evidence/combined/patches/observability.patch"
+      ],
+      "apply_exit": 0,
+      "apply_output": ""
+    },
+    {
+      "phase": "improve/performance",
+      "commit": "373c94b021e70ca0d1ae5049cd0e720b98aa103a",
+      "diff_base": "2865cb29b806121d4a90f55ba6ce151a150279a0",
+      "patch_sha256": "4e68fc73aa238bf933afa04f020787685126c6200b71a914321c97abcb3ec161",
+      "check_command": [
+        "git",
+        "apply",
+        "--check",
+        "--directory=.improve/evidence/combined/tree",
+        "<repository>/.improve/evidence/combined/patches/performance.patch"
+      ],
+      "check_exit": 0,
+      "check_output": "",
+      "apply_command": [
+        "git",
+        "apply",
+        "--directory=.improve/evidence/combined/tree",
+        "<repository>/.improve/evidence/combined/patches/performance.patch"
+      ],
+      "apply_exit": 0,
+      "apply_output": ""
+    },
+    {
+      "phase": "improve/database-scale",
+      "commit": "586f37aa5708e88b91cd7dc45a10aad86eb36aa7",
+      "diff_base": "2865cb29b806121d4a90f55ba6ce151a150279a0",
+      "patch_sha256": "64ea67c6eba48508c8887e6af4da89c71f936863b57c065cde5018b3001b7256",
+      "check_command": [
+        "git",
+        "apply",
+        "--check",
+        "--directory=.improve/evidence/combined/tree",
+        "<repository>/.improve/evidence/combined/patches/database-scale.patch"
+      ],
+      "check_exit": 0,
+      "check_output": "",
+      "apply_command": [
+        "git",
+        "apply",
+        "--directory=.improve/evidence/combined/tree",
+        "<repository>/.improve/evidence/combined/patches/database-scale.patch"
+      ],
+      "apply_exit": 0,
+      "apply_output": ""
+    },
+    {
+      "phase": "improve/laws",
+      "commit": "e978f28d145d8674cbd5de5b1ecb02f3cc2f5d2d",
+      "diff_base": "2865cb29b806121d4a90f55ba6ce151a150279a0",
+      "patch_sha256": "746cf58eddadd545ba6fbd86566275d74a60985d78c44396394d019a036819ef",
+      "check_command": [
+        "git",
+        "apply",
+        "--check",
+        "--directory=.improve/evidence/combined/tree",
+        "<repository>/.improve/evidence/combined/patches/laws.patch"
+      ],
+      "check_exit": 1,
+      "check_output": "error: patch failed: .improve/evidence/combined/tree/crates/arbos-core/src/redact.rs:8\nerror: .improve/evidence/combined/tree/crates/arbos-core/src/redact.rs: patch does not apply\n",
+      "conflict_resolution": "Use reviewed canonical Phase6+8 redact.rs; apply every other Phase8 patch path unchanged",
+      "expected_conflict_path": "crates/arbos-core/src/redact.rs",
+      "apply_command": [
+        "git",
+        "apply",
+        "--directory=.improve/evidence/combined/tree",
+        "<repository>/.improve/evidence/combined/patches/laws-except-redact.patch"
+      ],
+      "apply_exit": 0,
+      "apply_output": "<repository>/.improve/evidence/combined/patches/laws-except-redact.patch:1564: trailing whitespace.\n \n<repository>/.improve/evidence/combined/patches/laws-except-redact.patch:1614: trailing whitespace.\n \n<repository>/.improve/evidence/combined/patches/laws-except-redact.patch:1620: trailing whitespace.\n \n<repository>/.improve/evidence/combined/patches/laws-except-redact.patch:2079: trailing whitespace.\n \nwarning: 4 lines add whitespace errors.\n",
+      "canonical_redact_sha256": "1919913639b72ba43ffcff9a51bd29fe3038f08701de5e390463613b2dbde3da"
+    }
+  ]
+}

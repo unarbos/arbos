@@ -1,0 +1,108 @@
+{
+  "seed": 20261109,
+  "pairs": 21,
+  "iterations_per_sample": 2000,
+  "timing_seconds": 13.821083249989897,
+  "warm_release_only": true,
+  "corpus_cases": 130,
+  "original_phase6_cases": 109,
+  "additional_minimum_tail_cases": 21,
+  "fingerprint": "8068b373b0f24b7e",
+  "exact_outputs_sha256": "289dc0cc6387f7a1db7538dee6390611d4fe8b110c47ea3941f104f65eb8b6e5",
+  "same_exact_output_bytes": true,
+  "machine": {
+    "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+    "machine": "arm64",
+    "cpu_count": 18,
+    "cpu": "Apple M5 Pro",
+    "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18) (Homebrew)"
+  },
+  "summary": {
+    "redact_patterns": {
+      "units": "nanoseconds per call",
+      "uncached": {
+        "median": 63311.3125,
+        "min": 61161.146,
+        "max": 64258.208
+      },
+      "cached": {
+        "median": 12306.125,
+        "min": 11873.104,
+        "max": 12666.292
+      },
+      "median_speedup_ratio": 5.144699285924692,
+      "paired_median_saved_ns": 51077.771,
+      "paired_median_saved_ns_bootstrap_95_ci": [
+        50812.7915,
+        51429.833
+      ],
+      "paired_two_sided_sign_test_p": 9.5367431640625e-07,
+      "pairs": 21
+    },
+    "find_key_like": {
+      "units": "nanoseconds per call",
+      "uncached": {
+        "median": 31317.042,
+        "min": 29953.25,
+        "max": 31763.5835
+      },
+      "cached": {
+        "median": 1085.396,
+        "min": 1030.646,
+        "max": 1122.4165
+      },
+      "median_speedup_ratio": 28.85310246214285,
+      "paired_median_saved_ns": 30242.1045,
+      "paired_median_saved_ns_bootstrap_95_ci": [
+        29913.5625,
+        30243.4375
+      ],
+      "paired_two_sided_sign_test_p": 9.5367431640625e-07,
+      "pairs": 21
+    },
+    "redact_placeholders": {
+      "units": "nanoseconds per call",
+      "uncached": {
+        "median": 5829.0415,
+        "min": 5639.125,
+        "max": 6031.271
+      },
+      "cached": {
+        "median": 1896.271,
+        "min": 1850.1875,
+        "max": 1962.042
+      },
+      "median_speedup_ratio": 3.073949609523112,
+      "paired_median_saved_ns": 3938.9165000000003,
+      "paired_median_saved_ns_bootstrap_95_ci": [
+        3864.9995000000004,
+        3971.7295
+      ],
+      "paired_two_sided_sign_test_p": 9.5367431640625e-07,
+      "pairs": 21
+    },
+    "scrub_value": {
+      "units": "nanoseconds per call",
+      "uncached": {
+        "median": 138111.458,
+        "min": 134651.3335,
+        "max": 144892.875
+      },
+      "cached": {
+        "median": 27883.5625,
+        "min": 26756.375,
+        "max": 28375.5205
+      },
+      "median_speedup_ratio": 4.9531496558232115,
+      "paired_median_saved_ns": 110344.77100000001,
+      "paired_median_saved_ns_bootstrap_95_ci": [
+        109723.93800000001,
+        110609.1045
+      ],
+      "paired_two_sided_sign_test_p": 9.5367431640625e-07,
+      "pairs": 21
+    }
+  },
+  "raw_pairs": "raw-pairs.json",
+  "limits": "Fixed-policy cache comparison, not old versus corrected policy. One machine and one exclusive team timing window, no cross-device replication. JSON workload includes cloning the synthetic two-string-leaf fixture. Warm module microbenchmarks are not whole-app latency. All raw values/order retained; bootstrap intervals describe paired local samples, not production confidence bounds."
+}
