@@ -14,7 +14,7 @@ production, network, device-frame or end-to-end chat timings.
 | Independent sequential async work | Mac registry now hydrates four projects concurrently, with independent people hydration and ordered results; unread and project-list calls run together. Actual-code fixtures preserve cancellation, deterministic merges and partial failures. Both clients' attachment uploads and iOS directory/registry work are under implementation review. Matrix per-room awaits may read SDK cache; network dependency must be established before parallelizing roster misses. |
 | Loading extra DB data | `rooms::build_room_doc` / `advance_room_doc` ask for full `Db::room_state` statistics to get only head/floor. This is the next phase's source-SQL scale target. Keep full statistics at compaction/budget/protocol callers that consume them. Agent-link SELECT-star reads cross authorization DTOs; Store history reads are bounded and consume full events, so do not automatically narrow every star. |
 | Unnecessary URL parsing | The edge worker's one `new URL(request.url)` supplies routing data and is required. Native typed URL creation handles actual requests/links/validation; removing it would discard behavior. `SenderAccents` guard order is a possible redundant cached-hit parse, unmeasured and blocked on native gates. |
-| Repeated static regex construction | Shared `core/redact.rs` reconstructs token, bearer/env and placeholder regexes on every call; cache compiled patterns once, retaining the single key-rule table, order and skip semantics. Harness detached-shell literals allocate per call; measure before deciding whether hoisting earns a change. Agentd web parsing has static regexes; tree salvage has two fixed regexes. Their native callers remain unverified and are deferred. |
+| Repeated static regex construction | Shared `core/redact.rs` reconstructs token, bearer/env and placeholder regexes on every call; cache compiled patterns once, retaining the single key-rule table, order and skip semantics. Harness detached-shell literals allocate per call; measure before deciding whether hoisting earns a change. Agentd HTML/search parsing and truncated memory-card salvage now cache 17 fixed patterns through std LazyLock. All 64 actual-function fixture outputs and literal pattern inventories match; actual agentd all-target Clippy passes66.538s; final combined gates remain separate. |
 | Input-specific regex construction | Harness `peek` grep and agentd MCP grep compile user patterns once per request. These vary by input and remain dynamic; a global unbounded pattern cache would add unrelated state. |
 | Large JSON-key reads / jsonb | Owned stores are SQLite; no owned PostgreSQL jsonb column was found. Agentd uses `json_extract(source, '$.message_id')` over thread-scoped metadata; measure that workload before a new column/migration. Synapse's PostgreSQL schema is external to this codebase. No shared migration/backfill is applied. |
 | Extra hot-loop finding | Mac `hint_bare_urls` repeatedly searches the whole remaining suffix for both schemes. With many HTTPS links and no HTTP link, the unsuccessful search repeats work quadratically. A forward candidate scan preserves earliest-match behavior and the existing wrap output. |
@@ -63,6 +63,9 @@ it does not block the local changes or final gates.
 | Mac URL hints, 1,000 HTTPS links / 37,890 bytes | 2,004.850 µs/call | 134.608 µs/call | 14.89×; long-message stress fixture |
 | Mac URL hints, 1,000 HTTP links / 36,890 bytes | 3,108.083 µs/call | 132.083 µs/call | 23.53× |
 | Mac URL hints, 1,000 mixed links / 37,390 bytes | 177.275 µs/call | 141.250 µs/call | 1.26× |
+| Agentd short HTML conversion | 33.680 µs/call | 7.327 µs/call | 4.60×; unchanged parsing policy |
+| Agentd32-link HTML conversion | 870.729 µs/call | 772.695 µs/call | 1.13× |
+| Truncated memory-card salvage | 5.674 µs/call | 2.223 µs/call | 2.55× |
 | Detached-shell classifier, foreground corpus | 109.48 ns/call | 98.93 ns/call | ~10 ns allocation cleanup, not perceptible chat latency |
 | Detached-shell classifier, mixed corpus | 182.23 ns/call | 172.05 ns/call | same unchanged patterns, ~10 ns |
 
@@ -89,13 +92,24 @@ filesystem/system caches were not flushed.
 
 Registry results use 21 randomized paired runs of the selected actual production
 functions and typed mappers. The 27-request multiset and complete typed outputs
-match; the paired median saving is238.353ms (95% bootstrap interval
-230.700–241.418ms), two-sided sign-test p=9.54e-7. Two success/failure scenarios,
+match; the paired median saving is 238.353 ms (95% bootstrap interval
+230.700–241.418 ms), two-sided sign-test p=9.54e-7. Two success/failure scenarios,
 cancellation and a delayed concurrency/order check pass in both arms. The peak
-changes1→5 per refresh; this is a bounded load tradeoff, not fewer requests.
+changes 1→5 per refresh; this is a bounded load tradeoff, not fewer requests.
 [The retained check](perf/registry/README.md) uses OS network isolation, a fresh
 per-arm Cargo target and locked/offline builds. It does not execute authentication,
 GUI, Keychain or real HTTP behavior. Per-chat send order is unaffected.
+
+The [agent parser check](perf/static-regex/README.md) extracts actual pure
+production functions and search regex bindings, with 64 fixed/generated outputs.
+It uses 21 randomized paired runs, 50 warmups and 100/1000/2000 calls per sample.
+Each workload improves in every pair (p=9.54e-7); retained JSON includes the
+paired bootstrap intervals, source hashes and raw samples. The host is shared,
+with no CPU isolation or cache flushing. An uncommitted mechanical edit changed
+a closing-list-item pattern; review caught it, the added behavioral fixture
+failed on that candidate, and the literal inventory now verifies exact patterns.
+Earlier candidate timings are withdrawn. Final 64 outputs match upstream. No
+search endpoint, live agent or app latency was measured.
 
 ## Before / after gates
 
@@ -110,9 +124,11 @@ GUI, Keychain or real HTTP behavior. Per-chat send order is unaffected.
 | Harness typecheck / build | pass, 2.816 / 2.260 s | pass, 2.630 / 2.252 s |
 | Harness tests | 14 passed / 0 failed/skipped; 0.541 s | 14 passed / 0 failed/skipped; 2.243 s |
 | Workspace formatting | pass, baseline 3.016 s | pass, 2.567 s |
+| Actual agentd all-target Clippy | upstream full gate passed earlier | changed-source snapshot passes66.538s, unique cloned target/all12source packages cleaned; OS network denied |
+| Agent parser actual-code adapter | 64 HTML/card/search outputs pass against upstream | same 64 outputs; pattern inventory matches; fresh locked/offline release builds 3.668/3.756s |
 | Registry actual-code adapter | 2scenarios + cancellation + delayed bound/order pass | same typed outputs; bound5 verified, locked/offline builds32.136/31.402s |
 | Swift test-plan fence | old plan allowed default endpoint | 12contracts pass1.515s; exact shared fence carried before future push |
-| Mac all-target Clippy, actual SDK composed tree | native ownership snapshot previously passed | metadata composition passes21.500s, all12workspace packages cleaned in its private cloned target; final successor/runtime/full CI remain separate |
+| Mac all-target Clippy, actual SDK composed tree | native ownership snapshot previously passed | metadata composition passes 21.500 s, all 12 workspace packages cleaned in its private cloned target; final successor/runtime/full CI remain separate |
 
 Compiler/test wall durations include cache/scheduling differences and are not
 speedup measurements. No tests were removed. The new source regression checks
