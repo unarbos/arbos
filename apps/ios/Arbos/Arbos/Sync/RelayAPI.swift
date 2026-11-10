@@ -84,6 +84,13 @@ private struct ProjectListId: Decodable {
     var id: String
 }
 
+/// The bearer captured by this owned client's latest admitted request.
+@MainActor
+private final class CallAuthority {
+    var bearer: String
+    init(_ bearer: String) { self.bearer = bearer }
+}
+
 final class RelayAPI {
     let endpoint: RelayEndpoint
     var token: () -> String
@@ -92,6 +99,8 @@ final class RelayAPI {
     var refresher: (() async -> Bool)?
 
     private let session: URLSession
+    private var authorization: (@MainActor () -> String?)?
+    private var cleanupAuthority: CallAuthority?
 
     init(endpoint: RelayEndpoint, token: @escaping () -> String) {
         self.endpoint = endpoint
@@ -100,6 +109,55 @@ final class RelayAPI {
         config.timeoutIntervalForRequest = 30
         config.waitsForConnectivity = false
         session = URLSession(configuration: config)
+    }
+
+    private init(endpoint: RelayEndpoint, token: @escaping () -> String, session: URLSession) {
+        self.endpoint = endpoint
+        self.token = token
+        self.session = session
+    }
+
+    /// Preserve refresh within one local account lifetime. The guard is also
+    /// checked immediately before each request, including a refreshed retry.
+    @MainActor
+    func bound(to isCurrent: @escaping @MainActor () -> Bool) -> RelayAPI {
+        let sourceToken = token
+        let sourceAuthorization = authorization
+        let refresh = refresher
+        let captured = CallAuthority(sourceAuthorization.map { $0() ?? "" } ?? sourceToken())
+        let api = RelayAPI(endpoint: endpoint, token: sourceToken, session: session)
+        api.cleanupAuthority = captured
+        api.authorization = {
+            guard isCurrent() else { return nil }
+            let bearer: String
+            if let sourceAuthorization {
+                guard let current = sourceAuthorization() else { return nil }
+                bearer = current
+            } else { bearer = sourceToken() }
+            captured.bearer = bearer
+            return bearer
+        }
+        api.refresher = { @MainActor in
+            guard isCurrent(), let refresh else { return false }
+            let renewed = await refresh()
+            return isCurrent() && renewed
+        }
+        return api
+    }
+
+    /// Best-effort cleanup for abandoned work uses its original bearer only.
+    /// It shares transport and the original owner's admitted bearer updates,
+    /// never a replacement account or a cleanup-triggered refresh.
+    @MainActor
+    func frozenAuthority() -> RelayAPI {
+        let bearer = authorization.map { $0() ?? "" } ?? token()
+        let api = RelayAPI(endpoint: endpoint, token: { bearer }, session: session)
+        if let cleanupAuthority {
+            // Only the original bound client's guarded admissions can update it.
+            // A successful refresh remains usable after the account is retired.
+            api.authorization = { cleanupAuthority.bearer }
+        }
+        return api
     }
 
     // MARK: Raw calls
@@ -131,9 +189,15 @@ final class RelayAPI {
         var req = URLRequest(url: url)
         req.httpMethod = method
         if let timeout { req.timeoutInterval = timeout }
-        if auth {
-            req.setValue("Bearer \(token())", forHTTPHeaderField: "Authorization")
+        let bearer: String
+        if let authorization {
+            // Admission and dynamic token capture share one MainActor turn.
+            guard let allowed = await authorization() else { throw CancellationError() }
+            bearer = allowed
+        } else {
+            bearer = auth ? token() : ""
         }
+        if auth { req.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization") }
         // What runs here (`ios/1.0.0 (202610192230)`): the relay's "installed version" signal for
         // continuous delivery (GET /admin/installs), on every call.
         req.setValue(Self.clientHeader, forHTTPHeaderField: "X-Arbos-Client")

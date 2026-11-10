@@ -3,6 +3,8 @@
 //! (zeron-study §4.4 step 4). It owns the sync channel; nothing here touches
 //! GPUI elements.
 
+use crate::call_attempt::CallAttempt;
+use crate::sync::work_lifetime::{WorkLifetime, WorkTicket};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -15,6 +17,7 @@ use tokio::sync::mpsc;
 use crate::auth;
 use crate::calls::{self, CallCmd, CallEvent};
 use crate::chat_search;
+use crate::chat_title::title_from;
 use crate::model::SpaceKind;
 use crate::model::{
     add_members_plan, added_line, call_ended_line, created_group, reachable_line,
@@ -33,6 +36,7 @@ use crate::palette;
 use crate::search;
 use crate::search_index::{self, SearchIndex};
 use crate::sign_in;
+use crate::sync::session_scope::UiSession;
 use crate::sync::user_error::{ErrorClass, UserError};
 use crate::sync::{ClientCommand, PushRefusal, SyncEvent, SyncSource};
 use crate::ui::error_note;
@@ -150,15 +154,6 @@ impl AgentPick {
             _ => None,
         }
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-/// Kept for the relay path; the person pane (2026-10-20) and the agent pane
-/// (2026-10-21) no longer offer a call button — calls start from the chat.
-#[allow(dead_code)]
-pub enum CallTarget {
-    User(String),
-    Agent(Id),
 }
 
 fn muted_path() -> PathBuf {
@@ -661,6 +656,8 @@ pub struct AppState {
     pub source_name: &'static str,
     pub pairing: Option<Pairing>,
     pub device_id: Option<String>,
+    call_account: WorkLifetime,
+    call_backend: Option<WorkTicket>,
     /// Signed-in account (`/auth/token` user, then `/me`).
     pub account: Option<AccountView>,
     /// The tree mark (the macOS app icon), drawn on the sign-in screen.
@@ -708,9 +705,6 @@ pub struct AppState {
     awaiting_group: Option<Vec<String>>,
     /// The sheet invites into this project instead of starting a DM (step 3).
     pub invite_target: Option<Id>,
-    /// "Who may message X" (agent-to-agent messaging): the agent whose grant list a pick in
-    /// the people sheet adds to.
-    pub message_grant_target: Option<Id>,
     /// The group picker adds to this people group instead of creating one
     /// (the group pane's "Add members").
     pub add_members_target: Option<Id>,
@@ -1063,6 +1057,8 @@ pub struct AppState {
     /// D88: a channel waiting for its room (`room_id` null right after creation).
     channel_pending_room: Option<(Id, Id)>,
     commands: mpsc::UnboundedSender<ClientCommand>,
+    session: UiSession,
+    account_scoped: bool,
     update_commands: mpsc::UnboundedSender<UpdateCommand>,
     call_commands: mpsc::UnboundedSender<CallCmd>,
     _pump: Task<()>,
@@ -1093,6 +1089,7 @@ pub enum CallStatus {
 /// The call this device is in, as the UI shows it.
 #[derive(Clone, Debug)]
 pub struct ActiveCall {
+    pub attempt: CallAttempt,
     pub call: Call,
     pub status: CallStatus,
     pub muted: bool,
@@ -1147,6 +1144,7 @@ fn drop_video_frame(cx: &mut App, frame: Option<Arc<RenderImage>>) {
 }
 
 fn drop_active_call_images(active: ActiveCall, cx: &mut App) {
+    active.attempt.cancel();
     drop_video_frame(cx, active.local_video);
     for p in active.participants {
         drop_video_frame(cx, p.video);
@@ -1165,8 +1163,18 @@ impl EventEmitter<AppEvent> for AppState {}
 impl AppState {
     pub fn new(source: Box<dyn SyncSource>, cx: &mut Context<Self>) -> Self {
         let source_name = source.name();
+        let account_scoped = source.account_scoped();
+        let session = UiSession::default();
         let (event_tx, mut event_rx) = mpsc::unbounded_channel::<SyncEvent>();
         let (command_tx, command_rx) = mpsc::unbounded_channel::<ClientCommand>();
+        if account_scoped {
+            if let Some(owner) = session.control.ticket() {
+                let _ = command_tx.send(ClientCommand::BindUi {
+                    control: session.control.clone(),
+                    owner,
+                });
+            }
+        }
 
         let run = Tokio::spawn(cx, async move {
             if let Err(err) = source.run(event_tx, command_rx).await {
@@ -1227,7 +1235,7 @@ impl AppState {
                 }
             }
         });
-        let (call_event_tx, mut call_event_rx) = mpsc::unbounded_channel::<CallEvent>();
+        let (call_event_tx, mut call_event_rx) = mpsc::unbounded_channel::<calls::AttemptEvent>();
         let (call_command_tx, call_command_rx) = mpsc::unbounded_channel::<CallCmd>();
         let call_worker = Tokio::spawn(cx, calls::run(call_command_rx, call_event_tx));
         let call_pump = cx.spawn(async move |this, cx| {
@@ -1277,7 +1285,6 @@ impl AppState {
             pending_dm_reply: None,
             awaiting_group: None,
             invite_target: None,
-            message_grant_target: None,
             add_members_target: None,
             add_members_server: None,
             add_members_secret: None,
@@ -1287,6 +1294,8 @@ impl AppState {
             profile_from_name: false,
             typing_sent_at: HashMap::new(),
             device_id: None,
+            call_account: WorkLifetime::default(),
+            call_backend: None,
             projects: Vec::new(),
             models: Vec::new(),
             project_docs: HashMap::new(),
@@ -1381,11 +1390,7 @@ impl AppState {
             renaming_project: None,
             muted: load_muted(),
             read_receipts: load_read_receipts(),
-            link_previews: {
-                let on = load_link_previews();
-                crate::ui::link_card::set_enabled(on);
-                on
-            },
+            link_previews: load_link_previews(),
             message_receipts: HashMap::new(),
             presence_seen: HashMap::new(),
             notify_prompt_answered: false,
@@ -1403,6 +1408,8 @@ impl AppState {
             speech_failed: HashMap::new(),
             awaiting_new_project: false,
             commands: command_tx,
+            session,
+            account_scoped,
             update_commands: update_command_tx,
             call_commands: call_command_tx,
             calls_in_chat: HashMap::new(),
@@ -1795,11 +1802,199 @@ impl AppState {
         rx
     }
 
+    /// A real account replacement must not paint A while B's cache/network is empty.
+    /// Global settings, updater/window ownership and monotonic request IDs remain local to this Mac.
+    fn reset_account_views(&mut self) {
+        self.pairing = None;
+        self.device_id = None;
+        self.account = None;
+        self.new_chat_open = false;
+        self.new_group_open = false;
+        self.new_group_draft = None;
+        self.new_group_picked.clear();
+        self.new_group_agents.clear();
+        self.people_query.clear();
+        self.people_results.clear();
+        self.blocked.clear();
+        self.people_busy = false;
+        self.people_error = None;
+        self.send_errors.clear();
+        self.people_directory.clear();
+        self.typing.clear();
+        self.avatars.clear();
+        self.accents.clear();
+        self.awaiting_dm = None;
+        self.draft_dm = None;
+        self.pending_dm_reply = None;
+        self.awaiting_group = None;
+        self.invite_target = None;
+        self.add_members_target = None;
+        self.add_members_server = None;
+        self.add_members_secret = None;
+        self.pending_join_code = None;
+        self.avatar_reply_until.clear();
+        self.avatar_picker = None;
+        self.profile_from_name = false;
+        self.typing_sent_at.clear();
+        self.first_project_pending = false;
+        self.onboarding = None;
+        self.projects.clear();
+        self.models.clear();
+        self.project_docs.clear();
+        self.skills.clear();
+        self.chats.clear();
+        self.messages.clear();
+        self.optimistic_notices.clear();
+        self.chat_ui.clear();
+        self.blobs.clear();
+        self.thumbnails.clear();
+        self.search_index = SearchIndex::default();
+        self.thumbnails_trimmed.clear();
+        self.thumbnails_requested.clear();
+        self.link_icons.clear();
+        self.link_icon_tones.clear();
+        self.link_icons_requested.clear();
+        self.thumbnails_failed.clear();
+        self.gif_results = None;
+        self.gif_query_pending = None;
+        self.sticker_packs = None;
+        self.sticker_packs_requested = false;
+        self.sticker_raw.clear();
+        self.copy_request = None;
+        self.notices.clear();
+        self.push_refused.clear();
+        self.silence_until_armed.clear();
+        self.silence_until_gen.clear();
+        self.selected_project = None;
+        self.store_usage = (0, 0);
+        self.active_tab.clear();
+        self.last_chats.clear();
+        self.archived_chats.clear();
+        self.pins.clear();
+        self.pin_cap = PIN_CAP_DEFAULT;
+        self.search_chat = None;
+        self.reveal_message = None;
+        self.highlight_message = None;
+        self.chat_search = None;
+        self.link = Link::Connecting;
+        self.room_links.clear();
+        self.relay_link = (LinkState::Live, 0);
+        self.details_open = None;
+        self.media_viewer = None;
+        self.chart_viewer = None;
+        self.forward_message = None;
+        self.new_project_open = false;
+        self.connect_open = false;
+        self.connect_reveal = None;
+        self.wake_form = None;
+        self.machine = Machine::default();
+        self.local = LocalView::default();
+        self.connectors = ConnectorsView::default();
+        self.secrets = SecretsView::default();
+        self.devices = DevicesView::default();
+        self.agent_links = AgentLinksView::default();
+        self.agent_link_reveal = None;
+        self.project_secrets.clear();
+        self.shell_grants.clear();
+        self.handoff.clear();
+        self.routines.clear();
+        self.box_report = None;
+        self.jobs.clear();
+        self.tasks_open = None;
+        self.rollouts.clear();
+        self.job_tabs.clear();
+        self.closed_job_tabs.clear();
+        self.pending_steers.clear();
+        self.routine_runs.clear();
+        self.notify_prompt = false;
+        self.profile = None;
+        self.profile_tab = 0;
+        self.profile_stack.clear();
+        self.avatar_picker_request = None;
+        self.avatar_rig_prompt = None;
+        self.avatar_rig_upload = None;
+        self.avatar_generated = None;
+        self.agent_pick = None;
+        self.profile_editing_description = false;
+        self.profile_editing_name = false;
+        self.renaming_project = None;
+        self.message_receipts.clear();
+        self.presence_seen.clear();
+        self.focus_sent = None;
+        self.channels = ChannelsView::default();
+        self.voice_mode = false;
+        self.voice_mode_feature = false;
+        self.spoken.clear();
+        self.speech_failed.clear();
+        self.awaiting_new_project = false;
+        self.calls_in_chat.clear();
+        self.incoming_call = None;
+        self.incoming_since = None;
+        self.ring_tone = None;
+        self.ringback_tone = None;
+        self.voices.clear();
+        self.default_voice = None;
+        self.sample_playing = None;
+        self.sample_player = None;
+        self.sample_paths.clear();
+        self.sample_wanted = None;
+        self.voices_requested = false;
+        self.missed_written.clear();
+        self.missed_pending.clear();
+        self.ended_written.clear();
+        self.servers_available = false;
+        self.servers.clear();
+        self.open_server_hook_done = false;
+        self.rig_channel_menu = None;
+        self.rig_member_menu = None;
+        self.rig_unblock = None;
+        self.rig_space_opened = false;
+        self.matrix_snapshot = Snapshot::default();
+        self.matrix_connected = false;
+        self.channel_rows.clear();
+        self.channel_paged.clear();
+        self.server_rosters_requested.clear();
+        self.selected_channel = None;
+        self.open_server = None;
+        self.server_sheet = None;
+        self.server_busy = false;
+        self.server_error = None;
+        self.failure_claim = None;
+        self.claimed_failure = None;
+        self.channel_pending_room = None;
+        self.notifier.reset_account();
+    }
+
     /// One sync event into the state. A panic while applying it (a row shape the code did
     /// not expect: 2026-10-26, Mac 0.6.268 crashed at every launch restoring the saved
     /// chats) is caught here, logged by the panic hook (`panic_log`) and the event is skipped
     /// — the app stays up with that one row missing instead of aborting on the main thread.
     pub(crate) fn apply(&mut self, event: SyncEvent, cx: &mut Context<Self>) {
+        let event = match event {
+            SyncEvent::ForAccount { owner, event } => {
+                if !self.session.accepts_account(owner) {
+                    return;
+                }
+                *event
+            }
+            SyncEvent::ForCoordinator { owner, event } => {
+                if !self.session.control.accepts(owner) {
+                    return;
+                }
+                *event
+            }
+            SyncEvent::SessionStarted { control, account } => {
+                let changed = self.session.account() != Some(account);
+                if self.session.adopt(control, account) && changed {
+                    self.on_call_account(account, cx);
+                    self.reset_account_views();
+                    cx.notify();
+                }
+                return;
+            }
+            event if !self.account_scoped => event,
+            _ => return,
+        };
         let label = sync_event_label(&event);
         let result =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.apply_inner(event, cx)));
@@ -1821,6 +2016,9 @@ impl AppState {
             assert!(text != "panic!", "test poison event");
         }
         match event {
+            SyncEvent::ForAccount { .. }
+            | SyncEvent::ForCoordinator { .. }
+            | SyncEvent::SessionStarted { .. } => {}
             SyncEvent::OutsideAgentKey {
                 project_id,
                 name,
@@ -1880,11 +2078,16 @@ impl AppState {
                 cx.notify();
             }
             SyncEvent::NeedsPairing { relay_url } => {
+                self.session.clear_account();
+                self.call_account.close();
+                self.call_backend = None;
+                self.leave_call(cx);
                 let mode = self
                     .pairing
                     .as_ref()
                     .map(|p| p.mode)
                     .unwrap_or(SignInMode::GitHub);
+                self.reset_account_views();
                 self.pairing = Some(Pairing {
                     relay_url,
                     mode,
@@ -1920,6 +2123,12 @@ impl AppState {
                 cx.notify();
             }
             SyncEvent::Account(account) => {
+                if account.is_none() {
+                    // Scoped revocation sends NeedsPairing next; keep its original admission until then.
+                    self.call_backend = None;
+                    self.call_account.close();
+                    self.leave_call(cx);
+                }
                 self.account = account;
                 if self.account.is_some() {
                     self.maybe_prompt_notifications();
@@ -1964,11 +2173,13 @@ impl AppState {
                 }
                 cx.notify();
             }
+            SyncEvent::CallAccount(owner) => self.on_call_account(owner, cx),
             SyncEvent::CallReady {
+                attempt,
                 call,
                 created,
                 reachable,
-            } => self.on_call_ready(call, created, reachable, cx),
+            } => self.on_call_ready(attempt, call, created, reachable, cx),
             SyncEvent::CallStarted { call, sender } => self.on_call_started(call, sender, cx),
             SyncEvent::ChannelMessage {
                 server_id,
@@ -2001,6 +2212,18 @@ impl AppState {
                 }
             }
             SyncEvent::CallEnded(ended) => self.on_call_ended(ended, cx),
+            SyncEvent::CallLeft { attempt, ended } => self.on_call_left(attempt, ended, cx),
+            SyncEvent::CallLeftInfo { attempt, call } => {
+                if self.call_account.accepts(attempt.account()) {
+                    self.on_call_info(call, cx);
+                }
+            }
+            SyncEvent::CallLeaveError { attempt, error } => {
+                if self.call_account.accepts(attempt.account()) {
+                    self.push_failure(error, None);
+                    cx.notify();
+                }
+            }
             SyncEvent::CallMissed(missed) => self.on_call_missed(missed, cx),
             SyncEvent::CallInfo(call) => self.on_call_info(call, cx),
             SyncEvent::CallSeen { chat_id, call_id } => {
@@ -2014,8 +2237,19 @@ impl AppState {
                     self.command(ClientCommand::FetchCall { call_id });
                 }
             }
-            SyncEvent::CallError { chat_id, error } => {
+            SyncEvent::CallError {
+                attempt,
+                chat_id,
+                error,
+            } => {
                 let _ = chat_id;
+                if !self
+                    .my_call
+                    .as_ref()
+                    .is_some_and(|active| active.attempt.owns(&attempt))
+                {
+                    return;
+                }
                 if matches!(
                     self.my_call.as_ref().map(|c| &c.status),
                     Some(CallStatus::Connecting)
@@ -2533,11 +2767,20 @@ impl AppState {
                                 Some((p, d)) => (p.to_owned(), d.parse().unwrap_or(8_000)),
                                 None => (spec.clone(), 8_000u64),
                             };
+                            let control = self.session.control.ticket();
+                            let account = self.session.account();
                             cx.spawn(async move |this, cx| {
                                 cx.background_executor()
                                     .timer(std::time::Duration::from_millis(delay_ms))
                                     .await;
-                                let _ = this.update(cx, |s, cx| s.add_agent(chat, pid, cx));
+                                let _ = this.update(cx, |state, cx| {
+                                    if state.account_scoped
+                                        && !state.session.accepts_account_work(control, account)
+                                    {
+                                        return;
+                                    }
+                                    state.add_agent(chat, pid, cx);
+                                });
                             })
                             .detach();
                         }
@@ -3784,7 +4027,32 @@ impl AppState {
         if crate::draft_dm::names_draft(&cmd) {
             return;
         }
-        let _ = self.commands.send(cmd);
+        if !self.account_scoped {
+            let _ = self.commands.send(cmd);
+            return;
+        }
+        let Some(control) = self.session.control.ticket() else {
+            return;
+        };
+        let account = match &cmd {
+            ClientCommand::StartCall { attempt, .. }
+            | ClientCommand::JoinCall { attempt, .. }
+            | ClientCommand::LeaveCall { attempt, .. } => Some(attempt.backend()),
+            _ => self.session.account(),
+        };
+        if account.is_none()
+            && !matches!(
+                cmd,
+                ClientCommand::Pair { .. } | ClientCommand::SignIn { .. } | ClientCommand::SignOut
+            )
+        {
+            return;
+        }
+        let _ = self.commands.send(ClientCommand::Scoped {
+            control,
+            account,
+            command: Box::new(cmd),
+        });
     }
 
     pub fn select_project(&mut self, project_id: Id, cx: &mut Context<Self>) {
@@ -7026,7 +7294,6 @@ impl AppState {
             return;
         }
         self.link_previews = enabled;
-        crate::ui::link_card::set_enabled(enabled);
         save_link_previews(enabled);
         cx.notify();
     }
@@ -8018,41 +8285,6 @@ impl AppState {
             });
         }
         cx.notify();
-    }
-
-    /// Call a person (their DM) or an agent (its chat; Calls Phase 2). The
-    /// panes no longer offer it (2026-10-21); the composer's call button does.
-    #[allow(dead_code)]
-    pub fn start_call(&mut self, target: CallTarget, video: bool, cx: &mut Context<Self>) {
-        let kind = if video {
-            CallKind::Video
-        } else {
-            CallKind::Voice
-        };
-        match target {
-            CallTarget::User(handle) => {
-                let dm = self
-                    .people_spaces()
-                    .find(|p| p.person().map(|x| x.handle == handle).unwrap_or(false))
-                    .map(|p| p.id.clone());
-                match dm {
-                    Some(chat_id) => {
-                        self.select_project(chat_id, cx);
-                        self.start_call_in_chat(kind, cx);
-                    }
-                    None => {
-                        self.push_notice(format!("Start a chat with @{handle} first, then call."));
-                        cx.notify();
-                    }
-                }
-            }
-            CallTarget::Agent(project_id) => {
-                // Calls Phase 2: a call in the agent's chat; the voice worker joins as the agent.
-                self.close_profile(cx);
-                self.select_project(project_id, cx);
-                self.start_call_in_chat(kind, cx);
-            }
-        }
     }
 
     /// A person by handle, from any space's member list or the directory.
@@ -9502,6 +9734,9 @@ impl AppState {
     }
 
     pub fn pair(&mut self, code: String, cx: &mut Context<Self>) {
+        if self.account_scoped {
+            let _ = self.session.begin_control();
+        }
         if let Some(p) = &mut self.pairing {
             p.busy = true;
             p.error = None;
@@ -9521,12 +9756,17 @@ impl AppState {
             return;
         };
         let relay = p.relay_url.clone();
+        let control = self.session.begin_control();
         cx.notify();
         self.arm_sign_in_timeout(attempt, cx);
         let this = cx.entity().downgrade();
         auth::begin(relay, device_name(), cx, move |event, cx| {
             let _ = this.update(cx, |state, cx| {
-                state.on_sign_in_event(attempt, event);
+                if !state.account_scoped
+                    || control.is_some_and(|owner| state.session.control.accepts(owner))
+                {
+                    state.on_sign_in_event(attempt, event);
+                }
                 cx.notify();
             });
         });
@@ -9558,11 +9798,17 @@ impl AppState {
 
     /// `sign_in::SOFT_TIMEOUT_MS` after the click: Retry / Open in browser.
     fn arm_sign_in_timeout(&mut self, attempt: u64, cx: &mut Context<Self>) {
+        let control = self.session.control.ticket();
         cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(std::time::Duration::from_millis(sign_in::SOFT_TIMEOUT_MS))
                 .await;
             let _ = this.update(cx, |state, cx| {
+                if state.account_scoped
+                    && !control.is_some_and(|owner| state.session.control.accepts(owner))
+                {
+                    return;
+                }
                 if let Some(p) = &mut state.pairing {
                     if p.flow.tick(attempt, now_ms()) {
                         cx.notify();
@@ -9636,6 +9882,9 @@ impl AppState {
     /// Cancel on the pill: close the sheet (its block reports Cancelled) and
     /// go back to "Sign in with GitHub" at once.
     pub fn cancel_sign_in(&mut self, cx: &mut Context<Self>) {
+        if self.account_scoped {
+            let _ = self.session.begin_control();
+        }
         auth::cancel();
         if let Some(p) = &mut self.pairing {
             let attempt = p.flow.attempt;
@@ -9654,6 +9903,9 @@ impl AppState {
         let Some(attempt) = p.flow.continue_in_browser(now_ms()) else {
             return;
         };
+        if self.account_scoped {
+            let _ = self.session.begin_control();
+        }
         auth::cancel();
         let url = auth::start_url(&p.relay_url, &device_name());
         if let Err(err) = auth::open_in_browser(&url) {
@@ -9756,7 +10008,6 @@ impl AppState {
         self.new_group_picked.clear();
         self.new_group_agents.clear();
         self.invite_target = None;
-        self.message_grant_target = None;
         self.add_members_target = None;
         self.add_members_server = None;
         self.add_members_secret = None;
@@ -9788,56 +10039,6 @@ impl AppState {
         cx.notify();
     }
 
-    /// "Give a person access…": the same sheet; a pick lets that person's agents message
-    /// this agent (`PUT /projects/{id}/message-access`). The agent pane's "Who may message"
-    /// card that opened it left on 2026-10-25 ([feedback
-    /// agent-details-remove-sections-mac-2026-10-25]); the list and its calls stay for the
-    /// next way in.
-    #[allow(dead_code)]
-    pub fn open_message_grant_picker(&mut self, project_id: Id, cx: &mut Context<Self>) {
-        self.open_new_chat(cx);
-        self.message_grant_target = Some(project_id);
-        cx.notify();
-    }
-
-    #[allow(dead_code)]
-    pub fn set_message_grant(
-        &mut self,
-        project_id: Id,
-        grantee: String,
-        enabled: bool,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(p) = self.projects.iter_mut().find(|p| p.id == project_id) {
-            if let Some(g) = p.message_grants.iter_mut().find(|g| g.grantee == grantee) {
-                g.enabled = enabled;
-            }
-        }
-        self.command(ClientCommand::SetMessageGrant {
-            project_id,
-            grantee,
-            enabled,
-        });
-        cx.notify();
-    }
-
-    #[allow(dead_code)]
-    pub fn remove_message_grant(
-        &mut self,
-        project_id: Id,
-        grantee: String,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(p) = self.projects.iter_mut().find(|p| p.id == project_id) {
-            p.message_grants.retain(|g| g.grantee != grantee);
-        }
-        self.command(ClientCommand::RemoveMessageGrant {
-            project_id,
-            grantee,
-        });
-        cx.notify();
-    }
-
     pub fn close_new_chat(&mut self, cx: &mut Context<Self>) {
         self.new_chat_open = false;
         self.new_group_open = false;
@@ -9846,7 +10047,6 @@ impl AppState {
         self.awaiting_dm = None;
         self.awaiting_group = None;
         self.invite_target = None;
-        self.message_grant_target = None;
         self.add_members_target = None;
         self.add_members_server = None;
         self.add_members_secret = None;
@@ -10233,19 +10433,6 @@ impl AppState {
             }
             return;
         }
-        if let Some(project_id) = self.message_grant_target.take() {
-            self.new_chat_open = false;
-            let handle = handle.trim().trim_start_matches('@').to_string();
-            if !handle.is_empty() {
-                self.command(ClientCommand::SetMessageGrant {
-                    project_id,
-                    grantee: format!("@{handle}"),
-                    enabled: true,
-                });
-            }
-            cx.notify();
-            return;
-        }
         match self.invite_target.clone() {
             Some(project_id) => {
                 self.new_chat_open = false;
@@ -10628,13 +10815,23 @@ impl AppState {
     }
 
     pub fn sign_out(&mut self, cx: &mut Context<Self>) {
-        self.command(ClientCommand::SignOut);
-        self.account = None;
-        self.projects.clear();
-        self.chats.clear();
-        self.selected_project = None;
-        self.people_directory.clear();
-        self.people_results.clear();
+        self.call_account.close();
+        self.call_backend = None;
+        self.leave_call(cx);
+        let previous_account = self.session.account();
+        let control = self.session.invalidate();
+        if self.account_scoped {
+            if let Some(control) = control {
+                let _ = self.commands.send(ClientCommand::Scoped {
+                    control,
+                    account: previous_account,
+                    command: Box::new(ClientCommand::SignOut),
+                });
+            }
+        } else {
+            self.command(ClientCommand::SignOut);
+        }
+        self.reset_account_views();
         cx.notify();
     }
 
@@ -10683,6 +10880,8 @@ impl AppState {
 
     /// While the reveal sheet is up, ask the relay every 3 s whether the agent has checked in.
     fn poll_connect_status(&mut self, cx: &mut Context<Self>) {
+        let control = self.session.control.ticket();
+        let account = self.session.account();
         let Some(project_id) = self.connect_reveal.as_ref().map(|r| r.project_id.clone()) else {
             return;
         };
@@ -10693,14 +10892,19 @@ impl AppState {
             cx.background_executor()
                 .timer(std::time::Duration::from_secs(3))
                 .await;
-            let go = this.update(cx, |state, _| match state.connect_reveal.as_ref() {
-                Some(r) if r.project_id == project_id => {
-                    state.command(ClientCommand::OutsideAgentStatus {
-                        project_id: project_id.clone(),
-                    });
-                    true
+            let go = this.update(cx, |state, _| {
+                if state.account_scoped && !state.session.accepts_account_work(control, account) {
+                    return false;
                 }
-                _ => false,
+                match state.connect_reveal.as_ref() {
+                    Some(r) if r.project_id == project_id => {
+                        state.command(ClientCommand::OutsideAgentStatus {
+                            project_id: project_id.clone(),
+                        });
+                        true
+                    }
+                    _ => false,
+                }
             });
             if !matches!(go, Ok(true)) {
                 break;
@@ -11931,7 +12135,15 @@ impl AppState {
                 None => return,
             }
         };
+        let Some(backend) = self.call_backend else {
+            return;
+        };
+        let Some(account) = self.call_account.ticket() else {
+            return;
+        };
+        let attempt = CallAttempt::new(chat_id.clone(), None, account, backend);
         self.my_call = Some(ActiveCall {
+            attempt: attempt.clone(),
             call: Call {
                 chat_id: chat_id.clone(),
                 kind,
@@ -11949,7 +12161,11 @@ impl AppState {
             reachable: None,
             agent_seeing: false,
         });
-        self.command(ClientCommand::StartCall { chat_id, kind });
+        self.command(ClientCommand::StartCall {
+            attempt,
+            chat_id,
+            kind,
+        });
         self.sync_tones();
         cx.notify();
     }
@@ -11965,7 +12181,20 @@ impl AppState {
             .find(|c| c.call_id == call_id)
             .cloned()
             .unwrap_or_default();
+        let Some(backend) = self.call_backend else {
+            return;
+        };
+        let Some(account) = self.call_account.ticket() else {
+            return;
+        };
+        let attempt = CallAttempt::new(
+            known.chat_id.clone(),
+            Some(call_id.clone()),
+            account,
+            backend,
+        );
         self.my_call = Some(ActiveCall {
+            attempt: attempt.clone(),
             camera: known.kind == CallKind::Video,
             call: known,
             status: CallStatus::Connecting,
@@ -11980,7 +12209,7 @@ impl AppState {
             agent_seeing: false,
         });
         self.incoming_call = None;
-        self.command(ClientCommand::JoinCall { call_id });
+        self.command(ClientCommand::JoinCall { attempt, call_id });
         cx.notify();
     }
 
@@ -12067,12 +12296,14 @@ impl AppState {
         let Some(active) = self.my_call.take() else {
             return;
         };
-        let _ = self.call_commands.send(CallCmd::Leave);
-        if !active.call.call_id.is_empty() {
-            self.command(ClientCommand::LeaveCall {
-                call_id: active.call.call_id.clone(),
-            });
-        }
+        active.attempt.cancel();
+        let _ = self.call_commands.send(CallCmd::Leave {
+            attempt: active.attempt.clone(),
+        });
+        self.command(ClientCommand::LeaveCall {
+            attempt: active.attempt.clone(),
+            call_id: active.call.call_id.clone(),
+        });
         drop_active_call_images(active, cx);
         self.sync_tones();
         cx.notify();
@@ -12085,7 +12316,10 @@ impl AppState {
                 return;
             }
             c.muted = !c.muted;
-            let _ = self.call_commands.send(CallCmd::SetMuted(c.muted));
+            let _ = self.call_commands.send(CallCmd::SetMuted {
+                attempt: c.attempt.clone(),
+                muted: c.muted,
+            });
             cx.notify();
         }
     }
@@ -12098,7 +12332,10 @@ impl AppState {
                 c.agent_seeing = false;
             }
             c.notice = None;
-            let _ = self.call_commands.send(CallCmd::SetCamera(c.camera));
+            let _ = self.call_commands.send(CallCmd::SetCamera {
+                attempt: c.attempt.clone(),
+                on: c.camera,
+            });
             cx.notify();
         }
     }
@@ -12128,11 +12365,19 @@ impl AppState {
 
     fn on_call_ready(
         &mut self,
+        attempt: CallAttempt,
         call: Call,
         created: bool,
         reachable: Vec<Reachable>,
         cx: &mut Context<Self>,
     ) {
+        if !self
+            .my_call
+            .as_ref()
+            .is_some_and(|active| active.attempt.owns(&attempt))
+        {
+            return;
+        }
         self.calls_in_chat
             .insert(call.space_id().to_owned(), call.clone());
         if created {
@@ -12154,27 +12399,12 @@ impl AppState {
             .unwrap_or(call.kind == CallKind::Video);
         let Some(token) = call.token.clone() else {
             self.push_notice("The relay sent no join token.");
-            if let Some(active) = self.my_call.take() {
-                drop_active_call_images(active, cx);
-            }
+            self.leave_call(cx);
             cx.notify();
             return;
         };
         let listen_only = call.can_speak == Some(false);
-        let active = self.my_call.get_or_insert_with(|| ActiveCall {
-            call: call.clone(),
-            status: CallStatus::Connecting,
-            muted: listen_only,
-            camera,
-            participants: Vec::new(),
-            local_video: None,
-            joined_at: now_ms(),
-            expanded: true,
-            notice: None,
-            outgoing: false,
-            reachable: None,
-            agent_seeing: false,
-        });
+        let active = self.my_call.as_mut().unwrap();
         active.call = call.clone();
         active.status = CallStatus::Connecting;
         if listen_only {
@@ -12185,12 +12415,16 @@ impl AppState {
             active.reachable = reachable_line(&reachable);
         }
         let _ = self.call_commands.send(CallCmd::Join {
+            attempt: attempt.clone(),
             url: call.livekit_url.clone(),
             token,
             camera,
         });
         if listen_only {
-            let _ = self.call_commands.send(CallCmd::SetMuted(true));
+            let _ = self.call_commands.send(CallCmd::SetMuted {
+                attempt,
+                muted: true,
+            });
         }
         self.incoming_call = None;
         self.sync_tones();
@@ -12218,6 +12452,20 @@ impl AppState {
         }
         self.sync_tones();
         cx.notify();
+    }
+
+    fn on_call_account(&mut self, owner: WorkTicket, cx: &mut Context<Self>) {
+        if self.call_backend != Some(owner) {
+            self.leave_call(cx);
+            self.call_account.reopen();
+            self.call_backend = Some(owner);
+        }
+    }
+
+    fn on_call_left(&mut self, attempt: CallAttempt, ended: CallEnded, cx: &mut Context<Self>) {
+        if self.call_account.accepts(attempt.account()) {
+            self.on_call_ended(ended, cx);
+        }
     }
 
     fn on_call_ended(&mut self, ended: CallEnded, cx: &mut Context<Self>) {
@@ -12261,9 +12509,11 @@ impl AppState {
             .unwrap_or(false)
         {
             if let Some(active) = self.my_call.take() {
+                let _ = self.call_commands.send(CallCmd::Leave {
+                    attempt: active.attempt.clone(),
+                });
                 drop_active_call_images(active, cx);
             }
-            let _ = self.call_commands.send(CallCmd::Leave);
         }
         // Exactly one device writes the end line (contract §1) — and once: the
         // leave answer and the `call_ended` push may both name this device.
@@ -12382,7 +12632,15 @@ impl AppState {
     }
 
     /// Events from the LiveKit engine.
-    fn apply_call_event(&mut self, event: CallEvent, cx: &mut Context<Self>) {
+    fn apply_call_event(&mut self, event: calls::AttemptEvent, cx: &mut Context<Self>) {
+        if !self
+            .my_call
+            .as_ref()
+            .is_some_and(|active| active.attempt.owns(&event.attempt))
+        {
+            return;
+        }
+        let event = event.event;
         let my_identity = format!("u_{}", self.me_id());
         let my_handle = self.me_handle();
         let Some(active) = self.my_call.as_mut() else {
@@ -12522,11 +12780,12 @@ impl AppState {
                 if active.status == CallStatus::Connected {
                     // The engine dropped the room on its own: leave the relay side too.
                     let call_id = active.call.call_id.clone();
+                    let attempt = active.attempt.clone();
                     if let Some(ended) = self.my_call.take() {
                         drop_active_call_images(ended, cx);
                     }
                     if !call_id.is_empty() {
-                        self.command(ClientCommand::LeaveCall { call_id });
+                        self.command(ClientCommand::LeaveCall { attempt, call_id });
                     }
                 }
             }
@@ -12562,19 +12821,6 @@ pub fn fnv1a64(s: &str) -> u64 {
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
     }
     h
-}
-
-pub fn title_from(text: &str) -> String {
-    let line = text.lines().next().unwrap_or("").trim();
-    let mut out: String = line.chars().take(34).collect();
-    if line.chars().count() > 34 {
-        out.push('…');
-    }
-    if out.is_empty() {
-        "New chat".into()
-    } else {
-        out
-    }
 }
 
 /// MIME from a local path's extension (optimistic echo before the relay replies).
@@ -14557,7 +14803,9 @@ mod call_video_frame_tests {
     //! new RenderImage left in the sprite atlas. swap_frame / remove_call_participant
     //! hand the previous frame back so App::drop_image can free it.
     use super::{remove_call_participant, swap_frame, ActiveCall, CallParticipant, CallStatus};
+    use crate::call_attempt::CallAttempt;
     use crate::model::{Call, Sender};
+    use crate::sync::work_lifetime::WorkLifetime;
     use gpui::RenderImage;
     use std::sync::Arc;
 
@@ -14567,6 +14815,12 @@ mod call_video_frame_tests {
 
     fn active_with(participant: CallParticipant) -> ActiveCall {
         ActiveCall {
+            attempt: CallAttempt::new(
+                "test".into(),
+                None,
+                WorkLifetime::default().ticket().unwrap(),
+                WorkLifetime::default().ticket().unwrap(),
+            ),
             call: Call::default(),
             status: CallStatus::Connected,
             muted: false,

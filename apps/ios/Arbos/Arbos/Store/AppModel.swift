@@ -298,7 +298,12 @@ final class AppModel: ObservableObject {
     /// After a fresh GitHub sign-in, ask for display name + handle once (Settings can edit later).
     @Published var needsProfileSetup = false
     private let webAuth = WebAuth()
-    private var refreshTask: Task<Bool, Never>?
+    var accountLifetime = WorkLifetime()
+    private enum TokenRefreshState {
+        case idle
+        case running(WorkLifetime.Ticket, Task<Bool, Never>)
+    }
+    private var tokenRefreshState: TokenRefreshState = .idle
     /// Outside agents (#2142): the connection per project, for the agent pane and the reveal.
     @Published var outsideInfo: [Id: OutsideAgentInfo] = [:]
     /// Connected agents' session logs (`GET /outside-agents/{id}/log`, #2224), oldest first,
@@ -486,7 +491,7 @@ final class AppModel: ObservableObject {
     /// Servers whose member list was asked for this session (`wantServerRosters`).
     var serverRostersRequested: Set<Id> = []
     /// `matrixStart` in flight (one at a time).
-    var matrixStarting = false
+    var matrixLifetime = MatrixLifetime()
 
     /// Who the call screen shows before anyone joins: the DM peer, or (for a
     /// people group) every other human plus the agents in that chat; for a
@@ -1221,9 +1226,16 @@ final class AppModel: ObservableObject {
 
     // MARK: Calls v1
 
+    private func boundCallAPI() -> RelayAPI? {
+        guard credentials != nil, let owner = accountLifetime.ticket else { return nil }
+        let bound = api.bound(to: { [weak self] in self?.accountLifetime.accepts(owner) == true })
+        bound.refresher = { [weak self] in await self?.refreshTokens(expectedOwner: owner) ?? false }
+        return bound
+    }
+
     private func hookCalls() {
         let calls = CallManager.shared
-        calls.api = api
+        calls.api = boundCallAPI()
         calls.isFixture = isFixture
         calls.deviceId = { [weak self] in self?.deviceId ?? "" }
         calls.me = { [weak self] in
@@ -1439,17 +1451,23 @@ final class AppModel: ObservableObject {
         guard !signingIn else { return }
         signingIn = true
         signInError = nil
+        let owner = accountLifetime.ticket ?? accountLifetime.reopen()
+        let requestAPI = api
         Task {
-            defer { signingIn = false }
+            defer { if accountLifetime.accepts(owner) { signingIn = false } }
             do {
-                guard let start = api.authStartURL(deviceName: UIDevice.current.name) else {
+                guard let start = requestAPI.authStartURL(deviceName: UIDevice.current.name) else {
                     throw AuthError(message: "Bad relay address")
                 }
                 let code = try await webAuth.signIn(startURL: start)
-                let (toks, who) = try await api.exchange(grantCode: code)
+                guard accountLifetime.accepts(owner) else { return }
+                let (toks, who) = try await requestAPI.exchange(grantCode: code)
+                guard accountLifetime.accepts(owner) else { return }
+                signingIn = false
                 adopt(tokens: toks, user: who)
                 needsProfileSetup = true
             } catch {
+                guard accountLifetime.accepts(owner) else { return }
                 signInError = UserError.classify("sign in", error)
             }
         }
@@ -1493,7 +1511,22 @@ final class AppModel: ObservableObject {
         }
     }
 
+    private func prepareCredentialOwner(relayUrl: String, deviceId: String) {
+        if let credentials, credentials.relayUrl == relayUrl, credentials.deviceId == deviceId,
+           accountLifetime.ticket != nil { return }
+        if credentials != nil {
+            unpair(forget: false)
+            tokens = nil
+            user = nil
+            credits = nil
+            needsProfileSetup = false
+        }
+        accountLifetime.reopen()
+        stopMatrix()
+    }
+
     private func adopt(tokens toks: AuthTokens, user who: AuthUser?, persist: Bool = true) {
+        prepareCredentialOwner(relayUrl: toks.relayUrl, deviceId: toks.deviceId)
         tokens = toks
         if let who { user = who }
         if persist {
@@ -1503,6 +1536,7 @@ final class AppModel: ObservableObject {
         }
         let wasPaired = credentials != nil
         credentials = DeviceCredentials(relayUrl: toks.relayUrl, deviceId: toks.deviceId, deviceToken: toks.accessToken)
+        CallManager.shared.api = boundCallAPI()
         if !wasPaired {
             // A sign-in through the browser (not a token refresh): a possible first login.
             // Rig (Debug): `ARBOS_SKIP_FIRST_LOGIN=1` lands on the lists at once — a shot of an
@@ -1514,16 +1548,22 @@ final class AppModel: ObservableObject {
 
     /// Single-flight refresh; false when the relay rejected the refresh token
     /// (the device is then signed out — a reused rotated token revokes it).
-    func refreshTokens() async -> Bool {
-        if let running = refreshTask { return await running.value }
-        guard let current = tokens, !current.refreshToken.isEmpty else { return false }
+    func refreshTokens(expectedOwner: WorkLifetime.Ticket? = nil) async -> Bool {
+        if let expectedOwner, !accountLifetime.accepts(expectedOwner) { return false }
+        if case .running(let owner, let task) = tokenRefreshState,
+           accountLifetime.accepts(owner) { return await task.value }
+        guard let current = tokens, !current.refreshToken.isEmpty,
+              let owner = accountLifetime.ticket else { return false }
+        let requestAPI = api
         let task = Task<Bool, Never> { [weak self] in
-            guard let self else { return false }
+            guard let self, self.accountLifetime.accepts(owner) else { return false }
             do {
-                let (next, who) = try await api.refresh(current)
+                let (next, who) = try await requestAPI.refresh(current)
+                guard accountLifetime.accepts(owner), !Task.isCancelled else { return false }
                 adopt(tokens: next, user: who)
                 return true
             } catch {
+                guard accountLifetime.accepts(owner), !Task.isCancelled else { return false }
                 if let e = error as? RelayError, e.status == 401 || e.status == 403 {
                     signOut(remote: false)
                     signInError = UserError.of("stay signed in", .authExpired, "token refresh refused")
@@ -1531,9 +1571,11 @@ final class AppModel: ObservableObject {
                 return false
             }
         }
-        refreshTask = task
+        tokenRefreshState = .running(owner, task)
         let ok = await task.value
-        refreshTask = nil
+        if case .running(let currentOwner, _) = tokenRefreshState, currentOwner == owner {
+            tokenRefreshState = .idle
+        }
         return ok
     }
 
@@ -1568,14 +1610,14 @@ final class AppModel: ObservableObject {
 
     func signOut(remote: Bool = true) {
         let had = tokens
-        if remote, let creds = credentials {
-            let api = self.api
-            Task { try? await api.unregisterPush(deviceId: creds.deviceId); try? await api.unregisterVoip(deviceId: creds.deviceId) }
+        let cleanupAPI = remote ? api.frozenAuthority() : nil
+        if let cleanupAPI, let creds = credentials {
+            Task { try? await cleanupAPI.unregisterPush(deviceId: creds.deviceId); try? await cleanupAPI.unregisterVoip(deviceId: creds.deviceId) }
         }
         CallManager.shared.forgetVoipRegistration()
         PushManager.shared.forgetRegistration()
         PushManager.shared.setBadge(0)
-        if remote, had != nil { Task { await api.logout() } }
+        if had != nil, let cleanupAPI { Task { await cleanupAPI.logout() } }
         if let had { Keychain.deleteAuth(relayUrl: had.relayUrl) }
         tokens = nil
         user = nil
@@ -1592,8 +1634,10 @@ final class AppModel: ObservableObject {
     /// Unit tests: talk to a loopback relay with a fixed token — no keychain, no auth probe,
     /// no rooms. Used by `AddMembersActionTests` to drive `addMembers` end to end.
     func installRelayForTests(url: String, token: String) {
+        prepareCredentialOwner(relayUrl: url, deviceId: "ios:test")
         api = RelayAPI(endpoint: RelayEndpoint(url)) { token }
         credentials = DeviceCredentials(relayUrl: url, deviceId: "ios:test", deviceToken: token)
+        CallManager.shared.api = boundCallAPI()
     }
     #endif
 
@@ -1616,21 +1660,26 @@ final class AppModel: ObservableObject {
             credentials = Keychain.load(relayUrl: endpoint.httpUrl)
         }
         if credentials != nil {
+            accountLifetime.reopen()
+            CallManager.shared.api = boundCallAPI()
             startAfterPairing()
         } else if let previous, tokens == nil, previous.deviceToken.hasPrefix("adv_") {
             // A quick-tunnel URL changes while the relay (and this device's
             // token) stays the same: try the old token on the new address
             // before asking for a pairing code.
-            Task { await adopt(previous, at: endpoint) }
+            let owner = accountLifetime.reopen()
+            Task { await adopt(previous, at: endpoint, owner: owner) }
         }
     }
 
-    private func adopt(_ old: DeviceCredentials, at endpoint: RelayEndpoint) async {
+    private func adopt(_ old: DeviceCredentials, at endpoint: RelayEndpoint, owner: WorkLifetime.Ticket) async {
         let probe = RelayAPI(endpoint: endpoint) { old.deviceToken }
-        guard (try? await probe.registry()) != nil else { return }
+        guard (try? await probe.registry()) != nil, accountLifetime.accepts(owner) else { return }
         let creds = DeviceCredentials(relayUrl: endpoint.httpUrl, deviceId: old.deviceId, deviceToken: old.deviceToken)
+        prepareCredentialOwner(relayUrl: creds.relayUrl, deviceId: creds.deviceId)
         try? Keychain.store(creds)
         credentials = creds
+        CallManager.shared.api = boundCallAPI()
         startAfterPairing()
     }
 
@@ -1779,19 +1828,26 @@ final class AppModel: ObservableObject {
         guard !pairingBusy else { return }
         pairingBusy = true
         pairingError = nil
+        let owner = accountLifetime.ticket ?? accountLifetime.reopen()
+        let requestAPI = api
         Task {
-            defer { pairingBusy = false }
+            defer { if accountLifetime.accepts(owner) { pairingBusy = false } }
             do {
-                let creds = try await api.pair(code: code, name: UIDevice.current.name)
+                let creds = try await requestAPI.pair(code: code, name: UIDevice.current.name)
+                guard accountLifetime.accepts(owner) else { return }
+                pairingBusy = false
+                prepareCredentialOwner(relayUrl: creds.relayUrl, deviceId: creds.deviceId)
                 do {
                     try Keychain.store(creds)
                 } catch {
                     fail("save your sign-in to the keychain", error)
                 }
                 credentials = creds
+                CallManager.shared.api = boundCallAPI()
                 beginFirstLogin()
                 startAfterPairing()
             } catch {
+                guard accountLifetime.accepts(owner) else { return }
                 pairingError = (error as? RelayError)?.isUnauthorized == true
                     ? UserError.refused("pair this iPhone", "That code was not accepted. Codes expire after 10 minutes.")
                     : UserError.classify("pair this iPhone", error)
@@ -1800,6 +1856,12 @@ final class AppModel: ObservableObject {
     }
 
     func unpair(forget: Bool = true) {
+        accountLifetime.close()
+        CallManager.shared.invalidateForSignOut()
+        signingIn = false
+        pairingBusy = false
+        if case .running(_, let task) = tokenRefreshState { task.cancel() }
+        tokenRefreshState = .idle
         registryTask?.cancel()
         registryTask = nil
         for room in rooms.values { room.stop() }
@@ -1841,6 +1903,7 @@ final class AppModel: ObservableObject {
             if forget { Keychain.delete(relayUrl: creds.relayUrl) }
         }
         credentials = nil
+        CallManager.shared.api = nil
         link = .connecting
         roomLinks = [:]
         roomLinkSince = [:]
@@ -2636,6 +2699,7 @@ final class AppModel: ObservableObject {
         snapshotPending.remove(chatId)
         snapshotLastAt[chatId] = Date().timeIntervalSince1970
         guard let doc = docs[chatId] else { return }
+        guard let account = accountLifetime.ticket else { return }
         let gen = (snapshotGeneration[chatId] ?? 0) &+ 1
         snapshotGeneration[chatId] = gen
         #if DEBUG
@@ -2661,7 +2725,13 @@ final class AppModel: ObservableObject {
             await MainActor.run {
                 // A superseded read still paints a chat that shows nothing yet: rows arriving
                 // faster than one read finishes must not keep the transcript blank.
-                guard let self, self.snapshotGeneration[chatId] == gen || (self.messages[chatId]?.isEmpty ?? true) else { return }
+                guard let self else { return }
+                let ticket = SnapshotPublication.Ticket(account: account, doc: ObjectIdentifier(doc), revision: gen)
+                let target: SnapshotPublication.Target = self.docs[chatId].map {
+                    .active(doc: ObjectIdentifier($0), revision: self.snapshotGeneration[chatId] ?? 0)
+                } ?? .disposed
+                guard SnapshotPublication.accepts(ticket, account: self.accountLifetime, target: target,
+                                                  empty: self.messages[chatId]?.isEmpty ?? true) else { return }
                 self.applySnapshot(chatId, list: list)
             }
         }

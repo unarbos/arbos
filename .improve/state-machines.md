@@ -843,3 +843,19 @@ legacy defaults, soft cap/clamp, UTC placement and voice-before-vision remain.
 [Financial receipt evidence](state-machine-checks/voice-settlement/README.md)
 records exact counts, hashes and owner review before merge. Informational machine
 metering remains separate; this does not claim all H11 catalog entries complete.
+
+
+### Native ownership integration checkpoint
+
+Account/control work tickets, coordinator replacement, call attempts and store-file
+retirement are explicit owned lifetimes in the current native source. Genuine
+account replacement creates fresh private state; same-account refresh preserves
+its session. Root replay passes the 66 selected call cases, UI21/backend23/Matrix2/
+Swift-auth16 adapters, seven generated laws (1,792 cases) and protocol recovery.
+Actual Mac all-target Clippy passes against the pinned SDK; 17 actual Cargo helper
+cases pass. These scopes overlap and are not a whole-application test total.
+See `state-machine-checks/session-owner/{ROOT-REPLAY,NATIVE-GATES}.json` and
+`STORE-LIFETIME.md`. Persistent attribution of preexisting unbound cache files is
+an owner migration decision. More iOS admitted account-work callers and final
+unfiltered integration gates are still being completed; no global phase exit is
+claimed at this checkpoint.

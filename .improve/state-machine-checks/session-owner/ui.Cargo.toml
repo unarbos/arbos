@@ -1,0 +1,11 @@
+[workspace]
+[package]
+name="session-ui-checks"
+version="0.0.0"
+edition="2021"
+[dependencies]
+tokio={version="=1.53.3",features=["sync","rt","macros","time"]}
+log="0.4"
+[profile.dev]
+debug=0
+incremental=false

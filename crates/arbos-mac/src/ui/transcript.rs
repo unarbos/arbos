@@ -1682,6 +1682,7 @@ impl Transcript {
             &mentions,
             multi_party,
             people_space,
+            state.link_previews,
             &mut self.row_cache,
             &hidden_senders,
         );
@@ -4236,6 +4237,7 @@ fn message_render_version(
     names_senders: bool,
     // Width class: multi-party layout changes who gets a name caption.
     width_class: u8,
+    link_previews: bool,
 ) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     message.id.hash(&mut h);
@@ -4297,6 +4299,7 @@ fn message_render_version(
     me_id.hash(&mut h);
     names_senders.hash(&mut h);
     width_class.hash(&mut h);
+    link_previews.hash(&mut h);
     h.finish()
 }
 
@@ -4307,8 +4310,6 @@ fn message_render_version(
 ///
 /// `thumb_keys` are blob refs that already have a decoded preview; they are
 /// mixed into row versions so a late thumbnail reloads the picture row.
-/// `names_senders` landed from a parallel feedback; keep it a plain arg
-/// rather than a one-off options struct.
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub fn build_rows(
@@ -4357,6 +4358,7 @@ pub fn build_rows_hiding(
         mentions,
         names_senders,
         false,
+        true,
         &mut cache,
         hidden_senders,
     )
@@ -4375,6 +4377,7 @@ pub fn build_rows_with_cache(
     mentions: &Mentions,
     names_senders: bool,
     people_space: bool,
+    link_previews: bool,
     cache: &mut MessageRowCache,
     hidden_senders: &HashSet<String>,
 ) -> Vec<Row> {
@@ -4467,6 +4470,7 @@ pub fn build_rows_with_cache(
             thumb_keys,
             names_senders,
             width_class,
+            link_previews,
         );
         if let Some(hit) = cache.entries.get(&message.id) {
             if hit.version == version {
@@ -4516,7 +4520,7 @@ pub fn build_rows_with_cache(
                 // alone (iMessage's rule), the full URL stays one hover away on the card.
                 let preview = ghost
                     .is_none()
-                    .then(|| link_preview_of(message))
+                    .then(|| link_preview_of(message, link_previews))
                     .flatten()
                     .map(|(id, p)| Box::new((id.clone(), p.clone())));
                 if let Some(p) = &preview {
@@ -4844,7 +4848,8 @@ pub fn build_rows_with_cache(
                     .iter()
                     .filter(|p| matches!(p, Part::Chart { .. }))
                     .count();
-                let link_preview = link_preview_of(message).map(|(id, _)| id.clone());
+                let link_preview =
+                    link_preview_of(message, link_previews).map(|(id, _)| id.clone());
                 let total_blocks: usize = polished
                     .iter()
                     .map(|(_, text)| {
@@ -5733,10 +5738,9 @@ fn secret_ghost_body(name: &str, from: Option<&Person>, theme: &Theme) -> AnyEle
         .into_any_element()
 }
 
-/// The message's link preview, when the global switch is on and the sender has not removed
-/// it ([feedback link-embeds-mac-2026-10-27]).
-pub fn link_preview_of(message: &Message) -> Option<(&Id, &LinkPreview)> {
-    if !crate::ui::link_card::enabled() {
+/// The message's link preview under this transcript's settings, unless the sender removed it.
+pub fn link_preview_of(message: &Message, link_previews: bool) -> Option<(&Id, &LinkPreview)> {
+    if !link_previews {
         return None;
     }
     message.link_preview()
@@ -11275,6 +11279,7 @@ mod grouping_tests {
             &Mentions::empty(),
             names_senders,
             names_senders,
+            true,
             &mut cache,
             &HashSet::new(),
         );
@@ -11623,6 +11628,7 @@ mod grouping_tests {
                 &Mentions::empty(),
                 true,
                 true,
+                true,
                 cache,
                 &HashSet::new(),
             )
@@ -11686,6 +11692,7 @@ mod time_divider_tests {
             "gh_me",
             &HashSet::new(),
             &Mentions::empty(),
+            true,
             true,
             true,
             &mut cache,
@@ -12248,6 +12255,7 @@ mod delivery_tests {
             &Mentions::empty(),
             false,
             false,
+            true,
             &mut cache,
             &HashSet::new(),
         );
@@ -12268,6 +12276,7 @@ mod delivery_tests {
             &Mentions::empty(),
             false,
             false,
+            true,
             &mut cache,
             &HashSet::new(),
         );
@@ -12299,6 +12308,7 @@ mod delivery_tests {
             &Mentions::empty(),
             false,
             false,
+            true,
             &mut cache,
             &HashSet::new(),
         );
@@ -13298,7 +13308,7 @@ mod chart_tests {
 
 /// Link previews ([feedback link-embeds-mac-2026-10-27]): the `link_preview` part parses,
 /// becomes a card under the text (or the whole bubble for a bare link), is hidden by
-/// `preview: "off"` and the global switch, and the card draws its parts.
+/// `preview: "off"` and each transcript setting, and the card draws its parts.
 #[cfg(test)]
 mod link_preview_tests {
     use super::*;
@@ -13335,6 +13345,10 @@ mod link_preview_tests {
     }
 
     fn rows_of(m: Message) -> Vec<Row> {
+        rows_with_previews(m, true)
+    }
+
+    fn rows_with_previews(m: Message, link_previews: bool) -> Vec<Row> {
         let spoken = HashSet::new();
         let failed = HashMap::new();
         let speech = SpeechRows {
@@ -13343,7 +13357,7 @@ mod link_preview_tests {
             failed: &failed,
             voice_mode: false,
         };
-        build_rows(
+        build_rows_with_cache(
             &[m],
             false,
             speech,
@@ -13351,14 +13365,11 @@ mod link_preview_tests {
             &HashSet::new(),
             &Mentions::empty(),
             false,
+            false,
+            link_previews,
+            &mut MessageRowCache::default(),
+            &HashSet::new(),
         )
-    }
-
-    /// The global Link previews switch is process-wide: the tests that read or flip it take
-    /// this lock so the parallel runner cannot interleave them.
-    fn switch_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        LOCK.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     fn user_row(rows: &[Row]) -> (String, Option<Box<(String, LinkPreview)>>) {
@@ -13400,7 +13411,6 @@ mod link_preview_tests {
 
     #[test]
     fn text_plus_link_keeps_the_text_and_a_bare_link_becomes_the_card() {
-        let _switch = switch_lock();
         let (text, preview) = user_row(&rows_of(user_message(
             "listen to this https://open.spotify.com/track/7eiYNCojnoUVnz14kjBcQH?si=163bbf4a6caf4b39",
             None,
@@ -13424,8 +13434,7 @@ mod link_preview_tests {
     }
 
     #[test]
-    fn preview_off_and_the_global_switch_hide_the_card() {
-        let _switch = switch_lock();
+    fn preview_off_and_transcript_setting_hide_the_card() {
         let (text, preview) = user_row(&rows_of(user_message(
             "https://open.spotify.com/track/7eiYNCojnoUVnz14kjBcQH",
             Some("off"),
@@ -13433,18 +13442,77 @@ mod link_preview_tests {
         assert!(preview.is_none());
         assert!(text.starts_with("https://"), "the plain link is back");
 
-        crate::ui::link_card::set_enabled(false);
-        let (_, preview) = user_row(&rows_of(user_message(
-            "https://open.spotify.com/track/7eiYNCojnoUVnz14kjBcQH",
-            None,
-        )));
-        crate::ui::link_card::set_enabled(true);
+        let (_, preview) = user_row(&rows_with_previews(
+            user_message(
+                "https://open.spotify.com/track/7eiYNCojnoUVnz14kjBcQH",
+                None,
+            ),
+            false,
+        ));
         assert!(preview.is_none());
     }
 
     #[test]
+    fn changing_preview_policy_rebuilds_a_warm_cache_and_restores_plain_links() {
+        let url = "https://open.spotify.com/track/7eiYNCojnoUVnz14kjBcQH";
+        let messages = [user_message(url, None)];
+        let spoken = HashSet::new();
+        let failed = HashMap::new();
+        let speech = SpeechRows {
+            enabled: false,
+            spoken: &spoken,
+            failed: &failed,
+            voice_mode: false,
+        };
+        let mut cache = MessageRowCache::default();
+        let build = |cache: &mut MessageRowCache, enabled| {
+            build_rows_with_cache(
+                &messages,
+                false,
+                speech,
+                "gh_me",
+                &HashSet::new(),
+                &Mentions::empty(),
+                false,
+                false,
+                enabled,
+                cache,
+                &HashSet::new(),
+            )
+        };
+        let (text, preview) = user_row(&build(&mut cache, true));
+        assert_eq!(text, "");
+        assert!(preview.is_some());
+        let (text, preview) = user_row(&build(&mut cache, false));
+        assert_eq!(text, url);
+        assert!(preview.is_none());
+        assert_eq!(
+            cache.built, 1,
+            "a changed policy rebuilds the cached message"
+        );
+        build(&mut cache, false);
+        assert_eq!(cache.built, 0, "an unchanged policy still reuses rows");
+        let (text, preview) = user_row(&build(&mut cache, true));
+        assert_eq!(text, "");
+        assert!(preview.is_some());
+        assert_eq!(cache.built, 1);
+    }
+
+    #[test]
+    fn independent_transcript_settings_do_not_change_each_others_previews() {
+        let message = || {
+            user_message(
+                "https://open.spotify.com/track/7eiYNCojnoUVnz14kjBcQH",
+                None,
+            )
+        };
+        assert!(user_row(&rows_with_previews(message(), true)).1.is_some());
+        assert!(user_row(&rows_with_previews(message(), false)).1.is_none());
+        assert!(user_row(&rows_with_previews(message(), true)).1.is_some());
+    }
+
+    #[test]
     fn an_agents_link_preview_is_the_bubbles_last_block() {
-        let _switch = switch_lock();
         let m: Message = serde_json::from_value(serde_json::json!({
             "id": "m2", "chatId": "c1", "role": "assistant", "sender": "box:1", "status": "done",
             "createdAt": 1_700_000_002_000u64,

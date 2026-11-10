@@ -24,7 +24,9 @@
 
 use std::path::{Path, PathBuf};
 
-use gpui::{App, ClipboardEntry, ClipboardItem, ClipboardString, ImageFormat};
+use gpui::{App, ClipboardItem, ImageFormat};
+#[cfg(not(all(target_os = "macos", not(test))))]
+use gpui::{ClipboardEntry, ClipboardString};
 
 /// The bytes of one attachment as fetched from the relay (`GET /blob/{slot}/{key}`).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -64,7 +66,7 @@ pub struct PasteItem {
 impl PasteItem {
     /// The pasteboard types this item declares, most descriptive first — the order a
     /// reader that walks `types` sees (the native picture type before its fallbacks).
-    #[cfg_attr(any(not(target_os = "macos"), test), allow(dead_code))]
+    #[cfg(test)]
     pub fn types(&self) -> Vec<&'static str> {
         let mut out = Vec::new();
         if let Some(image) = &self.image {
@@ -402,6 +404,7 @@ pub fn read(cx: &App) -> Option<ClipboardItem> {
 /// The gpui `ClipboardItem` for `items` where the platform writer is not available
 /// (Linux dev builds, tests): every text and every picture as entries; gpui's writer
 /// keeps what it can of them.
+#[cfg(not(all(target_os = "macos", not(test))))]
 pub fn fallback_item(items: &[PasteItem]) -> ClipboardItem {
     let mut entries = Vec::new();
     let mut paths = Vec::new();

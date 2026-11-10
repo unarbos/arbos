@@ -13,24 +13,35 @@ private let matrixLog = Logger(subsystem: "com.unarbos.arbos.ios", category: "ma
 /// UniFFI callbacks arrive on the Rust sync task; hop to the main actor before touching AppModel.
 final class MatrixBridgeListener: ArbosFFI.MatrixListener, @unchecked Sendable {
     private weak var model: AppModel?
+    private let owner: MatrixLifetime.Ticket
 
-    init(model: AppModel) {
+    init(model: AppModel, owner: MatrixLifetime.Ticket) {
         self.model = model
+        self.owner = owner
     }
 
     func onRooms(snapshot: ArbosFFI.MatrixSnapshot) {
         let model = self.model
-        Task { @MainActor in model?.applyMatrixSnapshot(snapshot) }
+        Task { @MainActor [owner] in
+            guard let model, model.acceptsMatrix(owner) else { return }
+            model.applyMatrixSnapshot(snapshot)
+        }
     }
 
     func onTimeline(roomId: String, rows: [ArbosFFI.MatrixMessageRow]) {
         let model = self.model
-        Task { @MainActor in model?.applyMatrixTimeline(roomId: roomId, rows: rows) }
+        Task { @MainActor [owner] in
+            guard let model, model.acceptsMatrix(owner) else { return }
+            model.applyMatrixTimeline(roomId: roomId, rows: rows)
+        }
     }
 
     func onConnection(connected: Bool, error: String?) {
         let model = self.model
-        Task { @MainActor in model?.applyMatrixConnection(connected: connected, error: error) }
+        Task { @MainActor [owner] in
+            guard let model, model.acceptsMatrix(owner) else { return }
+            model.applyMatrixConnection(connected: connected, error: error)
+        }
     }
 }
 
@@ -716,30 +727,45 @@ extension AppModel {
     /// Start the shared client once `GET /me/matrix` answers; a relay without servers (503
     /// `servers_off`) leaves `matrixClient` nil and nothing server-related shows.
     func startMatrixIfNeeded() async {
-        guard credentials != nil, !isFixture, matrixClient == nil, !matrixStarting else { return }
-        matrixStarting = true
-        defer { matrixStarting = false }
+        guard credentials != nil, !isFixture, matrixClient == nil,
+              let account = accountLifetime.ticket,
+              let owner = matrixLifetime.start(account: account) else { return }
+        defer { matrixLifetime.failed(owner) }
+        let requestAPI = relay.bound(to: { [weak self] in
+            self?.accountLifetime.accepts(account) == true
+        })
+        requestAPI.refresher = { [weak self] in
+            await self?.refreshTokens(expectedOwner: account) ?? false
+        }
         do {
-            guard let creds = try await relay.matrixSession() else { return }
-            let listener = MatrixBridgeListener(model: self)
+            guard let creds = try await requestAPI.matrixSession(), acceptsMatrix(owner) else { return }
+            let listener = MatrixBridgeListener(model: self, owner: owner)
             let session = ArbosFFI.MatrixSession(homeserver: creds.homeserver, userId: creds.userId,
                                                  accessToken: creds.accessToken, deviceId: creds.deviceId)
             let client = try await matrixStart(session: session, listener: listener)
             // Signed out (or started twice) while the handshake ran.
-            guard credentials != nil, matrixClient == nil else {
+            guard acceptsMatrix(owner), matrixClient == nil else {
                 client.stop()
                 return
             }
             matrixListener = listener
             matrixClient = client
+            matrixLifetime.ready(owner)
             matrixConnected = true
-            applyMatrixSnapshot(await client.snapshot())
+            let snapshot = await client.snapshot()
+            guard acceptsMatrix(owner) else { return }
+            applyMatrixSnapshot(snapshot)
         } catch {
             matrixLog.notice("matrix start failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 
+    func acceptsMatrix(_ owner: MatrixLifetime.Ticket) -> Bool {
+        credentials != nil && accountLifetime.accepts(owner.account) && matrixLifetime.accepts(owner)
+    }
+
     func stopMatrix() {
+        matrixLifetime.stop()
         matrixClient?.stop()
         matrixClient = nil
         matrixListener = nil

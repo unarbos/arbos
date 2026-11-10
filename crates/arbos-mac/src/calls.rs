@@ -11,6 +11,7 @@
 //! out comes from the camera (macOS: AVFoundation through `nokhwa`) as I420
 //! into a `NativeVideoSource`.
 
+use crate::call_attempt::CallAttempt;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -37,13 +38,22 @@ const CAMERA_HEIGHT: u32 = 480;
 pub enum CallCmd {
     /// Connect to the room and publish the mic (and the camera for a video call).
     Join {
+        attempt: CallAttempt,
         url: String,
         token: String,
         camera: bool,
     },
-    SetMuted(bool),
-    SetCamera(bool),
-    Leave,
+    SetMuted {
+        attempt: CallAttempt,
+        muted: bool,
+    },
+    SetCamera {
+        attempt: CallAttempt,
+        on: bool,
+    },
+    Leave {
+        attempt: CallAttempt,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -90,13 +100,62 @@ pub enum CallEvent {
     Disconnected,
 }
 
+/// The UI discards every event whose lease no longer owns its pending call.
+#[derive(Debug, Clone)]
+pub struct AttemptEvent {
+    pub attempt: CallAttempt,
+    pub event: CallEvent,
+}
+
+#[derive(Clone)]
+struct CallEvents {
+    attempt: CallAttempt,
+    sender: mpsc::UnboundedSender<AttemptEvent>,
+}
+
+impl CallEvents {
+    fn send(&self, event: CallEvent) -> Result<(), ()> {
+        if !self.attempt.is_active() {
+            return Ok(());
+        }
+        self.sender
+            .send(AttemptEvent {
+                attempt: self.attempt.clone(),
+                event,
+            })
+            .map_err(|_| ())
+    }
+}
+
 struct Session {
-    room: Room,
+    room: Arc<Room>,
     mic: Option<LocalAudioTrack>,
     /// Keeps WebRTC's audio device module alive for the call.
     _audio: Option<PlatformAudio>,
     camera: Option<CameraPublish>,
     video_tasks: HashMap<String, tokio::task::JoinHandle<()>>,
+    closed: bool,
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        for task in self.video_tasks.values() {
+            task.abort();
+        }
+        if let Some(camera) = &self.camera {
+            camera
+                .stop
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        if !self.closed {
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                let room = self.room.clone();
+                runtime.spawn(async move {
+                    let _ = room.close().await;
+                });
+            }
+        }
+    }
 }
 
 struct CameraPublish {
@@ -104,64 +163,89 @@ struct CameraPublish {
     stop: Arc<std::sync::atomic::AtomicBool>,
 }
 
+impl Drop for CameraPublish {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// The engine loop. Runs on the tokio runtime for the app's lifetime.
 pub async fn run(
     mut cmds: mpsc::UnboundedReceiver<CallCmd>,
-    events: mpsc::UnboundedSender<CallEvent>,
+    events: mpsc::UnboundedSender<AttemptEvent>,
 ) {
-    let mut session: Option<Session> = None;
+    let mut session: Option<(CallAttempt, Session)> = None;
     let mut room_events: Option<mpsc::UnboundedReceiver<RoomEvent>> = None;
     loop {
         tokio::select! {
             cmd = cmds.recv() => {
                 let Some(cmd) = cmd else { break };
                 match cmd {
-                    CallCmd::Join { url, token, camera } => {
-                        if let Some(old) = session.take() {
-                            end_session(old).await;
-                        }
-                        let _ = events.send(CallEvent::Connecting);
-                        match connect(&url, &token, camera, &events).await {
-                            Ok((s, rx)) => {
-                                session = Some(s);
+                    CallCmd::Join { attempt, url, token, camera } => {
+                        if !attempt.is_active() { continue; }
+                        if let Some((_, old)) = session.take() { end_session(old).await; }
+                        room_events = None;
+                        if !attempt.is_active() { continue; }
+                        let scoped = CallEvents { attempt: attempt.clone(), sender: events.clone() };
+                        let _ = scoped.send(CallEvent::Connecting);
+                        let result = tokio::select! {
+                            _ = attempt.cancelled() => continue,
+                            result = connect(&url, &token, camera, &scoped, &attempt) => result,
+                        };
+                        match result {
+                            Ok((s, rx)) if attempt.is_active() => {
+                                session = Some((attempt, s));
                                 room_events = Some(rx);
-                                let _ = events.send(CallEvent::Connected);
+                                let _ = scoped.send(CallEvent::Connected);
                             }
-                            Err(err) => {
-                                let _ = events.send(CallEvent::Error(format!("{err:#}")));
-                            }
+                            Ok((s, _)) => end_session(s).await,
+                            Err(err) => { let _ = scoped.send(CallEvent::Error(format!("{err:#}"))); }
                         }
                     }
-                    CallCmd::SetMuted(muted) => {
-                        if let Some(mic) = session.as_ref().and_then(|s| s.mic.as_ref()) {
-                            if muted { mic.mute() } else { mic.unmute() }
+                    CallCmd::SetMuted { attempt, muted } => {
+                        if let Some((owner, s)) = session.as_ref().filter(|(owner, _)| owner.owns(&attempt)) {
+                            let _ = owner;
+                            if let Some(mic) = s.mic.as_ref() { if muted { mic.mute() } else { mic.unmute() } }
                         }
                     }
-                    CallCmd::SetCamera(on) => {
-                        if let Some(s) = session.as_mut() {
+                    CallCmd::SetCamera { attempt, on } => {
+                        if let Some((owner, s)) = session.as_mut().filter(|(owner, _)| owner.owns(&attempt)) {
+                            let scoped = CallEvents { attempt: owner.clone(), sender: events.clone() };
                             if on && s.camera.is_none() {
-                                match publish_camera(&s.room, &events).await {
-                                    Ok(c) => s.camera = Some(c),
-                                    Err(err) => {
-                                        let _ = events.send(CallEvent::CameraUnavailable(format!("{err:#}")));
-                                    }
+                                let result = tokio::select! {
+                                    _ = attempt.cancelled() => continue,
+                                    result = publish_camera(&s.room, &scoped) => result,
+                                };
+                                match result {
+                                    Ok(c) if attempt.is_active() => s.camera = Some(c),
+                                    Ok(c) => stop_camera(&s.room, c).await,
+                                    Err(err) => { let _ = scoped.send(CallEvent::CameraUnavailable(format!("{err:#}"))); }
                                 }
                             } else if !on {
                                 if let Some(c) = s.camera.take() {
                                     stop_camera(&s.room, c).await;
-                                    let _ = events.send(CallEvent::VideoOff { identity: "local".into() });
+                                    let _ = scoped.send(CallEvent::VideoOff { identity: "local".into() });
                                 }
                             }
                         }
                     }
-                    CallCmd::Leave => {
-                        if let Some(old) = session.take() {
-                            end_session(old).await;
+                    CallCmd::Leave { attempt } => {
+                        if session.as_ref().is_some_and(|(owner, _)| owner.is_same(&attempt)) {
+                            if let Some((_, old)) = session.take() { end_session(old).await; }
+                            room_events = None;
+                            let _ = CallEvents { attempt, sender: events.clone() }.send(CallEvent::Disconnected);
                         }
-                        room_events = None;
-                        let _ = events.send(CallEvent::Disconnected);
                     }
                 }
+            }
+            _ = async {
+                match session.as_ref() {
+                    Some((owner, _)) => owner.cancelled().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                if let Some((_, old)) = session.take() { end_session(old).await; }
+                room_events = None;
             }
             ev = async {
                 match room_events.as_mut() {
@@ -169,15 +253,16 @@ pub async fn run(
                     None => std::future::pending().await,
                 }
             } => {
-                let Some(ev) = ev else {
-                    room_events = None;
-                    continue;
-                };
-                if let Some(s) = session.as_mut() {
-                    on_room_event(s, ev, &events);
+                let Some(ev) = ev else { room_events = None; continue; };
+                if let Some((owner, s)) = session.as_mut() {
+                    let scoped = CallEvents { attempt: owner.clone(), sender: events.clone() };
+                    if owner.is_active() { on_room_event(s, ev, &scoped); }
                 }
             }
         }
+    }
+    if let Some((_, old)) = session {
+        end_session(old).await;
     }
 }
 
@@ -185,7 +270,8 @@ async fn connect(
     url: &str,
     token: &str,
     camera: bool,
-    events: &mpsc::UnboundedSender<CallEvent>,
+    events: &CallEvents,
+    attempt: &CallAttempt,
 ) -> anyhow::Result<(Session, mpsc::UnboundedReceiver<RoomEvent>)> {
     // Audio first: WebRTC's device module must exist before the peer connection
     // so the call hears remote tracks from the first packet.
@@ -204,6 +290,11 @@ async fn connect(
         .await
         .map_err(|e| anyhow::anyhow!("LiveKit: {e}"))?;
 
+    if !attempt.is_active() {
+        let _ = room.close().await;
+        anyhow::bail!("Call canceled");
+    }
+
     // Everyone already in the room.
     for (_, p) in room.remote_participants() {
         let _ = events.send(CallEvent::Participant {
@@ -215,11 +306,12 @@ async fn connect(
     }
 
     let mut session = Session {
-        room,
+        room: Arc::new(room),
         mic: None,
         _audio: None,
         camera: None,
         video_tasks: HashMap::new(),
+        closed: false,
     };
     if let Some(audio) = audio {
         let track = LocalAudioTrack::create_audio_track("mic", audio.rtc_source());
@@ -242,6 +334,10 @@ async fn connect(
         }
         session._audio = Some(audio);
     }
+    if !attempt.is_active() {
+        end_session(session).await;
+        anyhow::bail!("Call canceled");
+    }
     if camera {
         match publish_camera(&session.room, events).await {
             Ok(c) => session.camera = Some(c),
@@ -261,9 +357,10 @@ async fn end_session(mut s: Session) {
         stop_camera(&s.room, c).await;
     }
     let _ = s.room.close().await;
+    s.closed = true;
 }
 
-fn on_room_event(s: &mut Session, ev: RoomEvent, events: &mpsc::UnboundedSender<CallEvent>) {
+fn on_room_event(s: &mut Session, ev: RoomEvent, events: &CallEvents) {
     match ev {
         RoomEvent::ParticipantConnected(p) => {
             let _ = events.send(CallEvent::Participant {
@@ -381,11 +478,7 @@ fn on_room_event(s: &mut Session, ev: RoomEvent, events: &mpsc::UnboundedSender<
 }
 
 /// Remote video → BGRA `RenderImage` tiles, throttled.
-async fn pump_video(
-    mut stream: NativeVideoStream,
-    identity: String,
-    events: mpsc::UnboundedSender<CallEvent>,
-) {
+async fn pump_video(mut stream: NativeVideoStream, identity: String, events: CallEvents) {
     let mut last = Instant::now() - Duration::from_secs(1);
     while let Some(frame) = stream.next().await {
         if last.elapsed() < Duration::from_millis(TILE_FRAME_MS) {
@@ -468,10 +561,7 @@ fn to_i420_any(b: &dyn VideoBuffer) -> Option<I420Buffer> {
 // Camera publish
 // ---------------------------------------------------------------------------
 
-async fn publish_camera(
-    room: &Room,
-    events: &mpsc::UnboundedSender<CallEvent>,
-) -> anyhow::Result<CameraPublish> {
+async fn publish_camera(room: &Room, events: &CallEvents) -> anyhow::Result<CameraPublish> {
     let source = NativeVideoSource::new(
         VideoResolution {
             width: CAMERA_WIDTH,
@@ -483,9 +573,10 @@ async fn publish_camera(
         LocalVideoTrack::create_video_track("camera", RtcVideoSource::Native(source.clone()));
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     camera::start(source, stop.clone(), events.clone())?;
+    let camera = CameraPublish { track, stop };
     room.local_participant()
         .publish_track(
-            LocalTrack::Video(track.clone()),
+            LocalTrack::Video(camera.track.clone()),
             TrackPublishOptions {
                 source: TrackSource::Camera,
                 simulcast: false,
@@ -495,7 +586,7 @@ async fn publish_camera(
         )
         .await
         .map_err(|e| anyhow::anyhow!("publish camera: {e}"))?;
-    Ok(CameraPublish { track, stop })
+    Ok(camera)
 }
 
 async fn stop_camera(room: &Room, c: CameraPublish) {
@@ -510,7 +601,7 @@ async fn stop_camera(room: &Room, c: CameraPublish) {
 /// "agent_name":…,"agent":"a_…","seeing_identities":[…]}` — the data message
 /// (topic `agent_vision`) and the agent participant's `agent_vision`
 /// attribute carry the same JSON → [`CallEvent::AgentVision`].
-fn emit_agent_vision(events: &mpsc::UnboundedSender<CallEvent>, raw: &str) {
+fn emit_agent_vision(events: &CallEvents, raw: &str) {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) else {
         return;
     };
@@ -583,19 +674,17 @@ mod camera {
     #[cfg(target_os = "macos")]
     use std::sync::atomic::Ordering;
 
-    use livekit::webrtc::prelude::*;
-    use livekit::webrtc::video_source::native::NativeVideoSource;
-    use tokio::sync::mpsc;
-
-    use super::CallEvent;
+    use super::{CallEvent, CallEvents};
     #[cfg(target_os = "macos")]
     use super::{CAMERA_HEIGHT, CAMERA_WIDTH};
+    use livekit::webrtc::prelude::*;
+    use livekit::webrtc::video_source::native::NativeVideoSource;
 
     #[cfg(target_os = "macos")]
     pub fn start(
         source: NativeVideoSource,
         stop: Arc<AtomicBool>,
-        events: mpsc::UnboundedSender<CallEvent>,
+        events: CallEvents,
     ) -> anyhow::Result<()> {
         use nokhwa::pixel_format::RgbFormat;
         use nokhwa::utils::{CameraIndex, RequestedFormat, RequestedFormatType, Resolution};
@@ -678,7 +767,7 @@ mod camera {
     pub fn start(
         source: NativeVideoSource,
         stop: Arc<AtomicBool>,
-        events: mpsc::UnboundedSender<CallEvent>,
+        events: CallEvents,
     ) -> anyhow::Result<()> {
         if std::env::var_os("ARBOS_SYNTHETIC_CAMERA").is_some() {
             return synthetic(source, stop, events);
@@ -691,7 +780,7 @@ mod camera {
     pub fn synthetic(
         source: NativeVideoSource,
         stop: Arc<AtomicBool>,
-        events: mpsc::UnboundedSender<CallEvent>,
+        events: CallEvents,
     ) -> anyhow::Result<()> {
         use std::sync::atomic::Ordering;
         let (w, h) = (super::CAMERA_WIDTH, super::CAMERA_HEIGHT);

@@ -1,0 +1,58 @@
+{
+  "generated": {
+    "sources": {
+      "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "f40cc9f58ae3e238141cdf5f795a2c4cf855c198d8d0547cc1e9592516f33818",
+      "crates/arbos-mac/src/sync/work_lifetime.rs": "68d6c6fb42aa07499580c74e9ab465dd7d71d049bc76a8bfb67a6674024dde0b",
+      "crates/arbos-mac/src/sync/session_scope.rs": "40bd8659aa21f5dd6225bbab4c604376d617c9f2a98f3bc483958505624889e4",
+      "crates/arbos-mac/src/sync/account_tasks.rs": "b1a314282f340c973ce6debb6c28f39ea9997c44e9db2d73c9aa57e0ecc32cb7",
+      ".improve/state-machine-checks/native-ownership/oracle.swift": "d063fe3c8ccfa222cfd6eda4f5440d5eb4f525e3170f46b7d4ff2da81467edb4",
+      ".improve/state-machine-checks/native-ownership/native/src/main.rs": "55095260317a50e6c61fd3fba84d284b94b8cd6820f9c32420c4b589321d44d8",
+      ".improve/state-machine-checks/native-ownership/native/Cargo.toml": "b82c0c64850327f04968f7314bedeb354ad3e27a66721280269d3e6b1d609c2d",
+      ".improve/state-machine-checks/native-ownership/native/Cargo.lock": "1ceaf7c6bc9983c3c3d133eca617bbc873d33451e832e4930cced3bc0aef2326"
+    },
+    "outcomes": [
+      {
+        "seed": 90001,
+        "outcome": "Passed",
+        "runs": 256
+      },
+      {
+        "seed": 90002,
+        "outcome": "Passed",
+        "runs": 256
+      },
+      {
+        "seed": 90004,
+        "outcome": "Passed",
+        "runs": 256
+      },
+      {
+        "seed": 90005,
+        "outcome": "Passed",
+        "runs": 256
+      },
+      {
+        "seed": 90003,
+        "outcome": "Passed",
+        "runs": 256
+      },
+      {
+        "seed": 90006,
+        "outcome": "Passed",
+        "runs": 256
+      },
+      {
+        "seed": 90007,
+        "outcome": "Passed",
+        "runs": 256
+      }
+    ]
+  },
+  "law_count": 7,
+  "runs_per_law": 256,
+  "generated_cases": 1792,
+  "tests_with_protocol": 8,
+  "seconds": 4.665,
+  "mutants": 8,
+  "typecheck": "strict TypeScript passed; command in README; no product dependency change"
+}

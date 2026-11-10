@@ -90,6 +90,19 @@ struct CallTile: Identifiable, Equatable {
     }
 }
 
+/// Local ownership of one start/join, including its permission and media awaits.
+/// A replacement to the same server call/chat shares membership and must not be
+/// left by an older request's compensating cleanup.
+private struct CallAttempt {
+    let id = UUID()
+    let chatId: String
+    let callId: String?
+    let accountId: UUID
+    let userId: String?
+    let api: RelayAPI?
+    let cleanupAPI: RelayAPI?
+}
+
 @MainActor
 final class CallManager: NSObject, ObservableObject {
     static let shared = CallManager()
@@ -144,7 +157,10 @@ final class CallManager: NSObject, ObservableObject {
     /// this so a selective group start only shows the people we named as "Ringing…".
     @Published private(set) var ringIds: Set<String>?
 
-    let room = LiveKit.Room()
+    private var accountLifetime = UUID()
+    private var callAttempt: CallAttempt?
+    private var staleCallCleanup: Set<String> = []
+    private(set) var room = LiveKit.Room()
     var localVideoTrack: VideoTrack? { room.localParticipant.firstCameraVideoTrack }
     var localScreenShareTrack: VideoTrack? {
         room.localParticipant.firstScreenSharePublication?.track as? VideoTrack
@@ -222,15 +238,55 @@ final class CallManager: NSObject, ObservableObject {
 
     // MARK: Start / join / accept / leave
 
+    /// Reserve ownership before permissions or REST can suspend on MainActor.
+    private func beginAttempt(chatId: String, callId: String? = nil) -> CallAttempt? {
+        guard !isActive, !isTearingDown, !staleCallCleanup.contains(chatId) else { return nil }
+        let account = accountLifetime
+        let bound = api?.bound(to: { [weak self] in self?.accountLifetime == account })
+        let cleanup = api?.frozenAuthority()
+        let attempt = CallAttempt(chatId: chatId, callId: callId, accountId: account, userId: (me()?.id).flatMap { $0.isEmpty ? nil : $0 }, api: bound, cleanupAPI: cleanup)
+        callAttempt = attempt
+        phase = .connecting
+        room.delegates.remove(delegate: self)
+        room = LiveKit.Room()
+        room.add(delegate: self)
+        return attempt
+    }
+
+    private func ownsAttempt(_ attempt: CallAttempt) -> Bool {
+        callAttempt?.id == attempt.id
+    }
+
+    /// The old request's API is captured by its caller. Never leave a newer
+    /// attempt to the same call/chat, whose server membership may be shared.
+    private func releaseStaleCall(_ stale: Call, api: RelayAPI, userId: String?) async {
+        if let current = callAttempt, current.api?.endpoint == api.endpoint,
+           current.callId == stale.callId || current.chatId == stale.chatId {
+            // The server leave removes (call_id, user_id), even across devices
+            // or local re-adoption. Missing legacy metadata stays conservative.
+            if current.userId == nil || userId == nil || current.userId == userId { return }
+        }
+        guard !isFixture, staleCallCleanup.insert(stale.chatId).inserted else { return }
+        defer { staleCallCleanup.remove(stale.chatId) }
+        _ = try? await api.leaveCall(stale.callId)
+    }
+
     /// From the chat header: start (201) or join (200) the chat's call.
     /// `ring` — optional member ids to notify (selective group call). Nil / empty = everyone.
     func start(chatId: String, projectId: String?, kind: CallKind, title: String, ring: [String]? = nil) async {
-        guard !isActive else { isPresented = true; return }
-        guard await CallManager.micGranted() else { error = UserError.refused("start the call", "Microphone access is off in Settings."); return }
+        guard let sourceAPI = api else { return }
+        guard let attempt = beginAttempt(chatId: chatId) else { isPresented = true; return }
+        let api = attempt.api ?? sourceAPI
+        guard await CallManager.micGranted() else {
+            guard ownsAttempt(attempt) else { return }
+            error = UserError.refused("start the call", "Microphone access is off in Settings.")
+            await teardown(leave: false)
+            return
+        }
+        guard ownsAttempt(attempt) else { return }
         if kind == .video { _ = await CallManager.cameraGranted() }
-        guard let api else { return }
+        guard ownsAttempt(attempt) else { return }
         error = nil
-        phase = .connecting
         isPresented = true
         prepareCallAudioSession(video: kind == .video)
         ringbackWanted = true
@@ -239,14 +295,16 @@ final class CallManager: NSObject, ObservableObject {
         ringIds = ringList.map { Set($0) }
         do {
             let (started, isNew) = try await api.startCall(chatId: chatId, projectId: projectId, kind: kind, ring: ringList)
+            guard ownsAttempt(attempt) else { await releaseStaleCall(started, api: attempt.cleanupAPI ?? api, userId: attempt.userId); return }
             call = started
             if isNew, let who = me() {
                 writeSystemLine?(chatId, started.projectId, "\(who.displayName) started a \(kind == .video ? "video" : "voice") call", started.callId)
             }
             activeByChat[chatId] = started
             reportOutgoing(title: title, video: kind == .video)
-            try await connect(started, video: kind == .video)
+            try await connect(started, video: kind == .video, attempt: attempt)
         } catch {
+            guard ownsAttempt(attempt) else { return }
             log.error("start failed: \(error.localizedDescription, privacy: .public)")
             self.error = CallManager.describe("start the call", error)
             await teardown(leave: false)
@@ -255,20 +313,30 @@ final class CallManager: NSObject, ObservableObject {
 
     /// From the "On a call · Join" bar.
     func join(_ existing: Call, title: String) async {
-        guard !isActive, let api else { isPresented = true; return }
-        guard await CallManager.micGranted() else { error = UserError.refused("start the call", "Microphone access is off in Settings."); return }
+        guard let sourceAPI = api else { return }
+        guard let attempt = beginAttempt(chatId: existing.chatId, callId: existing.callId) else { isPresented = true; return }
+        let api = attempt.api ?? sourceAPI
+        guard await CallManager.micGranted() else {
+            guard ownsAttempt(attempt) else { return }
+            error = UserError.refused("start the call", "Microphone access is off in Settings.")
+            await teardown(leave: false)
+            guard accountLifetime == attempt.accountId else { return }
+            return
+        }
+        guard ownsAttempt(attempt) else { return }
         error = nil
-        phase = .connecting
         isPresented = true
         prepareCallAudioSession(video: existing.kind == .video)
         ringbackWanted = true
         syncRingback()
         do {
             let fresh = try await api.joinCall(existing.callId)
+            guard ownsAttempt(attempt) else { await releaseStaleCall(fresh, api: attempt.cleanupAPI ?? api, userId: attempt.userId); return }
             call = fresh
             reportOutgoing(title: title, video: fresh.kind == .video)
-            try await connect(fresh, video: fresh.kind == .video)
+            try await connect(fresh, video: fresh.kind == .video, attempt: attempt)
         } catch {
+            guard ownsAttempt(attempt) else { return }
             self.error = CallManager.describe("join the call", error)
             await teardown(leave: false)
             // 410 / call_ended left the Join bar up; re-check the chat.
@@ -322,7 +390,10 @@ final class CallManager: NSObject, ObservableObject {
             // PushKit's completion must run here (not inside a later Task).
             if let err {
                 log.error("reportNewIncomingCall: \(err.localizedDescription, privacy: .public)")
-                Task { @MainActor in self?.startIncomingRingFallback() }
+                Task { @MainActor in
+                    guard self?.incoming?.call.callId == incomingCall.callId else { return }
+                    self?.startIncomingRingFallback()
+                }
             } else {
                 audioLog.notice("incoming: CallKit is ringing")
             }
@@ -369,7 +440,7 @@ final class CallManager: NSObject, ObservableObject {
     /// A VoIP-woken phone checks the call did not end in the meantime.
     private func verifyStillLive(_ callId: String) async {
         guard let api, let live = try? await api.call(callId) else { return }
-        if live.ended {
+        if live.ended, incoming?.call.callId == callId {
             // Drop the Join bar too — endIncoming alone left "On a call · Join" up.
             noteActive(nil, chatId: live.chatId)
             endIncoming(reason: .remoteEnded)
@@ -479,10 +550,11 @@ final class CallManager: NSObject, ObservableObject {
     }
 
     /// Sync half of answering: no awaits. Returns the incoming call to join, or nil.
-    private func startAccept() -> (call: Call, from: CallPerson?)? {
+    private func startAccept() -> (call: Call, from: CallPerson?, attempt: CallAttempt, api: RelayAPI)? {
         let micDenied = AVAudioApplication.shared.recordPermission == .denied
         guard answerPlan(hasIncoming: incoming != nil, micDenied: micDenied) == .fulfillThenJoin,
-              let inc = incoming else {
+              let inc = incoming, let api,
+              let attempt = beginAttempt(chatId: inc.call.chatId, callId: inc.call.callId) else {
             return nil
         }
         ringTimeout?.cancel()
@@ -492,28 +564,32 @@ final class CallManager: NSObject, ObservableObject {
         isPresented = true
         ringbackWanted = false
         stopRingback()
-        return inc
+        return (inc.call, inc.from, attempt, attempt.api ?? api)
     }
 
     /// Async half of answering: mic/camera if needed, then join and connect.
-    private func joinAccept(_ inc: (call: Call, from: CallPerson?)) async {
+    private func joinAccept(_ inc: (call: Call, from: CallPerson?, attempt: CallAttempt, api: RelayAPI)) async {
+        guard ownsAttempt(inc.attempt) else { return }
+        let api = inc.api
         guard await CallManager.micGranted() else {
+            guard ownsAttempt(inc.attempt) else { return }
             error = UserError.refused("answer the call", "Microphone access is off in Settings.")
             await teardown(leave: false, reason: .failed)
             return
         }
+        guard ownsAttempt(inc.attempt) else { return }
         if inc.call.kind == .video { _ = await CallManager.cameraGranted() }
-        guard let api else {
-            await teardown(leave: false, reason: .failed)
-            return
-        }
+        guard ownsAttempt(inc.attempt) else { return }
         do {
             let fresh = try await api.joinCall(inc.call.callId)
+            guard ownsAttempt(inc.attempt) else { await releaseStaleCall(fresh, api: inc.attempt.cleanupAPI ?? api, userId: inc.attempt.userId); return }
             call = fresh
-            try await connect(fresh, video: fresh.kind == .video)
+            try await connect(fresh, video: fresh.kind == .video, attempt: inc.attempt)
         } catch {
+            guard ownsAttempt(inc.attempt) else { return }
             self.error = CallManager.describe("join the call", error)
             await teardown(leave: false)
+            guard accountLifetime == inc.attempt.accountId else { return }
             await syncActiveBar(chatId: inc.call.chatId, projectId: inc.call.isPeople ? nil : inc.call.projectId)
         }
     }
@@ -531,6 +607,53 @@ final class CallManager: NSObject, ObservableObject {
         if phase == .ringing { phase = .idle }
     }
 
+    /// Unpair closes ownership synchronously, before AppModel installs another API.
+    /// Cleanup retains the old room and authority and cannot reset a later call.
+    func invalidateForSignOut() {
+        accountLifetime = UUID()
+        let api = callAttempt?.cleanupAPI
+        callAttempt = nil
+        let room = self.room
+        let ended = call
+        let fixture = isFixture
+        room.delegates.remove(delegate: self)
+        ringTimeout?.cancel()
+        stopIncomingRing()
+        if let uuid = cxUUID { provider.reportCall(with: uuid, endedAt: Date(), reason: .remoteEnded) }
+        cxUUID = nil
+        incoming = nil
+        ringbackWanted = false
+        stopRingback()
+        outgoingTimeout?.cancel()
+        outgoingTimeout = nil
+        disableCallAudioEngine()
+        callKitOwnsAudio = false
+        #if DEBUG
+        micInjector?.stop()
+        micInjector = nil
+        #endif
+        call = nil
+        ringIds = nil
+        tiles = []
+        connectedAt = nil
+        cameraOn = false
+        screenShareOn = false
+        agentSeeing = false
+        seeingAgentName = nil
+        muted = false
+        anyoneJoined = false
+        phase = .idle
+        isPresented = false
+        // An already-running teardown owns its own captured cleanup.
+        guard !isTearingDown else { return }
+        isTearingDown = true
+        Task {
+            await room.disconnect()
+            self.isTearingDown = false
+            if let ended, let api, !fixture { _ = try? await api.leaveCall(ended.callId) }
+        }
+    }
+
     func hangUp() async {
         await teardown(leave: true)
     }
@@ -538,9 +661,10 @@ final class CallManager: NSObject, ObservableObject {
     /// Outgoing: start the no-answer clock; a joiner cancels it.
     private func armOutgoingTimeout() {
         outgoingTimeout?.cancel()
+        guard let attempt = callAttempt else { return }
         outgoingTimeout = Task { [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(CallManager.missedAfter * 1_000_000_000))
-            guard let self, !Task.isCancelled, self.isActive, !self.anyoneJoined else { return }
+            guard let self, !Task.isCancelled, self.ownsAttempt(attempt), self.isActive, !self.anyoneJoined else { return }
             audioLog.notice("no answer after \(Int(CallManager.missedAfter))s — ending as missed")
             self.outgoingTimeout = nil  // teardown must not cancel the task it runs in
             self.error = nil
@@ -597,22 +721,26 @@ final class CallManager: NSObject, ObservableObject {
     #if DEBUG
     /// Dev: connect to a room with a token minted outside the relay.
     func debugJoin(url: String, token: String, kind: CallKind, chatId: String, projectId: String) async {
-        guard !isActive else { isPresented = true; return }
+        guard let attempt = beginAttempt(chatId: chatId) else { isPresented = true; return }
         _ = await CallManager.micGranted()
+        guard ownsAttempt(attempt) else { return }
         if kind == .video { _ = await CallManager.cameraGranted() }
+        guard ownsAttempt(attempt) else { return }
         let c = Call(callId: "dev-\(chatId)", chatId: chatId, projectId: projectId, kind: kind, room: "call_dev01", livekitUrl: url,
                      token: token, tokenExpiresAt: nil, startedBy: me(), startedAt: nowMs(), endedAt: nil, reason: nil, participants: [])
         call = c
         phase = .connecting
         isPresented = true
         reportOutgoing(title: "Dev call", video: kind == .video)
-        do { try await connect(c, video: kind == .video) } catch { self.error = CallManager.describe("start the call", error); await teardown(leave: false) }
+        do { try await connect(c, video: kind == .video, attempt: attempt) } catch { guard ownsAttempt(attempt) else { return }; self.error = CallManager.describe("start the call", error); await teardown(leave: false) }
     }
     #endif
 
     // MARK: Media
 
-    private func connect(_ c: Call, video: Bool) async throws {
+    private func connect(_ c: Call, video: Bool, attempt: CallAttempt) async throws {
+        guard ownsAttempt(attempt) else { return }
+        let room = self.room
         guard let token = c.token, let url = URL(string: c.livekitUrl) else {
             throw RelayError(status: 0, message: "The call has no join token")
         }
@@ -636,6 +764,7 @@ final class CallManager: NSObject, ObservableObject {
             adaptiveStream: true, dynacast: true
         )
         try await room.connect(url: url.absoluteString, token: token, connectOptions: ConnectOptions(autoSubscribe: true), roomOptions: roomOptions)
+        guard ownsAttempt(attempt), self.room === room else { await room.disconnect(); return }
         phase = .connected
         connectedAt = Date()
         if room.remoteParticipants.isEmpty { armOutgoingTimeout() } else { anyoneJoined = true }
@@ -645,12 +774,21 @@ final class CallManager: NSObject, ObservableObject {
         // Hosted group calls: stay muted until the host invites you to speak.
         if c.canSpeak == false { muted = true }
         try? await room.localParticipant.setMicrophone(enabled: !muted && c.canSpeak != false)
+        guard ownsAttempt(attempt), self.room === room else { await room.disconnect(); return }
         #if DEBUG
         micInjector?.start()
         #endif
         if video, AVCaptureDevice.authorizationStatus(for: .video) == .authorized {
-            do { try await room.localParticipant.setCamera(enabled: true); cameraOn = true } catch { cameraOn = false }
+            do {
+                try await room.localParticipant.setCamera(enabled: true)
+                guard ownsAttempt(attempt), self.room === room else { await room.disconnect(); return }
+                cameraOn = true
+            } catch {
+                guard ownsAttempt(attempt), self.room === room else { return }
+                cameraOn = false
+            }
         }
+        guard ownsAttempt(attempt), self.room === room else { await room.disconnect(); return }
         #if DEBUG
         if DebugHooks.fakeVision {
             // No camera on the simulator: pretend ours is on and the agent sees it (§11 badge).
@@ -673,6 +811,11 @@ final class CallManager: NSObject, ObservableObject {
 
     private func teardown(leave: Bool, reason: CXCallEndedReason = .remoteEnded) async {
         guard !isTearingDown else { return }
+        let api = callAttempt?.api ?? self.api
+        let cleanupAPI = callAttempt?.cleanupAPI
+        callAttempt = nil
+        let room = self.room
+        let account = accountLifetime
         isTearingDown = true
         defer { isTearingDown = false }
         #if DEBUG
@@ -688,7 +831,6 @@ final class CallManager: NSObject, ObservableObject {
         let missed = !anyoneJoined
         let ended = call
         let wasConnected = connectedAt
-        await room.disconnect()
         // Always `reportCall(ended:)` — never `request(CXEndCallAction)` from here.
         // The provider delegate queue is main (`setDelegate(..., queue: nil)`); awaiting
         // CXEndCallAction on MainActor deadlocks Hang up (fulfill waits on teardown that
@@ -711,9 +853,12 @@ final class CallManager: NSObject, ObservableObject {
         anyoneJoined = false
         phase = .idle
         isPresented = false
+        await room.disconnect()
         if leave, let ended, let api, !isFixture {
             do {
-                let r = try await api.leaveCall(ended.callId)
+                let authority = accountLifetime == account ? api : (cleanupAPI ?? api)
+                let r = try await authority.leaveCall(ended.callId)
+                guard accountLifetime == account else { return }
                 if r.ended {
                     activeByChat[ended.chatId] = nil
                     // Nobody ever joined: the callee's client writes "Missed call from …"
@@ -725,11 +870,12 @@ final class CallManager: NSObject, ObservableObject {
                     await syncActiveBar(chatId: ended.chatId, projectId: ended.isPeople ? nil : ended.projectId)
                 }
             } catch {
+                guard accountLifetime == account else { return }
                 log.error("leave: \(error.localizedDescription, privacy: .public)")
                 await syncActiveBar(chatId: ended.chatId, projectId: ended.isPeople ? nil : ended.projectId)
             }
         }
-        if leave, isFixture, let ended {
+        if leave, accountLifetime == account, isFixture, let ended {
             activeByChat[ended.chatId] = nil
             writeSystemLine?(ended.chatId, ended.projectId, callEndedLine(durationS: Int(wasConnected.map { Date().timeIntervalSince($0) } ?? 0)), ended.callId)
         }
@@ -737,40 +883,51 @@ final class CallManager: NSObject, ObservableObject {
 
     /// Match the Join bar to GET …/call (nil / ended → hide; live → show).
     private func syncActiveBar(chatId: String, projectId: String?) async {
-        guard let api else { activeByChat[chatId] = nil; return }
+        let account = accountLifetime
+        guard let sourceAPI = api else { activeByChat[chatId] = nil; return }
+        let api = sourceAPI.bound(to: { [weak self] in self?.accountLifetime == account })
         if let live = try? await api.activeCall(chatId: chatId, projectId: projectId) {
+            guard accountLifetime == account else { return }
             noteActive(live, chatId: chatId)
         } else {
+            guard accountLifetime == account else { return }
             activeByChat[chatId] = nil
         }
     }
 
     func toggleMute() async {
+        guard let attempt = callAttempt else { return }
+        let room = self.room
         // Listen-only on a hosted group call: the host has not invited you yet.
         if muted, call?.canSpeak == false { return }
         muted.toggle()
         try? await room.localParticipant.setMicrophone(enabled: !muted)
+        guard ownsAttempt(attempt), self.room === room else { return }
         if let uuid = cxUUID { try? await callController.request(CXTransaction(action: CXSetMutedCallAction(call: uuid, muted: muted))) }
     }
 
     /// Host invites `userId` to speak (hosted group calls). Updates local call state.
     func inviteSpeaker(_ userId: String) async {
-        guard let api, let c = call, c.isHostedSpeak, c.isHost(me()?.id) else { return }
+        guard let attempt = callAttempt, let api = attempt.api, let c = call, c.isHostedSpeak, c.isHost(me()?.id) else { return }
         do {
             let fresh = try await api.inviteSpeaker(callId: c.callId, userId: userId)
+            guard ownsAttempt(attempt) else { return }
             applySpeakState(fresh)
         } catch {
+            guard ownsAttempt(attempt) else { return }
             self.error = CallManager.describe("invite the speaker", error)
         }
     }
 
     /// Host revokes speak permission for `userId`.
     func revokeSpeaker(_ userId: String) async {
-        guard let api, let c = call, c.isHostedSpeak, c.isHost(me()?.id) else { return }
+        guard let attempt = callAttempt, let api = attempt.api, let c = call, c.isHostedSpeak, c.isHost(me()?.id) else { return }
         do {
             let fresh = try await api.revokeSpeaker(callId: c.callId, userId: userId)
+            guard ownsAttempt(attempt) else { return }
             applySpeakState(fresh)
         } catch {
+            guard ownsAttempt(attempt) else { return }
             self.error = CallManager.describe("change the speaker", error)
         }
     }
@@ -784,7 +941,12 @@ final class CallManager: NSObject, ObservableObject {
         call = current
         if current.canSpeak == false, !muted {
             muted = true
-            Task { try? await room.localParticipant.setMicrophone(enabled: false) }
+            let room = self.room
+            let attempt = callAttempt
+            Task {
+                guard let attempt, self.ownsAttempt(attempt), self.room === room else { return }
+                try? await room.localParticipant.setMicrophone(enabled: false)
+            }
         }
     }
 
@@ -795,12 +957,23 @@ final class CallManager: NSObject, ObservableObject {
         call = current
         if !canPublish, !muted {
             muted = true
-            Task { try? await room.localParticipant.setMicrophone(enabled: false) }
+            let room = self.room
+            let attempt = callAttempt
+            Task {
+                guard let attempt, self.ownsAttempt(attempt), self.room === room else { return }
+                try? await room.localParticipant.setMicrophone(enabled: false)
+            }
         }
     }
 
     func toggleCamera() async {
-        if !cameraOn, !(await CallManager.cameraGranted()) { error = UserError.refused("turn the camera on", "Camera access is off in Settings."); return }
+        guard let attempt = callAttempt else { return }
+        let room = self.room
+        if !cameraOn, !(await CallManager.cameraGranted()) {
+            guard ownsAttempt(attempt) else { return }
+            error = UserError.refused("turn the camera on", "Camera access is off in Settings."); return
+        }
+        guard ownsAttempt(attempt), self.room === room else { return }
         let turningOn = !cameraOn
         if !turningOn {
             // Off means off at once: the indicator drops now, and the camera track is
@@ -811,13 +984,16 @@ final class CallManager: NSObject, ObservableObject {
         }
         do {
             try await room.localParticipant.setCamera(enabled: turningOn)
+            guard ownsAttempt(attempt), self.room === room else { await room.disconnect(); return }
             if !turningOn {
                 for pub in room.localParticipant.videoTracks where pub.source == .camera {
                     if let local = pub as? LocalTrackPublication { try? await room.localParticipant.unpublish(publication: local) }
                 }
             }
+            guard ownsAttempt(attempt), self.room === room else { return }
             cameraOn = turningOn
         } catch {
+            guard ownsAttempt(attempt), self.room === room else { return }
             self.error = CallManager.describe("turn the camera on", error)
         }
         objectWillChange.send()
@@ -827,6 +1003,8 @@ final class CallManager: NSObject, ObservableObject {
     /// (LiveKit ScreenCaptureKit) so the user chooses the app or screen to share; dismissing
     /// the picker cancels with no track. Stopping unpublishes the share track.
     func toggleScreenShare() async {
+        guard let attempt = callAttempt else { return }
+        let room = self.room
         let turningOn = !screenShareOn
         if !turningOn {
             if !cameraOn { agentSeeing = false }
@@ -835,13 +1013,16 @@ final class CallManager: NSObject, ObservableObject {
         }
         do {
             try await room.localParticipant.setScreenShare(enabled: turningOn)
+            guard ownsAttempt(attempt), self.room === room else { await room.disconnect(); return }
             if !turningOn {
                 for pub in room.localParticipant.videoTracks where pub.source == .screenShareVideo {
                     if let local = pub as? LocalTrackPublication { try? await room.localParticipant.unpublish(publication: local) }
                 }
             }
+            guard ownsAttempt(attempt), self.room === room else { return }
             screenShareOn = room.localParticipant.isScreenShareEnabled()
         } catch {
+            guard ownsAttempt(attempt), self.room === room else { return }
             screenShareOn = room.localParticipant.isScreenShareEnabled()
             // User dismissed the content picker — not an error to show on the call screen.
             if let lk = error as? LiveKitError, lk.type == .cancelled { /* no-op */ }
@@ -1270,6 +1451,7 @@ final class CallManager: NSObject, ObservableObject {
 extension CallManager: RoomDelegate {
     nonisolated func room(_ room: LiveKit.Room, didUpdateConnectionState connectionState: ConnectionState, from oldConnectionState: ConnectionState) {
         Task { @MainActor in
+            guard self.room === room, self.callAttempt != nil else { return }
             switch connectionState {
             case .reconnecting: if self.phase == .connected { self.phase = .reconnecting }
             case .connected: if self.phase == .reconnecting { self.phase = .connected }
@@ -1289,6 +1471,7 @@ extension CallManager: RoomDelegate {
 
     nonisolated func room(_ room: LiveKit.Room, participantDidConnect participant: RemoteParticipant) {
         Task { @MainActor in
+            guard self.room === room, self.callAttempt != nil else { return }
             self.refreshTiles()
             self.handleAttributes(participant.attributes, of: participant)
         }
@@ -1296,6 +1479,7 @@ extension CallManager: RoomDelegate {
 
     nonisolated func room(_ room: LiveKit.Room, participantDidDisconnect participant: RemoteParticipant) {
         Task { @MainActor in
+            guard self.room === room, self.callAttempt != nil else { return }
             self.refreshTiles()
             // The agent that was watching left: nothing is seeing us now.
             if participant.identity?.stringValue.hasPrefix("a_") == true || self.tiles.allSatisfy({ !$0.person.isAgent }) {
@@ -1305,46 +1489,65 @@ extension CallManager: RoomDelegate {
     }
 
     nonisolated func room(_ room: LiveKit.Room, participant: RemoteParticipant?, didReceiveData data: Data, forTopic topic: String, encryptionType: EncryptionType) {
-        Task { @MainActor in self.handleData(data, topic: topic, from: participant) }
+        Task { @MainActor in
+            guard self.room === room, self.callAttempt != nil else { return }
+            self.handleData(data, topic: topic, from: participant) }
     }
 
     nonisolated func room(_ room: LiveKit.Room, participant: Participant, didUpdatePermissions permissions: ParticipantPermissions) {
         Task { @MainActor in
+            guard self.room === room, self.callAttempt != nil else { return }
             guard participant is LocalParticipant else { return }
             self.notePublishPermission(permissions.canPublish)
         }
     }
 
     nonisolated func room(_ room: LiveKit.Room, participant: Participant, didUpdateAttributes attributes: [String: String]) {
-        Task { @MainActor in self.handleAttributes(attributes, of: participant) }
+        Task { @MainActor in
+            guard self.room === room, self.callAttempt != nil else { return }
+            self.handleAttributes(attributes, of: participant) }
     }
 
     nonisolated func room(_ room: LiveKit.Room, participant: RemoteParticipant, didSubscribeTrack publication: RemoteTrackPublication) {
-        Task { @MainActor in self.refreshTiles() }
+        Task { @MainActor in
+            guard self.room === room, self.callAttempt != nil else { return }
+            self.refreshTiles() }
     }
 
     nonisolated func room(_ room: LiveKit.Room, participant: RemoteParticipant, didUnsubscribeTrack publication: RemoteTrackPublication) {
-        Task { @MainActor in self.refreshTiles() }
+        Task { @MainActor in
+            guard self.room === room, self.callAttempt != nil else { return }
+            self.refreshTiles() }
     }
 
     nonisolated func room(_ room: LiveKit.Room, participant: LocalParticipant, didPublishTrack publication: LocalTrackPublication) {
-        Task { @MainActor in self.syncScreenShareFromRoom() }
+        Task { @MainActor in
+            guard self.room === room, self.callAttempt != nil else { return }
+            self.syncScreenShareFromRoom() }
     }
 
     nonisolated func room(_ room: LiveKit.Room, participant: LocalParticipant, didUnpublishTrack publication: LocalTrackPublication) {
-        Task { @MainActor in self.syncScreenShareFromRoom() }
+        Task { @MainActor in
+            guard self.room === room, self.callAttempt != nil else { return }
+            self.syncScreenShareFromRoom() }
     }
 
     nonisolated func room(_ room: LiveKit.Room, participant: Participant, didUpdateIsSpeaking isSpeaking: Bool) {
-        Task { @MainActor in self.refreshTiles() }
+        Task { @MainActor in
+            guard self.room === room, self.callAttempt != nil else { return }
+            self.refreshTiles() }
     }
 
     nonisolated func room(_ room: LiveKit.Room, participant: Participant, didUpdateMetadata metadata: String?) {
-        Task { @MainActor in self.refreshTiles() }
+        Task { @MainActor in
+            guard self.room === room, self.callAttempt != nil else { return }
+            self.refreshTiles() }
     }
 
     nonisolated func room(_ room: LiveKit.Room, participant: Participant, trackPublication: TrackPublication, didUpdateIsMuted isMuted: Bool) {
-        Task { @MainActor in self.refreshTiles() }
+        Task { @MainActor in
+            guard self.room === room, self.callAttempt != nil else { return }
+            self.refreshTiles() }
     }
 }
 
@@ -1367,6 +1570,7 @@ extension CallManager: CXProviderDelegate {
 
     nonisolated func provider(_ provider: CXProvider, perform action: CXAnswerCallAction) {
         Task { @MainActor in
+            guard self.cxUUID == action.callUUID else { action.fail(); return }
             // CallKit expects a prompt fulfill/fail: it will not activate the audio
             // session until then, and times out a slow join (lock-screen "Connecting").
             let micDenied = AVAudioApplication.shared.recordPermission == .denied
@@ -1390,6 +1594,7 @@ extension CallManager: CXProviderDelegate {
 
     nonisolated func provider(_ provider: CXProvider, perform action: CXEndCallAction) {
         Task { @MainActor in
+            guard self.cxUUID == action.callUUID else { action.fulfill(); return }
             // Fulfill before awaiting teardown so CallKit is never blocked on MainActor work.
             if self.incoming != nil {
                 self.ringTimeout?.cancel()
@@ -1411,6 +1616,7 @@ extension CallManager: CXProviderDelegate {
 
     nonisolated func provider(_ provider: CXProvider, perform action: CXSetMutedCallAction) {
         Task { @MainActor in
+            guard self.cxUUID == action.callUUID else { action.fulfill(); return }
             // CallKit often fires CXSetMutedCallAction(true) during CXStartCallAction
             // / audio-session setup on recent iOS (and can flap for a moment after).
             // Applying that publishes us as muted to everyone — remotes see "Muted"

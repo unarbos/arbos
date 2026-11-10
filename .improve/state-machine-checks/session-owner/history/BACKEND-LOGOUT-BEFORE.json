@@ -1,0 +1,11 @@
+{
+  "exit_code": 101,
+  "seconds": 1.5983734580222517,
+  "source_sha256": "ae34750129114a98afed1c3200e8895d18c76db74168d62a13b6dcfa68ad6833",
+  "fixture_sha256": "2771a1cf7230f7baaa3f86ff63b2a6e65257b85015a7230d4993f0b619d0b48e",
+  "counts": {
+    "passed": 11,
+    "failed": 1,
+    "ignored": 0
+  }
+}
