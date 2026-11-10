@@ -1,6 +1,7 @@
 # Phase 6: hot-path performance
 
-**Status: verified pure-path optimizations; broader native paths remain blocked.**
+**Status: pure-path optimizations and bounded Mac registry hydration verified;
+remaining native hot paths and final composition gates are in progress.**
 The entire source inventory was scanned by category, with focused flow reads.
 This is not an every-line proof or a claim that reported app latency is resolved.
 Before/after measurements below are local synthetic microbenchmarks, not
@@ -10,7 +11,7 @@ production, network, device-frame or end-to-end chat timings.
 
 | Category | Evidence / action |
 | --- | --- |
-| Independent sequential async work | Mac registry serial project detail/member hydration before people chats (`sync/relay.rs:2585`); Matrix per-room snapshots/sender resolution (`arbos-matrix/src/client.rs`); both clients' attachment uploads; iOS initialization/cache publication. Concurrency must be bounded and preserve cancellation, ordered sends, identity epochs and deterministic merge semantics. Existing native lifetime bugs and unavailable adapter gates block these changes. |
+| Independent sequential async work | Mac registry now hydrates four projects concurrently, with independent people hydration and ordered results; unread and project-list calls run together. Actual-code fixtures preserve cancellation, deterministic merges and partial failures. Both clients' attachment uploads and iOS directory/registry work are under implementation review. Matrix per-room awaits may read SDK cache; network dependency must be established before parallelizing roster misses. |
 | Loading extra DB data | `rooms::build_room_doc` / `advance_room_doc` ask for full `Db::room_state` statistics to get only head/floor. This is the next phase's source-SQL scale target. Keep full statistics at compaction/budget/protocol callers that consume them. Agent-link SELECT-star reads cross authorization DTOs; Store history reads are bounded and consume full events, so do not automatically narrow every star. |
 | Unnecessary URL parsing | The edge worker's one `new URL(request.url)` supplies routing data and is required. Native typed URL creation handles actual requests/links/validation; removing it would discard behavior. `SenderAccents` guard order is a possible redundant cached-hit parse, unmeasured and blocked on native gates. |
 | Repeated static regex construction | Shared `core/redact.rs` reconstructs token, bearer/env and placeholder regexes on every call; cache compiled patterns once, retaining the single key-rule table, order and skip semantics. Harness detached-shell literals allocate per call; measure before deciding whether hoisting earns a change. Agentd web parsing has static regexes; tree salvage has two fixed regexes. Their native callers remain unverified and are deferred. |
@@ -35,24 +36,26 @@ existing GPUI visual-wrapper tests remain untouched. Fixed output fixtures and
 round-trip checks pin the pure behavior before/after; layout calibration and
 invisible wrap characters remain unchanged.
 
-Full workspace clippy/check/test/build and native UI/device measurements remain
-blocked by local build space and fork-CI approval. Narrow source tests do not
-establish whole-app integration. Independent review and recorded measurements
-must distinguish these scopes.
+Actual native SDK builds, safe full Linux/Swift baseline CI and local adapter
+gates are now available. Earlier scratch-space, SDK and fork-approval limits
+are superseded. Final changed-source composition gates remain in progress.
+Narrow source tests and scripted gateway timings do not establish live-app
+latency or physical-device frame performance.
 
-## Needs the owner
+## Remaining verification
 
-Unblock native gates and local fixture/device profiling before changing shared
-document lock ownership, registry concurrency, attachment FIFO/cancellation or
-Matrix identity lifetimes. Recommended default: preserve current ordering and
-authorization/durability checks, and prioritize a cold/warm group-open and send
-profile after the cheap store-query experiment. No production/staging access is
-needed or authorized.
+Release-device cold/warm group-open and Mac-send profiles need a local owner
+session and generated/non-private fixtures. Recommended default: retain all
+ordering, authorization and durability checks, and distinguish first visible row,
+frame time, upload/queue wait and durable ACK. No production/staging access is
+authorized. Broader telemetry is deferred to the owner/Jacob decision in Phase5;
+it does not block the local changes or final gates.
 
 ## Before / after measurements
 
-| Warm workload | Before | After | Interpretation |
+| Workload | Before | After | Interpretation |
 | --- | ---: | ---: | --- |
+| Mac registry, 12 projects + people, scripted 8 ms/request | 330.809 ms | 90.993 ms | 3.64× controlled critical path; at most five requests |
 | Shared pattern redaction | 50.237 µs/call | 11.970 µs/call | 4.20×; cached compiled patterns |
 | Token classification | 30.369 µs/call | 1.065 µs/call | 28.52×; cached whole-token anchoring |
 | Placeholder redaction | 5.758 µs/call | 1.927 µs/call | 2.99× |
@@ -84,6 +87,16 @@ caches regex compilation; this change removes literal-object/array allocation.
 Dynamic user grep remains unchanged. Team benchmarks ran in separate windows;
 filesystem/system caches were not flushed.
 
+Registry results use 21 randomized paired runs of the selected actual production
+functions and typed mappers. The 27-request multiset and complete typed outputs
+match; the paired median saving is238.353ms (95% bootstrap interval
+230.700–241.418ms), two-sided sign-test p=9.54e-7. Two success/failure scenarios,
+cancellation and a delayed concurrency/order check pass in both arms. The peak
+changes1→5 per refresh; this is a bounded load tradeoff, not fewer requests.
+[The retained check](perf/registry/README.md) uses OS network isolation, a fresh
+per-arm Cargo target and locked/offline builds. It does not execute authentication,
+GUI, Keychain or real HTTP behavior. Per-chat send order is unaffected.
+
 ## Before / after gates
 
 | Row | Before | After |
@@ -97,7 +110,9 @@ filesystem/system caches were not flushed.
 | Harness typecheck / build | pass, 2.816 / 2.260 s | pass, 2.630 / 2.252 s |
 | Harness tests | 14 passed / 0 failed/skipped; 0.541 s | 14 passed / 0 failed/skipped; 2.243 s |
 | Workspace formatting | pass, baseline 3.016 s | pass, 2.567 s |
-| Full native clippy/check/test/build | blocked | blocked; leaf success does not replace them |
+| Registry actual-code adapter | 2scenarios + cancellation + delayed bound/order pass | same typed outputs; bound5 verified, locked/offline builds32.136/31.402s |
+| Swift test-plan fence | old plan allowed default endpoint | 12contracts pass1.515s; exact shared fence carried before future push |
+| Full changed native composition | earlier constraints superseded | final integration pending; source adapters do not replace it |
 
 Compiler/test wall durations include cache/scheduling differences and are not
 speedup measurements. No tests were removed. The new source regression checks
@@ -107,5 +122,5 @@ URL compilation uses the exact source bytes and records their hash.
 
 Reproduce with the commands in [redaction harness](perf/redact/README.md) and
 [URL driver](perf/urlwrap/README.md). Both are small local-only checks that avoid
-unrelated native dependencies. Native high-risk ordering/identity/storage work
-and the store-scale experiment remain separate.
+unrelated native dependencies. Native ownership changes and the measured store-scale work are tracked in
+Phases3/4/7. Their integration remains a separate validation step.
