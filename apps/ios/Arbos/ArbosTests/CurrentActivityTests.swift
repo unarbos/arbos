@@ -8,7 +8,9 @@ import XCTest
 @MainActor
 final class CurrentActivityTests: XCTestCase {
     private let chat = "c-activity"
-    private let t0: Int64 = 1_700_000_000_000
+
+    /// Inside the 15-minute freshness window `currentActivity` / `isStreaming` share.
+    private var now: Int64 { nowMs() }
 
     private func row(id: String, role: Role, status: MessageStatus, at: Int64,
                      activity: String? = nil, job: JobRef? = nil,
@@ -25,10 +27,11 @@ final class CurrentActivityTests: XCTestCase {
 
     func testStaleMainTurnStepDoesNotSurviveANewAsk() {
         let model = AppModel()
+        let t0 = now - 60_000
         model.messages[chat] = [
             row(id: "a1", role: .assistant, status: .streaming, at: t0,
                 activity: "Finding sock stores in LA"),
-            row(id: "u1", role: .user, status: .done, at: t0 + 60_000,
+            row(id: "u1", role: .user, status: .done, at: t0 + 30_000,
                 parts: [.text(id: "u1-t", text: "Hey Bob, can you message one of my other agents and ask it to run LS?")]),
         ]
         XCTAssertNil(model.currentActivity(chat),
@@ -37,6 +40,7 @@ final class CurrentActivityTests: XCTestCase {
 
     func testLiveMainTurnStillShowsItsStep() {
         let model = AppModel()
+        let t0 = now - 5_000
         model.messages[chat] = [
             row(id: "u1", role: .user, status: .done, at: t0,
                 parts: [.text(id: "u1-t", text: "find socks")]),
@@ -48,11 +52,12 @@ final class CurrentActivityTests: XCTestCase {
 
     func testLiveJobStepSurvivesANewAsk() {
         let model = AppModel()
+        let t0 = now - 60_000
         let job = JobRef(["id": "j1", "title": "Sock hunt"])!
         model.messages[chat] = [
             row(id: "a1", role: .assistant, status: .streaming, at: t0,
                 activity: "Finding sock stores in LA", job: job),
-            row(id: "u1", role: .user, status: .done, at: t0 + 60_000,
+            row(id: "u1", role: .user, status: .done, at: t0 + 30_000,
                 parts: [.text(id: "u1-t", text: "ask it to run LS")]),
         ]
         XCTAssertEqual(model.currentActivity(chat), "Finding sock stores in LA",
@@ -61,6 +66,7 @@ final class CurrentActivityTests: XCTestCase {
 
     func testShortMainTurnFallsThroughToALiveJob() {
         let model = AppModel()
+        let t0 = now - 5_000
         let job = JobRef(["id": "j1", "title": "Reads"])!
         model.messages[chat] = [
             row(id: "job", role: .assistant, status: .streaming, at: t0,
