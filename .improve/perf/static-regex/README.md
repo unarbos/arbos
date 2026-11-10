@@ -40,3 +40,10 @@ paired median bootstrap 95% intervals are 25.998–26.529 µs, 89.450–98.769 �
 workstation, without cache flushing or CPU isolation. Initial regex compilation
 is outside warm measurements. This is no network, hosted-agent or chat-latency
 speedup claim. Full source hashes, raw samples and output fingerprint are retained.
+
+The actual full agentd caller passes all-target Clippy with warnings denied
+(66.538 s) in an isolated snapshot. Three existing native pure-parser tests
+also pass with exact nonzero count guards: HTML conversion, entity decoding and
+truncated-card parsing. The first test command includes 174.261 s of full codegen;
+remaining commands take 0.789/0.259 s. NATIVE_GATES.json and NATIVE_TESTS.json
+record those source hashes and commands. They are separate from full combined CI.
