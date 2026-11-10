@@ -141,3 +141,52 @@ Reproduce with the commands in [redaction harness](perf/redact/README.md) and
 [URL driver](perf/urlwrap/README.md). Both are small local-only checks that avoid
 unrelated native dependencies. Native ownership changes and the measured store-scale work are tracked in
 Phases3/4/7. Their integration remains a separate validation step.
+
+
+## Client hydration and attachment batches
+
+The iOS registry now hydrates at most four independent details and folds them in
+input order, preserving actual DTO/default/archive/omission/error policy. Thirteen
+scripted GETs remain thirteen; p50 falls129.691→33.651ms (3.85x), with mean-saving
+95% interval94.642–98.029ms over21 randomized pairs, p9.54e-7. Median whole-fixture
+RSS increases176KiB. Already-admitted GETs may complete after a fatal result;
+ordered folding retains the first input-position error. See
+[registry scope and rerun](perf/ios-registry/README.md).
+
+Project/people attachments share one private two-request batch helper, preserving
+input-minted keys, ordered outcomes/errors and one final commit. People omit failed
+attachments; projects retain nil-blob rows. Actual intercepted Foundation PUT
+profiles retain exact bytes/MIME/captured synthetic bearer, four PUTs, ordered
+rows and one commit. Across21 random pairs per workload, p50 is47.410→24.994ms
+(4x64B people),47.849→25.722ms(4x1MiB project),52.828→28.079ms(4x8MiB project).
+All paired intervals are positive, p9.54e-7 each. Logical in-flight bodies1→2;
+whole-fixture RSS includes deliberate oracle copies and is not a device memory
+ceiling. Concurrent batches have separate limits. Errors publish after the batch;
+individual cancellation errors remain item failures, while task cancellation
+stops further admission and drains without a result. See
+[upload contracts,63pairs and memory limits](perf/ios-uploads/README.md).
+
+The independent public check passes11 before/11 after contracts,4 new helper
+contracts and2 actual Foundation transport scenarios per version. The explicit
+Phase4 composition passes17 ownership/performance contracts per version; no
+missing ownership prerequisites are silently skipped. Its sixteen real raw API
+owner regressions remain separate. The performance branch uses captured baseline
+APIs; composition must preserve work.api, every owner guard and the bound raw
+request helper. A full93-source SDK compile of the guarded combined variant
+passes27.399s; this is compile-only, not a simulator/device or app-speed verdict.
+
+## Forwarded payload reuse
+
+Mac forwarded copies retain a reusable Bytes-backed request body and avoid one
+payload-sized allocation; owned sticker/voice data uses Arc::unwrap_or_clone.
+The selected actual upload bodies preserve hashes/length/MIME/order and307 replay.
+Eighteen selected controls pass. Actual Mac all-target Clippy and complete app
+linking also pass on the final structural/ownership/performance composition.
+
+Twenty-one paired local12ms GET/PUT samples show a small16MiB latency improvement
+85.584→83.660ms, mean-saving95% interval1.281–3.533ms. Smaller payload intervals
+include zero and do not establish latency improvement. Separate allocation pairs
+show requested bytes53,017,257→36,240,032 at16MiB (one payload allocation2→1).
+Peak heap is unchanged; no lower RSS or end-to-end send claim follows. Streaming
+was withheld after a real307 replay regression; nonexistent multi-upload producers
+were not fabricated to justify batching. See[retained upload proof](perf/uploads/README.md).
