@@ -20,7 +20,7 @@ METHODS = {
     'forward': 6, 'actions': 19, 'connectors': 6, 'ui_identity': 4,
     'firstlogin': 5, 'people_actions': 12, 'avatar_state': 5,
     'feedback_send': 5, 'fun_picker': 7, 'final_edges': 7,
-    'connect_reveal': 3,
+    'connect_reveal': 3, 'raw_api': 16,
 }
 
 

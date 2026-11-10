@@ -182,6 +182,17 @@ final class RelayAPI {
         }
     }
 
+    /// JSON and raw-body requests share the same account admission boundary.
+    /// Keep the returned bearer fixed for the request after its MainActor check.
+    private func requestBearer(auth: Bool = true) async throws -> String {
+        if let authorization {
+            // Admission and dynamic token capture share one MainActor turn.
+            guard let allowed = await authorization() else { throw CancellationError() }
+            return allowed
+        }
+        return auth ? token() : ""
+    }
+
     private func requestOnce(_ method: String, _ path: String, body: Any?, auth: Bool, headers: [String: String] = [:], timeout: TimeInterval? = nil) async throws -> (Data, HTTPURLResponse) {
         guard let url = URL(string: endpoint.httpUrl + path) else {
             throw RelayError(status: 0, message: "Bad relay URL")
@@ -189,14 +200,7 @@ final class RelayAPI {
         var req = URLRequest(url: url)
         req.httpMethod = method
         if let timeout { req.timeoutInterval = timeout }
-        let bearer: String
-        if let authorization {
-            // Admission and dynamic token capture share one MainActor turn.
-            guard let allowed = await authorization() else { throw CancellationError() }
-            bearer = allowed
-        } else {
-            bearer = auth ? token() : ""
-        }
+        let bearer = try await requestBearer(auth: auth)
         if auth { req.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization") }
         // What runs here (`ios/1.0.0 (202610192230)`): the relay's "installed version" signal for
         // continuous delivery (GET /admin/installs), on every call.
@@ -697,7 +701,8 @@ final class RelayAPI {
         }
         var req = URLRequest(url: url)
         req.httpMethod = "PUT"
-        req.setValue("Bearer \(token())", forHTTPHeaderField: "Authorization")
+        let bearer = try await requestBearer()
+        req.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization")
         req.setValue(mime, forHTTPHeaderField: "Content-Type")
         req.httpBody = data
         let (body, response) = try await session.data(for: req)
@@ -716,7 +721,8 @@ final class RelayAPI {
         }
         var req = URLRequest(url: url)
         req.httpMethod = "PUT"
-        req.setValue("Bearer \(token())", forHTTPHeaderField: "Authorization")
+        let bearer = try await requestBearer()
+        req.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization")
         req.setValue(PictureMaster.mime(jpeg), forHTTPHeaderField: "Content-Type")
         req.httpBody = jpeg
         let (body, response) = try await session.data(for: req)
@@ -790,7 +796,8 @@ final class RelayAPI {
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.timeoutInterval = 60
-        req.setValue("Bearer \(token())", forHTTPHeaderField: "Authorization")
+        let bearer = try await requestBearer()
+        req.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization")
         req.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
         if let projectId { req.setValue(projectId, forHTTPHeaderField: "X-Arbos-Project") }
         req.httpBody = body
@@ -1221,7 +1228,8 @@ final class RelayAPI {
             throw RelayError(status: 0, message: "Bad relay URL")
         }
         var req = URLRequest(url: url)
-        req.setValue("Bearer \(token())", forHTTPHeaderField: "Authorization")
+        let bearer = try await requestBearer()
+        req.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization")
         let (body, response) = try await session.data(for: req)
         guard let http = response as? HTTPURLResponse, http.statusCode < 400 else {
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0

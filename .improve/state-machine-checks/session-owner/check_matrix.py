@@ -5,13 +5,15 @@ import argparse,re
 HERE=Path(__file__).resolve().parent;REPO=HERE.parents[2]
 ap=argparse.ArgumentParser();ap.add_argument('--tree',type=Path,default=REPO);ap.add_argument('--record-dir',type=Path);args=ap.parse_args();TREE=args.tree.resolve();OUTPUT=args.record_dir.resolve() if args.record_dir else Path(tempfile.mkdtemp(prefix='arbos-session-matrix-results-'));OUTPUT.mkdir(parents=True,exist_ok=True)
 P='apps/ios/Arbos/Arbos/'
-inputs=['apps/ios/Arbos/Arbos/Sync/RelayAPI.swift',P+'Store/ServerStore.swift',P+'Sync/WorkLifetime.swift'];sources={p:hashlib.sha256((TREE/p).read_bytes()).hexdigest() for p in inputs}
-api=(TREE/inputs[0]).read_text();server=(TREE/inputs[1]).read_text();helper=(TREE/inputs[2]).read_text()
+inputs=['apps/ios/Arbos/Arbos/Sync/RelayAPI.swift',P+'Store/ServerStore.swift',P+'Sync/WorkLifetime.swift',P+'Store/AppModel.swift'];sources={p:hashlib.sha256((TREE/p).read_bytes()).hexdigest() for p in inputs}
+api=(TREE/inputs[0]).read_text();server=(TREE/inputs[1]).read_text();helper=(TREE/inputs[2]).read_text();app=(TREE/inputs[3]).read_text()
 def method(text,name):
  matches=list(re.finditer(r'^    (?:private )?func '+re.escape(name)+r'\(',text,re.M));assert len(matches)==1,(name,'Expected one actual method');a=matches[0].start();a=a-len('    @MainActor\n') if text[:a].endswith('    @MainActor\n') else a;return text[a:text.index('\n    }',a)+6]
 at=api.index('@MainActor\nprivate final class CallAuthority {');capture=api[at:api.index('\n}',at)+2]
 at=api.index('    private init(endpoint:');extra=api[at:api.index('\n    }',at)+6]
-fixture=capture+'\n'+(HERE/'matrix_fakes.swift').read_text().replace('var isUnauthorized:Bool','var type:String{""};var isUnauthorized:Bool')+extra+'\n'+'\n'.join(method(api,n) for n in ['request','requestOnce','bound','frozenAuthority','json','matrixSession'])+'\n}\n'+helper
+fixture=capture+'\n'+(HERE/'matrix_fakes.swift').read_text().replace('var isUnauthorized:Bool','var type:String{""};var isUnauthorized:Bool')+extra+'\n'+'\n'.join(method(api,n) for n in (['requestBearer']if 'func requestBearer('in api else[])+['request','requestOnce','bound','frozenAuthority','json','matrixSession'])+'\n}\n'+helper
+if 'struct AccountWork' in app:
+ at=app.index('struct AccountWork {');fixture+='\n'+app[at:app.index('\n}',at)+2]+'\n'
 fixture+='''
 import os
 struct MatrixCredentials {let homeserver="http://matrix.synthetic.invalid";let userId="synthetic";let accessToken="synthetic";let deviceId="synthetic";static func parse(_ v:Any)->Self?{Self()}}
@@ -25,11 +27,11 @@ final class MatrixBridgeListener {init(model:AppModel,owner:MatrixLifetime.Ticke
 @MainActor func matrixStart(session:ArbosFFI.MatrixSession,listener:MatrixBridgeListener)async throws->ArbosFFI.MatrixClient{starts+=1;return ArbosFFI.MatrixClient()}
 let matrixLog=Logger(subsystem:"synthetic",category:"matrix")
 @MainActor final class AppModel {
- var credentials:Bool?=true;var isFixture=false;var matrixClient:ArbosFFI.MatrixClient?;var accountLifetime=WorkLifetime();var matrixLifetime=MatrixLifetime();var matrixListener:MatrixBridgeListener?;var matrixConnected=false;let relay:RelayAPI
+ var credentials:Bool?=true;var isFixture=false;var matrixClient:ArbosFFI.MatrixClient?;var accountLifetime=WorkLifetime();var matrixLifetime=MatrixLifetime();var matrixListener:MatrixBridgeListener?;var matrixConnected=false;let relay:RelayAPI;var api:RelayAPI{relay}
  init(_ api:RelayAPI){relay=api}
  func applyMatrixSnapshot(_ v:ArbosFFI.MatrixSnapshot){}
  func refreshTokens(expectedOwner:WorkLifetime.Ticket)async->Bool{guard accountLifetime.accepts(expectedOwner)else{return false};return await relay.refresher?() ?? false}
-'''+method(server,'startMatrixIfNeeded')+'\n'+method(server,'acceptsMatrix')+'''
+'''+(method(app,'accountWork')if 'func accountWork('in app else'')+'\n'+method(server,'startMatrixIfNeeded')+'\n'+method(server,'acceptsMatrix')+'''
 }
 @MainActor final class Gate{var waiter:CheckedContinuation<Bool,Never>?;func wait()async->Bool{await withCheckedContinuation{waiter=$0}};func finish(){waiter?.resume(returning:true);waiter=nil}}
 @main struct Checks {

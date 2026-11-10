@@ -43,7 +43,7 @@ TESTS=r'''
 '''
 def main():
  p=argparse.ArgumentParser();p.add_argument('--tree',type=Path,default=REPO);p.add_argument('--label',default='api');p.add_argument('--record-dir',type=Path);args=p.parse_args();source=(args.tree/SOURCE).read_text();after='func frozenAuthority()' in source
- methods=['request','requestOnce'];extra=''
+ methods=(['requestBearer'] if 'func requestBearer(' in source else [])+['request','requestOnce'];extra=''
  if after:
   methods+=['bound','frozenAuthority'];at=source.index('    private init(endpoint:');extra=source[at:source.index('\n    }',at)+6]
  capture=''

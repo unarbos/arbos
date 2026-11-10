@@ -8,7 +8,7 @@ python3 -I -B .improve/state-machine-checks/ios-account-work/run_all.py --out /t
 
 The output path must not exist. `--tree PATH` checks an explicit source tree;
 `--only uploads` (or another named gate from `--help`) runs one controller group.
-The complete command has 37 entrypoints and 280 runtime assertions. It compiles
+The complete command now has 38 entrypoints and 296 runtime assertions. It compiles
 selected **actual production method bodies** into fresh temporary executables,
 with paused synthetic API/store/UI/SDK collaborators, then runs them under
 `network*` denial. No relay, account, keychain, model, device, microphone, camera,
@@ -18,7 +18,7 @@ the top-level runner rejects missing results, compiler errors, zero/wrong counts
 nonzero exits, assertion failures and source changes. The synthetic collaborator
 contracts are intentionally smaller than the real SDKs.
 
-`GATES.json` records the retained pre-ChatView handoff: 280/280 assertions in
+`GATES.json` records the earlier pre-ChatView checkpoint: 280/280 assertions in
 31.885 seconds on one local machine. These are correctness gates, not app-speed
 measurements. `BEFORE.json` retains the earlier failure-first cases, including
 positive controls. Those 31 groups contain 126 failures and 84 passing controls;
@@ -108,3 +108,20 @@ under its existing contract; this change does not redefine it as account data.
 APNs/global notification attribution and persistent legacy-cache provenance are
 not certified by selected controller tests. Full app/unit/UI/device verification
 is reported separately rather than inferred from these local collaborators.
+
+## Raw HTTP admission follow-up
+
+The upload review found four raw-body/read methods bypassing the bound account
+admission used by JSON requests. The actual methods and bound API, intercepted
+by URLProtocol under network denial, initially failed all four retired-owner
+cases while twelve current/unbound/wire-policy controls passed (1.582 seconds).
+`requestBearer` now supplies the same atomic actor admission and fixed bearer
+to JSON, blob PUT/read, avatar PUT and transcription. All sixteen cases pass
+in 1.528 seconds; `RAW-API-BEFORE.json` and `RAW-API-AFTER.json` record them.
+Bodies, MIME, response handling, the transcription deadline and the original raw
+methods' no-401-retry behavior are preserved. These cases are additive to the
+280-case checkpoint; a later full command records 296 only when actually run.
+The current and original selected HTTP adapters include this actual helper;
+the historical Matrix adapter also includes the shared AccountWork boundary
+required by the evolved production startup method. No copied authority model
+is used to decide the expected retired-owner outcome.

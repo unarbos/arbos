@@ -11,7 +11,7 @@ def method(text,name):
  matches=list(re.finditer(r'^    (?:private )?func '+re.escape(name)+r'\(',text,re.M));assert len(matches)==1,(name,'Expected one actual method');a=matches[0].start();a=a-len('    @MainActor\n') if text[:a].endswith('    @MainActor\n') else a;return text[a:text.index('\n    }',a)+6]
 at=api.index('@MainActor\nprivate final class CallAuthority {');capture=api[at:api.index('\n}',at)+2]
 at=api.index('    private init(endpoint:');extra=api[at:api.index('\n    }',at)+6]
-fixture=capture+'\n'+(HERE/'matrix_fakes.swift').read_text().replace('var isUnauthorized:Bool','var type:String{""};var isUnauthorized:Bool')+extra+'\n'+'\n'.join(method(api,n) for n in ['request','requestOnce','bound','frozenAuthority','json','matrixSession'])+'\n}\n'+helper
+fixture=capture+'\n'+(HERE/'matrix_fakes.swift').read_text().replace('var isUnauthorized:Bool','var type:String{""};var isUnauthorized:Bool')+extra+'\n'+'\n'.join(method(api,n) for n in (['requestBearer']if 'func requestBearer('in api else[])+['request','requestOnce','bound','frozenAuthority','json','matrixSession'])+'\n}\n'+helper
 extra_helper=''
 if 'struct AccountWork' in app:
  a=app.index('struct AccountWork {');extra_helper=app[a:app.index('\n}',a)+2]+'\n'
