@@ -1,0 +1,8 @@
+{
+  "workflow_sha256": "9863a44d7bb4f7488dab349fd4de911cb20f3d6dd3cf88c7dded40745d2814a7",
+  "binary_sha256": "8db11704dc296f096216db4db65d86cd7f0ebfdf4c38453a1da276b137b88388",
+  "exit": 0,
+  "seconds": 0.02302470908034593,
+  "scope": "Native actionlint1.7.12 on exact final Swift consumer-check workflow; external ShellCheck/pyflakes unavailable and explicitly disabled. Runtime network denied. No project code or CI job execution.",
+  "workflow_unchanged": true
+}

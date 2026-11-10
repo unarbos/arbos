@@ -1,0 +1,142 @@
+{
+  "id": 129873404857,
+  "run_id": 42828800182,
+  "head_sha": "84cb882feefc327e67167b723c9441015ab65944",
+  "status": "completed",
+  "conclusion": "failure",
+  "started_at": "2026-11-10T13:55:04Z",
+  "completed_at": "2026-11-10T15:34:30Z",
+  "steps": [
+    {
+      "name": "Set up job",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 1,
+      "started_at": "2026-11-10T13:55:05Z",
+      "completed_at": "2026-11-10T13:55:06Z"
+    },
+    {
+      "name": "Run actions/checkout@v4",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 2,
+      "started_at": "2026-11-10T13:55:06Z",
+      "completed_at": "2026-11-10T13:55:13Z"
+    },
+    {
+      "name": "Swift package cache",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 3,
+      "started_at": "2026-11-10T13:55:13Z",
+      "completed_at": "2026-11-10T13:55:14Z"
+    },
+    {
+      "name": "Select Xcode",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 4,
+      "started_at": "2026-11-10T13:55:14Z",
+      "completed_at": "2026-11-10T13:55:18Z"
+    },
+    {
+      "name": "Rust toolchain",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 5,
+      "started_at": "2026-11-10T13:55:18Z",
+      "completed_at": "2026-11-10T13:55:25Z"
+    },
+    {
+      "name": "Cache key for the dependency build",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 6,
+      "started_at": "2026-11-10T13:55:25Z",
+      "completed_at": "2026-11-10T13:55:26Z"
+    },
+    {
+      "name": "Run Swatinem/rust-cache@v2",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 7,
+      "started_at": "2026-11-10T13:55:26Z",
+      "completed_at": "2026-11-10T13:55:27Z"
+    },
+    {
+      "name": "Fall back to the newest cache for this compiler",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 8,
+      "started_at": "2026-11-10T13:55:27Z",
+      "completed_at": "2026-11-10T13:55:27Z"
+    },
+    {
+      "name": "Build ArbosFFI xcframework",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 9,
+      "started_at": "2026-11-10T13:55:27Z",
+      "completed_at": "2026-11-10T14:27:22Z"
+    },
+    {
+      "name": "Pick an available simulator",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 10,
+      "started_at": "2026-11-10T14:27:22Z",
+      "completed_at": "2026-11-10T14:28:17Z"
+    },
+    {
+      "name": "fastlane test",
+      "status": "completed",
+      "conclusion": "failure",
+      "number": 11,
+      "started_at": "2026-11-10T14:28:17Z",
+      "completed_at": "2026-11-10T15:34:20Z"
+    },
+    {
+      "name": "Keep the xcodebuild logs",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 12,
+      "started_at": "2026-11-10T15:34:20Z",
+      "completed_at": "2026-11-10T15:34:23Z"
+    },
+    {
+      "name": "Post Run Swatinem/rust-cache@v2",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 22,
+      "started_at": "2026-11-10T15:34:23Z",
+      "completed_at": "2026-11-10T15:34:23Z"
+    },
+    {
+      "name": "Post Swift package cache",
+      "status": "completed",
+      "conclusion": "skipped",
+      "number": 23,
+      "started_at": "2026-11-10T15:34:23Z",
+      "completed_at": "2026-11-10T15:34:23Z"
+    },
+    {
+      "name": "Post Run actions/checkout@v4",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 24,
+      "started_at": "2026-11-10T15:34:23Z",
+      "completed_at": "2026-11-10T15:34:24Z"
+    },
+    {
+      "name": "Complete job",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 25,
+      "started_at": "2026-11-10T15:34:24Z",
+      "completed_at": "2026-11-10T15:34:28Z"
+    }
+  ],
+  "console_sha256": "c7a6fd38022c2f63e4613663323cb5c836ab20ea1561be43fb251ef37909911e",
+  "console_bytes": 130742,
+  "selected_line_count": 6
+}

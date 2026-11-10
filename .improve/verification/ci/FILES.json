@@ -1,0 +1,18 @@
+{
+  "scope": "Published data-only subset of frozen CI handoff-v2; private read-only collection helpers are omitted. Actual workflow/runner/test sources remain in the phase PRs.",
+  "source_packet_FILES_sha256": "b3b3905e1ba80a5353edc75397ce17169b1b7a1db79ea7ea3720d20d3f195da4",
+  "files": {
+    "README.md": {
+      "sha256": "c65a63f31b48e63c027b5c2b15133e6e794ab7211a49e5d0258ae969be49ac3a",
+      "bytes": 4287
+    },
+    "RESULTS.json": {
+      "sha256": "054a32e8d9d18f4b76dd5129eefbcd3fe175f74b9ba69e0f933d2259f00e86ca",
+      "bytes": 180171
+    },
+    "LOG-PROVENANCE.json": {
+      "sha256": "d59cfeee4d4283c3861138cb3b9298ca1e6ac705f76c494896afa09988e392f7",
+      "bytes": 10602
+    }
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "id": 42828800182,
+  "head_sha": "84cb882feefc327e67167b723c9441015ab65944",
+  "head_branch": "improve/performance",
+  "run_attempt": 1,
+  "status": "completed",
+  "conclusion": "failure",
+  "created_at": "2026-11-10T13:54:13Z",
+  "updated_at": "2026-11-10T15:34:30Z",
+  "html_url": "https://github.com/cisterciansis/arbos/actions/runs/42828800182",
+  "tree": "5c17aabde2272f28f3a69907fd66b0b5b343688a",
+  "artifacts": [
+    {
+      "id": 13777124404,
+      "name": "swift-core-check-logs-84cb882feefc327e67167b723c9441015ab65944",
+      "size_in_bytes": 117634,
+      "expired": false,
+      "digest": "sha256:029567f1b94430209ac8f847b2ebf6de5e5d5f7938b94df1d1f2542e3b836b3d",
+      "workflow_run": {
+        "id": 42828800182,
+        "repository_id": 1451546622,
+        "head_repository_id": 1451546622,
+        "head_branch": "improve/performance",
+        "head_sha": "84cb882feefc327e67167b723c9441015ab65944"
+      }
+    }
+  ]
+}

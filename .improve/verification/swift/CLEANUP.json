@@ -1,0 +1,17 @@
+{
+  "runtime": "com.apple.CoreSimulator.SimRuntime.iOS-26-2",
+  "before": "Booted",
+  "after": "Shutdown",
+  "operations": [
+    {
+      "operation": "shutdown",
+      "owned_device_verified": true,
+      "exit_code": 0
+    }
+  ],
+  "only_owned_device_targeted": true,
+  "no_other_device_create_boot_shutdown_erase_or_delete": true,
+  "no_runtime_remove_or_import": true,
+  "recorded_UTC": "2026-11-10T16:36:44.396743+00:00",
+  "scope": "Routine cleanup of the single verification simulator created for this work; existing devices and both installed runtimes retained."
+}

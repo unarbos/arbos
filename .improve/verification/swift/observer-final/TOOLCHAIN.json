@@ -1,0 +1,8 @@
+{
+  "xcode": "Xcode 26.2\nBuild version 17C52",
+  "SDK": "iphonesimulator26.2",
+  "runtime": "iOS26.2 (23C52)",
+  "architecture": "arm64",
+  "signing_allowed": false,
+  "artifact_scope": "Exact C19 Rust FFI simulator arm64 slice; same reviewed owned verification simulator, no physical device"
+}

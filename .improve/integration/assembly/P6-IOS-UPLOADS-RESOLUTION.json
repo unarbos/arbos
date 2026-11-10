@@ -1,0 +1,10 @@
+{
+  "path": "apps/ios/Arbos/Arbos/Store/AppModel.swift",
+  "phase4_sha256": "cc2932a3f6cbf10b1408eb3c6cf3c6640e4620bb358262f793ee256b2590098e",
+  "phase6_sha256": "983a49bac2d6c8844fe342f6723cac2069495632858957c415c017b85575d613",
+  "output_sha256": "f0f596d4757209173c3a39141174097cafa9fac4bac52568af0bcfda1b6f9ee7",
+  "patch": "p6-ios-uploads.patch",
+  "patch_sha256": "3e7f3e3a23a8cb25c208fa7f93531e4592815a42e3b9f1067369c4f502ff2734",
+  "patch_bytes": 5851,
+  "scope": "Apply unchanged exact5851B reviewed P6uploads-on-ownership delta to final P4cc293. Preserve local fixture/relay DraftDMWork pre-task API capture plus P3 explicit preview policy and P4 async ownership. Main-only P6AppModel is never replacement."
+}

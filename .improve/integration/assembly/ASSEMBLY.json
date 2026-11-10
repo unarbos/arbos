@@ -1,0 +1,86 @@
+{
+  "version": 3,
+  "status": "assembled source projection; execution itself does not run tests or publish",
+  "tree": "f3903159bb239a21f68a62ec029b82102ffe3f87",
+  "base": "2865cb29b806121d4a90f55ba6ce151a150279a0",
+  "source_files": 2724,
+  "source_bytes": 68696786,
+  "elapsed_wall_seconds": 3.024397,
+  "elapsed_measurement": "Invoking execution controller",
+  "source_manifest_sha256": "c9cf2b2d0cec1f7b2369561ba3c66e86ae5e5f25148695f55ad901057748b877",
+  "provenance_sha256": "f6a01163d0bb14fed10ba2c45faf7ca6489b3e331b0226c20155577e665ba9af",
+  "assembler_sha256": "80f96bc0928bb14fd95820a739e1f69a2ca412b1a7bd2b875ace88bddf3eb987",
+  "preexecution_manifest_sha256": "22d8d578728f67c4c5a39f73aa877caa28849a7c8b1656c2c56653306bb4a732",
+  "pins": {
+    "version": 1,
+    "base": "2865cb29b806121d4a90f55ba6ce151a150279a0",
+    "phases": [
+      {
+        "phase": 3,
+        "ref": "refs/heads/improve/structure",
+        "commit": "658266a56e21eff1f740b6040d802033b4620873"
+      },
+      {
+        "phase": 4,
+        "ref": "refs/heads/improve/state-machines",
+        "commit": "03a12e30e7d956070cfcacfd0e30cd35fca16598"
+      },
+      {
+        "phase": 5,
+        "ref": "refs/heads/improve/observability",
+        "commit": "ef3cfc72a02027d89e0236420e4282d573fe9f7c"
+      },
+      {
+        "phase": 6,
+        "ref": "refs/heads/improve/performance",
+        "commit": "84cb882feefc327e67167b723c9441015ab65944"
+      },
+      {
+        "phase": 7,
+        "ref": "refs/heads/improve/database-scale",
+        "commit": "a35e9ccfd54bbdc40ee8a3ac50da80dc5083e768"
+      },
+      {
+        "phase": 8,
+        "ref": "refs/heads/improve/laws",
+        "commit": "b15e3f9ba8080539a9f882cc806478f3ba6a8f33"
+      },
+      {
+        "phase": 9,
+        "ref": "refs/heads/improve/finish",
+        "commit": "f1f7e745bb40cc4314a12392abb7cdb7be9cc25e"
+      }
+    ],
+    "readiness": "Explicit final local source commits supplied by Root; package pending Root review before any full assembly execution."
+  },
+  "preserved": {
+    "baseline_assets": true,
+    "root_Cargo_lock": true,
+    "live_HEAD_and_index": true,
+    "local_guard_patch_and_assembler_bytes": true,
+    "snapshot_labels": true
+  },
+  "reviewed_final_outputs": {
+    "crates/arbos-mac/src/app.rs": "23711ea2b97caa5a6291410822eb8a1cbce977e3e4b2d3a29dc3145a95ebb498",
+    "crates/arbos-mac/src/main.rs": "24c038985e09450aded8230bf49567506b8d155e56a41cdc0cffb7e3f433fee4",
+    "crates/arbos-mac/src/sync/fixture.rs": "0e1a5bad836a0040a84b7b02858b546f4e97e363fcdf68b9b8962d3bb47fea9f",
+    "crates/arbos-mac/src/sync/mod.rs": "5bf67a00e819a80415b20f06b293a07533d275d57ac6cce3618b72c912e8a392",
+    "crates/arbos-mac/src/sync/relay.rs": "781cdd41b95811d2d7063cef3debf535ba636263e00eb7abb0ceed336666f0e9",
+    "apps/ios/Arbos/Arbos/Store/AppModel.swift": "f0f596d4757209173c3a39141174097cafa9fac4bac52568af0bcfda1b6f9ee7",
+    "apps/ios/Arbos/Arbos/UI/ChatView.swift": "9a1ef5c35bda8fefa417ce24114f1b56d1633f48d2b231f2ff34c1bd8caf5e57",
+    "apps/ios/Arbos/Arbos/UI/Transcript.swift": "a5346472e97eef520e3c7f57b033009940471f0d54a7aae43238b811328530a0",
+    "apps/ios/Arbos/Arbos/UI/LibraryList.swift": "3ca6ed63e266188795806fe9c30d1c31d9cd9be822c054309b407009247711fe",
+    ".improve/finish-checks/source-consumers/check.py": "5d5a4f7011b24a06f148245831b2bb589d0431d09df9b8f43eb28fa229c91dcb",
+    ".improve/finish-checks/source-consumers/README.md": "c06ff9cb36db41db7d50ef15e6224495521c2b96dd05ee62fe8241c8080df461",
+    ".github/workflows/ci.yml": "8a2faa25352f0d9ae7a8df37644ebc03d0eaa9eb5976a7b401cda62cb95a689a",
+    "apps/ios/Arbos/Arbos/Sync/RelayAPI.swift": "79a41459c976e98f3ced1a3fcdba24dda59bb0a755265ac8af40991486a69467",
+    "crates/arbos-relay/src/people.rs": "39855dcf42e5d5098673a8594a5fc70f2ce949b3545ae3e3bddef17d42833d3b",
+    "crates/arbos-core/src/redact.rs": "1919913639b72ba43ffcff9a51bd29fe3038f08701de5e390463613b2dbde3da"
+  },
+  "common_Swift_workflow_sha256": "9863a44d7bb4f7488dab349fd4de911cb20f3d6dd3cf88c7dded40745d2814a7",
+  "foreign_compile_time_inputs": [
+    "harness/arbos-pi-ext/index.ts",
+    "edge/sites-worker/tests/routes.json"
+  ],
+  "scope": "Fresh v3 run only. Whole-source delta/compiled-input closure and source-compatible test reuse are separate verification receipts; no prior test rerun is implied."
+}

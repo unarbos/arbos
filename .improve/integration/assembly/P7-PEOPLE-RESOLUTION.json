@@ -1,0 +1,10 @@
+{
+  "path": "crates/arbos-relay/src/people.rs",
+  "preimage_sha256": "1e09faf9d34fed7abc953712c7cfffb48d661d6427381e5e2eb1e6eaf93c9ee5",
+  "phase7_sha256": "b2977c2a042db13b06be5faf7232d88adb57368cc00f54528b9674741755c80f",
+  "output_sha256": "39855dcf42e5d5098673a8594a5fc70f2ce949b3545ae3e3bddef17d42833d3b",
+  "scope": "Install exactP7batchimplementation, preserving literalP3failclosed may_add_to_group plus all5actualroute regressions and removalofunusedmember_json. No ACL/default/schemachange beyond reviewedphasechanges. Final11privacy+DTO/budget/nativefullgatesrequired.",
+  "patch": "p7-people.patch",
+  "patch_sha256": "166c43ed245f64cae2edaeba048d67626c6c6a139f05818bdc9d2de528c79ae2",
+  "patch_bytes": 21961
+}

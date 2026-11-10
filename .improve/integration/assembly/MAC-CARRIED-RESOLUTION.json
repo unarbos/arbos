@@ -1,0 +1,43 @@
+{
+  "crates/arbos-mac/src/app.rs": {
+    "phase3_sha256": "f0b787d6d8da1cdcae6808b183f5d4cb26403ea47c357b41e78c769896888684",
+    "phase4_sha256": "23711ea2b97caa5a6291410822eb8a1cbce977e3e4b2d3a29dc3145a95ebb498",
+    "review_diff_sha256": "28fc60669a6e396eba154ecbd12bcd22a3fbbe81f8f21ec41b586155e55deecc",
+    "prior_review_diff_sha256": "f5585b71fc7353bf77f8fbc114c3d8af253b143e1acd99214b3bf69e3c6b97fd",
+    "review_diff_algorithm": "stdlib-difflib-unified-context3-phase3-phase4-v1",
+    "mode": "100644"
+  },
+  "crates/arbos-mac/src/main.rs": {
+    "phase3_sha256": "f7bb57884c06975917d31e6d5743aeaa39b18a69c0fea494d38e5ff14f55e81d",
+    "phase4_sha256": "24c038985e09450aded8230bf49567506b8d155e56a41cdc0cffb7e3f433fee4",
+    "review_diff_sha256": "838f3ab2bf56314d3faa5c62addd00c583dfd740fb376e4c5df8af9e4621c776",
+    "prior_review_diff_sha256": "2953397f63adbcb2df3a4d0b020ed6f6e6752de0fd3d4ae18138c09c22ea15d5",
+    "review_diff_algorithm": "stdlib-difflib-unified-context3-phase3-phase4-v1",
+    "mode": "100644"
+  },
+  "crates/arbos-mac/src/sync/fixture.rs": {
+    "phase3_sha256": "4ca1118796b0d3fde9fb1d9dd017c8a42b46904abe44d78c1d5f398e0853c84e",
+    "phase4_sha256": "0e1a5bad836a0040a84b7b02858b546f4e97e363fcdf68b9b8962d3bb47fea9f",
+    "review_diff_sha256": "2bc07d453f77fc902d5af171d9e6fc3585e066444be9761692cf3b02c348c405",
+    "prior_review_diff_sha256": "3d5dd53e1c606536553f5664f5b0b2d227fdd6b7363f0e33d80645e2bf743f16",
+    "review_diff_algorithm": "stdlib-difflib-unified-context3-phase3-phase4-v1",
+    "mode": "100644"
+  },
+  "crates/arbos-mac/src/sync/mod.rs": {
+    "phase3_sha256": "4977c90543461379fe83195232adb5f29055ef387a68ecd56dd0005ef96c9a0a",
+    "phase4_sha256": "5bf67a00e819a80415b20f06b293a07533d275d57ac6cce3618b72c912e8a392",
+    "review_diff_sha256": "cdd9dd8664faf89babce11bfe5ec24e81f141d0f5399a9e2a5c55ad2a4e156db",
+    "prior_review_diff_sha256": "6e9c7076879c81917072d2d3679978d81e0ecb643f1ad545c6a7ebfb5284b6e2",
+    "review_diff_algorithm": "stdlib-difflib-unified-context3-phase3-phase4-v1",
+    "mode": "100644"
+  },
+  "crates/arbos-mac/src/sync/relay.rs": {
+    "phase3_sha256": "b25140cdcb45d8370f5983e192d8220cf5f17d03265133c9a3119c60438387ba",
+    "phase4_sha256": "4d5b0658245f0d4380eee7965de377ca479ce4ab60900a093f41125251add2eb",
+    "review_diff_sha256": "081ef43cd4d317efe7774273e11e2986fd0482e6823870f7bb9d9a75427302ee",
+    "prior_review_diff_sha256": "e88180d4e2debc94dfe613459541346dcb981cf35c6bba24e35adf9c969deca8",
+    "review_diff_algorithm": "stdlib-difflib-unified-context3-phase3-phase4-v1",
+    "mode": "100644"
+  },
+  "scope": "Explicit five-file carried-structure resolution: P4 main adds call_attempt only; fixture adds scoped call metadata, preservingP3fixture logic; sync/mod adds account/task/call ownership exports and envelopes, preservingallP3modules; app/relay are reviewed nativeownership successors retaining RoomDocs/snapshot/pending/title/mention/avatar/deadUIcleanup. Actual nativefinalSDK source hashes/compiler proofs are crosschecked before final publication; actualP3structural/regression checks rerun against final composition. No unknown-path fallback. Followup57a8cbe/04edd9595 carries unchanged external_open module/call owner into BOTH phases; currentdifferences otherwise same previously reviewed ownership successor."
+}

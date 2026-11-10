@@ -1,0 +1,21 @@
+{
+  "scope": "all",
+  "source_sha256": {
+    "apps/ios/Arbos/Arbos/UI/ChatView.swift": "9a1ef5c35bda8fefa417ce24114f1b56d1633f48d2b231f2ff34c1bd8caf5e57",
+    "apps/ios/Arbos/Arbos/UI/Transcript.swift": "a5346472e97eef520e3c7f57b033009940471f0d54a7aae43238b811328530a0",
+    "apps/ios/Arbos/Arbos/Model/ChatSearchShortcut.swift": "6f444c6b80dab93cbcfba05d69e0d674103a636c875ac7189d4a2c5e7c9fe568",
+    "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f",
+    "apps/ios/Arbos/Arbos/Store/AppModel.swift": "f0f596d4757209173c3a39141174097cafa9fac4bac52568af0bcfda1b6f9ee7"
+  },
+  "fixture_sha256": "9a7c536b6a436f8ef68e470d081eef5c75c84d73ff4df6c6df98e8afdbe0ff83",
+  "mutant": null,
+  "compile_exit": 0,
+  "exit_code": 0,
+  "results": {
+    "failed": 0,
+    "failures": [],
+    "passed": 29,
+    "total": 29
+  },
+  "seconds": 1.4876542090205476
+}

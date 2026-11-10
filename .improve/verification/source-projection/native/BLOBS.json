@@ -1,0 +1,8 @@
+{
+  "status": "PASS",
+  "tree": "f3903159bb239a21f68a62ec029b82102ffe3f87",
+  "native_blob_count": 470,
+  "all_git_modes_match": true,
+  "problems": [],
+  "scope": "Immutable git tree/blob reads only; no app/build/test execution or index/ref mutation"
+}

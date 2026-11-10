@@ -1,0 +1,525 @@
+{
+  "status": "PASS exact reviewed source projection",
+  "historical_execution_commit": "419d3944cf77a31086b44ee36534864bc5662758",
+  "historical_tree": "c19a6e2ab764c53065d8f79e53bbe90f76508c4d",
+  "corrected_tree": "f3903159bb239a21f68a62ec029b82102ffe3f87",
+  "changed_paths": 50,
+  "added_paths": 35,
+  "modified_paths": 15,
+  "deleted_paths": 0,
+  "exact_delta_source": "union of d405\u2192658 and624\u219203a, Phase4 wins overlaps; only AppModel uses exact composed output",
+  "records": [
+    {
+      "path": ".github/workflows/swift-core-check.yml",
+      "before": {
+        "mode": "100644",
+        "sha256": "4ca0c75cc5979da5a156f458ef6f12a886d128b3fc5e9f7da158777f2f904243"
+      },
+      "after": {
+        "mode": "100644",
+        "sha256": "9863a44d7bb4f7488dab349fd4de911cb20f3d6dd3cf88c7dded40745d2814a7"
+      },
+      "decision": "Exact reviewed Phase4 blob/mode"
+    },
+    {
+      "path": ".improve/finish-checks/calendar/AFTER.json",
+      "before": null,
+      "after": {
+        "mode": "100644",
+        "sha256": "fc3a12b82b810aa59100268f32202df796d108a235d81778bdbe3ca392a58fec"
+      },
+      "decision": "Exact reviewed Phase4 blob/mode"
+    },
+    {
+      "path": ".improve/finish-checks/calendar/CLOCK-ORIGINAL.json",
+      "before": null,
+      "after": {
+        "mode": "100644",
+        "sha256": "fa55520af47e767ca91dfec7b561d714c5296f786a3f4546687c243819b2cfcb"
+      },
+      "decision": "Exact reviewed Phase4 blob/mode"
+    },
+    {
+      "path": ".improve/finish-checks/calendar/PORTABLE.json",
+      "before": null,
+      "after": {
+        "mode": "100644",
+        "sha256": "79a3942565fc43a4a0bda2509bcfca0dee05a751abcd264ce45a93108bdb43eb"
+      },
+      "decision": "Exact reviewed Phase4 blob/mode"
+    },
+    {
+      "path": ".improve/finish-checks/calendar/PREEXISTING.json",
+      "before": null,
+      "after": {
+        "mode": "100644",
+        "sha256": "f813219ffc3b76fa81ab83cd45dc5d048710a6193cc417b05daa57cde4c702d4"
+      },
+      "decision": "Exact reviewed Phase4 blob/mode"
+    },
+    {
+      "path": ".improve/finish-checks/calendar/PRODUCT-BEFORE.json",
+      "before": null,
+      "after": {
+        "mode": "100644",
+        "sha256": "bac273557f18bc12a9c71f89f306f295b2326aa223c0e69d3f14e16a8144f871"
+      },
+      "decision": "Exact reviewed Phase4 blob/mode"
+    },
+    {
+      "path": ".improve/finish-checks/calendar/README.md",
+      "before": null,
+      "after": {
+        "mode": "100644",
+        "sha256": "42cd5f49e9fd6bc642872138acbe5dc5c82127aa3f0d451e6549b3b5f9ce7b81"
+      },
+      "decision": "Exact reviewed Phase4 blob/mode"
+    },
+    {
+      "path": ".improve/finish-checks/calendar/baseline-date-methods.swift",
+      "before": null,
+      "after": {
+        "mode": "100644",
+        "sha256": "47654913021e020ae86dbfaac0d685ad7169f52c7c292377369f9c7e76a48f4c"
+      },
+      "decision": "Exact reviewed Phase4 blob/mode"
+    },
+    {
+      "path": ".improve/finish-checks/calendar/check.py",
+      "before": null,
+      "after": {
+        "mode": "100644",
+        "sha256": "58ba3ab68e05c2883d30a2fe3a9705f6a1f5c4f787397f230243d2124da4d93f"
+      },
+      "decision": "Exact reviewed Phase4 blob/mode"
+    },
+    {
+      "path": ".improve/finish-checks/composer-lifetime/CONTROLS.json",
+      "before": null,
+      "after": {
+        "mode": "100644",
+        "sha256": "3003978f586f3f98b1b0327868095f36e05801bb1df7030a716d164cfbfabdf0"
+      },
+      "decision": "Exact reviewed Phase4 blob/mode"
+    },
+    {
+      "path": ".improve/finish-checks/composer-lifetime/DIAGNOSIS.json",
+      "before": null,
+      "after": {
+        "mode": "100644",
+        "sha256": "a7093b0746e0a9bed6c5976d3f5233d65b907dfcc95857757f11811b961a480d"
+      },
+      "decision": "Exact reviewed Phase4 blob/mode"
+    },
+    {
+      "path": ".improve/finish-checks/composer-lifetime/README.md",
+      "before": null,
+      "after": {
+        "mode": "100644",
+        "sha256": "2cd06da02115c27664d3880410ac1640b8241067cc7cbc155965e88b9b58af85"
+      },
+      "decision": "Exact reviewed Phase4 blob/mode"
+    },
+    {
+      "path": ".improve/finish-checks/composer-lifetime/SOURCE.json",
+      "before": null,
+      "after": {
+        "mode": "100644",
+        "sha256": "e6a8f4748dc802e9f5fd1a963153aa751f34471cd31dd6a8f37e98bb58711d9b"
+      },
+      "decision": "Exact reviewed Phase4 blob/mode"
+    },
+    {
+      "path": ".improve/finish-checks/composer-lifetime/STATIC.json",
+      "before": null,
+      "after": {
+        "mode": "100644",
+        "sha256": "9e25b759c5114c65a2fd88e3d64d7c3d9476022c84518e7e96904776ab5aaee7"
+      },
+      "decision": "Exact reviewed Phase4 blob/mode"
+    },
+    {
+      "path": ".improve/finish-checks/source-consumers/README.md",
+      "before": null,
+      "after": {
+        "mode": "100644",
+        "sha256": "c06ff9cb36db41db7d50ef15e6224495521c2b96dd05ee62fe8241c8080df461"
+      },
+      "decision": "Exact reviewed Phase4 blob/mode"
+    },
+    {
+      "path": ".improve/finish-checks/source-consumers/check.py",
+      "before": null,
+      "after": {
+        "mode": "100644",
+        "sha256": "5d5a4f7011b24a06f148245831b2bb589d0431d09df9b8f43eb28fa229c91dcb"
+      },
+      "decision": "Exact reviewed Phase4 blob/mode"
+    },
+    {
+      "path": ".improve/finish-checks/source-consumers/verification-p3.json",
+      "before": null,
+      "after": {
+        "mode": "100644",
+        "sha256": "1df57aa6219171360195ca1406848cfe13390bff64abd7c6ae89c467573730ef"
+      },
+      "decision": "Exact reviewed Phase4 blob/mode"
+    },
+    {
+      "path": ".improve/finish-checks/source-consumers/verification-p4.json",
+      "before": null,
+      "after": {
+        "mode": "100644",
+        "sha256": "5cdd2abc421201ee5bd982448ef7c96185a1ef35c0ff33ebcac41b8c2e2987b7"
+      },
+      "decision": "Exact reviewed Phase4 blob/mode"
+    },
+    {
+      "path": ".improve/state-machine-checks/ios-account-work/README.md",
+      "before": {
+        "mode": "100644",
+        "sha256": "7a62aadc294fde842da7c8a4be91a36998fe41eac7bc6f7fad3ef3a3a3da9056"
+      },
+      "after": {
+        "mode": "100644",
+        "sha256": "9b9f6535572dbadb3a8e5fd30edb56b8fe357cde5f0cf99126eefd354cb6a2d1"
+      },
+      "decision": "Exact reviewed Phase4 blob/mode"
+    },
+    {
+      "path": ".improve/state-machine-checks/ios-account-work/draft-fixture/public-v1/AFTER.json",
+      "before": null,
+      "after": {
+        "mode": "100644",
+        "sha256": "ce8fdd4b2085c419569ae26b1b9fabb28ff2dd4915ca6affe0376b8c1345a621"
+      },
+      "decision": "Exact reviewed Phase4 blob/mode"
+    },
+    {
+      "path": ".improve/state-machine-checks/ios-account-work/draft-fixture/public-v1/BEFORE.json",
+      "before": null,
+      "after": {
+        "mode": "100644",
+        "sha256": "7ab482005aad2e5a481cae858f29e3e1035a4eadfc0af70b44d4e2e4fb2a3f34"
+      },
+      "decision": "Exact reviewed Phase4 blob/mode"
+    },
+    {
+      "path": ".improve/state-machine-checks/ios-account-work/draft-fixture/public-v1/COMPILE-GATES.json",
+      "before": null,
+      "after": {
+        "mode": "100644",
+        "sha256": "2ec4b79a5ef388230ac1575363695bdda2d66b88726ff066c53e3d5a3f417d31"
+      },
+      "decision": "Exact reviewed Phase4 blob/mode"
+    },
+    {
+      "path": ".improve/state-machine-checks/ios-account-work/draft-fixture/public-v1/DIAGNOSIS.json",
+      "before": null,
+      "after": {
+        "mode": "100644",
+        "sha256": "4d7f56ed2bf25fa875b42211ef1a97cb8c28e10369b7cded72cba777ae6d9208"
+      },
+      "decision": "Exact reviewed Phase4 blob/mode"
+    },
+    {
+      "path": ".improve/state-machine-checks/ios-account-work/draft-fixture/public-v1/README.md",
+      "before": null,
+      "after": {
+        "mode": "100644",
+        "sha256": "8a9b750198aa4482a27cd72b4380d51fbe884330e009b707c15b7ee21d28ac0f"
+      },
+      "decision": "Exact reviewed Phase4 blob/mode"
+    },
+    {
+      "path": ".improve/state-machine-checks/ios-account-work/draft-fixture/public-v1/SOURCE.json",
+      "before": null,
+      "after": {
+        "mode": "100644",
+        "sha256": "ac6ecf6026178b5a727398c4656b25d25c2ba43708a32863d41e16e0aa32e15f"
+      },
+      "decision": "Exact reviewed Phase4 blob/mode"
+    },
+    {
+      "path": ".improve/state-machine-checks/ios-account-work/draft-fixture/retained-handoff-v1/ACTUAL-METHODS.json",
+      "before": null,
+      "after": {
+        "mode": "100644",
+        "sha256": "8d9f97325f8b008aad62d4afe37c1c1ed01c210be143b092fd9c8695b0eabbb3"
+      },
+      "decision": "Exact reviewed Phase4 blob/mode"
+    },
+    {
+      "path": ".improve/state-machine-checks/ios-account-work/draft-fixture/retained-handoff-v1/INDEPENDENT-REVIEW.md",
+      "before": null,
+      "after": {
+        "mode": "100644",
+        "sha256": "8b8dbcd6089ffcadd8ac7b4564b02b1883171b4034b51b78d551a6b6a9deb877"
+      },
+      "decision": "Exact reviewed Phase4 blob/mode"
+    },
+    {
+      "path": ".improve/state-machine-checks/ios-account-work/draft-fixture/retained-handoff-v1/MUTANTS.json",
+      "before": null,
+      "after": {
+        "mode": "100644",
+        "sha256": "c0308b4d6278669d557fb9732da1aa0af43f68687e7dd5a356656a89eb444565"
+      },
+      "decision": "Exact reviewed Phase4 blob/mode"
+    },
+    {
+      "path": ".improve/state-machine-checks/ios-account-work/draft-fixture/retained-handoff-v1/README.md",
+      "before": null,
+      "after": {
+        "mode": "100644",
+        "sha256": "bd7eef11563aa7d5f118f6c4c0b0f1b6f20d00154832400f9467c3574afec412"
+      },
+      "decision": "Exact reviewed Phase4 blob/mode"
+    },
+    {
+      "path": ".improve/state-machine-checks/ios-account-work/draft-fixture/retained-handoff-v1/SELECTED-RUNNER.json",
+      "before": null,
+      "after": {
+        "mode": "100644",
+        "sha256": "470a429354cd14b71ed5f97d93fb23186fb9ff450119ebf6664d7d7c0d5b3b1e"
+      },
+      "decision": "Exact reviewed Phase4 blob/mode"
+    },
+    {
+      "path": ".improve/state-machine-checks/ios-account-work/draft-fixture/retained-handoff-v1/SOURCE.json",
+      "before": null,
+      "after": {
+        "mode": "100644",
+        "sha256": "b314cfebfe7e6ffca4a93578c44a8efa4e8441df984e11c767cbcce4c498b3e6"
+      },
+      "decision": "Exact reviewed Phase4 blob/mode"
+    },
+    {
+      "path": ".improve/state-machine-checks/ios-account-work/methods/check_draft_sends.py",
+      "before": {
+        "mode": "100644",
+        "sha256": "1157982e52501f42095fc9e5edee45d5e48d0a9ad79fde03939d60c5e5ae1efb"
+      },
+      "after": {
+        "mode": "100644",
+        "sha256": "056b8b6ec111a39581172ebcc3597675507030045ea8c39d267e01099965b7f9"
+      },
+      "decision": "Exact reviewed Phase4 blob/mode"
+    },
+    {
+      "path": ".improve/state-machine-checks/ios-account-work/run_all.py",
+      "before": {
+        "mode": "100644",
+        "sha256": "3fd79a17ccd9a1132c66421cb5828e3c3cade01f681182774a0de6acf6009cb2"
+      },
+      "after": {
+        "mode": "100644",
+        "sha256": "4c93743e70225a4cc55e475b4f6c303fb09ad6319cf0cfe3b7a717a1e15d8394"
+      },
+      "decision": "Exact reviewed Phase4 blob/mode"
+    },
+    {
+      "path": ".improve/state-machine-checks/ios-chat/row-identity/CAUSAL-COMPARISON.json",
+      "before": null,
+      "after": {
+        "mode": "100644",
+        "sha256": "850b4db0b73ba090124cf5c4fe42a1c4f73290b1dffe51e9267e1d4cdb3e59fe"
+      },
+      "decision": "Exact reviewed Phase4 blob/mode"
+    },
+    {
+      "path": ".improve/state-machine-checks/ios-chat/row-identity/FIXTURE-NONINTERFERENCE.json",
+      "before": null,
+      "after": {
+        "mode": "100644",
+        "sha256": "3f26e75e03050a8382759f97c3d845b9294c53313fe002e0ccd4494b09ae0c16"
+      },
+      "decision": "Exact reviewed Phase4 blob/mode"
+    },
+    {
+      "path": ".improve/state-machine-checks/ios-chat/row-identity/GATES.json",
+      "before": null,
+      "after": {
+        "mode": "100644",
+        "sha256": "0d8b36e273cde5ba7dd81719cd6f8465d18457f384afd8fbde0da489f23a9902"
+      },
+      "decision": "Exact reviewed Phase4 blob/mode"
+    },
+    {
+      "path": ".improve/state-machine-checks/ios-chat/row-identity/PARITY.json",
+      "before": null,
+      "after": {
+        "mode": "100644",
+        "sha256": "9d247463676034d6e3b1dd9efdbd08880609813b54325f80103a71ffc23f124c"
+      },
+      "decision": "Exact reviewed Phase4 blob/mode"
+    },
+    {
+      "path": ".improve/state-machine-checks/ios-chat/row-identity/README.md",
+      "before": null,
+      "after": {
+        "mode": "100644",
+        "sha256": "218caf52984d90d165a63d6b23e2a63a8dbf3d36685a0e7c7d0dd5b7e28f5d6b"
+      },
+      "decision": "Exact reviewed Phase4 blob/mode"
+    },
+    {
+      "path": ".improve/state-machine-checks/ios-chat/row-identity/one-line.patch",
+      "before": null,
+      "after": {
+        "mode": "100644",
+        "sha256": "bef1d3738d852bb870e3192df1b4a510582b0b2f7f150717504803b5dcf864db"
+      },
+      "decision": "Exact reviewed Phase4 blob/mode"
+    },
+    {
+      "path": ".improve/state-machines.md",
+      "before": {
+        "mode": "100644",
+        "sha256": "f2130c0c882a1f5b5da7f6265a5c3a9efe39dfbc0f46cfd2e2c20d67becca908"
+      },
+      "after": {
+        "mode": "100644",
+        "sha256": "3909b168ceabbcc9f1dcb7127347eaa494cf3cab6a87a9f3283f2ca661d3ac8f"
+      },
+      "decision": "Exact reviewed Phase4 blob/mode"
+    },
+    {
+      "path": ".improve/structural-checks/structural-exit.md",
+      "before": {
+        "mode": "100644",
+        "sha256": "ad0f064760d4be59f1e359b2ce38572af680373d1752f29b327042a1e98f9372"
+      },
+      "after": {
+        "mode": "100644",
+        "sha256": "7c783e88420fd7c57c8af5989baea56f98deb0ce178f85c3d4398af19cbc19c2"
+      },
+      "decision": "Exact reviewed Phase3 blob/mode"
+    },
+    {
+      "path": "apps/ios/Arbos/Arbos/Store/AppModel.swift",
+      "before": {
+        "mode": "100644",
+        "sha256": "2fb19532c675bdda31e60e658a032543f5c9178fce185fcd327bcd628aad81ca"
+      },
+      "after": {
+        "mode": "100644",
+        "sha256": "f0f596d4757209173c3a39141174097cafa9fac4bac52568af0bcfda1b6f9ee7"
+      },
+      "decision": "Exact reviewed Phase6 uploads delta on Phase4 owned/fixture AppModel"
+    },
+    {
+      "path": "apps/ios/Arbos/Arbos/UI/ChatView.swift",
+      "before": {
+        "mode": "100644",
+        "sha256": "cebc573edc37875a5740cef582ad2ecace19551b1852e22bb66e30b525c7cccc"
+      },
+      "after": {
+        "mode": "100644",
+        "sha256": "9a1ef5c35bda8fefa417ce24114f1b56d1633f48d2b231f2ff34c1bd8caf5e57"
+      },
+      "decision": "Exact reviewed Phase4 blob/mode"
+    },
+    {
+      "path": "apps/ios/Arbos/Arbos/UI/LibraryList.swift",
+      "before": {
+        "mode": "100644",
+        "sha256": "b56c88fefcb51654b14c04d9c7cb4e35161c73057d5757f446f7af319647fd69"
+      },
+      "after": {
+        "mode": "100644",
+        "sha256": "3ca6ed63e266188795806fe9c30d1c31d9cd9be822c054309b407009247711fe"
+      },
+      "decision": "Exact reviewed Phase4 blob/mode"
+    },
+    {
+      "path": "apps/ios/Arbos/ArbosTests/BlockedStateTests.swift",
+      "before": {
+        "mode": "100644",
+        "sha256": "2bed3b75c43979d8af823711590ed0304b0c3ff22b940da62caa4882223e2984"
+      },
+      "after": {
+        "mode": "100644",
+        "sha256": "48d540743d7ec56b847a64b183d091386e873a5f7cd55f56b4710bf974c37a9f"
+      },
+      "decision": "Exact reviewed Phase4 blob/mode"
+    },
+    {
+      "path": "apps/ios/Arbos/ArbosTests/ChatSearchCloseTests.swift",
+      "before": {
+        "mode": "100644",
+        "sha256": "827e35c9e9e32fa905b1a577e95c0c57aef0bfaeb8c7a1bfc130903b636d023e"
+      },
+      "after": {
+        "mode": "100644",
+        "sha256": "c86f604663d20fff7bc91fd516f44467c323390a621267de6ca12563afd4bbd3"
+      },
+      "decision": "Exact reviewed Phase4 blob/mode"
+    },
+    {
+      "path": "apps/ios/Arbos/ArbosTests/ComposerMetricsTests.swift",
+      "before": {
+        "mode": "100644",
+        "sha256": "e146312184ac679467495dd3b1da485e0bfb0a4b5c967c5ed8f2d3375c0e2d12"
+      },
+      "after": {
+        "mode": "100644",
+        "sha256": "030d305d5f681669483e48b7df9ab1436d33dea2a71c9cd1c10f7379d50a5f4b"
+      },
+      "decision": "Exact reviewed Phase4 blob/mode"
+    },
+    {
+      "path": "apps/ios/Arbos/ArbosTests/HomeSearchTests.swift",
+      "before": {
+        "mode": "100644",
+        "sha256": "f6e7d0a53746ec64d5b9c281359665d2e81b4c649c40fadf15b254e2bf2a51e1"
+      },
+      "after": {
+        "mode": "100644",
+        "sha256": "994e3f5de50bcb086b651029aa6a77502ea7fe52613e17326349373305be5084"
+      },
+      "decision": "Exact reviewed Phase4 blob/mode"
+    },
+    {
+      "path": "apps/ios/Arbos/ArbosTests/LibraryListTests.swift",
+      "before": {
+        "mode": "100644",
+        "sha256": "c59adfeec9f95c932529030a6bf0330918eecf6f174ae25fe1cb7394401c0424"
+      },
+      "after": {
+        "mode": "100644",
+        "sha256": "b3a4f65b6ad45de2e72f83c7112f66d049a684fd4a34285a9b74da0585c518fa"
+      },
+      "decision": "Exact reviewed Phase4 blob/mode"
+    },
+    {
+      "path": "apps/ios/Arbos/ArbosTests/ProfileToggleTests.swift",
+      "before": {
+        "mode": "100644",
+        "sha256": "851f01d8040d85eb7776a81ead837b5a95e28d1db4beb4a7f8ff9f4e84d2dde0"
+      },
+      "after": {
+        "mode": "100644",
+        "sha256": "b1327b19754b1dfa5ba640f296fc4d26bef627f843bb52fd02b9bba9c3cd5f5c"
+      },
+      "decision": "Exact reviewed Phase4 blob/mode"
+    }
+  ],
+  "all_other_blob_modes_identical": true,
+  "no_broad_path_or_extension_exclusion": true,
+  "Rust_Cargo_build_fixtures_harness_law_production_inputs_unchanged": true,
+  "foreign_Rust_includes": {
+    "harness/arbos-pi-ext/index.ts": {
+      "mode": "100644",
+      "sha256": "bae6f73643c5e4978ab0131de60d85cb6c2691319f4ad9aeeac5e8d654d9e6df",
+      "unchanged": true
+    },
+    "edge/sites-worker/tests/routes.json": {
+      "mode": "100644",
+      "sha256": "67b1981860e58b3c5d0d5abe37dd7dfd624ac57f58c6dd7abc376ace5c69a421",
+      "unchanged": true
+    }
+  },
+  "existing_CI_scope": "2586Rust/0failed/3ignored and94harness passes remain executions of419d/run42833942969, reused only by unchanged input identity. No new CI execution is claimed.",
+  "changed_input_scope": "Nine Swift files plus exact reviewed helper/workflow/proof/docs inputs have their own native/consumer/calendar/actionlint verification."
+}

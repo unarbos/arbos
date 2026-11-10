@@ -1,0 +1,32 @@
+[
+  {
+    "path": "CASES.json",
+    "bytes": 98751,
+    "sha256": "dac7e212f5bd7a68a9164d23267692d2f0bcda98607b6408cbdc559344d806e4"
+  },
+  {
+    "path": "GATES.json",
+    "bytes": 2767,
+    "sha256": "fcacb7078ea1c6f389dfe03c7bcef30397826ea036ec4f9c15d7ece709da69b5"
+  },
+  {
+    "path": "MEMBERSHIP.json",
+    "bytes": 36204,
+    "sha256": "a39f1766982b691098bdf690d6b0b5f29ac66bb3d644e2e76c4a38e4fd8df3e3"
+  },
+  {
+    "path": "README.md",
+    "bytes": 1681,
+    "sha256": "877439d908b1f2d689ff94c4990c863945285499e7834dad0b9fc8d36d053807"
+  },
+  {
+    "path": "SOURCE.json",
+    "bytes": 4419,
+    "sha256": "c08534ce53a1d39623d56257e9417ccb41615053578abd3cc9a95dd7808164e9"
+  },
+  {
+    "path": "TOOLCHAIN.json",
+    "bytes": 296,
+    "sha256": "e6168c6ba3c705479aa840d0da9e7f947d3c07f7771496d3aac95808bb3daf21"
+  }
+]
