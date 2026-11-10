@@ -66,6 +66,7 @@ jobs:
         run: |
           python3 -B scripts/ci/test_no_egress_runner.py -v
           python3 -B scripts/ci/test_netns_smoke.py -v
+          python3 -B scripts/ci/test_xctestrun_env.py -v
       - name: The tree is the monorepo, and the old pipeline is gone
         run: |
           set -euo pipefail
@@ -163,6 +164,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - run: cargo fmt --all --check
       # rust-cache keys on every workspace Cargo.toml as well as Cargo.lock, but with
       # `cache-workspace-crates: false` (its default, which this job keeps) the entry holds only
       # *dependency* artifacts. Those are decided by the external dependency set and the compiler,
@@ -329,7 +331,6 @@ jobs:
           echo "$("/usr/lib/llvm-${major}/bin/clang++" --version | head -1), from $prefix"
           echo "CC=/usr/lib/llvm-${major}/bin/clang" >> "$GITHUB_ENV"
           echo "CXX=/usr/lib/llvm-${major}/bin/clang++" >> "$GITHUB_ENV"
-      - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Full workspace tests with loopback-only networking
         run: bash scripts/ci/run-tests-no-egress.sh
@@ -372,8 +373,8 @@ jobs:
         working-directory: harness
       - run: pnpm -r typecheck
         working-directory: harness
-      - run: pnpm -r build
-        working-directory: harness
+      # build is also tsc --noEmit; typecheck already covers it.
+      # Restore a separate build gate when the package starts emitting artifacts.
       - run: pnpm -r test
         working-directory: harness
 
@@ -381,7 +382,6 @@ jobs:
     name: image (dockerfile lint)
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    needs: [rust, harness]
     if: github.event_name == 'push'
     steps:
       - uses: actions/checkout@v4
