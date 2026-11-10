@@ -1,7 +1,8 @@
 # Phase 7: database scale
 
-**Status: source-SQL scale suite and narrow cache-query improvement verified;
-full native integration and remaining query rewrites are blocked.**
+**Status: position projection, roster batching and worker lookup index verified
+with local scale profiles. Native relay regressions pass; combined whole-workspace
+and physical app measurements remain separate checks.**
 
 The retained [suite, assumptions and reproduction commands](load-test/README.md)
 uses fresh generated local databases only. It extracts actual Rust DDL/SELECTs,
@@ -39,11 +40,34 @@ saving is 5.956 ms (95% interval 5.937–5.981 ms), p=7.89e-31. This is SQL-only
 work, excluding relay lock waits, Rust allocation, transport, CRDT decoding and UI.
 It does not establish that the reported app delays are fixed.
 
-The unchanged roster control exposes an N+1 flow: `chats_of_member` followed by
-`members_of` per chat. At 10,000 rooms it executes 10,001 statements, visits 70,000
-logical rows and has p50 90.845 ms / p95 94.058 ms / p99 100.503 ms. It remains an
-explicit failure to address after native membership/order regressions can run;
-there is no claim of improvement for the unchanged control.
+## Batched room rosters
+
+`chats_of_member` now fetches its unchanged ordered chat list and all visible live
+rosters in two SELECTs, instead of calling `members_of` once per chat. Both reads
+use the existing membership mapper and the same live-member/nondeleted-chat
+scope. The first query controls chat order, and the second preserves each
+roster's existing total order. No permission, payload or pagination policy changes.
+
+The [roster comparison](load-test/roster.html) retains 101 randomized pairs per
+scale and complete ordered-row checks for owner, peer, agent and missing users.
+At 10,000 rooms, p50 is **84.308 → 27.615 ms (3.05×)** and p95 is
+89.277 → 29.275 ms, with **10,001 → 2 statements** and the same 60,000 returned
+chat/member rows. Paired median saving 95% interval: 56.538–56.852 ms;
+two-sided sign-test p=7.89e-31. All four scales improve.
+
+Repeated scope validation raises logical visits 70,000 → 90,000 and VM steps
+2,165,015 → 2,465,039. Native code now holds the connection mutex through both
+queries and mapping instead of releasing it between rosters. These SQL profiles
+exclude Rust mapping, concurrent writers, mutex waits, network and rendering;
+they establish neither device latency nor a complete group-open improvement.
+
+Three actual Rust regressions cover complete list/detail JSON, membership and
+visibility boundaries, ordering/fields, and SQLite statement counts. Before the
+fix, two behavioral controls passed and the 11-versus-2 statement budget failed.
+The fixed code passes all three. A root verification additionally rebuilt the
+exact applied source in a unique target with all workspace packages cleaned.
+Its test-only trace callback has no borrowed context pointer, so unwinding cannot
+leave SQLite pointing at freed counter storage.
 
 ## Box-worker lookup index
 
@@ -65,13 +89,28 @@ a single sample, not a write-throughput claim. Index maintenance adds write work
 See the [self-contained worker chart](load-test/job-index.html) and retained
 `JOB_INDEX_RESULTS.json` for percentiles, raw pairs and query plans.
 
-Supplementary unchanged probes retain exact unread, common-term full-text search,
-and open-job SELECTs at all four scales, 41 samples each. They expose remaining
-work rather than claim fixes: unread returns three visible chats but visits
-200,033 rows at 1000×; thread-filtered common-term FTS visits 200,000 for six rows;
-open jobs returns 10,000 rows. Membership/filter semantics, FTS ranking/refusals,
-and unbounded-result API behavior require dedicated native regression coverage
-before broader rewrites. See the suite's coverage report for metrics and limits.
+## Measured changes withheld
+
+The [unread experiment](load-test/UNREAD_RESEARCH.md) measures 16 combinations of
+scale, sparse/broad ACLs and people-heavy/mixed legacy history. An experimental
+partial project index greatly helps sparse access but **regresses every broad
+case**, so it is not added to the product. At mixed 1000× scale, sparse p50 is
+50.542 → 0.110 ms, while broad p50 is 144.332 → 158.781 ms; the broad paired
+median saving interval is entirely negative, −14.532 to −13.363 ms. All cases,
+raw pairs and plans remain in the [four-panel comparison](load-test/unread-index.html).
+Two actual native tests pin the existing ACL/filter/full-row contract. This is
+a measured workload tradeoff, not a missing-test blocker. Default: withhold it.
+
+A thread-filtered FTS pushdown was also withheld: `Store::scrub_all_text` updates
+authoritative rows before rebuilding FTS under separate autocommits. An interrupted
+scrub can leave metadata stale, so adding a metadata filter could silently drop
+matches that the existing authoritative-row guard returns. Do not claim a global
+FTS mirror invariant or ship that optimization without addressing durability.
+
+Unchanged supplementary probes retain open-job SELECTs at all four scales;
+returning 10,000 open jobs is still an unbounded-result contract. A cap or paging
+change would change callers' behavior. Other storage families and concurrent
+writer/WAL pressure are unmeasured workloads, not evidence of scalability.
 
 ## Before / after gates
 
@@ -83,28 +122,37 @@ before broader rewrites. See the suite's coverage report for metrics and limits.
 | Index equivalence/replay checks | old-DDL latest/tie/NULL/default checks pass before edit | 6 check groups pass, 0 failed; final 0.108 s wall |
 | Main scaled fixtures | original exact SELECTs retained | 8/8 equivalence/integrity fixtures pass; 3,568 timed executions |
 | Worker-index scaled fixtures | 4 old-schema fixtures | 4 equivalent new-schema fixtures, 808 timed executions |
-| Full native lint/typecheck/test/build | blocked/unmeasured | blocked/unmeasured; two Rust regressions written, not executed |
+| Roster regressions | isolated original: 2 passed / 1 budget failure / 0 ignored, 39.829 s | exact applied source: 3 passed / 0 failed/ignored, 41.230 s including compilation |
+| Native unread / position characterization | preserved behavior; original position gate previously unrun | 2 unread passed, 0.719 s; 2 position passed, 0.290 s; no failures/ignores |
+| Relay/core all-target Clippy | original full native baseline was unavailable | exact applied source passed with warnings denied, 28.176 s |
+| Extended Python suite | initial 8 passed | 12 passed / 0 failed/skipped, 10.778 s |
+| Supplementary/index/unread contracts | original SQL retained | 6 supplementary + 6 index groups pass; unread source contract passes |
+| Full combined workspace / native UI | initial disk/CI limits, now partly resolved | final combined branch pending; these scoped rows are not whole-app gates |
 
 The new suite's gate timings include cache/compiler differences, not application
 speedups. Counts of regression tests and grouped SQL checks are kept separate.
 
 ## Verification boundary
 
-Native regressions pin missing-room defaults, append/checkpoint head/floor and
-statistics, and database-error propagation. They are written but **not executed**:
-the full Rust build remains blocked by disk capacity and fork-CI approval. SQL
-fixture/equivalence tests exercise actual queries, not the Rust mutex/adapter or
-Loro cache lifecycle. Full native clippy/check/test/build counts are unmeasured.
-The retained suite reports its own checks separately from these native gates.
+[NATIVE_GATES.json](load-test/NATIVE_GATES.json) records source hashes, exact
+selected counts and commands. Dependencies were cloned into a new target and all
+12 workspace packages cleaned before root verification. Earlier cross-workspace
+shared-target results are superseded after an expected-count guard caught a stale
+binary. No zero-test filter was accepted as a pass. Author-isolated broader DB
+34 passed/1 pre-existing live test ignored, people 46 passed, package check/build
+and all-target Clippy also passed. Counts overlap with selected checks and must
+not be added as independent coverage. Worker-index SQL replay/equivalence checks
+are distinct from executing the production Store adapter.
 
 The [scope review](reviews/load-test-scope.md) inventories other relay, local-box,
-device-cache and external homeserver families. Supplementary probes and their
-limits are retained with the suite. Unmeasured paths are not declared scalable.
-No shared migration, production/staging connection or service change was made.
+device-cache and external homeserver families. Native DeviceStore/Mac persistence,
+Matrix/Synapse and physical app timing require dedicated checks. No shared
+migration, production/staging connection or service change was made by this suite.
 
 ## Needs the owner
 
-Recommended default: approve existing fork CI or provide native build capacity,
-then run the two Rust regressions and room-cache integration gates before merging.
-Prioritize a privacy-preserving batched roster read with pinned membership and
-ordering behavior next. Preserve current authorization and durability semantics.
+Recommended default: keep the unread index withheld and preserve current FTS and
+unbounded-result behavior. Run a representative device group-open/send trace and
+concurrent writer benchmark before attributing user-visible latency to these SQL
+savings. Security-sensitive membership behavior is pinned by failing-before or
+characterization tests and deserves maintainer review before merge.
