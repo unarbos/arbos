@@ -187,8 +187,8 @@ pub trait HarnessAdapter: Send + Sync {
     }
 
     /// Take the children map, say so on `ready`, and hold it until `release` fires, so a case can
-    /// measure what a contended read does. This is the state a sibling session's `stop` puts the
-    /// map in for up to five seconds.
+    /// measure a genuinely contended registry read. Child cleanup itself runs outside
+    /// this lock; independent Ready siblings remain readable during Stop.
     #[cfg(test)]
     async fn test_hold_children_until(
         &self,

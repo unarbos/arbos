@@ -2000,6 +2000,13 @@ mod job_approval_tests {
     const JOB: &str = "01TESTJOBAPPROVAL000000000";
     const WORKER: &str = "01TESTJOBWORKER00000000000";
 
+    fn shell_argument(path: impl AsRef<std::path::Path>) -> String {
+        format!(
+            "'{}'",
+            path.as_ref().to_string_lossy().replace('\'', "'\\''")
+        )
+    }
+
     /// An agent with one running job in a pinned chat, as `start_job` leaves it.
     async fn agent_running_a_job() -> (Arc<Agent>, SharedHost, std::path::PathBuf) {
         job_agent(test_agent().await).await
@@ -2166,7 +2173,7 @@ mod job_approval_tests {
             let state = agent
                 .hook_approval(
                     "bash",
-                    &json!({ "command": format!("rm -rf {}", target.display()) }),
+                    &json!({ "command": format!("rm -rf {}", shell_argument(&target)) }),
                     WORKER,
                     "subagent",
                 )
@@ -2228,7 +2235,7 @@ mod job_approval_tests {
             .note_job_write(
                 JOB,
                 "bash",
-                &json!({ "command": format!("curl -sS https://example.invalid/x > {}", out("taxi_app_curl.txt")) }),
+                &json!({ "command": format!("curl -sS https://example.invalid/x > {}", shell_argument(out("taxi_app_curl.txt"))) }),
             )
             .await;
         agent
@@ -2246,34 +2253,38 @@ mod job_approval_tests {
             }
         };
         assert_eq!(
-            state(format!("rm -f {}", out("taxi_app_curl.txt"))).await,
+            state(format!(
+                "rm -f {}",
+                shell_argument(out("taxi_app_curl.txt"))
+            ))
+            .await,
             "allowed"
         );
         assert_eq!(
-            state(format!("rm -f {}", out("taxi_app.zip"))).await,
+            state(format!("rm -f {}", shell_argument(out("taxi_app.zip")))).await,
             "allowed"
         );
         assert_eq!(
-            state(format!("rm -f {}", out("vendor.zip"))).await,
+            state(format!("rm -f {}", shell_argument(out("vendor.zip")))).await,
             "pending"
         );
         assert_eq!(
             state(format!(
                 "rm -f {} {}",
-                out("taxi_app.zip"),
-                out("vendor.zip")
+                shell_argument(out("taxi_app.zip")),
+                shell_argument(out("vendor.zip"))
             ))
             .await,
             "pending",
             "one file it did not write keeps the card"
         );
         assert_eq!(
-            state(format!("rm -rf {}", outside.display())).await,
+            state(format!("rm -rf {}", shell_argument(&outside))).await,
             "pending",
             "the folder that holds its file is not its file"
         );
         assert_eq!(
-            state(format!("rm -f {}", out("*.zip"))).await,
+            state(format!("rm -f {}/*.zip", shell_argument(&outside))).await,
             "pending",
             "a glob is not an exact path"
         );
@@ -2282,11 +2293,11 @@ mod job_approval_tests {
             .note_job_write(
                 JOB,
                 "bash",
-                &json!({ "command": format!("rm -f {} > {}", out("old.zip"), out("clean.log")) }),
+                &json!({ "command": format!("rm -f {} > {}", shell_argument(out("old.zip")), shell_argument(out("clean.log"))) }),
             )
             .await;
         assert_eq!(
-            state(format!("rm -f {}", out("clean.log"))).await,
+            state(format!("rm -f {}", shell_argument(out("clean.log")))).await,
             "pending"
         );
         // A write over a file that is already there creates nothing, so it records nothing. The
@@ -2300,13 +2311,16 @@ mod job_approval_tests {
         agent
             .note_job_write(JOB, "write", &json!({ "path": already_there }))
             .await;
-        assert_eq!(state(format!("rm -f {already_there}")).await, "pending");
+        assert_eq!(
+            state(format!("rm -f {}", shell_argument(&already_there))).await,
+            "pending"
+        );
         // The same delete from a session that is no job of ours: nothing is exempt.
         assert_eq!(
             agent
                 .hook_approval(
                     "bash",
-                    &json!({ "command": format!("rm -f {}", out("taxi_app.zip")) }),
+                    &json!({ "command": format!("rm -f {}", shell_argument(out("taxi_app.zip"))) }),
                     CHAT,
                     "main"
                 )
@@ -2346,17 +2360,25 @@ mod job_approval_tests {
         let incident = "sed -i 's/limit = 1000/limit = 10000/' p018.py; for f in p*.py; do python3 \"$f\" >> results.csv; done; du -sh .; rm d*.html.bak";
         assert_eq!(state(incident.into()).await, "allowed");
         assert_eq!(
-            state(format!("rm -rf {}/build", agent.cfg.work_dir.display())).await,
+            state(format!(
+                "rm -rf {}",
+                shell_argument(agent.cfg.work_dir.join("build"))
+            ))
+            .await,
             "allowed"
         );
         // Another project's folder, the box's own state, and the system.
         let other = root.join("01TESTOTHERPROJECT00000000");
         assert_eq!(
-            state(format!("rm -rf {}/exports", other.display())).await,
+            state(format!("rm -rf {}", shell_argument(other.join("exports")))).await,
             "pending"
         );
         assert_eq!(
-            state(format!("rm -f {}/.arbos/audit.jsonl", root.display())).await,
+            state(format!(
+                "rm -f {}",
+                shell_argument(root.join(".arbos/audit.jsonl"))
+            ))
+            .await,
             "pending"
         );
         assert_eq!(state("rm -rf /etc/ssh".into()).await, "pending");
