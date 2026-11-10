@@ -1501,7 +1501,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 Ok(()) => {
                     let open_external = quick_look || !cfg!(target_os = "macos");
                     if open_external {
-                        crate::ui::attachments::open_with_system(&path, quick_look);
+                        crate::external_open::open_with_system(&path, quick_look);
                     }
                     opened_path = Some(path);
                 }

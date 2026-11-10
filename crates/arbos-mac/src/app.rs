@@ -2490,7 +2490,7 @@ impl AppState {
             }
             SyncEvent::AttachmentSaved { path } => {
                 self.push_notice(format!("Saved to {}", path.display()));
-                crate::ui::attachments::reveal(&path);
+                crate::external_open::reveal(&path);
                 cx.notify();
             }
             SyncEvent::AttachmentOpened { key, path } => {
