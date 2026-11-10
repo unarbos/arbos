@@ -209,8 +209,9 @@ struct SettingsView: View {
             // and the one place every agent token is listed — including the reader tokens
             // that used to show under Devices.
             account.append(AnyView(NavigationLink { AgentAccessLinkPage() } label: {
-                SettingsRow(icon: "link.badge.plus", title: "Agent access link", value: agentLinksSummary)
-            }))
+                SettingsRow(icon: "link", title: "Agent access link", value: agentLinksSummary)
+            }
+            .accessibilityIdentifier("settings-agent-links")))
             // Devices (Oct 23): every GitHub sign-in is one; sign another out here.
             account.append(AnyView(NavigationLink { DevicesPage() } label: {
                 SettingsRow(icon: "laptopcomputer", title: "Devices", value: devicesSummary)

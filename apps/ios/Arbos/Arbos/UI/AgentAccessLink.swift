@@ -28,7 +28,6 @@ struct AgentAccessLinkPage: View {
     @State private var label = ""
     @State private var creating = false
     @State private var reveal: AgentLinkReveal?
-    @State private var pending: AgentAccessLink?
     @State private var errorDetailsOpen = false
 
     private var rows: [AgentAccessLink] { model.agentLinkRows }
@@ -48,19 +47,15 @@ struct AgentAccessLinkPage: View {
             await model.refreshAgentLinks()
             guard let landing, landing.hasPrefix("agent-links-cop") else { return }
             scope = .reply
+            // Rig URL: a short open-secret tail only — never a real bearer.
             reveal = AgentLinkReveal(id: "lnk-rig", label: "Jacob's Claude", scope: .reply,
                                      expiry: .standard,
-                                     url: "https://relay.arbos.life/agent-link/open/9kT2vQ")
+                                     url: "https://relay.arbos.life/agent-link/open/fxOpen1")
         }
         .sheet(item: $reveal) { made in
             AgentLinkCopySheet(reveal: made, startCopied: landing == "agent-links-copied") { reveal = nil }
                 .environmentObject(model)
                 .environment(\.theme, theme)
-        }
-        .confirm(item: $pending, spec: { link in
-            ConfirmSpec(title: AgentAccessLink.confirmQuestion(link.displayName), message: nil, action: "Revoke")
-        }) { link in
-            model.revokeAgentLink(link.id)
         }
     }
 
@@ -132,8 +127,11 @@ struct AgentAccessLinkPage: View {
     // MARK: Create
 
     private var createCard: some View {
-        PaneCard(footer: "One link is all you hand over. Shown on the next screen, once.",
-                 separatorInset: PaneKit.inset) {
+        let blankDefault = AgentAccessLink.nextLabel(model.agentLinks)
+        return PaneCard(
+            footer: "Name it for the agent you are giving it to. Left blank it is called “\(blankDefault)”. One link is all you hand over, shown on the next screen, once.",
+            separatorInset: PaneKit.inset
+        ) {
             nameRow
             SettingsActionRow(title: scope.createAction, destructive: scope.isDangerous, disabled: creating) {
                 create()
@@ -218,17 +216,21 @@ struct AgentAccessLinkPage: View {
             }
             .layoutPriority(1)
             Spacer(minLength: 8)
-            Button { pending = link } label: {
+            // Revoke acts at once, as the Mac does: the link is already out of the owner's
+            // hands, so a confirm step only keeps it alive longer.
+            Button { model.revokeAgentLink(link.id) } label: {
                 // error-ui: exception destructive-action
                 Text("Revoke").font(theme.font(Theme.small)).foregroundStyle(theme.danger)
                     .lineLimit(1).fixedSize()
             }
             .buttonStyle(.borderless)
             .accessibilityLabel("Revoke \(link.displayName)")
+            .accessibilityIdentifier("agent-link-revoke-\(link.id)")
         }
         .padding(.horizontal, PaneKit.inset)
         .padding(.vertical, 8)
         .frame(minHeight: 64)
+        .accessibilityIdentifier("agent-link-row-\(link.id)")
     }
 
     /// The Devices page's kind-tag capsule, in danger ink for a link that replies as you.
@@ -319,6 +321,9 @@ struct AgentLinkCopySheet: View {
 
     /// No leading tile. In the precedent the tile told the Link row from the Key row; with one
     /// row it identifies nothing, and its 50 pt was why the URL truncated.
+    ///
+    /// The owner copies or shares the open URL — that is what hands the agent its `llms.txt`
+    /// (with the bearer inside). The owner's device never holds the bearer itself.
     private var copyRow: some View {
         HStack(spacing: 14) {
             VStack(alignment: .leading, spacing: 2) {
@@ -330,26 +335,39 @@ struct AgentLinkCopySheet: View {
                     .truncationMode(.middle)
             }
             Spacer(minLength: 8)
+            if let url = URL(string: reveal.url) {
+                ShareLink(item: url) {
+                    capsule(glyph: "square.and.arrow.up", title: "Share", on: false)
+                }
+                .simultaneousGesture(TapGesture().onEnded { copied = true })
+                .accessibilityIdentifier("agent-link-share")
+            }
             Button {
                 UIPasteboard.general.string = reveal.url
                 copied = true
             } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: copied ? "checkmark" : "doc.on.doc")
-                        .font(.system(size: 13, weight: .medium))
-                    Text(copied ? "Copied" : "Copy")
-                        .font(.system(size: 14, weight: .medium))
-                }
-                .foregroundStyle(copied ? theme.online : ink)
-                .padding(.horizontal, 12)
-                .frame(height: 32)
-                .background(Capsule().fill(copied ? theme.online.opacity(0.18) : tileBg))
+                capsule(glyph: copied ? "checkmark" : "doc.on.doc",
+                        title: copied ? "Copied" : "Copy",
+                        on: copied)
             }
             .buttonStyle(.plain)
             .accessibilityIdentifier("agent-link-copy")
         }
         .padding(.horizontal, 16)
         .frame(minHeight: 60)
+    }
+
+    private func capsule(glyph: String, title: String, on: Bool) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: glyph)
+                .font(.system(size: 13, weight: .medium))
+            Text(title)
+                .font(.system(size: 14, weight: .medium))
+        }
+        .foregroundStyle(on ? theme.online : ink)
+        .padding(.horizontal, 12)
+        .frame(height: 32)
+        .background(Capsule().fill(on ? theme.online.opacity(0.18) : tileBg))
     }
 
     /// The scope again, with its expiry: you should not be able to copy a reply-as-me link

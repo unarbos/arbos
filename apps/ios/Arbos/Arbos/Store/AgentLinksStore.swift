@@ -49,10 +49,11 @@ enum AgentLinkScope: String, CaseIterable, Identifiable, Equatable {
 
     /// The card's footer, which swaps with the choice: the dangerous sentence is never on
     /// screen while the safe option is selected, so it cannot become furniture the eye skips.
+    /// Wording matches the Mac (`crates/arbos-mac/src/ui/agent_links.rs`).
     var footer: String {
         switch self {
         case .read:
-            return "The agent reads your chats and nothing else. Nothing it does can appear as a message from you."
+            return "This link can only read. Nothing it does appears as a message from you."
         case .reply:
             return "Replies from this link are from you. Nobody you talk to can tell them apart from your own messages."
         }
@@ -86,10 +87,11 @@ enum AgentLinkScope: String, CaseIterable, Identifiable, Equatable {
 
     /// The glyph on the copy sheet's scope tile (an SF Symbol). The tile is not an identifier —
     /// its fill is what carries the warning's colour — so the two scopes wear different marks.
+    /// Matches the Mac reveal sheet.
     var glyph: String {
         switch self {
         case .read: return "eye"
-        case .reply: return "hand.raised.fill"
+        case .reply: return "arrowshape.turn.up.left"
         }
     }
 
@@ -187,10 +189,12 @@ struct AgentAccessLink: Identifiable, Equatable {
     }
 
     /// "used 2 h ago", or "never opened" written in words rather than left blank.
+    /// Matches the Mac: a link nobody has fetched stays "never opened" even if a last-seen
+    /// stamp somehow arrives without an open.
     func usedLabel(now: Int64 = Int64(Date().timeIntervalSince1970 * 1000)) -> String {
-        if let seen = lastSeenAt, seen > 0 { return "used \(AgentAccessLink.ago(seen, now: now))" }
-        if let opened = openedAt, opened > 0 { return "opened \(AgentAccessLink.ago(opened, now: now))" }
-        return "never opened"
+        guard let opened = openedAt, opened > 0 else { return "never opened" }
+        let seen = lastSeenAt.flatMap { $0 > 0 ? $0 : nil } ?? opened
+        return "used \(AgentAccessLink.ago(seen, now: now))"
     }
 
     /// "4 min ago" / "3 d ago", the Devices page's own scale.
@@ -202,9 +206,26 @@ struct AgentAccessLink: Identifiable, Equatable {
         return "\(min / (24 * 60)) d ago"
     }
 
-    /// The question under a Revoke.
-    static func confirmQuestion(_ name: String) -> String {
-        "Revoke \(name)? The agent stops at once."
+    /// The longest label the relay accepts; a longer name is cut rather than sent and refused.
+    static let labelMax = 60
+
+    /// The label to send for a link the owner named `typed`. Never empty: the relay stores one
+    /// literal "Agent link" for a blank, so numbering is composed here (`nextLabel`) the way
+    /// the Mac does it.
+    static func labelFor(typed: String, items: [AgentAccessLink]) -> String {
+        let trimmed = typed.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return nextLabel(items) }
+        return String(trimmed.prefix(labelMax))
+    }
+
+    /// "Agent link", then "Agent link 2", past whatever is already live.
+    static func nextLabel(_ items: [AgentAccessLink]) -> String {
+        let base = "Agent link"
+        let taken = Set(active(items).map { $0.label.trimmingCharacters(in: .whitespaces) })
+        if !taken.contains(base) { return base }
+        var n = 2
+        while taken.contains("\(base) \(n)") { n += 1 }
+        return "\(base) \(n)"
     }
 
     /// The list the page draws: live rows only, newest first. The relay returns revoked and
@@ -303,10 +324,13 @@ extension RelayAPI {
     }
 
     /// `POST /me/agent-links {label, scope, ttl_hours}` → the row and its URL, returned once.
+    /// `label` is always sent (never blank): the caller composed it with `labelFor`.
     func createAgentLink(label: String, scope: AgentLinkScope, expiry: AgentLinkExpiry) async throws -> AgentLinkReveal {
-        var body: [String: Any] = ["scope": scope.rawValue, "ttl_hours": expiry.ttlHours]
-        let clean = label.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !clean.isEmpty { body["label"] = clean }
+        let body: [String: Any] = [
+            "label": label,
+            "scope": scope.rawValue,
+            "ttl_hours": expiry.ttlHours,
+        ]
         let v = try await json("POST", "/me/agent-links", body: body)
         guard let reveal = AgentLinkReveal.parse(v, expiry: expiry) else {
             throw RelayError(status: 500, message: "The relay answered without a link.")
@@ -358,14 +382,25 @@ extension AppModel {
     }
 
     /// Mint one. Returns the reveal for the copy sheet, or nil after a refusal the page's
-    /// note has already claimed.
+    /// note has already claimed. The name that goes on the wire is composed here so a blank
+    /// field never becomes five identical "Agent link" rows.
     func createAgentLink(label: String, scope: AgentLinkScope, expiry: AgentLinkExpiry) async -> AgentLinkReveal? {
-        guard !isFixture else {
-            return AgentLinkReveal(id: "lnk-fx-new", label: label, scope: scope, expiry: expiry,
-                                   url: "https://relay.arbos.life/agent-link/open/9kT2vQ")
+        let name = AgentAccessLink.labelFor(typed: label, items: agentLinks)
+        if isFixture {
+            // Fixture URL: a short open-secret tail only — never a real bearer (`arbl_…`).
+            let id = "lnk-fx-\(Int(Date().timeIntervalSince1970 * 1000) % 100_000)"
+            let now = Int64(Date().timeIntervalSince1970 * 1000)
+            agentLinks.insert(
+                AgentAccessLink(id: id, origin: "link", label: name, scope: scope,
+                                createdAt: now, expiresAt: now + Int64(expiry.ttlHours) * 3_600_000,
+                                openedAt: nil, revokedAt: nil, lastSeenAt: nil, live: true, note: nil),
+                at: 0
+            )
+            return AgentLinkReveal(id: id, label: name, scope: scope, expiry: expiry,
+                                   url: "https://relay.arbos.life/agent-link/open/fxOpen1")
         }
         do {
-            let reveal = try await relay.createAgentLink(label: label, scope: scope, expiry: expiry)
+            let reveal = try await relay.createAgentLink(label: name, scope: scope, expiry: expiry)
             await refreshAgentLinks()
             return reveal
         } catch {
