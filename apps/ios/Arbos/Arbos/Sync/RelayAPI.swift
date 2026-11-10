@@ -78,14 +78,14 @@ struct RegistryResult {
     var incomplete: Bool
 }
 
-/// List rows from `GET /projects` may overwrite `owner` with a user-id string; that
-/// fails `ProjectDto` decoding, so we only need the id to fetch the detail.
 private enum RegistryDetail {
     case project(RegistryProject)
     case skipped(String)
     case omitted
 }
 
+/// List rows from `GET /projects` may overwrite `owner` with a user-id string; that
+/// fails `ProjectDto` decoding, so we only need the id to fetch the detail.
 private struct ProjectListId: Decodable {
     var id: String
 }
