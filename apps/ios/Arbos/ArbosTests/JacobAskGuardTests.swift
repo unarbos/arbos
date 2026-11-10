@@ -92,11 +92,10 @@ final class JacobAskGuardTests: XCTestCase {
         let sections = LibraryList.sections(items: [link], empty: "Nothing shared here yet.")
         let isEmptyState = sections.contains { if case .empty = $0 { return true }; return false }
         XCTAssertFalse(isEmptyState, "a link is a library item; the group pane must not drop it")
-        let rows = sections.reduce(0) { n, s in
-            if case .card(let views, _) = s { return n + views.count }
-            return n
-        }
-        XCTAssertGreaterThan(rows, 0, "the link must reach the list as a row")
+        // The rows are drawn inside the day card, which `sections` hands back as an opaque
+        // `.custom` view, so the reachable claim is the grouping that card draws from.
+        XCTAssertEqual(LibraryList.days([link]).flatMap(\.items).map(\.id), ["i1"],
+                       "the link must reach the day it belongs to")
 
         XCTAssertTrue(source("UI/ProfilePages.swift").contains("LibraryList.sections(items: items, empty:"),
                       "the group pane builds its Library through the shared builder, not its own")
