@@ -77,7 +77,7 @@ For paths shortened to filenames in a row, the directory is that row's first pat
 | --- | --- | --- |
 | Account-session ownership | Explicit account/control/task/cache ownership rejects stale publications and actions; iOS callbacks, snapshots and nested media retain their rendered origin. **High** | I/Store/AppModel.swift; I/Sync/Auth.swift; I/Sync/RelayAPI.swift; M/sync/relay.rs; M/sync/credentials.rs |
 | iOS transport-attempt lifecycle | Socket/task/generation flags coordinate idle, dialing, active, retrying and permanently stopped hosts around an already explicit room protocol. **High** | I/Sync/SessionRoom.swift; I/Store/AppModel.swift; F/lib.rs |
-| Mac pending delivery ownership | User-message pending sets change on enqueue, failure and room ACK, but room ownership currently disappears in one global set. **High** | M/sync/relay.rs; M/sync/mod.rs; M/app.rs; M/sync/chat_send_queue.rs |
+| Mac pending delivery ownership — implemented in Phase3 | Room-keyed PendingMessages owns enqueue, failure-removal and ACK clearing; another room cannot consume the receipt. **High** | M/pending_messages.rs; M/sync/relay.rs; M/sync/mod.rs; M/app.rs |
 | Call-attempt ownership | REST call creation/join, UI cancellation and LiveKit/CallKit completion must belong to one current attempt. **High** | I/Store/CallManager.swift; I/Model/Call.swift; M/app.rs; M/calls.rs; M/ui/callview.rs |
 | Matrix client identity lifetime | Starting/available/disconnected/stopped bridge state and callbacks must belong to the current account/client generation. **High** | I/Store/ServerStore.swift; I/Store/AppModel.swift; F/matrix.rs; M/sync/relay.rs |
 | Snapshot publication lifetime | A detached doc read may complete after room/account cleanup and must not republish obsolete private messages. **High** | I/Store/AppModel.swift; I/Sync/CoreChatDoc.swift; I/UI/ChatView.swift |
@@ -305,7 +305,7 @@ rewritten as part of the state classification.
 **H12 — sidecar receipt (Phase3).** Actual `apply_page` sequences mirror→accepted
 wake handoff→durable cursor save→installed cursor. Event/mirror/wake/save failure
 cannot advance the receipt; replay recovers wakes from already mirrored but
-uncommitted rows.13 daemon +4 mirror cursor/wake checks pass. Accepted channel
+uncommitted rows.15 daemon +4 mirror cursor/wake checks pass. Accepted channel
 delivery can repeat across a crash; this is not a persistent outbox or exactly-once
 claim. No duplicate Phase4 model is needed.
 
