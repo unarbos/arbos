@@ -561,8 +561,12 @@ pub(crate) fn forwarded_header(by: String, text_color: gpui::Hsla) -> Stateful<D
 /// First words of a message for its quote header: the whole message on one
 /// line (newlines and markdown flattened), cut on a word boundary; attachments
 /// name their file.
+///
+/// A routine's prompt names its routine instead. Quoting one verbatim put
+/// `"Tell the user (reply_to 01M6N21WFJQ92GJX6QF1Z…` at the top of the reply
+/// that answered it — the plumbing, twice over.
 pub fn quote_text(message: &Message) -> String {
-    message_line(message, QUOTE_CHARS)
+    routine_prompt_label(message).unwrap_or_else(|| message_line(message, QUOTE_CHARS))
 }
 
 /// Who sent an attachment row that is not mine, for the avatar column and the name
@@ -613,6 +617,16 @@ pub enum RowKind {
         /// (or as the whole bubble when the text was only the link): `(part id, preview)`
         /// ([feedback link-embeds-mac-2026-10-27]).
         preview: Option<Box<(String, LinkPreview)>>,
+    },
+    /// A routine's prompt, collapsed to one quiet line on the user's side —
+    /// never a bubble (`docs/mac-design-rules.md` § The routine prompt is one
+    /// quiet line). The prompt's own words are not drawn at all: they are an
+    /// instruction to the agent, not a message to read.
+    RoutinePrompt {
+        /// "Routine · Morning stand-up" ([`routine_prompt_label`]).
+        label: String,
+        /// "9:41 PM", revealed on hover like a bubble's.
+        time: Option<String>,
     },
     Markdown {
         block: Block,
@@ -3342,6 +3356,27 @@ impl Transcript {
                 self.agent_line(&lead, &names, &theme, cx)
             }
             RowKind::RepliedTo { name } => self.agent_line("Replied to", &[name], &theme, cx),
+            RowKind::RoutinePrompt { label, time } => {
+                // One muted line on the user's side, on the page itself: no fill,
+                // no radius, no padding of its own. A bubble here would say a
+                // person wrote this, and nobody did.
+                let (row_el, reveal) = self.hover_row(&row.id, &row.id, now, window, cx);
+                row_el
+                    .justify_end()
+                    .py(px(ROW_GAP_HALF))
+                    .children(hover_time(time, reveal, &theme).map(|t| t.mr(px(8.0))))
+                    .child(
+                        div()
+                            .debug_selector(|| "routine-prompt-line".to_string())
+                            .max_w(relative_width(own_bubble_fraction(self.people)))
+                            .truncate()
+                            .text_size(px(CHAT_BODY))
+                            .line_height(px(CHAT_LINE_HEIGHT))
+                            .text_color(theme.text_muted)
+                            .child(label),
+                    )
+                    .into_any_element()
+            }
             RowKind::Attachment {
                 attachment,
                 part_id,
@@ -3974,6 +4009,24 @@ fn block_text_len(block: &Block) -> usize {
     }
 }
 
+/// "Routine · Morning stand-up" when a routine injected this prompt, `None`
+/// otherwise.
+///
+/// A routine's prompt reaches the chat as a **user-role** message whose sender
+/// is `routine:<id>`, which is why it used to draw as a user bubble: nothing
+/// about it said "machine". This is the one label that stands in for it —
+/// on its own row and in the quote header of whatever answered it.
+pub fn routine_prompt_label(message: &Message) -> Option<String> {
+    let id = message.sender.strip_prefix("routine:")?;
+    let name = message
+        .routine_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .unwrap_or(id);
+    Some(format!("Routine · {name}"))
+}
+
 /// "Routine · Morning stand-up" for a prompt a routine injected; `None` for the
 /// user's own messages (`sender` empty or `user`).
 fn sender_caption(message: &Message) -> Option<String> {
@@ -3981,9 +4034,8 @@ fn sender_caption(message: &Message) -> Option<String> {
     if sender.is_empty() || sender == "user" || sender.starts_with("user:") {
         return None;
     }
-    if let Some(id) = sender.strip_prefix("routine:") {
-        let name = message.routine_name.as_deref().unwrap_or(id);
-        return Some(format!("Routine · {name}"));
+    if let Some(label) = routine_prompt_label(message) {
+        return Some(label);
     }
     Some(sender.replace(':', " · "))
 }
@@ -4495,6 +4547,22 @@ pub fn build_rows_with_cache(
         }
         let rows_before_message = rows.len();
         match message.role {
+            // A routine's prompt is a user-role message, so every bubble rule
+            // applied to it and a fifteen-line `Tell the user (reply_to 01M…)`
+            // drew as a slab. It collapses to one quiet line and its words are
+            // dropped: they address the agent, not the reader.
+            Role::User if routine_prompt_label(message).is_some() => {
+                let label = routine_prompt_label(message).unwrap_or_default();
+                rows.push(Row {
+                    version: hash_version(&label, false),
+                    id: format!("{}#routine", message.id),
+                    message_id: message.id.clone(),
+                    kind: RowKind::RoutinePrompt {
+                        label,
+                        time: clock_label(message.created_at),
+                    },
+                });
+            }
             Role::User => {
                 // Secret hand-off: a redacted row carries one `secret_redacted` part and no
                 // text; it draws as the ghost bubble ("Secret saved as NAME").
@@ -13653,6 +13721,160 @@ mod link_preview_tests {
         assert!(
             vcx.debug_bounds("link-remove").is_none(),
             "no × when not removable"
+        );
+    }
+}
+
+#[cfg(test)]
+mod routine_prompt_tests {
+    //! A routine's prompt arrives as a **user-role** message with `sender: routine:<id>`, so
+    //! it inherited every user-bubble rule and a long `Tell the user (reply_to 01M…)` drew as
+    //! a mid-grey slab. It collapses to one quiet line, and a reply that quotes it names the
+    //! routine instead of repeating the plumbing.
+    use std::collections::{HashMap, HashSet};
+
+    use super::*;
+
+    const PROMPT: &str = "Tell the user (reply_to 01M6N21WFJQ92GJX6QF1ZQ8K3W) what changed \
+                          in the repository since yesterday. Do not greet them.";
+
+    fn routine_prompt(id: &str, name: Option<&str>, at: u64) -> Message {
+        let mut row = serde_json::json!({
+            "id": id,
+            "chatId": "chat_testing",
+            "role": "user",
+            "sender": "routine:rt_7KQ2",
+            "status": "done",
+            "createdAt": at,
+            "parts": [{ "id": format!("p-{id}"), "kind": "text", "text": PROMPT }],
+        });
+        if let Some(name) = name {
+            row["routineName"] = serde_json::json!(name);
+        }
+        serde_json::from_value(row).expect("routine prompt")
+    }
+
+    fn reply(id: &str, to: &str, at: u64) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "chatId": "chat_testing",
+            "role": "assistant",
+            "sender": "agent:doug",
+            "inReplyTo": to,
+            "status": "done",
+            "createdAt": at,
+            "parts": [{ "id": format!("p-{id}"), "kind": "text", "text": "Three merges landed." }],
+        }))
+        .expect("reply")
+    }
+
+    fn rows_of(messages: &[Message]) -> Vec<Row> {
+        let spoken = HashSet::new();
+        let failed = HashMap::new();
+        build_rows(
+            messages,
+            false,
+            SpeechRows {
+                enabled: false,
+                spoken: &spoken,
+                failed: &failed,
+                voice_mode: false,
+            },
+            "gh_me",
+            &HashSet::new(),
+            &Mentions::empty(),
+            false,
+        )
+    }
+
+    #[test]
+    fn a_routine_prompt_is_one_quiet_line_and_never_a_bubble() {
+        let t = 1_700_000_000_000u64;
+        let rows = rows_of(&[
+            routine_prompt("r1", Some("Morning stand-up"), t),
+            reply("a1", "r1", t + 1_000),
+        ]);
+
+        let lines: Vec<&String> = rows
+            .iter()
+            .filter_map(|r| match &r.kind {
+                RowKind::RoutinePrompt { label, .. } => Some(label),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            lines,
+            [&"Routine · Morning stand-up".to_string()],
+            "{rows:?}"
+        );
+
+        assert!(
+            !rows
+                .iter()
+                .any(|r| matches!(r.kind, RowKind::User { .. }) && r.message_id == "r1"),
+            "the prompt must not keep a user bubble: {rows:?}"
+        );
+        assert!(
+            !rows.iter().any(|r| match &r.kind {
+                RowKind::User { text, .. } => text.contains("reply_to"),
+                _ => false,
+            }),
+            "the prompt's own words are not drawn anywhere: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn a_reply_quotes_the_routine_by_name_not_the_prompt() {
+        let prompt = routine_prompt("r1", Some("Morning stand-up"), 1_700_000_000_000);
+        let quote = Quote::for_reply("r1", std::slice::from_ref(&prompt));
+        assert_eq!(quote.text, "Routine · Morning stand-up");
+        assert!(
+            !quote.text.contains("reply_to"),
+            "the header must not repeat the plumbing: {}",
+            quote.text
+        );
+    }
+
+    #[test]
+    fn a_nameless_routine_falls_back_to_its_id() {
+        // `routineName` is written by the relay beside the sender and is absent on rows
+        // older than the field; the line still has to say something true.
+        let prompt = routine_prompt("r1", None, 1_700_000_000_000);
+        assert_eq!(
+            routine_prompt_label(&prompt).as_deref(),
+            Some("Routine · rt_7KQ2")
+        );
+        let blank = routine_prompt("r2", Some("   "), 1_700_000_000_000);
+        assert_eq!(
+            routine_prompt_label(&blank).as_deref(),
+            Some("Routine · rt_7KQ2"),
+            "a whitespace name is no name"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_user_message_is_untouched() {
+        let mine: Message = serde_json::from_value(serde_json::json!({
+            "id": "u1",
+            "chatId": "chat_testing",
+            "role": "user",
+            "sender": "user",
+            "status": "done",
+            "createdAt": 1_700_000_000_000u64,
+            "parts": [{ "id": "p-u1", "kind": "text", "text": "what changed today?" }],
+        }))
+        .expect("user message");
+        assert_eq!(routine_prompt_label(&mine), None);
+        let rows = rows_of(&[mine]);
+        assert!(
+            rows.iter().any(|r| matches!(r.kind, RowKind::User { .. })),
+            "a person's message keeps its bubble: {rows:?}"
+        );
+        assert!(
+            !rows
+                .iter()
+                .any(|r| matches!(r.kind, RowKind::RoutinePrompt { .. })),
+            "{rows:?}"
         );
     }
 }

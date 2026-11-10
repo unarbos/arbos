@@ -3090,8 +3090,9 @@ struct ChatSession: View {
         if isChannel { return false }
         switch row.kind {
         // A secret ghost row has nothing to copy, forward or quote; Delete stays off too —
-        // the row is the record that a value went to the vault.
-        case .system, .question, .error, .forwardHint, .secretGhost, .hidden:
+        // the row is the record that a value went to the vault. A routine prompt does not
+        // draw its own words at all, so there is nothing to copy, quote or forward either.
+        case .system, .question, .error, .forwardHint, .secretGhost, .hidden, .routinePrompt:
             return false
         case .user, .other, .member, .assistant, .file, .voiceMemo, .image:
             return messageById[row.messageId] != nil
@@ -4505,10 +4506,11 @@ extension ChatSession {
         }
     }
 
-    /// Prose / media bubbles get the search wash; date / system / card / blocked rows do not.
+    /// Prose / media bubbles get the search wash; date / system / card / blocked rows do not,
+    /// and neither does a routine prompt, which is one quiet line rather than a bubble.
     private static func isMessageBubble(_ row: Row) -> Bool {
         switch row.kind {
-        case .system, .question, .error, .forwardHint, .secretGhost, .hidden:
+        case .system, .question, .error, .forwardHint, .secretGhost, .hidden, .routinePrompt:
             return false
         case .user, .other, .member, .assistant, .file, .voiceMemo, .image:
             return true
