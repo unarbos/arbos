@@ -1168,6 +1168,21 @@ pub(crate) mod tests {
     /// Visible summary for [`RESEARCH_JOB_RESULT_ASK`].
     pub(crate) const RESEARCH_JOB_RESULT_ANSWER: &str = "The three strongest picks in LA are Sushi Gen (downtown omakase), n/naka (reservation kaiseki-style), and Kato (strong value westside). Waitlists move weekly.";
 
+    /// Busy-reply smoke on 0.1.204: "what is going on now?" while a long turn runs. The quick
+    /// model returned a long `[status]` that `settle_quick` could not keep as a status line
+    /// (`quick reply could not stand as a status line; silent queue`), #2986 then put only a
+    /// Queued working row, and the ask became an `ask-…` job whose result must still show words
+    /// (#2964 / #2985). Unique phrasing so the stub does not collide with the clean status ask.
+    pub(crate) const LONG_STATUS_QUICK_ASK: &str = "what is going on now with the long status one?";
+
+    /// A 151-shaped `[status]` cut mid-sentence by the token cap — `finish_cleanly` returns
+    /// `None`, so the lane silent-queues rather than posting a fragment.
+    pub(crate) const LONG_STATUS_QUICK_FRAGMENT: &str = "[status]\nI'm still on the sleep you started — bash has been running for about ninety seconds with no output yet and the turn is waiting on that tool call to finish before I can say more about";
+
+    /// What `write_job_result` must post for [`LONG_STATUS_QUICK_ASK`] once the ask runs as a job.
+    pub(crate) const LONG_STATUS_JOB_ANSWER: &str =
+        "The sleep is still running — about a minute in. Nothing else is open in this chat.";
+
     /// The ask that makes the stub answer a job-result call with round 14's r14notes draft: an
     /// opening sentence in the register `ProseFilter::strip_leading_thought_paragraphs` judges
     /// thought-shaped, a GFM table **glued** to it with no blank line, and a closing line in its
@@ -1257,6 +1272,14 @@ It ran as a real background job, not inline.";
             ("", "stop")
         } else if user.contains(RESEARCH_JOB_RESULT_ASK) {
             (RESEARCH_JOB_RESULT_ANSWER, "stop")
+        } else if user.contains(LONG_STATUS_QUICK_ASK) {
+            // Job-result calls carry the ask under "The user's message:" plus worker notes;
+            // the quick lane carries the snapshot. Same ask string, two answers.
+            if user.contains("Notes from the work") {
+                (LONG_STATUS_JOB_ANSWER, "stop")
+            } else {
+                (LONG_STATUS_QUICK_FRAGMENT, "length")
+            }
         } else if user.contains(GLUED_TABLE_JOB_RESULT_ASK) {
             (GLUED_TABLE_DRAFT, "stop")
         } else if user.contains("stop at 20, not 40") {
@@ -1625,6 +1648,98 @@ It ran as a real background job, not inline.";
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Busy-reply smoke on image 0.1.204 (`c4de532cf` / #2985+#2986): a same-chat "what is
+    /// going on now?" while a long turn runs. The quick model returned a long `[status]` that
+    /// could not stand as a status line → silent queue + Queued working row only → ask ran as
+    /// `ask-what-is-going-on` → `job result written` logged, but the client saw a wordless Done
+    /// because the result waited on send order behind the busy turn. #2964: never look like no
+    /// reply. Path under test: long quick reply → job → result row with text, within the gate,
+    /// even while the busy ask still holds the head of the chat's send order.
+    #[tokio::test]
+    async fn a_long_status_quick_reply_falls_to_a_job_result_with_visible_text() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATQUICKREPLY000204";
+        let host = agent.sync.open_room(chat).await.unwrap();
+
+        // The long turn's ask is ahead in send order and still owed an answer — production's
+        // shape when the sleep is mid-flight. Without the ask-job exception, `write_job_result`
+        // would wait up to `SEND_ORDER_WAIT` (120 s) here.
+        let (busy_msg, _) = send_cmd(
+            &host,
+            "Use bash to run sleep 90 && echo finished. Wait for it yourself.",
+        );
+        let _busy_place = agent
+            .send_order
+            .join(chat, &busy_msg)
+            .expect("busy ask takes the head of the send order");
+        let _busy = agent.test_hold_turn_for(chat, &busy_msg).await;
+
+        // Premise: the quick fragment cannot stand as a status line (same decision as the
+        // production warn `quick reply could not stand as a status line; silent queue`).
+        let tagged = LONG_STATUS_QUICK_FRAGMENT;
+        let (kind, body) = parse_tagged_reply(tagged);
+        assert_eq!(kind, SideKind::Status);
+        assert_eq!(
+            settle_quick(kind, &body, true),
+            (SideKind::Task, None),
+            "a truncated mid-sentence status is demoted — no fragment bubble"
+        );
+
+        // `settle_quick` → Task is what #2986's silent queue reads; the ask then runs as a job
+        // (`start_job_for_send`). Drive `write_job_result` directly so this case does not race
+        // the shared ACTIVITY_LOG with other Queued-ack tests.
+        let (ask, _cmd) = send_cmd(&host, LONG_STATUS_QUICK_ASK);
+        let _ask_place = agent
+            .send_order
+            .join(chat, &ask)
+            .expect("the ask keeps its place until the job result posts");
+        assert_eq!(
+            agent.send_order.ahead(chat, &ask),
+            1,
+            "the busy turn is still ahead — the regression waited here"
+        );
+
+        let t0 = Instant::now();
+        agent
+            .write_job_result(
+                chat,
+                &host,
+                &ask,
+                "ask-what-is-going-on",
+                "done",
+                "Worker notes: bash sleep is still running; no other tools; nothing failed.",
+                None,
+            )
+            .await
+            .expect("the ask-job result posts");
+        let elapsed = t0.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(FIRST_REPLY_GATE_SECS),
+            "ask-job result must not wait behind the busy turn: {elapsed:?}"
+        );
+
+        let rows: Vec<_> = reply_rows(&host, &ask)
+            .into_iter()
+            .filter(|m| {
+                m.rest.get("hidden").and_then(Value::as_bool) != Some(true)
+                    && !m.text().trim().is_empty()
+            })
+            .collect();
+        assert_eq!(
+            rows.len(),
+            1,
+            "one visible result with words: {:?}",
+            rows.iter().map(|m| m.text()).collect::<Vec<_>>()
+        );
+        assert_eq!(rows[0].text().trim(), LONG_STATUS_JOB_ANSWER);
+        assert_eq!(
+            rows[0].rest.get("decision").and_then(Value::as_str),
+            Some("job")
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// Jacob on Test5 (2026-11-04, agentd 0.1.191, chat 01M6M0G9257SCE4RRQDW2GXFS9): the quick
     /// call sends `reasoning {enabled: false}`, and the Opus 5.5 endpoint answers HTTP 400
     /// "Reasoning is mandatory for this endpoint and cannot be disabled". Every side-session
@@ -1803,12 +1918,14 @@ It ran as a real background job, not inline.";
             "a task is not a side note"
         );
         // The presence line names the new ask, not the step that was already running.
+        // Match this ask's gist — ACTIVITY_LOG is process-wide and parallel Queued-ack
+        // cases can post other "Queued: …" lines into the same vec.
         let seen = loop {
             if let Some(a) = ACTIVITY_LOG
                 .lock()
                 .unwrap()
                 .iter()
-                .find(|a| a.starts_with("Queued:"))
+                .find(|a| a.starts_with("Queued: also add a plot of the results"))
                 .cloned()
             {
                 break a;
@@ -1819,10 +1936,6 @@ It ran as a real background job, not inline.";
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
         };
-        assert!(
-            seen.starts_with("Queued: also add a plot of the results"),
-            "{seen}"
-        );
         let row_id = agent
             .turn
             .lock()
