@@ -3780,32 +3780,47 @@ struct ChatSession: View {
                 }
             },
             onMicEnd: { value in
+                // A pure tap can deliver onEnded with no onChanged
+                // (`DragGesture(minimumDistance: 0)` on current iOS). Decide
+                // here so a click is never a no-op ([feedback
+                // app-01M69J94RZRMZXKGMC6XDGWBFH]).
                 let held = Date().timeIntervalSince(memoPressStartedAt ?? Date())
-                let cancel = memoCancelArmed || value.translation.width < -Self.memoCancelDistance
+                let action = MemoMicRelease.decide(
+                    holdActive: memoHoldActive,
+                    recording: recorder.recording,
+                    ignoreRelease: memoIgnoreRelease,
+                    cancelArmed: memoCancelArmed,
+                    translationWidth: value.translation.width,
+                    heldSeconds: held,
+                    cancelDistance: Self.memoCancelDistance)
                 memoHoldActive = false
                 memoPressStartedAt = nil
                 memoDragX = 0
                 memoCancelArmed = false
-                if memoIgnoreRelease {
-                    memoIgnoreRelease = false
-                    return
-                }
-                // Slide-left discard: drop the memo instead of sending.
-                if cancel {
+                memoIgnoreRelease = false
+                switch action {
+                case .toggleTap:
                     memoFinishWhenPermission = false
-                    if recorder.recording { recorder.cancel() }
-                    return
-                }
-                // Hold-to-talk: release after the threshold sends.
-                if held >= 0.25 {
                     if recorder.recording {
                         finishMemoHold()
                     } else {
-                        // Permission still pending; finish when it starts.
-                        memoFinishWhenPermission = true
+                        Haptics.recordStart()
+                        recorder.start()
                     }
+                case .ignore:
+                    break
+                case .cancel:
+                    memoFinishWhenPermission = false
+                    if recorder.recording { recorder.cancel() }
+                case .finishHold:
+                    finishMemoHold()
+                case .waitForPermission:
+                    // Permission still pending; finish when it starts.
+                    memoFinishWhenPermission = true
+                case .keepRecording:
+                    // Short tap after hold tracked: leave recording on (click-to-toggle).
+                    break
                 }
-                // Short tap: leave recording on (click-to-toggle).
             },
             onPrimary: {
                 if recorder.recording {
@@ -4928,6 +4943,44 @@ final class ComposerDraft: ObservableObject {
     #endif
 }
 
+/// What a mic press/release should do. Pure so a tap that never sees
+/// `onChanged` still starts recording ([feedback app-01M69J94RZRMZXKGMC6XDGWBFH]).
+enum MemoMicRelease: Equatable {
+    /// `onEnded` arrived with no `onChanged` — toggle start/finish.
+    case toggleTap
+    /// Second press already finished the memo; ignore this release.
+    case ignore
+    /// Slide-left discard (or cancel armed).
+    case cancel
+    /// Hold past the send threshold; recording is live — finish and send.
+    case finishHold
+    /// Hold past the send threshold; permission still pending — finish once it starts.
+    case waitForPermission
+    /// Short tap after hold was tracked: leave recording on (click-to-toggle).
+    case keepRecording
+
+    static func decide(
+        holdActive: Bool,
+        recording: Bool,
+        ignoreRelease: Bool,
+        cancelArmed: Bool,
+        translationWidth: CGFloat,
+        heldSeconds: TimeInterval,
+        cancelDistance: CGFloat,
+        holdSendThreshold: TimeInterval = 0.25
+    ) -> MemoMicRelease {
+        // Ended-only tap: `DragGesture(minimumDistance: 0)` can skip onChanged.
+        if !holdActive { return .toggleTap }
+        if ignoreRelease { return .ignore }
+        let cancel = cancelArmed || translationWidth < -cancelDistance
+        if cancel { return .cancel }
+        if heldSeconds >= holdSendThreshold {
+            return recording ? .finishHold : .waitForPermission
+        }
+        return .keepRecording
+    }
+}
+
 /// Which of the composer's trailing controls the field's state calls for. The
 /// mic and the round pill are decided apart, because a recording wants both:
 /// the mic so a hold-to-talk release lands somewhere, the arrow so a tap can
@@ -5297,7 +5350,9 @@ private struct ComposerField<Leading: View>: View {
         // ours on it, so the transcript reads through the pill ([feedback
         // iphone-composer-glass-2026-10-28]). Rim below.
         .background(PillSurface(shape: fieldShape)) // control-size: source (the family's field, rim below)
-        .overlay(ComposerRim(shape: fieldShape, tint: rimTint))
+        // Rim is paint only: a hit-testing stroke over the trailing edge would
+        // swallow taps on the mic ([feedback app-01M69J94RZRMZXKGMC6XDGWBFH]).
+        .overlay(ComposerRim(shape: fieldShape, tint: rimTint).allowsHitTesting(false))
         // Grok lights the pill under a resting finger while the Paste / AutoFill menu comes up.
         .inputHoldHighlight(fieldShape)
         .alert("Microphone access is off", isPresented: $recorder.permissionDenied) {
