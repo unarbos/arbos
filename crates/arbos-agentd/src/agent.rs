@@ -12540,8 +12540,9 @@ impl Agent {
                 if has_row {
                     return;
                 }
-                // Even the failure line is a reply to this message and waits its turn.
-                me.await_send_order(&chat, &user_msg_id, "job_failed").await;
+                // Ask-beside-busy: do not wait behind the turn this ask is answering about
+                // (same rule as `write_job_result` for `ask-…` names). A failure line that sits
+                // on send order for up to two minutes is another wordless wait for the user.
                 let live = me.room_for_reply(&chat, &host2).await;
                 let h = live.lock().await;
                 let id = ulid();
@@ -12819,6 +12820,12 @@ impl Agent {
                     h.doc.set_activity(&msg_id, Some(&j.title));
                 }
                 None => {
+                    // `ask-…` workers answer beside a busy turn (`start_job_for_send`). Their
+                    // prose is a separate `write_job_result` row; the spawn row itself is only a
+                    // progress carrier. Without `hidden`, it finishes as a wordless Done the
+                    // client can see — busy-reply smoke on 0.1.204 / #2985+#2986. Same hide as
+                    // a JobSpec worker above.
+                    let hide_ask_worker = is_job_name(&sub_name);
                     h.doc.set_message_fields(
                         &msg_id,
                         &[
@@ -12836,6 +12843,7 @@ impl Agent {
                             // A background worker the user never named (traits 15): clients hide
                             // this row; an agent-to-agent send keeps its "Messaged ◉ X" line.
                             ("worker", json!(true)),
+                            ("hidden", json!(hide_ask_worker)),
                         ],
                     );
                 }
@@ -14006,6 +14014,24 @@ impl Agent {
         // Whichever branch wrote it: the summariser is given the worker's notes, contract and
         // all, so a model that echoes the block is the same leak by another route.
         let text = crate::store::redact(&crate::llm::strip_return_contract(&text));
+        // Never a wordless Done: strips above can empty a draft that logged as written. The
+        // fallback is the same one an empty model call already uses (#2964 / busy-reply smoke).
+        let text = if text.trim().is_empty() {
+            tracing::warn!(
+                chat_id,
+                name,
+                "job result text empty after strip; plain line"
+            );
+            let again = crate::store::redact(&crate::llm::strip_return_contract(&fallback()));
+            if again.trim().is_empty() {
+                "I finished that, but had nothing to report. Ask me again if you need more."
+                    .to_owned()
+            } else {
+                again
+            }
+        } else {
+            text
+        };
         // The answer is written; where it lands in the chat is the chat's send order to decide
         // (bug O). A job that overtook an older message waits here, after its own model call, so
         // the hold costs nothing once the older answer is posted. A job whose ask is not queued
@@ -14014,17 +14040,25 @@ impl Agent {
         // cancel can land anywhere in it (bug S). Here, so a cancelled answer does not sit at
         // the head of its chat's queue holding every message behind it for a row it will never
         // write; the wait would be spent to reach a `return` either way.
+        //
+        // Exception: `ask-…` jobs from `start_job_for_send` (#2986 silent-queue fallback). They
+        // exist to answer *beside* the busy turn — the same urgency as a status quick reply,
+        // which skips send order on purpose. Waiting here parked their prose behind the long
+        // turn for up to two minutes while the worker row finished as a wordless Done
+        // (0.1.204 busy-reply smoke / #2964).
         if let Some(job_id) = self.cancelled_job_for_ask(chat_id, in_reply_to) {
             tracing::info!(chat_id, job = %job_id, "the job was cancelled before its answer took its turn; not posted");
             return Ok(());
         }
-        self.await_send_order(chat_id, in_reply_to, "job").await;
-        // And again on the far side: the worker had already finished, so the check in
-        // `run_subagent` ran before the cancel and caught nothing, and this is the last moment
-        // the question can be asked before the row exists.
-        if let Some(job_id) = self.cancelled_job_for_ask(chat_id, in_reply_to) {
-            tracing::info!(chat_id, job = %job_id, "the job was cancelled while its answer waited its turn; not posted");
-            return Ok(());
+        if !is_job_name(name) {
+            self.await_send_order(chat_id, in_reply_to, "job").await;
+            // And again on the far side: the worker had already finished, so the check in
+            // `run_subagent` ran before the cancel and caught nothing, and this is the last moment
+            // the question can be asked before the row exists.
+            if let Some(job_id) = self.cancelled_job_for_ask(chat_id, in_reply_to) {
+                tracing::info!(chat_id, job = %job_id, "the job was cancelled while its answer waited its turn; not posted");
+                return Ok(());
+            }
         }
         // This task resolved its handle before the job ran, which is minutes ago and a wait ago.
         let host = &self.room_for_reply(chat_id, host).await;
