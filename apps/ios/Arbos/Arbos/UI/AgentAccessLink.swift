@@ -251,6 +251,9 @@ struct AgentAccessLinkPage: View {
         .padding(.horizontal, PaneKit.inset)
         .padding(.vertical, 8)
         .frame(minHeight: 64)
+        // Keep children queryable: a bare identifier on the HStack hid Revoke from XCTest
+        // even while `agent-link-row-…` itself was found.
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("agent-link-row-\(link.id)")
     }
 

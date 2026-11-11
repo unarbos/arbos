@@ -62,8 +62,14 @@ final class AgentAccessLinkUITests: XCTestCase {
         XCTAssertTrue(any(app, "agent-link-row-lnk-fx-codex").waitForExistence(timeout: appear))
 
         // Revoke first — before the copy cover — so we are not asserting through a dismiss.
-        let revoke = any(app, "agent-link-revoke-lnk-fx-codex")
-        XCTAssertTrue(revoke.waitForExistence(timeout: appear))
+        // Prefer the button id; fall back to the VoiceOver label if the row's container
+        // ever swallows child identifiers again.
+        var revoke = any(app, "agent-link-revoke-lnk-fx-codex")
+        if !revoke.waitForExistence(timeout: 5) {
+            revoke = app.buttons["Revoke Codex debugger"].firstMatch
+        }
+        XCTAssertTrue(revoke.waitForExistence(timeout: appear),
+                      "Revoke on the Codex debugger fixture row is exposed to accessibility")
         tap(revoke)
         let codex = any(app, "agent-link-row-lnk-fx-codex")
         let revokedDeadline = Date().addingTimeInterval(10)
