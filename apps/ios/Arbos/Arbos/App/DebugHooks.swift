@@ -156,7 +156,9 @@ enum DebugHooks {
     /// With `ARBOS_SHOW=onboarding`: also present the name/handle sheet over the terminal (rig).
     static var onboardingProfile: Bool { value("ARBOS_ONBOARDING_PROFILE") == "1" }
     /// With `ARBOS_SHOW=settings`: the Settings page to land on — appearance, textsize, connectors, secrets, machine, credits, notifications, about, relay;
-    /// `avatar[-generate|-upload]` opens the avatar picker over my picture.
+    /// `avatar[-generate|-upload]` opens the avatar picker over my picture;
+    /// `agent-links` opens Agent access link, `agent-links-copy` lands with the copy sheet up and
+    /// `agent-links-copied` with its Copy already pressed.
     static var settingsPage: String? { value("ARBOS_SETTINGS_PAGE") }
     /// With the avatar picker open on Generate: type this prompt and press Generate (a shot
     /// shows prompt → result).
