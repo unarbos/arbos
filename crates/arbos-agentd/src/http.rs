@@ -283,6 +283,23 @@ async fn box_state(State(b): State<B>, headers: HeaderMap) -> Response {
     Json(crate::inspect::box_state(&b).await).into_response()
 }
 
+/// `POST /box/prepare-sleep` (same bearer): purge, compact, measure and report, so the box's
+/// supervisor can stop it clean or checkpoint it (`sleep.rs`). 409 with the reason while the box
+/// is not idle. It never stops the box itself.
+async fn box_prepare_sleep(State(b): State<B>, headers: HeaderMap) -> Response {
+    if !box_admin_authed(&b, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    match crate::sleep::prepare(&b).await {
+        Ok(report) => Json(report).into_response(),
+        Err(reason) => (
+            StatusCode::CONFLICT,
+            Json(json!({ "ok": false, "reason": reason })),
+        )
+            .into_response(),
+    }
+}
+
 fn box_admin_authed(b: &Supervisor, headers: &HeaderMap) -> bool {
     headers
         .get(axum::http::header::AUTHORIZATION)
@@ -356,6 +373,7 @@ pub fn box_router(sup: Arc<Supervisor>) -> Router {
         .route("/w/{project}/inspect", get(workspace_inspect))
         .route("/w/{project}/jobs/{job_id}", get(workspace_job))
         .route("/box/state", get(box_state))
+        .route("/box/prepare-sleep", axum::routing::post(box_prepare_sleep))
         .route("/w/{project}/history/{chat_id}", get(history))
         .route("/w/{project}/t3/search", get(t3_search))
         .route("/history/{chat_id}", get(history_legacy))
@@ -456,6 +474,10 @@ mod tests {
     /// thread. The point of these tests is what happens when the main runtime is unavailable,
     /// and a client that needs that runtime could not ask the question.
     fn http_get(port: u16, path: &str, bearer: Option<&str>) -> String {
+        http_call("GET", port, path, bearer)
+    }
+
+    fn http_call(method: &str, port: u16, path: &str, bearer: Option<&str>) -> String {
         use std::io::{Read, Write};
         let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect");
         s.set_read_timeout(Some(NO_ANSWER_AFTER))
@@ -465,7 +487,7 @@ mod tests {
             .unwrap_or_default();
         write!(
             s,
-            "GET {path} HTTP/1.1\r\nhost: box\r\n{auth}connection: close\r\n\r\n"
+            "{method} {path} HTTP/1.1\r\nhost: box\r\n{auth}connection: close\r\n\r\n"
         )
         .expect("write request");
         let mut out = String::new();
@@ -580,6 +602,44 @@ mod tests {
             body.contains("\"state\":\"ready\"") && body.contains("\"ready\":true"),
             "answer was: {body}"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `POST /box/prepare-sleep` over the wire: the bearer `/box/state` asks for, a 409 that
+    /// says why while the box is not idle, and the same answer to two calls made at once.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn prepare_sleep_asks_for_the_bearer_refuses_a_busy_box_and_answers_twice() {
+        let (sup, port, root) = box_surface("prepare-sleep");
+        let post = |bearer: Option<&'static str>| {
+            tokio::task::spawn_blocking(move || {
+                http_call("POST", port, "/box/prepare-sleep", bearer)
+            })
+        };
+        for bearer in [None, Some("wrong")] {
+            let body = post(bearer).await.unwrap();
+            assert!(body.starts_with("HTTP/1.1 401"), "{bearer:?}: {body}");
+        }
+        let body = post(Some("test-mcp")).await.unwrap();
+        assert!(body.starts_with("HTTP/1.1 409"), "{body}");
+        assert!(
+            body.contains("still starting"),
+            "the refusal says why: {body}"
+        );
+
+        std::fs::create_dir_all(root.join(".trash")).unwrap();
+        std::fs::write(root.join(".trash").join("deleted-today"), b"x").unwrap();
+        sup.apply_listing(&json!({ "workspaces": [] })).await;
+        let (a, b) = tokio::join!(post(Some("test-mcp")), post(Some("test-mcp")));
+        for body in [a.unwrap(), b.unwrap()] {
+            assert!(body.starts_with("HTTP/1.1 200"), "{body}");
+            let report: serde_json::Value =
+                serde_json::from_str(body.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+            assert_eq!(report["active_user_pids"], json!(0), "{report}");
+            assert_eq!(report["trash_removed"], json!(0), "{report}");
+            assert!(report["trash_bytes"].as_u64().unwrap() > 0, "{report}");
+            assert!(report["files_bytes"].is_u64() && report["scratch_bytes"].is_u64());
+        }
+        assert!(root.join(".trash").join("deleted-today").exists());
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -2628,6 +2628,45 @@ for line in sys.stdin:
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Sleep (docs/box-scaling.md §3.1): an open card does not keep the box awake. The parked
+    /// job is open and reads `queued`, which is exactly what a sleep check counting open jobs
+    /// would refuse on — for as long as the owner takes to answer. The restart half of "the
+    /// card survives the sleep" is the test above; a job that is waiting for capacity rather
+    /// than for a person still holds the box up.
+    #[tokio::test]
+    async fn an_open_card_does_not_keep_the_box_from_sleeping() {
+        let (agent, root) = test_agent().await;
+        agent.store.upsert_chat(CHAT, "Main", true, 0).unwrap();
+        assert_eq!(crate::sleep::agent_busy(&agent), None);
+        let (_parked, _w, card) = a_parked_job(&agent, 1).await;
+        assert_eq!(
+            crate::sleep::agent_busy(&agent),
+            None,
+            "a job parked on a card is not work in flight"
+        );
+        assert_eq!(
+            agent.store.approval(&card).unwrap().unwrap().state,
+            "pending"
+        );
+
+        let waiting = "01TESTWAITINGJOB0000000001";
+        agent
+            .store
+            .insert_job(
+                waiting,
+                CHAT,
+                "01TESTPARKEDASK00000000000",
+                "Queued work",
+                "code",
+                "Do the thing.",
+                &[],
+            )
+            .unwrap();
+        let why = crate::sleep::agent_busy(&agent).expect("a queued job holds the box up");
+        assert!(why.contains("1 background jobs"), "{why}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// Capacity: a parked job consumes no permit, no worker and no memory, so counting them
     /// would let a few unanswered cards stop the box starting any work at all, which is the
     /// original stall by another route.

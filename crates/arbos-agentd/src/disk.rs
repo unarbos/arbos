@@ -254,7 +254,7 @@ pub struct DirSize {
 
 const WALK_FILE_CAP: usize = 400_000;
 
-fn dir_size(p: &Path, budget: &mut usize) -> u64 {
+pub(crate) fn dir_size(p: &Path, budget: &mut usize) -> u64 {
     let mut total = 0u64;
     let mut stack = vec![p.to_path_buf()];
     while let Some(d) = stack.pop() {

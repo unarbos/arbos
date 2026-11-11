@@ -2315,6 +2315,19 @@ impl Agent {
         self.pi().await
     }
 
+    /// The children this agent holds a handle for: the main pi and every retained worker.
+    /// `sleep.rs` reads it to tell them from what a tool call left running. A handle that is
+    /// busy right now yields nothing, so its child is counted as somebody else's — the side
+    /// that costs a checkpoint rather than a process.
+    pub(crate) fn child_pids(&self) -> Vec<u32> {
+        let pi = self.pi.try_lock().ok();
+        let pi = pi.and_then(|c| c.as_ref().filter(|c| c.is_alive())?.pid());
+        let workers = self.adapters.values().flat_map(|a| a.retained());
+        pi.into_iter()
+            .chain(workers.filter_map(|w| w.pid))
+            .collect()
+    }
+
     pub fn http_client(&self) -> reqwest::Client {
         self.http.get()
     }

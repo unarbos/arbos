@@ -114,6 +114,7 @@ mod settings;
 mod silence;
 mod sites;
 mod skills;
+mod sleep;
 mod status;
 mod steer_gate;
 mod store;
