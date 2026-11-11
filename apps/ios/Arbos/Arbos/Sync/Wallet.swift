@@ -111,6 +111,14 @@ enum WalletVault {
         guard status == errSecSuccess else { throw Keychain.KeychainError.status(status) }
     }
 
+    /// Forget a phrase this device made a moment ago and never showed, when another device's
+    /// backup turned out to be there first. Only that exact phrase: anything else stored here
+    /// may be holding money and is left alone.
+    static func discard(unshown phrase: String, user: String) {
+        guard Self.phrase(user: user) == phrase else { return }
+        SecItemDelete(query(user: user) as CFDictionary)
+    }
+
     /// The random key that encrypts this device's Matrix store, made once.
     static func storeKey(device: String) -> String? {
         let account = "matrix-store:\(device)"
@@ -190,8 +198,15 @@ extension AppModel {
         } else if backup == "off" {
             let phrase = walletNewPhrase()
             guard (try? WalletVault.save(phrase, user: me.id)) != nil else { return }
-            try? await client.recover(passphrase: walletRecoveryPassphrase(phrase: phrase))
-            walletPrompt = .backup(phrase)
+            do {
+                try await client.recover(passphrase: walletRecoveryPassphrase(phrase: phrase))
+                walletPrompt = .backup(phrase)
+            } catch {
+                // Another device set the backup up first: its phrase is the account's, not
+                // this one. Showing this one would have the person write down the wrong words.
+                WalletVault.discard(unshown: phrase, user: me.id)
+                walletPrompt = .restore
+            }
         } else if backup == "locked" {
             walletPrompt = .restore
         }
@@ -204,15 +219,21 @@ extension AppModel {
         guard let phrase = try? walletCheckPhrase(phrase: typed) else {
             return "That isn't a recovery phrase. Check each word."
         }
-        // Only a locked backup checks the passphrase: `recover` accepts anything once the
-        // backup is open on this device, and with none it would set one up under whatever was
-        // typed. Until the Matrix client can verify a passphrase in those states, a phrase that
-        // cannot be checked is not kept — it would become this account's wallet unverified.
-        guard let client = matrixClient, await client.backup() == "locked" else {
+        // The phrase must open this account's backup before it is kept. A locked backup is
+        // opened with it; one already open on this device is checked without changing anything
+        // (`recover` would accept any phrase there). With no backup, or a state not yet known,
+        // nothing can vouch for the phrase and it is not kept.
+        guard let client = matrixClient else {
             return "This device can't check that phrase right now. Try again once your chats have loaded."
         }
+        let passphrase = walletRecoveryPassphrase(phrase: phrase)
         do {
-            try await client.recover(passphrase: walletRecoveryPassphrase(phrase: phrase))
+            switch await client.backup() {
+            case "locked": try await client.recover(passphrase: passphrase)
+            case "on": try await client.checkPassphrase(passphrase: passphrase)
+            default:
+                return "This device can't check that phrase right now. Try again once your chats have loaded."
+            }
         } catch {
             return "That phrase doesn't belong to this account."
         }
