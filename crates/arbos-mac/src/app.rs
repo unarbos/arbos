@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use arbos_matrix::{ChannelRow, MessageRow, Snapshot, SpaceRow};
+use arbos_matrix::{Backup, ChannelRow, MessageRow, Snapshot, SpaceRow};
 use gpui::{App, Context, EventEmitter, RenderImage, Task};
 use gpui_tokio::Tokio;
 use tokio::sync::mpsc;
@@ -123,6 +123,8 @@ pub enum ServerSheet {
     JoinServer,
     /// `+` inside a server: channel name and the "Admins only post" toggle.
     NewChannel { server_id: Id },
+    /// The account's encryption keys were set up on another device: type the recovery phrase.
+    RestoreKeys,
 }
 
 /// A page under the open one in the right pane's stack (a group under the
@@ -590,6 +592,11 @@ pub struct ChatUi {
     pub editing: Option<Id>,
 }
 
+/// Said once when an encrypted message cannot be read because nobody has set the account's
+/// keys up: that takes the wallet, which only the iPhone app has.
+const KEYS_ON_IPHONE_FIRST: &str =
+    "Set up encrypted chats in Arbos on your iPhone first, then reopen Arbos on this Mac.";
+
 /// Rows per history page the shared Matrix client fetches (`arbos_matrix::client::HISTORY_PAGE`).
 const CHANNEL_PAGE: usize = 50;
 
@@ -1047,6 +1054,11 @@ pub struct AppState {
     pub open_server: Option<Id>,
     /// D88: the sheet open over the shell (new server / join / new channel).
     pub server_sheet: Option<ServerSheet>,
+    /// The restore sheet just opened by itself: the shell empties its field (taken once).
+    pub pending_restore_keys: bool,
+    /// The account has no encryption keys and this Mac cannot make them (no wallet here);
+    /// said once, when a row it cannot read turns up.
+    pub keys_off: bool,
     /// D88: a server write is in flight (sheet buttons dim) and its last failure.
     pub server_busy: bool,
     pub server_error: Option<error_note::Slot>,
@@ -1443,6 +1455,8 @@ impl AppState {
             selected_channel: None,
             open_server: None,
             server_sheet: None,
+            pending_restore_keys: false,
+            keys_off: false,
             server_busy: false,
             server_error: None,
             failure_claim: None,
@@ -3582,6 +3596,7 @@ impl AppState {
                 self.on_matrix_timeline(room_id, rows, cx)
             }
             SyncEvent::ChannelHistoryEnd { room_id } => self.chat_search_history_end(&room_id, cx),
+            SyncEvent::MatrixBackup(backup) => self.on_matrix_backup(backup, cx),
             SyncEvent::MatrixConnection { connected, error } => {
                 if let (false, Some(err)) = (connected, &error) {
                     log::warn!("servers: homeserver connection: {err}");
@@ -5751,6 +5766,46 @@ impl AppState {
         cx.notify();
     }
 
+    /// Where the account's key backup stands (the iPhone's `ensureKeys`, without the wallet).
+    /// Locked — the keys were set up on another device — asks for the recovery phrase, unless
+    /// another sheet is up (the next launch asks again). Off is remembered, not acted on: the
+    /// iPhone makes the phrase. On closes the sheet a phrase just satisfied.
+    fn on_matrix_backup(&mut self, backup: Backup, cx: &mut Context<Self>) {
+        self.keys_off = backup == Backup::Off;
+        match backup {
+            Backup::Locked if self.server_sheet.is_none() => {
+                self.pending_restore_keys = true;
+                self.open_server_sheet(ServerSheet::RestoreKeys, cx);
+            }
+            Backup::On if self.server_sheet == Some(ServerSheet::RestoreKeys) => {
+                self.close_server_sheet(cx);
+            }
+            Backup::On | Backup::Off | Backup::Locked => {}
+        }
+    }
+
+    /// Sheet "Unlock": what was typed, if it is a recovery phrase at all, goes to open the
+    /// backup; `false` when it is not one (the field keeps it for the fix). Nothing keeps
+    /// the phrase: this Mac needs only the keys it unlocks.
+    pub fn restore_keys(&mut self, typed: &str, cx: &mut Context<Self>) -> bool {
+        if self.server_busy {
+            return false;
+        }
+        let Ok(seed) = arbos_wallet::Seed::parse(typed) else {
+            self.server_error = Some(refused(
+                "",
+                "That isn't a recovery phrase. Check each word.",
+            ));
+            cx.notify();
+            return false;
+        };
+        self.server_busy = true;
+        self.server_error = None;
+        self.command(ClientCommand::MatrixRestore { seed });
+        cx.notify();
+        true
+    }
+
     /// Rule 7: letters, digits and dashes; lower-cased, spaces become dashes.
     pub fn channel_name_clean(name: &str) -> String {
         let mut out = String::new();
@@ -6450,8 +6505,9 @@ impl AppState {
     fn on_server_detail(&mut self, server: ServerInfo, cx: &mut Context<Self>) {
         self.server_busy = false;
         self.server_error = None;
-        if self.server_sheet.is_some() {
-            // A channel was created: the sheet is done.
+        // A channel was created: the sheet is done. The restore sheet is not about a server
+        // (the rosters fetched at launch answer here too).
+        if self.server_sheet.is_some() && self.server_sheet != Some(ServerSheet::RestoreKeys) {
             self.server_sheet = None;
         }
         if let Some(url) = server.image_url.clone() {
@@ -6536,6 +6592,10 @@ impl AppState {
             .collect();
         for url in urls {
             self.want_avatar(url);
+        }
+        if self.keys_off && rows.iter().any(|r| r.locked) {
+            self.keys_off = false;
+            self.push_notice(KEYS_ON_IPHONE_FIRST);
         }
         let count = decoded.len();
         self.channel_rows.insert(room_id.clone(), decoded);
@@ -14319,6 +14379,51 @@ mod channel_sender_tests {
             Some("https://relay.test/a/scout.png"),
             "the picture still comes from the roster"
         );
+    }
+
+    /// What the key backup's state has the Mac do (the iPhone's `ensureKeys`, without the
+    /// wallet): locked asks for the phrase; off says where to set the keys up, once, at the
+    /// first row this Mac cannot read; on asks nothing.
+    #[gpui::test]
+    fn only_a_locked_key_backup_asks_for_the_phrase(cx: &mut TestAppContext) {
+        let (_rt, state) = mount(cx);
+        state.update(cx, |s, cx| {
+            for quiet in [Backup::On, Backup::Off] {
+                s.apply(SyncEvent::MatrixBackup(quiet), cx);
+                assert_eq!(s.server_sheet, None, "{quiet:?}");
+            }
+            assert!(s.notices.is_empty());
+            let locked = serde_json::json!({
+                "type": "m.room.encrypted", "event_id": "$l", "sender": "@x:arbos.life",
+                "origin_server_ts": 1, "content": {},
+            });
+            let locked = arbos_matrix::rows::message_row(&locked, &|_| None).expect("row");
+            for _ in 0..2 {
+                s.on_matrix_timeline(ROOM.into(), vec![locked.clone()], cx);
+            }
+            let said: Vec<&str> = s.notices.iter().map(|n| n.text.as_str()).collect();
+            assert_eq!(said, [KEYS_ON_IPHONE_FIRST]);
+
+            s.apply(SyncEvent::MatrixBackup(Backup::Locked), cx);
+            assert_eq!(s.server_sheet, Some(ServerSheet::RestoreKeys));
+            // A roster fetched at launch does not take the sheet down.
+            s.apply(SyncEvent::ServerDetail(server(Vec::new())), cx);
+            assert_eq!(s.server_sheet, Some(ServerSheet::RestoreKeys));
+            // Not a phrase: refused here, and nothing is on its way.
+            assert!(!s.restore_keys("twelve words", cx));
+            assert!(s.server_error.is_some() && !s.server_busy);
+            assert!(s.restore_keys(&arbos_wallet::Seed::generate().phrase(), cx));
+            assert!(s.server_error.is_none() && s.server_busy);
+            // The phrase opened the backup.
+            s.apply(SyncEvent::MatrixBackup(Backup::On), cx);
+            assert_eq!(s.server_sheet, None);
+            assert!(!s.server_busy);
+
+            // A sheet the person is in is not replaced.
+            s.open_server_sheet(ServerSheet::JoinServer, cx);
+            s.apply(SyncEvent::MatrixBackup(Backup::Locked), cx);
+            assert_eq!(s.server_sheet, Some(ServerSheet::JoinServer));
+        });
     }
 }
 

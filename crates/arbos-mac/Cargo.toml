@@ -18,6 +18,7 @@ path = "src/main.rs"
 arbos-core = { workspace = true, features = ["chart-png"] }
 arbos-client.workspace = true
 arbos-matrix.workspace = true
+arbos-wallet.workspace = true
 arbos-update.workspace = true
 rusqlite.workspace = true
 

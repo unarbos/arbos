@@ -38,7 +38,8 @@ use arbos_core::api::{
 use arbos_core::doc::{UserAttachment, UserMessageOpts};
 use arbos_core::wire::{BoxState as WireBox, PROJECT_DOC_CHAT_ID};
 use arbos_matrix::{
-    Error as MatrixError, Listener as MatrixListener, MatrixClient, MessageRow, Session, Snapshot,
+    Backup, Error as MatrixError, Listener as MatrixListener, MatrixClient, MessageRow, Session,
+    Snapshot,
 };
 use futures::future::BoxFuture;
 use futures::{SinkExt, StreamExt};
@@ -2963,8 +2964,8 @@ async fn start_matrix(shared: &Arc<Shared>, expected: Option<WorkTicket>) {
         shared: Arc::downgrade(shared),
         owner,
     });
-    // One key store per Matrix device; the iPhone's phrase backs keys up, this Mac only keeps
-    // its own until it can restore from it too.
+    // One key store per Matrix device; the iPhone's phrase backs keys up, and this Mac opens
+    // that backup with it (`ClientCommand::MatrixRestore`).
     // No store directory or no word from the keychain: no client (the registry poll retries),
     // rather than room keys in a store nothing encrypts.
     let crypto = credentials::matrix_store_dir(&session.device_id).and_then(|store_dir| {
@@ -2972,6 +2973,8 @@ async fn start_matrix(shared: &Arc<Shared>, expected: Option<WorkTicket>) {
         Ok(arbos_matrix::Crypto {
             store_dir,
             store_key,
+            // No wallet on the Mac to make a recovery phrase with: the iPhone sets the keys up.
+            first_device: false,
         })
     });
     let started = match crypto {
@@ -2986,6 +2989,7 @@ async fn start_matrix(shared: &Arc<Shared>, expected: Option<WorkTicket>) {
                 client.stop();
                 return;
             }
+            tokio::spawn(report_backup(shared.clone(), client));
         }
         Err(err) => {
             if shared.with_matrix_owner(owner, |_| ()).is_some() {
@@ -2997,6 +3001,29 @@ async fn start_matrix(shared: &Arc<Shared>, expected: Option<WorkTicket>) {
     if shared.with_matrix_owner(owner, |_| ()).is_some() {
         refresh_servers_list(shared).await;
     }
+}
+
+/// Tell the UI where the account's key backup stands once the homeserver has said. No answer
+/// in time (`backup` waits 30 s) is not an answer, least of all "off": ask again for as long
+/// as this client is the one in use.
+async fn report_backup(shared: Arc<Shared>, client: Arc<MatrixClient>) {
+    while matrix_client(&shared).is_some_and(|c| Arc::ptr_eq(&c, &client)) {
+        if let Ok(backup) = client.backup().await {
+            let _ = shared.events.send(SyncEvent::MatrixBackup(backup));
+            return;
+        }
+    }
+}
+
+/// The restore sheet's refusal, in the iPhone's words (`restoreWallet`).
+fn restore_refused(why: &str) -> SyncEvent {
+    SyncEvent::ServerError(UserError::of(
+        "",
+        ErrorClass::Refused {
+            message: Some(why.to_owned()),
+        },
+        "",
+    ))
 }
 
 /// The registry poll's homeserver retry: a launch whose `GET /me/matrix` failed (a timeout,
@@ -3457,6 +3484,33 @@ fn handle_server_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                     Err(MatrixError::NoRoom(_)) => {}
                     Err(err) => shared.diagnostic("channel-open", err.to_string()),
                 }
+            });
+        }
+        ClientCommand::MatrixRestore { seed } => {
+            let client = matrix_client(shared);
+            let shared = shared.clone();
+            let seed = seed.clone();
+            tokio::spawn(async move {
+                // As the iPhone does it (`restoreWallet`): a locked backup is opened with the
+                // phrase, one this Mac already holds is only checked against it (`recover`
+                // would accept any phrase there), and with no backup, or no word on it yet,
+                // nothing can vouch for the phrase.
+                let passphrase = seed.recovery_passphrase();
+                let opened = match &client {
+                    Some(client) => match client.backup().await {
+                        Ok(Backup::Locked) => Some(client.recover(&passphrase).await),
+                        Ok(Backup::On) => Some(client.check_passphrase(&passphrase).await),
+                        Ok(Backup::Off) | Err(_) => None,
+                    },
+                    None => None,
+                };
+                let _ = shared.events.send(match opened {
+                    Some(Ok(())) => SyncEvent::MatrixBackup(Backup::On),
+                    Some(Err(_)) => restore_refused("That phrase doesn't belong to this account."),
+                    None => restore_refused(
+                        "This device can't check that phrase right now. Try again once your chats have loaded.",
+                    ),
+                });
             });
         }
         ClientCommand::ChannelLoadOlder { room_id } => {
@@ -10380,7 +10434,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         | ClientCommand::ChannelOpen { .. }
         | ClientCommand::ChannelLoadOlder { .. }
         | ClientCommand::ChannelSend { .. }
-        | ClientCommand::ChannelMarkRead { .. } => {}
+        | ClientCommand::ChannelMarkRead { .. }
+        | ClientCommand::MatrixRestore { .. } => {}
     }
 }
 

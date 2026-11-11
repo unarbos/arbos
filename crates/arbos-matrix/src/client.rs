@@ -48,6 +48,11 @@ pub struct Crypto {
     pub store_dir: PathBuf,
     /// Encrypts the store at rest; the app keeps it in the keychain.
     pub store_key: Option<String>,
+    /// Whether this device makes the account's cross-signing identity and key backup when
+    /// the account has none. Only an app that then puts them under the person's phrase
+    /// ([`MatrixClient::recover`]) may: no later device can open, or replace, what a device
+    /// that cannot has made.
+    pub first_device: bool,
 }
 
 /// The account's key backup, as the first sync reports it.
@@ -123,9 +128,9 @@ impl MatrixClient {
             .http_client(http)
             .sqlite_store(&crypto.store_dir, crypto.store_key.as_deref())
             .with_encryption_settings(EncryptionSettings {
-                auto_enable_cross_signing: true,
+                auto_enable_cross_signing: crypto.first_device,
                 backup_download_strategy: BackupDownloadStrategy::OneShot,
-                auto_enable_backups: true,
+                auto_enable_backups: crypto.first_device,
             })
             // The homeserver can add a device to anyone's account. Only a device signed by
             // its owner's cross-signing identity is sent room keys, and a message from one
@@ -738,6 +743,7 @@ mod backup_tests {
             Crypto {
                 store_dir: dir.clone(),
                 store_key: None,
+                first_device: true,
             },
             Arc::new(Quiet),
         )
