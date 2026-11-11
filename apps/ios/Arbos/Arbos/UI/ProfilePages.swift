@@ -1548,6 +1548,82 @@ struct GroupProfileView: View {
         }
     }
 
+    /// Invite links for a people group (not a shared project chat): mint, copy, share, revoke.
+    private var groupInviteSections: [PaneSection] {
+        guard projectId == nil, people?.kind == "group" else { return [] }
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        var rows: [AnyView] = []
+        if groupInvites.isEmpty {
+            rows.append(AnyView(PaneRow(leading: .tile("link"), title: "No invite links",
+                                        subtitle: "People you add by name need none")))
+        }
+        for inv in groupInvites {
+            let short = inv.url.split(separator: "/").last.map(String.init) ?? inv.code
+            rows.append(AnyView(
+                PaneRow(leading: .tile("link"), title: "…/g/\(short)", subtitle: inv.terms(now: now),
+                        trailing: AnyView(HStack(spacing: 4) {
+                            if inv.usable {
+                                Button {
+                                    UIPasteboard.general.string = inv.url
+                                    inviteCopied = true
+                                    Task { @MainActor in
+                                        try? await Task.sleep(for: .seconds(1.5))
+                                        inviteCopied = false
+                                    }
+                                } label: {
+                                    Image(systemName: inviteCopied ? "checkmark" : "doc.on.doc")
+                                        .font(theme.font(15)).foregroundStyle(theme.muted)
+                                        .frame(width: 30, height: 44).contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel("Copy link")
+                                if let url = URL(string: inv.url) {
+                                    ShareLink(item: url) {
+                                        Image(systemName: "square.and.arrow.up")
+                                            .font(theme.font(15)).foregroundStyle(theme.muted)
+                                            .frame(width: 30, height: 44).contentShape(Rectangle())
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
+                            Button {
+                                Task {
+                                    if await model.revokeGroupInvite(chatId, inviteId: inv.id) {
+                                        groupInvites.removeAll { $0.id == inv.id }
+                                    }
+                                }
+                            } label: {
+                                Image(systemName: "xmark.circle")
+                                    .font(theme.font(17)).foregroundStyle(theme.muted)
+                                    .frame(width: 30, height: 44).contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Revoke link")
+                        }))
+                .opacity(inv.usable ? 1 : 0.55)
+            ))
+        }
+        let options: [AnyView] = [
+            AnyView(PaneToggleRow(title: "Expires after 7 days", isOn: $inviteExpires)),
+            AnyView(PaneToggleRow(title: "Single use", subtitle: "One person joins, then the link is spent", isOn: $inviteSingleUse)),
+            AnyView(Button {
+                Task {
+                    if let inv = await model.createGroupInvite(chatId, expires: inviteExpires, singleUse: inviteSingleUse) {
+                        groupInvites.insert(inv, at: 0)
+                    }
+                }
+            } label: {
+                PaneRow(leading: .glyph("plus"), title: "New invite link")
+            }.buttonStyle(.plain)),
+        ]
+        return [
+            .title("Invite links"),
+            .card(rows, separatorInset: PaneKit.separatorInset(.tile(""))),
+            .card(options),
+            .footnote("Share a link so someone can join this group. Add people who already have an account from Add members above."),
+        ]
+    }
+
     /// Members sub-page: Add members, Share invite link (people groups), then
     /// every person (name, @handle) and agent as kit rows. Banned people
     /// (owner/admin) sit under Banned with Unban. Activity lives on the overview.

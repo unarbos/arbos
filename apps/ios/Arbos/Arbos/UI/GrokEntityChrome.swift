@@ -181,7 +181,7 @@ struct EntityPickerRow: View {
     let title: String
     var value: String? = nil
     var body: some View {
-        PaneRow(title: title, value: value, trailing: AnyView(PickerGlyph()), chevron: false)
+        PaneRow(title: title, value: value, chevron: false, trailing: AnyView(PickerGlyph()))
     }
 }
 
