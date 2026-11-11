@@ -178,7 +178,11 @@ final class ComposerParityUITests: XCTestCase {
 
         let held = brightness(app, of: pill)
         let delta = abs(held - resting)
-        XCTAssertGreaterThan(delta, 12,
+        // Threshold 8 (was 12): #2998 dropped `PillSurface.translucentAlpha` to 0.12, so the
+        // same wash reads ~10.26 mean delta on CI instead of the older denser-pill figure.
+        // Still well above the invisible ~2.7 cut Jacob rejected — held must remain visibly
+        // brighter than idle; this only recalibrates for the intentionally lighter fill.
+        XCTAssertGreaterThan(delta, 8,
                              "the light is too faint to see: the pill read \(resting) at rest "
                              + "and \(held) under the finger, a delta of \(delta). Jacob "
                              + "measured the cut that failed review at about 2.7.")
