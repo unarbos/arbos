@@ -937,13 +937,13 @@ async fn handle_frame(
             if let Principal::Device { id, .. } = principal {
                 let focused = f.header.get("focused_chat").and_then(|v| v.as_str());
                 crate::notify::set_focus(state, id, focused).await;
-                // Presence counts as "seen" (last_seen_at / online), at most one write a minute.
-                let now = arbos_core::ids::now_ms();
-                let mut seen = state.presence_seen.lock().await;
-                if seen.get(id).is_none_or(|t| now - t >= 60_000) {
-                    seen.insert(id.clone(), now);
-                    let _ = state.db.touch_device(id);
-                }
+                // Presence counts as "seen" (last_seen_at / online). Stamped in memory here;
+                // `flush_presence` writes every device's stamp in one transaction.
+                state
+                    .presence_seen
+                    .lock()
+                    .await
+                    .insert(id.clone(), arbos_core::ids::now_ms());
             }
             let out = Frame::new(FrameType::Presence, f.header, f.payload).encode();
             let _ = room.tx.send(RoomBroadcast {
@@ -1359,12 +1359,54 @@ mod refusal_frame_tests {
     }
 }
 
+/// How often presence stamps reach `devices.last_seen_at`.
+///
+/// Not free to raise: a person reads as online for `people::ONLINE_MS` (90 s) after the newest
+/// stamp in that column, and presence frames come every 15 s, so this plus one frame has to
+/// stay under it. Going past 60 s means answering `online` from `presence_seen` first.
+const PRESENCE_FLUSH: Duration = Duration::from_secs(60);
+
+/// Write every presence stamp newer than `since` to `devices.last_seen_at`, all in one
+/// transaction (2,500 sockets used to be 2,500 single-row writes a minute, each one queued
+/// ahead of some room's PUSH). Returns how many devices were written.
+pub async fn flush_presence(state: &AppState, since: i64) -> usize {
+    let seen: Vec<(String, i64)> = state
+        .presence_seen
+        .lock()
+        .await
+        .iter()
+        .filter(|(_, at)| **at > since)
+        .map(|(id, at)| (id.clone(), *at))
+        .collect();
+    if seen.is_empty() {
+        return 0;
+    }
+    // A failed flush loses nothing that matters: the next frame stamps the device again.
+    if let Err(e) = state.db.touch_devices(&seen) {
+        tracing::warn!(error = %e, devices = seen.len(), "presence flush failed");
+    }
+    seen.len()
+}
+
 /// Grace-period sweeper: a box socket that stays gone marks the project asleep (crdt-sync §8.5).
+/// Also the presence flush ([`flush_presence`]).
 pub async fn spawn_sweeper(state: AppState) {
+    let presence = state.clone();
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_secs(5)).await;
             boxes::sweep_box_liveness(&state).await;
+        }
+    });
+    tokio::spawn(async move {
+        let mut since = 0;
+        loop {
+            tokio::time::sleep(PRESENCE_FLUSH).await;
+            // Taken before the flush reads the map, so a stamp that lands meanwhile is
+            // written by the next one rather than skipped.
+            let now = arbos_core::ids::now_ms();
+            flush_presence(&presence, since).await;
+            since = now;
         }
     });
 }
@@ -1662,6 +1704,31 @@ mod ordering_tests {
                 .await
                 .box_joined(&alice);
         }
+    }
+
+    /// Presence stamps reach `last_seen_at` through the batched flush: only the ones newer than
+    /// the last flush are written, and a stamp never moves a device back behind a later HTTP
+    /// call's `touch_device`.
+    #[tokio::test]
+    async fn presence_stamps_are_flushed_in_a_batch_and_never_move_a_device_back() {
+        let state = test_state(AuthMode::Github);
+        let (alice, dev) = person(&state, 1);
+        let Principal::Device { id, .. } = dev else {
+            unreachable!()
+        };
+        let t = now_ms() + 60_000;
+        state.presence_seen.lock().await.insert(id.clone(), t);
+        assert_eq!(super::flush_presence(&state, 0).await, 1);
+        assert_eq!(state.db.user_last_seen(&alice).unwrap(), Some(t));
+        assert_eq!(
+            super::flush_presence(&state, t).await,
+            0,
+            "nothing new since"
+        );
+
+        state.presence_seen.lock().await.insert(id, t - 500);
+        assert_eq!(super::flush_presence(&state, t - 1_000).await, 1);
+        assert_eq!(state.db.user_last_seen(&alice).unwrap(), Some(t));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

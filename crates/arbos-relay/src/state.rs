@@ -343,7 +343,8 @@ pub struct AppState {
     pub fallback_sent: Arc<Mutex<HashMap<(String, String), i64>>>,
     /// Self-hosted LiveKit for calls (`LIVEKIT_*`); `None` = calls answer 503.
     pub livekit: Option<crate::livekit::LiveKit>,
-    /// device_id → last presence frame that was written to `devices.last_seen_at`.
+    /// device_id → its last presence frame; `rooms::flush_presence` writes these to
+    /// `devices.last_seen_at` in batches.
     pub presence_seen: Arc<Mutex<HashMap<String, i64>>>,
     /// project_id → what its agent is doing right now (agent-flow contract §3), in memory only.
     pub activity: Arc<Mutex<HashMap<String, ProjectActivity>>>,
