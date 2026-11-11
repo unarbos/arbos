@@ -246,22 +246,93 @@ impl RpcChild {
         Ok(r.data.unwrap_or(serde_json::Value::Null))
     }
 
-    /// Orderly shutdown: close stdin, wait up to 5 s, then kill.
+    /// Give the whole EOF cleanup five seconds, then kill the captured process.
     pub async fn shutdown(&self) {
-        self.stdin.lock().await.take();
-        if let Some(mut child) = self.child.lock().await.take() {
-            if tokio::time::timeout(Duration::from_secs(5), child.wait())
-                .await
-                .is_err()
-            {
+        // Keep the handle outside the timed future: cancelling the grace must not
+        // discard the authority needed to kill and reap a backpressured child.
+        let mut process = None;
+        let graceful = async {
+            process = self.child.lock().await.take();
+            self.stdin.lock().await.take();
+            if let Some(child) = process.as_mut() {
+                let _ = child.wait().await;
+            }
+        };
+        if tokio::time::timeout(Duration::from_secs(5), graceful)
+            .await
+            .is_err()
+        {
+            // A process-handle owner may have delayed capture. Never wait for the
+            // blocked stdin writer before terminating this exact process.
+            if process.is_none() {
+                process = self.child.lock().await.take();
+            }
+            if let Some(child) = process.as_mut() {
+                // Tokio's kill also waits/reaps, retaining the existing best-effort error policy.
                 let _ = child.kill().await;
             }
+            self.stdin.lock().await.take();
         }
         self.exited.store(true, Ordering::SeqCst);
     }
 
+    /// Retire only this captured child. If the runtime drops the cleanup task, use its owned
+    /// Child handle as a last resort; never reconstruct authority from a pid or process name.
+    pub(crate) fn retire_owned(self: Arc<Self>) {
+        struct Cleanup(Option<Arc<RpcChild>>);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                if let Some(child) = &self.0 {
+                    if let Ok(mut input) = child.stdin.try_lock() {
+                        input.take();
+                    }
+                    if let Ok(mut held) = child.child.try_lock() {
+                        if let Some(process) = held.as_mut() {
+                            let _ = process.start_kill();
+                            let _ = process.try_wait();
+                        }
+                    }
+                }
+            }
+        }
+        let mut cleanup = Cleanup(Some(self));
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                if let Some(child) = &cleanup.0 {
+                    child.shutdown().await;
+                }
+                cleanup.0.take();
+            });
+        }
+        // Without a runtime, Cleanup drops here. If a shutdown future held either mutex,
+        // its own Child kill_on_drop and eventual RpcChild drop remain the final fallback.
+    }
+
     pub fn is_alive(&self) -> bool {
         !self.exited.load(Ordering::SeqCst)
+    }
+
+    /// Pause only this captured process handle while a test observes owned cleanup.
+    /// RPC stdin, sibling processes and the session registry remain independent.
+    #[cfg(test)]
+    pub(crate) async fn test_hold_process_until(
+        &self,
+        ready: oneshot::Sender<()>,
+        release: oneshot::Receiver<()>,
+    ) {
+        let _process = self.child.lock().await;
+        let _ = ready.send(());
+        let _ = release.await;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_process_is_captured(&self) -> bool {
+        self.child.try_lock().is_ok_and(|process| process.is_none())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_stdin_is_locked(&self) -> bool {
+        self.stdin.try_lock().is_err()
     }
 
     /// This child carried traffic just now.

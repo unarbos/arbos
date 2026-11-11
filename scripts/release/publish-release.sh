@@ -145,17 +145,16 @@ BODY="$DIST/.release-notes.md"
 
 ASSETS=("${mac_tar[@]}" "${mac_dmg[@]}" "${linux_desktop[@]}" "${linux_tools[@]}" "${notary_logs[@]}" appcast.xml latest.txt)
 echo "==> release $TAG with: ${ASSETS[*]}"
-FLAGS=(--repo "$REPO" --target "$SHA" --title "$TITLE" --notes-file "$BODY")
-# A build that is not promoted stays a pre-release on every channel: `latest`
-# (the stable feed) and the `edge` feed are left exactly where they were.
-if [[ "$CHANNEL" == "edge" || "$PROMOTE" == false ]]; then FLAGS+=(--prerelease); else FLAGS+=(--latest); fi
-if ! $DRY_RUN && gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
-  echo "    (release exists; replacing assets)"
-  gh_run release upload "$TAG" --repo "$REPO" --clobber "${ASSETS[@]}"
-  gh_run release edit "$TAG" --repo "$REPO" --title "$TITLE" --notes-file "$BODY"
-else
-  gh_run release create "$TAG" "${FLAGS[@]}" "${ASSETS[@]}"
-fi
+# The release object's observed state and publication transitions live together.
+# Signing/verification above and channel-feed updates below remain separate edges.
+PUBLICATION_ARGS=(--repo "$REPO" --tag "$TAG" --sha "$SHA" --title "$TITLE" --notes-file "$BODY"
+                  --channel "$CHANNEL" --promote "$PROMOTE")
+if $DRY_RUN; then PUBLICATION_ARGS+=(--dry-run); fi
+publication=$(python3 "$ROOT/scripts/release/publication.py" "${PUBLICATION_ARGS[@]}" -- "${ASSETS[@]}")
+case "$publication:$DRY_RUN:$PROMOTE" in
+  draft:false:false|preview:true:*|published:false:*) ;;
+  *) echo "invalid release publication completion" >&2; exit 1 ;;
+esac
 
 if [[ "$PROMOTE" == false ]]; then
   echo "==> --no-promote: the $CHANNEL feed was not moved (dry run)"
@@ -214,4 +213,9 @@ if [[ "$CHANNEL" == "stable" && "$PROMOTE" != false ]]; then
 fi
 
 rm -f "$BODY"
-echo "published $TAG -> $RELEASE_URL"
+case "$publication" in
+  draft) echo "staged draft $TAG -> $RELEASE_URL" ;;
+  preview) echo "previewed $TAG -> $RELEASE_URL" ;;
+  published) echo "published $TAG -> $RELEASE_URL" ;;
+  *) echo "release publication returned an unknown completion" >&2; exit 1 ;;
+esac

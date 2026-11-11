@@ -1,0 +1,249 @@
+{
+  "controls": "Run the unmodified seven-law suite separately; this command runs eight isolated actual-function mutants.",
+  "sources": {
+    "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "f40cc9f58ae3e238141cdf5f795a2c4cf855c198d8d0547cc1e9592516f33818",
+    "crates/arbos-mac/src/sync/work_lifetime.rs": "68d6c6fb42aa07499580c74e9ab465dd7d71d049bc76a8bfb67a6674024dde0b",
+    "crates/arbos-mac/src/sync/session_scope.rs": "40bd8659aa21f5dd6225bbab4c604376d617c9f2a98f3bc483958505624889e4",
+    "crates/arbos-mac/src/sync/account_tasks.rs": "b1a314282f340c973ce6debb6c28f39ea9997c44e9db2d73c9aa57e0ecc32cb7",
+    "harness/arbos-pi-ext/native-ownership.laws.ts": "b8734cefe60b41f196deadb40b30743c4c38b1484bd87b1df78ac7ec01fbe88b",
+    ".improve/state-machine-checks/native-ownership/bridge.py": "62f7569d784369ffda84fc61cd64d4c15b471f47dd304e1fbf902c37d2129f94",
+    ".improve/state-machine-checks/native-ownership/oracle.swift": "d063fe3c8ccfa222cfd6eda4f5440d5eb4f525e3170f46b7d4ff2da81467edb4",
+    ".improve/state-machine-checks/native-ownership/native/Cargo.toml": "b82c0c64850327f04968f7314bedeb354ad3e27a66721280269d3e6b1d609c2d",
+    ".improve/state-machine-checks/native-ownership/native/Cargo.lock": "1ceaf7c6bc9983c3c3d133eca617bbc873d33451e832e4930cced3bc0aef2326",
+    ".improve/state-machine-checks/native-ownership/native/src/main.rs": "55095260317a50e6c61fd3fba84d284b94b8cd6820f9c32420c4b589321d44d8"
+  },
+  "results": [
+    {
+      "name": "ui-control-only-admits-old-account",
+      "seed": 90006,
+      "source": "crates/arbos-mac/src/sync/session_scope.rs",
+      "original_sha256": "40bd8659aa21f5dd6225bbab4c604376d617c9f2a98f3bc483958505624889e4",
+      "mutant_sha256": "2020bc55afed5574e4dce3b2e58809ff63a01e739ecfe071d79c2378c79af9f0",
+      "generated": {
+        "exit_code": 1,
+        "seconds": 3.2755952910520136,
+        "detected": true,
+        "accepted_shrinks": 1
+      },
+      "replay": {
+        "exit_code": 1,
+        "seconds": 3.2833338340278715,
+        "detected": true
+      },
+      "shrunk_input": {
+        "noise": [],
+        "late": [],
+        "closed": true,
+        "foreign": false,
+        "disposed": false,
+        "sameDoc": true,
+        "empty": true,
+        "revision": 0,
+        "latest": 1
+      }
+    },
+    {
+      "name": "ui-stale-controls-admitted",
+      "seed": 90006,
+      "source": "crates/arbos-mac/src/sync/session_scope.rs",
+      "original_sha256": "40bd8659aa21f5dd6225bbab4c604376d617c9f2a98f3bc483958505624889e4",
+      "mutant_sha256": "de6b228461085ecdb89f90ac59a7c0f260f1aa516b9a3462bc64102059c8d750",
+      "generated": {
+        "exit_code": 1,
+        "seconds": 3.354453832958825,
+        "detected": true,
+        "accepted_shrinks": 1
+      },
+      "replay": {
+        "exit_code": 1,
+        "seconds": 3.1625089589506388,
+        "detected": true
+      },
+      "shrunk_input": {
+        "noise": [],
+        "late": [],
+        "closed": true,
+        "foreign": false,
+        "disposed": false,
+        "sameDoc": true,
+        "empty": true,
+        "revision": 0,
+        "latest": 1
+      }
+    },
+    {
+      "name": "task-retirement-reopens",
+      "seed": 90007,
+      "source": "crates/arbos-mac/src/sync/account_tasks.rs",
+      "original_sha256": "b1a314282f340c973ce6debb6c28f39ea9997c44e9db2d73c9aa57e0ecc32cb7",
+      "mutant_sha256": "d10ed609325e9de9dfc98714a921c24e1698a329c1a6af1e0459f26cf63542cd",
+      "generated": {
+        "exit_code": 1,
+        "seconds": 3.7295697920490056,
+        "detected": true,
+        "accepted_shrinks": 1
+      },
+      "replay": {
+        "exit_code": 1,
+        "seconds": 2.9513146670069546,
+        "detected": true
+      },
+      "shrunk_input": {
+        "noise": [],
+        "late": [],
+        "closed": true,
+        "foreign": false,
+        "disposed": false,
+        "sameDoc": true,
+        "empty": true,
+        "revision": 0,
+        "latest": 1
+      }
+    },
+    {
+      "name": "swift-accepts-any-owner",
+      "seed": 90001,
+      "source": "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift",
+      "original_sha256": "f40cc9f58ae3e238141cdf5f795a2c4cf855c198d8d0547cc1e9592516f33818",
+      "mutant_sha256": "3444d98faa59a2b1e7f3246bded268771cd40ccf0796b9968c1f8d43c2ce881b",
+      "generated": {
+        "exit_code": 1,
+        "seconds": 2.9764165829401463,
+        "detected": true,
+        "accepted_shrinks": 1
+      },
+      "replay": {
+        "exit_code": 1,
+        "seconds": 2.9011277919635177,
+        "detected": true
+      },
+      "shrunk_input": {
+        "noise": [],
+        "late": [],
+        "closed": true,
+        "foreign": false,
+        "disposed": false,
+        "sameDoc": true,
+        "empty": true,
+        "revision": 0,
+        "latest": 1
+      }
+    },
+    {
+      "name": "swift-stale-matrix-failure",
+      "seed": 90002,
+      "source": "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift",
+      "original_sha256": "f40cc9f58ae3e238141cdf5f795a2c4cf855c198d8d0547cc1e9592516f33818",
+      "mutant_sha256": "853090986926945c2550e505bfdab78c23e747957c17dbc5aa2b998399b2759a",
+      "generated": {
+        "exit_code": 1,
+        "seconds": 3.0728545000310987,
+        "detected": true,
+        "accepted_shrinks": 1
+      },
+      "replay": {
+        "exit_code": 1,
+        "seconds": 3.016745459055528,
+        "detected": true
+      },
+      "shrunk_input": {
+        "noise": [],
+        "late": [],
+        "closed": true,
+        "foreign": false,
+        "disposed": false,
+        "sameDoc": true,
+        "empty": true,
+        "revision": 0,
+        "latest": 1
+      }
+    },
+    {
+      "name": "swift-empty-paint-bypasses-owner",
+      "seed": 90003,
+      "source": "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift",
+      "original_sha256": "f40cc9f58ae3e238141cdf5f795a2c4cf855c198d8d0547cc1e9592516f33818",
+      "mutant_sha256": "4eb70c18613adfd03ede0da65568dd00e44034cdd4cfff4bd1e73cba8ff24d18",
+      "generated": {
+        "exit_code": 1,
+        "seconds": 2.9666380420094356,
+        "detected": true,
+        "accepted_shrinks": 1
+      },
+      "replay": {
+        "exit_code": 1,
+        "seconds": 2.9282990829087794,
+        "detected": true
+      },
+      "shrunk_input": {
+        "noise": [],
+        "late": [],
+        "closed": true,
+        "foreign": false,
+        "disposed": false,
+        "sameDoc": true,
+        "empty": true,
+        "revision": 0,
+        "latest": 1
+      }
+    },
+    {
+      "name": "rust-accepts-any-owner",
+      "seed": 90004,
+      "source": "crates/arbos-mac/src/sync/work_lifetime.rs",
+      "original_sha256": "68d6c6fb42aa07499580c74e9ab465dd7d71d049bc76a8bfb67a6674024dde0b",
+      "mutant_sha256": "4724e4aab8770974cf2c08723f43fb06227663cab050bd01be458a8891b6c421",
+      "generated": {
+        "exit_code": 1,
+        "seconds": 3.0304619999369606,
+        "detected": true,
+        "accepted_shrinks": 1
+      },
+      "replay": {
+        "exit_code": 1,
+        "seconds": 3.005262083024718,
+        "detected": true
+      },
+      "shrunk_input": {
+        "noise": [],
+        "late": [],
+        "closed": true,
+        "foreign": false,
+        "disposed": false,
+        "sameDoc": true,
+        "empty": true,
+        "revision": 0,
+        "latest": 1
+      }
+    },
+    {
+      "name": "rust-stale-matrix-failure",
+      "seed": 90005,
+      "source": "crates/arbos-mac/src/sync/work_lifetime.rs",
+      "original_sha256": "68d6c6fb42aa07499580c74e9ab465dd7d71d049bc76a8bfb67a6674024dde0b",
+      "mutant_sha256": "8a700a10350dc6c127800c8132d364b63ff871c5325134f32261102e0f3104c4",
+      "generated": {
+        "exit_code": 1,
+        "seconds": 3.115807249909267,
+        "detected": true,
+        "accepted_shrinks": 1
+      },
+      "replay": {
+        "exit_code": 1,
+        "seconds": 2.9374464160064235,
+        "detected": true
+      },
+      "shrunk_input": {
+        "noise": [],
+        "late": [],
+        "closed": true,
+        "foreign": false,
+        "disposed": false,
+        "sameDoc": true,
+        "empty": true,
+        "revision": 0,
+        "latest": 1
+      }
+    }
+  ]
+}

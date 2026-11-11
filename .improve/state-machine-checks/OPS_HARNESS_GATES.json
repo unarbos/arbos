@@ -1,0 +1,26 @@
+[
+  {
+    "name": "typecheck",
+    "command": [
+      "pnpm",
+      "--dir",
+      "harness/arbos-pi-ext",
+      "typecheck"
+    ],
+    "exit_code": 0,
+    "seconds": 3.3087106669554487,
+    "tail": "\n> arbos-pi-ext@0.1.0 typecheck /Users/cister/arbos life/arbos-codex/harness/arbos-pi-ext\n> tsc --noEmit\n\n"
+  },
+  {
+    "name": "harness",
+    "command": [
+      "pnpm",
+      "--dir",
+      "harness/arbos-pi-ext",
+      "test"
+    ],
+    "exit_code": 0,
+    "seconds": 23.29440999997314,
+    "tail": "uest: 256 seeded traces\nok 57 - old mute completions cannot commit over a newer request: 256 seeded traces\n  ---\n  duration_ms: 69.108666\n  type: 'test'\n  ...\n# Subtest: old mode completions cannot commit over a newer request: 256 seeded traces\nok 58 - old mode completions cannot commit over a newer request: 256 seeded traces\n  ---\n  duration_ms: 91.380625\n  type: 'test'\n  ...\n# Subtest: pure trace protocol rejects malformed, oversized and wrong-type inputs\nok 59 - pure trace protocol rejects malformed, oversized and wrong-type inputs\n  ---\n  duration_ms: 67.51775\n  type: 'test'\n  ...\n1..59\n# tests 59\n# suites 0\n# pass 59\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n# duration_ms 22789.93125\n"
+  }
+]

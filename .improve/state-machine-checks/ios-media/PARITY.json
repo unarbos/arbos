@@ -1,0 +1,15 @@
+{
+  "MediaFetch_complete_enum_unchanged": true,
+  "chrome_dismiss_calibration_unchanged": true,
+  "image_gesture_methods_unchanged": true,
+  "fixture_and_platform_helpers_unchanged": true,
+  "both_actual_image_loaders_same": true,
+  "MediaViewer_numeric_literal_multiset_unchanged": true,
+  "MessagePasteboard_numeric_literal_multiset_unchanged": true,
+  "LibraryList_numeric_literal_multiset_unchanged": true,
+  "ChatView_numeric_literal_multiset_unchanged": true,
+  "Transcript_numeric_literal_multiset_unchanged": true,
+  "FunPicker_numeric_literal_multiset_unchanged": true,
+  "LinkPreviewCard_link_delta_numeric_literal_multiset_unchanged": true,
+  "Transcript_link_delta_numeric_literal_multiset_unchanged": true
+}

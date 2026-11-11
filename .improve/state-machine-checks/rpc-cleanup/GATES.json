@@ -1,0 +1,160 @@
+{
+  "before": {
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-agentd",
+      "rpc_blocked_cleanup_",
+      "--",
+      "--test-threads=2"
+    ],
+    "exit": 101,
+    "seconds": 33.200529958936386,
+    "counts": [
+      [
+        "FAILED",
+        "1",
+        "2",
+        "0"
+      ]
+    ],
+    "source_hashes": {
+      "crates/arbos-agentd/src/rpc_child.rs": "6b3462c4a44431c244e382b5c66ed3a6cc9d21fd9e16df210da5aca30846167f",
+      "crates/arbos-agentd/src/harness.rs": "f5340cd0ee2dc10ae6d5246204afeb798fa01dccae61db9042582da9175fb5c0"
+    },
+    "source_unchanged": true,
+    "log_sha256": "fb221d1701a6133f694a9d221bd6cd458261ef01a93a84887131dda8e0cb731e"
+  },
+  "after": {
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-agentd",
+      "rpc_blocked_cleanup_",
+      "--",
+      "--test-threads=2"
+    ],
+    "exit": 0,
+    "seconds": 28.100492125027813,
+    "counts": [
+      [
+        "ok",
+        "4",
+        "0",
+        "0"
+      ]
+    ],
+    "source_hashes": {
+      "crates/arbos-agentd/src/rpc_child.rs": "cc277c8e333ec8e3d705ee71d30f6818b2c9950c8bfb187981ea9bcbb5082b69",
+      "crates/arbos-agentd/src/harness.rs": "8e19c6d511157928040d50f4ca0cb1022f24bcc11741d23a8f17be0153077442"
+    },
+    "source_unchanged": true,
+    "log_sha256": "3425f415ba7bf87e2935e889551a16634c52dfd23121c70b2d2c06eeb09303c8"
+  },
+  "harness": {
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-agentd",
+      "harness::",
+      "--",
+      "--test-threads=2"
+    ],
+    "exit": 0,
+    "seconds": 10.128901749965735,
+    "counts": [
+      [
+        "ok",
+        "33",
+        "0",
+        "0"
+      ]
+    ],
+    "source_hashes": {
+      "crates/arbos-agentd/src/rpc_child.rs": "cc277c8e333ec8e3d705ee71d30f6818b2c9950c8bfb187981ea9bcbb5082b69",
+      "crates/arbos-agentd/src/harness.rs": "8e19c6d511157928040d50f4ca0cb1022f24bcc11741d23a8f17be0153077442"
+    },
+    "source_unchanged": true,
+    "log_sha256": "24187a67ed397f271386ce2a18ed236ae76b5f224ca6fbd884ca5adfffc861ba"
+  },
+  "clippy": {
+    "command": [
+      "cargo",
+      "clippy",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-agentd",
+      "--all-targets",
+      "--",
+      "-D",
+      "warnings"
+    ],
+    "exit": 0,
+    "seconds": 18.398241957998835,
+    "counts": [],
+    "source_hashes": {
+      "crates/arbos-agentd/src/rpc_child.rs": "cc277c8e333ec8e3d705ee71d30f6818b2c9950c8bfb187981ea9bcbb5082b69",
+      "crates/arbos-agentd/src/harness.rs": "8e19c6d511157928040d50f4ca0cb1022f24bcc11741d23a8f17be0153077442"
+    },
+    "source_unchanged": true,
+    "log_sha256": "6cf58d6ad48825cf63061cebbcbab4dd94393c961577f350f60cab07b1ff2bc9"
+  },
+  "check": {
+    "command": [
+      "cargo",
+      "check",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-agentd",
+      "--all-targets"
+    ],
+    "exit": 0,
+    "seconds": 17.25681795796845,
+    "counts": [],
+    "source_hashes": {
+      "crates/arbos-agentd/src/rpc_child.rs": "cc277c8e333ec8e3d705ee71d30f6818b2c9950c8bfb187981ea9bcbb5082b69",
+      "crates/arbos-agentd/src/harness.rs": "8e19c6d511157928040d50f4ca0cb1022f24bcc11741d23a8f17be0153077442"
+    },
+    "source_unchanged": true,
+    "log_sha256": "7cc13644d49a6ed18883deaa5afc211c742d00fbc94ad53588e80d60eafbcd15"
+  },
+  "build": {
+    "command": [
+      "cargo",
+      "build",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-agentd"
+    ],
+    "exit": 0,
+    "seconds": 14.933344250079244,
+    "counts": [],
+    "source_hashes": {
+      "crates/arbos-agentd/src/rpc_child.rs": "cc277c8e333ec8e3d705ee71d30f6818b2c9950c8bfb187981ea9bcbb5082b69",
+      "crates/arbos-agentd/src/harness.rs": "8e19c6d511157928040d50f4ca0cb1022f24bcc11741d23a8f17be0153077442"
+    },
+    "source_unchanged": true,
+    "log_sha256": "26da8c4a85e3c874222ce710d79fea878d359f28eab9e5d3e0fc58e102e44295"
+  },
+  "format": {
+    "exit": 0,
+    "seconds": 0.15284104098100215,
+    "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "linux_v2": {
+    "status": "PENDING separate fresh Linux source/target rebuild + actual4physical cases + focused4RPC cases",
+    "historical_baseline": "original4physical cases:3PASS/1FAIL; immutable older-source fixture result; not final corrected source"
+  }
+}

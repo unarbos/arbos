@@ -1,0 +1,78 @@
+{
+  "unchanged_methods": [
+    {
+      "file": "agent.rs",
+      "method": "pi_ready_for_ms",
+      "sha256": "5ef63a0b07e1beaf5955b1a667b7887177cfa708a8c43b022f36a431f1f94566"
+    },
+    {
+      "file": "agent.rs",
+      "method": "pi_unready_for_ms",
+      "sha256": "3169e70566134cf4ecc8a4dd99e93bb7171abc391411a70a169278ed840a8176"
+    },
+    {
+      "file": "agent.rs",
+      "method": "note_pi_ready",
+      "sha256": "4877b67847c31d95c67545a31ef4b7682bded8c88ee23d4785a1280847738586"
+    },
+    {
+      "file": "agent.rs",
+      "method": "note_pi_not_ready",
+      "sha256": "6bfb318fc87819231e53f6a2bcbe14b7993d13e5c02e923ccfc05194aabbba2f"
+    },
+    {
+      "file": "agent.rs",
+      "method": "next_pi_backoff_ms",
+      "sha256": "6ae3b8b5e537c84bd232f8791f2483e476133a9ca18e413604e97d91205aa92a"
+    },
+    {
+      "file": "agent.rs",
+      "method": "note_pi_proven",
+      "sha256": "e2fd4e52893451777c8ab6c4dced49a8c206d20ad0c24b406be688263c6533ed"
+    },
+    {
+      "file": "agent.rs",
+      "method": "pi_log_tail",
+      "sha256": "197a2a27c72a9f546f5cee9a71bfdff6d2c26b3fb8130bb8edfe212dcb4c777e"
+    },
+    {
+      "file": "agent.rs",
+      "method": "workspace_memory",
+      "sha256": "ad4ebefb05f640ddddd477d642685c8f5c233ebb120ba810e2024a525e69f674"
+    },
+    {
+      "file": "agent.rs",
+      "method": "sample_pi_rss",
+      "sha256": "c0bd53bdbe4219212badff777f8994261abb7a80dc89f5fdf3908c8aa7e37e1d"
+    },
+    {
+      "file": "agent.rs",
+      "method": "pi_rss_for",
+      "sha256": "ef209f55630cae3658ef6506efd64511532ad6d874f805edb6bfd255ede9f762"
+    },
+    {
+      "file": "rpc_child.rs",
+      "method": "spawn",
+      "sha256": "49e4fe16ee3b34a3c8bbd611653c11d2fc4164445621eeaffedba95d6d66a8cd"
+    },
+    {
+      "file": "rpc_child.rs",
+      "method": "call_timeout",
+      "sha256": "41a19b77004f4fac15b8d7bc6742b7f981e5d67d64a30c90595509160c366d0d"
+    },
+    {
+      "file": "rpc_child.rs",
+      "method": "shutdown",
+      "sha256": "1d8b01c54beb0fa9fefab9301a7ee9c1225f3d8187c904222076579b36e8ced3"
+    }
+  ],
+  "duration_call_multisets_equal": {
+    "agent.rs": true,
+    "rpc_child.rs": true
+  },
+  "tokio": "1.53.3 exact root lock",
+  "normal_child_shutdown_seconds": 5,
+  "boot_get_state_seconds": 30,
+  "supervisor_tick_seconds": 2,
+  "no_new_retry_or_grace_constant": true
+}

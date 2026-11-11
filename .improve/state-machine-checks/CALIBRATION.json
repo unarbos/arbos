@@ -1,0 +1,56 @@
+{
+  "worker": {
+    "worker_sha256": "dbae3cf0df16897feb159d9be9a5e72761bb52b4a177d4fd733f8918e2ee9548",
+    "scope": "Physical/configuration values are preserved; changed controller functions are not claimed byte/AST-identical.",
+    "turn_detection_for_exact_ast": true,
+    "agent_speaking_exact_ast": true,
+    "speak_line_exact_ast": true,
+    "idle_loop_exact_ast": true,
+    "usage_loop_exact_ast": true,
+    "kill_word_exact_ast": true,
+    "wait_for_silence_exact_ast": true,
+    "prewarm_exact_ast": true,
+    "goodbye_body_exact_ast": true,
+    "all_existing_module_constants_unchanged": true,
+    "respond_group_whole_function_ast_changed": true,
+    "respond_group_original_prompt_strings_unchanged": true,
+    "respond_group_speech_arguments_unchanged": true,
+    "greet_whole_function_ast_changed": true,
+    "greet_original_prompt_strings_unchanged": true,
+    "greet_speech_arguments_unchanged": true,
+    "human_wait_poll_seconds_preserved": true,
+    "new_cleanup_waits": {
+      "local_resource_wait_for_seconds": 5.0,
+      "owned_task_wait_seconds": 5.0,
+      "session_close_seconds": 5.0,
+      "session_close_was_already_5_seconds": true,
+      "limit": "wait_for requires cooperative SDK cancellation; not an arbitrary hard wall bound. Task drain uses asyncio.wait and records pending ownership."
+    }
+  },
+  "vision": {
+    "method_source_bytes_unchanged": {
+      "_encode": true,
+      "_diff": true,
+      "camera_seconds": true,
+      "_prune": true,
+      "_forget": true,
+      "_delete": true,
+      "summary": true
+    },
+    "all_calibration_constant_source_bytes_unchanged": [
+      "STATIC_DIFF",
+      "VISION_STATIC_EVERY_S",
+      "SCENE_CHANGE_DIFF",
+      "MIN_GAP_S",
+      "THUMB",
+      "LOOK_PHRASES",
+      "SOURCES"
+    ],
+    "vision_source_sha256": "0a32b6df229abbc4c4a379e554776fbfdc309e55d88320683f53aeb45c8ab663"
+  },
+  "preserved_contracts": {
+    "voice/tests/test_updates.py": true,
+    "voice/tests/test_usage_loop.py": true,
+    "runtime_dependencies_unchanged": true
+  }
+}

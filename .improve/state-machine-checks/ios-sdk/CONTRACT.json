@@ -1,0 +1,18 @@
+{
+  "commit": "9d9d6c212",
+  "default_values_removed": 4,
+  "all_other_source_bytes_unchanged": true,
+  "source": {
+    "apps/ios/Arbos/Arbos/UI/MediaViewer.swift": "dc0e592f995b1855817b27f20fda5cf234bffd0730df4f60a62f0cde0bf5e66d",
+    "apps/ios/Arbos/Arbos/UI/MessagePasteboard.swift": "ef9a34f53b369046f44e76134641f13ecc2ba1100baab7f8dde00224318459e2"
+  },
+  "before": {
+    "apps/ios/Arbos/Arbos/UI/MediaViewer.swift": "42b6f4483036bf1763e54e8f7396f16648977e28e3eda2bde9ce2aad90217768",
+    "apps/ios/Arbos/Arbos/UI/MessagePasteboard.swift": "600dfd856ca217e852d1b5c38b1035dceaff3bd56d20cc9d0ab6df0efe0d464e"
+  },
+  "sdk_actual_source": {
+    "apps/ios/Arbos/Arbos/UI/MediaViewer.swift": "dc0e592f995b1855817b27f20fda5cf234bffd0730df4f60a62f0cde0bf5e66d",
+    "apps/ios/Arbos/Arbos/UI/MessagePasteboard.swift": "ef9a34f53b369046f44e76134641f13ecc2ba1100baab7f8dde00224318459e2"
+  },
+  "app_gate_sha256": "9aa454a1dd3993ab92de6e277ffe4a0fe015906b25bfbfc08f62c4cdf3836e88"
+}

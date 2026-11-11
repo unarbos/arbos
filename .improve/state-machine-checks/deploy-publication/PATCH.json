@@ -1,0 +1,20 @@
+{
+  "sha256": "05a535a0de83a19d0f7e0b6c521fdcc490aab1164f9103761cabc0bbd2b5eeee",
+  "bytes": 39758,
+  "files": [
+    "scripts/deploy/deploy-state.sh",
+    "scripts/deploy/arbos-deploy-hook",
+    "scripts/deploy/arbos-deploy-worker",
+    "scripts/feedback/feedback_poller.py",
+    "scripts/deploy/test_deploy_publication.py",
+    "scripts/deploy/tests/deploy_state_bridge.py",
+    "scripts/deploy/tests/check_state_mutants.py",
+    "harness/arbos-pi-ext/deploy-state-laws.test.ts",
+    "docs/deployment-lanes.md"
+  ],
+  "new_public_files": [
+    "scripts/deploy/test_deploy_publication.py"
+  ],
+  "apply_check": true,
+  "base": "frozen H7 core/P4 ee1ee4abd plus unchanged frozen H6 request caller"
+}

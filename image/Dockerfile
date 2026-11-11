@@ -111,6 +111,13 @@ RUN if [ "$WITH_BROWSER" = "1" ]; then \
    && chmod +x /usr/local/bin/agent-browser; \
     fi
 
+# The extension's runtime is shared by every workspace. Key this layer on its manifest,
+# before the per-commit seed copy, so source edits do not reinstall the dependency.
+RUN --mount=type=bind,source=harness/arbos-pi-ext/package.json,target=/tmp/arbos-pi-ext-package.json \
+    EFFECT_VERSION="$(node -e 'const v = require(process.argv[1]).dependencies?.effect; if (!/^\d+\.\d+\.\d+$/.test(v)) throw new Error("arbos-pi-ext requires an exact Effect version"); process.stdout.write(v)' /tmp/arbos-pi-ext-package.json)" \
+ && npm install --prefix /usr/local/lib/arbos/pi-ext-runtime --ignore-scripts --no-package-lock --no-save --no-audit --no-fund "effect@$EFFECT_VERSION" \
+ && npm cache clean --force
+
 # --- Arbos files last, so a code change rebuilds only these thin layers (heavy downloads stay cached)
 COPY image/pi-seed/ /etc/arbos/pi-seed/
 # The extension is copied by a RUN keyed on this build's AGENTD_SHA, from a bind mount of the build
@@ -124,11 +131,13 @@ RUN --mount=type=bind,source=harness/arbos-pi-ext,target=/tmp/arbos-pi-ext \
  && cp -a /tmp/arbos-pi-ext/. /etc/arbos/pi-seed/extensions/arbos-pi-ext/ \
  && rm -rf /etc/arbos/pi-seed/extensions/arbos-pi-ext/node_modules \
  && echo "$AGENTD_SHA" > /etc/arbos/pi-seed/extensions/arbos-pi-ext/.source-sha
-# typebox resolves from pi's own node_modules; link it next to the extension so jiti finds it.
+# Keep runtime package links in the seed: workspace copies preserve links instead of
+# duplicating dependency trees. typebox and pi come from the global pi installation.
 RUN mkdir -p /etc/arbos/pi-seed/extensions/arbos-pi-ext/node_modules \
  && TB="$(dirname "$(find "$(npm root -g)/@earendil-works" -path '*/node_modules/typebox/package.json' | head -1)")" \
  && ln -s "$TB" /etc/arbos/pi-seed/extensions/arbos-pi-ext/node_modules/typebox \
- && ln -s "$(npm root -g)/@earendil-works" /etc/arbos/pi-seed/extensions/arbos-pi-ext/node_modules/@earendil-works
+ && ln -s "$(npm root -g)/@earendil-works" /etc/arbos/pi-seed/extensions/arbos-pi-ext/node_modules/@earendil-works \
+ && ln -s /usr/local/lib/arbos/pi-ext-runtime/node_modules/effect /etc/arbos/pi-seed/extensions/arbos-pi-ext/node_modules/effect
 COPY image/claude-settings.json /etc/arbos/claude-seed/settings.json
 COPY image/claude-mcp.json      /etc/arbos/claude-mcp.json
 # --- D64 hooks: deny-list + audit shell wrapper (Prime bash()), Claude Code hook scripts, Prime skills

@@ -169,6 +169,35 @@ final class SessionRoomTests: XCTestCase {
         room.stop()
     }
 
+    func testTerminal403And404IgnoreLateOpenCallbacks() async throws {
+        for status in [403, 404] {
+            let sockets = SocketFactory()
+            let room = SessionRoom(
+                projectId: "people", key: "gone", roomChat: "gone",
+                doc: CoreChatDoc(key: "gone"),
+                roomURL: { _ in URL(string: "wss://example.test/r")! },
+                makeSocket: { sockets.make($0) },
+                fetchCheckpoint: { _ in (0, Data()) },
+                deviceId: { "dev:me" }
+            )
+            room.start()
+            try await waitUntil { sockets.current != nil }
+            let sock = try XCTUnwrap(sockets.current)
+            sock.failReceive(httpStatus: status)
+            try await waitUntil { room.lastError != nil }
+            // A delegate callback already queued for the retired socket can still run.
+            sock.fireOpen()
+            for _ in 0..<20 {
+                await Task.yield()
+                try await Task.sleep(nanoseconds: 1_000_000)
+            }
+            XCTAssertTrue(sock.sent.isEmpty, "terminal HTTP \(status) must not reopen HELLO/presence")
+            room.start()
+            XCTAssertEqual(sockets.sockets.count, 1)
+            room.stop()
+        }
+    }
+
     func testPlainReceiveErrorStillReconnects() async throws {
         let sockets = SocketFactory()
         let room = SessionRoom(

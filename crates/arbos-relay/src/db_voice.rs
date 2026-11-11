@@ -130,8 +130,9 @@ pub struct VoiceCallRow {
     pub ended_at: Option<i64>,
     pub updated_at: i64,
     pub usage: VoiceUsage,
+    /// Cumulative reported dollars settled, including policy refusals/clamps; ledger debits may be lower.
     pub usd_charged: f64,
-    /// The part of `usd_charged` that went to the ledger as `call:<id>#vision`.
+    /// The vision portion of reported settlement; its ledger entry may be clamped or refused.
     pub vision_charged: f64,
 }
 
@@ -163,65 +164,118 @@ pub struct VoiceAgentSettings {
 
 pub const CHATTINESS_LEVELS: [&str; 3] = ["quiet", "balanced", "chatty"];
 
+fn voice_call_on(
+    c: &rusqlite::Connection,
+    call_id: &str,
+    project_id: &str,
+) -> rusqlite::Result<Option<VoiceCallRow>> {
+    c.query_row(
+        &format!("SELECT {VOICE_COLS} FROM voice_calls WHERE call_id = ?1 AND project_id = ?2"),
+        params![call_id, project_id],
+        voice_from_row,
+    )
+    .optional()
+}
+
+fn voice_usage_on(
+    c: &rusqlite::Connection,
+    call_id: &str,
+    project_id: &str,
+    payer: &str,
+    started_at: i64,
+    u: &VoiceUsage,
+) -> rusqlite::Result<Option<VoiceCallRow>> {
+    let now = now_ms();
+    c.execute(
+    "INSERT INTO voice_calls(call_id, project_id, payer, started_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)
+     ON CONFLICT(call_id, project_id) DO NOTHING",
+    params![call_id, project_id, payer, started_at, now],
+)?;
+    let updated = c.execute(
+    "UPDATE voice_calls SET mode = COALESCE(?3, mode), updated_at = ?4,
+       seconds = MAX(seconds, ?5), audio_in_tokens = MAX(audio_in_tokens, ?6), audio_out_tokens = MAX(audio_out_tokens, ?7),
+       text_in_tokens = MAX(text_in_tokens, ?8), text_out_tokens = MAX(text_out_tokens, ?9), cached_tokens = MAX(cached_tokens, ?10),
+       stt_seconds = MAX(stt_seconds, ?11), decisions = MAX(decisions, ?12), tool_calls = MAX(tool_calls, ?13),
+       turns_spoken = MAX(turns_spoken, ?14), usd = MAX(usd, ?15),
+       ttfa_ms_p50 = COALESCE(?16, ttfa_ms_p50), ttfa_ms_p95 = COALESCE(?17, ttfa_ms_p95),
+       barge_ms_p50 = COALESCE(?18, barge_ms_p50), barge_ms_max = COALESCE(?19, barge_ms_max),
+       ended_at = CASE WHEN ?20 THEN COALESCE(ended_at, ?4) ELSE ended_at END,
+       stop_reason = COALESCE(?21, stop_reason),
+       image_in_tokens = MAX(image_in_tokens, ?22), frames = MAX(frames, ?23), looks = MAX(looks, ?24),
+       vision_seconds = MAX(vision_seconds, ?25), vision_usd = MAX(vision_usd, ?26)
+     WHERE call_id = ?1 AND project_id = ?2",
+    params![
+        call_id, project_id, u.mode, now, u.seconds, u.audio_in_tokens, u.audio_out_tokens,
+        u.text_in_tokens, u.text_out_tokens, u.cached_tokens, u.stt_seconds, u.decisions,
+        u.tool_calls, u.turns_spoken, u.usd, u.ttfa_ms_p50, u.ttfa_ms_p95, u.barge_ms_p50,
+        u.barge_ms_max, u.ended, u.stop_reason, u.image_in_tokens, u.frames, u.looks,
+        u.vision_seconds, u.vision_usd
+    ],
+)?;
+    if updated != 1 {
+        return Err(rusqlite::Error::QueryReturnedNoRows);
+    }
+    voice_call_on(c, call_id, project_id)
+}
+
+pub(crate) struct VoiceBilling {
+    pub metered: bool,
+    pub legacy: crate::db_accounts::LegacyCreditDefaults,
+}
+
+/// One committed cumulative settlement; reported totals may exceed clamped ledger dollars.
+pub(crate) struct VoiceSettlement {
+    pub reported_total: f64,
+    pub reported_delta: f64,
+    pub charges: Vec<(f64, crate::db_accounts::PostfactCharge)>,
+}
+
 impl Db {
-    /// The usage row for (call, agent); created on the first report.
-    pub fn voice_usage_upsert(
+    /// Observe cumulative usage, apply the existing postfact debit policy, and settle once.
+    pub(crate) fn settle_voice_usage(
         &self,
         call_id: &str,
         project_id: &str,
         payer: &str,
         started_at: i64,
-        u: &VoiceUsage,
-    ) -> Result<VoiceCallRow> {
-        let now = now_ms();
+        usage: &VoiceUsage,
+        billing: &VoiceBilling,
+    ) -> Result<VoiceSettlement> {
         self.with(|c| {
-            c.execute(
-                "INSERT INTO voice_calls(call_id, project_id, payer, started_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT(call_id, project_id) DO NOTHING",
-                params![call_id, project_id, payer, started_at, now],
-            )?;
-            c.execute(
-                "UPDATE voice_calls SET mode = COALESCE(?3, mode), updated_at = ?4,
-                   seconds = MAX(seconds, ?5), audio_in_tokens = MAX(audio_in_tokens, ?6), audio_out_tokens = MAX(audio_out_tokens, ?7),
-                   text_in_tokens = MAX(text_in_tokens, ?8), text_out_tokens = MAX(text_out_tokens, ?9), cached_tokens = MAX(cached_tokens, ?10),
-                   stt_seconds = MAX(stt_seconds, ?11), decisions = MAX(decisions, ?12), tool_calls = MAX(tool_calls, ?13),
-                   turns_spoken = MAX(turns_spoken, ?14), usd = MAX(usd, ?15),
-                   ttfa_ms_p50 = COALESCE(?16, ttfa_ms_p50), ttfa_ms_p95 = COALESCE(?17, ttfa_ms_p95),
-                   barge_ms_p50 = COALESCE(?18, barge_ms_p50), barge_ms_max = COALESCE(?19, barge_ms_max),
-                   ended_at = CASE WHEN ?20 THEN COALESCE(ended_at, ?4) ELSE ended_at END,
-                   stop_reason = COALESCE(?21, stop_reason),
-                   image_in_tokens = MAX(image_in_tokens, ?22), frames = MAX(frames, ?23), looks = MAX(looks, ?24),
-                   vision_seconds = MAX(vision_seconds, ?25), vision_usd = MAX(vision_usd, ?26)
-                 WHERE call_id = ?1 AND project_id = ?2",
-                params![
-                    call_id, project_id, u.mode, now, u.seconds, u.audio_in_tokens, u.audio_out_tokens,
-                    u.text_in_tokens, u.text_out_tokens, u.cached_tokens, u.stt_seconds, u.decisions,
-                    u.tool_calls, u.turns_spoken, u.usd, u.ttfa_ms_p50, u.ttfa_ms_p95, u.barge_ms_p50,
-                    u.barge_ms_max, u.ended, u.stop_reason, u.image_in_tokens, u.frames, u.looks,
-                    u.vision_seconds, u.vision_usd
-                ],
-            )?;
-            Ok(())
-        })?;
-        self.voice_call(call_id, project_id)?
-            .ok_or_else(|| anyhow::anyhow!("voice usage row vanished"))
-    }
-
-    /// Record that `usd` more was debited for this (call, agent), `vision_usd` of it as vision.
-    pub fn voice_charged(
-        &self,
-        call_id: &str,
-        project_id: &str,
-        usd: f64,
-        vision_usd: f64,
-    ) -> Result<()> {
-        self.with(|c| {
-            c.execute(
+            let transaction = rusqlite::Transaction::new_unchecked(c, rusqlite::TransactionBehavior::Immediate)?;
+            let row = voice_usage_on(&transaction, call_id, project_id, payer, started_at, usage)?
+                .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+            let delta = row.usage.usd - row.usd_charged;
+            if delta <= 0.000_001 {
+                transaction.commit()?;
+                return Ok(VoiceSettlement { reported_total: row.usd_charged, reported_delta: 0.0, charges: Vec::new() });
+            }
+            let vision_delta = (row.usage.vision_usd - row.vision_charged).clamp(0.0, delta);
+            let voice_delta = delta - vision_delta;
+            let mut charges = Vec::new();
+            let reference = format!("call:{call_id}");
+            // Preserve voice-before-vision and the strict per-part threshold, including refusals.
+            if billing.metered {
+                if voice_delta > 0.000_001 {
+                    if let Some(charged) = crate::db_accounts::charge_postfact_on(&transaction, payer, voice_delta, "voice", Some(&reference), &billing.legacy)? {
+                        charges.push((voice_delta, charged));
+                    }
+                }
+                if vision_delta > 0.000_001 {
+                    let vision_ref = format!("{reference}#vision");
+                    if let Some(charged) = crate::db_accounts::charge_postfact_on(&transaction, payer, vision_delta, "voice", Some(&vision_ref), &billing.legacy)? {
+                        charges.push((vision_delta, charged));
+                    }
+                }
+            }
+            let updated = transaction.execute(
                 "UPDATE voice_calls SET usd_charged = usd_charged + ?3, vision_charged = vision_charged + ?4
                  WHERE call_id = ?1 AND project_id = ?2",
-                params![call_id, project_id, usd, vision_usd],
-            )
-            .map(|_| ())
+                params![call_id, project_id, delta, vision_delta],
+            )?;
+            if updated != 1 { return Err(rusqlite::Error::QueryReturnedNoRows); }
+            transaction.commit()?;
+            Ok(VoiceSettlement { reported_total: row.usd_charged + delta, reported_delta: delta, charges })
         })
     }
 
@@ -238,16 +292,7 @@ impl Db {
     }
 
     pub fn voice_call(&self, call_id: &str, project_id: &str) -> Result<Option<VoiceCallRow>> {
-        self.with(|c| {
-            c.query_row(
-                &format!(
-                    "SELECT {VOICE_COLS} FROM voice_calls WHERE call_id = ?1 AND project_id = ?2"
-                ),
-                params![call_id, project_id],
-                voice_from_row,
-            )
-            .optional()
-        })
+        self.with(|c| voice_call_on(c, call_id, project_id))
     }
 
     /// Every agent's usage row of one call.

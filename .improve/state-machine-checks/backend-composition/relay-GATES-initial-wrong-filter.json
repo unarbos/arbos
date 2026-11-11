@@ -1,0 +1,77 @@
+{
+  "source_manifest": "SOURCE.json",
+  "packages_cleaned": 12,
+  "network": "validated loopback-only Seatbelt",
+  "gates": [
+    {
+      "label": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-relay",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": 0,
+      "seconds": 24.93679449998308,
+      "counts": [],
+      "expected": null,
+      "source_unchanged": true
+    },
+    {
+      "label": "tests-0",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-relay",
+        "box_row_tests::",
+        "--",
+        "--test-threads=2"
+      ],
+      "exit_code": 0,
+      "seconds": 39.609225249965675,
+      "counts": [
+        [
+          13,
+          0,
+          0
+        ]
+      ],
+      "expected": 13,
+      "source_unchanged": true
+    },
+    {
+      "label": "tests-1",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-relay",
+        "voice::tests::",
+        "--",
+        "--test-threads=2"
+      ],
+      "exit_code": 0,
+      "seconds": 0.3966994999209419,
+      "counts": [
+        [
+          0,
+          0,
+          0
+        ]
+      ],
+      "expected": 24,
+      "source_unchanged": true
+    }
+  ]
+}

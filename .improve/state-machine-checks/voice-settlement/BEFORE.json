@@ -1,0 +1,145 @@
+{
+  "before": {
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-relay",
+      "voice::charge_receipt_regressions::",
+      "--",
+      "--test-threads=2"
+    ],
+    "exit": 101,
+    "seconds": 37.69155712495558,
+    "results": [
+      [
+        "FAILED",
+        "2",
+        "2",
+        "0"
+      ]
+    ],
+    "source_sha256": "815918e4c250305ffd3edf535c3fe86f1e05fb727bee2a92541bf890ccca44a7",
+    "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+    "scope": "actual pinned55ea source plus synthetic tests; unique target/workspace artifacts cleaned; all network denied; fresh HOME and no inherited opt-ins",
+    "expected_tests": 4,
+    "count_matches": true
+  },
+  "concurrency-before": {
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-relay",
+      "concurrent_cumulative_reports_have_one_durable_settlement",
+      "--",
+      "--test-threads=1"
+    ],
+    "exit": 101,
+    "seconds": 0.702309666085057,
+    "results": [
+      [
+        "FAILED",
+        "0",
+        "1",
+        "0"
+      ]
+    ],
+    "source_sha256": "717c35d8f3ee5b1439b2e25a22209e63f804afc3298cc7ee0cb2ceeda15f378c",
+    "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+    "scope": "actual pinned55ea source plus synthetic tests; unique target/workspace artifacts cleaned; all network denied; fresh HOME and no inherited opt-ins",
+    "expected_tests": 1,
+    "count_matches": true
+  },
+  "zero-before": {
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-relay",
+      "voice::charge_receipt_regressions::ignored_",
+      "--",
+      "--test-threads=2"
+    ],
+    "exit": 101,
+    "seconds": 24.71782154205721,
+    "results": [
+      [
+        "FAILED",
+        "0",
+        "2",
+        "0"
+      ]
+    ],
+    "source_sha256": "e4b58f4e90b53945107216a326771f9f42b96cfaf7518739370c153f3aac3e34",
+    "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+    "scope": "actual pinned55ea source plus synthetic tests; unique target/workspace artifacts cleaned; all network denied; fresh HOME and no inherited opt-ins",
+    "expected_tests": 2,
+    "count_matches": true
+  },
+  "positives-before": {
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-relay",
+      "voice::charge_receipt_regressions::preserved_",
+      "--",
+      "--test-threads=2"
+    ],
+    "exit": 0,
+    "seconds": 32.2110729169799,
+    "results": [
+      [
+        "ok",
+        "6",
+        "0",
+        "0"
+      ]
+    ],
+    "source_sha256": "9120b7b47005e526c426d7485d8e4bdd15f5cce21703188de290d69913dbbe65",
+    "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+    "scope": "actual pinned55ea source plus synthetic tests; unique target/workspace artifacts cleaned; all network denied; fresh HOME and no inherited opt-ins",
+    "expected_tests": 6,
+    "count_matches": true
+  },
+  "required_metadata_candidate_before": {
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-relay",
+      "voice::charge_receipt_regressions::skipped_legacy_",
+      "--",
+      "--test-threads=2",
+      "--nocapture"
+    ],
+    "exit_code": 101,
+    "seconds": 39.26401987497229,
+    "counts": [
+      [
+        0,
+        2,
+        0
+      ]
+    ],
+    "source_sha256": {
+      "crates/arbos-relay/src/db_accounts.rs": "6c34c3f3920fd0f844f8f01c4aeb706d052c7546c3acae5d70e6320ee300de34",
+      "crates/arbos-relay/src/db_voice.rs": "c90f55baeb9a4fa90f814164c87a50804713114f2536f70ddbc44be597be3846",
+      "crates/arbos-relay/src/credits.rs": "4835284e4b5c6bd355fbda94277833dd32746d75f62f5970cc2ecaa111eaf2ae",
+      "crates/arbos-relay/src/voice.rs": "14d4c7838c7dd058b961c082f95036ca73ac807b432f1460e098d9fe050f4216"
+    },
+    "workspace_packages_cleaned": 12,
+    "scope": "two additional actual-helper required-metadata SQL-ignore regressions against frozen H11 candidate; not a claim of original base execution"
+  }
+}

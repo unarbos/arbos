@@ -1,0 +1,466 @@
+{
+  "before_copy": {
+    "sources": {
+      "apps/ios/Arbos/Arbos/UI/MediaViewer.swift": "18f2ea2a36ccc5128865bd213346db6461e1a087cade07bacd9be18f6df9e935",
+      "apps/ios/Arbos/Arbos/UI/MessagePasteboard.swift": "17ce8f83ef6436247f8d56687ec380808d09a7dd571ed3bb11db7678f784350d",
+      "apps/ios/Arbos/Arbos/UI/LibraryList.swift": "0247b5599d88076d7464cd91e8b4d21aadc8f44182b3b0f2ef792854c7ed3ffb",
+      "apps/ios/Arbos/Arbos/UI/ChatView.swift": "3b274c383874f8c57258523381dea026afbe36d4eebc82ab2e363fc739b77d4c",
+      "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f",
+      "apps/ios/Arbos/Arbos/Store/AppModel.swift": "7c944e04f8483f0d5e0c19a26d9414f8a50cba79462b08bdae3c704af91e2b0c"
+    },
+    "compile_exit": 0,
+    "fixture_sha256": "b7c86e96834681f5e3bb2b3749ec1ecb9ce2804ac556d882011ff3a46103ec57",
+    "exit_code": 1,
+    "results": {
+      "cases": {
+        "current-download-failure-note-control": true,
+        "current-library-copy-control": true,
+        "current-viewer-copy-control": true,
+        "paused-library-A-no-post-retire-clipboard-or-notice": false,
+        "paused-viewer-A-no-post-retire-clipboard-or-notice": false,
+        "queued-library-render-A-never-admits-B": false,
+        "queued-viewer-A-never-fetches-or-pastes-B": false,
+        "retired-local-attachment-no-B-notice": false
+      },
+      "failed": 5,
+      "passed": 3,
+      "total": 8
+    },
+    "seconds": 1.6679047499783337
+  },
+  "before_media": {
+    "sources": {
+      "apps/ios/Arbos/Arbos/UI/MediaViewer.swift": "18f2ea2a36ccc5128865bd213346db6461e1a087cade07bacd9be18f6df9e935",
+      "apps/ios/Arbos/Arbos/UI/ChatView.swift": "3b274c383874f8c57258523381dea026afbe36d4eebc82ab2e363fc739b77d4c",
+      "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f"
+    },
+    "compile_exit": 0,
+    "fixture_sha256": "ff89824c4ba7923b8d31a6374a4b1d5cd170a4e1fb2719caacd66667ba69ef51",
+    "exit_code": 1,
+    "results": {
+      "cases": {
+        "anonymous-private-blob-denied": false,
+        "anonymous-public-picture-control": true,
+        "current-denied-photos-share-control": true,
+        "current-file-open-control": true,
+        "current-file-share-control": true,
+        "current-fixture-picture-control": true,
+        "current-photo-save-control": true,
+        "current-picture-control": true,
+        "current-video-control": true,
+        "issued-photos-effect-not-recalled-but-no-stale-toast": false,
+        "queued-cached-preview-does-not-restore-after-retire": false,
+        "queued-file-refuses-replacement": false,
+        "queued-picture-refuses-replacement": false,
+        "queued-save-refuses-replacement": false,
+        "queued-video-refuses-replacement": false,
+        "retired-fetch-cannot-request-photos-or-share": false,
+        "retired-file-no-temp-preview-publication": false,
+        "retired-permission-cannot-save-or-share": false,
+        "retired-picture-no-image-publication": false,
+        "retired-video-no-temp-player-publication": false
+      },
+      "failed": 12,
+      "passed": 8,
+      "total": 20
+    },
+    "seconds": 1.8203088749432936
+  },
+  "before_constructor": {
+    "sources": {
+      "apps/ios/Arbos/Arbos/UI/MediaViewer.swift": "18f2ea2a36ccc5128865bd213346db6461e1a087cade07bacd9be18f6df9e935",
+      "apps/ios/Arbos/Arbos/UI/ChatView.swift": "3b274c383874f8c57258523381dea026afbe36d4eebc82ab2e363fc739b77d4c",
+      "apps/ios/Arbos/Arbos/UI/Transcript.swift": "60012311b2b41dc5583bed0fbf620ad3e5e7d524806d161fbf745805181f5aa8",
+      "apps/ios/Arbos/Arbos/UI/FunPicker.swift": "a0e79f32d5fa9c8ea82e46c58b4bb33b520742265061fe375f097618484e4e26",
+      "apps/ios/Arbos/Arbos/UI/LibraryList.swift": "0247b5599d88076d7464cd91e8b4d21aadc8f44182b3b0f2ef792854c7ed3ffb",
+      "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f"
+    },
+    "fixture_sha256": "6fd1676ac2bf84da648a25602b137cbdceb89623bcd7fcf751d16faa025ca8c4",
+    "compile_exit": 0,
+    "exit_code": 1,
+    "results": {
+      "cases": {
+        "file-constructor-carries-rendered-A-not-B": false,
+        "forward-sheet-carries-rendered-A-not-B": false,
+        "image-constructor-carries-rendered-A-not-B": false,
+        "library-row-carries-rendered-day-origin": false,
+        "preview-passes-origin-to-blob-image": false,
+        "rig-constructor-carries-rendered-A-not-B": false,
+        "sticker-constructor-carries-rendered-A-not-B": false,
+        "thumb-passes-origin-to-blob-image": false
+      },
+      "failed": 8,
+      "passed": 0,
+      "total": 8
+    },
+    "seconds": 1.4826166670536622
+  },
+  "final_copy": {
+    "sources": {
+      "apps/ios/Arbos/Arbos/UI/MediaViewer.swift": "42b6f4483036bf1763e54e8f7396f16648977e28e3eda2bde9ce2aad90217768",
+      "apps/ios/Arbos/Arbos/UI/MessagePasteboard.swift": "600dfd856ca217e852d1b5c38b1035dceaff3bd56d20cc9d0ab6df0efe0d464e",
+      "apps/ios/Arbos/Arbos/UI/LibraryList.swift": "b56c88fefcb51654b14c04d9c7cb4e35161c73057d5757f446f7af319647fd69",
+      "apps/ios/Arbos/Arbos/UI/ChatView.swift": "cebc573edc37875a5740cef582ad2ecace19551b1852e22bb66e30b525c7cccc",
+      "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f",
+      "apps/ios/Arbos/Arbos/Store/AppModel.swift": "7c944e04f8483f0d5e0c19a26d9414f8a50cba79462b08bdae3c704af91e2b0c"
+    },
+    "compile_exit": 0,
+    "fixture_sha256": "df0def6d669636935c1075af25f09757dfa6b0c8368d1dd5aec28a453cb2b8e7",
+    "exit_code": 0,
+    "results": {
+      "cases": {
+        "current-download-failure-note-control": true,
+        "current-library-copy-control": true,
+        "current-viewer-copy-control": true,
+        "paused-library-A-no-post-retire-clipboard-or-notice": true,
+        "paused-viewer-A-no-post-retire-clipboard-or-notice": true,
+        "queued-library-render-A-never-admits-B": true,
+        "queued-viewer-A-never-fetches-or-pastes-B": true,
+        "retired-local-attachment-no-B-notice": true
+      },
+      "failed": 0,
+      "passed": 8,
+      "total": 8
+    },
+    "seconds": 1.9961582499090582
+  },
+  "final_media": {
+    "sources": {
+      "apps/ios/Arbos/Arbos/UI/MediaViewer.swift": "42b6f4483036bf1763e54e8f7396f16648977e28e3eda2bde9ce2aad90217768",
+      "apps/ios/Arbos/Arbos/UI/ChatView.swift": "cebc573edc37875a5740cef582ad2ecace19551b1852e22bb66e30b525c7cccc",
+      "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f"
+    },
+    "compile_exit": 0,
+    "fixture_sha256": "d61c120dc107cf7fed5b094a1a8933be6669fd6de4383550f61698fc9766a247",
+    "exit_code": 0,
+    "results": {
+      "cases": {
+        "anonymous-private-blob-denied": true,
+        "anonymous-public-picture-control": true,
+        "current-denied-photos-share-control": true,
+        "current-file-open-control": true,
+        "current-file-share-control": true,
+        "current-fixture-picture-control": true,
+        "current-photo-save-control": true,
+        "current-picture-control": true,
+        "current-video-control": true,
+        "issued-photos-effect-not-recalled-but-no-stale-toast": true,
+        "queued-cached-preview-does-not-restore-after-retire": true,
+        "queued-file-refuses-replacement": true,
+        "queued-picture-refuses-replacement": true,
+        "queued-save-refuses-replacement": true,
+        "queued-video-refuses-replacement": true,
+        "retired-fetch-cannot-request-photos-or-share": true,
+        "retired-file-no-temp-preview-publication": true,
+        "retired-permission-cannot-save-or-share": true,
+        "retired-picture-no-image-publication": true,
+        "retired-video-no-temp-player-publication": true
+      },
+      "failed": 0,
+      "passed": 20,
+      "total": 20
+    },
+    "seconds": 1.6851345000322908
+  },
+  "final_constructor": {
+    "sources": {
+      "apps/ios/Arbos/Arbos/UI/MediaViewer.swift": "42b6f4483036bf1763e54e8f7396f16648977e28e3eda2bde9ce2aad90217768",
+      "apps/ios/Arbos/Arbos/UI/ChatView.swift": "cebc573edc37875a5740cef582ad2ecace19551b1852e22bb66e30b525c7cccc",
+      "apps/ios/Arbos/Arbos/UI/Transcript.swift": "3bc3fbcb157580660fda9ccfc60c92c65d87d4c97e4ba3569c6442996b480399",
+      "apps/ios/Arbos/Arbos/UI/FunPicker.swift": "ac79b9632d0b9dd20b5fec87f30da04ccd29ff3ecd42b0f6809508728e4b6c45",
+      "apps/ios/Arbos/Arbos/UI/LibraryList.swift": "b56c88fefcb51654b14c04d9c7cb4e35161c73057d5757f446f7af319647fd69",
+      "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f"
+    },
+    "fixture_sha256": "12c498d4ecb1e555bab88c790c0d3104927855eca77e8ce5a292a1f51631a849",
+    "compile_exit": 0,
+    "exit_code": 0,
+    "results": {
+      "cases": {
+        "file-constructor-carries-rendered-A-not-B": true,
+        "forward-sheet-carries-rendered-A-not-B": true,
+        "image-constructor-carries-rendered-A-not-B": true,
+        "library-row-carries-rendered-day-origin": true,
+        "preview-passes-origin-to-blob-image": true,
+        "rig-constructor-carries-rendered-A-not-B": true,
+        "sticker-constructor-carries-rendered-A-not-B": true,
+        "thumb-passes-origin-to-blob-image": true
+      },
+      "failed": 0,
+      "passed": 8,
+      "total": 8
+    },
+    "seconds": 1.8345970419468358
+  },
+  "final_origin": {
+    "sources": {
+      "apps/ios/Arbos/Arbos/UI/MediaViewer.swift": "42b6f4483036bf1763e54e8f7396f16648977e28e3eda2bde9ce2aad90217768",
+      "apps/ios/Arbos/Arbos/UI/ChatView.swift": "cebc573edc37875a5740cef582ad2ecace19551b1852e22bb66e30b525c7cccc",
+      "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f"
+    },
+    "fixture_sha256": "f0a250c20eefe102530b3680436137f77f17a443f9274e10f6cde87fae60ae71",
+    "compile_exit": 0,
+    "exit_code": 0,
+    "results": {
+      "cases": {
+        "anonymous-origin-retires-with-lifetime": true,
+        "anonymous-public-read-zero-private-authority": true,
+        "cancelled-task-cannot-read-or-act": true,
+        "current-private-read-and-actions": true,
+        "explicit-unavailable-chat-never-falls-back": true,
+        "fixture-mode-exit-revokes-receipt": true,
+        "fixture-private-control": true,
+        "old-account-ticket-cannot-read-or-act": true,
+        "public-origin-bound-to-model-instance": true,
+        "public-origin-not-promoted-by-credential-install": true,
+        "same-owner-receipt-stable-no-API-factory": true,
+        "supplied-old-chat-never-falls-back-to-B": true
+      },
+      "failed": 0,
+      "passed": 12,
+      "total": 12
+    },
+    "seconds": 0.65465708298143
+  },
+  "final_total": 80,
+  "semantic_before": {
+    "passed": 18,
+    "failed": 24,
+    "total": 42
+  },
+  "origin_baseline": "not applicable: new predicate",
+  "constructor_before_scope": "separate exact-constructor propagation check, not an additional HTTP/SDK behavior claim",
+  "mutants": {
+    "sources": {
+      "apps/ios/Arbos/Arbos/UI/MediaViewer.swift": "42b6f4483036bf1763e54e8f7396f16648977e28e3eda2bde9ce2aad90217768",
+      "apps/ios/Arbos/Arbos/UI/MessagePasteboard.swift": "600dfd856ca217e852d1b5c38b1035dceaff3bd56d20cc9d0ab6df0efe0d464e",
+      "apps/ios/Arbos/Arbos/UI/LibraryList.swift": "b56c88fefcb51654b14c04d9c7cb4e35161c73057d5757f446f7af319647fd69",
+      "apps/ios/Arbos/Arbos/UI/ChatView.swift": "cebc573edc37875a5740cef582ad2ecace19551b1852e22bb66e30b525c7cccc",
+      "apps/ios/Arbos/Arbos/UI/LinkPreviewCard.swift": "af175a27584ff0a90200206cd4f6909a46c0dae42853611092350c2d58461a11",
+      "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f",
+      "apps/ios/Arbos/Arbos/Store/AppModel.swift": "7c944e04f8483f0d5e0c19a26d9414f8a50cba79462b08bdae3c704af91e2b0c"
+    },
+    "mutants": [
+      {
+        "name": "copy-predicate-discarded",
+        "mutation_count": 1,
+        "detected": true,
+        "same_deterministic_replay": true,
+        "results": {
+          "cases": {
+            "current-download-failure-note-control": true,
+            "current-library-copy-control": true,
+            "current-viewer-copy-control": true,
+            "paused-library-A-no-post-retire-clipboard-or-notice": false,
+            "paused-viewer-A-no-post-retire-clipboard-or-notice": false,
+            "queued-library-render-A-never-admits-B": true,
+            "queued-viewer-A-never-fetches-or-pastes-B": true,
+            "retired-local-attachment-no-B-notice": true
+          },
+          "failed": 2,
+          "passed": 6,
+          "total": 8
+        }
+      },
+      {
+        "name": "photos-permission-owner-check-removed",
+        "mutation_count": 1,
+        "detected": true,
+        "same_deterministic_replay": true,
+        "results": {
+          "cases": {
+            "anonymous-private-blob-denied": true,
+            "anonymous-public-picture-control": true,
+            "current-denied-photos-share-control": true,
+            "current-file-open-control": true,
+            "current-file-share-control": true,
+            "current-fixture-picture-control": true,
+            "current-photo-save-control": true,
+            "current-picture-control": true,
+            "current-video-control": true,
+            "issued-photos-effect-not-recalled-but-no-stale-toast": true,
+            "queued-cached-preview-does-not-restore-after-retire": true,
+            "queued-file-refuses-replacement": true,
+            "queued-picture-refuses-replacement": true,
+            "queued-save-refuses-replacement": true,
+            "queued-video-refuses-replacement": true,
+            "retired-fetch-cannot-request-photos-or-share": true,
+            "retired-file-no-temp-preview-publication": true,
+            "retired-permission-cannot-save-or-share": false,
+            "retired-picture-no-image-publication": true,
+            "retired-video-no-temp-player-publication": true
+          },
+          "failed": 1,
+          "passed": 19,
+          "total": 20
+        }
+      },
+      {
+        "name": "link-icon-publication-check-removed",
+        "mutation_count": 1,
+        "detected": true,
+        "same_deterministic_replay": true,
+        "results": {
+          "cases": {
+            "brand-skips-icon-control": true,
+            "cancelled-before-admission-no-fetch": true,
+            "current-icon-failure-still-loads-image": true,
+            "current-sequential-icon-and-image-control": true,
+            "empty-slot-no-private-fetch-control": true,
+            "queued-old-card-cannot-admit-B-icon-or-image": true,
+            "retired-icon-no-paint-or-second-B-image": false,
+            "retired-image-no-late-paint": true
+          },
+          "failed": 1,
+          "passed": 7,
+          "total": 8
+        }
+      }
+    ],
+    "detected": 3,
+    "total": 3,
+    "seconds": 5.363291208981536
+  },
+  "link_before": {
+    "sources": {
+      "apps/ios/Arbos/Arbos/UI/LinkPreviewCard.swift": "4b263a39bef088f8c790d50ff03a41bb97a7653183e5c5825483882ba2702a26",
+      "apps/ios/Arbos/Arbos/UI/MediaViewer.swift": "42b6f4483036bf1763e54e8f7396f16648977e28e3eda2bde9ce2aad90217768",
+      "apps/ios/Arbos/Arbos/UI/ChatView.swift": "cebc573edc37875a5740cef582ad2ecace19551b1852e22bb66e30b525c7cccc",
+      "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f"
+    },
+    "fixture_sha256": "e1ece4b893d3389e9e802d63b023c2dfb318abdee27b327ce4738805df17ccff",
+    "compile_exit": 0,
+    "exit_code": 1,
+    "results": {
+      "cases": {
+        "brand-skips-icon-control": true,
+        "cancelled-before-admission-no-fetch": false,
+        "current-icon-failure-still-loads-image": true,
+        "current-sequential-icon-and-image-control": true,
+        "empty-slot-no-private-fetch-control": true,
+        "queued-old-card-cannot-admit-B-icon-or-image": false,
+        "retired-icon-no-paint-or-second-B-image": false,
+        "retired-image-no-late-paint": false
+      },
+      "failed": 4,
+      "passed": 4,
+      "total": 8
+    },
+    "seconds": 0.9819230419816449
+  },
+  "link_after": {
+    "sources": {
+      "apps/ios/Arbos/Arbos/UI/LinkPreviewCard.swift": "af175a27584ff0a90200206cd4f6909a46c0dae42853611092350c2d58461a11",
+      "apps/ios/Arbos/Arbos/UI/MediaViewer.swift": "42b6f4483036bf1763e54e8f7396f16648977e28e3eda2bde9ce2aad90217768",
+      "apps/ios/Arbos/Arbos/UI/ChatView.swift": "cebc573edc37875a5740cef582ad2ecace19551b1852e22bb66e30b525c7cccc",
+      "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f"
+    },
+    "fixture_sha256": "c24ea0a5fc3db76ccdbdffc764da2f1031657ea05fe7b5ae3d5e57ff71739a2f",
+    "compile_exit": 0,
+    "exit_code": 0,
+    "results": {
+      "cases": {
+        "brand-skips-icon-control": true,
+        "cancelled-before-admission-no-fetch": true,
+        "current-icon-failure-still-loads-image": true,
+        "current-sequential-icon-and-image-control": true,
+        "empty-slot-no-private-fetch-control": true,
+        "queued-old-card-cannot-admit-B-icon-or-image": true,
+        "retired-icon-no-paint-or-second-B-image": true,
+        "retired-image-no-late-paint": true
+      },
+      "failed": 0,
+      "passed": 8,
+      "total": 8
+    },
+    "seconds": 1.22271662496496
+  },
+  "link_bindings_after": {
+    "sources": {
+      "apps/ios/Arbos/Arbos/UI/Transcript.swift": "a5346472e97eef520e3c7f57b033009940471f0d54a7aae43238b811328530a0",
+      "apps/ios/Arbos/Arbos/UI/MediaViewer.swift": "42b6f4483036bf1763e54e8f7396f16648977e28e3eda2bde9ce2aad90217768",
+      "apps/ios/Arbos/Arbos/UI/ChatView.swift": "cebc573edc37875a5740cef582ad2ecace19551b1852e22bb66e30b525c7cccc",
+      "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f"
+    },
+    "fixture_sha256": "a1c7bae68d68358fdbb9d61176acfcd4c6d920e1f939889958118a2b7b8d00a8",
+    "compile_exit": 0,
+    "exit_code": 0,
+    "results": {
+      "cases": {
+        "BlockView0-current": true,
+        "BlockView0-retired": true,
+        "BlockView1-current": true,
+        "BlockView1-retired": true,
+        "BlockView2-current": true,
+        "BlockView2-retired": true,
+        "BlockView3-current": true,
+        "BlockView3-retired": true,
+        "LinkPreviewCard0-current": true,
+        "LinkPreviewCard0-retired": true,
+        "LinkPreviewCard1-current": true,
+        "LinkPreviewCard1-retired": true,
+        "LinkPreviewCard2-current": true,
+        "LinkPreviewCard2-retired": true,
+        "TypedBody0-current": true,
+        "TypedBody0-retired": true,
+        "TypedBody1-current": true,
+        "TypedBody1-retired": true
+      },
+      "failed": 0,
+      "passed": 18,
+      "total": 18
+    },
+    "seconds": 1.0654622500296682
+  },
+  "link_actions_before": {
+    "sources": {
+      "apps/ios/Arbos/Arbos/UI/LinkPreviewCard.swift": "4b263a39bef088f8c790d50ff03a41bb97a7653183e5c5825483882ba2702a26",
+      "apps/ios/Arbos/Arbos/UI/MediaViewer.swift": "42b6f4483036bf1763e54e8f7396f16648977e28e3eda2bde9ce2aad90217768",
+      "apps/ios/Arbos/Arbos/UI/ChatView.swift": "cebc573edc37875a5740cef582ad2ecace19551b1852e22bb66e30b525c7cccc",
+      "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f"
+    },
+    "fixture_sha256": "e3c0cae97ba74dcad5d113ec4e4864f528f5cda2a8b271e9b7bba8a5c0f4b8cf",
+    "callback_sha256": "10685af6b2f848b1c2083d06a0a24ee53873e4db9503655f1617c6f13e9bdc45",
+    "compile_exit": 0,
+    "exit_code": 1,
+    "results": {
+      "cases": {
+        "link-tap-anonymous": false,
+        "link-tap-cancelled": false,
+        "link-tap-current": true,
+        "link-tap-fixture": true,
+        "link-tap-missing-url": true,
+        "link-tap-retired": false
+      },
+      "failed": 3,
+      "passed": 3,
+      "total": 6
+    },
+    "seconds": 0.6562581249745563
+  },
+  "link_actions_after": {
+    "sources": {
+      "apps/ios/Arbos/Arbos/UI/LinkPreviewCard.swift": "af175a27584ff0a90200206cd4f6909a46c0dae42853611092350c2d58461a11",
+      "apps/ios/Arbos/Arbos/UI/MediaViewer.swift": "42b6f4483036bf1763e54e8f7396f16648977e28e3eda2bde9ce2aad90217768",
+      "apps/ios/Arbos/Arbos/UI/ChatView.swift": "cebc573edc37875a5740cef582ad2ecace19551b1852e22bb66e30b525c7cccc",
+      "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f"
+    },
+    "fixture_sha256": "b6ee4d507d5e1acc776659884ac0a6b48e7948c11a87f70c94bcf31fe1387891",
+    "callback_sha256": "84e29d4ca3329b264622303a7c0eaf2586690b03a1c504caa49cb952c95a43b5",
+    "compile_exit": 0,
+    "exit_code": 0,
+    "results": {
+      "cases": {
+        "link-tap-anonymous": true,
+        "link-tap-cancelled": true,
+        "link-tap-current": true,
+        "link-tap-fixture": true,
+        "link-tap-missing-url": true,
+        "link-tap-retired": true
+      },
+      "failed": 0,
+      "passed": 6,
+      "total": 6
+    },
+    "seconds": 0.6849721249891445
+  }
+}

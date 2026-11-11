@@ -23,7 +23,7 @@ use arbos_core::approval::{ApprovalRequest, Risk};
 use arbos_core::widget::WIDGET_SCHEMA_JSON;
 
 use crate::agent::Agent;
-use crate::approval::WaitMode;
+use crate::approval::WaitDelivery;
 
 type S = Arc<Agent>;
 
@@ -965,7 +965,7 @@ async fn call_tool(
                 payload: json!({ "kind": "draft_message", "channel": channel, "to": to, "subject": subject, "body": body }),
             };
             match a
-                .begin_approval(&chat_for_scratch, req, WaitMode::Deferred, None)
+                .begin_approval(&chat_for_scratch, req, WaitDelivery::Deferred)
                 .await
             {
                 Ok(id) => text_result(format!(

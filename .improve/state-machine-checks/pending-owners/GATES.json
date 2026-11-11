@@ -1,0 +1,199 @@
+{
+  "source": {
+    "base_ref": "f5432ec3732f5d62ec57c7b9b22f0fa1d91faf9e",
+    "source_method": "exact explicit tracked Git blobs, no archive or environment files",
+    "sources": {
+      "crates/arbos-agentd/src/approval.rs": "cd68753519c939f3678e41027bd842bbebcb67a1c68a399f0bd9b281e9304cf3",
+      "crates/arbos-agentd/src/store.rs": "2d2049ea8981febdeb644855596de6b354079c436c19cbccc0ebfdf7fc2eb9d3",
+      "crates/arbos-core/src/approval.rs": "e96b5fea2e78d3b78b59717f8a980b3c772ddc3b9ded4afa7b4d2e3afad770b6",
+      "crates/arbos-core/src/ids.rs": "6849afcd728a470ca36382afe7525eb65f7056a90daf88e82efdc142b387a311",
+      "crates/arbos-relay/src/state.rs": "b610baa95f1b2a13dca5c2609709805bf2ef55f46acfbde0579322b41505b2b8",
+      "crates/arbos-relay/src/restart_lifetime.rs": "a4b24da84e70d504e68af1f64893899f81f6f3492b79cfae27a13baed0c31c1a"
+    },
+    "selected_production_items_unchanged_from_0434234": true,
+    "selected_items": {
+      "outcome:pub enum ApprovalOutcome": "0581d0d3db4e4a1544eceb7ef90799058c18fe008fe2287e88ff1be573246c3a",
+      "delivery:pub enum WaitDelivery": "6024937d4a9b6ed113df4aff33b414165c72cb4dfae1bf23929d2d7678e854c4",
+      "delivery:enum DeliveryEvent": "8249e61bfe429b991260fb439122f243b60a70be7a782e864aee5bfb0bd46489",
+      "delivery:enum DeliveryAction": "20c8e6993e63467b5ca0cd59442c5b5046b24a4c1d554d0e201b22dcf7a287ce",
+      "delivery:fn transition_delivery(": "b642c3728ef9c2a99a69c538b5895be2b45668c443f7863c92430c8a28f5a285",
+      "store:pub(crate) fn with<T>": "0a5dd79aab5c0c8d6619d99a7648f0364a4e99451dba5aa1b09c5a7decc6a1f7",
+      "store:pub fn insert_approval(": "03467775d3eca346ac87488f6008c0c16cfbf0bb85191c9474fbf2e46fd12a18",
+      "store:pub fn approval(": "d2f4c1494894bbc8b88a24d9534574504c7580218e4400e84b866d21ee3f52d8",
+      "store:pub fn consume_grant(": "5be1752eda65d0cb7daa953e0ce5df2377b95e0048d0af807efbac2b55e0fe86",
+      "store:pub fn decide_approval(": "46ba7af1c1b4d69ee55dd58c01857ed8f43355483cf78631db824b7c2c5166c6",
+      "store:pub struct ApprovalRow": "507978597533886b2fad36b520b05bd1b558a236b8b49eabb7f550e4b7acf3f2",
+      "store:fn approval_row(": "797a8bf5e218ea4925c4985511c4cf5094145395b9fadbef01254b5b5657a79c",
+      "creation:pub struct RestartSignal {": "938f89271a1708be65b329684d91cfb416d6da4bf2cb4832e0953018cba8fea2",
+      "creation:impl Default for RestartSignal": "940c66408b50531147fa59e17032b8c0d0f0030ef83023e8eac4ea6b9b15ae45",
+      "creation:pub(crate) async fn admit_creation(": "ae2ace2d6c7a0663b55c669dc9d654b454e8dfa02f43dd5b8e18f533b024a308",
+      "creation:pub(crate) struct CreationPermit {": "e4a65f280993581c61801a4f837d172e8f8a8ac1d4f1822ed36bb61518a2a39e",
+      "creation:impl CreationPermit {": "ef3480fb7059364518592caf843cbe885e28b427ed257b65ef5ad251a71a7e6e",
+      "creation:pub(crate) struct CreatingGuard<'a>": "c37c50062d35648b0be6ead4a80b66d93b174dca5bd654b4c27a04cfe0f1638c",
+      "creation:impl<'a> CreatingGuard<'a>": "b754591e88e60de13f9db24cac62ed18e659a41eb2831417009159f1dbad756d",
+      "creation:impl Drop for CreatingGuard<'_>": "1ef8fcc0838faaf54e3589fdc6e6e3f9ca5f69daa890b8dbc91165674e72a164",
+      "ids:pub fn now_ms()": "c6256b2e368e8f6d21c4503204bd3b08095cdeac4ae84a54e6d37173875796e1"
+    },
+    "schema_sha256": "aa88db8432b0eb51bbccf364537d0fbe5bc394924dfb138c2159e9abb7c99f54"
+  },
+  "tools": {
+    "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18) (Homebrew)",
+    "cargo": "cargo 1.98.0 (797e8a9bc 2026-08-05) (Homebrew)",
+    "node": "v22.22.3"
+  },
+  "dev_dependency_packages": 60,
+  "all_registry_versions_and_checksums_match_root_lock": true,
+  "laws": {
+    "tests": 6,
+    "pass": 6,
+    "fail": 0,
+    "ignored": 0,
+    "schema_laws": 5,
+    "runs_per_law": 256,
+    "generated_cases": 1280,
+    "protocol_tests": 1,
+    "protocol_negative_requests": 9,
+    "seconds": 4.036945833009668,
+    "log_sha256": "b5fd2a8f7dba62c9a8cca264ced7de18928077eeb37bb0dd30c0b1a460f6099a"
+  },
+  "leaf_gates": [
+    {
+      "gate": "check",
+      "exit": 0,
+      "seconds": 0.9855143749155104,
+      "log_sha256": "9935c7900f3689dd29273aa9013b1061457d46138860f8a2c443b3a61882c103"
+    },
+    {
+      "gate": "clippy",
+      "exit": 0,
+      "seconds": 0.8002842080313712,
+      "log_sha256": "a32882301d34e7177b51398d86df956c0113ef796183a9e34058fc9b8ab7b0da"
+    },
+    {
+      "gate": "build",
+      "exit": 0,
+      "seconds": 1.0279941250337288,
+      "log_sha256": "2000df585a399db9667fb0894a4cf9bd89216b1ac27a353eb5c3106dca687a4a"
+    },
+    {
+      "gate": "format",
+      "exit": 0,
+      "seconds": 0.027382708969525993,
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "gate": "python-syntax",
+      "exit": 0,
+      "seconds": 0.036648583016358316,
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "gate": "typecheck",
+      "exit": 0,
+      "seconds": 0.8809836250729859,
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ],
+  "mutants": [
+    {
+      "name": "closed-inline-stays-inline",
+      "seed": 94001,
+      "source": "crates/arbos-agentd/src/approval.rs",
+      "original_sha256": "cd68753519c939f3678e41027bd842bbebcb67a1c68a399f0bd9b281e9304cf3",
+      "mutant_sha256": "4a6e84d0a9b0c48e198a05a1067079825c0f5b44c3f20f2caab159ff584b1e32",
+      "generated": {
+        "exit": 1,
+        "seconds": 1.5262125000590459,
+        "detected": true,
+        "formatted_failure": "Property falsified after 1 run(s) and 2 shrink(s)"
+      },
+      "shrunk_input": {
+        "choice": 0,
+        "fault": 0,
+        "tail": []
+      },
+      "replay": {
+        "exit": 1,
+        "seconds": 0.9525644580135122,
+        "detected": true
+      }
+    },
+    {
+      "name": "ignored-claim-commits",
+      "seed": 94003,
+      "source": "crates/arbos-agentd/src/store.rs",
+      "original_sha256": "2d2049ea8981febdeb644855596de6b354079c436c19cbccc0ebfdf7fc2eb9d3",
+      "mutant_sha256": "89162119745880f57a372ef40d9bab142fe4fc582be9d43a7483166ae2b29e0e",
+      "generated": {
+        "exit": 1,
+        "seconds": 1.3317565829493105,
+        "detected": true,
+        "formatted_failure": "Property falsified after 4 run(s) and 0 shrink(s)"
+      },
+      "shrunk_input": {
+        "choice": 0,
+        "fault": 1,
+        "tail": []
+      },
+      "replay": {
+        "exit": 1,
+        "seconds": 0.9234190840506926,
+        "detected": true
+      }
+    },
+    {
+      "name": "same-user-separate-mutex",
+      "seed": 94004,
+      "source": "crates/arbos-relay/src/state.rs",
+      "original_sha256": "b610baa95f1b2a13dca5c2609709805bf2ef55f46acfbde0579322b41505b2b8",
+      "mutant_sha256": "1b23bdbac0d60adc5899f1bd8f57ca96b5e2a2ff8a03832baadb10f7b387ac60",
+      "generated": {
+        "exit": 1,
+        "seconds": 1.4345960000064224,
+        "detected": true,
+        "formatted_failure": "Property falsified after 1 run(s) and 1 shrink(s)"
+      },
+      "shrunk_input": {
+        "choice": 0,
+        "fault": 0,
+        "tail": []
+      },
+      "replay": {
+        "exit": 1,
+        "seconds": 1.076247083954513,
+        "detected": true
+      }
+    },
+    {
+      "name": "owner-clears-independent-marker",
+      "seed": 94005,
+      "source": "crates/arbos-relay/src/state.rs",
+      "original_sha256": "b610baa95f1b2a13dca5c2609709805bf2ef55f46acfbde0579322b41505b2b8",
+      "mutant_sha256": "37ed924a56017f499751b0e27bc9dacc4182a4aea159fe995a94195a10cd9c2a",
+      "generated": {
+        "exit": 1,
+        "seconds": 1.61012850003317,
+        "detected": true,
+        "formatted_failure": "Property falsified after 1 run(s) and 1 shrink(s)"
+      },
+      "shrunk_input": {
+        "choice": 0,
+        "fault": 0,
+        "tail": []
+      },
+      "replay": {
+        "exit": 1,
+        "seconds": 1.153935124981217,
+        "detected": true
+      }
+    }
+  ],
+  "source_unchanged": true,
+  "target_final_kib": 124240,
+  "target_note": "Own leaf target peaked at216MiB with duplicate check/clippy metadata; after preserving gates, only that owned target was cleaned and offline build restored121MiB. Mutant targets are disposable APFS clones with package cleaned before actual-source build.",
+  "limits": [
+    "finite legal API traces, not exhaustive proof",
+    "selected literal production definitions plus actual bundled SQLite; no full handler/provider or migration-open integration",
+    "existing native H4/H6 actual-caller regressions remain separate proof"
+  ]
+}

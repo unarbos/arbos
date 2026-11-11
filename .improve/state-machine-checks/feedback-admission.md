@@ -1,0 +1,9 @@
+# AUX-H6 inventory update
+
+Storage remains the existing atomic per-item state.json, cursor and approval policy files. The real temporal safety boundaries are now declared in `feedback_state.py` and used by `feedback_poller.py` at both normal/prepared merge edges and ship/deployment edges.
+
+Commit states: Candidate → Held / AwaitingApproval / GatePending / MissingHead / StaleHead / ReadyToMerge; only ReadyToMerge + successful Merged identity advances to Landed. InvalidControl and Landed absorb later events within an attempt. Each tick reconstructs from the authoritative legacy record; there is no second writable model. Policy takes the documented per-item approval result, operator hold, exact gate/live identities and stage eligibility. Prepared trees must contain every claimed member head and all members must be admitted before a merge.
+
+Delivery states: DeliveryPending → AwaitingArtifacts(with any remaining deployments) / AwaitingDeploy(nonempty deployment set) / Shipped, carrying device evidence. Deployment completion is commit-bound and cannot discharge a missing iOS artifact. A same-commit completion proof is persisted with the transition and can be reused when the iOS artifact later becomes installable. Compatibility adapters update the existing record format atomically, without migrating unrelated metadata.
+
+The existing top-level dispatcher explicitly names queued, running, gating, awaiting_jacob, parked and pushed stages; terminal outcomes are already declared in TERMINAL. The rebuilt boundaries close confirmed alternate-path and partial-write illegal combinations rather than adding an unused model around every status string. CI-half routing, follow-up source tier/approval inheritance and release/deployment/device observation contracts remain authoritative and unchanged. Further claims about unknown durable scheduling failures require an actual failing trace; representable dictionaries alone are not evidence of a bypass.

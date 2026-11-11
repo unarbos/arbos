@@ -1,0 +1,20 @@
+{
+  "adapters": {
+    "passed": 22,
+    "failed": 0,
+    "seconds": 7.483
+  },
+  "laws": {
+    "passed": 4,
+    "failed": 0,
+    "generated_cases": 768,
+    "seconds": 12.898632125
+  },
+  "bash_syntax_files": 6,
+  "strict_typescript_exit": 0,
+  "scope": "Actual selected functions and local generated filesystem/flock collaborators; no deployment, service, real configuration or account access.",
+  "remaining": [
+    "Automatic publication observation/ABA repair in progress.",
+    "Reviewer found legacy snapshot-switch restart lease bypass; actual failing pin and scoped correction in progress."
+  ]
+}

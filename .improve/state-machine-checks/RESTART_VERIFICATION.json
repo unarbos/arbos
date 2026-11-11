@@ -1,0 +1,439 @@
+{
+  "before": {
+    "gate": "before",
+    "command": [
+      "/usr/bin/sandbox-exec",
+      "-p",
+      "(version 1) (allow default) (deny network*)",
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-relay",
+      "restart::ownership_regressions::",
+      "--",
+      "--test-threads=2"
+    ],
+    "exit": 101,
+    "seconds": 75.12634229194373,
+    "results": [
+      [
+        "FAILED",
+        "3",
+        "2",
+        "0"
+      ]
+    ],
+    "target": "<checkout>/.improve/evidence/restart-owner/target",
+    "scope": "actual55ea sources plus tests; unique clone with all workspace artifacts cleaned; locked/offline and OS network denied; no live services/keys/config",
+    "expected_tests": 5,
+    "count_matches": true,
+    "actual_source_sha256": "2cb5d776b2b318fd509b43041d812aeb9710af6f0aba220b53e9b4a9fd0eaaad"
+  },
+  "overlap-before": {
+    "gate": "overlap-before",
+    "command": [
+      "/usr/bin/sandbox-exec",
+      "-p",
+      "(version 1) (allow default) (deny network*)",
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-relay",
+      "a_notice_phase_owner_rejects_an_overlapping_planned_restart",
+      "--",
+      "--test-threads=1"
+    ],
+    "exit": 101,
+    "seconds": 53.7390942920465,
+    "results": [
+      [
+        "FAILED",
+        "0",
+        "1",
+        "0"
+      ]
+    ],
+    "target": "<checkout>/.improve/evidence/restart-owner/target",
+    "scope": "actual55ea sources plus tests; unique clone with all workspace artifacts cleaned; locked/offline and OS network denied; no live services/keys/config",
+    "expected_tests": 1,
+    "count_matches": true
+  },
+  "after": {
+    "gate": "after",
+    "command": [
+      "/usr/bin/sandbox-exec",
+      "-p",
+      "(version 1) (allow default) (deny network*)",
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-relay",
+      "restart::ownership_regressions::",
+      "--",
+      "--test-threads=2"
+    ],
+    "exit": 0,
+    "seconds": 38.92815941700246,
+    "results": [
+      [
+        "ok",
+        "9",
+        "0",
+        "0"
+      ]
+    ],
+    "target": "<checkout>/.improve/evidence/restart-owner/target",
+    "scope": "actual55ea sources plus tests; unique clone with all workspace artifacts cleaned; locked/offline and OS network denied; no live services/keys/config",
+    "expected_tests": 9,
+    "count_matches": true
+  },
+  "box-work": {
+    "gate": "box-work",
+    "command": [
+      "/usr/bin/sandbox-exec",
+      "-p",
+      "(version 1) (allow default) (deny network*)",
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-relay",
+      "a_planned_restart_waits_for_box_work",
+      "--",
+      "--test-threads=1"
+    ],
+    "exit": 0,
+    "seconds": 1.0860380000667647,
+    "results": [
+      [
+        "ok",
+        "1",
+        "0",
+        "0"
+      ]
+    ],
+    "target": "<checkout>/.improve/evidence/restart-owner/target",
+    "scope": "actual55ea sources plus tests; unique clone with all workspace artifacts cleaned; locked/offline and OS network denied; no live services/keys/config"
+  },
+  "check": {
+    "gate": "check",
+    "command": [
+      "/usr/bin/sandbox-exec",
+      "-p",
+      "(version 1) (allow default) (deny network*)",
+      "cargo",
+      "check",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-relay",
+      "--all-targets"
+    ],
+    "exit": 0,
+    "seconds": 29.892633290961385,
+    "results": [],
+    "target": "<checkout>/.improve/evidence/restart-owner/target",
+    "scope": "actual55ea sources plus tests; unique clone with all workspace artifacts cleaned; locked/offline and OS network denied; no live services/keys/config"
+  },
+  "clippy": {
+    "gate": "clippy",
+    "command": [
+      "/usr/bin/sandbox-exec",
+      "-p",
+      "(version 1) (allow default) (deny network*)",
+      "cargo",
+      "clippy",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-relay",
+      "--all-targets",
+      "--",
+      "-D",
+      "warnings"
+    ],
+    "exit": 0,
+    "seconds": 23.41202783305198,
+    "results": [],
+    "target": "<checkout>/.improve/evidence/restart-owner/target",
+    "scope": "actual55ea sources plus tests; unique clone with all workspace artifacts cleaned; locked/offline and OS network denied; no live services/keys/config"
+  },
+  "build": {
+    "gate": "build",
+    "command": [
+      "/usr/bin/sandbox-exec",
+      "-p",
+      "(version 1) (allow default) (deny network*)",
+      "cargo",
+      "build",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-relay"
+    ],
+    "exit": 0,
+    "seconds": 36.59495108295232,
+    "results": [],
+    "target": "<checkout>/.improve/evidence/restart-owner/target",
+    "scope": "actual55ea sources plus tests; unique clone with all workspace artifacts cleaned; locked/offline and OS network denied; no live services/keys/config"
+  },
+  "fmt": {
+    "gate": "fmt",
+    "command": [
+      "/usr/bin/sandbox-exec",
+      "-p",
+      "(version 1) (allow default) (deny network*)",
+      "cargo",
+      "fmt",
+      "--all",
+      "--check"
+    ],
+    "exit": 0,
+    "seconds": 2.4172712500439957,
+    "results": [],
+    "target": "<checkout>/.improve/evidence/restart-owner/target",
+    "scope": "actual55ea sources plus tests; unique clone with all workspace artifacts cleaned; locked/offline and OS network denied; no live services/keys/config"
+  },
+  "laws": {
+    "command": [
+      "node",
+      "--test",
+      "restart-state-laws.test.ts"
+    ],
+    "exit": 0,
+    "seconds": 0.7934153749374673,
+    "tests": 5,
+    "generated_cases": 1024
+  },
+  "laws-typecheck": {
+    "command": [
+      "node",
+      "<checkout>/harness/arbos-pi-ext/node_modules/typescript/bin/tsc",
+      "--noEmit",
+      "--target",
+      "ES2022",
+      "--module",
+      "NodeNext",
+      "--moduleResolution",
+      "NodeNext",
+      "--strict",
+      "--skipLibCheck",
+      "--types",
+      "node",
+      "restart-state-laws.test.ts"
+    ],
+    "exit": 0,
+    "seconds": 1.2098841249244288
+  },
+  "bridge-fmt": {
+    "command": [
+      "rustfmt",
+      "--edition",
+      "2021",
+      "--check",
+      "<checkout>/.improve/evidence/restart-owner/workspace/.improve/state-machine-checks/restart_state_bridge.rs"
+    ],
+    "exit": 0,
+    "seconds": 0.018701417022384703
+  },
+  "clean": {
+    "command": [
+      "/usr/bin/sandbox-exec",
+      "-p",
+      "(version 1) (allow default) (deny network*)",
+      "cargo",
+      "clean",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-core",
+      "-p",
+      "arbos-client",
+      "-p",
+      "arbos-matrix",
+      "-p",
+      "arbos-ffi",
+      "-p",
+      "arbos-relay",
+      "-p",
+      "arbos-agentd",
+      "-p",
+      "arbosctl",
+      "-p",
+      "arbos-acp",
+      "-p",
+      "arbos-sidecar",
+      "-p",
+      "arbos-local",
+      "-p",
+      "arbos-mac",
+      "-p",
+      "arbos-update"
+    ],
+    "exit": 0,
+    "seconds": 0.6549054170027375,
+    "target": "<checkout>/.improve/evidence/restart-owner/target",
+    "scope": "own APFS clone only; all12workspace packages cleaned; oldseed read-only"
+  },
+  "patch": {
+    "base": "55ea2ad5462d378bf5aaea603a305c6ae73146c7",
+    "patch_bytes": 36991,
+    "patch_sha256": "491e6951ffff889ae8052a2ec410af7a6cd015673b61617ca75f203db1e436cc",
+    "live_apply_check": 0,
+    "apply_note": "",
+    "files": {
+      "crates/arbos-relay/src/main.rs": {
+        "bytes": 49117,
+        "sha256": "a9da373badede6fdf239c6dcbc977056d0a253368a25c26ad70865904a194dfd"
+      },
+      "crates/arbos-relay/src/restart.rs": {
+        "bytes": 17099,
+        "sha256": "1bff1d6e56e330d237d1ea375c6c57b45ff671d92d8fa9668f51f2af62421806"
+      },
+      "crates/arbos-relay/src/state.rs": {
+        "bytes": 36841,
+        "sha256": "99112bc61d0806a6c7d31d8a2e8bc4b62cf562823c7d8797a7db4c906ccd25c1"
+      },
+      "crates/arbos-relay/src/restart_lifetime.rs": {
+        "bytes": 1645,
+        "sha256": "a4b24da84e70d504e68af1f64893899f81f6f3492b79cfae27a13baed0c31c1a"
+      },
+      ".improve/state-machine-checks/restart_state_bridge.rs": {
+        "bytes": 3236,
+        "sha256": "d7923b8295a59b852feb6b19ef0d4654d54093c3d3a7ace2a0c5c8a33d2d8306"
+      },
+      ".improve/state-machine-checks/check_restart_mutant.py": {
+        "bytes": 4533,
+        "sha256": "43d1785e55bd5ce27e395dc4c100b58d164f787f219e2bb1932c28eb064f3365"
+      },
+      ".improve/state-machine-checks/RESTART.md": {
+        "bytes": 2027,
+        "sha256": "30cd46608838d953f4a186456260a028ed9f19762b35ffdade9dfd72d4aa98b8"
+      },
+      "harness/arbos-pi-ext/restart-state-laws.test.ts": {
+        "bytes": 9137,
+        "sha256": "c5753656825a8d512b1d3e3f007dd84764d49fe508924a9cbaa495e7e09550fd"
+      }
+    },
+    "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435"
+  },
+  "calibration": {
+    "constants": {
+      "DEFAULT_NOTICE": "Duration::from_secs(10)",
+      "DEFAULT_DRAIN": "Duration::from_secs(5)",
+      "MAX_NOTICE": "Duration::from_secs(60)",
+      "MAX_DRAIN": "Duration::from_secs(30)",
+      "CLOSING_RESET": "Duration::from_secs(90)",
+      "SIGTERM_BOX_WORK_WAIT": "Duration::from_secs(60)"
+    },
+    "unchanged_helper_sha256": {
+      "announce": "88cd9afeec05bc91111a278a9d3c24b4b39e14003133af1c8bb82fa89706b9ce",
+      "close_and_drain": "1c67a5967a471c7089feacf368d0b128551bfc88dc77a7ebbc717eba56ec8fec",
+      "box_work_in_flight": "580930f7d3ff4e52512bf144f888b5420e48d277ed3b0fd846921785634bdb4c",
+      "freeze_box_work": "4511af8c90dbd66970071cf0a28d5aa25d0512f703adad579391c0df690865d6",
+      "wait_for_box_work": "e470825da621d48a25eb7dcbf0896d2ec03c945059214b9a775b2e5f82724b9c"
+    },
+    "note": "No signal, restart, provider or deployment executed; socket/work counting and poll/timeout calculations unchanged"
+  },
+  "mutant": {
+    "source_unchanged": true,
+    "source_sha256": {
+      "crates/arbos-relay/src/restart_lifetime.rs": "a4b24da84e70d504e68af1f64893899f81f6f3492b79cfae27a13baed0c31c1a",
+      ".improve/state-machine-checks/restart_state_bridge.rs": "d7923b8295a59b852feb6b19ef0d4654d54093c3d3a7ace2a0c5c8a33d2d8306",
+      "harness/arbos-pi-ext/restart-state-laws.test.ts": "c5753656825a8d512b1d3e3f007dd84764d49fe508924a9cbaa495e7e09550fd"
+    },
+    "results": [
+      {
+        "variant": "control",
+        "command": [
+          "node",
+          "--test",
+          "--test-name-pattern=stale planned cleanup",
+          "restart-state-laws.test.ts"
+        ],
+        "exit": 0,
+        "seconds": 1.2374278330244124,
+        "actual_transition_source_sha256": "a4b24da84e70d504e68af1f64893899f81f6f3492b79cfae27a13baed0c31c1a",
+        "generated_cases": 256
+      },
+      {
+        "variant": "mutant",
+        "command": [
+          "node",
+          "--test",
+          "--test-name-pattern=stale planned cleanup",
+          "restart-state-laws.test.ts"
+        ],
+        "exit": 1,
+        "seconds": 0.8906562500633299,
+        "actual_transition_source_sha256": "5e05ae3779e9b284527566a4a8114f74330fa7f0f722011a51037e002bbb6f9a",
+        "counterexample": {
+          "law": "stale planned cleanup and out-of-order progress cannot change replacement ownership",
+          "seed": 82002,
+          "result": {
+            "_tag": "Falsified",
+            "initialInput": {
+              "tail": [],
+              "wrongOwner": 20,
+              "phase": "r"
+            },
+            "shrunkInput": {
+              "tail": [],
+              "wrongOwner": 2,
+              "phase": "n"
+            },
+            "failure": {
+              "_tag": "ReturnedFalse"
+            },
+            "runs": 1,
+            "discards": 0,
+            "shrinks": 1,
+            "replay": "[0,\"82002\",0,0,[0],\"ReturnedFalse\"]"
+          },
+          "replay": {
+            "_tag": "Falsified",
+            "initialInput": {
+              "tail": [],
+              "wrongOwner": 20,
+              "phase": "r"
+            },
+            "shrunkInput": {
+              "tail": [],
+              "wrongOwner": 2,
+              "phase": "n"
+            },
+            "failure": {
+              "_tag": "ReturnedFalse"
+            },
+            "runs": 1,
+            "discards": 0,
+            "shrinks": 1,
+            "replay": "[0,\"82002\",0,0,[0],\"ReturnedFalse\"]"
+          }
+        }
+      }
+    ]
+  },
+  "distinct_targeted_native_tests": 10,
+  "generated_law_cases": 1024,
+  "generated_law_and_protocol_tests": 5,
+  "log_sha256": {
+    "before": "11b11e208f2376ed920bc38fcea0766198908549a1588546326aeb0372e1082a",
+    "overlap-before": "e3e577233e011232f4989629134041270af31864f3435a3afa3d58bc7a095a86",
+    "after": "667987adcbe0cf8774efa369263a24adc08e5ecab5e45eee59436c11cd676b57",
+    "box-work": "db0169145961a3fe4f5a6dc343e8362be8cff69f7aa5a74dfd5b984725510a5f",
+    "check": "d6ac595e53b98944b0bdf9a52ebbddbce99ac8cf46a5614bd01b2cc9da3e8bcf",
+    "clippy": "77025f4a1fe6349938d2ba8568a9297b099121f5b50d89384174ec5a0022c095",
+    "build": "4bdc6b5e263f1c32718ec5d4a5c779308fda30a3654a06c6c64e14adb4809258",
+    "fmt": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "laws": "5b8e4c7680faefe7d0800503de370309fcd6f7a94ccfb97c2cbb317429dc7f86",
+    "laws-typecheck": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  }
+}

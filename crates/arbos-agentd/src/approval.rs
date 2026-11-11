@@ -114,11 +114,51 @@ fn doc_state(row_state: ApprovalState) -> ApprovalState {
     row_state
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WaitMode {
+/// The current owner of a pending decision. Inline always owns its sender.
+#[derive(Debug)]
+pub enum WaitDelivery {
+    Inline(oneshot::Sender<ApprovalOutcome>),
+    Polled,
+    Deferred,
+}
+
+#[derive(Clone, Copy)]
+enum DeliveryEvent {
+    Park,
+    Decide,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DeliveryAction {
+    Parked,
+    Unchanged,
     Inline,
     Polled,
     Deferred,
+}
+
+/// One transition boundary for caller ownership; the durable decision is committed separately.
+fn transition_delivery(delivery: &mut WaitDelivery, event: DeliveryEvent) -> DeliveryAction {
+    match event {
+        DeliveryEvent::Park => match delivery {
+            WaitDelivery::Deferred => DeliveryAction::Unchanged,
+            _ => {
+                *delivery = WaitDelivery::Deferred;
+                DeliveryAction::Parked
+            }
+        },
+        DeliveryEvent::Decide => {
+            if matches!(delivery, WaitDelivery::Inline(sender) if sender.is_closed()) {
+                // This is still pending: no approved decision has been published or claimed.
+                *delivery = WaitDelivery::Deferred;
+            }
+            match delivery {
+                WaitDelivery::Inline(_) => DeliveryAction::Inline,
+                WaitDelivery::Polled => DeliveryAction::Polled,
+                WaitDelivery::Deferred => DeliveryAction::Deferred,
+            }
+        }
+    }
 }
 
 pub struct PendingApproval {
@@ -126,8 +166,7 @@ pub struct PendingApproval {
     pub msg_id: String,
     pub in_reply_to: String,
     pub request: ApprovalRequest,
-    pub mode: WaitMode,
-    pub waiter: Option<oneshot::Sender<ApprovalOutcome>>,
+    pub delivery: WaitDelivery,
 }
 
 #[derive(Default)]
@@ -377,8 +416,7 @@ impl Agent {
         self: &Arc<Self>,
         chat_id: &str,
         req: ApprovalRequest,
-        mode: WaitMode,
-        waiter: Option<oneshot::Sender<ApprovalOutcome>>,
+        delivery: WaitDelivery,
     ) -> Result<String> {
         let host = self
             .sync
@@ -465,7 +503,12 @@ impl Agent {
                 "input_hash": args_hash("approval", &req.payload),
             }),
         );
-        tracing::info!(approval_id, chat_id, title = %req.title, risk = req.risk.as_str(), ?mode, "approval requested");
+        let mode = match &delivery {
+            WaitDelivery::Inline(_) => "Inline",
+            WaitDelivery::Polled => "Polled",
+            WaitDelivery::Deferred => "Deferred",
+        };
+        tracing::info!(approval_id, chat_id, title = %req.title, risk = req.risk.as_str(), mode, "approval requested");
         self.approvals.pending.lock().await.insert(
             approval_id.clone(),
             PendingApproval {
@@ -473,8 +516,7 @@ impl Agent {
                 msg_id,
                 in_reply_to,
                 request: req,
-                mode,
-                waiter,
+                delivery,
             },
         );
         // Working line / quick-reply status: the card's own title, not the gated tool's label
@@ -562,7 +604,7 @@ impl Agent {
     ) -> Option<ApprovalOutcome> {
         let (tx, rx) = oneshot::channel();
         let approval_id = match self
-            .begin_approval(chat_id, req, WaitMode::Inline, Some(tx))
+            .begin_approval(chat_id, req, WaitDelivery::Inline(tx))
             .await
         {
             Ok(id) => id,
@@ -672,15 +714,46 @@ impl Agent {
             .store
             .approval(approval_id)?
             .ok_or_else(|| anyhow!("unknown approval {approval_id}"))?;
+        let mut pending_entries = self.approvals.pending.lock().await;
+        let action = pending_entries
+            .get_mut(approval_id)
+            .map_or(DeliveryAction::Deferred, |pending| {
+                transition_delivery(&mut pending.delivery, DeliveryEvent::Decide)
+            });
+        let claim = matches!(outcome, ApprovalOutcome::Approved)
+            && matches!(action, DeliveryAction::Inline | DeliveryAction::Polled);
         if !self.store.decide_approval(
             approval_id,
             state.as_str(),
             Some(decided_by),
             reason.as_deref(),
+            claim,
         )? {
             return Err(anyhow!("approval {approval_id} is already {}", row.state));
         }
-        let pending = self.approvals.pending.lock().await.remove(approval_id);
+        let mut pending = pending_entries.remove(approval_id);
+        drop(pending_entries);
+        // No await between durable admission and the channel send. A failed send is uncertain:
+        // approval_status may already have exposed Approved, so a claimed grant stays spent.
+        let deferred = match pending
+            .as_mut()
+            .map(|pending| std::mem::replace(&mut pending.delivery, WaitDelivery::Deferred))
+        {
+            Some(WaitDelivery::Inline(sender)) => {
+                let undelivered = sender.send(outcome.clone()).is_err();
+                if undelivered && claim {
+                    tracing::warn!(
+                        approval_id,
+                        "approved inline delivery abandoned; grant remains spent"
+                    );
+                }
+                // Rejection/cancellation claimed no authority; keep their deferred notification.
+                // Published Approved admission remains spent even if its receiver disappeared.
+                undelivered && !claim
+            }
+            Some(WaitDelivery::Polled) => false,
+            Some(WaitDelivery::Deferred) | None => true,
+        };
         let (chat_id, msg_id) = match &pending {
             Some(p) => (p.chat_id.clone(), p.msg_id.clone()),
             None => (row.chat_id.clone(), row.message_id.clone()),
@@ -760,36 +833,6 @@ impl Agent {
             .as_ref()
             .map(|p| p.in_reply_to.clone())
             .unwrap_or_default();
-        let deferred = match pending {
-            Some(PendingApproval {
-                mode: WaitMode::Inline,
-                waiter: Some(tx),
-                ..
-            }) => {
-                // The gated tool is still blocked on this: it continues inline.
-                tx.send(outcome.clone()).is_err()
-            }
-            Some(PendingApproval {
-                mode: WaitMode::Polled,
-                ..
-            }) => false,
-            Some(PendingApproval {
-                mode: WaitMode::Inline | WaitMode::Deferred,
-                ..
-            })
-            | None => true,
-        };
-        // A caller that is still holding on runs the call itself, so the one execution this
-        // approval bought belongs to it and the row's grant is spent here.
-        //
-        // Without this the row would stay an unclaimed grant after the call had already run,
-        // and the next identical call would be waved through with no card: asked once, done
-        // twice. The claim belongs on this side of the branch rather than in the caller because
-        // both callers that reach it — an inline waiter and a polled harness that re-reads the
-        // state — would otherwise each need to remember.
-        if !deferred && matches!(outcome, ApprovalOutcome::Approved) {
-            let _ = self.store.consume_grant(approval_id);
-        }
         if deferred {
             let me = self.clone();
             let id = approval_id.to_owned();
@@ -1642,7 +1685,7 @@ impl Agent {
         // extension's fourteen-minute cap, after which the card was closed and the job failed
         // unasked. Releasing the worker and keeping the card is the inversion of that.
         match self
-            .begin_approval(&chat_id, req, WaitMode::Polled, None)
+            .begin_approval(&chat_id, req, WaitDelivery::Polled)
             .await
         {
             Ok(id) => {
@@ -1715,25 +1758,19 @@ impl Agent {
     ///
     /// Nothing here is a new waiting state, and `draft_message` has used this path since S18.
     pub async fn park_approval(self: &Arc<Self>, approval_id: &str) -> Value {
-        let Some(row) = self.store.approval(approval_id).ok().flatten() else {
-            return json!({ "ok": false, "error": "unknown approval" });
-        };
-        if row.state != ApprovalState::Pending.as_str() {
-            // Decided inside the grace: the caller reads the real state and acts on it.
-            return json!({ "ok": true, "state": row.state, "parked": false });
-        }
-        let parked = {
+        let (row, parked) = {
             let mut pending = self.approvals.pending.lock().await;
-            match pending.get_mut(approval_id) {
-                // `Inline` as well as `Polled`: an inline waiter that ran out of grace hands its
-                // card over the same way, so a gated MCP call does not hold its tool call open
-                // for as long as the user takes either.
-                Some(p) if p.mode != WaitMode::Deferred => {
-                    p.mode = WaitMode::Deferred;
-                    true
-                }
-                _ => false,
+            let Some(row) = self.store.approval(approval_id).ok().flatten() else {
+                return json!({ "ok": false, "error": "unknown approval" });
+            };
+            if row.state != ApprovalState::Pending.as_str() {
+                return json!({ "ok": true, "state": row.state, "parked": false });
             }
+            let parked = pending.get_mut(approval_id).is_some_and(|pending| {
+                transition_delivery(&mut pending.delivery, DeliveryEvent::Park)
+                    == DeliveryAction::Parked
+            });
+            (row, parked)
         };
         if !parked {
             return json!({ "ok": true, "state": row.state, "parked": false });
@@ -1963,6 +2000,13 @@ mod job_approval_tests {
     const JOB: &str = "01TESTJOBAPPROVAL000000000";
     const WORKER: &str = "01TESTJOBWORKER00000000000";
 
+    fn shell_argument(path: impl AsRef<std::path::Path>) -> String {
+        format!(
+            "'{}'",
+            path.as_ref().to_string_lossy().replace('\'', "'\\''")
+        )
+    }
+
     /// An agent with one running job in a pinned chat, as `start_job` leaves it.
     async fn agent_running_a_job() -> (Arc<Agent>, SharedHost, std::path::PathBuf) {
         job_agent(test_agent().await).await
@@ -2129,7 +2173,7 @@ mod job_approval_tests {
             let state = agent
                 .hook_approval(
                     "bash",
-                    &json!({ "command": format!("rm -rf {}", target.display()) }),
+                    &json!({ "command": format!("rm -rf {}", shell_argument(&target)) }),
                     WORKER,
                     "subagent",
                 )
@@ -2191,7 +2235,7 @@ mod job_approval_tests {
             .note_job_write(
                 JOB,
                 "bash",
-                &json!({ "command": format!("curl -sS https://example.invalid/x > {}", out("taxi_app_curl.txt")) }),
+                &json!({ "command": format!("curl -sS https://example.invalid/x > {}", shell_argument(out("taxi_app_curl.txt"))) }),
             )
             .await;
         agent
@@ -2209,34 +2253,38 @@ mod job_approval_tests {
             }
         };
         assert_eq!(
-            state(format!("rm -f {}", out("taxi_app_curl.txt"))).await,
+            state(format!(
+                "rm -f {}",
+                shell_argument(out("taxi_app_curl.txt"))
+            ))
+            .await,
             "allowed"
         );
         assert_eq!(
-            state(format!("rm -f {}", out("taxi_app.zip"))).await,
+            state(format!("rm -f {}", shell_argument(out("taxi_app.zip")))).await,
             "allowed"
         );
         assert_eq!(
-            state(format!("rm -f {}", out("vendor.zip"))).await,
+            state(format!("rm -f {}", shell_argument(out("vendor.zip")))).await,
             "pending"
         );
         assert_eq!(
             state(format!(
                 "rm -f {} {}",
-                out("taxi_app.zip"),
-                out("vendor.zip")
+                shell_argument(out("taxi_app.zip")),
+                shell_argument(out("vendor.zip"))
             ))
             .await,
             "pending",
             "one file it did not write keeps the card"
         );
         assert_eq!(
-            state(format!("rm -rf {}", outside.display())).await,
+            state(format!("rm -rf {}", shell_argument(&outside))).await,
             "pending",
             "the folder that holds its file is not its file"
         );
         assert_eq!(
-            state(format!("rm -f {}", out("*.zip"))).await,
+            state(format!("rm -f {}/*.zip", shell_argument(&outside))).await,
             "pending",
             "a glob is not an exact path"
         );
@@ -2245,11 +2293,11 @@ mod job_approval_tests {
             .note_job_write(
                 JOB,
                 "bash",
-                &json!({ "command": format!("rm -f {} > {}", out("old.zip"), out("clean.log")) }),
+                &json!({ "command": format!("rm -f {} > {}", shell_argument(out("old.zip")), shell_argument(out("clean.log"))) }),
             )
             .await;
         assert_eq!(
-            state(format!("rm -f {}", out("clean.log"))).await,
+            state(format!("rm -f {}", shell_argument(out("clean.log")))).await,
             "pending"
         );
         // A write over a file that is already there creates nothing, so it records nothing. The
@@ -2263,13 +2311,16 @@ mod job_approval_tests {
         agent
             .note_job_write(JOB, "write", &json!({ "path": already_there }))
             .await;
-        assert_eq!(state(format!("rm -f {already_there}")).await, "pending");
+        assert_eq!(
+            state(format!("rm -f {}", shell_argument(&already_there))).await,
+            "pending"
+        );
         // The same delete from a session that is no job of ours: nothing is exempt.
         assert_eq!(
             agent
                 .hook_approval(
                     "bash",
-                    &json!({ "command": format!("rm -f {}", out("taxi_app.zip")) }),
+                    &json!({ "command": format!("rm -f {}", shell_argument(out("taxi_app.zip"))) }),
                     CHAT,
                     "main"
                 )
@@ -2309,17 +2360,25 @@ mod job_approval_tests {
         let incident = "sed -i 's/limit = 1000/limit = 10000/' p018.py; for f in p*.py; do python3 \"$f\" >> results.csv; done; du -sh .; rm d*.html.bak";
         assert_eq!(state(incident.into()).await, "allowed");
         assert_eq!(
-            state(format!("rm -rf {}/build", agent.cfg.work_dir.display())).await,
+            state(format!(
+                "rm -rf {}",
+                shell_argument(agent.cfg.work_dir.join("build"))
+            ))
+            .await,
             "allowed"
         );
         // Another project's folder, the box's own state, and the system.
         let other = root.join("01TESTOTHERPROJECT00000000");
         assert_eq!(
-            state(format!("rm -rf {}/exports", other.display())).await,
+            state(format!("rm -rf {}", shell_argument(other.join("exports")))).await,
             "pending"
         );
         assert_eq!(
-            state(format!("rm -f {}/.arbos/audit.jsonl", root.display())).await,
+            state(format!(
+                "rm -f {}",
+                shell_argument(root.join(".arbos/audit.jsonl"))
+            ))
+            .await,
             "pending"
         );
         assert_eq!(state("rm -rf /etc/ssh".into()).await, "pending");
@@ -3304,9 +3363,11 @@ mod park_tests {
             reason.contains("Nothing ran") && reason.contains("end your turn"),
             "the model must not report work it did not do, and must stop: {reason}"
         );
-        assert_eq!(
-            agent.approvals.pending.lock().await[&id].mode,
-            WaitMode::Deferred,
+        assert!(
+            matches!(
+                agent.approvals.pending.lock().await[&id].delivery,
+                WaitDelivery::Deferred
+            ),
             "the parked entry is what makes the decision deferred"
         );
 
@@ -3614,7 +3675,7 @@ mod deadline_tests {
             payload: json!({ "kind": "tool_call", "tool": "bash" }),
         };
         let id = agent
-            .begin_approval(chat, req, WaitMode::Polled, None)
+            .begin_approval(chat, req, WaitDelivery::Polled)
             .await
             .unwrap();
         // Time is moved past all three rather than waited out: `tokio`'s clock is paused in
@@ -3669,7 +3730,7 @@ mod deadline_tests {
             payload: json!({ "kind": "tool_call", "tool": "bash", "job_id": "01TESTJOBCANCELCARD000000" }),
         };
         let id = agent
-            .begin_approval(chat, req, WaitMode::Polled, None)
+            .begin_approval(chat, req, WaitDelivery::Polled)
             .await
             .unwrap();
         agent
@@ -3686,5 +3747,539 @@ mod deadline_tests {
             "the card in the chat carries the row's own state; `doc_state` is where that changes"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod delivery_claim_regressions {
+    use super::*;
+    use crate::status::tests::test_agent;
+    use std::sync::atomic::Ordering;
+
+    const CHAT: &str = "01TESTCLAIMDELIVERYCHAT000";
+    fn request() -> ApprovalRequest {
+        ApprovalRequest {
+            title: "Synthetic single-use admission".into(),
+            summary: "No command is executed".into(),
+            risk: Risk::Destructive,
+            payload: json!({"kind":"tool_call", "tool":"bash", "input":{"command":"rm -rf /synthetic-owned-fixture"}}),
+        }
+    }
+    async fn fixture() -> (Arc<Agent>, std::path::PathBuf, crate::sync::SharedHost) {
+        let (agent, root) = test_agent().await;
+        agent.store.upsert_chat(CHAT, "Fixture", true, 0).unwrap();
+        let host = agent.sync.open_room(CHAT).await.unwrap();
+        (agent, root, host)
+    }
+    async fn inline_fault(action: &str) {
+        let (agent, root, _host) = fixture().await;
+        let (tx, mut rx) = oneshot::channel();
+        let id = agent
+            .begin_approval(CHAT, request(), WaitDelivery::Inline(tx))
+            .await
+            .unwrap();
+        agent.store.with(|c| c.execute_batch(&format!(
+            "CREATE TRIGGER refuse_claim BEFORE UPDATE OF grant_consumed_at ON approvals BEGIN SELECT RAISE({action}); END;"
+        ))).unwrap();
+        let result = agent
+            .decide_approval(&id, ApprovalOutcome::Approved, "synthetic-owner")
+            .await;
+        let delivered = rx.try_recv();
+        assert!(
+            !matches!(delivered, Ok(ApprovalOutcome::Approved)),
+            "a failed durable claim must never admit the inline tool"
+        );
+        assert!(result.is_err(), "claim failure must be reported");
+        assert_eq!(
+            agent.store.approval(&id).unwrap().unwrap().state,
+            "pending",
+            "decision must roll back with its failed claim"
+        );
+        agent
+            .store
+            .with(|c| c.execute_batch("DROP TRIGGER refuse_claim"))
+            .unwrap();
+        agent
+            .decide_approval(&id, ApprovalOutcome::Approved, "synthetic-owner")
+            .await
+            .unwrap();
+        assert!(
+            matches!(rx.try_recv(), Ok(ApprovalOutcome::Approved)),
+            "a local SQL failure leaves the original caller retryable"
+        );
+        assert!(agent
+            .store
+            .approval(&id)
+            .unwrap()
+            .unwrap()
+            .grant_consumed_at
+            .is_some());
+        let _ = std::fs::remove_dir_all(root);
+    }
+    #[tokio::test]
+    async fn an_aborted_claim_never_delivers_inline_approval() {
+        inline_fault("ABORT, 'synthetic claim failure'").await;
+    }
+    #[tokio::test]
+    async fn an_ignored_claim_never_delivers_inline_approval() {
+        inline_fault("IGNORE").await;
+    }
+
+    #[tokio::test]
+    async fn a_polled_approved_decision_is_already_claimed_before_doc_effects() {
+        let (agent, root, host) = fixture().await;
+        let id = agent
+            .begin_approval(CHAT, request(), WaitDelivery::Polled)
+            .await
+            .unwrap();
+        let paused_doc = host.lock().await;
+        let task = {
+            let agent = agent.clone();
+            let id = id.clone();
+            tokio::spawn(async move {
+                agent
+                    .decide_approval(&id, ApprovalOutcome::Approved, "synthetic-owner")
+                    .await
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if agent.approval_status(&id).await["state"] == "approved" {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("actual SQL decision did not complete");
+        assert!(
+            agent
+                .store
+                .approval(&id)
+                .unwrap()
+                .unwrap()
+                .grant_consumed_at
+                .is_some(),
+            "the real polling response admitted a tool before claiming its single-use grant"
+        );
+        drop(paused_doc);
+        task.await.unwrap().unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
+    #[tokio::test]
+    async fn inline_and_durable_grant_cannot_both_admit_the_same_card() {
+        let (agent, root, host) = fixture().await;
+        let (tx, rx) = oneshot::channel();
+        let id = agent
+            .begin_approval(CHAT, request(), WaitDelivery::Inline(tx))
+            .await
+            .unwrap();
+        let paused_doc = host.lock().await;
+        let task = {
+            let agent = agent.clone();
+            let id = id.clone();
+            tokio::spawn(async move {
+                agent
+                    .decide_approval(&id, ApprovalOutcome::Approved, "synthetic-owner")
+                    .await
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if agent.store.approval(&id).unwrap().unwrap().state == "approved" {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("actual SQL decision did not complete");
+        let other_admitted = agent.store.consume_grant(&id).unwrap();
+        drop(paused_doc);
+        let _ = task.await.unwrap();
+        let inline_admitted = matches!(rx.await, Ok(ApprovalOutcome::Approved));
+        assert!(
+            !(other_admitted && inline_admitted),
+            "one approval admitted both an inline call and another durable grant claimant"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+    #[tokio::test]
+    async fn abandoning_inline_after_published_approval_never_restores_authority() {
+        let (agent, root, host) = fixture().await;
+        let (tx, rx) = oneshot::channel();
+        let id = agent
+            .begin_approval(CHAT, request(), WaitDelivery::Inline(tx))
+            .await
+            .unwrap();
+        let paused_doc = host.lock().await;
+        let task = {
+            let agent = agent.clone();
+            let id = id.clone();
+            tokio::spawn(async move {
+                agent
+                    .decide_approval(&id, ApprovalOutcome::Approved, "synthetic-owner")
+                    .await
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if agent.approval_status(&id).await["state"] == "approved" {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("actual SQL decision did not complete");
+        drop(rx);
+        drop(paused_doc);
+        let _ = task.await.unwrap();
+        assert!(agent.store.approval(&id).unwrap().unwrap().grant_consumed_at.is_some(), "published approval may already have admitted an observer; never restore it after receiver loss");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_receiver_closed_while_pending_defers_without_spending_the_grant() {
+        let (agent, root, _host) = fixture().await;
+        let (tx, rx) = oneshot::channel();
+        let id = agent
+            .begin_approval(CHAT, request(), WaitDelivery::Inline(tx))
+            .await
+            .unwrap();
+        drop(rx);
+        agent
+            .decide_approval(&id, ApprovalOutcome::Approved, "synthetic-owner")
+            .await
+            .unwrap();
+        assert_eq!(
+            agent
+                .store
+                .approval(&id)
+                .unwrap()
+                .unwrap()
+                .grant_consumed_at,
+            None
+        );
+        assert!(
+            agent
+                .take_grant(
+                    "bash",
+                    &json!({"command":"rm -rf /synthetic-owned-fixture"})
+                )
+                .await
+                .is_some(),
+            "existing canonical deferred claim is retained"
+        );
+        assert!(agent
+            .take_grant(
+                "bash",
+                &json!({"command":"rm -rf /synthetic-owned-fixture"})
+            )
+            .await
+            .is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+    #[tokio::test]
+    async fn a_polled_claim_failure_keeps_pending_until_a_successful_retry() {
+        for action in ["ABORT, 'synthetic claim failure'", "IGNORE"] {
+            let (agent, root, _host) = fixture().await;
+            let id = agent
+                .begin_approval(CHAT, request(), WaitDelivery::Polled)
+                .await
+                .unwrap();
+            agent.store.with(|c| c.execute_batch(&format!("CREATE TRIGGER refuse_claim BEFORE UPDATE OF grant_consumed_at ON approvals BEGIN SELECT RAISE({action}); END;"))).unwrap();
+            assert!(agent
+                .decide_approval(&id, ApprovalOutcome::Approved, "synthetic-owner")
+                .await
+                .is_err());
+            assert_eq!(
+                agent.approval_status(&id).await["state"],
+                "pending",
+                "the actual polling path cannot publish an unclaimed approval"
+            );
+            agent
+                .store
+                .with(|c| c.execute_batch("DROP TRIGGER refuse_claim"))
+                .unwrap();
+            agent
+                .decide_approval(&id, ApprovalOutcome::Approved, "synthetic-owner")
+                .await
+                .unwrap();
+            assert_eq!(agent.approval_status(&id).await["state"], "approved");
+            assert!(agent
+                .store
+                .approval(&id)
+                .unwrap()
+                .unwrap()
+                .grant_consumed_at
+                .is_some());
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+    #[tokio::test]
+    async fn rejection_and_cancellation_deliver_without_claiming_authority() {
+        for outcome in [
+            ApprovalOutcome::Rejected {
+                reason: Some("synthetic refusal".into()),
+            },
+            ApprovalOutcome::Cancelled,
+        ] {
+            let (agent, root, _host) = fixture().await;
+            let (tx, rx) = oneshot::channel();
+            let id = agent
+                .begin_approval(CHAT, request(), WaitDelivery::Inline(tx))
+                .await
+                .unwrap();
+            agent.store.with(|c| c.execute_batch("CREATE TRIGGER refuse_claim BEFORE UPDATE OF grant_consumed_at ON approvals BEGIN SELECT RAISE(ABORT, 'must not claim'); END;")).unwrap();
+            agent
+                .decide_approval(&id, outcome.clone(), "synthetic-owner")
+                .await
+                .unwrap();
+            assert_eq!(rx.await.unwrap(), outcome);
+            assert_eq!(
+                agent
+                    .store
+                    .approval(&id)
+                    .unwrap()
+                    .unwrap()
+                    .grant_consumed_at,
+                None
+            );
+            assert!(agent
+                .take_grant(
+                    "bash",
+                    &json!({"command":"rm -rf /synthetic-owned-fixture"})
+                )
+                .await
+                .is_none());
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+    #[tokio::test]
+    async fn the_first_decision_and_its_claim_are_terminal() {
+        let (agent, root, _host) = fixture().await;
+        let (tx, rx) = oneshot::channel();
+        let id = agent
+            .begin_approval(CHAT, request(), WaitDelivery::Inline(tx))
+            .await
+            .unwrap();
+        agent
+            .decide_approval(&id, ApprovalOutcome::Approved, "synthetic-owner")
+            .await
+            .unwrap();
+        assert_eq!(rx.await.unwrap(), ApprovalOutcome::Approved);
+        let first = agent.store.approval(&id).unwrap().unwrap();
+        for outcome in [
+            ApprovalOutcome::Approved,
+            ApprovalOutcome::Cancelled,
+            ApprovalOutcome::Rejected { reason: None },
+        ] {
+            assert!(agent
+                .decide_approval(&id, outcome, "later-owner")
+                .await
+                .is_err());
+            let row = agent.store.approval(&id).unwrap().unwrap();
+            assert_eq!(
+                (row.state, row.grant_consumed_at, row.decided_by),
+                (
+                    first.state.clone(),
+                    first.grant_consumed_at,
+                    first.decided_by.clone()
+                )
+            );
+        }
+        assert_eq!(agent.park_approval(&id).await["parked"], false);
+        let _ = std::fs::remove_dir_all(root);
+    }
+    #[test]
+    fn generated_delivery_traces_keep_deferred_absorbing_and_never_invent_a_waiter() {
+        let mut seed = 0x5eed_4110_u64;
+        for case in 0..64 {
+            let (tx, rx) = oneshot::channel();
+            let mut receiver = Some(rx);
+            let mut state = match case % 3 {
+                0 => WaitDelivery::Inline(tx),
+                1 => WaitDelivery::Polled,
+                _ => WaitDelivery::Deferred,
+            };
+            let mut parked = matches!(state, WaitDelivery::Deferred);
+            for _ in 0..16 {
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                if seed & 4 != 0 {
+                    receiver.take();
+                }
+                let event = if seed & 1 == 0 {
+                    DeliveryEvent::Park
+                } else {
+                    DeliveryEvent::Decide
+                };
+                let action = transition_delivery(&mut state, event);
+                if matches!(action, DeliveryAction::Parked) {
+                    parked = true;
+                }
+                if parked {
+                    assert!(matches!(state, WaitDelivery::Deferred));
+                    assert!(matches!(
+                        action,
+                        DeliveryAction::Parked
+                            | DeliveryAction::Unchanged
+                            | DeliveryAction::Deferred
+                    ));
+                }
+                if matches!(action, DeliveryAction::Inline) {
+                    assert!(receiver.is_some());
+                    assert!(matches!(state, WaitDelivery::Inline(_)));
+                }
+                if matches!(state, WaitDelivery::Deferred) {
+                    parked = true;
+                }
+            }
+        }
+    }
+    struct CloseAtDecision {
+        receiver: std::sync::Mutex<Option<oneshot::Receiver<ApprovalOutcome>>>,
+        hits: std::sync::atomic::AtomicUsize,
+    }
+    struct ReceiverCloser {
+        store: crate::store::Store,
+        context: *const CloseAtDecision,
+    }
+    impl ReceiverCloser {
+        fn install(
+            store: &crate::store::Store,
+            receiver: oneshot::Receiver<ApprovalOutcome>,
+        ) -> Self {
+            unsafe extern "C" fn close_receiver(
+                event: u32,
+                context: *mut std::ffi::c_void,
+                statement: *mut std::ffi::c_void,
+                _: *mut std::ffi::c_void,
+            ) -> i32 {
+                if event != rusqlite::ffi::SQLITE_TRACE_PROFILE as u32 {
+                    return 0;
+                }
+                let sql = unsafe { rusqlite::ffi::sqlite3_sql(statement.cast()) };
+                if sql.is_null() {
+                    return 0;
+                }
+                let sql = unsafe { std::ffi::CStr::from_ptr(sql) }.to_bytes();
+                if sql.starts_with(b"UPDATE approvals SET state =") {
+                    let closer = unsafe { &*context.cast::<CloseAtDecision>() };
+                    if let Ok(mut receiver) = closer.receiver.lock() {
+                        receiver.take();
+                    }
+                    closer.hits.fetch_add(1, Ordering::SeqCst);
+                }
+                0
+            }
+            let context = Arc::into_raw(Arc::new(CloseAtDecision {
+                receiver: std::sync::Mutex::new(Some(receiver)),
+                hits: std::sync::atomic::AtomicUsize::new(0),
+            }));
+            store
+                .with(|connection| {
+                    // Context lives through registration; unregister under the same Store lock.
+                    let code = unsafe {
+                        rusqlite::ffi::sqlite3_trace_v2(
+                            connection.handle(),
+                            rusqlite::ffi::SQLITE_TRACE_PROFILE as u32,
+                            Some(close_receiver),
+                            context.cast_mut().cast(),
+                        )
+                    };
+                    assert_eq!(code, rusqlite::ffi::SQLITE_OK);
+                    Ok(())
+                })
+                .unwrap();
+            Self {
+                store: store.clone(),
+                context,
+            }
+        }
+        fn hits(&self) -> usize {
+            unsafe { &*self.context }.hits.load(Ordering::SeqCst)
+        }
+    }
+    impl Drop for ReceiverCloser {
+        fn drop(&mut self) {
+            self.store
+                .with(|connection| {
+                    unsafe {
+                        rusqlite::ffi::sqlite3_trace_v2(
+                            connection.handle(),
+                            0,
+                            None,
+                            std::ptr::null_mut(),
+                        );
+                    }
+                    Ok(())
+                })
+                .unwrap();
+            unsafe {
+                drop(Arc::from_raw(self.context));
+            }
+        }
+    }
+    async fn receiver_loss_after_nonapproved_admission(outcome: ApprovalOutcome, follow_up: bool) {
+        let (agent, root, host) = fixture().await;
+        let (tx, rx) = oneshot::channel();
+        let id = agent
+            .begin_approval(CHAT, request(), WaitDelivery::Inline(tx))
+            .await
+            .unwrap();
+        let closer = ReceiverCloser::install(&agent.store, rx);
+        agent
+            .decide_approval(&id, outcome.clone(), "synthetic-owner")
+            .await
+            .unwrap();
+        assert_eq!(
+            closer.hits(),
+            1,
+            "receiver must close at the actual SQL decision edge"
+        );
+        drop(closer);
+        assert_eq!(
+            agent
+                .store
+                .approval(&id)
+                .unwrap()
+                .unwrap()
+                .grant_consumed_at,
+            None
+        );
+        if follow_up {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if host.lock().await.doc.messages().iter().any(|m| m.rest.get("approvalId").and_then(Value::as_str) == Some(&id)) { break; }
+                    tokio::task::yield_now().await;
+                }
+            }).await.expect("a rejected decision whose receiver disappeared must still produce its real follow-up row");
+        } else {
+            tokio::task::yield_now().await;
+            assert!(
+                !host.lock().await.doc.messages().iter().any(|m| m
+                    .rest
+                    .get("approvalId")
+                    .and_then(Value::as_str)
+                    == Some(&id)),
+                "cancellation must remain silent"
+            );
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+    #[tokio::test]
+    async fn a_rejected_receiver_lost_after_classification_still_gets_its_followup() {
+        receiver_loss_after_nonapproved_admission(
+            ApprovalOutcome::Rejected {
+                reason: Some("synthetic refusal".into()),
+            },
+            true,
+        )
+        .await;
+    }
+    #[tokio::test]
+    async fn a_cancelled_receiver_lost_after_classification_remains_silent() {
+        receiver_loss_after_nonapproved_admission(ApprovalOutcome::Cancelled, false).await;
     }
 }

@@ -1,0 +1,26 @@
+{
+  "sources": {
+    "apps/ios/Arbos/Arbos/Store/AppModel.swift": "f73b529139a3ba6d630740a6e22172a30fe66906e55260bf7943851593bcad38",
+    "apps/ios/Arbos/Arbos/Sync/RelayAPI.swift": "0d50ec56055a25ad6cb7f595a679a03e33b14b9aeb7eacb887008ac592ca2985",
+    "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f"
+  },
+  "compile_exit": 0,
+  "fixture_sha256": "914a79ca174508fcee0a67f4325440a62149b619ada5e00148088b4d5643449d",
+  "exit_code": 0,
+  "results": {
+    "cases": {
+      "current-sticker-source-bytes-control": true,
+      "current-transcript-control": true,
+      "fixture-transcribe-no-request": true,
+      "queued-sticker-never-uses-B": true,
+      "stale-sticker-error-no-paint": true,
+      "stale-sticker-success-no-commit": true,
+      "stale-transcribe-error-no-paint": true,
+      "stale-transcript-no-private-return": true
+    },
+    "failed": 0,
+    "passed": 8,
+    "total": 8
+  },
+  "seconds": 0.7254383749095723
+}

@@ -1,0 +1,62 @@
+{
+  "sources": {
+    "apps/ios/Arbos/Arbos/Store/AppModel.swift": "f73b529139a3ba6d630740a6e22172a30fe66906e55260bf7943851593bcad38",
+    "apps/ios/Arbos/Arbos/Sync/RelayAPI.swift": "0d50ec56055a25ad6cb7f595a679a03e33b14b9aeb7eacb887008ac592ca2985",
+    "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f"
+  },
+  "compile_exit": 0,
+  "fixture_sha256": "a961fd267235fccc38c165765775261d9f567248f01d4fef6b4627da245cfa8d",
+  "exit_code": 0,
+  "results": {
+    "failed": 0,
+    "passed": 11,
+    "results": [
+      {
+        "name": "people-queued-A-never-uses-B",
+        "pass": true
+      },
+      {
+        "name": "people-stale-success-no-commit",
+        "pass": true
+      },
+      {
+        "name": "people-stale-error-no-paint",
+        "pass": true
+      },
+      {
+        "name": "people-current-partial-failure-policy",
+        "pass": true
+      },
+      {
+        "name": "people-current-order-bytes-single-commit",
+        "pass": true
+      },
+      {
+        "name": "project-queued-A-never-uses-B",
+        "pass": true
+      },
+      {
+        "name": "project-stale-success-no-commit",
+        "pass": true
+      },
+      {
+        "name": "project-stale-error-no-paint",
+        "pass": true
+      },
+      {
+        "name": "project-current-partial-failure-policy",
+        "pass": true
+      },
+      {
+        "name": "project-current-order-bytes-single-commit",
+        "pass": true
+      },
+      {
+        "name": "project-fixture-no-network-control",
+        "pass": true
+      }
+    ],
+    "total": 11
+  },
+  "seconds": 0.8120475839823484
+}

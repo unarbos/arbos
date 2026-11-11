@@ -1,0 +1,468 @@
+{
+  "qualification": "Source-derived selected controllers with synthetic collaborators, no real HTTP/device/UI rendering. connect_reveal was pinned after the common model boundary existed, before its UI closure changed. Matrix has four cases; actual total is passed+failed. Final-edge compile failures were introduced candidate defects, separately recorded by the real SDK compiler; excluded from original behavioral counts.",
+  "gates": [
+    {
+      "gate": "directory",
+      "compile_exit": 0,
+      "test_exit": 1,
+      "passed": 2,
+      "failed": 3,
+      "seconds": 3.1725166250253096,
+      "sources": {
+        "apps/ios/Arbos/Arbos/Store/AppModel.swift": "6086d5bd5e919f6d89648b840038a7bd9b5eabf735b4a70f8e66c1bbf2313b83",
+        "apps/ios/Arbos/Arbos/Sync/RelayAPI.swift": "0d50ec56055a25ad6cb7f595a679a03e33b14b9aeb7eacb887008ac592ca2985",
+        "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "f40cc9f58ae3e238141cdf5f795a2c4cf855c198d8d0547cc1e9592516f33818"
+      },
+      "fixture_sha256": "653c8fbb167c318e02eb4e8ff16c6123312fa6a1aaeb31d3850f60f4ba65914b",
+      "stage": "original-selected-source"
+    },
+    {
+      "gate": "registry",
+      "compile_exit": 0,
+      "test_exit": 1,
+      "passed": 2,
+      "failed": 4,
+      "seconds": 3.2155951249878854,
+      "sources": {
+        "apps/ios/Arbos/Arbos/Store/AppModel.swift": "6086d5bd5e919f6d89648b840038a7bd9b5eabf735b4a70f8e66c1bbf2313b83",
+        "apps/ios/Arbos/Arbos/Sync/RelayAPI.swift": "0d50ec56055a25ad6cb7f595a679a03e33b14b9aeb7eacb887008ac592ca2985",
+        "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "f40cc9f58ae3e238141cdf5f795a2c4cf855c198d8d0547cc1e9592516f33818"
+      },
+      "fixture_sha256": "07f491e7c13aa08eca8959024144c648a2d53b328923582e48109ab7358da66e",
+      "stage": "original-selected-source"
+    },
+    {
+      "gate": "machine",
+      "compile_exit": 0,
+      "test_exit": 1,
+      "passed": 2,
+      "failed": 4,
+      "seconds": 2.414433541940525,
+      "sources": {
+        "apps/ios/Arbos/Arbos/Store/AppModel.swift": "6086d5bd5e919f6d89648b840038a7bd9b5eabf735b4a70f8e66c1bbf2313b83",
+        "apps/ios/Arbos/Arbos/Sync/RelayAPI.swift": "0d50ec56055a25ad6cb7f595a679a03e33b14b9aeb7eacb887008ac592ca2985",
+        "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "f40cc9f58ae3e238141cdf5f795a2c4cf855c198d8d0547cc1e9592516f33818"
+      },
+      "fixture_sha256": "bcf3ac40f33e5487461963959bae58b7b2e6226a4be2acb6014c74cee4350531",
+      "stage": "original-selected-source"
+    },
+    {
+      "gate": "pins",
+      "compile_exit": 0,
+      "test_exit": 1,
+      "passed": 2,
+      "failed": 4,
+      "seconds": 1.3519790000282228,
+      "sources": {
+        "apps/ios/Arbos/Arbos/Store/AppModel.swift": "6086d5bd5e919f6d89648b840038a7bd9b5eabf735b4a70f8e66c1bbf2313b83",
+        "apps/ios/Arbos/Arbos/Sync/RelayAPI.swift": "0d50ec56055a25ad6cb7f595a679a03e33b14b9aeb7eacb887008ac592ca2985",
+        "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "f40cc9f58ae3e238141cdf5f795a2c4cf855c198d8d0547cc1e9592516f33818"
+      },
+      "fixture_sha256": "2d586c0dd8b1604e9edc629a689809f532f0574b6547797dde8ebd3885cbdb23",
+      "stage": "original-selected-source"
+    },
+    {
+      "gate": "poll_data",
+      "compile_exit": 0,
+      "test_exit": 1,
+      "passed": 4,
+      "failed": 5,
+      "seconds": 2.759777041967027,
+      "sources": {
+        "apps/ios/Arbos/Arbos/Store/AppModel.swift": "6086d5bd5e919f6d89648b840038a7bd9b5eabf735b4a70f8e66c1bbf2313b83",
+        "apps/ios/Arbos/Arbos/Sync/RelayAPI.swift": "0d50ec56055a25ad6cb7f595a679a03e33b14b9aeb7eacb887008ac592ca2985",
+        "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "f40cc9f58ae3e238141cdf5f795a2c4cf855c198d8d0547cc1e9592516f33818"
+      },
+      "fixture_sha256": "efe15c6c2863f49db139859f4547bf45123397d55032f0c222cc1c840032d04f",
+      "stage": "original-selected-source"
+    },
+    {
+      "gate": "people",
+      "compile_exit": 0,
+      "test_exit": 1,
+      "passed": 2,
+      "failed": 3,
+      "seconds": 2.3098787909839302,
+      "sources": {
+        "apps/ios/Arbos/Arbos/Store/AppModel.swift": "6086d5bd5e919f6d89648b840038a7bd9b5eabf735b4a70f8e66c1bbf2313b83",
+        "apps/ios/Arbos/Arbos/Sync/RelayAPI.swift": "0d50ec56055a25ad6cb7f595a679a03e33b14b9aeb7eacb887008ac592ca2985",
+        "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "f40cc9f58ae3e238141cdf5f795a2c4cf855c198d8d0547cc1e9592516f33818"
+      },
+      "fixture_sha256": "819c71a5443f3fe2b4b5e275e72a070bb1f9463e409fe2695d46413b33af9290",
+      "stage": "original-selected-source"
+    },
+    {
+      "gate": "servers",
+      "compile_exit": 0,
+      "test_exit": 1,
+      "passed": 3,
+      "failed": 5,
+      "seconds": 1.8610907080583274,
+      "sources": {
+        "apps/ios/Arbos/Arbos/Store/AppModel.swift": "6086d5bd5e919f6d89648b840038a7bd9b5eabf735b4a70f8e66c1bbf2313b83",
+        "apps/ios/Arbos/Arbos/Sync/RelayAPI.swift": "0d50ec56055a25ad6cb7f595a679a03e33b14b9aeb7eacb887008ac592ca2985",
+        "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "f40cc9f58ae3e238141cdf5f795a2c4cf855c198d8d0547cc1e9592516f33818",
+        "apps/ios/Arbos/Arbos/Store/ServerStore.swift": "fe3e2d7c9a1549057f1ed8ebec641d1d8470139896d162646bfe2b550e594369"
+      },
+      "fixture_sha256": "f6f3f05c09d7eb63df166a67b3c059c3775337da4e7f872671003fe75c42f52f",
+      "stage": "original-selected-source"
+    },
+    {
+      "gate": "store_docs",
+      "compile_exit": 0,
+      "test_exit": 1,
+      "passed": 1,
+      "failed": 3,
+      "seconds": 0.6664504999062046,
+      "sources": {
+        "apps/ios/Arbos/Arbos/Store/AppModel.swift": "6086d5bd5e919f6d89648b840038a7bd9b5eabf735b4a70f8e66c1bbf2313b83",
+        "apps/ios/Arbos/Arbos/Sync/RelayAPI.swift": "0d50ec56055a25ad6cb7f595a679a03e33b14b9aeb7eacb887008ac592ca2985",
+        "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "f40cc9f58ae3e238141cdf5f795a2c4cf855c198d8d0547cc1e9592516f33818"
+      },
+      "fixture_sha256": "0a1f1691b5790ab8296ff6c1169789471461ee90379abcbf2af52ce61320d36b",
+      "stage": "original-selected-source"
+    },
+    {
+      "gate": "matrix_entry",
+      "compile_exit": 0,
+      "test_exit": 1,
+      "passed": 3,
+      "failed": 1,
+      "seconds": 0.7956097500864416,
+      "sources": {
+        "apps/ios/Arbos/Arbos/Sync/RelayAPI.swift": "0d50ec56055a25ad6cb7f595a679a03e33b14b9aeb7eacb887008ac592ca2985",
+        "apps/ios/Arbos/Arbos/Store/ServerStore.swift": "fe3e2d7c9a1549057f1ed8ebec641d1d8470139896d162646bfe2b550e594369",
+        "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "f40cc9f58ae3e238141cdf5f795a2c4cf855c198d8d0547cc1e9592516f33818",
+        "apps/ios/Arbos/Arbos/Store/AppModel.swift": "6086d5bd5e919f6d89648b840038a7bd9b5eabf735b4a70f8e66c1bbf2313b83"
+      },
+      "fixture_sha256": "83a8ee7db833f18b82d4c686b2feb79c4814dba9c6c3371f2c7024625bf25b5a",
+      "stage": "original-selected-source"
+    },
+    {
+      "gate": "secrets",
+      "compile_exit": 0,
+      "test_exit": 1,
+      "passed": 4,
+      "failed": 5,
+      "seconds": 3.0368239999515936,
+      "sources": {
+        "apps/ios/Arbos/Arbos/Store/AppModel.swift": "6086d5bd5e919f6d89648b840038a7bd9b5eabf735b4a70f8e66c1bbf2313b83",
+        "apps/ios/Arbos/Arbos/Sync/RelayAPI.swift": "0d50ec56055a25ad6cb7f595a679a03e33b14b9aeb7eacb887008ac592ca2985",
+        "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "f40cc9f58ae3e238141cdf5f795a2c4cf855c198d8d0547cc1e9592516f33818",
+        "apps/ios/Arbos/Arbos/Store/SecretsStore.swift": "72f94e87ed6c49216c99cfbd2205cea141a5d2a80898c03d20ad02cc17159b6e"
+      },
+      "fixture_sha256": "64b929b890045fe739ac1fbb830f2217ec4e2c75a12844a32cff0711acfb3527",
+      "stage": "original-selected-source"
+    },
+    {
+      "gate": "push_admission",
+      "compile_exit": 0,
+      "test_exit": 1,
+      "passed": 2,
+      "failed": 3,
+      "seconds": 3.2166881249286234,
+      "sources": {
+        "apps/ios/Arbos/Arbos/Store/AppModel.swift": "6086d5bd5e919f6d89648b840038a7bd9b5eabf735b4a70f8e66c1bbf2313b83",
+        "apps/ios/Arbos/Arbos/Sync/RelayAPI.swift": "0d50ec56055a25ad6cb7f595a679a03e33b14b9aeb7eacb887008ac592ca2985",
+        "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "f40cc9f58ae3e238141cdf5f795a2c4cf855c198d8d0547cc1e9592516f33818"
+      },
+      "fixture_sha256": "7be27ac3374348fe98d0c1753fb3a601e7434a71b5c5bc9ce1530bf0554ab104",
+      "stage": "original-selected-source"
+    },
+    {
+      "gate": "feedback_capture",
+      "compile_exit": 0,
+      "test_exit": 1,
+      "passed": 3,
+      "failed": 2,
+      "seconds": 1.9992990409955382,
+      "sources": {
+        "apps/ios/Arbos/Arbos/Store/AppModel.swift": "6086d5bd5e919f6d89648b840038a7bd9b5eabf735b4a70f8e66c1bbf2313b83",
+        "apps/ios/Arbos/Arbos/Sync/RelayAPI.swift": "0d50ec56055a25ad6cb7f595a679a03e33b14b9aeb7eacb887008ac592ca2985",
+        "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "f40cc9f58ae3e238141cdf5f795a2c4cf855c198d8d0547cc1e9592516f33818"
+      },
+      "fixture_sha256": "2828bf279a477ec5fbfb0e767f318834289ca0ae2de964a226b380b2b1985efb",
+      "stage": "original-selected-source"
+    },
+    {
+      "gate": "startup",
+      "compile_exit": 0,
+      "test_exit": 1,
+      "passed": 1,
+      "failed": 5,
+      "seconds": 1.7436545409727842,
+      "sources": {
+        "apps/ios/Arbos/Arbos/Store/AppModel.swift": "6086d5bd5e919f6d89648b840038a7bd9b5eabf735b4a70f8e66c1bbf2313b83",
+        "apps/ios/Arbos/Arbos/Sync/RelayAPI.swift": "0d50ec56055a25ad6cb7f595a679a03e33b14b9aeb7eacb887008ac592ca2985",
+        "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "f40cc9f58ae3e238141cdf5f795a2c4cf855c198d8d0547cc1e9592516f33818"
+      },
+      "fixture_sha256": "c8e1ceaa4909ad8dc9c3e4feef2a577f5cde1abc66f202012ec765dc779bdebd",
+      "stage": "original-selected-source"
+    },
+    {
+      "gate": "notification",
+      "compile_exit": 0,
+      "test_exit": 1,
+      "passed": 4,
+      "failed": 2,
+      "seconds": 1.3599921250715852,
+      "sources": {},
+      "fixture_sha256": "1c7cb413a4fd3104f54a8fce87798ef214590e6db13ae811ece11447114831ec",
+      "stage": "original-selected-source"
+    },
+    {
+      "gate": "push_registration",
+      "compile_exit": 0,
+      "test_exit": 1,
+      "passed": 2,
+      "failed": 4,
+      "seconds": 0.9229991659522057,
+      "sources": {
+        "apps/ios/Arbos/Arbos/Store/AppModel.swift": "6086d5bd5e919f6d89648b840038a7bd9b5eabf735b4a70f8e66c1bbf2313b83",
+        "apps/ios/Arbos/Arbos/Sync/RelayAPI.swift": "0d50ec56055a25ad6cb7f595a679a03e33b14b9aeb7eacb887008ac592ca2985",
+        "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "f40cc9f58ae3e238141cdf5f795a2c4cf855c198d8d0547cc1e9592516f33818"
+      },
+      "fixture_sha256": "b438d95d9037734daf1fbd41e133c23e98ca0aecd36b188aa0c07b6de055e304",
+      "stage": "original-selected-source"
+    },
+    {
+      "gate": "draft_sends",
+      "compile_exit": 0,
+      "test_exit": 1,
+      "passed": 3,
+      "failed": 6,
+      "seconds": 0.8592097499640658,
+      "sources": {
+        "apps/ios/Arbos/Arbos/Store/AppModel.swift": "6086d5bd5e919f6d89648b840038a7bd9b5eabf735b4a70f8e66c1bbf2313b83",
+        "apps/ios/Arbos/Arbos/Sync/RelayAPI.swift": "0d50ec56055a25ad6cb7f595a679a03e33b14b9aeb7eacb887008ac592ca2985",
+        "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "f40cc9f58ae3e238141cdf5f795a2c4cf855c198d8d0547cc1e9592516f33818"
+      },
+      "fixture_sha256": "5d926d9bb880955ee30e7ee1684c447802025ab4a64920707844cd7f267fa1db",
+      "stage": "original-selected-source"
+    },
+    {
+      "gate": "reset",
+      "compile_exit": 0,
+      "test_exit": 1,
+      "passed": 2,
+      "failed": 7,
+      "seconds": null,
+      "sources": {
+        "base/apps/ios/Arbos/Arbos/Store/AppModel.swift": "6086d5bd5e919f6d89648b840038a7bd9b5eabf735b4a70f8e66c1bbf2313b83",
+        "base/apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "f40cc9f58ae3e238141cdf5f795a2c4cf855c198d8d0547cc1e9592516f33818",
+        "ownership/apps/ios/Arbos/Arbos/Sync/DraftSendQueue.swift": "0985e595fa179b2919fed2c5b401d8f15a956fed78ce9b9f6ed6d20ecebc9e94"
+      },
+      "fixture_sha256": "cbb6bb53c4ab1aed03aa0c114c1a4716a510d69c5dbd3e7c4cd279bdfc154262",
+      "stage": "original-selected-source"
+    },
+    {
+      "gate": "uploads",
+      "compile_exit": 0,
+      "test_exit": 1,
+      "passed": 5,
+      "failed": 6,
+      "seconds": 0.8697131669614464,
+      "sources": {
+        "apps/ios/Arbos/Arbos/Store/AppModel.swift": "6086d5bd5e919f6d89648b840038a7bd9b5eabf735b4a70f8e66c1bbf2313b83",
+        "apps/ios/Arbos/Arbos/Sync/RelayAPI.swift": "0d50ec56055a25ad6cb7f595a679a03e33b14b9aeb7eacb887008ac592ca2985",
+        "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "f40cc9f58ae3e238141cdf5f795a2c4cf855c198d8d0547cc1e9592516f33818"
+      },
+      "fixture_sha256": "58ef865f3646aff9ab88dee2670306cb9236ad7d22f61c46634ab16479f1fca5",
+      "stage": "original-selected-source"
+    },
+    {
+      "gate": "identity",
+      "compile_exit": 0,
+      "test_exit": 1,
+      "passed": 5,
+      "failed": 1,
+      "seconds": 0.9048494999296963,
+      "sources": {
+        "apps/ios/Arbos/Arbos/Store/AppModel.swift": "6086d5bd5e919f6d89648b840038a7bd9b5eabf735b4a70f8e66c1bbf2313b83",
+        "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "f40cc9f58ae3e238141cdf5f795a2c4cf855c198d8d0547cc1e9592516f33818"
+      },
+      "fixture_sha256": "7901643a9f867c90377a46359b25ba79a755b8855dd7698f3cca5133ea86d594",
+      "stage": "original-selected-source"
+    },
+    {
+      "gate": "media",
+      "compile_exit": 0,
+      "test_exit": 1,
+      "passed": 3,
+      "failed": 5,
+      "seconds": 1.5300681249937043,
+      "sources": {
+        "apps/ios/Arbos/Arbos/Store/AppModel.swift": "6086d5bd5e919f6d89648b840038a7bd9b5eabf735b4a70f8e66c1bbf2313b83",
+        "apps/ios/Arbos/Arbos/Sync/RelayAPI.swift": "0d50ec56055a25ad6cb7f595a679a03e33b14b9aeb7eacb887008ac592ca2985",
+        "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "f40cc9f58ae3e238141cdf5f795a2c4cf855c198d8d0547cc1e9592516f33818"
+      },
+      "fixture_sha256": "11145f11b2f6da432f938426df3353a2b987fd3e8738bd8d2c350584ece0e71e",
+      "stage": "original-selected-source"
+    },
+    {
+      "gate": "memo",
+      "compile_exit": 0,
+      "test_exit": 1,
+      "passed": 2,
+      "failed": 3,
+      "seconds": 1.3813010420417413,
+      "sources": {
+        "apps/ios/Arbos/Arbos/Store/AppModel.swift": "6086d5bd5e919f6d89648b840038a7bd9b5eabf735b4a70f8e66c1bbf2313b83",
+        "apps/ios/Arbos/Arbos/Sync/RelayAPI.swift": "0d50ec56055a25ad6cb7f595a679a03e33b14b9aeb7eacb887008ac592ca2985",
+        "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "f40cc9f58ae3e238141cdf5f795a2c4cf855c198d8d0547cc1e9592516f33818",
+        "apps/ios/Arbos/Arbos/UI/ChatView.swift": "3b8f1353a2923126ca736137dc1266c1edc52dc5bfe241e38ac03e7ea974db86"
+      },
+      "fixture_sha256": "85afa8e2c7d8d0a63b2ff76b428b75cb2e0119b8e0aed3f6b45225be6487cf1f",
+      "stage": "original-selected-source"
+    },
+    {
+      "gate": "forward",
+      "compile_exit": 0,
+      "test_exit": 1,
+      "passed": 2,
+      "failed": 4,
+      "seconds": 1.7144757499918342,
+      "sources": {
+        "apps/ios/Arbos/Arbos/Store/AppModel.swift": "6086d5bd5e919f6d89648b840038a7bd9b5eabf735b4a70f8e66c1bbf2313b83",
+        "apps/ios/Arbos/Arbos/Sync/RelayAPI.swift": "0d50ec56055a25ad6cb7f595a679a03e33b14b9aeb7eacb887008ac592ca2985",
+        "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "f40cc9f58ae3e238141cdf5f795a2c4cf855c198d8d0547cc1e9592516f33818",
+        "apps/ios/Arbos/Arbos/UI/MediaViewer.swift": "7a838a6d8f2e0699138b360910e16e5289338398b39540ee6c74e61f513e9432"
+      },
+      "fixture_sha256": "aca9005e7f7e5dd407b2befd1fe91f35dca6b0dfc31956c63f0d2e1711553e9a",
+      "stage": "original-selected-source"
+    },
+    {
+      "gate": "actions",
+      "compile_exit": 0,
+      "test_exit": 1,
+      "passed": 8,
+      "failed": 11,
+      "seconds": 0.8349140839418396,
+      "sources": {
+        "apps/ios/Arbos/Arbos/Store/AppModel.swift": "6086d5bd5e919f6d89648b840038a7bd9b5eabf735b4a70f8e66c1bbf2313b83",
+        "apps/ios/Arbos/Arbos/Sync/RelayAPI.swift": "0d50ec56055a25ad6cb7f595a679a03e33b14b9aeb7eacb887008ac592ca2985",
+        "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "f40cc9f58ae3e238141cdf5f795a2c4cf855c198d8d0547cc1e9592516f33818"
+      },
+      "fixture_sha256": "8c9968660a750517721392fc777d144e4f86b1f18e6ad8a976db0f3d045504fb",
+      "stage": "original-selected-source"
+    },
+    {
+      "gate": "connectors",
+      "compile_exit": 0,
+      "test_exit": 1,
+      "passed": 2,
+      "failed": 4,
+      "seconds": 1.5477119580609724,
+      "sources": {
+        "apps/ios/Arbos/Arbos/Store/AppModel.swift": "6086d5bd5e919f6d89648b840038a7bd9b5eabf735b4a70f8e66c1bbf2313b83",
+        "apps/ios/Arbos/Arbos/Sync/RelayAPI.swift": "0d50ec56055a25ad6cb7f595a679a03e33b14b9aeb7eacb887008ac592ca2985",
+        "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "f40cc9f58ae3e238141cdf5f795a2c4cf855c198d8d0547cc1e9592516f33818"
+      },
+      "fixture_sha256": "8a53d976d71fe39984dbf08fbb63e215fe1989a24b11b23f6a089ce4e9dc35a6",
+      "stage": "original-selected-source"
+    },
+    {
+      "gate": "ui_identity",
+      "compile_exit": 0,
+      "test_exit": 1,
+      "passed": 2,
+      "failed": 2,
+      "seconds": 1.2255225420231,
+      "sources": {
+        "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "f40cc9f58ae3e238141cdf5f795a2c4cf855c198d8d0547cc1e9592516f33818",
+        "apps/ios/Arbos/Arbos/App/ArbosApp.swift": "35fb60bb437d9da241494d7c8269d99314e8d8a1140211585c94e2d9491c8eee"
+      },
+      "fixture_sha256": "97a22fad9f77c1f1dbfb52e9d52d76b85fc6ea2eb5a5066bf7a38e62a3c8bdbd",
+      "stage": "original-selected-source"
+    },
+    {
+      "gate": "firstlogin",
+      "compile_exit": 0,
+      "test_exit": 1,
+      "passed": 2,
+      "failed": 3,
+      "seconds": 0.9022235840093344,
+      "sources": {
+        "apps/ios/Arbos/Arbos/Store/FirstLogin.swift": "49ff5e715dbff7bc744c26e2c94cc3dbd31de5dfe6304ea0a2f7fac15b38dd6d",
+        "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "f40cc9f58ae3e238141cdf5f795a2c4cf855c198d8d0547cc1e9592516f33818"
+      },
+      "fixture_sha256": "d2ea53838c614543d5fb6edf8a520be78991142691189e7276d231d77563e035",
+      "stage": "original-selected-source"
+    },
+    {
+      "gate": "people_actions",
+      "compile_exit": 0,
+      "test_exit": 1,
+      "passed": 4,
+      "failed": 8,
+      "seconds": 0.6524364158976823,
+      "sources": {
+        "apps/ios/Arbos/Arbos/UI/PeopleSheets.swift": "f358517805e6883a8dbcd7a352bcaa7829c091c8550275044dd0d38cfdefe734",
+        "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "f40cc9f58ae3e238141cdf5f795a2c4cf855c198d8d0547cc1e9592516f33818"
+      },
+      "fixture_sha256": "7db9f6bebc758e24add427aba6eeaf9c26f41d6083d5001798800b8173eafd2d",
+      "stage": "original-selected-source"
+    },
+    {
+      "gate": "avatar_state",
+      "compile_exit": 0,
+      "test_exit": 1,
+      "passed": 2,
+      "failed": 3,
+      "seconds": 1.113764917012304,
+      "sources": {
+        "apps/ios/Arbos/Arbos/UI/AvatarPickerSheet.swift": "12e6830b96419fbe0a5c748973136d146ccb7550e35e514bff8293576002fca1",
+        "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "f40cc9f58ae3e238141cdf5f795a2c4cf855c198d8d0547cc1e9592516f33818"
+      },
+      "fixture_sha256": "a257ccf878959b393942ed3dd708341cbadaf8405f01ed3f8534a0b2f34788e6",
+      "stage": "original-selected-source"
+    },
+    {
+      "gate": "feedback_send",
+      "compile_exit": 0,
+      "test_exit": 1,
+      "passed": 1,
+      "failed": 4,
+      "seconds": 1.5826824998948723,
+      "sources": {
+        "apps/ios/Arbos/Arbos/Store/AppModel.swift": "6086d5bd5e919f6d89648b840038a7bd9b5eabf735b4a70f8e66c1bbf2313b83",
+        "apps/ios/Arbos/Arbos/Sync/RelayAPI.swift": "0d50ec56055a25ad6cb7f595a679a03e33b14b9aeb7eacb887008ac592ca2985",
+        "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "f40cc9f58ae3e238141cdf5f795a2c4cf855c198d8d0547cc1e9592516f33818",
+        "apps/ios/Arbos/Arbos/UI/FeedbackSheet.swift": "df34361040c68b1f4e0f758e7ec4466677ad6bfa75ef0d10877bc57c0be2ba05"
+      },
+      "fixture_sha256": "493c0a436462c6bd47b092292cd9706366bd26a9c59e369eab84b2ae47fd3257",
+      "stage": "original-selected-source"
+    },
+    {
+      "gate": "fun_picker",
+      "compile_exit": 0,
+      "test_exit": 1,
+      "passed": 3,
+      "failed": 4,
+      "seconds": 1.0363228749483824,
+      "sources": {
+        "apps/ios/Arbos/Arbos/Store/AppModel.swift": "6086d5bd5e919f6d89648b840038a7bd9b5eabf735b4a70f8e66c1bbf2313b83",
+        "apps/ios/Arbos/Arbos/Sync/RelayAPI.swift": "0d50ec56055a25ad6cb7f595a679a03e33b14b9aeb7eacb887008ac592ca2985",
+        "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "f40cc9f58ae3e238141cdf5f795a2c4cf855c198d8d0547cc1e9592516f33818",
+        "apps/ios/Arbos/Arbos/UI/FunPicker.swift": "4f6d4ddbceebff472aee80bc3418edbda6016ea403a13302d2139c4ae2d35840"
+      },
+      "fixture_sha256": "a2af62cbae9384e78fa5e70babc1ab8a360b2467636aeda081a82ca356396b86",
+      "stage": "original-selected-source"
+    },
+    {
+      "gate": "connect_reveal",
+      "compile_exit": 0,
+      "test_exit": 1,
+      "passed": 1,
+      "failed": 2,
+      "seconds": 1.743869167054072,
+      "sources": {
+        "apps/ios/Arbos/Arbos/UI/PeopleSheets.swift": "f40dcf81c7a24fd3ea53a5fb292cc946c844b1c4efaebb039e5da9349728f18f",
+        "apps/ios/Arbos/Arbos/Store/AppModel.swift": "f73b529139a3ba6d630740a6e22172a30fe66906e55260bf7943851593bcad38",
+        "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f"
+      },
+      "fixture_sha256": "198e4a83782e70663a44f9206147efe7de7756cadfe27b22be315ae57919d614",
+      "stage": "after-shared-model-before-UI"
+    }
+  ]
+}

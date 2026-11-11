@@ -225,7 +225,253 @@ fn user_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<User> {
 
 const USER_COLS: &str = "id, github_id, login, avatar_url, name, created_at, last_login_at, spend_cap_usd, cap_unlimited, allow_negative, test";
 
+/// Defaults are used only when a chargeable part first creates a legacy account.
+pub(crate) struct LegacyCreditDefaults {
+    pub limit: crate::credits::SpendLimit,
+    pub grant_usd: f64,
+}
+
+pub(crate) enum LegacyCreditInit {
+    Existing,
+    Granted,
+    Unfunded,
+}
+pub(crate) enum PostfactDebit {
+    Paid,
+    Clamped { balance_usd: f64 },
+    Refused(DebitRefused),
+}
+
+/// Post-commit facts for logs; no effect or account lock escapes the database.
+pub(crate) struct PostfactCharge {
+    pub legacy: LegacyCreditInit,
+    pub debit: PostfactDebit,
+}
+
+fn ensure_legacy_credit_on(
+    c: &Connection,
+    user_id: &str,
+    defaults: &LegacyCreditDefaults,
+) -> rusqlite::Result<LegacyCreditInit> {
+    if user_id.is_empty()
+        || c.query_row(
+            "SELECT 1 FROM users WHERE id = ?1",
+            params![user_id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some()
+    {
+        return Ok(LegacyCreditInit::Existing);
+    }
+    set_user_limits_on(c, user_id, Some(defaults.limit.stored()), None)?;
+    if !defaults.grant_usd.is_finite() || defaults.grant_usd <= 0.0 {
+        // Existing policy: a zero/invalid default creates an unfunded legacy user.
+        return Ok(LegacyCreditInit::Unfunded);
+    }
+    grant_credits_on(
+        c,
+        user_id,
+        defaults.grant_usd,
+        "legacy account grant (device-token user)",
+        "relay",
+    )?;
+    Ok(LegacyCreditInit::Granted)
+}
+
+pub(crate) fn charge_postfact_on(
+    c: &Connection,
+    user_id: &str,
+    usd: f64,
+    kind: &str,
+    reference: Option<&str>,
+    defaults: &LegacyCreditDefaults,
+) -> rusqlite::Result<Option<PostfactCharge>> {
+    if !crate::credits::chargeable_amount(usd) {
+        return Ok(None);
+    }
+    let legacy = ensure_legacy_credit_on(c, user_id, defaults)?;
+    // Preserve the per-part UTC check after legacy initialization, even across midnight.
+    let day = crate::credits::start_of_utc_day_ms();
+    let debit = match debit_on(c, user_id, usd, kind, reference, day)? {
+        Ok(_) => PostfactDebit::Paid,
+        Err(DebitRefused::Insufficient { balance_usd, .. }) if balance_usd > 0.0 => {
+            match debit_on(c, user_id, balance_usd, kind, reference, day)? {
+                Ok(_) => PostfactDebit::Clamped { balance_usd },
+                Err(reason) => PostfactDebit::Refused(reason),
+            }
+        }
+        Err(reason) => PostfactDebit::Refused(reason),
+    };
+    Ok(Some(PostfactCharge { legacy, debit }))
+}
+
+fn set_user_limits_on(
+    c: &Connection,
+    user_id: &str,
+    daily_cap_usd: Option<Option<f64>>,
+    allow_negative: Option<bool>,
+) -> rusqlite::Result<()> {
+    c.execute(
+        "INSERT OR IGNORE INTO users(id, created_at) VALUES (?1, ?2)",
+        params![user_id, now_ms()],
+    )?;
+    if let Some(cap) = daily_cap_usd {
+        let written = match cap {
+            Some(v) => c.execute(
+                "UPDATE users SET spend_cap_usd = ?2, cap_unlimited = 0 WHERE id = ?1",
+                params![user_id, v],
+            )?,
+            None => c.execute(
+                "UPDATE users SET cap_unlimited = 1 WHERE id = ?1",
+                params![user_id],
+            )?,
+        };
+        if written != 1 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+    }
+    if let Some(neg) = allow_negative {
+        c.execute(
+            "UPDATE users SET allow_negative = ?2 WHERE id = ?1",
+            params![user_id, neg as i64],
+        )?;
+    }
+    Ok(())
+}
+
+fn grant_credits_on(
+    c: &Connection,
+    user_id: &str,
+    usd: f64,
+    note: &str,
+    actor: &str,
+) -> rusqlite::Result<()> {
+    c.execute(
+        "INSERT OR IGNORE INTO users(id, created_at) VALUES (?1, ?2)",
+        params![user_id, now_ms()],
+    )?;
+    let written = c.execute(
+    "INSERT INTO credit_ledger(user_id, at, kind, usd, note, actor) VALUES (?1, ?2, 'grant', ?3, ?4, ?5)",
+    params![user_id, now_ms(), usd, note, actor],
+)?;
+    if written != 1 {
+        return Err(rusqlite::Error::QueryReturnedNoRows);
+    }
+    Ok(())
+}
+
+fn debit_on(
+    c: &Connection,
+    user_id: &str,
+    usd: f64,
+    kind: &str,
+    reference: Option<&str>,
+    start_of_day_ms: i64,
+) -> rusqlite::Result<std::result::Result<f64, DebitRefused>> {
+    // No row yet (a device-token user `ensure_account` has not reached) is unlimited, not
+    // a limit of zero: an account nobody configured must not be the one that cannot spend.
+    let (cap, unlimited, allow_negative): (f64, i64, i64) = c
+        .query_row(
+            "SELECT spend_cap_usd, cap_unlimited, allow_negative FROM users WHERE id = ?1",
+            params![user_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?
+        .unwrap_or((0.0, 1, 0));
+    let balance: f64 = c.query_row(
+    "SELECT COALESCE(SUM(usd), 0.0) FROM credit_ledger WHERE user_id = ?1 AND kind != 'machine'",
+    params![user_id],
+    |r| r.get(0),
+)?;
+    if allow_negative == 0 && balance - usd < -1e-9 {
+        return Ok(Err(DebitRefused::Insufficient {
+            balance_usd: balance,
+            needed_usd: usd,
+        }));
+    }
+    // Machine time is its own bucket: the day's total below leaves it out, so the limit
+    // must leave it out here too, or a day of inference would stop the box being billed
+    // for time it is still running.
+    let limit = if kind == "machine" {
+        crate::credits::SpendLimit::Unlimited
+    } else {
+        crate::credits::SpendLimit::from_row(cap, unlimited != 0)
+    };
+    if let crate::credits::SpendLimit::Daily(cap) = limit {
+        let today: f64 = c.query_row(
+        "SELECT COALESCE(-SUM(usd), 0.0) FROM credit_ledger WHERE user_id = ?1 AND usd < 0 AND kind != 'machine' AND at >= ?2",
+        params![user_id, start_of_day_ms],
+        |r| r.get(0),
+    )?;
+        if limit.reached(today) {
+            return Ok(Err(DebitRefused::DailyCap {
+                cap_usd: cap,
+                spent_today_usd: today,
+            }));
+        }
+    }
+    if usd > 0.0 {
+        let written = c.execute(
+            "INSERT INTO credit_ledger(user_id, at, kind, usd, ref) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![user_id, now_ms(), kind, -usd, reference],
+        )?;
+        if written != 1 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+    }
+    Ok(Ok(balance - usd))
+}
+
 impl Db {
+    pub(crate) fn ensure_legacy_credit(
+        &self,
+        user_id: &str,
+        defaults: &LegacyCreditDefaults,
+    ) -> Result<LegacyCreditInit> {
+        if user_id.is_empty() {
+            return Ok(LegacyCreditInit::Existing);
+        }
+        self.with(|c| {
+            if c.query_row(
+                "SELECT 1 FROM users WHERE id = ?1",
+                params![user_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some()
+            {
+                return Ok(LegacyCreditInit::Existing);
+            }
+            let transaction =
+                rusqlite::Transaction::new_unchecked(c, rusqlite::TransactionBehavior::Immediate)?;
+            let initialized = ensure_legacy_credit_on(&transaction, user_id, defaults)?;
+            transaction.commit()?;
+            Ok(initialized)
+        })
+    }
+
+    pub(crate) fn charge_postfact(
+        &self,
+        user_id: &str,
+        usd: f64,
+        kind: &str,
+        reference: Option<&str>,
+        defaults: &LegacyCreditDefaults,
+    ) -> Result<Option<PostfactCharge>> {
+        if !crate::credits::chargeable_amount(usd) {
+            return Ok(None);
+        }
+        self.with(|c| {
+            let transaction =
+                rusqlite::Transaction::new_unchecked(c, rusqlite::TransactionBehavior::Immediate)?;
+            let charged =
+                charge_postfact_on(&transaction, user_id, usd, kind, reference, defaults)?;
+            transaction.commit()?;
+            Ok(charged)
+        })
+    }
+
     // ---- users --------------------------------------------------------------------------------
 
     pub fn user(&self, id: &str) -> Result<Option<User>> {
@@ -553,31 +799,7 @@ impl Db {
         daily_cap_usd: Option<Option<f64>>,
         allow_negative: Option<bool>,
     ) -> Result<()> {
-        self.with(|c| {
-            c.execute(
-                "INSERT OR IGNORE INTO users(id, created_at) VALUES (?1, ?2)",
-                params![user_id, now_ms()],
-            )?;
-            if let Some(cap) = daily_cap_usd {
-                match cap {
-                    Some(v) => c.execute(
-                        "UPDATE users SET spend_cap_usd = ?2, cap_unlimited = 0 WHERE id = ?1",
-                        params![user_id, v],
-                    )?,
-                    None => c.execute(
-                        "UPDATE users SET cap_unlimited = 1 WHERE id = ?1",
-                        params![user_id],
-                    )?,
-                };
-            }
-            if let Some(neg) = allow_negative {
-                c.execute(
-                    "UPDATE users SET allow_negative = ?2 WHERE id = ?1",
-                    params![user_id, neg as i64],
-                )?;
-            }
-            Ok(())
-        })
+        self.with(|c| set_user_limits_on(c, user_id, daily_cap_usd, allow_negative))
     }
 
     // ---- sign-in flows and grants -------------------------------------------------------------
@@ -942,17 +1164,7 @@ impl Db {
         if !usd.is_finite() || usd <= 0.0 {
             return Err(anyhow!("grant must be a positive amount"));
         }
-        self.with(|c| {
-            c.execute(
-                "INSERT OR IGNORE INTO users(id, created_at) VALUES (?1, ?2)",
-                params![user_id, now_ms()],
-            )?;
-            c.execute(
-                "INSERT INTO credit_ledger(user_id, at, kind, usd, note, actor) VALUES (?1, ?2, 'grant', ?3, ?4, ?5)",
-                params![user_id, now_ms(), usd, note, actor],
-            )
-            .map(|_| ())
-        })
+        self.with(|c| grant_credits_on(c, user_id, usd, note, actor))
     }
 
     /// Debits across every user since `since_ms` (the global cap).
@@ -980,57 +1192,7 @@ impl Db {
         if !usd.is_finite() || usd < 0.0 {
             return Err(anyhow!("debit must be a non-negative amount"));
         }
-        self.with(|c| {
-            // No row yet (a device-token user `ensure_account` has not reached) is unlimited, not
-            // a limit of zero: an account nobody configured must not be the one that cannot spend.
-            let (cap, unlimited, allow_negative): (f64, i64, i64) = c
-                .query_row(
-                    "SELECT spend_cap_usd, cap_unlimited, allow_negative FROM users WHERE id = ?1",
-                    params![user_id],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-                )
-                .optional()?
-                .unwrap_or((0.0, 1, 0));
-            let balance: f64 = c.query_row(
-                "SELECT COALESCE(SUM(usd), 0.0) FROM credit_ledger WHERE user_id = ?1 AND kind != 'machine'",
-                params![user_id],
-                |r| r.get(0),
-            )?;
-            if allow_negative == 0 && balance - usd < -1e-9 {
-                return Ok(Err(DebitRefused::Insufficient {
-                    balance_usd: balance,
-                    needed_usd: usd,
-                }));
-            }
-            // Machine time is its own bucket: the day's total below leaves it out, so the limit
-            // must leave it out here too, or a day of inference would stop the box being billed
-            // for time it is still running.
-            let limit = if kind == "machine" {
-                crate::credits::SpendLimit::Unlimited
-            } else {
-                crate::credits::SpendLimit::from_row(cap, unlimited != 0)
-            };
-            if let crate::credits::SpendLimit::Daily(cap) = limit {
-                let today: f64 = c.query_row(
-                    "SELECT COALESCE(-SUM(usd), 0.0) FROM credit_ledger WHERE user_id = ?1 AND usd < 0 AND kind != 'machine' AND at >= ?2",
-                    params![user_id, start_of_day_ms],
-                    |r| r.get(0),
-                )?;
-                if limit.reached(today) {
-                    return Ok(Err(DebitRefused::DailyCap {
-                        cap_usd: cap,
-                        spent_today_usd: today,
-                    }));
-                }
-            }
-            if usd > 0.0 {
-                c.execute(
-                    "INSERT INTO credit_ledger(user_id, at, kind, usd, ref) VALUES (?1, ?2, ?3, ?4, ?5)",
-                    params![user_id, now_ms(), kind, -usd, reference],
-                )?;
-            }
-            Ok(Ok(balance - usd))
-        })
+        self.with(|c| debit_on(c, user_id, usd, kind, reference, start_of_day_ms))
     }
 
     pub fn credits(&self, user_id: &str, start_of_day_ms: i64) -> Result<Credits> {

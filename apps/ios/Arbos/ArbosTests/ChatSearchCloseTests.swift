@@ -60,7 +60,8 @@ final class ChatSearchCloseTests: XCTestCase {
         XCTAssertTrue(src.contains("if searchResultTapped == nil { closeSearch() }"), "…unless a result row took the tap")
         XCTAssertTrue(src.contains("if ChatSearchClose.scrollCloses(open: showSearch, query: searchText) { closeSearch() }"), "swipe closes")
         XCTAssertTrue(src.contains("SearchResultTap(active: searchHitsActive && Self.isMessageBubble(row))"), "result rows take the tap")
-        XCTAssertTrue(src.contains("closeSearch(scrollToTail: false)\n        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { revealQuoted(messageId) }"), "a result closes, then reveals")
+        // The source-consumer Swift check executes the actual close/result callbacks:
+        // close, reset and blur before the 0.05s reveal; retired callbacks stay refused.
         // closeSearch: bar, query, keyboard, window.
         guard let start = src.range(of: "private func closeSearch(scrollToTail: Bool = true) {"),
               let end = src.range(of: "private func openSearchResult", range: start.upperBound..<src.endIndex) else {
@@ -86,8 +87,9 @@ final class ChatSearchCloseTests: XCTestCase {
     /// opened in the measurement was an agent's. An ordinary web link is left alone.
     func testEveryRouteOutOfAResultRowAsksThatOneRule() {
         let rows = transcript
-        XCTAssertTrue(rows.contains("guard !ChatSearchClose.rowOwnsInnerTap(resultRow: searchHit) else { return }"),
-                      "the row's decision point")
+        // The actual openProfile callback is executed by the source-consumer check:
+        // result rows suppress navigation, ordinary current rows toggle the profile,
+        // and retired/unavailable/cancelled callbacks cannot act.
         XCTAssertEqual(rows.components(separatedBy: "model.toggleProfile(").count - 1, 1,
                        "a row opens a page through openProfile and nowhere else")
         XCTAssertEqual(rows.components(separatedBy: "= openProfile(").count - 1, 4,

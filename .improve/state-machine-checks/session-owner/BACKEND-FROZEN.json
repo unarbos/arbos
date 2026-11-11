@@ -1,0 +1,10 @@
+{
+  "scope": "Map-owned backend/call source; Clients owns remaining composition and adapters",
+  "source_sha256": {
+    "crates/arbos-mac/src/sync/relay.rs": "b190a0b42450828972360a74a2ac02d5fd115a64b75b8d8510bfd551724beb52",
+    "crates/arbos-mac/src/sync/call_requests.rs": "801b3e87a9070f7f37711d448296635c3324205578898cf2af9097ea19d66058",
+    "crates/arbos-mac/src/sync/store_owner.rs": "b162091688e62a0b979af140c678ee8d6e797633129e835e96d4407ad4f39875",
+    "crates/arbos-mac/src/calls.rs": "13bc976a1cec45213596ca4324ee6a45d28530bf38026f732de287fc36af5430",
+    "crates/arbos-mac/src/call_attempt.rs": "391483a81860b9abc9def27ccbb0d197ea301a59e6f4ba969c9f8c7fbcaa9bf3"
+  }
+}

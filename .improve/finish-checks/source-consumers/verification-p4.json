@@ -1,0 +1,172 @@
+{
+  "base": "6247938b68aaef84fdfeb1768d0b7ac80e6e8b3e",
+  "control": {
+    "scope": "all",
+    "source_sha256": {
+      "apps/ios/Arbos/Arbos/UI/ChatView.swift": "cebc573edc37875a5740cef582ad2ecace19551b1852e22bb66e30b525c7cccc",
+      "apps/ios/Arbos/Arbos/UI/Transcript.swift": "a5346472e97eef520e3c7f57b033009940471f0d54a7aae43238b811328530a0",
+      "apps/ios/Arbos/Arbos/Model/ChatSearchShortcut.swift": "6f444c6b80dab93cbcfba05d69e0d674103a636c875ac7189d4a2c5e7c9fe568",
+      "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f",
+      "apps/ios/Arbos/Arbos/Store/AppModel.swift": "7c944e04f8483f0d5e0c19a26d9414f8a50cba79462b08bdae3c704af91e2b0c"
+    },
+    "fixture_sha256": "9a7c536b6a436f8ef68e470d081eef5c75c84d73ff4df6c6df98e8afdbe0ff83",
+    "mutant": null,
+    "compile_exit": 0,
+    "exit_code": 0,
+    "results": {
+      "failed": 0,
+      "failures": [],
+      "passed": 29,
+      "total": 29
+    },
+    "seconds": 1.9676645830040798
+  },
+  "eligibility": {
+    "existing_selftests": 7,
+    "existing_selftest_exit": 0,
+    "actual_decision_cases": [
+      {
+        "file": ".improve/finish-checks/source-consumers/check.py",
+        "applies": true,
+        "exit_code": 0
+      },
+      {
+        "file": ".improve/finish-checks/source-consumers/README.md",
+        "applies": true,
+        "exit_code": 0
+      },
+      {
+        "file": ".improve/finish-checks/source-consumers/extra/data.json",
+        "applies": true,
+        "exit_code": 0
+      },
+      {
+        "file": "apps/ios/Arbos/Arbos/UI/ChatView.swift",
+        "applies": true,
+        "exit_code": 0
+      },
+      {
+        "file": "docs/ordinary.md",
+        "applies": false,
+        "exit_code": 0
+      }
+    ],
+    "seconds": 0.25555341702420264,
+    "workflow_sha256": "9863a44d7bb4f7488dab349fd4de911cb20f3d6dd3cf88c7dded40745d2814a7",
+    "decision_script_sha256": "2669df80f1f8d837d504ea3e43dd6dd0764cc48df9e64dc872ac3a5b3e56fd6a",
+    "scope": "Existing actual pattern parser, union, matcher and decide function; only changed() file-list effect is controlled. No refs, dispatch, CI or network changes."
+  },
+  "negative_controls": [
+    {
+      "scope": "all",
+      "source_sha256": {
+        "apps/ios/Arbos/Arbos/UI/ChatView.swift": "cebc573edc37875a5740cef582ad2ecace19551b1852e22bb66e30b525c7cccc",
+        "apps/ios/Arbos/Arbos/UI/Transcript.swift": "a5346472e97eef520e3c7f57b033009940471f0d54a7aae43238b811328530a0",
+        "apps/ios/Arbos/Arbos/Model/ChatSearchShortcut.swift": "6f444c6b80dab93cbcfba05d69e0d674103a636c875ac7189d4a2c5e7c9fe568",
+        "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f",
+        "apps/ios/Arbos/Arbos/Store/AppModel.swift": "7c944e04f8483f0d5e0c19a26d9414f8a50cba79462b08bdae3c704af91e2b0c"
+      },
+      "fixture_sha256": "54ae596c6c1f22f7cd6b85cfc9a99597c0bb402ef81735e0e0d3cdbdde4afe74",
+      "mutant": "omit-hidden",
+      "compile_exit": 1,
+      "seconds": 0.27037316595669836
+    },
+    {
+      "scope": "all",
+      "source_sha256": {
+        "apps/ios/Arbos/Arbos/UI/ChatView.swift": "cebc573edc37875a5740cef582ad2ecace19551b1852e22bb66e30b525c7cccc",
+        "apps/ios/Arbos/Arbos/UI/Transcript.swift": "a5346472e97eef520e3c7f57b033009940471f0d54a7aae43238b811328530a0",
+        "apps/ios/Arbos/Arbos/Model/ChatSearchShortcut.swift": "6f444c6b80dab93cbcfba05d69e0d674103a636c875ac7189d4a2c5e7c9fe568",
+        "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f",
+        "apps/ios/Arbos/Arbos/Store/AppModel.swift": "7c944e04f8483f0d5e0c19a26d9414f8a50cba79462b08bdae3c704af91e2b0c"
+      },
+      "fixture_sha256": "592a22e1162e62e9107d4dc977b3d39049d8d1ed535dc23a39b22917f10a1d38",
+      "mutant": "ignore-result",
+      "compile_exit": 0,
+      "exit_code": 1,
+      "results": {
+        "failed": 2,
+        "failures": [
+          "profile-current-result-true",
+          "profile-fixture-result-true"
+        ],
+        "passed": 27,
+        "total": 29
+      },
+      "seconds": 1.0403162910370156
+    },
+    {
+      "scope": "all",
+      "source_sha256": {
+        "apps/ios/Arbos/Arbos/UI/ChatView.swift": "cebc573edc37875a5740cef582ad2ecace19551b1852e22bb66e30b525c7cccc",
+        "apps/ios/Arbos/Arbos/UI/Transcript.swift": "a5346472e97eef520e3c7f57b033009940471f0d54a7aae43238b811328530a0",
+        "apps/ios/Arbos/Arbos/Model/ChatSearchShortcut.swift": "6f444c6b80dab93cbcfba05d69e0d674103a636c875ac7189d4a2c5e7c9fe568",
+        "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f",
+        "apps/ios/Arbos/Arbos/Store/AppModel.swift": "7c944e04f8483f0d5e0c19a26d9414f8a50cba79462b08bdae3c704af91e2b0c"
+      },
+      "fixture_sha256": "f1a4bf44114f5a64b85ede65497c2164cbb7a11d7e786d0e8b7d84a19660cad8",
+      "mutant": "late-reveal",
+      "compile_exit": 0,
+      "exit_code": 1,
+      "results": {
+        "failed": 1,
+        "failures": [
+          "search-late-retirement"
+        ],
+        "passed": 28,
+        "total": 29
+      },
+      "seconds": 0.7200017080176622
+    },
+    {
+      "scope": "all",
+      "source_sha256": {
+        "apps/ios/Arbos/Arbos/UI/ChatView.swift": "cebc573edc37875a5740cef582ad2ecace19551b1852e22bb66e30b525c7cccc",
+        "apps/ios/Arbos/Arbos/UI/Transcript.swift": "a5346472e97eef520e3c7f57b033009940471f0d54a7aae43238b811328530a0",
+        "apps/ios/Arbos/Arbos/Model/ChatSearchShortcut.swift": "6f444c6b80dab93cbcfba05d69e0d674103a636c875ac7189d4a2c5e7c9fe568",
+        "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f",
+        "apps/ios/Arbos/Arbos/Store/AppModel.swift": "7c944e04f8483f0d5e0c19a26d9414f8a50cba79462b08bdae3c704af91e2b0c"
+      },
+      "fixture_sha256": "918238090909329385ad60f699e27bf28516ec6a060cff9b2d8f16f079084074",
+      "mutant": "unguarded-picture",
+      "compile_exit": 0,
+      "exit_code": 1,
+      "results": {
+        "failed": 3,
+        "failures": [
+          "presence-picture-cancelled",
+          "presence-picture-retired",
+          "presence-picture-unavailable"
+        ],
+        "passed": 26,
+        "total": 29
+      },
+      "seconds": 0.8245870830724016
+    },
+    {
+      "scope": "all",
+      "source_sha256": {
+        "apps/ios/Arbos/Arbos/UI/ChatView.swift": "cebc573edc37875a5740cef582ad2ecace19551b1852e22bb66e30b525c7cccc",
+        "apps/ios/Arbos/Arbos/UI/Transcript.swift": "a5346472e97eef520e3c7f57b033009940471f0d54a7aae43238b811328530a0",
+        "apps/ios/Arbos/Arbos/Model/ChatSearchShortcut.swift": "6f444c6b80dab93cbcfba05d69e0d674103a636c875ac7189d4a2c5e7c9fe568",
+        "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f",
+        "apps/ios/Arbos/Arbos/Store/AppModel.swift": "7c944e04f8483f0d5e0c19a26d9414f8a50cba79462b08bdae3c704af91e2b0c"
+      },
+      "fixture_sha256": "118075e2a4849f44d713fa804600e04fdad124a8f52464128774593ac115b4f0",
+      "mutant": "skip-close",
+      "compile_exit": 0,
+      "exit_code": 1,
+      "results": {
+        "failed": 3,
+        "failures": [
+          "search-current",
+          "search-fixture",
+          "search-late-retirement"
+        ],
+        "passed": 26,
+        "total": 29
+      },
+      "seconds": 0.7721503750653937
+    }
+  ]
+}

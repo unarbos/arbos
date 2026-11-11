@@ -1,0 +1,28 @@
+{
+  "passed": 122,
+  "failed": 0,
+  "groups": 12,
+  "seconds": 7.2129144159844145,
+  "source_before": {
+    "apps/ios/Arbos/Arbos/UI/ChatView.swift": "19142cc76f8381f6114c0ab48ec9a2fff230b49d2eb63c7ca4e5f9f3d4237440",
+    "apps/ios/Arbos/Arbos/UI/Transcript.swift": "ac6a02d802151f02215b0760e17c832c9b2385dbac21fbf6adcad48960a565ef",
+    "apps/ios/Arbos/Arbos/UI/QuestionCard.swift": "20472d3698cc302cb6789f4d0c3190f807c28add04c52702421e5fa88f19c225",
+    "apps/ios/Arbos/Arbos/UI/FunPicker.swift": "a0e79f32d5fa9c8ea82e46c58b4bb33b520742265061fe375f097618484e4e26",
+    "apps/ios/Arbos/Arbos/UI/MediaViewer.swift": "18f2ea2a36ccc5128865bd213346db6461e1a087cade07bacd9be18f6df9e935",
+    "apps/ios/Arbos/Arbos/UI/MessagePasteboard.swift": "17ce8f83ef6436247f8d56687ec380808d09a7dd571ed3bb11db7678f784350d",
+    "apps/ios/Arbos/Arbos/Store/AppModel.swift": "f73b529139a3ba6d630740a6e22172a30fe66906e55260bf7943851593bcad38",
+    "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f"
+  },
+  "source_after": {
+    "apps/ios/Arbos/Arbos/UI/ChatView.swift": "19142cc76f8381f6114c0ab48ec9a2fff230b49d2eb63c7ca4e5f9f3d4237440",
+    "apps/ios/Arbos/Arbos/UI/Transcript.swift": "ac6a02d802151f02215b0760e17c832c9b2385dbac21fbf6adcad48960a565ef",
+    "apps/ios/Arbos/Arbos/UI/QuestionCard.swift": "20472d3698cc302cb6789f4d0c3190f807c28add04c52702421e5fa88f19c225",
+    "apps/ios/Arbos/Arbos/UI/FunPicker.swift": "a0e79f32d5fa9c8ea82e46c58b4bb33b520742265061fe375f097618484e4e26",
+    "apps/ios/Arbos/Arbos/UI/MediaViewer.swift": "18f2ea2a36ccc5128865bd213346db6461e1a087cade07bacd9be18f6df9e935",
+    "apps/ios/Arbos/Arbos/UI/MessagePasteboard.swift": "17ce8f83ef6436247f8d56687ec380808d09a7dd571ed3bb11db7678f784350d",
+    "apps/ios/Arbos/Arbos/Store/AppModel.swift": "f73b529139a3ba6d630740a6e22172a30fe66906e55260bf7943851593bcad38",
+    "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f"
+  },
+  "source_unchanged": true,
+  "scope": "Selected actual chat/card/equality/media/player/pasteboard controller bodies and real context/lifetime helpers; fake API, network, codec, cache and clipboard collaborators. No SwiftUI rendering, physical device, or runtime SDK proof. Clean environment and macOS deny-network sandbox."
+}

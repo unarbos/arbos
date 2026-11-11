@@ -101,6 +101,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import feedback_state as lifecycle
+
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
@@ -1466,8 +1468,13 @@ class Loop:
         return state
 
     def needs_approval(self, fid: str, st: dict) -> bool:
+        if lifecycle.approved(st.get("approved_by_jacob")):
+            return False
+        # A global lift/allow-list change cannot approve an already held item.
+        if st.get("awaiting") or st.get("approved_by_jacob"):
+            return True
         gate = self.approval_state()
-        if not gate or st.get("approved_by_jacob"):
+        if not gate:
             return False
         return not self.freeze_allows(fid, st, gate)
 
@@ -3259,6 +3266,9 @@ class Loop:
         Red → nothing lands; the diagnostics go to every member's issue (bisecting a resolved tree is the
         owner's call)."""
         tree, members = active["tree"], active["members"]
+        if not lifecycle.valid_sha(tree) or not isinstance(members, dict) or not members:
+            log("Prepared tree has invalid commit/member control evidence; not merged")
+            return
         commits = self.gh.compare(active["base"], tree).get("commits", [])
         note = (f"Gate ✓ (CI on Linux {active.get('linux_run') or ''}; arbos-mac release build on the Mac" + ("; Xcode build of the tree" if active.get("ios") == "ok" else "") + ")" if ok
                 else f"Gate red (linux={active['linux']}, mac={active['mac']}, ios={active.get('ios', 'skipped')})")
@@ -3276,6 +3286,13 @@ class Loop:
                     self.gh.comment(st["issue"], f"{note} for integration tree `{tree[:8]}` — not merged. {st.get('handed_off_to') or 'owner'}: fix on the "
                                     "integration branch and ask for a new `gate-tree` run.\n\n```\n" + diag[-5000:] + "\n```")
             log(f"Rust gate {active['id']}: integration tree {tree[:8]} red; nothing landed")
+            return
+        tree_green = ok is True and all(active.get(half) in ("ok", "skipped") for half in ("linux", "mac", "ios"))
+        admissions = {fid: self.admit_merge(fid, self.store.state(fid), covered,
+                          tree_green and lifecycle.valid_sha(covered) and self.gh.contains(tree, covered))
+                      for fid, covered in members.items()}
+        if not admissions or any(not isinstance(state, lifecycle.ReadyToMerge) for state in admissions.values()):
+            log(f"Rust gate {active['id']}: prepared tree held; every member needs approval, a live covered head and no operator hold")
             return
         merged = self.gh.merge_into_main(tree, f"Merge integration tree {tree[:8]}: {len(members)} feedback fixes [gate {active['id']}]")
         if merged is None:
@@ -3295,6 +3312,9 @@ class Loop:
                 log(f"[{fid}] not in the integration tree or not landable ({st.get('status')}); untouched")
                 continue
             files = [f["filename"] for f in self.gh.commit(fix["sha"]).get("files", [])]
+            landed = lifecycle.commit_transition(admissions[fid], lifecycle.Merged(merged["sha"]))
+            if not isinstance(landed, lifecycle.Landed):
+                raise ValueError("Invalid merged tree identity")
             self.note_priority_merge(fid, st, merged["sha"])
             st.update(status="pushed", commit=fix["sha"], commit_url=fix["html_url"], commit_message=fix["commit"]["message"].splitlines()[0],
                       pushed_at=iso(), merge_sha=merged["sha"], merge_url=merged["html_url"], commit_date=merged["commit"]["committer"]["date"],
@@ -3641,36 +3661,51 @@ class Loop:
             raise RuntimeError(f"iOS gate infrastructure error: {out[-1500:]}")
         return r.returncode == 0, out
 
-    def merge_branch(self, fid: str, st: dict) -> None:
-        if st.get("do_not_merge"):
-            # Operator hold above approval (coordinator 2026-10-27 22:28: #2047 conflicts with Jacob's hour-stamp rule and
-            # must not land even if `approve` is run by mistake). Green stays green; nothing merges until the flag is
-            # removed by hand.
+    def admit_merge(self, fid: str, st: dict, covered_head: str, green: bool) -> lifecycle.CommitState:
+        """The same SHA-bound policy applies to single branches and atomic prepared trees."""
+        head = st.get("branch_head") or ""
+        held = bool(st.get("do_not_merge"))
+        branch = st.get("branch")
+        live = self.gh.branch_head(branch) if isinstance(branch, str) and branch and not held else None
+        decision = lifecycle.commit_transition(lifecycle.Candidate(head), lifecycle.ObserveGate(
+            covered_head, live, green, st.get("status") in ("gating", "handed_off", "running"),
+            held, self.needs_approval(fid, st)))
+        if isinstance(decision, lifecycle.Held):
+            # Operator hold remains above approval, including a mistaken explicit approve.
             if st.get("do_not_merge_noted") != head_or(st):
                 st["do_not_merge_noted"] = head_or(st)
                 self.store.save_state(fid, st)
                 self.store.event(fid, "merge_refused", reason=str(st["do_not_merge"])[:200])
                 log(f"[{fid}] green but do_not_merge is set ({st['do_not_merge']}); holding")
-            return
-        if self.needs_approval(fid, st):
+        elif isinstance(decision, lifecycle.AwaitingApproval):
             self.hold_for_approval(fid, st)
-            return
-        head = st["branch_head"]
-        # Merge-time probe (2026-10-25, #1656/#1659/#1707 and the re-landed tails #1684/#1721): the commit that
-        # merges must be the branch's LIVE head. If the author pushed after the gate run started, the gated head
-        # is stale — re-gate the new head instead of merging the old one and orphaning the tail.
-        live = self.gh.branch_head(st["branch"]) if st.get("branch") else None
-        if live and live != head:
-            st.update(branch_head=live, gated_head=None)
+        elif isinstance(decision, lifecycle.StaleHead):
+            st.update(branch_head=decision.live, gated_head=None)
             st.pop("rust_gate", None)
             self.store.save_state(fid, st)
-            self.store.event(fid, "branch_moved_at_merge", gated=head, live=live)
-            log(f"[{fid}] branch moved {head[:8]} → {live[:8]} after the gate started; not merging the gated head — re-gating the new one")
+            self.store.event(fid, "branch_moved_at_merge", gated=head, live=decision.live)
+            log(f"[{fid}] branch moved {head[:8]} → {decision.live[:8]} after the gate started; re-gating the new head")
             if st.get("issue"):
                 with contextlib.suppress(HttpError):
-                    self.gh.comment(st["issue"], f"`{st['branch']}` moved to `{live[:8]}` after the gate run started on `{head[:8]}`; the gated head was NOT merged. "
+                    self.gh.comment(st["issue"], f"`{st['branch']}` moved to `{decision.live[:8]}` after the gate started on `{head[:8]}`; the gated head was NOT merged. "
                                     "The new head re-gates and merges on green. (Nothing is orphaned: the loop always merges the live head, never an older one.)")
+        elif not isinstance(decision, lifecycle.ReadyToMerge):
+            if isinstance(decision, lifecycle.MissingHead):
+                # Another item's merge may already have carried and deleted a shared branch.
+                # Track that proven ancestor through the existing read-only path; never POST
+                # an old recorded head merely because its branch could not be observed.
+                self.carried_probe(fid, head)
+            log(f"[{fid}] merge waiting: {type(decision).__name__} (no current covered live head)")
+        return decision
+
+    def merge_branch(self, fid: str, st: dict) -> None:
+        head = st.get("branch_head") or ""
+        needs_gate = bool(self.rust_crates(st.get("files") or [])) or touches_ios(st.get("files") or [])
+        proof = (st.get("rust_gate") or {}) if needs_gate else {"head": head, "ok": True}
+        decision = self.admit_merge(fid, st, proof.get("head"), proof.get("ok") is True)
+        if not isinstance(decision, lifecycle.ReadyToMerge):
             return
+        head = decision.head
         summary = re.sub(r"\s+", " ", st.get("agent_summary") or "").strip()[:80]
         merged = self.gh.merge_into_main(head, f"Merge {st['branch']}: {summary or 'feedback fix'} [feedback {fid}]")
         if merged is None:
@@ -3687,6 +3722,9 @@ class Loop:
         tagged = [c for c in self.gh.compare(base, head).get("commits", []) if f"[feedback {fid}]" in c["commit"]["message"]]
         fix = tagged[-1] if tagged else {"sha": head, "html_url": f"https://github.com/{self.cfg.github_repo}/commit/{head}",
                                          "commit": {"message": st.get("agent_summary") or ""}}
+        landed = lifecycle.commit_transition(decision, lifecycle.Merged(merged["sha"]))
+        if not isinstance(landed, lifecycle.Landed):
+            raise ValueError("Invalid merged commit identity")
         self.note_priority_merge(fid, st, merged["sha"])
         st.update(status="pushed", commit=fix["sha"], commit_url=fix["html_url"],
                   commit_message=fix["commit"]["message"].splitlines()[0], pushed_at=iso(), merge_sha=merged["sha"],
@@ -4275,6 +4313,25 @@ class Loop:
         self.gh.set_labels(st["issue"], ["fixed-on-main"], ["needs-human"])
         self.gh.comment(st["issue"], "Fixed on main, ships in the next release.")
 
+    @staticmethod
+    def apply_delivery(st: dict, state: lifecycle.DeliveryState) -> None:
+        """Persist one compatible legacy record; phase and its required evidence move together."""
+        if not isinstance(state, (lifecycle.AwaitingArtifacts, lifecycle.AwaitingDeploy, lifecycle.Shipped)):
+            raise ValueError("Invalid feedback delivery evidence")
+        st["status"] = "pushed" if isinstance(state, lifecycle.AwaitingArtifacts) else "shipped"
+        st["device_evidence"] = state.device_evidence
+        pending = () if isinstance(state, lifecycle.Shipped) else state.pending_deploy
+        if pending:
+            st["pending_deploy"] = list(pending)
+        else:
+            st.pop("pending_deploy", None)
+
+    def delivery_evidence(self, fid: str, st: dict) -> str:
+        existing = st.get("device_evidence")
+        if isinstance(existing, str) and existing and existing not in ("pending", "not needed"):
+            return existing  # retain an explicit device confirmation on a partial/retried ship
+        return "pending" if self.needs_device_evidence(self.store.submission(fid), st) else "not needed"
+
     def ship(self, fid: str, st: dict, partial: bool = False) -> None:
         info = self.store.submission(fid)
         parts = []
@@ -4285,21 +4342,23 @@ class Loop:
             parts.append(f"Mac edge release **{st['edge_release']}**")
         end = st.get("testflight_ready_at") or st.get("ios_uploaded_at") or st.get("release_at") or iso()
         elapsed = minutes_between(info["created"], end)
-        st.update(status="shipped", shipped_at=iso(), elapsed_min=elapsed, partial=partial)
+        kinds = [] if st.get("deployed_commit") == st.get("commit") else self.deploy_kinds(st.get("files") or [])
+        delivery = lifecycle.delivery_transition(lifecycle.DeliveryPending(st.get("commit") or ""),
+            lifecycle.ObserveDelivery(tuple(kinds), bool(st.get("expects_ios") and not st.get("testflight_ready_at")),
+                                      self.delivery_evidence(fid, st)))
+        self.apply_delivery(st, delivery)
+        st.update(shipped_at=iso(), elapsed_min=elapsed, partial=partial)
         if partial:
             st["partial_shipped_at"] = iso()
+        # A restart can now see either the old record, or every prerequisite of the new phase.
         self.store.save_state(fid, st)
         self.store.event(fid, "shipped", testflight_build=st.get("testflight_build"), edge=st.get("edge_release"),
                          elapsed_min=elapsed, commit=st.get("commit"), issue=st.get("issue_url"))
-        unverified = self.needs_device_evidence(info, st)
-        st["device_evidence"] = "pending" if unverified else "not needed"
-        kinds = self.deploy_kinds(st.get("files") or [])
+        unverified = st["device_evidence"] == "pending"
         if kinds:
             # The build artifacts carry the commit, but the code runs on the voice pod / in the sandbox
             # image / the relay: landed, not shipped, until watch_deploys sees every one of those
             # services on a sha that contains it.
-            st["pending_deploy"] = kinds
-            self.store.save_state(fid, st)
             self.store.event(fid, "landed_not_shipped", deploy=kinds, commit=st.get("commit"), issue=st.get("issue_url"))
             where = " and ".join(self.DEPLOY_WHERE[k] for k in kinds)
             self.gh.ensure_label("landed-not-shipped", "FBCA04", "Fix is on main but not yet in a TestFlight build / release / fleet image")
@@ -4319,25 +4378,30 @@ class Loop:
                            if unverified else ""))
         self.gh.ensure_label("shipped-unverified", "C2E0C6", "Built and in TestFlight/edge; needs device-level confirmation (audio/call/haptic/notification)")
         self.gh.set_labels(st["issue"], ["shipped-unverified"] if unverified else ["shipped"], ["needs-human", "landed-not-shipped"])
-        if partial and st.get("expects_ios") and not st.get("testflight_ready_at"):
-            # The iPhone half is not installable yet (Apple has not processed / listed the build): stay open,
-            # fixed-on-main; the next ticks keep looking for a processed build and close then.
-            st["status"] = "pushed"
-            self.store.save_state(fid, st)
+        if isinstance(delivery, lifecycle.AwaitingArtifacts):
+            # The iPhone half is not installable yet; the persisted phase already remains pushed.
             self.note_fixed_on_main(st)
             return
         self.close_fixed(fid, st)
 
     @staticmethod
-    def queued_deploy_sha(kind: str) -> str | None:
-        """The sha currently queued for `kind` by the CD hook (one file per kind), or None."""
-        try:
-            for line in Path(DEPLOY_QUEUE, kind).read_text().splitlines():
-                if line.startswith("sha="):
-                    return line[4:].strip() or None
-        except OSError:
+    def deploy_observation(kind: str) -> tuple[str, str | None] | None:
+        """A hook-owned queue/installed snapshot, retained across the ancestry check."""
+        if kind not in ("relay", "voice", "agentd"):
             return None
-        return None
+        try:
+            result = subprocess.run([DEPLOY_HOOK, "--observe", kind], capture_output=True, text=True, timeout=60)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if result.returncode != 0 or len(result.stdout) > 256 or not result.stdout.endswith("\n"):
+            return None
+        receipt = result.stdout[:-1]
+        fields = receipt.split(":")
+        if len(fields) != 5 or fields[0] != kind or not re.fullmatch(r"0|[1-9][0-9]{0,17}", fields[1]):
+            return None
+        if any(value != "-" and not re.fullmatch(r"[0-9a-f]{7,40}", value) for value in fields[2:]):
+            return None
+        return receipt, None if fields[2] == "-" else fields[2]
 
     def request_deploys(self, fid: str, kinds: list[str], sha: str) -> None:
         """Ask the CD hook to deploy the relay / roll the image / redeploy voice for a landed fix. Only speeds the
@@ -4348,14 +4412,18 @@ class Loop:
             # The queue holds one sha per kind and the last write wins. Never replace a queued request that already
             # contains this fix with an older commit (22:01 Oct 21: the worker's "newest green" request b22f22b6 was
             # overwritten by a branch commit from 21:22, resetting the debounce and pointing the deploy backwards).
-            queued = self.queued_deploy_sha(kind)
+            observation = self.deploy_observation(kind)
+            if observation is None:
+                log(f"[{fid}] deploy {kind}: observation unavailable; request deferred")
+                continue
+            receipt, queued = observation
             if queued and queued != sha and self.gh.contains(queued, sha):
                 log(f"[{fid}] deploy {kind}: queued {queued[:8]} already carries {sha[:8]}; not requested again")
                 continue
             try:
                 # Direct call: the unit runs with NoNewPrivileges, so no sudo; the hook queues the request under
                 # /var/lib/arbos-feedback/deploy-requests/ (inside the unit's ReadWritePaths) for the CD worker.
-                r = subprocess.run([DEPLOY_HOOK, kind, sha], capture_output=True, text=True, timeout=60)
+                r = subprocess.run([DEPLOY_HOOK, kind, sha, receipt], capture_output=True, text=True, timeout=60)
                 log(f"[{fid}] deploy hook {kind} {sha[:8]}: exit {r.returncode} {(r.stdout or r.stderr).strip()[:120]}")
                 self.store.event(fid, "deploy_requested", deploy=kind, commit=sha, exit=r.returncode)
             except (OSError, subprocess.TimeoutExpired) as e:
@@ -5137,16 +5205,24 @@ class Loop:
                 else:
                     still.append(kind)
             if still != kinds:
-                st["pending_deploy"] = still
                 st["deployed_parts"] = (st.get("deployed_parts") or []) + done_notes
-                self.store.save_state(fid, st)
+                if still:
+                    st["pending_deploy"] = still
+                    self.store.save_state(fid, st)
             if not still:
                 self.mark_deployed(fid, st, "; ".join(st.get("deployed_parts") or done_notes) + f" — all contain {st['commit'][:8]}")
 
     def mark_deployed(self, fid: str, st: dict, note: str) -> None:
-        kind = st.pop("pending_deploy", None)
+        kind = st.get("pending_deploy") or []
+        pending = tuple(kind) if isinstance(kind, list) else (kind,)
+        current = lifecycle.delivery_transition(lifecycle.DeliveryPending(st.get("commit") or ""),
+            lifecycle.ObserveDelivery(pending, bool(st.get("expects_ios") and not st.get("testflight_ready_at")),
+                                      self.delivery_evidence(fid, st)))
+        complete = lifecycle.delivery_transition(current, lifecycle.Deployed(st.get("commit") or ""))
+        self.apply_delivery(st, complete)
         st.pop("deployed_parts", None)
         st["deployed_note"] = note
+        st["deployed_commit"] = st["commit"]  # this proof cannot be reused for a later repair commit
         self.store.save_state(fid, st)
         self.store.event(fid, "deployed", deploy=kind, note=note)
         if st.get("issue"):

@@ -497,4 +497,40 @@ final class DraftDMTests: XCTestCase {
         XCTAssertEqual(model.path, [.chat(chatId: "fx-dm-unconst", projectId: peopleSlot)])
         XCTAssertNil(model.draftDM)
     }
+
+    func testFixtureFirstSendsStayInOrder() async throws {
+        let model = fixtureModel()
+        _ = await model.openDM(handle: "mira-k")
+        model.sendPeople(chatId: draft, text: "first", replyTo: nil)
+        model.sendPeople(chatId: draft, text: "second", replyTo: nil)
+        for _ in 0..<50 where model.draftDM != nil { try? await Task.sleep(for: .milliseconds(20)) }
+        let dm = try XCTUnwrap(dmWithMira(model))
+        XCTAssertEqual(model.messages(of: dm.id).suffix(2).map(\.plainText), ["first", "second"])
+    }
+
+    func testQueuedFixtureFirstSendIsRetiredWithTheAccount() async {
+        let model = fixtureModel()
+        _ = await model.openDM(handle: "mira-k")
+        model.sendPeople(chatId: draft, text: "retired", replyTo: nil)
+        model.unpair(forget: false)
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertNil(dmWithMira(model))
+        XCTAssertNil(model.draftDM)
+        XCTAssertTrue(model.peopleChats.isEmpty)
+        XCTAssertTrue(model.path.isEmpty)
+    }
+
+    func testAlreadyCancelledFixtureFirstSendIsNotAdmitted() async {
+        let model = fixtureModel()
+        _ = await model.openDM(handle: "mira-k")
+        let caller = Task { @MainActor in
+            model.sendPeople(chatId: self.draft, text: "cancelled", replyTo: nil)
+        }
+        caller.cancel()
+        await caller.value
+        XCTAssertNil(dmWithMira(model))
+        XCTAssertNotNil(model.draftDM)
+        XCTAssertFalse(model.draftDMSending)
+    }
+
 }

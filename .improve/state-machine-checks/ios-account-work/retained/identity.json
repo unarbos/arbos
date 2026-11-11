@@ -1,0 +1,23 @@
+{
+  "sources": {
+    "apps/ios/Arbos/Arbos/Store/AppModel.swift": "f73b529139a3ba6d630740a6e22172a30fe66906e55260bf7943851593bcad38",
+    "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f"
+  },
+  "compile_exit": 0,
+  "fixture_sha256": "e12c5f7ce24502e6ceb598326bb2de5092602c10bb9217e0d74180435b75b137",
+  "exit_code": 0,
+  "results": {
+    "cases": {
+      "different-device-retires-control": true,
+      "different-relay-retires-control": true,
+      "known-user-replacement-retires-same-device": true,
+      "legacy-unknown-upgrade-preserves": true,
+      "missing-user-refresh-preserves-known": true,
+      "same-known-user-refresh-preserves": true
+    },
+    "failed": 0,
+    "passed": 6,
+    "total": 6
+  },
+  "seconds": 0.6039909590035677
+}

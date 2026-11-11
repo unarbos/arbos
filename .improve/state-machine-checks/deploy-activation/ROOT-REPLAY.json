@@ -1,0 +1,57 @@
+{
+  "sources": {
+    "scripts/deploy/deploy-state.sh": "58cec985ecbd03a2e2fc034a04a8a651c952fb1ecb829544855113c42c681824",
+    "scripts/deploy/arbos-deploy-hook": "a7d5981e53822f07c69835681ecd172a765bb62f52d31cfca2b402bc5b8f0e19",
+    "scripts/deploy/arbos-deploy-worker": "07afc1fe02ec69d0d311074257e8d3b0b2bb7c446b56fd571025bd95f5974d3b",
+    "scripts/feedback/feedback_poller.py": "f68edb1e2b97e968ab1a8184c0ae91c43a3cd7d03ee81772e5df27bea77ddf20",
+    "scripts/deploy/test_deploy_publication.py": "98bff9f4345a94455f9254981442f875df24e582fd31f7e8fd2339f2908dc7c3",
+    "scripts/deploy/tests/deploy_state_bridge.py": "92a64281497ecc26fd5ed8f3ecbe20d5a09d48156dd212e4d14b91aa5f21c8c0",
+    "scripts/deploy/tests/check_state_mutants.py": "3bdea7ef578575e5ba3176cc71bdafd96854aff388146a5fd5fc4302526e7be1",
+    "harness/arbos-pi-ext/deploy-state-laws.test.ts": "1dc10aa860f1adca7f055e2ef478e505631168653f4f744c354db37f1c0ddaf9",
+    "docs/deployment-lanes.md": "981a2856527cedb7003f8767cee6a64a5290bd7bdba8101eb858a5f84a18a35b",
+    "scripts/deploy/test_deploy_lanes.py": "3f426c4125e26567e8751dc479d6eab68a7607b9f3126f7462473a841289a66a",
+    "scripts/deploy/test_image_activation.py": "86b9db6c59ba982a3630c21686b37279ad325af57727aec6a1762f52fb77ffe3"
+  },
+  "gates": [
+    {
+      "command": [
+        "python3",
+        "-I",
+        "scripts/deploy/test_deploy_lanes.py"
+      ],
+      "exit_code": 0,
+      "seconds": 9.51658883295022,
+      "expected": 22,
+      "actual": 22,
+      "source_unchanged": true,
+      "pass": true
+    },
+    {
+      "command": [
+        "python3",
+        "-I",
+        "scripts/deploy/test_deploy_publication.py"
+      ],
+      "exit_code": 0,
+      "seconds": 11.804007624974474,
+      "expected": 19,
+      "actual": 19,
+      "source_unchanged": true,
+      "pass": true
+    },
+    {
+      "command": [
+        "python3",
+        "-I",
+        "scripts/deploy/test_image_activation.py"
+      ],
+      "exit_code": 0,
+      "seconds": 2.008373750024475,
+      "expected": 5,
+      "actual": 5,
+      "source_unchanged": true,
+      "pass": true
+    }
+  ],
+  "scope": "actual selected source with generated files, local kernel FD/queue ownership and fake service/config effects; no deployments or real service access"
+}

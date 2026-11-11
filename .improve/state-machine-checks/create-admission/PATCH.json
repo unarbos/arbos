@@ -1,0 +1,25 @@
+{
+  "base": "28bc07946e3601603823ed3bb4988197fac4c659",
+  "patch": "create-admission.patch",
+  "bytes": 22545,
+  "sha256": "19282e7b1ce56d438df924f0d15e1acf63a42e4a7853c66d09d544a3c23acb8c",
+  "files": [
+    {
+      "path": "crates/arbos-relay/src/state.rs",
+      "base_sha256": "39e02e880e041898bb6282c22d79363f485dc4847baaf1589de802a42cc5c23a",
+      "candidate_sha256": "b610baa95f1b2a13dca5c2609709805bf2ef55f46acfbde0579322b41505b2b8"
+    },
+    {
+      "path": "crates/arbos-relay/src/boxes.rs",
+      "base_sha256": "a6fc2d541617d0060ef1ac796af8806432a726716129edb57802bc195b63501b",
+      "candidate_sha256": "a59ee0c17b3fd2badeab886d79edd74f2cb90257a9c40e4be9c86c04647ee8f7"
+    },
+    {
+      "path": "crates/arbos-relay/src/box_row_tests.rs",
+      "base_sha256": "ea64208af50351ff22421d20577ad6fbc8143009a2dba98593daebf60c97659a",
+      "candidate_sha256": "9ebb61bda4d185afb66635c952fdfaa118ef786be5fb21fe4ada9deabf787d2c"
+    }
+  ],
+  "target": "<owned-checkout>/.improve/evidence/create-admission/target",
+  "scope": "private pinned workspace; no live index/worktree mutation"
+}

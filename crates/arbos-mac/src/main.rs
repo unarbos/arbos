@@ -4,6 +4,7 @@ mod agent_link_expiry;
 mod app;
 mod audio;
 mod auth;
+mod call_attempt;
 mod calls;
 mod chat_search;
 mod chat_title;

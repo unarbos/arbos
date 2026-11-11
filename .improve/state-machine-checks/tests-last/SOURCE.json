@@ -1,0 +1,9 @@
+{
+  "paths": {
+    "crates/arbos-agentd/src/approval.rs": "cd68753519c939f3678e41027bd842bbebcb67a1c68a399f0bd9b281e9304cf3",
+    "crates/arbos-agentd/src/agent.rs": "9209d359902dce86b67af955dafaa967129cc122593d0bc3e28937253f763e15",
+    "crates/arbos-agentd/src/harness.rs": "69c8c25bd04306b13a997461eba9886f88efd5af311d9edb5b4134e7c4837f68",
+    "crates/arbos-agentd/src/sweep_contention_tests.rs": "faeb0a99ace2ceb6d8041a6deae24403d27dd73996861021e4ea073a6814364f"
+  },
+  "changes": "test inputs/premises and comments only; final combined Linux run required"
+}

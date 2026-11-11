@@ -1,0 +1,12 @@
+{
+  "crates/arbos-agentd/src/agent.rs": {
+    "duration_calls_equal": true,
+    "before_count": 53,
+    "after_count": 53
+  },
+  "crates/arbos-agentd/src/settings.rs": {
+    "duration_calls_equal": true,
+    "before_count": 3,
+    "after_count": 3
+  }
+}

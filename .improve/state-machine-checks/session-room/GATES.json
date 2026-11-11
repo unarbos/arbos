@@ -1,0 +1,84 @@
+{
+  "before": {
+    "source_sha256": "fff0534dd589e4d6dc180306adbf73aaed0e2c173ff6ea36f19978b5c0ab697d",
+    "fixture_sha256": "4f4e4955c1eebe2255dce902d99ae04d42879d1fb6a8e23a6b4210e1e7b52972",
+    "compile_exit": 0,
+    "exit_code": 1,
+    "results": {
+      "failed": 2,
+      "passed": 3,
+      "results": [
+        {
+          "name": "terminal-403-rejects-queued-open",
+          "pass": false
+        },
+        {
+          "name": "terminal-404-rejects-queued-open",
+          "pass": false
+        },
+        {
+          "name": "current-open-still-reaches-core-and-presence",
+          "pass": true
+        },
+        {
+          "name": "explicit-stop-rejects-queued-open",
+          "pass": true
+        },
+        {
+          "name": "reconnect-rejects-old-and-accepts-current-open",
+          "pass": true
+        }
+      ],
+      "total": 5
+    },
+    "seconds": 1.4871695840265602
+  },
+  "after": {
+    "source_sha256": "00b80c796bc8b2d31640e14108427b305c2324f44aaaab1a3edea3bbbef6d332",
+    "fixture_sha256": "91c150cf93542494bddce6df53300f6d313755076f54e44313b9572c8ee5a0cb",
+    "compile_exit": 0,
+    "exit_code": 0,
+    "results": {
+      "failed": 0,
+      "passed": 5,
+      "results": [
+        {
+          "name": "terminal-403-rejects-queued-open",
+          "pass": true
+        },
+        {
+          "name": "terminal-404-rejects-queued-open",
+          "pass": true
+        },
+        {
+          "name": "current-open-still-reaches-core-and-presence",
+          "pass": true
+        },
+        {
+          "name": "explicit-stop-rejects-queued-open",
+          "pass": true
+        },
+        {
+          "name": "reconnect-rejects-old-and-accepts-current-open",
+          "pass": true
+        }
+      ],
+      "total": 5
+    },
+    "seconds": 0.9123589170631021
+  },
+  "swift_syntax_parse": {
+    "exit_code": 0,
+    "scope": "changed SessionRoom.swift + retained XCTest file; no SDK typecheck/XCTest runtime claim"
+  },
+  "sources": {
+    "apps/ios/Arbos/Arbos/Sync/SessionRoom.swift": {
+      "before": "fff0534dd589e4d6dc180306adbf73aaed0e2c173ff6ea36f19978b5c0ab697d",
+      "after": "00b80c796bc8b2d31640e14108427b305c2324f44aaaab1a3edea3bbbef6d332"
+    },
+    "apps/ios/Arbos/ArbosTests/SessionRoomTests.swift": {
+      "before": "ef000ac4e27172dff0870a57c01c97c8333ef4f75b128f54eb26aeafc3e500ec",
+      "after": "2db787267d994a4a48c9ff6d31ddb839ef35ce3acba38d65907bad6c0f1a397b"
+    }
+  }
+}

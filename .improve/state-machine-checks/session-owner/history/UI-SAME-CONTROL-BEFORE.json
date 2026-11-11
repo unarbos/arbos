@@ -1,0 +1,17 @@
+{
+  "sources": {
+    "crates/arbos-mac/src/app.rs": "a007e231486cc322a2c430e1ef56fd83bbc8820d924e028c0febfd9507d76cf5",
+    "crates/arbos-mac/src/sync/work_lifetime.rs": "68d6c6fb42aa07499580c74e9ab465dd7d71d049bc76a8bfb67a6674024dde0b",
+    "crates/arbos-mac/src/sync/session_scope.rs": "3b95452cbce87558c568c213e521790cb221c4ebe83d39c11d63bf5ece5d6ef3",
+    "crates/arbos-mac/src/sync/session_events.rs": "63d13838ff6a26529e663eed915bc89a989d8d176d25d5120b856a368dcfbd1b"
+  },
+  "exit_code": 101,
+  "seconds": 0.9232332500396296,
+  "source_sha256": "a007e231486cc322a2c430e1ef56fd83bbc8820d924e028c0febfd9507d76cf5",
+  "fixture_sha256": "e09b925e2327a5b068e25b724c44bca8057dbb249d46de273c618e28c0254e4f",
+  "counts": {
+    "passed": 18,
+    "failed": 2,
+    "ignored": 0
+  }
+}

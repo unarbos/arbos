@@ -1,0 +1,221 @@
+{
+  "source": {
+    "ref": "8466129572241419de9a992bce0120fec8ee4e27",
+    "method": "explicit tracked Git blobs only",
+    "sources": {
+      "Cargo.lock": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+      "crates/arbos-relay/src/db.rs": "3d08c6397f24bc570c4c57221b47dde01ca09eaf489111e99b60ac7e4527a350",
+      "crates/arbos-relay/src/db_accounts.rs": "029b0adb718175fc50b24426f352b800814b8d3972cc2e804506ffa98e4412fd",
+      "crates/arbos-relay/src/db_voice.rs": "c90f55baeb9a4fa90f814164c87a50804713114f2536f70ddbc44be597be3846",
+      "crates/arbos-relay/src/credits.rs": "4835284e4b5c6bd355fbda94277833dd32746d75f62f5970cc2ecaa111eaf2ae",
+      "crates/arbos-relay/src/proxy.rs": "bdb626b6df1e852f71162a5882ecd10a3864a772d73994beaf0823fe556f9b81",
+      "crates/arbos-core/src/ids.rs": "6849afcd728a470ca36382afe7525eb65f7056a90daf88e82efdc142b387a311"
+    },
+    "shared_block_reader_sha256": "64061d80f55abb252c8860e9382e1926db2ea313209268a100099bfcd0cfadf9"
+  },
+  "selected_production_items": {
+    "db:(const SCHEMA: &str = r#\"[\\s\\S]*?\"#;)": "8768cff2b76a5364093601c75d04b03955241691aacca4c770ccc5857d3ee644",
+    "db:(#\\[derive\\(Clone\\)\\]\\s*pub struct Db\\(Arc<Mutex<Connection>>\\);)": "4be8d8e11e0d381abb29f95ed38ee4edf22501bd7da58fe730ab4783d2334110",
+    "accounts:(pub const ACCOUNTS_SCHEMA: &str = r#\"[\\s\\S]*?\"#;)": "fa5f6dfeb420f2bd8247ccc5eca9fec943b4ad42333cc4722ca59d7b01d5e373",
+    "voice:(pub const VOICE_SCHEMA: &str = r#\"[\\s\\S]*?\"#;)": "b4d4de47637616166eb3fc2af281daa35dad1f72347a6e551436c8de52e1c5a6",
+    "ids:pub fn now_ms()": "c6256b2e368e8f6d21c4503204bd3b08095cdeac4ae84a54e6d37173875796e1",
+    "proxy:pub(crate) fn start_of_utc_day_ms()": "72bfba4606265dc95ae69037569cec8f77ebeb49b702ae2653688dd4ee0bfdcf",
+    "credits:(const MIN_DEBIT_USD: f64 = [^;]+;)": "2e3259064b7ebacd94bd7c47687ed1f21008857956bc8f8ce8a9489fc164ad57",
+    "credits:(const UNLIMITED_WORDS: &\\[&str\\] = &[\\s\\S]*?];)": "c1cce58541c94a7e3cabc75a1347ef0ae9043ab256021c766a11d201f1c96d42",
+    "credits:pub enum SpendLimit": "eb655de78116e1304dace3d896f6b3bbf76dfcc8ba74d21ec929b7e0de912254",
+    "credits:impl SpendLimit {": "98a05571dcad7af3de80b79cd82dfd0eaa1c374ae658da584f24aa6bbcd99754",
+    "credits:pub(crate) fn chargeable_amount(": "b0c54cd52a7187aabbe72cf3378650d9bd5f7b168ec4eb86b1e59b966dccb7e4",
+    "db:pub(crate) fn with<T>": "13a7f0036b12e27bdbeaf87be2afc1a63713e8e605b44a423c2b80073d401bc2",
+    "accounts:pub fn migrate_accounts(": "9d6801bfdb3c489fdf8659519c33bf14f1dece2ee75d4ad1cba657a493c8dbbb",
+    "accounts:pub enum DebitRefused": "4a5d6c5528f731fbe591ac778ec8152d99bfb002a9bb01bc304c4863a65b45d4",
+    "accounts:pub(crate) struct LegacyCreditDefaults": "f301a54c0aaffe63ef143e25b770e48fe0bbca6de72e3ae38ad92ed2fdc2fcee",
+    "accounts:pub(crate) enum LegacyCreditInit": "f435219cc6dc8f6945e0c278ab2dcfe7f9869d1f1add5db02d8b45a57ecfaa20",
+    "accounts:pub(crate) enum PostfactDebit": "b613789da1fe898e7031f5bd7ae349b2f17418ea62b5b7e3e95e0e6060ecddf1",
+    "accounts:pub(crate) struct PostfactCharge": "72d486984b1dd879847b3aecefd15f59dce68b71436b9845ad3f11cd7a48afb9",
+    "accounts:fn ensure_legacy_credit_on(": "e2463268a69653bb06ffe02d27d518d7ef62735e3775d1b2e03cb7e385f6fb5c",
+    "accounts:pub(crate) fn charge_postfact_on(": "607d05132c80b76a24bbc9751aa8192e9b8f3917ae5b52d4baf8615638d8766c",
+    "accounts:fn set_user_limits_on(": "e62d1bbfa55c71550c4c8bdfa7021a909d3a8f9f278289289acf6773a235b856",
+    "accounts:fn grant_credits_on(": "946cb39c7fcabdc3acae956c3e3dde1cb1223432538b0177f6fdc4d1ac92da88",
+    "accounts:fn debit_on(": "92913da26cb30c590597459ca1c7006915845f76aa6c3ffbbaaabc1c33c94438",
+    "voice:pub fn migrate_voice(": "4e08d02b73b0c4624a1036c40cf85337d47bba1c096569a22c8b745269313cd3",
+    "voice:pub struct VoiceUsage": "77efdab65c571a062459d2bed2e728762c204271022d7a609015801a21985fae",
+    "voice:pub struct VoiceCallRow": "8498841653cfd8bbf3acb9f0a319568f1fad039c1d3e26046524ee74573d724f",
+    "voice:fn voice_call_on(": "a482f729e39473243b3c00cd7078b2177fee5eede3078f4d923cb069ba9761eb",
+    "voice:fn voice_usage_on(": "f0e02b0b2b851c1333212114d1e848a710dddccaf60c1f46ede00bd8a3edf076",
+    "voice:pub(crate) struct VoiceBilling": "567916287f2cec8c31ba47e02f21c0da4979a4e2f403b33e8e05d9dd06b2a509",
+    "voice:pub(crate) struct VoiceSettlement": "98765677fddfc03ca024b38252b95ba7aff5dddb864ea3defda8380d7f91ac88",
+    "voice:(const VOICE_COLS: &str = \"[^\\n]+\";)": "5e0a73380427d7ccbaa4b8a359a6bb5191da19587c72b419edb72ea336e5ea2a",
+    "voice:fn voice_from_row(": "3ba9cafda1b53cd00da5fcac9a960cab45e44c6c3397cf605b6fa6c261c3ecf5",
+    "voice:pub(crate) fn settle_voice_usage(": "0ae7ff7715f88aecacfec832aab60c5ce9610faba26a2cb800e00352e7c087b7",
+    "voice:pub fn voice_call(": "e22d08a49d687d57ac7e7d9a0a5241191809180cf546efd09161a1789ce83b19"
+  },
+  "selected_items_count": 34,
+  "tools": {
+    "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18) (Homebrew)",
+    "cargo": "cargo 1.98.0 (797e8a9bc 2026-08-05) (Homebrew)",
+    "node": "v22.22.3"
+  },
+  "sqlite": {
+    "sqlite_version": "3.46.0",
+    "library": "actual rusqlite::version() from bundled production-version SQLite",
+    "libsqlite3_sys": "0.30.1",
+    "rusqlite": "0.32.1"
+  },
+  "dev_registry_packages": 59,
+  "all_registry_versions_and_checksums_match_root_lock": true,
+  "laws": {
+    "tests": 5,
+    "pass": 5,
+    "fail": 0,
+    "ignored": 0,
+    "schema_laws": 4,
+    "runs_per_law": 256,
+    "generated_inputs": 1024,
+    "protocol_tests": 1,
+    "protocol_negative_requests": 9,
+    "seconds": 40.48383341706358,
+    "log_sha256": "64bb029302cd99395633c055dcb62ae64e5da275bb4d91f04dd2c7f933f0d693"
+  },
+  "leaf_gates": [
+    {
+      "gate": "check",
+      "exit": 0,
+      "seconds": 4.3198245000094175,
+      "log_sha256": "7c17fccca8de69f4b3a605b1a4ae7f0a006c5a88476d8acf570a5ee6b2cb069b"
+    },
+    {
+      "gate": "clippy",
+      "exit": 0,
+      "seconds": 9.705382667016238,
+      "log_sha256": "a36def455955be0db2ec8f02eaaf508b420b746bc377fcbeba206619e4b8f526"
+    },
+    {
+      "gate": "build",
+      "exit": 0,
+      "seconds": 0.20522666699253023,
+      "log_sha256": "6a981e4e2a0c9af6dead9afee0224555ade213f42082f62ec9b38c4d1fc0dd36"
+    },
+    {
+      "gate": "format",
+      "exit": 0,
+      "seconds": 0.046051374985836446,
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "gate": "python-syntax",
+      "exit": 0,
+      "seconds": 0.034209541976451874,
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "gate": "typecheck-final",
+      "exit": 0,
+      "seconds": 0.8899698329623789,
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ],
+  "mutants": [
+    {
+      "name": "ignored-configured-cap-commits",
+      "seed": 95001,
+      "source": "crates/arbos-relay/src/db_accounts.rs",
+      "original_sha256": "029b0adb718175fc50b24426f352b800814b8d3972cc2e804506ffa98e4412fd",
+      "mutant_sha256": "2657ed812fd83535cbc86787b4056d8bb7c81149d959fed587712f1a9924ae88",
+      "generated": {
+        "exit": 1,
+        "seconds": 2.265047249966301,
+        "detected": true,
+        "formatted_failure": "Property falsified after 1 run(s) and 1 shrink(s)"
+      },
+      "shrunk_input": {
+        "choice": 4,
+        "units": 0,
+        "tail": []
+      },
+      "replay": {
+        "exit": 1,
+        "seconds": 1.244403833989054,
+        "detected": true
+      }
+    },
+    {
+      "name": "settlement-cursor-never-advances",
+      "seed": 95002,
+      "source": "crates/arbos-relay/src/db_voice.rs",
+      "original_sha256": "c90f55baeb9a4fa90f814164c87a50804713114f2536f70ddbc44be597be3846",
+      "mutant_sha256": "dcc855572bc77e668f8faff34a7942e6820339ae2521e36a2865131970a35489",
+      "generated": {
+        "exit": 1,
+        "seconds": 1.5851849589962512,
+        "detected": true,
+        "formatted_failure": "Property falsified after 1 run(s) and 2 shrink(s)"
+      },
+      "shrunk_input": {
+        "choice": 0,
+        "units": 0,
+        "tail": []
+      },
+      "replay": {
+        "exit": 1,
+        "seconds": 1.0626123331021518,
+        "detected": true
+      }
+    },
+    {
+      "name": "strict-part-threshold-widened",
+      "seed": 95003,
+      "source": "crates/arbos-relay/src/db_voice.rs",
+      "original_sha256": "c90f55baeb9a4fa90f814164c87a50804713114f2536f70ddbc44be597be3846",
+      "mutant_sha256": "b87506a2925f19f70e91735dff7bde799340589465d8467c3f318edc6aeac9e7",
+      "generated": {
+        "exit": 1,
+        "seconds": 1.4769838340580463,
+        "detected": true,
+        "formatted_failure": "Property falsified after 1 run(s) and 1 shrink(s)"
+      },
+      "shrunk_input": {
+        "choice": 0,
+        "units": 0,
+        "tail": []
+      },
+      "replay": {
+        "exit": 1,
+        "seconds": 1.1802282499847934,
+        "detected": true
+      }
+    },
+    {
+      "name": "positive-balance-clamp-disabled",
+      "seed": 95002,
+      "source": "crates/arbos-relay/src/db_accounts.rs",
+      "original_sha256": "029b0adb718175fc50b24426f352b800814b8d3972cc2e804506ffa98e4412fd",
+      "mutant_sha256": "10ecf61a8f0d5a87710b30d676657ce9cdc2b9041c08cb4aa1ba5397ba62fe10",
+      "generated": {
+        "exit": 1,
+        "seconds": 1.720657708006911,
+        "detected": true,
+        "formatted_failure": "Property falsified after 1 run(s) and 2 shrink(s)"
+      },
+      "shrunk_input": {
+        "choice": 0,
+        "units": 0,
+        "tail": []
+      },
+      "replay": {
+        "exit": 1,
+        "seconds": 1.136232417076826,
+        "detected": true
+      }
+    }
+  ],
+  "source_unchanged": true,
+  "target_final_kib": 118752,
+  "target_note": "Own completed leaf target check/clippy metadata was cleaned after preserving gates; offline build restored small target. Disposable mutant targets clone dependencies then clean their own leaf before build. No shared workspace artifact authority.",
+  "development_oracle_note": "A first law incorrectly required cursor==total for delta<=1micro. Seed95002 found99.999994\u219299.999995; preserved production threshold intentionally permits up to1micro lag. Test oracle corrected; no product change.",
+  "limits": [
+    "finite generated legal-input helper execution, not exhaustive proof",
+    "real bundled SQLite and actual financial helpers, not full filesystem-open migration or remote/handler execution",
+    "existing41 native tests remain distinct caller/concurrency proof",
+    "no pricing, authorization, calibration, financial repair or automatic retry changes"
+  ]
+}

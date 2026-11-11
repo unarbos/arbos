@@ -7,6 +7,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		A1C098000000000000000004 /* DraftSendQueue.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C098000000000000000003 /* DraftSendQueue.swift */; };
+		A1C098000000000000000002 /* WorkLifetime.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C098000000000000000001 /* WorkLifetime.swift */; };
 		A1EE00000000000000000008 /* ErrorUILintTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1EE00000000000000000007 /* ErrorUILintTests.swift */; };
 		A1EE0000000000000000000A /* ToastStackTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1EE00000000000000000009 /* ToastStackTests.swift */; };
 		A1EE00000000000000000006 /* UserErrorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1EE00000000000000000005 /* UserErrorTests.swift */; };
@@ -272,6 +274,8 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		A1C098000000000000000003 /* DraftSendQueue.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DraftSendQueue.swift; sourceTree = "<group>"; };
+		A1C098000000000000000001 /* WorkLifetime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkLifetime.swift; sourceTree = "<group>"; };
 		A1EE00000000000000000007 /* ErrorUILintTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ErrorUILintTests.swift; sourceTree = "<group>"; };
 		A1EE00000000000000000009 /* ToastStackTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToastStackTests.swift; sourceTree = "<group>"; };
 		A1EE00000000000000000005 /* UserErrorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UserErrorTests.swift; sourceTree = "<group>"; };
@@ -638,6 +642,8 @@
 		A147AADF20080F5AA72B6504 /* Sync */ = {
 			isa = PBXGroup;
 			children = (
+				A1C098000000000000000001 /* WorkLifetime.swift */,
+				A1C098000000000000000003 /* DraftSendQueue.swift */,
 				A1EE00000000000000000001 /* UserError.swift */,
 				A1B646F374BD7AE1F3BE7A4B,
 				A1A8BC5FCD045299B0D7D13D,
@@ -1073,6 +1079,8 @@
 				A156C11ABF2E8C649148533D /* RelayAPI.swift in Sources */,
 				A115819FE05076AF542EABF0 /* SecretsAPI.swift in Sources */,
 				A15C00000000000000000009 /* SessionRoom.swift in Sources */,
+				A1C098000000000000000002 /* WorkLifetime.swift in Sources */,
+				A1C098000000000000000004 /* DraftSendQueue.swift in Sources */,
 				A15C0000000000000000000D /* CoreChatDoc.swift in Sources */,
 				A1B0F9F54DB2257BA4BA7B63 /* AgentProfileView.swift in Sources */,
 				A143D97A2803EDDA4BEA6B67 /* Avatar.swift in Sources */,

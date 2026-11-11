@@ -1,63 +1,17 @@
-//! Bug AQ: a sweep read "the adapter's lock was busy" as "this worker is dead", and killed a
-//! live worker's whole tree on it.
+//! A sweep must keep live work and describe the evidence it could not read.
 //!
-//! The second half of the reaper's evidence is the question "does any adapter still hold a child
-//! for this session". It was asked through `HarnessAdapter::is_open`, which was
-//! `children.try_lock().map(…).unwrap_or(false)` — so **a lock it could not take answered
-//! `false`, and `false` is what licences the kill.** One mutex guards the whole children map per
-//! adapter, and `stop()` holds it across `c.shutdown().await`, which waits on the child under a
-//! 5-second `timeout`. So for as long as any one session took to stop, every other live session
-//! on that adapter read as closed, and any of them with a subagent row had its entire marked
-//! tree collected.
+//! The original adapter held its entire child map while a sibling stopped. A failed
+//! try_lock was once read as “closed”, authorizing a kill of unrelated live writers
+//! (bug AQ, investigated after #2863). The registry now releases its short lock before
+//! child shutdown: an independent Ready sibling is readable, while the stopping
+//! session itself remains unknown. These cases distinguish both from a genuinely
+//! contended registry, without making the adapter recreate the old coupling.
 //!
-//! ## Where this came from
-//!
-//! Not from a field report. It was found by reading, while answering what remained destructive
-//! after #2863 narrowed the crash-loop sweep, and it was first demonstrated with a throwaway
-//! standalone probe rather than a test — twenty lines reproducing the `if let` plus `try_lock`
-//! shape outside this repo, which printed:
-//!
-//! ```text
-//! before any stop: is_open(live-worker) = true
-//! while another session is being stopped: is_open(live-worker) = false
-//! after the stop completes: is_open(live-worker) = true
-//! ```
-//!
-//! That probe is why the window is known not to be theoretical, and this file is that probe made
-//! permanent and moved onto the real path. A reviewer who sees only the case below should know
-//! the language-level behaviour was measured first and separately.
-//!
-//! ## Why it is driven through two real jobs
-//!
-//! The lock cannot be held from outside: `RpcSessions` and its `children` field are private to
-//! `harness.rs`, and an adapter is reached only as a `dyn HarnessAdapter`. Faking it would also
-//! prove nothing about the real hold, which is the whole question — the window exists because of
-//! where `stop()` puts its `.await`, not because a mutex can be contended.
-//!
-//! So: two jobs, two real worker sessions on one `PiAdapter`, a `stop()` left in flight on one,
-//! and the sweep run while that `stop()` is inside its wait. The stub's worker ignores the close
-//! of its stdin and sleeps, so the hold lasts the full `timeout` rather than a race the test
-//! would lose most runs.
-//!
-//! Real processes, read back by pid out of `/proc`. Linux-only, skipped elsewhere.
-//!
-//! ## And the window is reachable from a workload, which was doubted
-//!
-//! The 0.1.200 cancel canary could not open it from a workload in three attempts and concluded
-//! it was structurally unreachable, on the ground that the cancel kills through the cgroup and
-//! `cgroup.kill` delivers SIGKILL, so `RpcChild::shutdown` could never block. **That has the
-//! order backwards**, and the correction is worth stating here because this file is where the
-//! next reader will come looking before deleting the guard.
-//!
-//! `Agent::end_cancelled_worker` issues an in-band RPC `Abort` (no signal), then `adapter.stop`
-//! (the blocking wait, no signal), and only then `tree.kill()` — the one place `cgroup.kill` is
-//! written. The SIGKILL lands after the window, so it cannot be what keeps it shut. The canary's
-//! lever put `trap '' TERM` on a job's bash **subprocess**, which `shutdown` never waits on; it
-//! waits on the worker's pi child, which exits promptly on EOF. That run tested something else.
-//!
-//! The third case below is that reachability, measured: the cancel a user issues, and the
-//! five-minute `reap_unreachable_workers` tick that already runs, with no second cancel and
-//! nothing planted.
+//! Real jobs, /proc marks and independently observed writers pin physical survival;
+//! the returned Sweep separately pins honest Nothing versus Unconfirmed evidence.
+//! A job cancel still orders in-band Abort, adapter stop, then process-tree kill.
+//! The historical 0.1.200 canary trapped a bash descendant's TERM, which could not
+//! exercise the worker's EOF wait. The job-path case retains that actual overlap.
 
 #![cfg(target_os = "linux")]
 
@@ -81,7 +35,7 @@ const SIBLING: &str = "01TESTSIBLINGMIDSTOP00001";
 /// The chat the job-path case runs in, kept apart so the two cases cannot see each other's jobs.
 const CHAT_VIA_JOB: &str = "01TESTCHATSWEEPCONTEND0002";
 const ASK_VIA_JOB: &str = "01TESTASKSWEEPCONTENDTWO01";
-/// In a job's brief, this marks its worker as the one whose `stop()` must hold the children map.
+/// In a job's brief, this marks the worker that remains alive after stdin closes.
 const HANG_BRIEF: &str = "hold-the-children-map-on-close";
 
 /// The live worker's detached work: a `setsid` writer and a nested child of it, each recording
@@ -112,10 +66,8 @@ while true; do echo setsid >> "@LOG@"; sleep 0.2; done
 /// own main pi child, which this same binary also serves.
 ///
 /// And the one session that is told to refuses to die when its stdin closes: after the read
-/// loop ends it sleeps well past `RpcChild::shutdown`'s 5-second `timeout`, so a `stop()` on it
-/// holds that adapter's children map for the whole of it. **That hold is the condition under
-/// test.** Without it the window is a few microseconds wide and the test would lose the race
-/// nearly every run; with it the window is the test's to choose.
+/// loop ends it sleeps past RpcChild::shutdown's5-second timeout. This makes the
+/// owned Stopping interval deterministic; independent Ready entries remain readable.
 ///
 /// It is told in one of two ways, so that only the chosen session hangs and every other child on
 /// the box — the main pi child above all — shuts down as it normally would. Either its session id
@@ -158,8 +110,7 @@ for line in sys.stdin:
         )
     reply(kind, cid)
 
-# stdin is closed. The sibling outlives it, so `stop()` sits in its wait holding the adapter's
-# children map; every other child exits as it normally would.
+# Keep this captured worker in its shutdown wait; every other child exits on EOF.
 if hang:
     time.sleep(30)
 "#;
@@ -366,8 +317,8 @@ async fn a_started_session(agent: &std::sync::Arc<Agent>, job: &str) -> String {
 
 /// A second real session on the same adapter, started directly rather than through a job.
 ///
-/// Through the adapter because the sibling's only part is to be a session whose `stop()` holds
-/// the children map — it needs no job row, no worker row and no brief, and a second job cannot
+/// Through the adapter because the sibling only needs to remain in Stopping;
+/// it needs no job row, no worker row and no brief, and a second job cannot
 /// supply one anyway: a job's worker waits for the first one's run to finish, so the second
 /// session would still have no child when the sweep ran.
 ///
@@ -460,17 +411,7 @@ async fn a_sweep_whose_filter_spares_everything_it_enumerated_has_nothing_to_acc
     assert!(sweep.clean(), "{sweep:?}");
 }
 
-/// The measurement. Two live sessions on one adapter; one of them is being stopped, so the
-/// adapter's children map is locked; the sweep runs inside that window.
-///
-/// On the unfixed code the sweep reads the locked map as "no adapter holds this session", takes
-/// that as proof the **other** session is over, and SIGKILLs everything carrying its mark — the
-/// detached work of a job that is running correctly and was never asked to stop.
-///
-/// Two assertions, and the first is the one that matters: the live job's work is still running.
-/// The second is the half that is easy to lose — the sweep must *say* it could not look. A sweep
-/// that spares the work and then reports a clean result has only moved the dishonesty: the next
-/// reader is told the box is accounted for over a session nobody read.
+/// A genuine registry read failure must never authorize collecting live work.
 #[tokio::test]
 async fn a_sweep_that_cannot_read_an_adapter_keeps_the_session_and_says_it_could_not_look() {
     let fx = Fixture::new();
@@ -491,21 +432,15 @@ async fn a_sweep_that_cannot_read_an_adapter_keeps_the_session_and_says_it_could
         "the live worker must have detached work for the sweep to take"
     );
 
-    a_sibling_session(&agent, &fx).await;
-    assert_ne!(
-        live, SIBLING,
-        "the two sessions must differ or this measures nothing"
-    );
-
-    // `stop` takes the adapter's children map and holds it across `shutdown`, whose wait on a
-    // child that ignores the close of its stdin runs to the full 5 s timeout.
     let adapter = agent.adapter(Harness::Pi);
-    let stopping = tokio::spawn(async move { adapter.stop(SIBLING).await });
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    assert!(
-        has_marked_session(SIBLING),
-        "the sibling's child must still be in its wait, or the lock is already free"
-    );
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let held = adapter.clone();
+    let holding = tokio::spawn(async move {
+        held.test_hold_children_until(ready_tx, release_rx).await;
+    });
+    ready_rx.await.expect("the actual registry is held");
+    assert_eq!(adapter.is_open(&live), None);
 
     let sweep = agent.reap_unreachable_workers().await;
 
@@ -513,8 +448,8 @@ async fn a_sweep_that_cannot_read_an_adapter_keeps_the_session_and_says_it_could
     assert_eq!(
         fx.alive(),
         doomed_if_broken,
-        "the sweep killed a live worker's detached work while a sibling session was mid-stop: \
-         it read a locked children map as proof the session was over (pids {:?}, sweep {sweep:?})",
+        "the sweep killed a live worker's detached work while the registry was held: \
+         an unreadable receipt cannot prove the session is over (pids {:?}, sweep {sweep:?})",
         fx.writer_pids()
     );
     let at_sweep = fx.log_len();
@@ -552,6 +487,75 @@ async fn a_sweep_that_cannot_read_an_adapter_keeps_the_session_and_says_it_could
         "the skipped session must be named, not merely counted"
     );
 
+    let _ = release_tx.send(());
+    holding.await.unwrap();
+}
+
+/// Slow cleanup of A cannot make an independent Ready sibling look unknown/dead.
+#[tokio::test]
+async fn a_sweep_reads_a_live_sibling_while_another_session_is_stopping() {
+    let fx = Fixture::new();
+    let (agent, host) = a_box(&fx).await;
+
+    // The job that must survive: a live worker with detached work of its own.
+    let live_job = a_job(&agent, &host).await;
+    let live = a_started_session(&agent, &live_job).await;
+    wait_for("the live worker's detached writers start", || {
+        fx.alive().len() >= 2
+    })
+    .await;
+    let before = fx.log_len();
+    wait_for("the writers are writing", || fx.log_len() > before).await;
+    let doomed_if_broken = fx.alive();
+    assert!(
+        doomed_if_broken.len() >= 2,
+        "the live worker must have detached work for the sweep to take"
+    );
+
+    a_sibling_session(&agent, &fx).await;
+    assert_ne!(
+        live, SIBLING,
+        "the two sessions must differ or this measures nothing"
+    );
+
+    let adapter = agent.adapter(Harness::Pi);
+    let stopping_adapter = adapter.clone();
+    let stopping = tokio::spawn(async move { stopping_adapter.stop(SIBLING).await });
+    wait_for("the sibling enters owned Stopping", || {
+        adapter.is_open(SIBLING).is_none()
+    })
+    .await;
+    assert!(!stopping.is_finished());
+    assert_eq!(adapter.is_open(&live), Some(true));
+    assert!(
+        has_marked_session(SIBLING),
+        "the sibling must still be waiting for its captured child"
+    );
+
+    let sweep = agent.reap_unreachable_workers().await;
+
+    // The physical half first, so nothing below rests on the sweep agreeing with itself.
+    assert_eq!(
+        fx.alive(),
+        doomed_if_broken,
+        "the sweep killed a live worker's detached work while the registry was held: \
+         an unreadable receipt cannot prove the session is over (pids {:?}, sweep {sweep:?})",
+        fx.writer_pids()
+    );
+    let at_sweep = fx.log_len();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(
+        fx.log_len() > at_sweep,
+        "the live job's writers stopped writing after the sweep, so something reached them"
+    );
+
+    assert_eq!(sweep.evidence, Evidence::Nothing, "{sweep:?}");
+    assert_eq!(
+        sweep.unread, None,
+        "the Ready sibling was actually read: {sweep:?}"
+    );
+    assert!(sweep.clean(), "{sweep:?}");
+
     let _ = stopping.await;
 }
 
@@ -567,51 +571,10 @@ fn job_state(agent: &std::sync::Arc<Agent>, job: &str) -> String {
         .unwrap_or_default()
 }
 
-/// The same window, opened by the cancel a user issues and read by the timer tick that exists.
-///
-/// # Why this case exists on top of the one above
-///
-/// The case above opens the window by calling `adapter.stop` directly on a session with no job.
-/// That proves the guard works; it does not prove any workload can reach it. The 0.1.200 cancel
-/// canary tried to reach it from a workload, failed three times, and concluded the window was
-/// structurally unreachable — **on a reading of the cancel path that is inverted**, stated here so
-/// that nobody repeats it:
-///
-/// > the cancel kills through the cgroup and `cgroup.kill` delivers SIGKILL, so
-/// > `RpcChild::shutdown` cannot block
-///
-/// [`Agent::end_cancelled_worker`] does three things, in this order:
-///
-/// 1. `adapter.cancel(sid)` — an in-band RPC `Abort` down the child's stdin. Not a signal.
-/// 2. `adapter.stop(sid)` — takes the adapter's children map and holds it across
-///    `c.shutdown().await`, because the `if let` scrutinee's temporary lives to the end of the
-///    block. [`crate::rpc_child::RpcChild::shutdown`] closes stdin and then waits **up to five
-///    seconds for the child to exit on EOF**, sending no signal of its own.
-/// 3. `tree.kill()` — the only place `cgroup.kill` is written.
-///
-/// So the cgroup SIGKILL lands strictly **after** the window, and cannot be what stops `shutdown`
-/// blocking. The canary's lever put `trap '' TERM` on the job's bash **subprocess**, which
-/// `shutdown` never waits on — it waits on the worker's pi child — so that run did not test this
-/// guard at all, and its 1.041 s reading is just pi exiting promptly on EOF.
-///
-/// # The concurrent caller is the one that already runs
-///
-/// No second cancel is needed and none is issued here. `Agent::spawn_keepalive` runs
-/// `reap_unreachable_workers` on a five-minute `tokio::time::interval` for the daemon's whole
-/// life, and the tick's body is this one call. So a single cancel of a worker that is slow to
-/// exit on EOF, overlapping a tick, is the whole shape — and `adapter.stop` is also called with
-/// no cgroup kill anywhere near it when a resumed session fails on its first prompt and when an
-/// approval card expires.
-///
-/// # What makes it fail if the guard is removed
-///
-/// With `is_open` back to answering a contended lock with `Some(false)`, `session_is_over` reads
-/// every adapter as having answered, returns `Some(true)` for the **subject** — a job running
-/// correctly that nobody asked to stop — and `reap_orphan_workers` SIGKILLs everything carrying
-/// its mark. Both halves below then fail: the subject's detached writers are gone, and the sweep
-/// reports no unread part. That is bug AQ, and it is why this guard is not dead code to delete.
+/// A user cancel overlaps the real keepalive tick. Only the cancelled worker's
+/// Stopping receipt is unknown; the subject's Ready receipt is actually read.
 #[tokio::test]
-async fn a_cancel_through_the_job_path_opens_the_window_and_a_timer_tick_reads_it() {
+async fn a_cancel_and_timer_tick_keep_live_work_and_name_only_the_stopping_session() {
     let fx = Fixture::new();
     let (agent, host) = a_box_for(&fx, CHAT_VIA_JOB, ASK_VIA_JOB).await;
 
@@ -641,14 +604,14 @@ async fn a_cancel_through_the_job_path_opens_the_window_and_a_timer_tick_reads_i
         "the subject must have detached work for a broken sweep to take"
     );
 
-    // The job the user cancels. Its brief marks its worker as the one that does not answer the
-    // close of its stdin, so the `shutdown` inside the cancel runs to its five-second timeout.
+    // The job the user cancels. Keep the existing marked worker fixture; the cleanup
+    // window below is owned by a process-handle barrier, not its response to stdin EOF.
     let doomed_job = a_job_in(
         &agent,
         &host,
         CHAT_VIA_JOB,
         ASK_VIA_JOB,
-        "Holding the map",
+        "Waiting for owned cleanup",
         &format!("Start some work and leave it running. {HANG_BRIEF}"),
         vec![format!("{}/doomed", fx.root.display())],
     )
@@ -659,6 +622,27 @@ async fn a_cancel_through_the_job_path_opens_the_window_and_a_timer_tick_reads_i
         "the two sessions must differ or this measures nothing"
     );
 
+    // Hold only the doomed child's process handle before cancellation. stop_jobs can
+    // still send its RPC and reap its tree; owned cleanup then pauses without making
+    // the independent Ready subject's registry receipt unreadable.
+    let adapter = agent.adapter(Harness::Pi);
+    // A /proc mark appears at spawn, before GetState completes and publishes Ready.
+    // Capture only the actual admitted worker, rather than racing its boot receipt.
+    wait_for("the doomed worker publishes its Ready receipt", || {
+        adapter.is_open(&doomed) == Some(true)
+    })
+    .await;
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let held = adapter.clone();
+    let held_session = doomed.clone();
+    let holding = tokio::spawn(async move {
+        held.test_hold_process_until(&held_session, ready_tx, release_rx)
+            .await
+            .expect("the doomed process is captured");
+    });
+    ready_rx.await.expect("the doomed process handle is held");
+
     // The cancel, through the path a user's `stop_job` takes. Nothing here calls `adapter.stop`.
     let cancelling = {
         let agent = agent.clone();
@@ -666,21 +650,24 @@ async fn a_cancel_through_the_job_path_opens_the_window_and_a_timer_tick_reads_i
         tokio::spawn(async move { agent.stop_jobs(CHAT_VIA_JOB, Some(&job)).await })
     };
 
-    // Synchronised on the job row rather than on `is_open`, so the wait does not depend on the
-    // guard under test: `stop_jobs` writes `cancelled` before it reaches any process. What is
-    // left after that is the `Abort` round trip and one `/proc` read of the worker's tree, both
-    // of which are milliseconds against `shutdown`'s five-second hold.
+    // The persisted cancellation and exact Stopping receipt establish the overlap;
+    // a killed child may exit immediately, so elapsed time cannot establish it.
     wait_for("the cancel reaches the doomed job's row", || {
         job_state(&agent, &doomed_job) == "cancelled"
     })
     .await;
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    wait_for("owned cleanup reaches the held doomed process", || {
+        adapter.is_open(&doomed).is_none() && adapter.is_open(&subject) == Some(true)
+    })
+    .await;
     assert!(
         !cancelling.is_finished(),
         "the cancel had already returned, so the tick below ran outside the window and this \
          measured nothing"
     );
 
+    assert_eq!(adapter.is_open(&subject), Some(true));
+    assert_eq!(adapter.is_open(&doomed), None);
     // The five-minute keepalive tick, which is this call and nothing else.
     let sweep = agent.reap_unreachable_workers().await;
 
@@ -688,8 +675,8 @@ async fn a_cancel_through_the_job_path_opens_the_window_and_a_timer_tick_reads_i
     assert_eq!(
         fx.alive(),
         doomed_if_broken,
-        "the tick collected a live job's detached work because a cancel held the adapter's \
-         children map: it read a locked map as proof the session was over (pids {:?}, \
+        "the tick collected a live job's detached work while another job was cancelling; \
+         the subject still had a readable Ready receipt (pids {:?}, \
          sweep {sweep:?})",
         fx.writer_pids()
     );
@@ -714,11 +701,12 @@ async fn a_cancel_through_the_job_path_opens_the_window_and_a_timer_tick_reads_i
     );
     let unread = sweep.unread.as_ref().expect("the skip is reported");
     assert_eq!(unread.cause, UnreadCause::AdapterLockContended);
-    assert!(
-        unread.sessions.contains(&subject),
-        "the live job's own session is the one that would have been collected, so it is the one \
-         that must be named: {unread:?}"
-    );
+    assert_eq!(unread.sessions, vec![doomed.clone()], "{unread:?}");
+    assert!(!unread.sessions.contains(&subject));
 
+    release_tx
+        .send(())
+        .expect("release the owned process handle");
+    holding.await.expect("the process barrier completed");
     let _ = cancelling.await;
 }

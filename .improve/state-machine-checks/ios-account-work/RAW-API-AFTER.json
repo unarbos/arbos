@@ -1,0 +1,33 @@
+{
+  "sources": {
+    "apps/ios/Arbos/Arbos/Sync/RelayAPI.swift": "850917e53fe86ddfd655f8ef85fcfab1808a6d6f4c9d5506dda83ed6d9d95616",
+    "RelayTypes.swift": "74c487d14baeede286a3e83347e7fcc659b3676cce7634a10e5633b5160c07c7"
+  },
+  "compile_exit": 0,
+  "fixture_sha256": "b05e966b3007f342768e14d2834251194e1d0032a8aafaf8e2d8edb4bce35790",
+  "exit_code": 0,
+  "results": {
+    "cases": {
+      "avatar-current-authority-bytes-mime-policy": true,
+      "avatar-no-new-401-retry": true,
+      "avatar-retired-bound-no-B-dispatch": true,
+      "avatar-unbound-compatible-control": true,
+      "put-current-authority-bytes-mime-policy": true,
+      "put-no-new-401-retry": true,
+      "put-retired-bound-no-B-dispatch": true,
+      "put-unbound-compatible-control": true,
+      "read-current-authority-bytes-mime-policy": true,
+      "read-no-new-401-retry": true,
+      "read-retired-bound-no-B-dispatch": true,
+      "read-unbound-compatible-control": true,
+      "transcribe-current-authority-bytes-mime-policy": true,
+      "transcribe-no-new-401-retry": true,
+      "transcribe-retired-bound-no-B-dispatch": true,
+      "transcribe-unbound-compatible-control": true
+    },
+    "failed": 0,
+    "passed": 16,
+    "total": 16
+  },
+  "seconds": 1.5278536250116304
+}
