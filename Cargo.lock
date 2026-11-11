@@ -392,6 +392,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "arbos-boxd"
+version = "0.6.409"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "nix 0.29.0",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "arbos-client"
 version = "0.6.410"
 dependencies = [
