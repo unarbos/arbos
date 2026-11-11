@@ -200,6 +200,11 @@ struct SettingsView: View {
                             valueTint: model.secrets?.paused == true ? theme.danger : nil)
             }))
         }
+        if model.credentials != nil {
+            account.append(AnyView(NavigationLink { WalletPage() } label: {
+                SettingsRow(icon: "wallet.bifold.fill", title: "Wallet")
+            }))
+        }
         if model.credentials != nil || model.isFixture {
             // Devices (Oct 23): every GitHub sign-in is one; sign another out here.
             account.append(AnyView(NavigationLink { DevicesPage() } label: {

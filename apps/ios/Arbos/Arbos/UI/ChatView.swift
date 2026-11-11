@@ -267,6 +267,7 @@ struct ChatSession: View {
     @State private var showAttach = false
     /// The Emoji · Stickers · GIFs picker (ARB-544), from the attach sheet's third row.
     @State private var showFun = false
+    @State private var showCheque = false
     @State private var scroller: ScrollViewProxy?
     /// Scrolled more than ~120 pt above the end: show Grok's round chevron
     /// (or the new-messages pill when rows landed below).
@@ -863,6 +864,8 @@ struct ChatSession: View {
     /// D88: a server channel rendered with this same view (`projectId == channelSlot`).
     private var channel: ServerChannel? { projectId == channelSlot ? model.channel(chatId) : nil }
     private var isChannel: Bool { projectId == channelSlot }
+    /// Cheques go to one person: a direct chat with exactly one other human and no agents.
+    private var chequeable: Bool { people.map { !$0.isGroup } ?? false }
     private var channelServer: Server? { channel.flatMap { model.server($0.serverId) } }
     private var counterpart: ChatMember? { people?.counterpart(me: model.user?.id) }
     /// The DM's other person while they are on my block list ([feedback
@@ -3099,7 +3102,7 @@ struct ChatSession: View {
         switch row.kind {
         // A secret ghost row has nothing to copy, forward or quote; Delete stays off too —
         // the row is the record that a value went to the vault.
-        case .system, .question, .error, .forwardHint, .secretGhost, .hidden:
+        case .system, .question, .error, .forwardHint, .secretGhost, .cheque, .hidden:
             return false
         case .user, .other, .member, .assistant, .file, .voiceMemo, .image:
             return messageById[row.messageId] != nil
@@ -3630,17 +3633,26 @@ struct ChatSession: View {
         }
         .buttonStyle(.plain)
         .sheet(isPresented: $showAttach, onDismiss: demoDismissed) {
-            AttachSheet {
+            AttachSheet(onPhoto: {
                 showAttach = false
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showPhotos = true }
-            } onFile: {
+            }, onFile: {
                 showAttach = false
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showFiles = true }
-            } onFun: {
+            }, onFun: {
                 showAttach = false
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showFun = true }
-            }
+            }, onCheque: chequeable ? {
+                showAttach = false
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showCheque = true }
+            } : nil)
             .environment(\.theme, theme)
+        }
+        .sheet(isPresented: $showCheque) {
+            SendChequeSheet(chatId: chatId)
+                .environmentObject(model)
+                .environment(\.theme, theme)
+                .presentationDetents([.medium])
         }
         .sheet(isPresented: $showFun) {
             FunPickerSheet(chatId: chatId, onEmoji: { glyph in
@@ -4299,6 +4311,7 @@ struct AttachSheet: View {
     let onPhoto: () -> Void
     let onFile: () -> Void
     var onFun: (() -> Void)? = nil
+    var onCheque: (() -> Void)? = nil
 
     var body: some View {
         VStack(spacing: 0) {
@@ -4309,11 +4322,15 @@ struct AttachSheet: View {
                 row(icon: "face.smiling", title: "Emoji, stickers & GIFs", subtitle: "Add some fun to the chat", action: onFun)
                     .accessibilityIdentifier("attach-fun")
             }
+            if let onCheque {
+                row(icon: "signature", title: "Send TAO", subtitle: "A cheque they can cash anytime", action: onCheque)
+                    .accessibilityIdentifier("attach-cheque")
+            }
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 16)
         .background(theme.bg)
-        .presentationDetents([.height(onFun == nil ? 190 : 258)])
+        .presentationDetents([.height(190 + (onFun == nil ? 0 : 68) + (onCheque == nil ? 0 : 68))])
         .presentationDragIndicator(.hidden)
         .presentationBackground(theme.bg)
     }
@@ -4504,7 +4521,7 @@ extension ChatSession {
     /// Prose / media bubbles get the search wash; date / system / card / blocked rows do not.
     private static func isMessageBubble(_ row: Row) -> Bool {
         switch row.kind {
-        case .system, .question, .error, .forwardHint, .secretGhost, .hidden:
+        case .system, .question, .error, .forwardHint, .secretGhost, .cheque, .hidden:
             return false
         case .user, .other, .member, .assistant, .file, .voiceMemo, .image:
             return true

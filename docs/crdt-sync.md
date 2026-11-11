@@ -9,7 +9,8 @@ This document is drawn from the code as it exists today:
 | Shared Loro chat writes (box / core) | `crates/arbos-core/src/doc.rs` |
 | App sans-IO room session | `crates/arbos-client/src/room.rs` (`RoomSession`) |
 | Shared Matrix client (D88 C1: servers and channels) | `crates/arbos-matrix` (`MatrixClient`: sliding sync through the relay proxy, channel timelines as chat-doc message rows, send, read) |
-| UniFFI / Swift bindings | `crates/arbos-ffi` (wraps client + core + the Matrix client; produces xcframework) |
+| Every user's wallet | `crates/arbos-wallet` (`Seed`: one phrase → TAO account, chat key backup passphrase, wallet link proof; `chain`: offline cheques) |
+| UniFFI / Swift bindings | `crates/arbos-ffi` (wraps client + core + the Matrix client + the wallet; produces xcframework) |
 | Golden doc / wire fixtures | `crates/arbos-core/fixtures/` |
 | Mac chat doc (reader shim; writes via arbos-core) | `crates/arbos-mac/src/sync/doc.rs` |
 | iOS chat doc (arbos-core via ArbosFFI) | `apps/ios/Arbos/Arbos/Sync/CoreChatDoc.swift` |
@@ -29,7 +30,8 @@ This document is drawn from the code as it exists today:
 - **Swift:** `./scripts/gen-swift-types.sh` runs `typeshare-cli` (pinned) on `crates/arbos-core` and writes `packages/ArbosFFI/Sources/ArbosFFI/RelayTypes.swift`. CI fails when that file is stale. Do not edit `RelayTypes.swift` by hand.
 - **`arbos-client`** — app-only sans-IO `RoomSession` (handshake, catch-up, pending PUSH, reconnect backoff, held wake/presence). Depends on `arbos-core`. No tokio, tungstenite, or HTTP.
 - **`arbos-matrix`** — the apps' Matrix client (D88 C1): one `matrix-sdk` client per device (stage D: E2EE, keys and room state in a per-device SQLite store, key backup under the person's recovery passphrase; injected HTTP client), sliding sync through `relay/_matrix/client/*`, servers (Spaces) and channels as list rows, channel timelines as the same message rows a chat doc projects, sending with `life.arbos.id` = the app's ULID, read receipts. Depends on tokio and `matrix-sdk`; like `arbos-client`, **only `arbos-mac` and `arbos-ffi` may depend on it** (CI checks). The relay never uses it (it has its own appservice client).
-- **`arbos-ffi`** — UniFFI layer over `arbos-client`, `arbos-matrix` and the core pieces Swift needs. The only crate that names Swift or `uniffi`. Builds an xcframework + generated Swift bindings (`scripts/build-xcframework.sh`).
+- **`arbos-wallet`** — the wallet every user has without having to know it: a BIP39 phrase made on the device (iCloud Keychain on the iPhone) derives the Bittensor account (the same address `btcli` derives from those words), the Matrix key-backup passphrase and the proof behind `PUT /me/wallet`; `chain` signs TAO cheques with no network from a saved chain snapshot and cashes them over plain JSON-RPC. Like `arbos-matrix`, **only `arbos-mac` and `arbos-ffi` may depend on it** (CI checks). The relay never holds a key; it only verifies link proofs (`arbos-relay/src/wallets.rs`).
+- **`arbos-ffi`** — UniFFI layer over `arbos-client`, `arbos-matrix`, `arbos-wallet` and the core pieces Swift needs. The only crate that names Swift or `uniffi`. Builds an xcframework + generated Swift bindings (`scripts/build-xcframework.sh`).
 - **Who may depend on `arbos-client`:** device apps and the FFI crate (`arbos-mac`, `arbos-ffi`). **`arbos-relay`, `arbos-agentd`, `arbosctl`, and `arbos-local` must not.** CI enforces this with `cargo tree -i arbos-client`.
 
 ### arbos-ffi / xcframework

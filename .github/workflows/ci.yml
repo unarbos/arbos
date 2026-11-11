@@ -378,6 +378,11 @@ jobs:
           set -euo pipefail
           deps=$(cargo tree -i arbos-matrix --prefix none --depth 1 | awk '/^arbos-/ {print $1}' | grep -v '^arbos-matrix$' | sort -u)
           test "$deps" = $'arbos-ffi' || test "$deps" = $'arbos-ffi\narbos-mac'
+      - name: arbos-wallet dependents
+        run: |
+          set -euo pipefail
+          deps=$(cargo tree -i arbos-wallet --prefix none --depth 1 | awk '/^arbos-/ {print $1}' | grep -v '^arbos-wallet$' | sort -u)
+          test "$deps" = $'arbos-ffi' || test "$deps" = $'arbos-ffi\narbos-mac'
 
   harness:
     name: harness (arbos-pi-ext typecheck + build + test)
