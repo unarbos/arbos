@@ -1,0 +1,16 @@
+--- actual/redact.rs
++++ temporary-mutant/redact.rs
+@@ -303,12 +303,7 @@
+ /// `scrub` over every string inside a JSON value (keys are left alone).
+ pub fn scrub_value(v: &mut Value) {
+     match v {
+-        Value::String(s) => {
+-            let clean = scrub(s);
+-            if clean != *s {
+-                *s = clean;
+-            }
+-        }
++        Value::String(s) => s.clear(),
+         Value::Array(items) => items.iter_mut().for_each(scrub_value),
+         Value::Object(map) => map.values_mut().for_each(scrub_value),
+         Value::Null | Value::Bool(_) | Value::Number(_) => {}
