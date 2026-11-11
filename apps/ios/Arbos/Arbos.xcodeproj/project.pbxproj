@@ -61,6 +61,7 @@
 		A1BB00000000000000000031 /* ScrollPerfUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000030 /* ScrollPerfUITests.swift */; };
 		A1F50000000000000000E004 /* PerfBaselineUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F50000000000000000E003 /* PerfBaselineUITests.swift */; };
 		A1BB00000000000000000033 /* HomeFilterTabsUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000032 /* HomeFilterTabsUITests.swift */; };
+		A1BB0000000000000000AA02 /* AAAWarmUpUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB0000000000000000AA01 /* AAAWarmUpUITests.swift */; };
 		A1BB00000000000000000035 /* ReactionPickerUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000034 /* ReactionPickerUITests.swift */; };
 		A1BB00000000000000000037 /* ChatSearchCloseUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000036 /* ChatSearchCloseUITests.swift */; };
 		A1BB00000000000000000043 /* PresenceAnchorUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000042 /* PresenceAnchorUITests.swift */; };
@@ -328,6 +329,7 @@
 		A1BB00000000000000000030 /* ScrollPerfUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScrollPerfUITests.swift; sourceTree = "<group>"; };
 		A1F50000000000000000E003 /* PerfBaselineUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerfBaselineUITests.swift; sourceTree = "<group>"; };
 		A1BB00000000000000000032 /* HomeFilterTabsUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeFilterTabsUITests.swift; sourceTree = "<group>"; };
+		A1BB0000000000000000AA01 /* AAAWarmUpUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AAAWarmUpUITests.swift; sourceTree = "<group>"; };
 		A1BB00000000000000000034 /* ReactionPickerUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReactionPickerUITests.swift; sourceTree = "<group>"; };
 		A1BB00000000000000000036 /* ChatSearchCloseUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatSearchCloseUITests.swift; sourceTree = "<group>"; };
 		A1BB00000000000000000042 /* PresenceAnchorUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PresenceAnchorUITests.swift; sourceTree = "<group>"; };
@@ -817,6 +819,7 @@
 		A1BB00000000000000000011 /* ArbosUITests */ = {
 			isa = PBXGroup;
 			children = (
+				A1BB0000000000000000AA01 /* AAAWarmUpUITests.swift */,
 				A1BB00000000000000000005 /* BackSwipeUITests.swift */,
 				A1BB00000000000000000030 /* ScrollPerfUITests.swift */,
 				A1F50000000000000000E003 /* PerfBaselineUITests.swift */,
@@ -1221,6 +1224,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A1BB0000000000000000AA02 /* AAAWarmUpUITests.swift in Sources */,
 				A1BB00000000000000000006 /* BackSwipeUITests.swift in Sources */,
 				A1BB00000000000000000031 /* ScrollPerfUITests.swift in Sources */,
 				A1F50000000000000000E004 /* PerfBaselineUITests.swift in Sources */,
