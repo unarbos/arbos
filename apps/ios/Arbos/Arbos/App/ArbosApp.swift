@@ -150,7 +150,20 @@ struct RootView: View {
             // After `.background`, rooms redial so Syncing… cannot stick
             // ([feedback app-01M5MVNNNBZHJWSRCZ81S04C8E]).
             model.noteScenePhase(phase)
-            if phase == .active { Task { await push.refreshStatus(); await model.refreshUnread(); await CallManager.shared.sendVoipTokenIfNeeded(); await model.checkForUpdate() } }
+            if phase == .active {
+                // Force-upload VoIP + APNs tokens every time we come to the front.
+                // The relay drops dead tokens (BadDeviceToken / Unregistered); without
+                // `force` the phone keeps its local "already registered" mark and never
+                // puts them back — callers then see "isn't open — they'll see a missed
+                // call" and the closed-app ring (PushKit / CallKit) never fires again.
+                Task {
+                    await push.refreshStatus()
+                    await push.sendTokenIfNeeded(force: true)
+                    await model.refreshUnread()
+                    await CallManager.shared.sendVoipTokenIfNeeded(force: true)
+                    await model.checkForUpdate()
+                }
+            }
         }
         // Safari / Mac-style connector OAuth: relay redirects to arbos://connectors/callback.
         .onOpenURL { url in

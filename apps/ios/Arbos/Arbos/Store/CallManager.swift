@@ -1179,6 +1179,10 @@ final class CallManager: NSObject, ObservableObject {
         voipRegistry = registry
     }
 
+    /// Upload the PushKit token to the relay. Pass `force: true` on foreground and
+    /// sign-in: the relay forgets tokens Apple rejects, and without a forced re-POST
+    /// this phone would keep its local "already registered" mark and never restore
+    /// closed-app ringing (callers then see "they'll see a missed call").
     func sendVoipTokenIfNeeded(force: Bool = false) async {
         guard !isFixture else { return }
         guard let token = voipToken else { voipStatus = "no token yet"; return }
@@ -1222,26 +1226,41 @@ final class CallManager: NSObject, ObservableObject {
         describe("start the call", error).sentence
     }
 
-    /// An ARBOS_CALL alert (tap or foreground): `event` started → ring, ended → stop.
+    /// An ARBOS_CALL alert (tap, foreground, or content-available wake): `event`
+    /// started → ring via CallKit, ended → stop. Falls back to `Call.parse` when the
+    /// full `CallAlertDto` shape fails so a banner tap still rings the phone.
     func handleCallAlert(_ info: [AnyHashable: Any]) {
         var dict: [String: Any] = [:]
         for (k, v) in info { if let key = k as? String { dict[key] = v } }
-        guard JSONSerialization.isValidJSONObject(dict),
-              let data = try? JSONSerialization.data(withJSONObject: dict),
-              let alert = try? JSONDecoder().decode(CallAlertDto.self, from: data) else { return }
-        let c = Call(dto: alert.call)
-        switch alert.event {
+        let event: String
+        let call: Call
+        let from: CallPerson?
+        if JSONSerialization.isValidJSONObject(dict),
+           let data = try? JSONSerialization.data(withJSONObject: dict),
+           let alert = try? JSONDecoder().decode(CallAlertDto.self, from: data) {
+            event = alert.event
+            call = Call(dto: alert.call)
+            from = alert.sender.map(CallPerson.init(dto:)) ?? call.startedBy
+        } else if let parsed = Call.parse(dict["call"]) {
+            event = (dict["event"] as? String) ?? "started"
+            call = parsed
+            from = CallPerson.parse(dict["sender"]) ?? parsed.startedBy
+        } else {
+            log.error("handleCallAlert: could not decode call payload")
+            return
+        }
+        switch event {
         case "missed":
             missedCall(
-                callId: c.callId,
-                chatId: c.chatId,
-                projectId: c.projectId.isEmpty ? peopleSlot : c.projectId,
-                from: alert.sender.map(CallPerson.init(dto:)) ?? c.startedBy
+                callId: call.callId,
+                chatId: call.chatId,
+                projectId: call.projectId.isEmpty ? peopleSlot : call.projectId,
+                from: from
             )
         case "ended":
-            remoteEnded(callId: c.callId, chatId: c.chatId, durationS: 0, writerDevice: nil)
+            remoteEnded(callId: call.callId, chatId: call.chatId, durationS: 0, writerDevice: nil)
         default:
-            ring(c, from: alert.sender.map(CallPerson.init(dto:)) ?? c.startedBy, viaVoip: false)
+            ring(call, from: from, viaVoip: false)
         }
     }
 
