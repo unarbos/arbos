@@ -2122,7 +2122,7 @@ pub struct Agent {
     pending_asks: Mutex<HashMap<String, HashSet<String>>>,
     /// Box-wide gate shared by every workspace (`workspace::BOX_MAX_SUBAGENTS`).
     box_slots: Arc<Semaphore>,
-    http: reqwest::Client,
+    http: crate::sync::RelayHttp,
     pub settings: crate::settings::Settings,
     /// Cached skills index (F5): shared + this Project's own, bodies included.
     pub skills: SkillsIndex,
@@ -2315,8 +2315,21 @@ impl Agent {
         self.pi().await
     }
 
-    pub fn http_client(&self) -> &reqwest::Client {
-        &self.http
+    /// The children this agent holds a handle for: the main pi and every retained worker.
+    /// `sleep.rs` reads it to tell them from what a tool call left running. A handle that is
+    /// busy right now yields nothing, so its child is counted as somebody else's — the side
+    /// that costs a checkpoint rather than a process.
+    pub(crate) fn child_pids(&self) -> Vec<u32> {
+        let pi = self.pi.try_lock().ok();
+        let pi = pi.and_then(|c| c.as_ref().filter(|c| c.is_alive())?.pid());
+        let workers = self.adapters.values().flat_map(|a| a.retained());
+        pi.into_iter()
+            .chain(workers.filter_map(|w| w.pid))
+            .collect()
+    }
+
+    pub fn http_client(&self) -> reqwest::Client {
+        self.http.get()
     }
 
     /// Remember that this box wrote `message_id` itself as the ask for a turn (see
@@ -2425,7 +2438,7 @@ impl Agent {
             subagent_slots: Arc::new(Semaphore::new(SUBAGENT_MAX_CONCURRENT)),
             pending_asks: Mutex::new(HashMap::new()),
             box_slots,
-            http: reqwest::Client::new(),
+            http: crate::sync::RelayHttp::default(),
             settings: crate::settings::Settings::new(&cfg_for_settings, models),
             skills: SkillsIndex::new(),
             approvals: crate::approval::Approvals::default(),
@@ -2648,7 +2661,7 @@ impl Agent {
         match self
             .skills
             .refresh(
-                &self.http,
+                &self.http_client(),
                 &self.cfg.relay_url,
                 &self.cfg.box_token,
                 &self.cfg.project_id,
@@ -9257,7 +9270,7 @@ impl Agent {
                 .upsert_chat(chat_id, title, c.is_pinned, c.created_at);
         }
         let r = self
-            .http
+            .http_client()
             .patch(format!(
                 "{}/projects/{}/chats/{}",
                 self.cfg.relay_url, self.cfg.project_id, chat_id
@@ -9273,7 +9286,7 @@ impl Agent {
     }
 
     pub async fn keepalive(&self, turn_running: bool) -> Result<()> {
-        self.http
+        self.http_client()
             .post(format!("{}/box/keepalive", self.cfg.relay_url))
             .bearer_auth(&self.cfg.box_token)
             .json(&json!({ "turn_running": turn_running }))
@@ -9318,7 +9331,7 @@ impl Agent {
         let me = self.clone();
         tokio::spawn(async move {
             if let Err(e) = me
-                .http
+                .http_client()
                 .post(url)
                 .bearer_auth(&me.cfg.box_token)
                 .json(&body)
@@ -9331,7 +9344,7 @@ impl Agent {
     }
 
     pub async fn post_timing(&self, kind: &str, ms: i64, detail: Option<&str>) -> Result<()> {
-        self.http
+        self.http_client()
             .post(format!(
                 "{}/projects/{}/timings",
                 self.cfg.relay_url, self.cfg.project_id
@@ -9352,7 +9365,7 @@ impl Agent {
         let k = key.clone();
         tokio::spawn(async move {
             let _ = me
-                .http
+                .http_client()
                 .put(format!(
                     "{}/blob/{}/{}",
                     me.cfg.relay_url, me.cfg.project_id, k
@@ -10482,7 +10495,7 @@ impl Agent {
             self.cfg.relay_url, self.cfg.project_id
         );
         let body = json!({ "chat_id": chat_id, "text": activity });
-        let http = self.http.clone();
+        let http = self.http_client();
         let token = self.cfg.box_token.clone();
         tokio::spawn(async move {
             if let Err(e) = http
@@ -13826,7 +13839,7 @@ impl Agent {
             self.cfg.relay_url, self.cfg.project_id
         );
         let body = json!({ "chat_id": chat_id, "text": activity, "jobs": jobs });
-        let http = self.http.clone();
+        let http = self.http_client();
         let token = self.cfg.box_token.clone();
         tokio::spawn(async move {
             if let Err(e) = http

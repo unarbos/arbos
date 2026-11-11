@@ -1274,7 +1274,7 @@ impl Agent {
             "at": now_ms(),
         });
         let url = format!("{}/box/people/{chat_id}/gate", self.cfg.relay_url);
-        let client = self.http_client().clone();
+        let client = self.http_client();
         let token = self.cfg.box_token.clone();
         let chat = chat_id.to_owned();
         tokio::spawn(async move {

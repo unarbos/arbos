@@ -103,7 +103,12 @@ async fn relay_goals_json(
     if let Some(b) = body {
         req = req.json(&b);
     }
-    let r = req.send().await.map_err(|e| e.to_string())?;
+    // Bounded: the goals poller calls this in a loop (see the push poll in `routines.rs`).
+    let r = req
+        .timeout(crate::workspace::REGISTRY_CALL_TIMEOUT)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
     let status = r.status();
     let text = r.text().await.unwrap_or_default();
     if !status.is_success() {

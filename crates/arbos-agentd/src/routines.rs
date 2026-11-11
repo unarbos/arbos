@@ -416,6 +416,10 @@ impl Agent {
                         agent.cfg.relay_url, agent.cfg.project_id
                     ))
                     .bearer_auth(&agent.cfg.box_token)
+                    // Bounded, because this loop is the only way a push reaches the box: a
+                    // request caught in flight by a checkpoint never answers after the restore
+                    // (docs/box-scaling.md §4.3.1), and unbounded it would end the loop there.
+                    .timeout(crate::workspace::REGISTRY_CALL_TIMEOUT)
                     .send()
                     .await;
                 let Ok(r) = resp else { continue };

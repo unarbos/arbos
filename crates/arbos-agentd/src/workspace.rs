@@ -163,7 +163,9 @@ pub struct Supervisor {
     pub boot: BootProgress,
     /// Result of the cross-workspace read check (`None` until two workspaces exist).
     pub cross_read_blocked: RwLock<Option<bool>>,
-    http: reqwest::Client,
+    http: sync::RelayHttp,
+    /// Woken by [`Supervisor::reconnect`] for the links that are not rooms (the voice link).
+    pub(crate) relinked: tokio::sync::Notify,
     /// At most one listing is applied at a time. The first listing (`/box/hello`) now runs on
     /// its own task so boot does not wait for every workspace to start, which puts it beside
     /// the 3 s registry poll for as long as it takes; two passes starting the same project
@@ -186,7 +188,8 @@ impl Supervisor {
             box_slots: Arc::new(Semaphore::new(BOX_MAX_SUBAGENTS)),
             booted_at: arbos_core::ids::now_ms(),
             boot: BootProgress::default(),
-            http: reqwest::Client::new(),
+            http: sync::RelayHttp::default(),
+            relinked: tokio::sync::Notify::new(),
             listing_lock: tokio::sync::Mutex::new(()),
             next_index: std::sync::atomic::AtomicU16::new(0),
         })
@@ -228,12 +231,69 @@ impl Supervisor {
         self.list().await.iter().any(|w| w.agent.any_turn_running())
     }
 
+    /// `POST /box/hello`: the box announces itself, and the answer lists every project of its
+    /// user as a workspace.
+    pub async fn hello(&self) -> reqwest::Result<reqwest::Response> {
+        self.http
+            .get()
+            .post(format!("{}/box/hello", self.cfg.relay_url))
+            .bearer_auth(&self.cfg.box_token)
+            .json(&json!({
+                "url": format!("http://127.0.0.1:{}", self.cfg.port),
+                "version": env!("CARGO_PKG_VERSION"),
+                "proto": arbos_core::PROTO_VERSION,
+                // Baked by image.yml (ARBOS_AGENTD_SHA / ARBOS_IMAGE_VERSION): which commit this
+                // box runs, so the relay admin can tell what is shipped.
+                "sha": std::env::var("ARBOS_AGENTD_SHA").ok().filter(|v| !v.is_empty() && v != "unknown"),
+                "image": std::env::var("ARBOS_IMAGE_VERSION").ok().filter(|v| !v.is_empty() && v != "unknown"),
+                // The pi-ext seed this box actually copies into its projects (#1708): on a host
+                // sandbox /etc is persisted, so it can lag behind the image.
+                "seed_sha": std::fs::read_to_string("/etc/arbos/pi-seed/extensions/arbos-pi-ext/.source-sha")
+                    .ok()
+                    .map(|s| s.trim().to_owned())
+                    .filter(|s| !s.is_empty()),
+            }))
+            .send()
+            .await
+    }
+
+    /// The sandbox was restored from a checkpoint and says so with SIGUSR1
+    /// (docs/box-scaling.md §4.3.1): every connection to the relay is dead on the wire, though
+    /// each still looks open from here. Drop them all and dial again now, without restarting —
+    /// the HTTP pools, every room socket, the voice link — then say hello, which is how the
+    /// relay learns the box is back and how the box learns what changed while it was frozen.
+    ///
+    /// A hello that fails is left to the 3 s registry poll, which brings the same listing.
+    pub async fn reconnect(self: &Arc<Self>) {
+        sync::drop_relay_http_pools();
+        self.relinked.notify_waiters();
+        let workspaces = self.list().await;
+        for w in &workspaces {
+            w.sync.kick();
+        }
+        tracing::info!(
+            workspaces = workspaces.len(),
+            "relay reconnect: every relay socket dropped and redialed"
+        );
+        match self.hello().await {
+            Ok(r) if r.status().is_success() => {
+                self.apply_listing(&r.json::<Value>().await.unwrap_or_default())
+                    .await;
+            }
+            Ok(r) => tracing::warn!(status = %r.status(), "relay reconnect: box hello refused"),
+            Err(e) => tracing::warn!(error = %e, "relay reconnect: box hello failed"),
+        }
+    }
+
     /// Box-level keep-alive: any workspace mid-turn keeps the box awake.
     pub async fn keepalive(&self, turn_running: bool) -> Result<()> {
         self.http
+            .get()
             .post(format!("{}/box/keepalive", self.cfg.relay_url))
             .bearer_auth(&self.cfg.box_token)
             .json(&json!({ "turn_running": turn_running }))
+            // Bounded for the reason the push poll is (`routines.rs`): it runs in a loop.
+            .timeout(REGISTRY_CALL_TIMEOUT)
             .send()
             .await?;
         Ok(())
@@ -564,6 +624,7 @@ impl Supervisor {
     pub async fn report_workspace_state(&self, project_id: &str, state: &str) {
         let _ = self
             .http
+            .get()
             .post(format!(
                 "{}/projects/{}/workspace",
                 self.cfg.relay_url, project_id

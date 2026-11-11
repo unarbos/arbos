@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 use crate::config::Config;
 
 pub struct Llm {
-    http: reqwest::Client,
+    http: crate::sync::RelayHttp,
     base: String,
     /// `POST {relay}/proxy/decisions` → OpenRouter's Decisions API (decision models such as Jev).
     decisions_url: String,
@@ -51,7 +51,7 @@ pub struct Decision {
 impl Llm {
     pub fn new(cfg: &Config) -> Self {
         Self {
-            http: reqwest::Client::new(),
+            http: crate::sync::RelayHttp::default(),
             base: format!("{}/proxy/v1", cfg.relay_url),
             decisions_url: format!("{}/proxy/decisions", cfg.relay_url),
             token: cfg.box_token.clone(),
@@ -96,6 +96,7 @@ impl Llm {
         let resp = self
             .purpose_header(
                 self.http
+                    .get()
                     .post(&self.decisions_url)
                     .bearer_auth(&self.token)
                     .header("x-arbos-project", &self.project_id),
@@ -159,7 +160,7 @@ impl Llm {
     /// or to OpenRouter directly): `chat_base` ends in `/v1`.
     pub fn with_endpoints(chat_base: &str, decisions_url: &str, token: &str) -> Self {
         Self {
-            http: reqwest::Client::new(),
+            http: crate::sync::RelayHttp::default(),
             base: chat_base.trim_end_matches('/').to_owned(),
             decisions_url: decisions_url.to_owned(),
             token: token.to_owned(),
@@ -224,6 +225,7 @@ impl Llm {
         let resp = self
             .purpose_header(
                 self.http
+                    .get()
                     .post(format!("{}/chat/completions", self.base))
                     .bearer_auth(&self.token),
             )
