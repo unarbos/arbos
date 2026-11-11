@@ -10,8 +10,11 @@ every update:
   response requested), so a later question ("is it done?") is answered from real state;
 * for a finished answer (`result`) or a job outcome (`job`): asks the voice agent to speak a
   short summary once, after the room is quiet and the agent is idle. It waits for the pause;
-  it never calls `interrupt()`. If the pause does not come within `SPEAK_WAIT_S`, the note stays
-  in context and the agent brings it up on its next turn.
+  it never calls `interrupt()`. While the call is still live it does **not** give up: after
+  `SPEAK_WAIT_S` without a long pause it speaks at the next quiet moment (even a brief one),
+  so a background job that finishes while the person is waiting on the call is heard without
+  them having to talk again. If the call has ended, speaking is skipped — the result already
+  landed in the chat as a normal message.
 * `quick` status lines and people's chat messages are context only.
 
 Updates are deduplicated by message id: the same bubble may reach the worker twice (the tool
@@ -31,10 +34,12 @@ log = logging.getLogger("arbos-voice.updates")
 
 # Kinds that the voice agent speaks about on its own (a pause permitting).
 SPOKEN_KINDS = frozenset({"result", "job"})
-# How long a proactive summary waits for a pause before it is left to the next turn.
+# How long a proactive summary prefers a natural pause before it speaks at the next quiet moment.
 SPEAK_WAIT_S = 30.0
 # Room quiet (nobody talking, agent idle) for this long = a natural pause.
 PAUSE_S = 0.9
+# After SPEAK_WAIT_S, a brief quiet window is enough — the person is waiting on the call.
+FORCED_PAUSE_S = 0.15
 # Context note length (the full text is in the chat).
 NOTE_CHARS = 1500
 POLL_WAIT_S = 20
@@ -78,9 +83,9 @@ def note_for(u: Update, agent_name: str) -> str:
 def speak_instructions(u: Update) -> str:
     what = "A background job of yours just finished" if u.kind == "job" else "Your agent just posted an answer"
     return (
-        f"{what} in the chat — it is the last [Chat] note above. If it answers something asked on this call, "
-        "tell the person now in one or two short spoken sentences: what was found and that the details are in "
-        "the chat. Do not read tables, links or phone numbers aloud. If it is not relevant to this call, say nothing."
+        f"{what} in the chat — it is the last [Chat] note above. Tell the person now, without waiting for them "
+        "to ask, in one or two short spoken sentences: what was found and that the details are in the chat. "
+        "Do not read tables, links or phone numbers aloud. Do not stay silent."
     )
 
 
@@ -179,23 +184,37 @@ class CallUpdates:
         return True
 
     async def say_at_pause(self, u: Update) -> bool:
-        """Speak once, at the next natural pause; never cut anyone off. False when no pause came."""
+        """Speak once at the next natural pause; never cut anyone off.
+
+        While the call is live, a finished job/result is always spoken: after `SPEAK_WAIT_S`
+        without a long pause we still speak at the next quiet moment (brief is enough). False
+        only when the call ended first — the bubble is already in the chat.
+        """
         async with self._speak_lock:
             deadline = time.monotonic() + SPEAK_WAIT_S
             quiet_since: float | None = None
-            while time.monotonic() < deadline:
+            forced = False
+            while True:
                 if self.leaving():
+                    log.info("call ended before the %s update could be spoken; left in chat", u.kind)
                     return False
+                need = FORCED_PAUSE_S if forced else PAUSE_S
                 if self.quiet():
                     quiet_since = quiet_since or time.monotonic()
-                    if time.monotonic() - quiet_since >= PAUSE_S:
+                    if time.monotonic() - quiet_since >= need:
                         break
                 else:
                     quiet_since = None
+                if not forced and time.monotonic() >= deadline:
+                    # Person may be waiting silently on the call; do not park this for their next turn.
+                    log.info(
+                        "no long pause for the %s update within %.0f s; speaking at the next quiet moment",
+                        u.kind,
+                        SPEAK_WAIT_S,
+                    )
+                    forced = True
+                    quiet_since = None
                 await asyncio.sleep(0.05)
-            else:
-                log.info("no pause for the %s update within %.0f s; left to the next turn", u.kind, SPEAK_WAIT_S)
-                return False
             try:
                 await self.speak(speak_instructions(u))
             except Exception as e:

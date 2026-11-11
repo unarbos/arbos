@@ -1,7 +1,7 @@
 import XCTest
 @testable import Arbos
 
-/// The ↓ button's landing window (jump-to-latest-instant-ios-2026-10-25): from deep
+/// The ↓ button's landing window ([feedback jump-to-latest-instant-ios-2026-10-25]): from deep
 /// history it re-cuts the view tree to one opening page instead of rebuilding the
 /// whole 360-row window; within the tail window it leaves the rows alone so the
 /// short animated hop stays.

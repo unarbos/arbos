@@ -11,6 +11,9 @@
 // `.default` mode, so it does not fire while a scroll view tracks a finger —
 // the spinner never competes with scroll frames. Only the glyph `Text`
 // observes the clock, so a tick re-evaluates the cell, not the row.
+// The one exception is a spinner floating over a scroll view rather than in
+// it (the chat's connection pill): `whileScrolling` gives it its own
+// display-linked timeline, so "Syncing…" keeps turning while the reader scrolls.
 // Reduce Motion draws the still glyph ⠿ and attaches nothing.
 
 import Combine
@@ -145,11 +148,17 @@ struct WorkingSpinner: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var size: CGFloat = WorkingSpinnerFrames.cell
     var glyphSize: CGFloat = WorkingSpinnerFrames.glyphSize
+    /// Keep turning while a scroll view tracks a finger (see the header).
+    var whileScrolling = false
 
     var body: some View {
         Group {
             if reduceMotion {
                 glyphText(WorkingSpinnerFrames.still)
+            } else if whileScrolling {
+                TimelineView(.animation(minimumInterval: WorkingSpinnerFrames.interval)) { context in
+                    glyphText(WorkingSpinnerFrames.glyph(elapsed: context.date.timeIntervalSinceReferenceDate))
+                }
             } else {
                 WorkingSpinnerGlyph(clock: .shared, glyphSize: glyphSize)
             }
