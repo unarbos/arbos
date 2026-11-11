@@ -518,6 +518,7 @@ dependencies = [
  "anyhow",
  "futures",
  "matrix-sdk",
+ "matrix-sdk-crypto",
  "reqwest 0.13.5",
  "serde",
  "serde_json",

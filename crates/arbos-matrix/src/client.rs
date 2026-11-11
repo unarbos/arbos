@@ -23,6 +23,7 @@ use matrix_sdk::ruma::events::{AnySyncTimelineEvent, MessageLikeEventType, State
 use matrix_sdk::ruma::serde::Raw;
 use matrix_sdk::ruma::{OwnedRoomId, OwnedUserId, RoomId, TransactionId, UInt, UserId};
 use matrix_sdk::{Client, Room, SessionMeta, SlidingSyncList, SlidingSyncMode};
+use matrix_sdk_crypto::{CollectStrategy, DecryptionSettings, TrustRequirement};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::watch;
@@ -123,6 +124,13 @@ impl MatrixClient {
                 auto_enable_cross_signing: true,
                 backup_download_strategy: BackupDownloadStrategy::OneShot,
                 auto_enable_backups: true,
+            })
+            // The homeserver can add a device to anyone's account. Only a device signed by
+            // its owner's cross-signing identity is sent room keys, and a message from one
+            // that is not stays locked.
+            .with_room_key_recipient_strategy(CollectStrategy::IdentityBasedStrategy)
+            .with_decryption_settings(DecryptionSettings {
+                sender_device_trust_requirement: TrustRequirement::CrossSignedOrLegacy,
             })
             .build()
             .await
