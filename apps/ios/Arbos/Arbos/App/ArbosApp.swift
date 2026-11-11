@@ -151,11 +151,13 @@ struct RootView: View {
             // ([feedback app-01M5MVNNNBZHJWSRCZ81S04C8E]).
             model.noteScenePhase(phase)
             if phase == .active {
-                // Force-upload VoIP + APNs tokens every time we come to the front.
-                // The relay drops dead tokens (BadDeviceToken / Unregistered); without
-                // `force` the phone keeps its local "already registered" mark and never
-                // puts them back — callers then see "isn't open — they'll see a missed
-                // call" and the closed-app ring (PushKit / CallKit) never fires again.
+                // Force-upload VoIP + APNs tokens every time we come to the front
+                // ([feedback closed-app-call-ring-2026-11-11], TestFlight
+                // AFjyB3HHRZ7GzKtZHyvxIUw). The relay drops dead tokens
+                // (BadDeviceToken / Unregistered); without `force` the phone keeps
+                // its local "already registered" mark and never puts them back —
+                // callers then see "isn't open — they'll see a missed call" and the
+                // closed-app ring (PushKit / CallKit) never fires again.
                 Task {
                     await push.refreshStatus()
                     await push.sendTokenIfNeeded(force: true)

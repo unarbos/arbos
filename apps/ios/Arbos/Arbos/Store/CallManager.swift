@@ -1180,14 +1180,15 @@ final class CallManager: NSObject, ObservableObject {
     }
 
     /// Upload the PushKit token to the relay. Pass `force: true` on foreground and
-    /// sign-in: the relay forgets tokens Apple rejects, and without a forced re-POST
-    /// this phone would keep its local "already registered" mark and never restore
-    /// closed-app ringing (callers then see "they'll see a missed call").
+    /// sign-in ([feedback closed-app-call-ring-2026-11-11]): the relay forgets tokens
+    /// Apple rejects, and without a forced re-POST this phone would keep its local
+    /// "already registered" mark and never restore closed-app ringing (callers then
+    /// see "they'll see a missed call").
     func sendVoipTokenIfNeeded(force: Bool = false) async {
         guard !isFixture else { return }
         guard let token = voipToken else { voipStatus = "no token yet"; return }
         guard let api, !deviceId().isEmpty, deviceId() != "ios:unpaired" else { voipStatus = "token ready · not signed in"; return }
-        if !force, token == registeredVoipToken { return }
+        guard pushTokenNeedsUpload(force: force, token: token, registered: registeredVoipToken) else { return }
         registeredVoipToken = token
         do {
             let enabled = try await api.registerVoip(deviceId: deviceId(), token: token, environment: PushManager.environment,
