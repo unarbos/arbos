@@ -91,12 +91,6 @@ pub struct DocHost {
     /// host. The idle close waits for this to go quiet, and the room cap closes the coldest
     /// room first (#2367).
     pub last_active_ms: i64,
-    /// Never closed for being idle:
-    /// - the project doc, which carries the box status and the settings;
-    /// - people chats, because the relay's "no box socket on this room" check is per owner,
-    ///   not per project (`Room::has_box`), so a sibling workspace's socket would keep the
-    ///   reopen push from being queued and this agent would never see the row.
-    pub keep_open: bool,
 }
 
 /// What a room's relay session is doing right now (2026-10-23 #1575: two rooms came back
@@ -162,6 +156,10 @@ const CORES_PER_ROOM: f64 = 0.0098;
 /// a box sitting exactly on it still has half its cores for work, and the idle close keeps
 /// pulling it below.
 const ROOM_CPU_SHARE: f64 = 0.5;
+/// Ceiling over the computed [`max_box_rooms`], whatever the quota says: a box granted more cores
+/// was granted them for turns, and [`CORES_PER_ROOM`] was measured on a 2-core box that saturates
+/// near 205 rooms. An explicit `ARBOS_MAX_BOX_ROOMS` is not clamped.
+const MAX_BOX_OPEN_ROOMS: usize = 128;
 /// Floor under [`max_box_rooms`]. A box with a small or misread quota still needs enough rooms to
 /// be useful, and below this the reopens would cost more than the sockets saved.
 const MIN_BOX_ROOMS: usize = 16;
@@ -185,8 +183,33 @@ fn env_i64(key: &str, default: i64) -> i64 {
 /// held 1,667 relay websockets and burnt 1.22 of its 2 cores on their timers.
 ///
 /// A row that lands in a closed room is not lost: the relay sees that no socket of the box is
-/// on the room and queues a `chat_open` push (`boxes::after_person_row`), which reopens it.
+/// on the room and queues a push that reopens it — `chat_open` or `people_chat_open`
+/// (`boxes::after_person_row`), `project_doc_open` for the project doc
+/// (`boxes::after_project_doc_row`).
 /// `ARBOS_ROOM_IDLE_SECS=0` keeps every room open for good, as before.
+///
+/// **That push is the whole safety net, so a room may only obey this close if it has one.**
+///
+/// `people/` rooms held it off until #2367, and the reason was real. One people chat is one
+/// shared room, and the relay's presence check is keyed by **owner** within that room
+/// (`Room::boxes`, `rooms.rs`: "box sockets count per user box"). An owner with two workspaces
+/// both serving the chat therefore has one key for both: workspace A's socket answers the
+/// check for workspace B, B's reopen push is never queued, and B never learns the row exists.
+/// The relay cannot currently tell those two sockets apart at all — the dialled path's project
+/// segment is the literal string `people`, the principal carries no project, and the device id
+/// is the same across workspaces — so nothing on the wire names the workspace. The fix is for
+/// the relay to **fail open** when an owner has two or more serving agents in a chat, pushing
+/// to all of them rather than trusting one socket to speak for the rest.
+///
+/// **This box therefore requires a relay carrying that fix.** Against an older relay, a closed
+/// people room on a multi-workspace owner is not told about its rows, and nothing errors or
+/// retries — the box just looks quiet. `ARBOS_ROOM_IDLE_SECS=0` restores the old behaviour
+/// without a new image, and is the lever to reach for if that is ever in doubt.
+///
+/// The project doc was the last room held open, because a row landing in it queued no push at
+/// all. It obeys this close too now that the relay queues `project_doc_open`, under the same
+/// condition as above: **the relay has to carry that push first.** Its writers on this side
+/// (status, settings, the chat index) reopen it themselves through [`SyncHub::project_doc`].
 pub fn room_idle_ms() -> i64 {
     static V: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
     *V.get_or_init(|| env_i64("ARBOS_ROOM_IDLE_SECS", ROOM_IDLE_SECS) * 1000)
@@ -194,14 +217,14 @@ pub fn room_idle_ms() -> i64 {
 
 /// At most this many chat rooms stay open per workspace, whatever their quiet window: opening
 /// one over the line closes the coldest room that holds no work. `ARBOS_MAX_OPEN_ROOMS=0`
-/// lifts the cap. The project doc and people chats are outside it (see `DocHost::keep_open`).
+/// lifts the cap. People chats and the project doc are inside it.
 pub fn max_open_rooms() -> usize {
     static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *V.get_or_init(|| env_i64("ARBOS_MAX_OPEN_ROOMS", MAX_OPEN_ROOMS as i64) as usize)
 }
 
-/// At most this many non-exempt chat rooms stay open **across every workspace on the box**, sized
-/// from the box's own CPU quota and [`CORES_PER_ROOM`] rather than fixed at a number.
+/// At most this many rooms stay open **across every workspace on the box**, sized from the box's
+/// own CPU quota and [`CORES_PER_ROOM`], and never above [`MAX_BOX_OPEN_ROOMS`].
 ///
 /// This is a second bound beside [`max_open_rooms`], not a replacement for it. That cap is per
 /// workspace, so a 16-workspace box permits 16 × 64 = 1024 rooms while its 2.00-core quota
@@ -209,17 +232,7 @@ pub fn max_open_rooms() -> usize {
 /// therefore sit far over its quota with every workspace apparently well behaved. This bounds the
 /// sum, at 102 rooms on that box.
 ///
-/// **It counts the rooms [`DocHost::keep_open`] does not exempt, and only those** — the same
-/// population both existing bounds act on. This deliberately takes no view on who is in that
-/// exemption: it is defined there, the other two bounds read it from there, and so does this.
-///
-/// That membership is the figure to re-read before trusting any number here, because the
-/// exemption is the denominator. While it holds the project doc of every workspace **and** every
-/// `people/` room, the exempt set grows with people and has no bound of its own, so a box can be
-/// mostly exempt rooms and this ceiling will not bring it under quota — it bounds the part it can
-/// reach and no more. Should `people/` rooms become evictable, nothing here needs re-deriving:
-/// the ceiling is a count of rooms worth half the quota at [`CORES_PER_ROOM`] each, whoever they
-/// are, and it would simply cover most of the box instead of a fraction of it.
+/// Every open room counts and every one may be closed to meet it: no room is exempt.
 ///
 /// `ARBOS_MAX_BOX_ROOMS=0` lifts it; any other value overrides the computed figure.
 pub fn max_box_rooms() -> usize {
@@ -232,32 +245,22 @@ pub fn max_box_rooms() -> usize {
             Some(n) => n.max(0) as usize,
             None => {
                 let budget = crate::resources::box_cores() * ROOM_CPU_SHARE;
-                ((budget / CORES_PER_ROOM) as usize).max(MIN_BOX_ROOMS)
+                ((budget / CORES_PER_ROOM) as usize).clamp(MIN_BOX_ROOMS, MAX_BOX_OPEN_ROOMS)
             }
         }
     })
 }
 
-/// Rooms this box holds open, across every workspace: non-exempt ones, which [`max_box_rooms`]
-/// bounds, and `keep_open` ones, which no bound can close. Cheap — no room's doc is read.
-///
-/// The second number answers a question that has only ever been inferred. The exempt set is the
-/// part of a box's socket count that neither the idle close nor either cap can reclaim, and what
-/// share of a loaded box it is decides how much the ceiling is worth there. Until this, it could
-/// only be guessed at from the workspace count — and a guess is no use for judging a change to
-/// the exemption itself, which is the decision this number exists to inform.
-pub(crate) async fn box_room_counts(hubs: &[SyncHub]) -> (usize, usize) {
+/// Rooms this box holds open, across every workspace. Cheap — no room's doc is read.
+pub(crate) async fn box_room_count(hubs: &[SyncHub]) -> usize {
     let mut open = 0usize;
-    let mut exempt = 0usize;
     for h in hubs {
-        let s = h.survey_rooms(None, false).await;
-        open += s.open;
-        exempt += s.exempt;
+        open += h.survey_rooms(None, false).await.open;
     }
-    (open, exempt)
+    open
 }
 
-/// Keep at most [`max_box_rooms`] non-exempt chat rooms open across every hub on the box,
+/// Keep at most [`max_box_rooms`] rooms open across every hub on the box,
 /// closing the coldest that hold no work until it is under.
 ///
 /// This is the bound no workspace can enforce for itself. [`max_open_rooms`] caps each hub at 64
@@ -275,7 +278,7 @@ pub(crate) async fn box_room_counts(hubs: &[SyncHub]) -> (usize, usize) {
 /// Returns the open count before the sweep and how many rooms it closed.
 pub(crate) async fn enforce_box_room_ceiling(hubs: &[SyncHub]) -> (usize, usize) {
     let ceiling = max_box_rooms();
-    let (open, _) = box_room_counts(hubs).await;
+    let open = box_room_count(hubs).await;
     if ceiling == 0 || open <= ceiling {
         return (open, 0);
     }
@@ -517,7 +520,6 @@ impl DocHost {
     /// No traffic for [`room_idle_ms`]. Cheap, unlike [`DocHost::work_in_flight`].
     pub fn quiet(&self, now: i64) -> bool {
         room_idle_ms() > 0
-            && !self.keep_open
             && !self.closed
             && now.saturating_sub(self.last_active_ms) >= room_idle_ms()
     }
@@ -553,7 +555,7 @@ impl DocHost {
     /// room cap closes a cold room without waiting for it. Neither ever closes a room that
     /// holds work or an unsent change.
     pub fn closable(&self, now: i64, quiet_first: bool) -> bool {
-        if self.keep_open || self.closed {
+        if self.closed {
             return false;
         }
         if quiet_first && !self.quiet(now) {
@@ -738,11 +740,9 @@ pub(crate) struct ColdRoom {
 /// What one pass over a workspace's open rooms found ([`SyncHub::survey_rooms`]).
 #[derive(Default)]
 pub(crate) struct RoomSurvey {
-    /// Non-exempt rooms open here: the ones both caps bound.
+    /// Rooms open here: the ones both caps bound.
     pub open: usize,
-    /// `keep_open` rooms open here: the ones no bound may close.
-    pub exempt: usize,
-    /// Non-exempt rooms that could be closed right now. Empty unless the caller asked for them,
+    /// Rooms that could be closed right now. Empty unless the caller asked for them,
     /// because finding them reads every room's doc.
     pub cold: Vec<ColdRoom>,
 }
@@ -907,7 +907,6 @@ impl SyncHub {
             link: LinkState::default(),
             opened_at: std::time::Instant::now(),
             last_active_ms: now_ms(),
-            keep_open: chat_id == PROJECT_DOC_CHAT_ID || room.starts_with("people/"),
         }));
         self.hosts
             .lock()
@@ -984,17 +983,13 @@ impl SyncHub {
         }
     }
 
-    /// One pass over this workspace's rooms: how many non-exempt rooms are open, and — when
+    /// One pass over this workspace's rooms: how many are open, and — when
     /// `candidates` — each one that could be closed right now.
     ///
     /// The two halves cost very different amounts. Counting only locks each host; collecting
     /// calls [`DocHost::closable`], which reads the whole doc. Both callers count first and
     /// collect only once they know they are over, so a box under its bounds pays nothing to be
     /// checked.
-    ///
-    /// `keep_open` rooms are neither counted nor offered. No bound may close them
-    /// ([`DocHost::keep_open`]), so counting them against a budget that cannot reclaim them
-    /// would spend the budget evicting rooms that are not the problem.
     pub(crate) async fn survey_rooms(&self, keep: Option<&str>, candidates: bool) -> RoomSurvey {
         let now = now_ms();
         let hosts: Vec<(String, SharedHost)> = self
@@ -1012,10 +1007,6 @@ impl SyncHub {
                 continue;
             };
             if g.closed {
-                continue;
-            }
-            if g.keep_open {
-                s.exempt += 1;
                 continue;
             }
             s.open += 1;
@@ -1653,9 +1644,20 @@ impl SyncHub {
         })
     }
 
+    /// The project doc's room, opened if the idle close or a cap took it. Everything that reads
+    /// or writes the project doc on this box comes through here, so the room can sleep like any
+    /// other and the next status, settings or chat-index write wakes it. `None` only when the
+    /// room may not be opened: the workspace is stopping, or its stored doc does not load.
+    pub async fn project_doc(&self) -> Option<SharedHost> {
+        self.open_room(PROJECT_DOC_CHAT_ID)
+            .await
+            .inspect_err(|e| tracing::warn!(error = %e, "project doc not opened"))
+            .ok()
+    }
+
     /// Write the box status into the project doc (`status` map).
     pub async fn write_status(&self, fields: &[(&str, serde_json::Value)]) {
-        if let Some(h) = self.host(PROJECT_DOC_CHAT_ID).await {
+        if let Some(h) = self.project_doc().await {
             let h = h.lock().await;
             let status = h.doc.doc.get_map("status");
             for (k, v) in fields {
@@ -1676,6 +1678,11 @@ mod tests {
     /// A relay with just enough of the room protocol for the room-budget tests (#2367): it
     /// keeps the rows of each room, walks a replica through them, acks pushes, and counts the
     /// box sockets on a room the way the real relay's `Room::has_box` does.
+    ///
+    /// Presence here is one count per room, so this fake stands in for an owner with **one**
+    /// workspace on the room. What the real relay does for an owner with two workspaces on one
+    /// people room — `Room::boxes` is keyed by owner, so it compares the socket count against
+    /// the agents served — is out of its reach, and is checked on the relay side instead.
     #[derive(Default)]
     struct FakeRelay {
         rooms: std::sync::Mutex<HashMap<String, FakeRoom>>,
@@ -1687,6 +1694,8 @@ mod tests {
         rows: Vec<Vec<u8>>,
         sockets: i64,
         peak_sockets: i64,
+        /// Reopen pushes this relay decided to queue, newest last. See [`FakeRelay::append_row`].
+        pushes: Vec<String>,
     }
 
     impl FakeRelay {
@@ -1698,9 +1707,28 @@ mod tests {
                 .entry(room.to_owned())
                 .or_default())
         }
-        /// A person's device wrote into the room while no box socket was on it.
+        /// A person's device wrote into the room. The relay's own next step rides along, since
+        /// that step is what the idle close rests on (`boxes::after_person_row`): with no box
+        /// socket on the room it queues the push that reopens it, and with one it queues
+        /// nothing, because the row reaches the box live over that socket.
         fn append_row(&self, room: &str, bytes: Vec<u8>) {
-            self.with(room, |r| r.rows.push(bytes));
+            let kind = if room.starts_with("people/") {
+                "people_chat_open"
+            } else if room.ends_with(&format!("/{PROJECT_DOC_CHAT_ID}")) {
+                "project_doc_open"
+            } else {
+                "chat_open"
+            };
+            self.with(room, |r| {
+                r.rows.push(bytes);
+                if r.sockets == 0 {
+                    r.pushes.push(kind.to_owned());
+                }
+            });
+        }
+        /// Reopen pushes queued for this room.
+        fn pushes(&self, room: &str) -> Vec<String> {
+            self.with(room, |r| r.pushes.clone())
         }
         fn sockets(&self, room: &str) -> i64 {
             self.with(room, |r| r.sockets)
@@ -2113,10 +2141,10 @@ mod tests {
             let d = |a: f64, b: f64| (b - a) / window.as_secs_f64();
             let box_cores = d(prev.box_cpu_s, now.box_cpu_s);
             cores.push(box_cores);
-            let (rooms, exempt) = box_rt.block_on(box_room_counts(std::slice::from_ref(&bx.hub)));
+            let rooms = box_rt.block_on(box_room_count(std::slice::from_ref(&bx.hub)));
             println!(
                 "sample {n}: box {:.3} cores, relay {:.3} cores, other {:.3} cores, \
-                 {rooms} rooms open ({exempt} exempt), {} relay sockets, {} process fds, \
+                 {rooms} rooms open, {} relay sockets, {} process fds, \
                  {:.0} MiB rss",
                 box_cores,
                 d(prev.relay_cpu_s, now.relay_cpu_s),
@@ -2210,7 +2238,6 @@ mod tests {
             link: LinkState::default(),
             opened_at: std::time::Instant::now(),
             last_active_ms: now_ms(),
-            keep_open: false,
         }
     }
 
@@ -2899,9 +2926,13 @@ mod tests {
         // A person writes into the chat while the room is closed.
         bx.relay
             .append_row(&room, person_row(chat, PROJECT, "m1", "are you there?"));
+        assert_eq!(
+            bx.relay.pushes(&room),
+            vec!["chat_open".to_owned()],
+            "with no box socket on the room, the relay queues the push that reopens it"
+        );
 
-        // What the relay does next (`boxes::after_person_row`): no box socket on the room, so a
-        // `chat_open` / `rows_pending` push. This is the push handler's own path.
+        // The box acting on that push. This is the push handler's own path.
         crate::workspace::open_listed_chat(
             &bx.cfg,
             &bx.store,
@@ -2941,6 +2972,228 @@ mod tests {
             "and the row is in the doc the turn will read"
         );
         bx.stop().await;
+    }
+
+    /// The same question for a `people/` room, which used to be held open: it closes on the
+    /// idle path like any other room now, and a row that lands while it is closed still reaches
+    /// the agent.
+    ///
+    /// Both halves are asserted, because either alone would pass while messages went missing:
+    /// that the relay queues the reopen push (the fake decides that itself, from box presence
+    /// on the room — the test does not assume it), **and** that the row arrives in the doc the
+    /// turn will read.
+    ///
+    /// Its limit is worth stating plainly, because it is the limit of the box half as a whole:
+    /// the fake counts one box presence per room, so this is the single-workspace owner. The
+    /// two-workspace case — where the relay's owner-keyed check lets one workspace's socket
+    /// answer for another's closed room — cannot be reproduced from here, and it is the case
+    /// this change depends on the relay fixing ([`room_idle_ms`]). Green here means the box
+    /// half is right; it does not mean the pair is safe.
+    #[tokio::test]
+    async fn a_people_room_closes_when_idle_and_a_row_reopens_it() {
+        const PROJECT: &str = "01TESTPROJECTPEOPLE000000";
+        let people = crate::people::PEOPLE_PROJECT;
+        let mut bx = TestBox::start(PROJECT).await;
+        let chat = "01TESTCHATPEOPLE00000001";
+        let room = wire::room_name(people, chat);
+        bx.hub.open_room_named(chat, &room, people).await.unwrap();
+        bx.wait_caught_up(chat).await;
+        wait_for("the box socket", || async { bx.relay.sockets(&room) == 1 }).await;
+
+        // This is the change under test: before it, a people room was skipped on both close
+        // paths and these two waits would time out.
+        bx.make_quiet(chat).await;
+        wait_for("the idle close", || async { !bx.hub.is_open(chat).await }).await;
+        wait_for("the socket to go", || async {
+            bx.relay.sockets(&room) == 0
+        })
+        .await;
+
+        // A person writes into the people chat while the room is closed.
+        bx.relay.append_row(
+            &room,
+            person_row(chat, people, "m1", "@agent are you there?"),
+        );
+        assert_eq!(
+            bx.relay.pushes(&room),
+            vec!["people_chat_open".to_owned()],
+            "with no box socket on the room, the relay queues the push that reopens it"
+        );
+
+        // The box acting on that push: `join_people_chat` fetches the membership and ends in
+        // this open, which is the leg that matters here.
+        bx.hub.open_room_named(chat, &room, people).await.unwrap();
+        assert!(bx.hub.is_open(chat).await, "the push reopened the room");
+
+        // Delivery, not just the push.
+        let mut sends = Vec::new();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_millis(250), bx.rx.recv()).await {
+                Ok(Some(Incoming::Command { chat_id, cmd })) => {
+                    assert_eq!(chat_id, chat);
+                    sends.push(cmd);
+                    break;
+                }
+                Ok(Some(_)) => {}
+                Ok(None) => break,
+                Err(_) => {}
+            }
+        }
+        assert_eq!(
+            sends.len(),
+            1,
+            "the waiting send reached the agent loop once"
+        );
+        assert_eq!(sends[0].kind, "send");
+        assert_eq!(sends[0].payload["messageId"], json!("m1"));
+        let host = bx.hub.host(chat).await.expect("room open");
+        assert_eq!(
+            host.lock().await.doc.message("m1").map(|m| m.text()),
+            Some("@agent are you there?".to_owned()),
+            "and the row is in the doc the turn will read"
+        );
+        bx.stop().await;
+    }
+
+    /// The box-scaling Phase 0 gate, as far as one process can show it: a multi-workspace box
+    /// with more than 150 rooms open — project chats, people rooms and every workspace's
+    /// project doc — is brought under the box ceiling, holds no room at all once they have sat
+    /// idle for the quiet window, and still receives a row written to a closed people room and
+    /// one written to a closed project doc.
+    ///
+    /// The relay's half of each delivery (the reopen push) is the fake's here; the real relay's
+    /// is checked in `arbos-relay` (`after_person_row`, `after_project_doc_row`).
+    #[tokio::test]
+    async fn an_idle_multi_workspace_box_closes_every_room_and_rows_still_reach_it() {
+        const WORKSPACES: usize = 4;
+        const PEOPLE: usize = 8;
+        const CHATS: usize = 31;
+        let people = crate::people::PEOPLE_PROJECT;
+        let mut boxes = Vec::new();
+        for w in 0..WORKSPACES {
+            let bx = TestBox::start(&format!("01TESTPROJECTGATE00000{w:03}")).await;
+            bx.hub.open_room(PROJECT_DOC_CHAT_ID).await.unwrap();
+            for i in 0..PEOPLE {
+                let chat = format!("people{w}x{i:02}");
+                bx.hub
+                    .open_room_named(&chat, &wire::room_name(people, &chat), people)
+                    .await
+                    .unwrap();
+            }
+            for i in 0..CHATS {
+                bx.hub.open_room(&format!("chat{i:02}")).await.unwrap();
+            }
+            boxes.push(bx);
+        }
+        let hubs: Vec<SyncHub> = boxes.iter().map(|b| b.hub.clone()).collect();
+        let total = WORKSPACES * (1 + PEOPLE + CHATS);
+        assert!(total > 150);
+        assert_eq!(box_room_count(&hubs).await, total);
+        let mut hosts: Vec<SharedHost> = Vec::new();
+        for h in &hubs {
+            hosts.extend(h.hosts.lock().await.values().cloned());
+        }
+        wait_for("every room to settle", || async {
+            let now = now_ms();
+            let mut all = true;
+            for h in &hosts {
+                all &= h.lock().await.closable(now, false);
+            }
+            all
+        })
+        .await;
+
+        // The ceiling: no room is outside it any more, so the sweep gets the box under.
+        let ceiling = max_box_rooms();
+        assert!(
+            ceiling > 0 && ceiling < total,
+            "the test needs a ceiling to exceed"
+        );
+        let (was, closed) = enforce_box_room_ceiling(&hubs).await;
+        assert_eq!(was, total);
+        assert!(total - closed <= ceiling, "{closed} closed of {total}");
+        assert!(box_room_count(&hubs).await <= ceiling);
+
+        // The quiet window: every room left goes, the project docs included.
+        for h in &hosts {
+            h.lock().await.last_active_ms = now_ms() - room_idle_ms() - 1;
+        }
+        wait_for("every room to close", || async {
+            box_room_count(&hubs).await == 0
+        })
+        .await;
+        wait_for("every socket to go", || async {
+            boxes.iter().map(|b| b.relay.open_sockets()).sum::<i64>() == 0
+        })
+        .await;
+
+        // A person writes into a closed people room: the push, then the row.
+        let chat = "people0x00";
+        let room = wire::room_name(people, chat);
+        let bx = &mut boxes[0];
+        bx.relay
+            .append_row(&room, person_row(chat, people, "m1", "@agent still there?"));
+        assert_eq!(bx.relay.pushes(&room), vec!["people_chat_open".to_owned()]);
+        bx.hub.open_room_named(chat, &room, people).await.unwrap();
+        let cmd = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let Some(Incoming::Command { cmd, .. }) = bx.rx.recv().await {
+                    return cmd;
+                }
+            }
+        })
+        .await
+        .expect("the send reached the agent loop");
+        assert_eq!(cmd.payload["messageId"], json!("m1"));
+
+        // A person changes a setting while the project doc is closed: the push, then the row.
+        let bx = &mut boxes[1];
+        let room = bx.room(PROJECT_DOC_CHAT_ID);
+        let theirs = ChatDoc::new(Some(0x5EED), true);
+        theirs
+            .doc
+            .get_map("settings")
+            .insert("agentModel", "their-model")
+            .unwrap();
+        theirs.doc.commit();
+        bx.relay.append_row(
+            &room,
+            theirs.export_updates_since(&VersionVector::default()),
+        );
+        assert_eq!(bx.relay.pushes(&room), vec!["project_doc_open".to_owned()]);
+        // What the `project_doc_open` push handler does.
+        let host = bx.hub.project_doc().await.expect("project doc reopened");
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !matches!(bx.rx.recv().await, Some(Incoming::ProjectDocChanged)) {}
+        })
+        .await
+        .expect("the agent loop was told the project doc changed");
+        let settings = serde_json::to_value(
+            host.lock()
+                .await
+                .doc
+                .doc
+                .get_map("settings")
+                .get_deep_value(),
+        )
+        .unwrap();
+        assert_eq!(settings["agentModel"], json!("their-model"));
+
+        // And the box's own writers wake a closed project doc rather than dropping the write.
+        let bx = &boxes[2];
+        assert!(!bx.hub.is_open(PROJECT_DOC_CHAT_ID).await);
+        bx.hub.write_status(&[("runningTurns", json!(1))]).await;
+        assert!(bx.hub.is_open(PROJECT_DOC_CHAT_ID).await);
+        let room = bx.room(PROJECT_DOC_CHAT_ID);
+        wait_for("the status row to reach the relay", || async {
+            bx.relay.with(&room, |r| !r.rows.is_empty())
+        })
+        .await;
+
+        for bx in boxes {
+            bx.stop().await;
+        }
     }
 
     /// #2367: a room is never closed while its chat holds work — a pending command, or a reply,
@@ -2997,11 +3250,12 @@ mod tests {
         assert!(!h.closable(now, true), "a room in use is not idle");
         assert!(h.closable(now, false), "the cap may still take a cold room");
 
-        // The project doc and people rooms are never closed for being idle.
+        // A people room obeys both paths like any other room — `host_with` builds one
+        // (`people/c1`) — because it has a reopen push.
         h.last_active_ms = now - room_idle_ms() - 1;
-        h.keep_open = true;
-        assert!(!h.closable(now, true));
-        assert!(!h.closable(now, false));
+        assert!(h.room.starts_with("people/"), "this host is a people room");
+        assert!(h.closable(now, true), "a people room obeys the idle close");
+        assert!(h.closable(now, false), "and the cap may take it");
     }
 
     /// #2367: a box with far more chats than the cap keeps at most `max_open_rooms` of them
@@ -3074,8 +3328,8 @@ mod tests {
     ///
     /// That asymmetry is the argument for fixing a queued reply at the writer rather than
     /// here. No marker in this layer can make a stale handle live, and a marker is not free:
-    /// `keep_open` is unbounded, so one that outlived its turn would pin the room for good,
-    /// which is the leak this PR exists to remove.
+    /// a "hold this room open" flag is unbounded, so one that outlived its turn would pin the
+    /// room for good, which is the leak this PR exists to remove.
     #[tokio::test]
     async fn a_room_evicted_with_a_reply_pending_is_reopened_by_the_write() {
         let bx = TestBox::start("01TESTPROJECTVALVE000000").await;

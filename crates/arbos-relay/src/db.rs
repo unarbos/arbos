@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use arbos_core::ids::now_ms;
@@ -23,8 +23,14 @@ pub struct BoxAgentd {
     pub reported_at: i64,
 }
 
+/// The single writer, and read-only connections beside it ([`Db::read`]). The readers are empty
+/// for an in-memory database, which a second connection cannot see.
 #[derive(Clone)]
-pub struct Db(Arc<Mutex<Connection>>);
+pub struct Db(Arc<Mutex<Connection>>, Arc<Vec<Mutex<Connection>>>);
+
+/// Read-only connections per relay. Reads hold one for a single query, so a handful covers many
+/// sockets; a read that finds them all busy waits for one rather than opening more.
+const READERS: usize = 4;
 
 const ROOM_POSITION_SQL: &str = "SELECT head, floor FROM room_seq WHERE room = ?1";
 
@@ -633,7 +639,9 @@ impl Db {
         c.execute_batch(
             // secure_delete: rows a shallow checkpoint replaces (secret hand-off) leave no old
             // bytes behind in the file.
-            "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON; PRAGMA secure_delete=ON;",
+            // busy_timeout: `flush_after_scrub`'s checkpoint waits for a reader mid-query
+            // instead of giving up on it.
+            "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON; PRAGMA secure_delete=ON;",
         )?;
         c.execute_batch(SCHEMA)?;
         c.execute_batch(crate::outside::SCHEMA)?;
@@ -764,7 +772,19 @@ impl Db {
              CREATE INDEX IF NOT EXISTS goals_moved ON goals(last_moved_at);",
         )?;
         c.execute_batch(crate::releases::RELEASES_SCHEMA)?;
-        Ok(Self(Arc::new(Mutex::new(c))))
+        // Opened after the schema is in place, so no reader ever sees a half-migrated file.
+        let readers = (0..READERS)
+            .map(|_| {
+                let r = Connection::open_with_flags(
+                    path,
+                    OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+                )?;
+                r.execute_batch("PRAGMA busy_timeout=5000; PRAGMA mmap_size=1073741824;")?;
+                Ok(Mutex::new(r))
+            })
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .with_context(|| format!("open readers on {}", path.display()))?;
+        Ok(Self(Arc::new(Mutex::new(c)), Arc::new(readers)))
     }
 
     /// Vault items used to belong to the whole relay (`name TEXT NOT NULL UNIQUE`, no owner), so
@@ -950,6 +970,37 @@ impl Db {
     pub(crate) fn with<T>(&self, f: impl FnOnce(&Connection) -> rusqlite::Result<T>) -> Result<T> {
         let c = self.0.lock().expect("db lock");
         Ok(f(&c)?)
+    }
+
+    /// Run a read on a read-only connection, off the writer's lock: a history walk or an admin
+    /// scan no longer stands between a room PUSH and its ack.
+    ///
+    /// **Only for closures that read.** The connection is opened read-only, so a write here
+    /// fails loudly rather than racing the writer.
+    ///
+    /// What a caller may rely on is what `with` gave it:
+    /// - *Read-your-writes.* `with` returns after its commit, and in WAL a read that starts
+    ///   after a commit sees it. No reader holds a snapshot between calls.
+    /// - *One snapshot per closure.* Under the single lock no write could land between two
+    ///   statements of one closure; the read transaction keeps that true here
+    ///   (`room_state` reads the head, the checkpoint and the row count as one).
+    ///
+    /// A write still in progress on another task is not seen, exactly as if this read had won
+    /// the lock first.
+    pub(crate) fn read<T>(&self, f: impl FnOnce(&Connection) -> rusqlite::Result<T>) -> Result<T> {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        if self.1.is_empty() {
+            return self.with(f);
+        }
+        let c = match self.1.iter().find_map(|m| m.try_lock().ok()) {
+            Some(c) => c,
+            None => {
+                let i = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % self.1.len();
+                self.1[i].lock().expect("db reader lock")
+            }
+        };
+        let tx = c.unchecked_transaction()?;
+        Ok(f(&tx)?)
     }
 
     // ---- pairing and devices ------------------------------------------------------------------
@@ -1303,7 +1354,7 @@ impl Db {
     /// Total rows ever appended to a room (`room_seq.head`): the relay's measure of how much a
     /// chat has been used (it never reads the rows themselves).
     pub fn room_head(&self, room: &str) -> Result<i64> {
-        self.with(|c| {
+        self.read(|c| {
             c.query_row(
                 "SELECT head FROM room_seq WHERE room = ?1",
                 params![room],
@@ -1788,11 +1839,11 @@ impl Db {
 
     /// Stored room head and checkpoint floor; unknown rooms start at `(0, 0)`.
     pub fn room_position(&self, room: &str) -> Result<(i64, i64)> {
-        self.with(|c| Self::room_position_from(c, room))
+        self.read(|c| Self::room_position_from(c, room))
     }
 
     pub fn room_state(&self, room: &str) -> Result<RoomState> {
-        self.with(|c| {
+        self.read(|c| {
             let (head, floor) = Self::room_position_from(c, room)?;
             let cp: Option<(i64, i64, Vec<u8>)> = c
                 .query_row(
@@ -1859,6 +1910,9 @@ impl Db {
     ) -> Result<(i64, bool)> {
         let now = now_ms();
         self.with(|c| {
+            // One transaction: a reader beside the writer ([`Db::read`]) must never see the
+            // head moved to a seq whose row is not there yet.
+            let c = c.unchecked_transaction()?;
             // Both tables, for the reason given on `row_seq_for_batch`: a quarantined row is no
             // longer covered by the `rows_batch` unique index, so this query is all that stands
             // between a replayed batch and a second seq for bytes the room already took.
@@ -1882,6 +1936,7 @@ impl Db {
                 "INSERT INTO rows(room, seq, device, batch_id, bytes, created_at) VALUES (?1,?2,?3,?4,?5,?6)",
                 params![room, seq, device, batch_id, bytes, now],
             )?;
+            c.commit()?;
             Ok((seq, false))
         })
     }
@@ -1893,7 +1948,7 @@ impl Db {
         exclude_device: Option<&str>,
         limit: i64,
     ) -> Result<Vec<Row>> {
-        self.with(|c| {
+        self.read(|c| {
             let mut st = c.prepare(
                 "SELECT seq, device, batch_id, bytes FROM rows WHERE room = ?1 AND seq > ?2 AND (?3 IS NULL OR device != ?3)
                  ORDER BY seq LIMIT ?4",
@@ -1907,7 +1962,7 @@ impl Db {
 
     /// Rows with `after < seq <= upto`, oldest first (the checkpoint validation walk).
     pub fn rows_between(&self, room: &str, after: i64, upto: i64, limit: i64) -> Result<Vec<Row>> {
-        self.with(|c| {
+        self.read(|c| {
             let mut st = c.prepare(
                 "SELECT seq, device, batch_id, bytes FROM rows WHERE room = ?1 AND seq > ?2 AND seq <= ?3
                  ORDER BY seq LIMIT ?4",
@@ -1989,6 +2044,9 @@ impl Db {
         bytes: &[u8],
     ) -> Result<bool> {
         self.with(|c| {
+            // One transaction, for the same reason as `append_row`: the checkpoint, the rows it
+            // replaces and the floor change together or not at all.
+            let c = c.unchecked_transaction()?;
             let floor: i64 = c
                 .query_row("SELECT floor FROM room_seq WHERE room = ?1", params![room], |r| r.get(0))
                 .optional()?
@@ -2004,13 +2062,14 @@ impl Db {
             )?;
             c.execute("DELETE FROM rows WHERE room = ?1 AND seq <= ?2", params![room, seq_covered])?;
             c.execute("INSERT INTO room_seq(room, head, floor) VALUES (?1, ?2, ?2) ON CONFLICT(room) DO UPDATE SET floor = ?2, head = MAX(head, ?2)", params![room, seq_covered])?;
+            c.commit()?;
             Ok(true)
         })
     }
 
     /// `(seq, created_at, bytes)` of the room's checkpoint.
     pub fn checkpoint_full(&self, room: &str) -> Result<Option<(i64, i64, Vec<u8>)>> {
-        self.with(|c| {
+        self.read(|c| {
             c.query_row(
                 "SELECT seq, created_at, bytes FROM checkpoints WHERE room = ?1",
                 params![room],
@@ -2043,7 +2102,7 @@ impl Db {
     }
 
     pub fn checkpoint_bytes(&self, room: &str) -> Result<Option<(i64, Vec<u8>)>> {
-        self.with(|c| {
+        self.read(|c| {
             c.query_row(
                 "SELECT seq, bytes FROM checkpoints WHERE room = ?1",
                 params![room],
@@ -3805,7 +3864,7 @@ mod room_position_tests {
     fn position_and_statistics_track_appends_and_checkpoints() {
         let c = Connection::open_in_memory().unwrap();
         c.execute_batch(SCHEMA).unwrap();
-        let db = Db(Arc::new(Mutex::new(c)));
+        let db = Db(Arc::new(Mutex::new(c)), Arc::default());
         let check = |position, counts, checkpoint_seq| {
             let state = db.room_state("project/chat").unwrap();
             assert_eq!((state.head, state.floor), position);
@@ -3835,10 +3894,68 @@ mod room_position_tests {
     fn a_position_query_error_is_not_a_missing_room() {
         let c = Connection::open_in_memory().unwrap();
         c.execute_batch(SCHEMA).unwrap();
-        let db = Db(Arc::new(Mutex::new(c)));
+        let db = Db(Arc::new(Mutex::new(c)), Arc::default());
         db.with(|c| c.execute_batch("DROP TABLE room_seq")).unwrap();
         assert!(db.room_state("project/chat").is_err());
         assert!(db.room_position("project/chat").is_err());
+    }
+}
+
+#[cfg(test)]
+mod reader_tests {
+    use super::*;
+
+    /// The split in one place: a read runs while the writer is held, sees every write that
+    /// returned before it, and cannot write.
+    #[test]
+    fn reads_run_beside_the_writer_and_see_what_it_committed() {
+        let dir = std::env::temp_dir().join(format!("arbos-readers-{}", arbos_core::ids::ulid()));
+        let db = Db::open(&dir.join("relay.db")).unwrap();
+        assert_eq!(db.1.len(), READERS);
+        db.append_row("p/c", "dev", "b1", b"abc").unwrap();
+        db.append_row("p/c", "dev", "b2", b"de").unwrap();
+
+        // With one connection this would never return: the writer's lock is held.
+        let writer = db.0.lock().unwrap();
+        assert_eq!(db.room_head("p/c").unwrap(), 2);
+        assert_eq!(db.rows_after("p/c", 0, None, 10).unwrap().len(), 2);
+        let st = db.room_state("p/c").unwrap();
+        assert_eq!((st.head, st.row_count, st.row_bytes), (2, 2, 5));
+        drop(writer);
+
+        // Read-your-writes, row by row and across a checkpoint.
+        for n in 3..=20 {
+            db.append_row("p/c", "dev", &format!("b{n}"), b"x").unwrap();
+            assert_eq!(db.room_head("p/c").unwrap(), n);
+        }
+        assert!(db.put_checkpoint("p/c", 20, b"f", b"snap").unwrap());
+        assert_eq!(db.room_position("p/c").unwrap(), (20, 20));
+        assert!(db.rows_after("p/c", 0, None, 10).unwrap().is_empty());
+        assert_eq!(db.checkpoint_bytes("p/c").unwrap().unwrap().0, 20);
+
+        // A reader never sees the head ahead of its row: an append lands whole or not at all.
+        let appender = {
+            let db = db.clone();
+            std::thread::spawn(move || {
+                for n in 0..300 {
+                    db.append_row("p/d", "dev", &format!("c{n}"), b"x").unwrap();
+                }
+            })
+        };
+        while !appender.is_finished() {
+            let st = db.room_state("p/d").unwrap();
+            assert_eq!(st.head, st.row_count);
+        }
+        appender.join().unwrap();
+
+        assert!(
+            db.read(|c| c.execute("DELETE FROM rows", [])).is_err(),
+            "a reader cannot write"
+        );
+        // The scrub's truncating checkpoint is not held up by idle readers.
+        db.flush_after_scrub().unwrap();
+        assert_eq!(db.room_head("p/c").unwrap(), 20);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

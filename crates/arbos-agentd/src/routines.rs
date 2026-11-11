@@ -338,6 +338,11 @@ impl Agent {
                     }
                 }
             }
+            // A person's row landed in the project doc while its room was closed here (a
+            // settings change): open it, and the catch-up hands the row to `settings_from_doc`.
+            "project_doc_open" => {
+                let _ = self.sync.project_doc().await;
+            }
             "people_agent_removed" => {
                 if let Some(chat_id) = payload.get("chat_id").and_then(Value::as_str) {
                     self.people_agent_removed(chat_id).await;

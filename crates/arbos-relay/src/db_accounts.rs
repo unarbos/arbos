@@ -318,7 +318,7 @@ impl Db {
     }
 
     pub fn list_users(&self) -> Result<Vec<User>> {
-        self.with(|c| {
+        self.read(|c| {
             let mut st = c.prepare(&format!(
                 "SELECT {USER_COLS} FROM users ORDER BY created_at"
             ))?;
@@ -674,6 +674,24 @@ impl Db {
         })
     }
 
+    /// Presence stamps for many devices in one transaction (`rooms::flush_presence`). `MAX`
+    /// because a stamp waits up to a minute for its flush, and an HTTP call may have stamped
+    /// the device since: `last_seen_at` only moves forward.
+    pub fn touch_devices(&self, seen: &[(String, i64)]) -> Result<()> {
+        self.with(|c| {
+            let tx = c.unchecked_transaction()?;
+            {
+                let mut st = tx.prepare(
+                    "UPDATE devices SET last_seen_at = MAX(COALESCE(last_seen_at, 0), ?2) WHERE id = ?1",
+                )?;
+                for (id, at) in seen {
+                    st.execute(params![id, at])?;
+                }
+            }
+            tx.commit()
+        })
+    }
+
     /// When any of the user's live devices last talked to the relay (HTTP call or presence).
     pub fn user_last_seen(&self, user_id: &str) -> Result<Option<i64>> {
         self.with(|c| {
@@ -957,7 +975,7 @@ impl Db {
 
     /// Debits across every user since `since_ms` (the global cap).
     pub fn debited_since_all(&self, since_ms: i64) -> Result<f64> {
-        self.with(|c| {
+        self.read(|c| {
             c.query_row(
                 "SELECT COALESCE(-SUM(usd), 0.0) FROM credit_ledger WHERE usd < 0 AND kind != 'machine' AND at >= ?1",
                 params![since_ms],
@@ -1107,7 +1125,7 @@ impl Db {
 
     /// Relay-wide machine cost since `since_ms` (informational alert threshold).
     pub fn machine_cost_since_all(&self, since_ms: i64) -> Result<f64> {
-        self.with(|c| {
+        self.read(|c| {
             c.query_row(
                 "SELECT COALESCE(-SUM(usd), 0.0) FROM credit_ledger WHERE kind = 'machine' AND at >= ?1",
                 params![since_ms],

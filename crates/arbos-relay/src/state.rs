@@ -209,9 +209,21 @@ impl Room {
         }
     }
 
-    /// Does `user_id`'s box have a socket open on this room right now?
-    pub fn has_box(&self, user_id: &str) -> bool {
-        self.boxes.lock().unwrap().contains_key(user_id)
+    /// How many sockets `user_id`'s box holds on this room.
+    ///
+    /// One box serves every workspace of its user, and a people room is one shared room that
+    /// several of those workspaces can each be an agent of — so the count, not the presence,
+    /// is what says whether every one of them is on the room. The sockets themselves carry no
+    /// workspace: a box dials `/room/people/{chat}` with a `Principal::Box { user_id }` and a
+    /// device id that is the same across workspaces, so there is nothing here to key on but
+    /// the owner.
+    pub fn box_count(&self, user_id: &str) -> u32 {
+        self.boxes
+            .lock()
+            .unwrap()
+            .get(user_id)
+            .copied()
+            .unwrap_or(0)
     }
 }
 
@@ -331,7 +343,8 @@ pub struct AppState {
     pub fallback_sent: Arc<Mutex<HashMap<(String, String), i64>>>,
     /// Self-hosted LiveKit for calls (`LIVEKIT_*`); `None` = calls answer 503.
     pub livekit: Option<crate::livekit::LiveKit>,
-    /// device_id → last presence frame that was written to `devices.last_seen_at`.
+    /// device_id → its last presence frame; `rooms::flush_presence` writes these to
+    /// `devices.last_seen_at` in batches.
     pub presence_seen: Arc<Mutex<HashMap<String, i64>>>,
     /// project_id → what its agent is doing right now (agent-flow contract §3), in memory only.
     pub activity: Arc<Mutex<HashMap<String, ProjectActivity>>>,

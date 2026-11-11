@@ -200,19 +200,13 @@ impl Supervisor {
         self.workspaces.read().await.values().cloned().collect()
     }
 
-    /// How many chat rooms this box holds open: non-exempt ones, which the ceiling bounds, and
-    /// `keep_open` ones, which neither bound can touch. Cheap — no room's doc is read.
-    ///
-    /// The second number is the one worth watching. Nobody has measured what share of a loaded
-    /// box's rooms are exempt, and it decides how much of that box's socket count the ceiling can
-    /// reach at all, so the box reports it rather than leaving it to be inferred from the
-    /// workspace count.
-    pub async fn room_counts(&self) -> (usize, usize) {
+    /// How many rooms this box holds open. Cheap — no room's doc is read.
+    pub async fn room_count(&self) -> usize {
         let hubs: Vec<SyncHub> = self.list().await.iter().map(|w| w.sync.clone()).collect();
-        sync::box_room_counts(&hubs).await
+        sync::box_room_count(&hubs).await
     }
 
-    /// Hold the box to [`sync::max_box_rooms`] non-exempt rooms, closing the coldest that hold
+    /// Hold the box to [`sync::max_box_rooms`] rooms, closing the coldest that hold
     /// no work wherever on the box they are. `workspaces` is the registry that makes it possible:
     /// no hub can see its siblings, so no hub can enforce a bound on their sum.
     pub async fn enforce_box_room_ceiling(&self) -> (usize, usize) {
@@ -380,8 +374,8 @@ impl Supervisor {
             .first()
             .map(|c| c.id.clone())
             .unwrap_or_else(|| "default".to_owned());
-        // The project doc carries this workspace's status and settings, and `write_status`
-        // below needs it, so it opens here.
+        // The project doc carries this workspace's status and settings, so it opens here; it
+        // closes when idle like any other room and its writers reopen it.
         sync.open_room(PROJECT_DOC_CHAT_ID).await?;
         // The chat rooms do not (2026-11-09). Opening one reads that chat's document out of SQLite
         // and decodes the Loro snapshot, which is where a loaded box's boot time goes: up to
