@@ -226,8 +226,8 @@ extension AppModel {
         guard let client = matrixClient else {
             return "This device can't check that phrase right now. Try again once your chats have loaded."
         }
-        let passphrase = walletRecoveryPassphrase(phrase: phrase)
         do {
+            let passphrase = try walletRecoveryPassphrase(phrase: phrase)
             switch await client.backup() {
             case "locked": try await client.recover(passphrase: passphrase)
             case "on": try await client.checkPassphrase(passphrase: passphrase)
