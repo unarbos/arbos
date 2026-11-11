@@ -63,6 +63,7 @@ on:
       - "crates/arbos-client/**"
       - "crates/arbos-matrix/**"
       - "crates/arbos-update/**"
+      - "crates/arbos-wallet/**"
       - "scripts/bundle-mac.sh"
       - "site/assets/logo/**"
       # Everything ios.yml uploads a TestFlight build for, that the Mac list does not already have.
