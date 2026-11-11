@@ -142,6 +142,7 @@
 		A15A00000000000000000013 /* ReactionToggleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000012 /* ReactionToggleTests.swift */; };
 		A15A00000000000000000021 /* AddMembersPlanTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000020 /* AddMembersPlanTests.swift */; };
 		A15A00000000000000000041 /* MessageDeleteRuleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000040 /* MessageDeleteRuleTests.swift */; };
+		A1C4E0000000000000000002 /* ChequeNonceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C4E0000000000000000001 /* ChequeNonceTests.swift */; };
 		A15A00000000000000000051 /* ReactionPickTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000050 /* ReactionPickTests.swift */; };
 		A1BC00000000000000000002 /* MessageMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BC00000000000000000001 /* MessageMenu.swift */; };
 		A1BC00000000000000000004 /* MessageMenuTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BC00000000000000000003 /* MessageMenuTests.swift */; };
@@ -413,6 +414,7 @@
 		A15A00000000000000000050 /* ReactionPickTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReactionPickTests.swift; sourceTree = "<group>"; };
 		A15A00000000000000000020 /* AddMembersPlanTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AddMembersPlanTests.swift; sourceTree = "<group>"; };
 		A15A00000000000000000040 /* MessageDeleteRuleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageDeleteRuleTests.swift; sourceTree = "<group>"; };
+		A1C4E0000000000000000001 /* ChequeNonceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChequeNonceTests.swift; sourceTree = "<group>"; };
 		A1BC00000000000000000001 /* MessageMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageMenu.swift; sourceTree = "<group>"; };
 		A1BC00000000000000000003 /* MessageMenuTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageMenuTests.swift; sourceTree = "<group>"; };
 		A1BC00000000000000000005 /* MessageActions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageActions.swift; sourceTree = "<group>"; };
@@ -732,6 +734,7 @@
 				A15A00000000000000000003 /* CoreFixturesTests.swift */,
 				A15A00000000000000000020 /* AddMembersPlanTests.swift */,
 				A15A00000000000000000040 /* MessageDeleteRuleTests.swift */,
+				A1C4E0000000000000000001 /* ChequeNonceTests.swift */,
 				A15A00000000000000000030 /* ProfilePaneStructureTests.swift */,
 				A1F7B0000000000000000003 /* BlockedStateTests.swift */,
 				A1DE9C000000000000000003 /* DevicesVisibleTests.swift */,
@@ -1140,6 +1143,7 @@
 				A15A00000000000000000051 /* ReactionPickTests.swift in Sources */,
 				A15A00000000000000000021 /* AddMembersPlanTests.swift in Sources */,
 				A15A00000000000000000041 /* MessageDeleteRuleTests.swift in Sources */,
+				A1C4E0000000000000000002 /* ChequeNonceTests.swift in Sources */,
 				A15A00000000000000000031 /* ProfilePaneStructureTests.swift in Sources */,
 				A1F7B0000000000000000004 /* BlockedStateTests.swift in Sources */,
 				A1DE9C000000000000000004 /* DevicesVisibleTests.swift in Sources */,
