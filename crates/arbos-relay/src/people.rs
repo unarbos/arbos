@@ -7010,14 +7010,14 @@ mod box_app_control_tests {
     //! A box acts as its owning user on people-chat REST (create/delete/archive/members/search).
     //! Authz stays the same as a device: only the owner deletes; a stranger's box cannot.
 
-    use axum::extract::{Path, Query, State};
-    use axum::http::StatusCode;
-    use axum::Json;
     use super::tests_support::{person, project_of};
     use super::*;
     use crate::export::{self, SendBody};
     use crate::state::test_support::test_state;
     use crate::state::AuthMode;
+    use axum::extract::{Path, Query, State};
+    use axum::http::StatusCode;
+    use axum::Json;
 
     fn box_of(user_id: &str) -> Principal {
         Principal::Box {
@@ -7046,7 +7046,11 @@ mod box_app_control_tests {
             }),
         )
         .await;
-        assert_eq!(r.status(), StatusCode::OK, "box may create a group as the owner");
+        assert_eq!(
+            r.status(),
+            StatusCode::OK,
+            "box may create a group as the owner"
+        );
 
         let cm = state
             .db
@@ -7056,7 +7060,10 @@ mod box_app_control_tests {
             .find(|cm| cm.chat.kind == "group")
             .expect("the group");
         assert_eq!(cm.chat.title.as_deref(), Some("Bob + Bubble"));
-        assert!(cm.members.iter().any(|m| m.project_id() == Some(bob.as_str())));
+        assert!(cm
+            .members
+            .iter()
+            .any(|m| m.project_id() == Some(bob.as_str())));
         assert!(cm
             .members
             .iter()
@@ -7185,7 +7192,13 @@ mod box_app_control_tests {
         .await;
         assert_eq!(r.status(), StatusCode::OK);
         assert_eq!(
-            state.db.people_chat(&chat).unwrap().unwrap().title.as_deref(),
+            state
+                .db
+                .people_chat(&chat)
+                .unwrap()
+                .unwrap()
+                .title
+                .as_deref(),
             Some("New")
         );
 
@@ -7202,11 +7215,7 @@ mod box_app_control_tests {
         )
         .await;
         assert_eq!(r.status(), StatusCode::OK);
-        assert!(state
-            .db
-            .chat_archived_at(&alice, &chat)
-            .unwrap()
-            .is_some());
+        assert!(state.db.chat_archived_at(&alice, &chat).unwrap().is_some());
 
         let r = chats_list(State(state.clone()), alice_box.clone()).await;
         assert_eq!(r.status(), StatusCode::OK);

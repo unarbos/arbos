@@ -440,7 +440,13 @@ async fn add_members(agent: &Arc<Agent>, args: &Value) -> Result<Value, String> 
         return Err("name at least one person or agent".into());
     }
     let body = json!({ "handles": handles, "agent_ids": agent_ids });
-    relay_json(agent, "POST", &format!("/chats/{chat_id}/members"), Some(&body)).await
+    relay_json(
+        agent,
+        "POST",
+        &format!("/chats/{chat_id}/members"),
+        Some(&body),
+    )
+    .await
 }
 
 async fn remove_members(agent: &Arc<Agent>, args: &Value) -> Result<Value, String> {
@@ -455,8 +461,13 @@ async fn remove_members(agent: &Arc<Agent>, args: &Value) -> Result<Value, Strin
     for raw in members {
         match resolve_member_target(agent, &roster, &raw).await {
             Ok(MemberTarget::User(uid)) => {
-                match relay_status(agent, "DELETE", &format!("/chats/{chat_id}/members/{uid}"), None)
-                    .await
+                match relay_status(
+                    agent,
+                    "DELETE",
+                    &format!("/chats/{chat_id}/members/{uid}"),
+                    None,
+                )
+                .await
                 {
                     Ok(()) => removed.push(json!({ "kind": "user", "id": uid, "input": raw })),
                     Err(e) => errors.push(json!({ "input": raw, "error": e })),
@@ -505,12 +516,7 @@ async fn resolve_member_target(
     {
         return Ok(MemberTarget::SelfLeave);
     }
-    if trimmed == agent.cfg.project_id
-        || agent
-            .cfg
-            .project_name
-            .eq_ignore_ascii_case(trimmed)
-    {
+    if trimmed == agent.cfg.project_id || agent.cfg.project_name.eq_ignore_ascii_case(trimmed) {
         return Ok(MemberTarget::Agent(agent.cfg.project_id.clone()));
     }
     if let Some(members) = roster.get("members").and_then(Value::as_array) {
@@ -607,7 +613,13 @@ async fn send_app_message(agent: &Arc<Agent>, args: &Value) -> Result<Value, Str
     let chat_id = if let Some(id) = args.get("chat_id").and_then(Value::as_str) {
         id.to_owned()
     } else if let Some(handle) = args.get("handle").and_then(Value::as_str) {
-        let dm = relay_json(agent, "POST", "/chats/dm", Some(&json!({ "handle": handle }))).await?;
+        let dm = relay_json(
+            agent,
+            "POST",
+            "/chats/dm",
+            Some(&json!({ "handle": handle })),
+        )
+        .await?;
         dm.get("id")
             .and_then(Value::as_str)
             .ok_or_else(|| "dm create returned no id".to_string())?
@@ -708,7 +720,10 @@ async fn resolve_agents(agent: &Arc<Agent>, names: &[String]) -> Result<Vec<Stri
                     out.push(id);
                 }
             }
-            None if list.iter().any(|p| p.get("id").and_then(Value::as_str) == Some(key)) => {
+            None if list
+                .iter()
+                .any(|p| p.get("id").and_then(Value::as_str) == Some(key)) =>
+            {
                 out.push(key.to_owned());
             }
             None => return Err(format!("no owned agent matches {raw:?}")),
@@ -755,11 +770,13 @@ async fn relay_json(
     let status = r.status();
     let text = r.text().await.unwrap_or_default();
     if !status.is_success() {
-        return Err(if serde_json::from_str::<arbos_core::api::ApiErrorDto>(&text).is_ok() {
-            crate::relay_error::message(&text)
-        } else {
-            format!("relay {path}: HTTP {status} {text}")
-        });
+        return Err(
+            if serde_json::from_str::<arbos_core::api::ApiErrorDto>(&text).is_ok() {
+                crate::relay_error::message(&text)
+            } else {
+                format!("relay {path}: HTTP {status} {text}")
+            },
+        );
     }
     if text.trim().is_empty() {
         return Ok(json!({ "ok": true }));
