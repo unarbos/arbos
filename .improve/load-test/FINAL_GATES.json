@@ -1,0 +1,55 @@
+{
+  "note": "Final cached verification; gate wall timings are not benchmarks. Formatting also passed; duration not separately recorded. Native tests remain unexecuted.",
+  "gates": [
+    {
+      "name": "suite",
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        ".improve/load-test",
+        "-p",
+        "test_suite.py",
+        "-v"
+      ],
+      "exit": 0,
+      "seconds": 0.351,
+      "counts": {
+        "tests": 8,
+        "pass": 8,
+        "fail": 0,
+        "skip": 0
+      }
+    },
+    {
+      "name": "coverage",
+      "command": [
+        "python3",
+        ".improve/load-test/coverage.py",
+        "--check"
+      ],
+      "exit": 0,
+      "seconds": 0.114,
+      "counts": {
+        "check_groups_pass": 6,
+        "check_groups_fail": 0
+      }
+    },
+    {
+      "name": "job-index",
+      "command": [
+        "python3",
+        ".improve/load-test/job_index.py",
+        "--check"
+      ],
+      "exit": 0,
+      "seconds": 0.108,
+      "counts": {
+        "check_groups_pass": 6,
+        "check_groups_fail": 0
+      }
+    }
+  ]
+}

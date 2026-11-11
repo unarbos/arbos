@@ -8,13 +8,57 @@
 //! endpoint's page reader when a site blocks bots or renders only with JavaScript. Credentials
 //! never travel through these tools: anything that needs a secret goes through `egress`.
 
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
 use crate::agent::Agent;
 use crate::mcp::{err_result, materialize_handle, text_result};
+
+static HTML_OMITTED: LazyLock<[regex_lite::Regex; 5]> = LazyLock::new(|| {
+    ["script", "style", "noscript", "svg", "template"]
+        .map(|tag| regex_lite::Regex::new(&format!(r"(?is)<{tag}\b[^>]*>.*?</{tag}>")).unwrap())
+});
+
+static HTML_COMMENTS: LazyLock<regex_lite::Regex> =
+    LazyLock::new(|| regex_lite::Regex::new(r"(?s)<!--.*?-->").unwrap());
+
+static HTML_ANCHORS: LazyLock<regex_lite::Regex> = LazyLock::new(|| {
+    regex_lite::Regex::new(r#"(?is)<a\b[^>]*href\s*=\s*["']([^"']+)["'][^>]*>(.*?)</a>"#).unwrap()
+});
+
+static HTML_LIST_ITEMS: LazyLock<regex_lite::Regex> =
+    LazyLock::new(|| regex_lite::Regex::new(r"(?i)<li\b[^>]*>").unwrap());
+
+static HTML_HEADINGS: LazyLock<regex_lite::Regex> =
+    LazyLock::new(|| regex_lite::Regex::new(r"(?i)<h([1-6])\b[^>]*>").unwrap());
+
+static HTML_BREAKS: LazyLock<regex_lite::Regex> = LazyLock::new(|| {
+    regex_lite::Regex::new(
+        r"(?i)<(br|/p|/div|/li|/h[1-6]|/tr|/table|/section|/article|/header|/footer|/pre|/blockquote|/ul|/ol|/dd|/dt|hr)\b[^>]*>",
+    )
+    .unwrap()
+});
+
+static HTML_CELLS: LazyLock<regex_lite::Regex> =
+    LazyLock::new(|| regex_lite::Regex::new(r"(?i)</t[dh]>").unwrap());
+
+static HTML_TAGS: LazyLock<regex_lite::Regex> =
+    LazyLock::new(|| regex_lite::Regex::new(r"(?s)<[^>]*>").unwrap());
+
+static HTML_NUMERIC_ENTITIES: LazyLock<regex_lite::Regex> =
+    LazyLock::new(|| regex_lite::Regex::new(r"&#(x?)([0-9a-fA-F]+);").unwrap());
+
+static SEARCH_LINKS: LazyLock<Result<regex_lite::Regex, String>> = LazyLock::new(|| {
+    regex_lite::Regex::new(r#"<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>"#)
+        .map_err(|e| e.to_string())
+});
+
+static SEARCH_SNIPPETS: LazyLock<Result<regex_lite::Regex, String>> = LazyLock::new(|| {
+    regex_lite::Regex::new(r#"<a[^>]*class="result__snippet"[^>]*>(.*?)</a>"#)
+        .map_err(|e| e.to_string())
+});
 
 const DEFAULT_SEARCH_MCP_URL: &str = "https://mcp.exa.ai/mcp";
 const SEARCH_TOOL: &str = "web_search_exa";
@@ -354,11 +398,8 @@ async fn html_search(agent: &Arc<Agent>, query: &str, limit: usize) -> Result<St
     if !status.is_success() {
         return Err(format!("search page answered {status}"));
     }
-    let link_re =
-        regex_lite::Regex::new(r#"<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>"#)
-            .map_err(|e| e.to_string())?;
-    let snippet_re = regex_lite::Regex::new(r#"<a[^>]*class="result__snippet"[^>]*>(.*?)</a>"#)
-        .map_err(|e| e.to_string())?;
+    let link_re = SEARCH_LINKS.as_ref().map_err(Clone::clone)?;
+    let snippet_re = SEARCH_SNIPPETS.as_ref().map_err(Clone::clone)?;
     let snippets: Vec<String> = snippet_re
         .captures_iter(&html)
         .map(|c| html_to_text(&c[1], None))
@@ -626,16 +667,11 @@ fn clip_chars(s: &str, max: usize) -> String {
 /// simple, and anything else can go to the reader endpoint.
 pub fn html_to_text(html: &str, base_url: Option<&str>) -> String {
     let mut s = html.to_owned();
-    for tag in ["script", "style", "noscript", "svg", "template"] {
-        let re = regex_lite::Regex::new(&format!(r"(?is)<{tag}\b[^>]*>.*?</{tag}>")).unwrap();
+    for re in HTML_OMITTED.iter() {
         s = re.replace_all(&s, " ").into_owned();
     }
-    let comments = regex_lite::Regex::new(r"(?s)<!--.*?-->").unwrap();
-    s = comments.replace_all(&s, " ").into_owned();
-    let anchors =
-        regex_lite::Regex::new(r#"(?is)<a\b[^>]*href\s*=\s*["']([^"']+)["'][^>]*>(.*?)</a>"#)
-            .unwrap();
-    s = anchors
+    s = HTML_COMMENTS.replace_all(&s, " ").into_owned();
+    s = HTML_ANCHORS
         .replace_all(&s, |c: &regex_lite::Captures| {
             let href = decode_entities(&c[1]);
             let label = strip_tags(&c[2]);
@@ -648,22 +684,15 @@ pub fn html_to_text(html: &str, base_url: Option<&str>) -> String {
             }
         })
         .into_owned();
-    let li = regex_lite::Regex::new(r"(?i)<li\b[^>]*>").unwrap();
-    s = li.replace_all(&s, "\n- ").into_owned();
-    let headings = regex_lite::Regex::new(r"(?i)<h([1-6])\b[^>]*>").unwrap();
-    s = headings
+    s = HTML_LIST_ITEMS.replace_all(&s, "\n- ").into_owned();
+    s = HTML_HEADINGS
         .replace_all(&s, |c: &regex_lite::Captures| {
             let n: usize = c[1].parse().unwrap_or(1);
             format!("\n\n{} ", "#".repeat(n))
         })
         .into_owned();
-    let breaks = regex_lite::Regex::new(
-        r"(?i)<(br|/p|/div|/li|/h[1-6]|/tr|/table|/section|/article|/header|/footer|/pre|/blockquote|/ul|/ol|/dd|/dt|hr)\b[^>]*>",
-    )
-    .unwrap();
-    s = breaks.replace_all(&s, "\n").into_owned();
-    let cells = regex_lite::Regex::new(r"(?i)</t[dh]>").unwrap();
-    s = cells.replace_all(&s, " | ").into_owned();
+    s = HTML_BREAKS.replace_all(&s, "\n").into_owned();
+    s = HTML_CELLS.replace_all(&s, " | ").into_owned();
     let text = strip_tags(&s);
     let text = decode_entities(&text);
     let mut out = String::with_capacity(text.len());
@@ -685,8 +714,7 @@ pub fn html_to_text(html: &str, base_url: Option<&str>) -> String {
 }
 
 fn strip_tags(s: &str) -> String {
-    let re = regex_lite::Regex::new(r"(?s)<[^>]*>").unwrap();
-    re.replace_all(s, " ").into_owned()
+    HTML_TAGS.replace_all(s, " ").into_owned()
 }
 
 fn absolute_url(href: &str, base: Option<&str>) -> Option<String> {
@@ -731,8 +759,7 @@ fn decode_entities(s: &str) -> String {
         .replace("&hellip;", "…")
         .replace("&mdash;", "—")
         .replace("&ndash;", "–");
-    let numeric = regex_lite::Regex::new(r"&#(x?)([0-9a-fA-F]+);").unwrap();
-    out = numeric
+    out = HTML_NUMERIC_ENTITIES
         .replace_all(&out, |c: &regex_lite::Captures| {
             let n = if c[1].is_empty() {
                 c[2].parse::<u32>().ok()

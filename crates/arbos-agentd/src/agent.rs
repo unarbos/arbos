@@ -8959,12 +8959,12 @@ impl Agent {
     /// main agent writes the update in prose, as a follow-up turn in the same chat (demo review
     /// item 1). Runs on a relay slot, so it lands after whatever the user is doing right now.
     ///
-    /// A job the user asked for in words (`forced_job.rs`) does **not** come here: its ack
-    /// answered its ask at job start and its result is written by `write_job_result`, because
-    /// this turn waits for a slot the main session may not free for minutes (bug AA, and the
-    /// branch in `run_subagent` that routes past this one says why). So this is a job the *model*
-    /// started, whose ask its own main turn answered. The cancel is still asked about on both
-    /// sides of the wait below — see the two checks for which moments they cover.
+    /// A background **job** (`JobSpec`) does **not** come here: its result is written by
+    /// `write_job_result`, because this turn waits for a slot the main session may not free for
+    /// minutes (bug AA / #2964, and the branch in `run_subagent` that routes past this one says
+    /// why). So this is a helper / subagent result the main session narrates, not a job's
+    /// findings. The cancel is still asked about on both sides of the wait below — see the two
+    /// checks for which moments they cover.
     pub(crate) async fn run_result_turn(
         self: &Arc<Self>,
         chat_id: &str,
@@ -10582,14 +10582,9 @@ impl Agent {
         let host = self.room(&chat_id).await.map_err(|e| e.to_string())?;
         // The same signal the burst path reads (`forced_job.rs`), read from the ask itself: a
         // job the user asked for in words must not meet the per-chat cap in one path and pass
-        // it in the other.
-        let forced = {
-            let h = host.lock().await;
-            h.doc
-                .message(&user_msg_id)
-                .map(|m| m.text())
-                .is_some_and(|t| crate::forced_job::forces_a_job(&t))
-        };
+        // it in the other. Result delivery no longer branches on this (#2964); the start
+        // receipt still does.
+        let forced = self.ask_forced_a_job(&host, &user_msg_id).await;
         // No ticket: this job's ask was answered by the acknowledgement this very turn posted,
         // and the main lane holds that message's place for as long as the turn runs.
         self.start_job(
@@ -12580,7 +12575,7 @@ impl Agent {
     /// no path or git lock on a guess.
     ///
     /// The ask is answered by the receipt [`Agent::start_job`] posts for it, and its result is
-    /// its own row later ([`Agent::write_job_result`], reached from the forced-job branch of
+    /// its own row later ([`Agent::write_job_result`], reached from the job branch of
     /// `run_subagent`). Nothing about this job waits for the main session.
     ///
     /// `Ok(false)` means no job was started — jobs are off on this box, or the per-agent cap is
@@ -13699,67 +13694,54 @@ impl Agent {
                 .run_job_fallback_turn(chat_id, host, in_reply_to, j, &e, &text)
                 .await;
         }
-        // A job the user asked for in words posts its own result row, by the same direct model
-        // call an `ask-…` subagent's answer takes above, and does not queue for the main session.
+        // Every job posts its own result row by the same direct model call an `ask-…` subagent's
+        // answer takes above, and does not queue for the main session.
         //
-        // The other half of bug AA. `run_result_turn` below is a *relay* turn: `relay_slot` waits
-        // for a moment when no user send is in flight and none is owed its first assistant row,
-        // and `open_turn_row` refuses the row again under the doc lock if one is. That politeness
-        // is right for a result the main session narrates — it is bug M's guarantee — but it has
-        // no bound, so a chat that keeps receiving messages starves it. In `r10burst` four
-        // answers that existed by 08:40:16 were posted at 08:46:28, when the chat finally went
-        // quiet. For work the user asked to be taken out of the turn, waiting for the turn to be
-        // free is the wrong contract: the result is one bubble, it needs no tools, and it is due
-        // when the worker lands.
+        // Bug AA's half for forced asks (`r10burst`): `run_result_turn` is a *relay* turn —
+        // `relay_slot` waits for a moment when no user send is in flight and none is owed its
+        // first assistant row, with no bound, so a busy chat starves finished answers. The
+        // result is one bubble, it needs no tools, and it is due when the worker lands.
         //
-        // Checked by reading the ask, which is where `hook_start_job` reads the same signal, so
-        // one message cannot be forced on one path and not on the other.
+        // #2964 / feedback AG5fMKSEGcm19R9A3FU1oKw extends that to every job. Act→job research
+        // ("Find me the best sushi in la") and a model `start_job` used to take the relay path
+        // when the ask's wording was not forced. A silent relay left the chat with a wordless
+        // Done main-turn row and the findings only on the hidden worker — no visible reply.
+        // `write_job_result` always posts one (model summary, else the worker's own prose).
         if let Some(j) = &job {
-            if self.ask_forced_a_job(host, in_reply_to).await {
-                let r = self
-                    .write_job_result(
-                        chat_id,
-                        host,
-                        in_reply_to,
-                        &sub_name,
-                        &status,
-                        &result_text,
-                        job_error.as_ref(),
-                    )
-                    .await;
-                if r.is_ok() {
-                    let _ = self
-                        .store
-                        .set_job_delivered(&j.id, &format!("job:{}:result", j.id));
-                }
-                return r;
-            }
-        }
-        let r = self
-            .run_result_turn(
-                chat_id,
-                host,
-                in_reply_to,
-                &ResultDelivery {
-                    subagent_id: &subagent_id,
-                    name: &sub_name,
-                    status: &status,
-                    total_ms,
-                    raw: &result_text,
-                    result: &notice_result,
-                    error: done_err.as_deref(),
-                    job: job.as_ref(),
-                },
-            )
-            .await;
-        if let Some(j) = &job {
+            let r = self
+                .write_job_result(
+                    chat_id,
+                    host,
+                    in_reply_to,
+                    &sub_name,
+                    &status,
+                    &result_text,
+                    job_error.as_ref(),
+                )
+                .await;
             if r.is_ok() {
                 let _ = self
                     .store
                     .set_job_delivered(&j.id, &format!("job:{}:result", j.id));
             }
+            return r;
         }
-        r
+        self.run_result_turn(
+            chat_id,
+            host,
+            in_reply_to,
+            &ResultDelivery {
+                subagent_id: &subagent_id,
+                name: &sub_name,
+                status: &status,
+                total_ms,
+                raw: &result_text,
+                result: &notice_result,
+                error: done_err.as_deref(),
+                job: None,
+            },
+        )
+        .await
     }
 
     /// The status line after a job ended: the newest step of another job still running in this
@@ -15154,6 +15136,10 @@ pub(crate) fn retire_row(doc: &arbos_core::doc::ChatDoc, msg_id: &str) {
 }
 
 /// Hide the turn's trailing wordless row (see the call site). Returns what was done.
+///
+/// Kept when this is the only client-visible reply to the ask: a hidden job / worker row is not
+/// a bubble (#2964), and retiring the empty result then leaves the ask with neither an answer
+/// nor the stock "didn't answer" line the apps draw from an empty Done row.
 pub(crate) fn trim_wordless_result_row(
     doc: &arbos_core::doc::ChatDoc,
     msg_id: &str,
@@ -15163,6 +15149,20 @@ pub(crate) fn trim_wordless_result_row(
     };
     let (wordless, only_empty) = wordless_row(&m);
     if !wordless {
+        return "kept";
+    }
+    let ask = m.rest.get("inReplyTo").and_then(Value::as_str);
+    let has_visible_sibling = ask.is_some_and(|ask| {
+        doc.messages().iter().any(|other| {
+            other.id != msg_id
+                && other.role == "assistant"
+                && other.rest.get("inReplyTo").and_then(Value::as_str) == Some(ask)
+                && other.rest.get("hidden").and_then(Value::as_bool) != Some(true)
+                && other.rest.get("job").is_none()
+                && other.has_visible_content()
+        })
+    });
+    if !has_visible_sibling {
         return "kept";
     }
     retire_row(doc, msg_id);

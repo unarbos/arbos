@@ -2,6 +2,8 @@
 //! per-user notification queue, and the rate-limit event log. Same SQLite file; created from
 //! `Db::open` through `PEOPLE_SCHEMA`.
 
+use std::collections::{HashMap, HashSet};
+
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -11,6 +13,51 @@ use arbos_core::api::{PushEventDto, UserCardDto};
 use arbos_core::ids::now_ms;
 
 use crate::db::Db;
+
+/// Public project data used by people rosters; excludes instructions and runtime state.
+#[derive(Clone)]
+#[cfg_attr(test, derive(Serialize))]
+pub(crate) struct MemberProject {
+    pub id: String,
+    pub name: String,
+    pub icon: String,
+    pub models: Value,
+    pub color: String,
+    pub user_id: String,
+    pub avatar: Option<String>,
+    pub avatar_color: Option<String>,
+    pub description: String,
+    pub avatar_color_index: Option<i64>,
+    pub avatar_leaf_color: Option<i64>,
+    pub image_key: Option<String>,
+    pub avatar_version: i64,
+}
+
+impl From<crate::db::Project> for MemberProject {
+    fn from(p: crate::db::Project) -> Self {
+        Self {
+            id: p.id,
+            name: p.name,
+            icon: p.icon,
+            models: p.models,
+            color: p.color,
+            user_id: p.user_id,
+            avatar: p.avatar,
+            avatar_color: p.avatar_color,
+            description: p.description,
+            avatar_color_index: p.avatar_color_index,
+            avatar_leaf_color: p.avatar_leaf_color,
+            image_key: p.image_key,
+            avatar_version: p.avatar_version,
+        }
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct UserPresence {
+    pub card: Option<UserCardDto>,
+    pub seen: Option<i64>,
+}
 
 pub const PEOPLE_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS people_chats (
@@ -481,7 +528,7 @@ impl Db {
 
     /// Live chats a member (`user:<id>` or `agent:<project>`) is in.
     pub fn chats_of_member(&self, member: &str) -> Result<Vec<ChatWithMembers>> {
-        let chats: Vec<PeopleChat> = self.with(|c| {
+        self.with(|c| {
             let mut st = c.prepare(
                 "SELECT p.id, p.kind, p.created_by, p.created_at, p.title, p.image_key, p.avatar_leaf, p.avatar_leaf_color, p.description FROM people_chats p
                  JOIN people_members m ON m.chat_id = p.id
@@ -489,15 +536,33 @@ impl Db {
                  ORDER BY p.created_at DESC",
             )?;
             let rows = st.query_map(params![member], people_chat_from_row)?;
-            rows.collect()
-        })?;
-        chats
-            .into_iter()
-            .map(|chat| {
-                let members = self.members_of(&chat.id)?;
-                Ok(ChatWithMembers { chat, members })
-            })
-            .collect()
+            let chats = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+            if chats.is_empty() {
+                return Ok(Vec::new());
+            }
+            // Fetch all rosters together, retaining members_of's per-chat total order.
+            // Keep the first query's chat order, including equal-created_at ties.
+            let mut st = c.prepare(&format!(
+                "SELECT {MEMBER_COLS} FROM people_members
+                 WHERE left_at IS NULL AND chat_id IN (
+                   SELECT p.id FROM people_chats p JOIN people_members m ON m.chat_id = p.id
+                   WHERE m.member = ?1 AND m.left_at IS NULL AND p.deleted_at IS NULL
+                 )
+                 ORDER BY chat_id, joined_at, CASE WHEN member LIKE 'user:%' THEN 0 ELSE 1 END, member"
+            ))?;
+            let rows = st.query_map(params![member], membership_from_row)?;
+            let mut out: Vec<_> = chats.into_iter()
+                .map(|chat| ChatWithMembers { chat, members: Vec::new() }).collect();
+            let positions: std::collections::HashMap<_, _> = out.iter().enumerate()
+                .map(|(index, cm)| (cm.chat.id.clone(), index)).collect();
+            for row in rows {
+                let row = row?;
+                if let Some(&index) = positions.get(&row.chat_id) {
+                    out[index].members.push(row);
+                }
+            }
+            Ok(out)
+        })
     }
 
     /// The existing DM between two users, if any (both still members).
@@ -1351,6 +1416,122 @@ impl Db {
         })
     }
 
+    /// Resolve the same id/name precedence as `project`, once for each distinct roster key.
+    pub(crate) fn member_projects(&self, ids: &[String]) -> Result<HashMap<String, MemberProject>> {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        self.with(|c| {
+            let mut statement = c.prepare(
+                "SELECT wanted.value, p.id, p.name, p.icon, p.models, p.color, p.user_id,
+                        p.avatar, p.avatar_color, p.description, p.avatar_color_index,
+                        p.avatar_leaf_color, p.image_key, p.avatar_version
+                 FROM json_each(?1) wanted JOIN projects p ON p.id = COALESCE(
+                    (SELECT id FROM projects WHERE id = wanted.value AND deleted_at IS NULL),
+                    (SELECT id FROM projects WHERE name = wanted.value AND deleted_at IS NULL
+                     ORDER BY last_active_at DESC LIMIT 1)
+                 )",
+            )?;
+            let rows = statement.query_map(params![serde_json::to_string(ids).unwrap()], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    MemberProject {
+                        id: r.get(1)?,
+                        name: r.get(2)?,
+                        icon: r.get(3)?,
+                        models: serde_json::from_str(&r.get::<_, String>(4)?).unwrap_or_default(),
+                        color: r.get(5)?,
+                        user_id: r.get(6)?,
+                        avatar: r.get(7)?,
+                        avatar_color: r.get(8)?,
+                        description: r.get::<_, Option<String>>(9)?.unwrap_or_default(),
+                        avatar_color_index: r.get(10)?,
+                        avatar_leaf_color: r.get(11)?,
+                        image_key: r.get(12)?,
+                        avatar_version: r.get::<_, Option<i64>>(13)?.unwrap_or(0),
+                    },
+                ))
+            })?;
+            // As with individual profile lookups, one unreadable row does not hide its peers.
+            Ok(rows.filter_map(Result::ok).collect())
+        })
+    }
+
+    /// Public cards and presence for only the requested people, including legacy device names.
+    pub(crate) fn user_presence(&self, ids: &[String]) -> Result<HashMap<String, UserPresence>> {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        self.with(|c| {
+            let mut statement = c.prepare(
+                "SELECT wanted.value, u.id, u.login, u.avatar_url, u.name, u.status, u.created_at,
+                   CASE WHEN COALESCE(u.login, '') = '' THEN (
+                     SELECT name FROM devices WHERE user_id = wanted.value AND revoked_at IS NULL
+                     ORDER BY COALESCE(last_seen_at, created_at) DESC LIMIT 1
+                   ) END,
+                   (SELECT MAX(last_seen_at) FROM devices
+                    WHERE user_id = wanted.value AND revoked_at IS NULL)
+                 FROM json_each(?1) wanted LEFT JOIN users u ON u.id = wanted.value",
+            )?;
+            let rows = statement.query_map(params![serde_json::to_string(ids).unwrap()], |r| {
+                let id: String = r.get(0)?;
+                // Card and presence decode failures are independent in the public profile API.
+                let card = (|| -> rusqlite::Result<Option<UserCardDto>> {
+                    Ok(if let Some(user_id) = r.get::<_, Option<String>>(1)? {
+                        Some(legacy_card(
+                            UserCardDto {
+                                id: user_id,
+                                handle: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                                avatar_url: r.get(3)?,
+                                name: r.get(4)?,
+                                status: r.get(5)?,
+                                created_at: Some(r.get(6)?),
+                                test: None,
+                                last_seen_at: None,
+                                online: None,
+                                avatar_color_index_effective: None,
+                            },
+                            r.get(7)?,
+                        ))
+                    } else {
+                        None
+                    })
+                })()
+                .ok()
+                .flatten();
+                Ok((
+                    id,
+                    UserPresence {
+                        card,
+                        seen: r.get::<_, Option<i64>>(8).ok().flatten(),
+                    },
+                ))
+            })?;
+            Ok(rows.filter_map(Result::ok).collect())
+        })
+    }
+
+    pub(crate) fn blocked_roster_users(
+        &self,
+        viewer: &str,
+        ids: &[String],
+    ) -> Result<HashSet<String>> {
+        if ids.is_empty() {
+            return Ok(HashSet::new());
+        }
+        self.with(|c| {
+            let mut statement = c.prepare(
+                "SELECT blocked FROM blocks JOIN json_each(?2) wanted ON wanted.value = blocked
+                 WHERE blocker = ?1",
+            )?;
+            let rows = statement
+                .query_map(params![viewer, serde_json::to_string(ids).unwrap()], |r| {
+                    r.get(0)
+                })?;
+            rows.collect()
+        })
+    }
+
     /// Public profile fields for a user id (for member lists).
     pub fn user_card(&self, user_id: &str) -> Result<Option<UserCardDto>> {
         self.with(|c| {
@@ -1374,31 +1555,31 @@ impl Db {
                     },
                 )
                 .optional()?;
-            let Some(mut card) = card else {
-                return Ok(None);
-            };
-            // Legacy device-token accounts have no GitHub login: show them by the name of the
-            // device they used most recently (stable, and what their owner recognises).
-            if card.handle.is_empty() {
-                let device_name: Option<String> = c
-                    .query_row(
-                        "SELECT name FROM devices WHERE user_id = ?1 AND revoked_at IS NULL
-                         ORDER BY COALESCE(last_seen_at, created_at) DESC LIMIT 1",
-                        params![user_id],
-                        |r| r.get(0),
-                    )
-                    .optional()?
-                    .filter(|n: &String| !n.trim().is_empty());
-                let fallback_name = device_name
-                    .unwrap_or_else(|| user_id.trim_start_matches("u_").to_owned());
-                card.handle = legacy_handle(&fallback_name);
-                if card.name.as_deref().is_none_or(str::is_empty) {
-                    card.name = Some(fallback_name);
-                }
-            }
+            let Some(card) = card else { return Ok(None); };
+            let device_name = if card.handle.is_empty() {
+                c.query_row(
+                    "SELECT name FROM devices WHERE user_id = ?1 AND revoked_at IS NULL
+                     ORDER BY COALESCE(last_seen_at, created_at) DESC LIMIT 1",
+                    params![user_id], |r| r.get::<_, String>(0),
+                ).optional()?
+            } else { None };
+            let card = legacy_card(card, device_name);
             Ok(Some(card))
         })
     }
+}
+
+fn legacy_card(mut card: UserCardDto, device_name: Option<String>) -> UserCardDto {
+    if card.handle.is_empty() {
+        let fallback = device_name
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| card.id.trim_start_matches("u_").to_owned());
+        card.handle = legacy_handle(&fallback);
+        if card.name.as_deref().is_none_or(str::is_empty) {
+            card.name = Some(fallback);
+        }
+    }
+    card
 }
 
 /// A handle-shaped slug for an account without a login: `"Jacob's Mac"` → `jacobs-mac`.
@@ -1537,6 +1718,192 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod roster_batch_tests {
+    use super::*;
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    fn chat(db: &Db, id: &str, created_at: i64, member: &str) {
+        db.insert_people_chat(&PeopleChat {
+            id: id.into(),
+            kind: "group".into(),
+            created_by: "owner".into(),
+            created_at,
+            title: Some(format!("Room {id}")),
+            image_key: None,
+            avatar_leaf: None,
+            avatar_leaf_color: Some(3),
+            description: Some("About é".into()),
+        })
+        .unwrap();
+        db.update_people_chat_profile(id, None, Some(Some(&format!("image/{id}"))), None, None)
+            .unwrap();
+        db.add_member(id, member, "owner", "owner", &serde_json::json!({}))
+            .unwrap();
+    }
+
+    #[test]
+    fn batched_rosters_preserve_scope_total_order_and_all_fields() {
+        let state = test_state(AuthMode::Github);
+        let db = &state.db;
+        for (id, at, member) in [
+            ("old", 1, "user:owner"),
+            ("tie-b", 3, "user:owner"),
+            ("tie-a", 3, "user:owner"),
+            ("deleted", 4, "user:owner"),
+            ("left", 5, "user:owner"),
+            ("foreign", 6, "user:other"),
+        ] {
+            chat(db, id, at, member);
+        }
+        db.with(|c| {
+            c.execute(
+                "UPDATE people_chats SET deleted_at=9 WHERE id='deleted'",
+                [],
+            )
+        })
+        .unwrap();
+        db.remove_member("left", "user:owner", false).unwrap();
+        for id in ["old", "tie-b", "tie-a"] {
+            for member in [
+                "agent:z",
+                "user:z",
+                "user:a",
+                "agent:a",
+                "user:left",
+                "user:banned",
+            ] {
+                db.add_member(id, member, "member", "owner", &serde_json::json!({}))
+                    .unwrap();
+            }
+            db.remove_member(id, "user:left", false).unwrap();
+            db.remove_member(id, "user:banned", true).unwrap();
+            db.with(|c| {
+                c.execute(
+                    "UPDATE people_members SET joined_at=7 WHERE chat_id=?1",
+                    params![id],
+                )
+            })
+            .unwrap();
+            db.add_member(id, "user:later", "member", "owner", &serde_json::json!({}))
+                .unwrap();
+            db.set_member_role(id, "user:a", "admin").unwrap();
+            db.set_member_settings(
+                id,
+                "user:a",
+                &serde_json::json!({"nested":["é",true,null,4]}),
+            )
+            .unwrap();
+            db.set_member_muted(id, "user:a", true).unwrap();
+            db.set_member_silenced(id, "user:a", true, Some(123))
+                .unwrap();
+        }
+        let chats = db.chats_of_member("user:owner").unwrap();
+        assert_eq!(
+            chats.iter().map(|c| c.chat.id.as_str()).collect::<Vec<_>>(),
+            ["tie-b", "tie-a", "old"]
+        );
+        for cm in &chats {
+            let detail = db.members_of(&cm.chat.id).unwrap();
+            assert_eq!(
+                serde_json::to_value(&cm.members).unwrap(),
+                serde_json::to_value(detail).unwrap()
+            );
+            assert_eq!(
+                cm.members
+                    .iter()
+                    .map(|m| m.member.as_str())
+                    .collect::<Vec<_>>(),
+                [
+                    "user:a",
+                    "user:owner",
+                    "user:z",
+                    "agent:a",
+                    "agent:z",
+                    "user:later"
+                ]
+            );
+            let admin = &cm.members[0];
+            assert_eq!(
+                (admin.role.as_str(), admin.added_by.as_str()),
+                ("admin", "owner")
+            );
+            assert_eq!(
+                admin.settings,
+                serde_json::json!({"nested":["é",true,null,4]})
+            );
+            assert!(admin.muted && admin.silenced);
+            assert_eq!(admin.silenced_until, Some(123));
+            assert_eq!(admin.joined_at, 7);
+            assert_eq!(cm.chat.image_key, Some(format!("image/{}", cm.chat.id)));
+            assert_eq!(cm.chat.avatar_leaf_color, Some(3));
+            assert_eq!(cm.chat.description.as_deref(), Some("About é"));
+        }
+        assert!(db.chats_of_member("user:missing").unwrap().is_empty());
+        assert_eq!(
+            db.chats_of_member("user:other").unwrap()[0].chat.id,
+            "foreign"
+        );
+    }
+
+    #[test]
+    fn roster_select_count_does_not_grow_per_room() {
+        std::thread_local! {
+            static STATEMENTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        }
+        unsafe extern "C" fn count_statement(
+            kind: u32,
+            _context: *mut std::ffi::c_void,
+            _statement: *mut std::ffi::c_void,
+            _sql: *mut std::ffi::c_void,
+        ) -> i32 {
+            if kind == rusqlite::ffi::SQLITE_TRACE_STMT as u32 {
+                let _ = STATEMENTS.try_with(|count| count.set(count.get().saturating_add(1)));
+            }
+            0
+        }
+        for rooms in [0, 1, 10] {
+            let state = test_state(AuthMode::Github);
+            let db = &state.db;
+            for n in 0..rooms {
+                chat(db, &format!("room-{n}"), n, "user:owner");
+            }
+            STATEMENTS.with(|count| count.set(0));
+            db.with(|c| {
+                // SAFETY: handle stays owned/locked by Db; callback has no SQLite calls.
+                let rc = unsafe {
+                    rusqlite::ffi::sqlite3_trace_v2(
+                        c.handle(),
+                        rusqlite::ffi::SQLITE_TRACE_STMT as u32,
+                        Some(count_statement),
+                        std::ptr::null_mut(),
+                    )
+                };
+                assert_eq!(rc, rusqlite::ffi::SQLITE_OK);
+                Ok(())
+            })
+            .unwrap();
+            let result = db.chats_of_member("user:owner");
+            db.with(|c| {
+                // SAFETY: the connection remains owned/locked; the callback holds no context pointer.
+                let rc = unsafe {
+                    rusqlite::ffi::sqlite3_trace_v2(c.handle(), 0, None, std::ptr::null_mut())
+                };
+                assert_eq!(rc, rusqlite::ffi::SQLITE_OK);
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(result.unwrap().len(), rooms as usize);
+            assert_eq!(
+                STATEMENTS.with(std::cell::Cell::get),
+                if rooms == 0 { 1 } else { 2 },
+                "room count {rooms}"
+            );
+        }
+    }
+}
+
 /// One agent's respond-gate verdict on one message, as its box reported it
 /// (`POST /box/people/{chat}/gate`; `agentd::people::report_gate_decision`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1617,5 +1984,284 @@ impl Db {
             })?;
             rows.collect()
         })
+    }
+}
+
+#[cfg(test)]
+mod profile_batch_tests {
+    use super::*;
+    use crate::people::tests_support::{person, project_of};
+    use crate::state::{test_support::test_state, AuthMode};
+
+    #[test]
+    fn batched_cards_keep_legacy_names_missing_users_and_revoked_device_presence() {
+        let state = test_state(AuthMode::Github);
+        let (legacy, _) = person(&state, 8001);
+        let (github, _) = person(&state, 8002);
+        state.db.with(|c| {
+            c.execute("UPDATE users SET login=NULL, name='' WHERE id=?1", params![legacy])?;
+            c.execute("UPDATE devices SET name='Jacob’s Mac', last_seen_at=123456 WHERE user_id=?1", params![legacy])?;
+            c.execute("INSERT INTO devices(id,name,token_hash,user_id,kind,created_at,last_seen_at,revoked_at) VALUES ('revoked-profile','Wrong name','profile-fixture-token',?1,'github',999999,999999,1)", params![legacy])?;
+            c.execute("UPDATE devices SET user_id='missing-profile-user',last_seen_at=123 WHERE user_id=?1", params![github])?;
+            Ok(())
+        }).unwrap();
+        let ids = vec![
+            legacy.clone(),
+            github.clone(),
+            "missing-profile-user".into(),
+            "absent".into(),
+        ];
+        let batch = state.db.user_presence(&ids).unwrap();
+        for id in &ids {
+            assert_eq!(
+                serde_json::to_value(&batch[id].card).unwrap(),
+                serde_json::to_value(state.db.user_card(id).unwrap()).unwrap()
+            );
+            assert_eq!(batch[id].seen, state.db.user_last_seen(id).unwrap());
+        }
+        let card = batch[&legacy].card.as_ref().unwrap();
+        assert_eq!(card.handle, "jacobs-mac");
+        assert_eq!(card.name.as_deref(), Some("Jacob’s Mac"));
+        assert_eq!(batch[&legacy].seen, Some(123456));
+        assert!(batch["missing-profile-user"].card.is_none());
+        assert_eq!(batch["missing-profile-user"].seen, Some(123));
+        assert_eq!(batch.len(), ids.len());
+    }
+
+    #[test]
+    fn projected_projects_keep_id_precedence_name_aliases_and_json_fallback() {
+        let state = test_state(AuthMode::Github);
+        let (owner, _) = person(&state, 8003);
+        let first = project_of(&state, &owner, "older alias");
+        let (other_owner, _) = person(&state, 8004);
+        let second = project_of(&state, &other_owner, "newer alias");
+        let deleted = project_of(&state, &owner, "deleted alias");
+        state.db.with(|c| {
+            c.execute("UPDATE projects SET name='shared alias',last_active_at=1,models='invalid JSON' WHERE id=?1", params![first])?;
+            c.execute("UPDATE projects SET name='shared alias',last_active_at=2,models='{\"talking_model\":{\"id\":\"first\",\"id\":\"last\"}}',description='',avatar_version=0 WHERE id=?1", params![second])?;
+            c.execute("UPDATE projects SET deleted_at=1 WHERE id=?1", params![deleted])?;
+            Ok(())
+        }).unwrap();
+        let ids = vec![
+            first.clone(),
+            second.clone(),
+            "shared alias".into(),
+            deleted.clone(),
+            "unknown".into(),
+        ];
+        let batch = state.db.member_projects(&ids).unwrap();
+        for id in &ids {
+            match state.db.project(id).unwrap() {
+                Some(expected) => assert_eq!(
+                    serde_json::to_value(&batch[id]).unwrap(),
+                    serde_json::to_value(MemberProject::from(expected)).unwrap()
+                ),
+                None => assert!(!batch.contains_key(id)),
+            }
+        }
+        assert_eq!(batch["shared alias"].id, second);
+        assert_eq!(batch[&first].models, Value::Null);
+        assert_eq!(batch["shared alias"].models["talking_model"]["id"], "last");
+        assert!(state.db.member_projects(&[]).unwrap().is_empty());
+    }
+    #[test]
+    fn live_device_profile_reads_skip_unrelated_accounts_and_keep_tie_order() {
+        use std::cell::Cell;
+        thread_local! { static SCANS: Cell<u64> = const { Cell::new(0) }; }
+        unsafe extern "C" fn profile(
+            _kind: u32,
+            _ctx: *mut std::ffi::c_void,
+            st: *mut std::ffi::c_void,
+            _extra: *mut std::ffi::c_void,
+        ) -> i32 {
+            let steps = unsafe {
+                rusqlite::ffi::sqlite3_stmt_status(
+                    st.cast(),
+                    rusqlite::ffi::SQLITE_STMTSTATUS_FULLSCAN_STEP,
+                    1,
+                )
+            };
+            let _ = SCANS.try_with(|v| v.set(v.get().saturating_add(steps.max(0) as u64)));
+            0
+        }
+        let state = test_state(AuthMode::Github);
+        let (legacy, _) = person(&state, 8011);
+        state.db.with(|c|{
+            let tx=rusqlite::Transaction::new_unchecked(c,rusqlite::TransactionBehavior::Immediate)?;
+            tx.execute("UPDATE users SET login=NULL,name=NULL WHERE id=?1",params![legacy])?;
+            tx.execute("UPDATE devices SET name='First tied device',last_seen_at=100,created_at=0 WHERE user_id=?1",params![legacy])?;
+            tx.execute("INSERT INTO devices(id,name,token_hash,user_id,kind,created_at,last_seen_at) VALUES ('tie-profile','Later tied device','tie-token',?1,'github',100,NULL)",params![legacy])?;
+            for n in 0..2500 {tx.execute("INSERT INTO devices(id,name,token_hash,user_id,kind,created_at,last_seen_at) VALUES (?1,'Unrelated',?2,?3,'github',100,100)",params![format!("other-{n}"),format!("other-token-{n}"),format!("other-user-{n}")])?;}
+            tx.commit()
+        }).unwrap();
+        SCANS.with(|v| v.set(0));
+        state
+            .db
+            .with(|c| {
+                unsafe {
+                    rusqlite::ffi::sqlite3_trace_v2(
+                        c.handle(),
+                        rusqlite::ffi::SQLITE_TRACE_PROFILE as u32,
+                        Some(profile),
+                        std::ptr::null_mut(),
+                    );
+                }
+                Ok(())
+            })
+            .unwrap();
+        let card = state.db.user_card(&legacy).unwrap();
+        let seen = state.db.user_last_seen(&legacy).unwrap();
+        state
+            .db
+            .with(|c| {
+                unsafe {
+                    rusqlite::ffi::sqlite3_trace_v2(c.handle(), 0, None, std::ptr::null_mut());
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(card.unwrap().name.as_deref(), Some("First tied device"));
+        assert_eq!(seen, Some(100));
+        let scans = SCANS.with(Cell::get);
+        assert!(
+            scans < 16,
+            "Profile lookup scanned {scans} unrelated device rows"
+        );
+    }
+    #[test]
+    fn card_decode_failure_does_not_erase_valid_presence() {
+        let state = test_state(AuthMode::Github);
+        let (uid, _) = person(&state, 8021);
+        state
+            .db
+            .with(|c| {
+                c.execute(
+                    "UPDATE users SET created_at='bad' WHERE id=?1",
+                    params![uid],
+                )?;
+                c.execute(
+                    "UPDATE devices SET last_seen_at=123456 WHERE user_id=?1",
+                    params![uid],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(state.db.user_card(&uid).is_err());
+        let expected = state.db.user_last_seen(&uid).unwrap();
+        assert_eq!(expected, Some(123456));
+        let batch = state.db.user_presence(std::slice::from_ref(&uid)).unwrap();
+        assert!(batch[&uid].card.is_none());
+        assert_eq!(batch[&uid].seen, expected);
+    }
+
+    #[test]
+    fn presence_decode_failure_does_not_erase_valid_card() {
+        let state = test_state(AuthMode::Github);
+        let (uid, _) = person(&state, 8022);
+        state
+            .db
+            .with(|c| {
+                c.execute(
+                    "UPDATE devices SET last_seen_at='bad' WHERE user_id=?1",
+                    params![uid],
+                )
+            })
+            .unwrap();
+        assert!(state.db.user_last_seen(&uid).is_err());
+        let expected = state.db.user_card(&uid).unwrap();
+        assert!(expected.is_some());
+        let batch = state.db.user_presence(std::slice::from_ref(&uid)).unwrap();
+        assert_eq!(
+            serde_json::to_value(&batch[&uid].card).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
+        assert_eq!(batch[&uid].seen, None);
+    }
+    #[test]
+    fn room_activity_reads_history_extrema_without_scanning_retained_rows() {
+        use std::cell::Cell;
+        thread_local! { static STEPS: Cell<u64> = const { Cell::new(0) }; }
+        unsafe extern "C" fn profile(
+            _kind: u32,
+            _ctx: *mut std::ffi::c_void,
+            st: *mut std::ffi::c_void,
+            _extra: *mut std::ffi::c_void,
+        ) -> i32 {
+            let steps = unsafe {
+                rusqlite::ffi::sqlite3_stmt_status(
+                    st.cast(),
+                    rusqlite::ffi::SQLITE_STMTSTATUS_VM_STEP,
+                    1,
+                )
+            };
+            let _ = STEPS.try_with(|v| v.set(v.get().saturating_add(steps.max(0) as u64)));
+            0
+        }
+        let state = test_state(AuthMode::Github);
+        state.db.with(|c|{
+            let tx=rusqlite::Transaction::new_unchecked(c,rusqlite::TransactionBehavior::Immediate)?;
+            tx.execute("INSERT INTO room_seq(room,head,floor) VALUES ('people/activity',3000,500)",[])?;
+            for n in 0..2500 {
+                tx.execute("INSERT INTO rows(room,seq,device,batch_id,bytes,created_at) VALUES ('people/activity',?1,'fixture-device',?2,zeroblob(64),?3)",params![501+n,format!("fixture-batch-{n}"),if n==0 {9999}else{-n}])?;
+            }
+            tx.commit()
+        }).unwrap();
+        assert_eq!(state.db.room_activity("missing").unwrap(), (0, 0));
+        STEPS.with(|v| v.set(0));
+        state
+            .db
+            .with(|c| {
+                unsafe {
+                    rusqlite::ffi::sqlite3_trace_v2(
+                        c.handle(),
+                        rusqlite::ffi::SQLITE_TRACE_PROFILE as u32,
+                        Some(profile),
+                        std::ptr::null_mut(),
+                    );
+                }
+                Ok(())
+            })
+            .unwrap();
+        let activity = state.db.room_activity("people/activity");
+        state
+            .db
+            .with(|c| {
+                unsafe {
+                    rusqlite::ffi::sqlite3_trace_v2(c.handle(), 0, None, std::ptr::null_mut());
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            activity.unwrap(),
+            (3000, 9999),
+            "last activity is a timestamp maximum, not the last sequence"
+        );
+        let steps = STEPS.with(Cell::get);
+        assert!(
+            steps < 200,
+            "room activity walked retained history: {steps} VM steps"
+        );
+        state
+            .db
+            .with(|c| {
+                c.execute(
+                    "DELETE FROM rows WHERE room='people/activity' AND seq=501",
+                    [],
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            state.db.room_activity("people/activity").unwrap(),
+            (3000, -1)
+        );
+        state
+            .db
+            .with(|c| c.execute("DELETE FROM rows WHERE room='people/activity'", []))
+            .unwrap();
+        assert_eq!(
+            state.db.room_activity("people/activity").unwrap(),
+            (3000, 0)
+        );
     }
 }

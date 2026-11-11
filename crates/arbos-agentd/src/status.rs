@@ -1161,6 +1161,13 @@ pub(crate) mod tests {
     /// 01M6PJABNVZ84YXHHFY9HV3FAK (bug AC, `job_handoff_leak_tests.rs`).
     pub(crate) const EMPTY_JOB_RESULT_ASK: &str = "what came out of the empty job one?";
 
+    /// #2964: a research ask that is not forced wording. The stub's job-result answer is the
+    /// summary the talking model would write from the worker's notes — what the user must see.
+    pub(crate) const RESEARCH_JOB_RESULT_ASK: &str = "Find me the best sushi in la";
+
+    /// Visible summary for [`RESEARCH_JOB_RESULT_ASK`].
+    pub(crate) const RESEARCH_JOB_RESULT_ANSWER: &str = "The three strongest picks in LA are Sushi Gen (downtown omakase), n/naka (reservation kaiseki-style), and Kato (strong value westside). Waitlists move weekly.";
+
     /// The ask that makes the stub answer a job-result call with round 14's r14notes draft: an
     /// opening sentence in the register `ProseFilter::strip_leading_thought_paragraphs` judges
     /// thought-shaped, a GFM table **glued** to it with no blank line, and a closing line in its
@@ -1248,6 +1255,8 @@ It ran as a real background job, not inline.";
             ("[status]\n", "stop")
         } else if user.contains(EMPTY_JOB_RESULT_ASK) {
             ("", "stop")
+        } else if user.contains(RESEARCH_JOB_RESULT_ASK) {
+            (RESEARCH_JOB_RESULT_ANSWER, "stop")
         } else if user.contains(GLUED_TABLE_JOB_RESULT_ASK) {
             (GLUED_TABLE_DRAFT, "stop")
         } else if user.contains("stop at 20, not 40") {
@@ -3391,6 +3400,53 @@ It ran as a real background job, not inline.";
             result_row.rest.get("turnRole").and_then(Value::as_str),
             Some("ack")
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// #2964: a finished hidden job worker is not a bubble. Trimming the empty result when that
+    /// is the only sibling leaves the ask with neither an answer nor the stock "didn't answer"
+    /// line — the same blank chat Jacob saw for "Find me the best sushi in la".
+    #[tokio::test]
+    async fn a_sole_empty_result_stays_when_only_a_hidden_job_spoke() {
+        use crate::agent::trim_wordless_result_row;
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATQUICKREPLY0002964";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        let empty = {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            agent.test_open_row(&host, t).await;
+            t.assistant_msg_id.clone()
+        };
+        {
+            let h = host.lock().await;
+            let job_row = arbos_core::ids::ulid();
+            let part = h
+                .doc
+                .start_assistant_message(&job_row, "m-busy", &agent.cfg.device_id);
+            h.doc.set_message_fields(
+                &job_row,
+                &[
+                    (
+                        "job",
+                        json!({ "id": "01JOBSUSHI000000000000000", "title": "Finding sushi", "kind": "research" }),
+                    ),
+                    ("hidden", json!(true)),
+                    ("worker", json!(true)),
+                ],
+            );
+            h.doc.append_text(&job_row, &part, "Done.");
+            h.doc.finish_message(&job_row, MessageStatus::Done);
+            h.doc.finish_message(&empty, MessageStatus::Done);
+            assert_eq!(
+                trim_wordless_result_row(&h.doc, &empty),
+                "kept",
+                "a hidden job is not a visible answer; keep the empty result for the stock line"
+            );
+            let m = h.doc.message(&empty).expect("empty result stays");
+            assert_ne!(m.rest.get("hidden").and_then(Value::as_bool), Some(true));
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 
