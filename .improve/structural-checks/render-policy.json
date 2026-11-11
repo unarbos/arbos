@@ -1,0 +1,53 @@
+{
+  "checks": [
+    {
+      "variant": "before2",
+      "exit_code": 101,
+      "seconds": 9.482025542063639,
+      "expected_semantic_outcome": true,
+      "scope": "actual extracted production fingerprint; no GPUI or full-builder claim",
+      "source": {
+        "snapshot": "before2",
+        "actual_source_sha256": {
+          "crates/arbos-mac/src/model.rs": "06160d8be8296301723fc258db0d3f6400f250dc50e13dc30d21b4cc7cf141d7",
+          "crates/arbos-mac/src/ui/transcript.rs": "3f9d1e71e136d4944506432cef81a01404887e05d0e90cc4b2dc6d3ede7deeea",
+          "crates/arbos-mac/src/ui/link_card.rs": "55770db61e85b7aa644e11b007d770fa904bdd0e7754843992e8969eea02e556",
+          "crates/arbos-mac/src/sync/user_error.rs": "bd72e3774026d5d43c76b68b268f45ad229f1a73b9399946b4cd1053fe026784"
+        },
+        "fingerprint_sha256": "64c5c0930ef24829dc90a911a4ba56e4b0314b624637c56bbcb3eaa37b75fcf8",
+        "explicit_policy": false,
+        "scope": "Exact extracted production fingerprint/DTO definitions; no GPUI renderer or SDK effects. Two stable/different policy assertions."
+      }
+    },
+    {
+      "variant": "after",
+      "exit_code": 0,
+      "seconds": 9.965893000015058,
+      "expected_semantic_outcome": true,
+      "scope": "actual extracted production fingerprint; no GPUI or full-builder claim",
+      "source": {
+        "snapshot": "after",
+        "actual_source_sha256": {
+          "crates/arbos-mac/src/model.rs": "06160d8be8296301723fc258db0d3f6400f250dc50e13dc30d21b4cc7cf141d7",
+          "crates/arbos-mac/src/ui/transcript.rs": "36ec19e3d573eb04720a76f6ef641049f3d51ee6651ca9247e76c2ea09e54e59",
+          "crates/arbos-mac/src/ui/link_card.rs": "5dc51786228743997119dfe9bec9173c47e659af4fd95cbf4252409cd827eb40",
+          "crates/arbos-mac/src/sync/user_error.rs": "bd72e3774026d5d43c76b68b268f45ad229f1a73b9399946b4cd1053fe026784"
+        },
+        "fingerprint_sha256": "7edead787d0e42923f5bab3596f24387f5e56c714751f9ee49f46ec84d827529",
+        "explicit_policy": true,
+        "scope": "Exact extracted production fingerprint/DTO definitions; no GPUI renderer or SDK effects. Two stable/different policy assertions."
+      }
+    }
+  ],
+  "before_counts": {
+    "passed_assertions": 1,
+    "failed_assertions": 1
+  },
+  "after_counts": {
+    "passed_assertions": 2,
+    "failed_assertions": 0
+  },
+  "test_setup_correction": "An initial isolated manifest omitted chrono/ulid required by the real DTO module and failed compilation; it is excluded from semantic RED proof. Corrected harness compiled and reproduced the intended cache-key assertion failure.",
+  "native_builder_regressions": "Two tests added to actual transcript module and compiled by full actual Mac all-target Clippy; runtime execution awaits combined native gate. Extraction alone does not verify full GPUI behavior.",
+  "policy": "Only transcript-owned link preview setting changed; stored preference, sender preview-off and card layout behavior preserved."
+}

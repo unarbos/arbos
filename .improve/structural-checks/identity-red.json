@@ -1,0 +1,17 @@
+{
+  "command": [
+    "/usr/bin/sandbox-exec",
+    "-p",
+    "(version 1) (allow default) (deny network*)",
+    "cargo",
+    "test",
+    "--locked",
+    "--offline",
+    "-p",
+    "arbos-sidecar",
+    "daemon::tests::distinct_"
+  ],
+  "exit_code": 101,
+  "seconds": 2.849949666997418,
+  "expected_failed": 2
+}

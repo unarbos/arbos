@@ -368,6 +368,51 @@ impl Mirror {
 
     // ---- events ---------------------------------------------------------------------------------
 
+    /// The daemon may replay an event after writing its row but before committing
+    /// the page cursor. Ordinary apply_event callers still deduplicate by row id.
+    pub fn apply_uncommitted_event(&self, e: &Value) -> Result<Option<WakeCandidate>> {
+        if let Some(candidate) = self.apply_event(e)? {
+            return Ok(Some(candidate));
+        }
+        if e["type"] != "message.received" || e["wake"] != true {
+            return Ok(None);
+        }
+        let Some(event_id) = e["id"].as_i64().filter(|id| *id > 0) else {
+            return Ok(None);
+        };
+        let Some(chat_id) = e["chat"]["id"].as_str().filter(|id| !id.is_empty()) else {
+            return Ok(None);
+        };
+        let text = fs::read_to_string(self.messages_file(chat_id))?;
+        let matched = text
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .any(|row| {
+                row["id"] == e["message"]["id"]
+                    && row["event_id"].as_i64() == Some(event_id)
+                    && row["wake"] == true
+            });
+        if !matched {
+            return Ok(None);
+        }
+        let chat = self
+            .chat(chat_id)
+            .ok_or_else(|| anyhow::anyhow!("mirrored wake has no chat metadata"))?;
+        let ts = e["ts"].as_i64().unwrap_or_else(now_ms);
+        Ok(Some(Self::message_wake(e, chat, ts)))
+    }
+
+    fn message_wake(e: &Value, chat: ChatMeta, ts: i64) -> WakeCandidate {
+        WakeCandidate {
+            chat,
+            event_id: e["id"].as_i64().unwrap_or(0),
+            ts,
+            from: e["message"]["from"].clone(),
+            from_agent: e["message"]["from"]["kind"] == "agent",
+            reason: "message",
+        }
+    }
+
     /// Apply one inbox event. Returns a wake candidate when the event asks the agent to act.
     /// Idempotent: a row already mirrored is not written twice and does not wake again.
     pub fn apply_event(&self, e: &Value) -> Result<Option<WakeCandidate>> {
@@ -426,15 +471,11 @@ impl Mirror {
                 if new == 0 || !wake {
                     return Ok(None);
                 }
-                let from_agent = m["from"]["kind"] == "agent";
-                Ok(Some(WakeCandidate {
-                    chat: self.chat(&chat_id).unwrap_or(meta),
-                    event_id,
+                Ok(Some(Self::message_wake(
+                    e,
+                    self.chat(&chat_id).unwrap_or(meta),
                     ts,
-                    from: m["from"].clone(),
-                    from_agent,
-                    reason: "message",
-                }))
+                )))
             }
             "member.added" => {
                 self.upsert_chat(&meta)?;

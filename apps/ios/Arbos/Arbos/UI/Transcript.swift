@@ -394,11 +394,8 @@ enum Transcript {
     /// `agentNames`: agent project id → display name from the chat's member list, the
     /// fallback when a reply row carries no `senderName` (older boxes).
     /// Settings → Appearance → Link previews: off hides every card (plain links stay).
-    /// Set by `AppModel.linkPreviews`; a static so the row builder needs no model.
-    nonisolated(unsafe) static var linkPreviewsEnabled = true
-
-    static func rows(_ messages: [Message], projectId: Id, subagentNames: [String: String] = [:], me: String? = nil, people: Bool = false, agentNames: [String: String] = [:], multiParty: Bool = false, memberNames: [String: String] = [:], hiddenSenders: Set<String> = []) -> [Row] {
-        rows(messages, byId: index(messages), projectId: projectId, subagentNames: subagentNames, me: me, people: people, agentNames: agentNames, multiParty: multiParty, memberNames: memberNames, hiddenSenders: hiddenSenders)
+    static func rows(_ messages: [Message], projectId: Id, subagentNames: [String: String] = [:], me: String? = nil, people: Bool = false, agentNames: [String: String] = [:], multiParty: Bool = false, memberNames: [String: String] = [:], hiddenSenders: Set<String> = [], linkPreviews: Bool = true) -> [Row] {
+        rows(messages, byId: index(messages), projectId: projectId, subagentNames: subagentNames, me: me, people: people, agentNames: agentNames, multiParty: multiParty, memberNames: memberNames, hiddenSenders: hiddenSenders, linkPreviews: linkPreviews)
     }
 
     /// Same, with the caller's `index(messages)` (the chat keeps it for its own lookups).
@@ -408,7 +405,7 @@ enum Transcript {
     /// membership line names its actor as the roster does now, not as the row was written.
     /// `hiddenSenders`: `user:<id>` keys of people I blocked — their messages fold into one
     /// `.hidden` row per run instead of bubbles, and carry no date separator.
-    static func rows(_ messages: [Message], byId: [Id: Message], projectId: Id, subagentNames: [String: String] = [:], me: String? = nil, people: Bool = false, agentNames: [String: String] = [:], multiParty: Bool = false, memberNames: [String: String] = [:], hiddenSenders: Set<String> = []) -> [Row] {
+    static func rows(_ messages: [Message], byId: [Id: Message], projectId: Id, subagentNames: [String: String] = [:], me: String? = nil, people: Bool = false, agentNames: [String: String] = [:], multiParty: Bool = false, memberNames: [String: String] = [:], hiddenSenders: Set<String> = [], linkPreviews: Bool = true) -> [Row] {
         var rows: [Row] = []
         rows.reserveCapacity(messages.count + messages.count / 8)
         var lastAt: Int64 = 0
@@ -523,7 +520,7 @@ enum Transcript {
                 var text = message.plainText
                 // The link preview card ([feedback link-embeds-ios-2026-10-27]); a message that
                 // was only the link shows the card alone (iMessage's rule).
-                var preview: LinkPreview? = Self.linkPreviewsEnabled ? message.linkPreview?.preview : nil
+                var preview: LinkPreview? = linkPreviews ? message.linkPreview?.preview : nil
                 preview?.slot = projectId
                 if let p = preview, p.isLinkOnly(text) { text = "" }
                 // A media-viewer forward's whole text is the "Forwarded from …" line: a
@@ -727,7 +724,7 @@ enum Transcript {
                             chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant,
                                              kind: .assistant(blocks: [block], live: false, caption: nil, quote: nil)))
                         }
-                    case .linkPreview(let id, var p) where Self.linkPreviewsEnabled && message.linkPreview?.id == id:
+                    case .linkPreview(let id, var p) where linkPreviews && message.linkPreview?.id == id:
                         // The link preview card: one block under the prose, joining the
                         // bubble before it ([feedback link-embeds-ios-2026-10-27]).
                         p.slot = projectId

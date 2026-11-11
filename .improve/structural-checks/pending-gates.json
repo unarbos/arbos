@@ -1,0 +1,91 @@
+{
+  "before": [
+    {
+      "gate": "before-compile",
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*)",
+        "rustc",
+        "--edition=2021",
+        "--test",
+        ".improve/evidence/mac-pending-messages/tree/crates/arbos-mac/src/pending_messages.rs",
+        "-D",
+        "warnings",
+        "-o",
+        ".improve/evidence/mac-pending-messages/pending-before"
+      ],
+      "exit_code": 0,
+      "seconds": 0.3567753750830889,
+      "results": []
+    },
+    {
+      "gate": "before-test",
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*)",
+        ".improve/evidence/mac-pending-messages/pending-before"
+      ],
+      "exit_code": 101,
+      "seconds": 0.23611570801585913,
+      "results": [
+        [
+          "FAILED",
+          "1",
+          "4",
+          "0"
+        ]
+      ]
+    }
+  ],
+  "after": [
+    {
+      "gate": "after-compile",
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*)",
+        "rustc",
+        "--edition=2021",
+        "--test",
+        ".improve/evidence/mac-pending-messages/tree/crates/arbos-mac/src/pending_messages.rs",
+        "-D",
+        "warnings",
+        "-o",
+        ".improve/evidence/mac-pending-messages/pending-after"
+      ],
+      "exit_code": 0,
+      "seconds": 0.5649476250400767,
+      "results": []
+    },
+    {
+      "gate": "after-test",
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*)",
+        ".improve/evidence/mac-pending-messages/pending-after"
+      ],
+      "exit_code": 0,
+      "seconds": 0.1854883749037981,
+      "results": [
+        [
+          "ok",
+          "5",
+          "0",
+          "0"
+        ]
+      ]
+    }
+  ],
+  "tests_identical_before_after": true,
+  "all_pending_callers_room_scoped": true,
+  "full_mac_compile_or_gui_test": false,
+  "source_sha256": {
+    "crates/arbos-mac/src/main.rs": "fdd34c0f99bbd5b168b7ac183b6784d85327280881ccb657753783f019072d46",
+    "crates/arbos-mac/src/sync/relay.rs": "29218564051756e15d746b08847347b112cee0a8d5c703c65b619f8a48f70bbe",
+    "crates/arbos-mac/src/pending_messages.rs": "c12fdcaed82a8d4541ce7855a096f8766dfb8206a21cbb3ac8f6001ceb9b4221"
+  },
+  "rebased_caller_hunks_preserve_coalescing_edits": true
+}

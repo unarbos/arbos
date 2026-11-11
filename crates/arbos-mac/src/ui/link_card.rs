@@ -23,17 +23,6 @@ use super::link_tile::{self, Brand, Icon, Tone};
 use super::sf_symbols;
 use super::theme::Theme;
 
-/// Settings → Chat → Link previews: off hides every card on this Mac (plain links stay).
-static ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
-
-pub fn enabled() -> bool {
-    ENABLED.load(std::sync::atomic::Ordering::Relaxed)
-}
-
-pub fn set_enabled(on: bool) {
-    ENABLED.store(on, std::sync::atomic::Ordering::Relaxed);
-}
-
 pub const CARD_RADIUS: f32 = 10.0;
 pub const CARD_PAD: f32 = 10.0;
 pub const CARD_MAX_WIDTH: f32 = 400.0;

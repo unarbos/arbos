@@ -4,6 +4,8 @@
 //! appended in 120 ms frames, a final status. The UI cannot tell it apart from
 //! the relay path.
 
+use crate::mentions::text_has_at_token;
+
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -19,6 +21,7 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tokio::time::sleep;
 
+use crate::chat_title::title_from;
 use crate::model::{
     AgentMember, Call, CallEnded, CallKind, LinkState, Machine, MachineState, MediaPick, Person,
     ProjectDocView, ReplyPolicy, ReplyRef, Sender, SpaceKind, ThreadInfo, Voice,
@@ -1176,8 +1179,6 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         | ClientCommand::UnblockUser { .. }
         | ClientCommand::InviteToProject { .. }
         | ClientCommand::RemoveProjectMember { .. }
-        | ClientCommand::SetMessageGrant { .. }
-        | ClientCommand::RemoveMessageGrant { .. }
         | ClientCommand::FetchAvatar { .. }
         | ClientCommand::DeleteProject { .. }
         | ClientCommand::ConnectAgent { .. }
@@ -1486,7 +1487,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 Ok(()) => {
                     let open_external = quick_look || !cfg!(target_os = "macos");
                     if open_external {
-                        crate::ui::attachments::open_with_system(&path, quick_look);
+                        crate::external_open::open_with_system(&path, quick_look);
                     }
                     opened_path = Some(path);
                 }
@@ -2355,7 +2356,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     url: "https://relay.arbos.life/agent-link/open/Kq2vB7xZ9kT2vQ".into(),
                     label,
                     scope: scope.to_owned(),
-                    expires_in: crate::ui::agent_links::expiry_label(ttl_hours).to_owned(),
+                    expires_in: crate::agent_link_expiry::expiry_label(ttl_hours).to_owned(),
                     copied: false,
                 },
             )));
@@ -3983,19 +3984,6 @@ fn maybe_retitle(shared: &Shared, chat_id: &str, text: &str) {
     };
     if changed {
         emit_chats(shared);
-    }
-}
-
-fn title_from(text: &str) -> String {
-    let line = text.lines().next().unwrap_or("").trim();
-    let mut out: String = line.chars().take(34).collect();
-    if line.chars().count() > 34 {
-        out.push('…');
-    }
-    if out.is_empty() {
-        "New chat".into()
-    } else {
-        out
     }
 }
 
@@ -7760,15 +7748,6 @@ fn seed_people_chat_docs() -> Vec<ChatDoc> {
     out
 }
 
-/// True when `lower` has `@token` as a whole mention (not a longer `@token…` handle).
-fn text_has_at_token(lower: &str, token: &str) -> bool {
-    let t = format!("@{token}");
-    lower.match_indices(&t).any(|(i, _)| {
-        let after = lower[i + t.len()..].chars().next();
-        after.is_none_or(|c| !(c.is_alphanumeric() || c == '-' || c == '_'))
-    })
-}
-
 /// `@slug` / `@handle` tokens in the text, resolved to member ids.
 /// Group owners may also use `@here` (every human) and `@agents` (every agent).
 fn mentions_in(space: &Project, text: &str, tokens: &[String]) -> Vec<String> {
@@ -8279,56 +8258,6 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                 .events
                 .send(SyncEvent::Notice(format!("@{handle} unblocked.")));
             emit_blocked(shared);
-            true
-        }
-        // "Who may message X" (agent-to-agent messaging): the grant list lives on the project.
-        ClientCommand::SetMessageGrant {
-            project_id,
-            grantee,
-            enabled,
-        } => {
-            let mut projects = shared.projects.lock().unwrap();
-            if let Some(p) = projects.iter_mut().find(|p| p.id == *project_id) {
-                if let Some(g) = p.message_grants.iter_mut().find(|g| g.grantee == *grantee) {
-                    g.enabled = *enabled;
-                } else {
-                    let handle = grantee.trim_start_matches('@').to_lowercase();
-                    let Some(other) = directory().into_iter().find(|p| p.handle == handle) else {
-                        drop(projects);
-                        let _ = shared
-                            .events
-                            .send(SyncEvent::PeopleError(no_such_user("give access", &handle)));
-                        return true;
-                    };
-                    p.message_grants.push(crate::model::MessageGrant {
-                        grantee: format!("user:{}", other.id),
-                        kind: "person".into(),
-                        id: other.id.clone(),
-                        name: other.name.clone(),
-                        handle: Some(other.handle.clone()),
-                        avatar_url: other.avatar_url.clone(),
-                        enabled: *enabled,
-                        note: String::new(),
-                        created_at: now_ms() as i64,
-                        last_at: None,
-                    });
-                }
-            }
-            drop(projects);
-            emit_projects(shared);
-            true
-        }
-        ClientCommand::RemoveMessageGrant {
-            project_id,
-            grantee,
-        } => {
-            {
-                let mut projects = shared.projects.lock().unwrap();
-                if let Some(p) = projects.iter_mut().find(|p| p.id == *project_id) {
-                    p.message_grants.retain(|g| g.grantee != *grantee);
-                }
-            }
-            emit_projects(shared);
             true
         }
         ClientCommand::InviteToProject { project_id, handle } => {

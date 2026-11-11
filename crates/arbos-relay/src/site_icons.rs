@@ -16,10 +16,10 @@
 //! 2. **Scale down, never up:** the chosen picture is centre-cropped square and resampled with
 //!    Lanczos3 to at most [`ICON_SIDE`] (128) px — 36 pt at 3× on an iPhone is 108 px, so the
 //!    apps always downscale from here.
-//! 3. **One fetch per host**, through the unfurl module's pinned-DNS fetcher ([`unfurl::fetch_bounded`]:
+//! 3. **One fetch per host**, through the unfurl module's pinned-DNS [`Fetcher`]:
 //!    public host names only, resolved before connecting and pinned, private / link-local /
 //!    metadata ranges refused on every hop, ≤ 3 redirects, 512 KB page / 5 MB picture caps,
-//!    10 s budget, the relay's own User-Agent, no cookies, no credentials). Cached on disk
+//!    10 s budget, the relay's own User-Agent, no cookies, no credentials. Cached on disk
 //!    under `<data>/site-icons/v<VERSION>/<host>.png|.none` with memory in front — found
 //!    [`FOUND_TTL_MS`] (7 d), missing [`MISSING_TTL_MS`] (1 d); bumping [`VERSION`] retires
 //!    every cached icon at once.

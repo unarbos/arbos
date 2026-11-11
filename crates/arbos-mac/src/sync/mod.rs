@@ -16,6 +16,7 @@ pub mod doc;
 pub mod dto;
 pub mod fixture;
 pub mod relay;
+mod room_docs;
 pub mod store;
 pub mod user_error;
 
@@ -774,18 +775,6 @@ pub enum ClientCommand {
     RemoveProjectMember {
         project_id: Id,
         user_id: String,
-    },
-    /// `PUT /projects/{id}/message-access {grantee, enabled}` — "Who may message X"
-    /// (agent-to-agent messaging). `grantee` = `@handle`, `user:<id>` or `project:<id>`.
-    SetMessageGrant {
-        project_id: Id,
-        grantee: String,
-        enabled: bool,
-    },
-    /// `DELETE /projects/{id}/message-access/{grantee}`.
-    RemoveMessageGrant {
-        project_id: Id,
-        grantee: String,
     },
     /// Fetch an avatar once (`SyncEvent::Avatar`).
     FetchAvatar {

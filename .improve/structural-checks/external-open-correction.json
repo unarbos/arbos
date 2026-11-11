@@ -1,0 +1,7 @@
+{
+  "path": "crates/arbos-mac/src/ui/chart_card.rs",
+  "before_sha256": "0097f391be6c473ad452a53a066858eec7dca75a0da0bf4ce3f73574f444fd75",
+  "after_sha256": "d6a77b2e6ed5db315cc889ff359184c912a00633e55c7941abead33ce84c6778",
+  "phase3_commit": "fc3eeef8faaa67b3ad956dca89a712204740a6cf",
+  "reason": "Full native SDK compiler caught actual chart caller omitted in original move; introduced candidate failure, not baseline RED; all attachments handoff references searched. Final fullcompiler required."
+}

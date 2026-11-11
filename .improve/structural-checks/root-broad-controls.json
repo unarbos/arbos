@@ -1,0 +1,62 @@
+[
+  {
+    "command": [
+      "/usr/bin/sandbox-exec",
+      "-p",
+      "(version 1) (allow default) (deny network*)",
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-relay",
+      "db"
+    ],
+    "exit_code": 0,
+    "seconds": 3.086812207940966,
+    "suites": [
+      [
+        "33",
+        "0",
+        "1"
+      ]
+    ],
+    "expected": [
+      33,
+      0,
+      1
+    ],
+    "passed": true,
+    "unique_source_target": true
+  },
+  {
+    "command": [
+      "/usr/bin/sandbox-exec",
+      "-p",
+      "(version 1) (allow default) (deny network*)",
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-relay",
+      "people::"
+    ],
+    "exit_code": 0,
+    "seconds": 3.253279917058535,
+    "suites": [
+      [
+        "48",
+        "0",
+        "0"
+      ]
+    ],
+    "expected": [
+      48,
+      0,
+      0
+    ],
+    "passed": true,
+    "unique_source_target": true
+  }
+]
