@@ -5209,12 +5209,18 @@ pub fn build_rows_with_cache(
                 // (wordless, "Working…") must not get "didn't answer" under its own answer
                 // (Jacob, "run bubble sort", 2026-10-25). Another visible row of the same turn
                 // = an assistant row answering the same user message with words or a card.
+                //
+                // A hidden / job worker row does not count (#2964): this builder skips those
+                // above, so treating their "Done." / status text as an answer left the ask with
+                // no bubble and no stock line after a research job finished without a delivery.
                 let turn_answered_elsewhere = !failed
                     && message.in_reply_to.as_deref().is_some_and(|ask| {
                         messages.iter().any(|m| {
                             m.id != message.id
                                 && m.role == Role::Assistant
                                 && m.in_reply_to.as_deref() == Some(ask)
+                                && !m.hidden
+                                && m.job.is_none()
                                 && (!m.plain_text().trim().is_empty()
                                     || m.parts.iter().any(|p| {
                                         matches!(
@@ -11967,6 +11973,32 @@ mod presence_rows_tests {
             rows.iter()
                 .any(|r| matches!(r.kind, RowKind::NoAnswer { .. })),
             "a turn that said nothing keeps the stock line"
+        );
+    }
+
+    /// #2964 / feedback AG5fMKSEGcm19R9A3FU1oKw: a research ask left a wordless Done result
+    /// and a finished hidden job worker with "Done." on it. The worker is not a bubble —
+    /// counting it as "answered elsewhere" drew neither the answer nor the stock line.
+    #[test]
+    fn a_hidden_job_row_does_not_suppress_the_stock_line() {
+        let now = now_ms();
+        let mut worker = reply_row("j1", "u1", "done", "Done.", now + 2);
+        worker.hidden = true;
+        worker.job = Some(crate::model::JobRef {
+            id: "01JOBSUSHI000000000000000".into(),
+            title: "Finding sushi".into(),
+        });
+        let messages = [reply_row("r1", "u1", "done", "", now + 1), worker];
+        let rows = rows_of(&messages);
+        assert!(
+            rows.iter()
+                .any(|r| matches!(r.kind, RowKind::NoAnswer { .. })),
+            "stock line when only a hidden job spoke: {:?}",
+            rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>()
+        );
+        assert!(
+            rows.iter().all(|r| r.message_id != "j1"),
+            "the job row stays off the transcript"
         );
     }
 
