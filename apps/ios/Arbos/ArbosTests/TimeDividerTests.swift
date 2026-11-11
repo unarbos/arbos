@@ -120,4 +120,24 @@ final class TimeDividerTests: XCTestCase {
         XCTAssertTrue(stamp.hasPrefix("Today ") || stamp.contains(":"),
                       "the hour-gap stamp still names the later message's clock: \(stamp)")
     }
+
+    /// Jacob's TestFlight shot ([feedback AGgL7fykRs0BE9uiHscNCvk]): "Today" sat on
+    /// the bubble above it. The shared `systemGap` is equal above and below the stamp,
+    /// but a bubble's own vertical pad opens the space below before its text — so the
+    /// stamp needs its own top pad, and that pad is what this pins on the view.
+    /// Landed on main via #2982; kept here so this branch stays compatible after the merge.
+    func testTheDateStampKeepsAirAboveTheBubbleAboveIt() throws {
+        XCTAssertEqual(Transcript.stampTopPad, 16,
+                       "enough air that \"Today …\" clears the bubble above it")
+        XCTAssertGreaterThan(Transcript.stampTopPad, 0)
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Arbos/UI/Transcript.swift")
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw XCTSkip("sources not beside the test bundle (CI without the tree)")
+        }
+        let src = try String(contentsOf: url, encoding: .utf8)
+        XCTAssertTrue(src.contains(".padding(.top, Transcript.stampTopPad)"),
+                      "the centred system stamp draws the pad above its glyphs")
+    }
 }

@@ -346,11 +346,11 @@ enum Transcript {
     static let turnGap: CGFloat = 13
     /// Space around a centred system line (dates, hand-offs, membership notices).
     static let systemGap: CGFloat = 20
-    /// Extra air above a centred stamp inside its row. `systemGap` alone was landing
-    /// "Today …" on the bubble above it ([feedback today-stamp-gap-ios-2026-11-10] /
-    /// #2962 / AGgL7fykRs0BE9uiHscNCvk). The Mac already pads the stamp itself
-    /// (`STAMP_PAD_TOP`); this is the iPhone match.
-    static let systemStampTopPad: CGFloat = 16
+    /// Extra air above a centred stamp's glyphs. `systemGap` alone left "Today …"
+    /// hard against the bubble above it ([feedback AGgL7fykRs0BE9uiHscNCvk]); the
+    /// bubble below already opens `Theme.bubbleVPad` before its text, so only the
+    /// stamp's top needs this pad.
+    static let stampTopPad: CGFloat = 16
 
     /// Whether a message from `sender` at `at` continues the run that ended with
     /// `prevSender` at `prevAt`: the same sender, within `runWindowMs` of the run's last
@@ -767,10 +767,18 @@ enum Transcript {
                 // (wordless, "Working…") must not get "didn't answer" under its own answer
                 // (Jacob, "run bubble sort", 2026-10-25). Another visible row of the same turn
                 // = an assistant row answering the same user message with words or a card.
+                //
+                // A hidden / job worker row does not count (#2964): the transcript skips those
+                // above, so treating their "Done." / status text as an answer left the ask with
+                // no bubble and no stock line after a research job finished without a delivery.
                 let turnAnsweredElsewhere: Bool = {
                     guard !failed, let ask = message.inReplyTo else { return false }
                     return messages.contains { other in
-                        other.id != message.id && other.role == .assistant && other.inReplyTo == ask
+                        other.id != message.id
+                            && other.role == .assistant
+                            && other.inReplyTo == ask
+                            && !other.hidden
+                            && other.job == nil
                             && (!other.plainText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                                 || other.parts.contains { part in
                                     switch part {
@@ -1816,8 +1824,6 @@ struct RowView: View, Equatable {
                 Spacer(minLength: 0)
             }
         case .system(let icon, let text, let avatarProject):
-            // Extra air above the stamp: `systemGap` alone was landing "Today …"
-            // on the bubble above it ([feedback today-stamp-gap-ios-2026-11-10] / #2962).
             HStack(spacing: 5) {
                 if let icon {
                     Image(systemName: icon).font(.system(size: 13, weight: .regular))
@@ -1828,7 +1834,7 @@ struct RowView: View, Equatable {
             .foregroundStyle(theme.muted)
             .frame(maxWidth: .infinity)
             .multilineTextAlignment(.center)
-            .padding(.top, Transcript.systemStampTopPad)
+            .padding(.top, Transcript.stampTopPad)
         case .hidden(let count, _, let handle, let name):
             // The blocker's folded line ([feedback blocked-state-ios-2026-10-26]); Unblock
             // opens the person's sheet (its Unblock asks first).

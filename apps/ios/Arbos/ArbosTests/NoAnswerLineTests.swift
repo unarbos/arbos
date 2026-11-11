@@ -44,4 +44,20 @@ final class NoAnswerLineTests: XCTestCase {
         let rows = Transcript.rows([reply("r3", ask: "u2", text: "", at: t0)], projectId: "fx")
         XCTAssertEqual(stockLines(rows).count, 1, "\(rows.map(\.id))")
     }
+
+    /// #2964 / feedback AG5fMKSEGcm19R9A3FU1oKw: a research ask left a wordless Done result
+    /// row and a finished hidden job worker with "Done." on it. The worker is not a bubble —
+    /// counting it as "answered elsewhere" drew neither the answer nor the stock line.
+    func testAHiddenJobRowDoesNotSuppressTheStockLine() {
+        var worker = reply("j1", ask: "u1", text: "Done.", at: t0 + 2_000)
+        worker.hidden = true
+        worker.job = JobRef(["id": "01JOBSUSHI000000000000000", "title": "Finding sushi"])
+        let messages = [
+            reply("r1", ask: "u1", text: "", at: t0 + 1_000),
+            worker,
+        ]
+        let rows = Transcript.rows(messages, projectId: "fx")
+        XCTAssertEqual(stockLines(rows).count, 1, "stock line when only a hidden job spoke: \(rows.map(\.id))")
+        XCTAssertFalse(rows.contains { $0.messageId == "j1" }, "the job row stays off the transcript")
+    }
 }
