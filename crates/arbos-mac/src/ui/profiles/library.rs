@@ -1295,7 +1295,7 @@ mod render_tests {
                 cx,
             );
             // Library is an overview drill-in now (tab pill gone on group).
-            s.set_profile_subpage(Some(super::group::TAB_LIBRARY), cx);
+            s.set_profile_subpage(Some(crate::ui::profiles::group::TAB_LIBRARY), cx);
             cx.notify();
         });
         let (shell, vcx) = cx.add_window_view(|window, cx| Shell::new(state.clone(), window, cx));
