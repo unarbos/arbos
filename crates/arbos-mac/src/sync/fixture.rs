@@ -6616,6 +6616,32 @@ fn seed_chat_docs() -> Vec<ChatDoc> {
                 text("The deck follows last quarter's structure; the budget sheet has a variance column and a chart on the second tab."),
             ],
         );
+        // Jacob's case (2026-11-03): two pictures in one send, the charts he named.
+        // `ARBOS_FIXTURE_PICTURE_STACK=<n>` seeds `n` of them (screenshot rig).
+        if let Some(n) = std::env::var("ARBOS_FIXTURE_PICTURE_STACK")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|n| *n > 0)
+        {
+            let titles = ["Flip credit", "Weights v9", "Loss curve", "Throughput"];
+            let shots = (0..n)
+                .map(|i| {
+                    let title = titles[i % titles.len()];
+                    Attachment {
+                        name: format!("{}.png", title.to_lowercase().replace(' ', "-")),
+                        mime: "image/png".into(),
+                        blob_ref: Some(format!("seed-stack-{i}.png")),
+                        bytes: Some(214_000),
+                        kind: Some(AttachmentKind::Image),
+                        title: Some(title.into()),
+                        chart_part: None,
+                        url: None,
+                        source: None,
+                    }
+                })
+                .collect();
+            s.user_with_attachments("Both of these, side by side.", shots);
+        }
         // Jacob's case (chat-preview-cards-2026-10-23): the agent screenshots the
         // small page it made — a white page with its own empty top margin.
         s.user("Make me a small page with a button that counts clicks.");

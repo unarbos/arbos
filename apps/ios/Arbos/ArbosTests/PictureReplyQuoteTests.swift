@@ -42,7 +42,7 @@ final class PictureReplyQuoteTests: XCTestCase {
     private func shape(_ rows: [Row]) -> [String] {
         rows.compactMap { row in
             switch row.kind {
-            case .image(_, _, let caption, _, _, _, _, _, let quote):
+            case .image(_, _, let caption, _, _, _, _, _, let quote, _):
                 return "image quote=\(quote?.text ?? "-") caption=\(caption ?? "-")"
             case .file(_, _, _, _, _, _, let quote):
                 return "file quote=\(quote?.text ?? "-")"
@@ -92,7 +92,7 @@ final class PictureReplyQuoteTests: XCTestCase {
         // Rows also hold the date stamp: find the card rather than index it.
         var header: String?
         for row in out {
-            if case .image(_, _, _, _, _, let forwardedFrom, _, _, _) = row.kind { header = forwardedFrom; break }
+            if case .image(_, _, _, _, _, let forwardedFrom, _, _, _, _) = row.kind { header = forwardedFrom; break }
         }
         XCTAssertEqual(header, "Sam Rivera")
     }

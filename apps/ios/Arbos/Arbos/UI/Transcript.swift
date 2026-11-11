@@ -207,8 +207,12 @@ enum RowKind: Equatable {
     /// `quote`: a reply's quote header above the picture when this is the first media of a
     /// reply — a picture reply quotes like a text one ([feedback
     /// picture-reply-quote-ios-2026-10-28]); the caption bar under it then carries none.
+    /// `stack`: how many pictures this row stands for. `1` is a plain picture. From
+    /// `MediaStack.min` up, the row is the one "+N" tile the message's pictures
+    /// collapsed into (Jacob 2026-11-03) and `item` is the first of them.
     case image(item: MediaItem, fromUser: Bool, caption: String?, lane: Bool, source: AttachmentSource?,
-               forwardedFrom: String? = nil, sender: MediaSender? = nil, named: Bool = false, quote: Quote? = nil)
+               forwardedFrom: String? = nil, sender: MediaSender? = nil, named: Bool = false, quote: Quote? = nil,
+               stack: Int = 1)
     /// "Forwarded from <name>" under a forwarded attachment (media-viewer-2026-10-23).
     case forwardHint(text: String, fromUser: Bool)
     case error(code: String, message: String)
@@ -437,17 +441,18 @@ enum Transcript {
                 let who = hiddenRowAgent(message, in: messages)
                 let inLane = people && who.senderHandle != nil
                 let whoId: String? = who.sender.hasPrefix("agent:") ? String(who.sender.dropFirst(6)) : nil
-                let cards = message.parts.compactMap { part -> (String, Attachment)? in
+                let cards = message.parts.compactMap { part -> (id: String, a: Attachment)? in
                     if case .attachment(let id, let a) = part { return (id, a) }
                     return nil
                 }
-                for (ix, (id, a)) in cards.enumerated() {
-                    rows.append(attachmentRow(id: "\(message.id)#\(id)", message: message, a: a,
+                for (ix, card) in Self.collapsingPictures(cards).enumerated() {
+                    rows.append(attachmentRow(id: "\(message.id)#\(card.id)", message: message, a: card.attachment,
                                               projectId: projectId, fromUser: false, agentNames: agentNames,
                                               lane: inLane,
                                               sender: inLane ? .agent(id: whoId, handle: who.senderHandle ?? "",
                                                                       name: who.senderName, avatar: who.senderAvatar) : nil,
-                                              named: multiParty && inLane && ix == 0))
+                                              named: multiParty && inLane && ix == 0,
+                                              stack: card.stack))
                 }
                 continue
             }
@@ -547,19 +552,25 @@ enum Transcript {
                 } else {
                     replyQuote = message.replyTo.flatMap { $0.isEmpty ? nil : Quote.forReply($0, in: byId) }
                 }
-                for (i, part) in mediaParts.enumerated() {
-                    let cap = (i == lastCaptionable) ? mediaCaption : nil
+                // Two or more pictures in one message are one "+N" tile, not a full-size
+                // card each (Jacob 2026-11-03). The caption bar lands on the last card
+                // that still draws.
+                let cards = Self.collapsingPictures(mediaParts)
+                let lastCaptionableCard = cards.lastIndex { Self.isCaptionableMedia($0.attachment) }
+                for (i, card) in cards.enumerated() {
+                    let cap = (i == lastCaptionableCard) ? mediaCaption : nil
                     // Another person's picture / file sits left like their bubble, with their
                     // avatar beside it and their name on the first card when the run changes
                     // sender ([feedback forward-attachments-ios-2026-10-27]).
-                    chunk.append(attachmentRow(id: "\(message.id)#\(part.id)", message: message, a: part.a,
+                    chunk.append(attachmentRow(id: "\(message.id)#\(card.id)", message: message, a: card.attachment,
                                                projectId: projectId, fromUser: mine, agentNames: agentNames,
                                                caption: cap, lane: !mine,
                                                forwardedFrom: i == 0 && forwarded == nil ? forwardedBy : nil,
                                                sender: mine ? nil : .person(handle: message.senderHandle ?? "someone",
                                                                             avatar: message.senderAvatar),
                                                named: named && i == 0,
-                                               quote: i == 0 ? replyQuote : nil))
+                                               quote: i == 0 ? replyQuote : nil,
+                                               stack: card.stack))
                 }
                 if let forwarded {
                     chunk.append(Row(id: "\(message.id)#forwarded", messageId: message.id, role: mine ? .user : .project,
@@ -633,6 +644,14 @@ enum Transcript {
                 // prose takes it, and the first text block then does not repeat it
                 // ([feedback forward-attachments-ios-2026-10-27]).
                 var nameTaken = false
+                // An agent's pictures collapse into one "+N" tile the same way a send of
+                // mine does (Jacob 2026-11-03). A chart's fallback picture is not one of
+                // them: this app draws the chart instead.
+                let stackPictures = message.parts.indices.filter { i in
+                    guard case .attachment(_, let a) = message.parts[i], a.isImage else { return false }
+                    return a.chartPart.map(message.hasChartPart) != true
+                }
+                let stacked = stackPictures.count >= MediaStack.min
                 for (pix, part) in message.parts.enumerated() {
                     switch part {
                     case .text(let id, let text):
@@ -687,6 +706,9 @@ enum Transcript {
                         // The chart's fallback picture: an older app shows it, this one draws
                         // the chart instead ([feedback chart-bubble-ios-2026-10-26]).
                         break
+                    // A picture the "+N" tile swallowed draws no card of its own.
+                    case .attachment(_, _) where stacked && stackPictures.contains(pix) && stackPictures[0] != pix:
+                        break
                     case .attachment(let id, let a):
                         // A people-chat agent's picture / file sits in its lane with its avatar
                         // and names it when it is the message's first row (Scout's photo in
@@ -699,7 +721,8 @@ enum Transcript {
                                                    lane: inLane,
                                                    sender: inLane ? .agent(id: agentId, handle: message.senderHandle ?? "",
                                                                            name: message.senderName, avatar: message.senderAvatar) : nil,
-                                                   named: names))
+                                                   named: names,
+                                                   stack: stacked && stackPictures[0] == pix ? stackPictures.count : 1))
                     case .chart(let id, _, let spec, let table, _):
                         // A chart bubble's card: one block of the bubble, like a code card. It
                         // joins the caption's bubble when that is the row just before it.
@@ -876,7 +899,7 @@ enum Transcript {
         switch kind {
         case .other, .member: return true
         case .secretGhost(name: _, mine: let mine, handle: _, avatar: _, named: _): return !mine
-        case .image(item: _, fromUser: _, caption: _, lane: _, source: _, forwardedFrom: _, sender: let sender, named: _, quote: _),
+        case .image(item: _, fromUser: _, caption: _, lane: _, source: _, forwardedFrom: _, sender: let sender, named: _, quote: _, stack: _),
              .file(item: _, subtitle: _, caption: _, forwardedFrom: _, sender: let sender, named: _, quote: _):
             return sender != nil
         case .user, .assistant, .system, .hidden, .question, .voiceMemo, .forwardHint, .error: return false
@@ -1051,7 +1074,8 @@ enum Transcript {
     private static func attachmentRow(id: String, message: Message, a: Attachment, projectId: Id, fromUser: Bool,
                                       agentNames: [String: String], caption: String? = nil,
                                       lane: Bool = false, forwardedFrom: String? = nil,
-                                      sender: MediaSender? = nil, named: Bool = false, quote: Quote? = nil) -> Row {
+                                      sender: MediaSender? = nil, named: Bool = false, quote: Quote? = nil,
+                                      stack: Int = 1) -> Row {
         guard let kind = MediaAlbum.kind(of: a) else {
             return Row(id: id, messageId: message.id, role: fromUser ? .user : .assistant,
                        kind: .voiceMemo(name: a.name, projectId: projectId, ref: a.blobRef, fromUser: fromUser))
@@ -1061,7 +1085,8 @@ enum Transcript {
         if kind == .image {
             return Row(id: id, messageId: message.id, role: fromUser ? .user : .assistant,
                        kind: .image(item: item, fromUser: fromUser, caption: caption, lane: lane, source: a.source,
-                                    forwardedFrom: forwardedFrom, sender: sender, named: named, quote: quote))
+                                    forwardedFrom: forwardedFrom, sender: sender, named: named, quote: quote,
+                                    stack: stack))
         }
         // Video shows as a file card in the bubble (poster + Play live in the viewer).
         // A typed description rides the card as a caption bar (pictures/videos only).
@@ -1069,6 +1094,39 @@ enum Transcript {
                    kind: .file(item: item, subtitle: subtitle(for: a),
                                caption: kind == .video ? caption : nil, forwardedFrom: forwardedFrom,
                                sender: sender, named: named, quote: quote))
+    }
+
+    /// One attachment card the transcript will draw.
+    struct MediaCard {
+        let id: String
+        let attachment: Attachment
+        /// How many pictures this card stands for: `1` for a plain card, `n` for the
+        /// tile that `n` pictures collapsed into.
+        let stack: Int
+    }
+
+    /// Which of a message's attachment parts draw, once its pictures have collapsed
+    /// into one "+N" tile. Same rule as the Mac's `attachments::STACK_MIN`.
+    ///
+    /// `parts` is every attachment part in message order; the answer keeps that order.
+    /// A chart's fallback picture is already filtered out by the caller.
+    static func collapsingPictures(_ parts: [(id: String, a: Attachment)]) -> [MediaCard] {
+        let pictures = parts.filter { $0.a.isImage }.count
+        guard pictures >= MediaStack.min else {
+            return parts.map { MediaCard(id: $0.id, attachment: $0.a, stack: 1) }
+        }
+        var out: [MediaCard] = []
+        var taken = false
+        for part in parts {
+            guard part.a.isImage else {
+                out.append(MediaCard(id: part.id, attachment: part.a, stack: 1))
+                continue
+            }
+            if taken { continue }
+            taken = true
+            out.append(MediaCard(id: part.id, attachment: part.a, stack: pictures))
+        }
+        return out
     }
 
     /// Picture or video — the kinds that take a description bar with the send.
@@ -1933,7 +1991,7 @@ struct RowView: View, Equatable {
                     .frame(maxWidth: maxBubble, alignment: fromUser ? .trailing : .leading)
                 if !fromUser { Spacer(minLength: 0) }
             }
-        case .image(let item, let fromUser, _, let lane, _, _, let sender, let named, _) where item.sticker:
+        case .image(let item, let fromUser, _, let lane, _, _, let sender, let named, _, _) where item.sticker:
             // A picker sticker (ARB-544): the picture alone, fixed square, no bubble — like
             // Telegram / iMessage stickers; same lane rules as a picture.
             if let sender {
@@ -1950,7 +2008,7 @@ struct RowView: View, Equatable {
                     if !fromUser { Spacer(minLength: 0) }
                 }
             }
-        case .image(let item, let fromUser, let caption, let lane, let source, let forwardedFrom, let sender, let named, let quote):
+        case .image(let item, let fromUser, let caption, let lane, let source, let forwardedFrom, let sender, let named, let quote, let stack):
             // Same left edge and cap as an incoming bubble: after the avatar lane in a
             // people chat ([feedback ADUIX9xlGQxCSzeXke7JVBw], Mac Attachment.lane) — with
             // the sender's avatar in that lane and the name above the first card.
@@ -1959,7 +2017,7 @@ struct RowView: View, Equatable {
                     ImageBubble(item: item, chatId: chatId, fromUser: false,
                                 maxWidth: maxBubble - Theme.memberLane(composerInset: composerInset),
                                 caption: caption, mentions: mentions, source: source, forwardedFrom: forwardedFrom,
-                                quote: quote, onQuoteTap: onQuoteTap)
+                                quote: quote, onQuoteTap: onQuoteTap, stack: stack)
                         .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: false) }
                 }
             } else {
@@ -1969,7 +2027,7 @@ struct RowView: View, Equatable {
                     ImageBubble(item: item, chatId: chatId, fromUser: fromUser,
                                 maxWidth: lane ? maxBubble - Theme.memberLane(composerInset: composerInset) : maxBubble,
                                 caption: caption, mentions: mentions, source: source, forwardedFrom: forwardedFrom,
-                                quote: quote, onQuoteTap: onQuoteTap)
+                                quote: quote, onQuoteTap: onQuoteTap, stack: stack)
                         .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: fromUser) }
                     if !fromUser { Spacer(minLength: 0) }
                 }
@@ -2113,7 +2171,7 @@ struct RowView: View, Equatable {
         case .other, .member: return lane
         case .question(_, _, _, _, _, _, let inLane, _, _): return inLane ? lane : 0
         case .secretGhost(_, let mine, _, _, _): return mine ? 0 : lane
-        case .image(_, _, _, let inLane, _, _, let sender, _, _): return inLane || sender != nil ? lane : 0
+        case .image(_, _, _, let inLane, _, _, let sender, _, _, _): return inLane || sender != nil ? lane : 0
         case .file(_, _, _, _, let sender, _, _): return sender != nil ? lane : 0
         case .user, .assistant, .system, .hidden, .voiceMemo, .forwardHint, .error: return 0
         }
@@ -3189,6 +3247,26 @@ struct ForwardedHeader: View {
 /// A picture narrower than its bubble (portrait + long caption) sits centred at
 /// the top with a small inset and its own radius; one that spans the bubble is
 /// flush, exactly as a picture-only bubble.
+/// Several pictures in one message as one tile (Jacob 2026-11-03: two pictures drew as
+/// two full-size cards stacked down the chat). The Mac side is `attachments::STACK_*`.
+///
+/// `dim` and `label` are PROVISIONAL: Grok's reference image has not reached us yet.
+enum MediaStack {
+    /// How many pictures one message needs before its cards collapse into one tile.
+    static let min = 2
+    /// The scrim over the tile's picture, so the "+N" reads on a bright chart.
+    static let dim: Double = 0.45
+    /// The "+N" overlay's point size.
+    static let label: CGFloat = 34
+
+    /// What the overlay says.
+    ///
+    /// `n` is **every** picture of the message, not the ones hiding behind the first.
+    /// Jacob's report describes a two-picture message as carrying "+2", so the count is
+    /// the total. Read it as the remainder and a two-picture message would say "+1".
+    static func text(_ count: Int) -> String { "+\(count)" }
+}
+
 struct ImageBubble: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
@@ -3207,6 +3285,9 @@ struct ImageBubble: View {
     /// text bubble carries ([feedback picture-reply-quote-ios-2026-10-28]).
     var quote: Quote? = nil
     var onQuoteTap: ((Quote) -> Void)? = nil
+    /// How many pictures this bubble stands for; from `MediaStack.min` up it is the
+    /// message's "+N" tile and `item` is the first picture.
+    var stack: Int = 1
 
     @State private var image: UIImage?
     /// First frame only — shown while the bubble is off screen so the animation pauses.
@@ -3346,6 +3427,18 @@ struct ImageBubble: View {
                 }
             }
             .frame(width: picture.width, height: picture.height)
+            .overlay {
+                if stack >= MediaStack.min {
+                    ZStack {
+                        Color.black.opacity(MediaStack.dim)
+                        Text(MediaStack.text(stack))
+                            .font(theme.font(MediaStack.label, weight: .semibold))
+                            .foregroundStyle(.white)
+                    }
+                    .accessibilityElement()
+                    .accessibilityLabel("\(stack) images, tap to view")
+                }
+            }
             .clipShape(RoundedRectangle(cornerRadius: flush ? 0 : Self.pictureRadius, style: .continuous))
             .frame(width: g.size.width, height: g.size.height, alignment: flush ? .top : .bottom)
         }
