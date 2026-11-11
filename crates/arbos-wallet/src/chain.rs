@@ -102,9 +102,9 @@ fn now() -> u64 {
 
 // ---- offline ----------------------------------------------------------------------------------
 
-/// Everything offline signing needs, captured while online. Not secret, not per-account: one
-/// snapshot signs every cheque until the runtime upgrades (then cheques stop validating and the
-/// app takes a new one).
+/// Everything offline signing needs, captured while online. Not secret, not per-account. One
+/// snapshot signs cheques for [`MAX_ANCHOR_AGE`] blocks and reads them for as long as the
+/// runtime does not upgrade; the app takes a new one whenever it is online.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Snapshot {
     pub net: Net,
