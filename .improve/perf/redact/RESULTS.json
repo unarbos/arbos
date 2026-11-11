@@ -1,0 +1,1687 @@
+{
+  "before": {
+    "source_sha256": "8d081a1d5eda346e8f67bf019c3d7a545db65801f27e9ad8b648eca7d6a19fb1",
+    "git_commit": "2865cb29b806121d4a90f55ba6ce151a150279a0",
+    "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18) (Homebrew)",
+    "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+    "machine": "arm64",
+    "cpu": "Apple M5 Pro",
+    "cpu_count": 18
+  },
+  "after": {
+    "source_sha256": "aeebd4d52c2cec5fc7cd32f23e5cf51a371e011caf735b8462282aa98f48b568",
+    "git_commit": "2865cb29b806121d4a90f55ba6ce151a150279a0",
+    "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18) (Homebrew)",
+    "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+    "machine": "arm64",
+    "cpu": "Apple M5 Pro",
+    "cpu_count": 18
+  },
+  "compared_cases": 109,
+  "fingerprint": "9ec42eeb1a212e90",
+  "unchanged_key_prefix_table": true,
+  "profile": "release opt-level=3; debug=0; incremental=false; CARGO_BUILD_JOBS=2",
+  "artifact_bytes": 66506742,
+  "initial_scrub_and_classify_single_observation_ns": {
+    "before": 214083,
+    "after": 192250
+  },
+  "gate_results": {
+    "before": [
+      {
+        "gate": "fmt",
+        "seconds": 0.259645,
+        "exit_code": 0
+      },
+      {
+        "gate": "clippy",
+        "seconds": 2.73136,
+        "exit_code": 0
+      },
+      {
+        "gate": "check",
+        "seconds": 1.882815,
+        "exit_code": 0
+      },
+      {
+        "gate": "test",
+        "seconds": 1.842667,
+        "exit_code": 0,
+        "counts": {
+          "pass": 9,
+          "fail": 0,
+          "ignored": 0
+        }
+      },
+      {
+        "gate": "build",
+        "seconds": 0.161153,
+        "exit_code": 0
+      },
+      {
+        "gate": "release-benchmark-build",
+        "seconds": 3.182102,
+        "exit_code": 0
+      }
+    ],
+    "after": [
+      {
+        "gate": "fmt",
+        "seconds": 0.260012,
+        "exit_code": 0
+      },
+      {
+        "gate": "clippy",
+        "seconds": 0.51008,
+        "exit_code": 0
+      },
+      {
+        "gate": "check",
+        "seconds": 0.189272,
+        "exit_code": 0
+      },
+      {
+        "gate": "test",
+        "seconds": 0.687151,
+        "exit_code": 0,
+        "counts": {
+          "pass": 10,
+          "fail": 0,
+          "ignored": 0
+        }
+      },
+      {
+        "gate": "build",
+        "seconds": 0.167877,
+        "exit_code": 0
+      },
+      {
+        "gate": "release-benchmark-build",
+        "seconds": 0.632916,
+        "exit_code": 0
+      }
+    ]
+  },
+  "seed": 20261109,
+  "iterations_per_sample": 2000,
+  "summary": {
+    "redact_patterns": {
+      "units": "nanoseconds per call",
+      "before": {
+        "median": 50236.6665,
+        "min": 49745.9585,
+        "max": 52657.5205
+      },
+      "after": {
+        "median": 11969.75,
+        "min": 11844.75,
+        "max": 12124.7295
+      },
+      "median_speedup_ratio": 4.196968733682826,
+      "paired_median_saved_ns": 38193.9585,
+      "paired_median_saved_ns_bootstrap_95_ci": [
+        38005.0625,
+        38379.0205
+      ],
+      "paired_two_sided_sign_test_p": 9.5367431640625e-07,
+      "pairs": 21
+    },
+    "find_key_like": {
+      "units": "nanoseconds per call",
+      "before": {
+        "median": 30369.0415,
+        "min": 29995.5415,
+        "max": 40522.0
+      },
+      "after": {
+        "median": 1065.0,
+        "min": 1055.8125,
+        "max": 1093.75
+      },
+      "median_speedup_ratio": 28.51553192488263,
+      "paired_median_saved_ns": 29309.625,
+      "paired_median_saved_ns_bootstrap_95_ci": [
+        29150.9165,
+        29374.625
+      ],
+      "paired_two_sided_sign_test_p": 9.5367431640625e-07,
+      "pairs": 21
+    },
+    "redact_placeholders": {
+      "units": "nanoseconds per call",
+      "before": {
+        "median": 5758.458,
+        "min": 5673.146,
+        "max": 7476.5625
+      },
+      "after": {
+        "median": 1926.8955,
+        "min": 1896.9795,
+        "max": 1955.771
+      },
+      "median_speedup_ratio": 2.9884640864021943,
+      "paired_median_saved_ns": 3831.5829999999996,
+      "paired_median_saved_ns_bootstrap_95_ci": [
+        3801.333,
+        3883.1454999999996
+      ],
+      "paired_two_sided_sign_test_p": 9.5367431640625e-07,
+      "pairs": 21
+    },
+    "scrub_value": {
+      "units": "nanoseconds per call",
+      "before": {
+        "median": 111791.6665,
+        "min": 110642.833,
+        "max": 117932.9585
+      },
+      "after": {
+        "median": 26989.125,
+        "min": 26810.292,
+        "max": 27287.375
+      },
+      "median_speedup_ratio": 4.1421004386025855,
+      "paired_median_saved_ns": 84835.6455,
+      "paired_median_saved_ns_bootstrap_95_ci": [
+        84127.89600000001,
+        85354.875
+      ],
+      "paired_two_sided_sign_test_p": 9.5367431640625e-07,
+      "pairs": 21
+    }
+  },
+  "pairs": [
+    {
+      "pair": 0,
+      "order": [
+        "after",
+        "before"
+      ],
+      "observations": {
+        "after": {
+          "corpus_cases": 109,
+          "fingerprint": "9ec42eeb1a212e90",
+          "first_scrub_and_classify_ns": 154333,
+          "samples": [
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 24001750,
+              "workload": "redact_patterns"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 2127916,
+              "workload": "find_key_like"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 3856000,
+              "workload": "redact_placeholders"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 54064416,
+              "workload": "scrub_value"
+            }
+          ]
+        },
+        "before": {
+          "corpus_cases": 109,
+          "fingerprint": "9ec42eeb1a212e90",
+          "first_scrub_and_classify_ns": 700500,
+          "samples": [
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 100701250,
+              "workload": "redact_patterns"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 61077209,
+              "workload": "find_key_like"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 11622291,
+              "workload": "redact_placeholders"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 223583333,
+              "workload": "scrub_value"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "pair": 1,
+      "order": [
+        "after",
+        "before"
+      ],
+      "observations": {
+        "after": {
+          "corpus_cases": 109,
+          "fingerprint": "9ec42eeb1a212e90",
+          "first_scrub_and_classify_ns": 156875,
+          "samples": [
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 23924625,
+              "workload": "redact_patterns"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 2144958,
+              "workload": "find_key_like"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 3821042,
+              "workload": "redact_placeholders"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 53978250,
+              "workload": "scrub_value"
+            }
+          ]
+        },
+        "before": {
+          "corpus_cases": 109,
+          "fingerprint": "9ec42eeb1a212e90",
+          "first_scrub_and_classify_ns": 168416,
+          "samples": [
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 100244917,
+              "workload": "redact_patterns"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 60623500,
+              "workload": "find_key_like"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 11496375,
+              "workload": "redact_placeholders"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 224484750,
+              "workload": "scrub_value"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "pair": 2,
+      "order": [
+        "before",
+        "after"
+      ],
+      "observations": {
+        "before": {
+          "corpus_cases": 109,
+          "fingerprint": "9ec42eeb1a212e90",
+          "first_scrub_and_classify_ns": 181125,
+          "samples": [
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 99921041,
+              "workload": "redact_patterns"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 60437958,
+              "workload": "find_key_like"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 11391333,
+              "workload": "redact_placeholders"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 221592084,
+              "workload": "scrub_value"
+            }
+          ]
+        },
+        "after": {
+          "corpus_cases": 109,
+          "fingerprint": "9ec42eeb1a212e90",
+          "first_scrub_and_classify_ns": 153291,
+          "samples": [
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 23689500,
+              "workload": "redact_patterns"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 2133125,
+              "workload": "find_key_like"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 3873958,
+              "workload": "redact_placeholders"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 53822917,
+              "workload": "scrub_value"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "pair": 3,
+      "order": [
+        "before",
+        "after"
+      ],
+      "observations": {
+        "before": {
+          "corpus_cases": 109,
+          "fingerprint": "9ec42eeb1a212e90",
+          "first_scrub_and_classify_ns": 173292,
+          "samples": [
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 100011584,
+              "workload": "redact_patterns"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 60358416,
+              "workload": "find_key_like"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 11355750,
+              "workload": "redact_placeholders"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 222413125,
+              "workload": "scrub_value"
+            }
+          ]
+        },
+        "after": {
+          "corpus_cases": 109,
+          "fingerprint": "9ec42eeb1a212e90",
+          "first_scrub_and_classify_ns": 150667,
+          "samples": [
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 24020083,
+              "workload": "redact_patterns"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 2128041,
+              "workload": "find_key_like"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 3880083,
+              "workload": "redact_placeholders"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 53710583,
+              "workload": "scrub_value"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "pair": 4,
+      "order": [
+        "after",
+        "before"
+      ],
+      "observations": {
+        "after": {
+          "corpus_cases": 109,
+          "fingerprint": "9ec42eeb1a212e90",
+          "first_scrub_and_classify_ns": 147917,
+          "samples": [
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 24173959,
+              "workload": "redact_patterns"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 2163875,
+              "workload": "find_key_like"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 3911542,
+              "workload": "redact_placeholders"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 54230250,
+              "workload": "scrub_value"
+            }
+          ]
+        },
+        "before": {
+          "corpus_cases": 109,
+          "fingerprint": "9ec42eeb1a212e90",
+          "first_scrub_and_classify_ns": 181750,
+          "samples": [
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 100932000,
+              "workload": "redact_patterns"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 61046584,
+              "workload": "find_key_like"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 11532375,
+              "workload": "redact_placeholders"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 225920833,
+              "workload": "scrub_value"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "pair": 5,
+      "order": [
+        "before",
+        "after"
+      ],
+      "observations": {
+        "before": {
+          "corpus_cases": 109,
+          "fingerprint": "9ec42eeb1a212e90",
+          "first_scrub_and_classify_ns": 165167,
+          "samples": [
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 99688000,
+              "workload": "redact_patterns"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 60894625,
+              "workload": "find_key_like"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 11432083,
+              "workload": "redact_placeholders"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 223574500,
+              "workload": "scrub_value"
+            }
+          ]
+        },
+        "after": {
+          "corpus_cases": 109,
+          "fingerprint": "9ec42eeb1a212e90",
+          "first_scrub_and_classify_ns": 151042,
+          "samples": [
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 24249459,
+              "workload": "redact_patterns"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 2111625,
+              "workload": "find_key_like"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 3852416,
+              "workload": "redact_placeholders"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 53903209,
+              "workload": "scrub_value"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "pair": 6,
+      "order": [
+        "before",
+        "after"
+      ],
+      "observations": {
+        "before": {
+          "corpus_cases": 109,
+          "fingerprint": "9ec42eeb1a212e90",
+          "first_scrub_and_classify_ns": 195959,
+          "samples": [
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 101077625,
+              "workload": "redact_patterns"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 61457834,
+              "workload": "find_key_like"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 11656292,
+              "workload": "redact_placeholders"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 231594584,
+              "workload": "scrub_value"
+            }
+          ]
+        },
+        "after": {
+          "corpus_cases": 109,
+          "fingerprint": "9ec42eeb1a212e90",
+          "first_scrub_and_classify_ns": 150125,
+          "samples": [
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 24213292,
+              "workload": "redact_patterns"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 2126084,
+              "workload": "find_key_like"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 3874250,
+              "workload": "redact_placeholders"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 54000625,
+              "workload": "scrub_value"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "pair": 7,
+      "order": [
+        "after",
+        "before"
+      ],
+      "observations": {
+        "after": {
+          "corpus_cases": 109,
+          "fingerprint": "9ec42eeb1a212e90",
+          "first_scrub_and_classify_ns": 148708,
+          "samples": [
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 23878542,
+              "workload": "redact_patterns"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 2130000,
+              "workload": "find_key_like"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 3829959,
+              "workload": "redact_placeholders"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 53679375,
+              "workload": "scrub_value"
+            }
+          ]
+        },
+        "before": {
+          "corpus_cases": 109,
+          "fingerprint": "9ec42eeb1a212e90",
+          "first_scrub_and_classify_ns": 169416,
+          "samples": [
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 102387375,
+              "workload": "redact_patterns"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 60427917,
+              "workload": "find_key_like"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 11346292,
+              "workload": "redact_placeholders"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 228854792,
+              "workload": "scrub_value"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "pair": 8,
+      "order": [
+        "after",
+        "before"
+      ],
+      "observations": {
+        "after": {
+          "corpus_cases": 109,
+          "fingerprint": "9ec42eeb1a212e90",
+          "first_scrub_and_classify_ns": 148166,
+          "samples": [
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 24238833,
+              "workload": "redact_patterns"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 2139958,
+              "workload": "find_key_like"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 3865500,
+              "workload": "redact_placeholders"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 54161666,
+              "workload": "scrub_value"
+            }
+          ]
+        },
+        "before": {
+          "corpus_cases": 109,
+          "fingerprint": "9ec42eeb1a212e90",
+          "first_scrub_and_classify_ns": 181125,
+          "samples": [
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 99942458,
+              "workload": "redact_patterns"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 60220959,
+              "workload": "find_key_like"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 11458667,
+              "workload": "redact_placeholders"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 221285666,
+              "workload": "scrub_value"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "pair": 9,
+      "order": [
+        "before",
+        "after"
+      ],
+      "observations": {
+        "before": {
+          "corpus_cases": 109,
+          "fingerprint": "9ec42eeb1a212e90",
+          "first_scrub_and_classify_ns": 176791,
+          "samples": [
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 99659709,
+              "workload": "redact_patterns"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 60526208,
+              "workload": "find_key_like"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 11512708,
+              "workload": "redact_placeholders"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 221781542,
+              "workload": "scrub_value"
+            }
+          ]
+        },
+        "after": {
+          "corpus_cases": 109,
+          "fingerprint": "9ec42eeb1a212e90",
+          "first_scrub_and_classify_ns": 154125,
+          "samples": [
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 23918709,
+              "workload": "redact_patterns"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 2125833,
+              "workload": "find_key_like"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 3844333,
+              "workload": "redact_placeholders"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 54574750,
+              "workload": "scrub_value"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "pair": 10,
+      "order": [
+        "after",
+        "before"
+      ],
+      "observations": {
+        "after": {
+          "corpus_cases": 109,
+          "fingerprint": "9ec42eeb1a212e90",
+          "first_scrub_and_classify_ns": 150375,
+          "samples": [
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 24131458,
+              "workload": "redact_patterns"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 2187500,
+              "workload": "find_key_like"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 3853791,
+              "workload": "redact_placeholders"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 54168875,
+              "workload": "scrub_value"
+            }
+          ]
+        },
+        "before": {
+          "corpus_cases": 109,
+          "fingerprint": "9ec42eeb1a212e90",
+          "first_scrub_and_classify_ns": 176208,
+          "samples": [
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 99618458,
+              "workload": "redact_patterns"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 60489333,
+              "workload": "find_key_like"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 11665792,
+              "workload": "redact_placeholders"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 222212292,
+              "workload": "scrub_value"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "pair": 11,
+      "order": [
+        "after",
+        "before"
+      ],
+      "observations": {
+        "after": {
+          "corpus_cases": 109,
+          "fingerprint": "9ec42eeb1a212e90",
+          "first_scrub_and_classify_ns": 144208,
+          "samples": [
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 23791459,
+              "workload": "redact_patterns"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 2114958,
+              "workload": "find_key_like"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 3869375,
+              "workload": "redact_placeholders"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 53708375,
+              "workload": "scrub_value"
+            }
+          ]
+        },
+        "before": {
+          "corpus_cases": 109,
+          "fingerprint": "9ec42eeb1a212e90",
+          "first_scrub_and_classify_ns": 165458,
+          "samples": [
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 105315041,
+              "workload": "redact_patterns"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 81044000,
+              "workload": "find_key_like"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 14953125,
+              "workload": "redact_placeholders"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 235865917,
+              "workload": "scrub_value"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "pair": 12,
+      "order": [
+        "before",
+        "after"
+      ],
+      "observations": {
+        "before": {
+          "corpus_cases": 109,
+          "fingerprint": "9ec42eeb1a212e90",
+          "first_scrub_and_classify_ns": 173833,
+          "samples": [
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 101871500,
+              "workload": "redact_patterns"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 60738083,
+              "workload": "find_key_like"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 11396625,
+              "workload": "redact_placeholders"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 222105000,
+              "workload": "scrub_value"
+            }
+          ]
+        },
+        "after": {
+          "corpus_cases": 109,
+          "fingerprint": "9ec42eeb1a212e90",
+          "first_scrub_and_classify_ns": 168167,
+          "samples": [
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 24059875,
+              "workload": "redact_patterns"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 2118833,
+              "workload": "find_key_like"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 3793959,
+              "workload": "redact_placeholders"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 53943625,
+              "workload": "scrub_value"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "pair": 13,
+      "order": [
+        "after",
+        "before"
+      ],
+      "observations": {
+        "after": {
+          "corpus_cases": 109,
+          "fingerprint": "9ec42eeb1a212e90",
+          "first_scrub_and_classify_ns": 221291,
+          "samples": [
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 23923875,
+              "workload": "redact_patterns"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 2117500,
+              "workload": "find_key_like"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 3818291,
+              "workload": "redact_placeholders"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 53688542,
+              "workload": "scrub_value"
+            }
+          ]
+        },
+        "before": {
+          "corpus_cases": 109,
+          "fingerprint": "9ec42eeb1a212e90",
+          "first_scrub_and_classify_ns": 176583,
+          "samples": [
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 101155375,
+              "workload": "redact_patterns"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 60866750,
+              "workload": "find_key_like"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 11450250,
+              "workload": "redact_placeholders"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 227020208,
+              "workload": "scrub_value"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "pair": 14,
+      "order": [
+        "before",
+        "after"
+      ],
+      "observations": {
+        "before": {
+          "corpus_cases": 109,
+          "fingerprint": "9ec42eeb1a212e90",
+          "first_scrub_and_classify_ns": 165667,
+          "samples": [
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 100552250,
+              "workload": "redact_patterns"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 61264875,
+              "workload": "find_key_like"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 11516916,
+              "workload": "redact_placeholders"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 224007541,
+              "workload": "scrub_value"
+            }
+          ]
+        },
+        "after": {
+          "corpus_cases": 109,
+          "fingerprint": "9ec42eeb1a212e90",
+          "first_scrub_and_classify_ns": 156042,
+          "samples": [
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 24164333,
+              "workload": "redact_patterns"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 2166250,
+              "workload": "find_key_like"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 3853750,
+              "workload": "redact_placeholders"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 54279000,
+              "workload": "scrub_value"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "pair": 15,
+      "order": [
+        "after",
+        "before"
+      ],
+      "observations": {
+        "after": {
+          "corpus_cases": 109,
+          "fingerprint": "9ec42eeb1a212e90",
+          "first_scrub_and_classify_ns": 155125,
+          "samples": [
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 23939500,
+              "workload": "redact_patterns"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 2185375,
+              "workload": "find_key_like"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 3859458,
+              "workload": "redact_placeholders"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 53788000,
+              "workload": "scrub_value"
+            }
+          ]
+        },
+        "before": {
+          "corpus_cases": 109,
+          "fingerprint": "9ec42eeb1a212e90",
+          "first_scrub_and_classify_ns": 183000,
+          "samples": [
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 100667208,
+              "workload": "redact_patterns"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 60156208,
+              "workload": "find_key_like"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 11615458,
+              "workload": "redact_placeholders"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 222034916,
+              "workload": "scrub_value"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "pair": 16,
+      "order": [
+        "before",
+        "after"
+      ],
+      "observations": {
+        "before": {
+          "corpus_cases": 109,
+          "fingerprint": "9ec42eeb1a212e90",
+          "first_scrub_and_classify_ns": 174833,
+          "samples": [
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 99491917,
+              "workload": "redact_patterns"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 60879500,
+              "workload": "find_key_like"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 11535375,
+              "workload": "redact_placeholders"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 222365709,
+              "workload": "scrub_value"
+            }
+          ]
+        },
+        "after": {
+          "corpus_cases": 109,
+          "fingerprint": "9ec42eeb1a212e90",
+          "first_scrub_and_classify_ns": 150000,
+          "samples": [
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 23930167,
+              "workload": "redact_patterns"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 2134250,
+              "workload": "find_key_like"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 3897000,
+              "workload": "redact_placeholders"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 54109917,
+              "workload": "scrub_value"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "pair": 17,
+      "order": [
+        "before",
+        "after"
+      ],
+      "observations": {
+        "before": {
+          "corpus_cases": 109,
+          "fingerprint": "9ec42eeb1a212e90",
+          "first_scrub_and_classify_ns": 174292,
+          "samples": [
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 100473333,
+              "workload": "redact_patterns"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 60710917,
+              "workload": "find_key_like"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 11633166,
+              "workload": "redact_placeholders"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 226857458,
+              "workload": "scrub_value"
+            }
+          ]
+        },
+        "after": {
+          "corpus_cases": 109,
+          "fingerprint": "9ec42eeb1a212e90",
+          "first_scrub_and_classify_ns": 160709,
+          "samples": [
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 23790500,
+              "workload": "redact_patterns"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 2117375,
+              "workload": "find_key_like"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 3840667,
+              "workload": "redact_placeholders"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 53620584,
+              "workload": "scrub_value"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "pair": 18,
+      "order": [
+        "after",
+        "before"
+      ],
+      "observations": {
+        "after": {
+          "corpus_cases": 109,
+          "fingerprint": "9ec42eeb1a212e90",
+          "first_scrub_and_classify_ns": 169459,
+          "samples": [
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 23903458,
+              "workload": "redact_patterns"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 2119000,
+              "workload": "find_key_like"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 3862959,
+              "workload": "redact_placeholders"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 53905333,
+              "workload": "scrub_value"
+            }
+          ]
+        },
+        "before": {
+          "corpus_cases": 109,
+          "fingerprint": "9ec42eeb1a212e90",
+          "first_scrub_and_classify_ns": 184458,
+          "samples": [
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 99913583,
+              "workload": "redact_patterns"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 59991083,
+              "workload": "find_key_like"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 11638958,
+              "workload": "redact_placeholders"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 224155084,
+              "workload": "scrub_value"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "pair": 19,
+      "order": [
+        "before",
+        "after"
+      ],
+      "observations": {
+        "before": {
+          "corpus_cases": 109,
+          "fingerprint": "9ec42eeb1a212e90",
+          "first_scrub_and_classify_ns": 172542,
+          "samples": [
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 101056500,
+              "workload": "redact_patterns"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 60788125,
+              "workload": "find_key_like"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 11401750,
+              "workload": "redact_placeholders"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 223169000,
+              "workload": "scrub_value"
+            }
+          ]
+        },
+        "after": {
+          "corpus_cases": 109,
+          "fingerprint": "9ec42eeb1a212e90",
+          "first_scrub_and_classify_ns": 150250,
+          "samples": [
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 23949625,
+              "workload": "redact_patterns"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 2141000,
+              "workload": "find_key_like"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 3815958,
+              "workload": "redact_placeholders"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 54001792,
+              "workload": "scrub_value"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "pair": 20,
+      "order": [
+        "before",
+        "after"
+      ],
+      "observations": {
+        "before": {
+          "corpus_cases": 109,
+          "fingerprint": "9ec42eeb1a212e90",
+          "first_scrub_and_classify_ns": 196083,
+          "samples": [
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 100160958,
+              "workload": "redact_patterns"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 60802500,
+              "workload": "find_key_like"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 11625500,
+              "workload": "redact_placeholders"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 224711125,
+              "workload": "scrub_value"
+            }
+          ]
+        },
+        "after": {
+          "corpus_cases": 109,
+          "fingerprint": "9ec42eeb1a212e90",
+          "first_scrub_and_classify_ns": 149125,
+          "samples": [
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 23935958,
+              "workload": "redact_patterns"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 2161791,
+              "workload": "find_key_like"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 3843792,
+              "workload": "redact_placeholders"
+            },
+            {
+              "iterations": 2000,
+              "round": 0,
+              "total_ns": 54001375,
+              "workload": "scrub_value"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "limits": "Warm release microbenchmark of one actual source module, not app latency. scrub_value includes cloning a JSON fixture with two text leaves and scalar values; all inputs are deterministic synthetic cases."
+}

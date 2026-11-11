@@ -1940,4 +1940,95 @@ mod inbox_tests {
             .is_empty());
         let _ = json!({});
     }
+
+    /// Call-ended fallback: a job that finishes after the call is gone still announces into
+    /// the chat (push / unread), but nothing is queued for a voice session that is no longer live.
+    #[tokio::test]
+    async fn a_job_after_the_call_ends_stays_in_chat_and_does_not_reach_a_voice_inbox() {
+        let mut state = test_state(AuthMode::Github);
+        state.livekit = Some(crate::livekit::LiveKit::new(
+            "wss://lk.test",
+            "APIkey",
+            "secret123",
+            None,
+        ));
+        let (alice, alice_dev) = person(&state, 1);
+        let (_bob, _) = person(&state, 2);
+        let bubble = project_of(&state, &alice, "Bubble");
+        let r = crate::people::chats_create_group(
+            State(state.clone()),
+            alice_dev.clone(),
+            Json(crate::people::CreateGroupBody {
+                kind: "group".into(),
+                members: vec!["user2".into()],
+                agent_ids: vec![bubble.clone()],
+                title: Some("Shell".into()),
+                avatar_disc_color: None,
+                description: None,
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let chat = state
+            .db
+            .chats_of_member(&format!("user:{alice}"))
+            .unwrap()
+            .into_iter()
+            .find(|cm| cm.chat.kind == "group")
+            .expect("the group")
+            .chat
+            .id;
+        let chat_ref = ChatRef::people(&chat);
+        let agent = Sender::agent(&state, &state.db.project(&bubble).unwrap().unwrap());
+
+        let r = start_people_call(
+            State(state.clone()),
+            alice_dev.clone(),
+            Path(chat.clone()),
+            HeaderMap::new(),
+            Some(Json(StartBody {
+                kind: Some("voice".into()),
+                ring: None,
+            })),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::CREATED);
+        let call_id = body_json(r).await["call"]["call_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        state.db.call_agent_join(&call_id, &bubble).unwrap();
+        state.voice_inbox.close_call(&call_id).await;
+        // End the call row so active_call_in_chat is None (same as hang-up).
+        assert!(state.db.end_call(&call_id, "hangup").unwrap());
+
+        let body = notify(
+            "job-after",
+            "ls: README.md Cargo.toml",
+            Some("job"),
+            Some("ls: README.md Cargo.toml"),
+        );
+        // Chat path still records the announce (unread / push fan-out).
+        let event_id = crate::notify::announce_with(
+            &state,
+            &chat_ref,
+            &agent,
+            &body.message_id,
+            &body.text,
+            None,
+            &[],
+        )
+        .await;
+        assert!(
+            event_id.is_some(),
+            "job result still lands in the chat after the call"
+        );
+        // Voice path is a no-op: no live call to wake.
+        call_update(&state, &chat_ref, &agent, &body).await;
+        let (items, _) = state.voice_inbox.take(&call_id, &bubble, 0).await;
+        assert!(
+            items.is_empty(),
+            "ended call must not receive a spoken follow-up queue: {items:?}"
+        );
+    }
 }

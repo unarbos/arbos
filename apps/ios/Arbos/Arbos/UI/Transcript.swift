@@ -1514,6 +1514,12 @@ struct RowView: View, Equatable {
     /// Fixed 56 pt wrapped at Largest ([feedback scaled-timestamp-clip-mac-2026-10-29] / #2310).
     static func timeRevealWidth(_ theme: Theme) -> CGFloat { theme.pt(56) }
 
+    /// Reply-count digit inset from the bubble's top-trailing corner
+    /// ([feedback ADc6sZtZP2moU0knIJ_ifHs]). Must clear `Theme.bubbleRadius`'s continuous
+    /// curve — 6/8 sat inside it.
+    static let replyCountTop: CGFloat = 10
+    static let replyCountTrailing: CGFloat = 12
+
     /// Skip re-drawing when the parent re-evaluates for an unrelated reason
     /// (composer keystrokes, presence ticks). Closures are not compared — they
     /// stay valid for the open chat.
@@ -1972,15 +1978,16 @@ struct RowView: View, Equatable {
         }
     }
 
-    /// Reply count in the bubble's top-right corner when this message has replies.
+    /// Reply count in the bubble's top-right corner when this message has replies
+    /// ([feedback ADc6sZtZP2moU0knIJ_ifHs]).
     @ViewBuilder
     private func replyCountBadge(userBubble: Bool) -> some View {
         if row.replyCount > 0 {
             Text("\(row.replyCount)")
                 .font(theme.font(11, weight: .semibold))
                 .foregroundStyle(userBubble ? theme.userText.opacity(0.7) : theme.muted)
-                .padding(.top, 6)
-                .padding(.trailing, 8)
+                .padding(.top, Self.replyCountTop)
+                .padding(.trailing, Self.replyCountTrailing)
                 .accessibilityLabel("\(row.replyCount) \(row.replyCount == 1 ? "reply" : "replies")")
         }
     }
