@@ -152,6 +152,9 @@ enum BackSwipe {
     /// only on a list that was already moving. At rest nothing waits, as before.
     static func waitsForBack(_ other: UIGestureRecognizer) -> Bool {
         guard let scroll = other.view as? UIScrollView, other === scroll.panGestureRecognizer else { return false }
+        // A markdown table gliding sideways keeps its own pan: a second flick scrolls it on,
+        // it does not leave the chat.
+        if scroll.contentSize.width > scroll.bounds.width + 1 { return false }
         return scroll.isDecelerating
     }
 }
