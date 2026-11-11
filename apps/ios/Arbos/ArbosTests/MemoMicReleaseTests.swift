@@ -120,8 +120,16 @@ final class MemoMicReleaseTests: XCTestCase {
         let text = try String(contentsOf: url, encoding: .utf8)
         XCTAssertTrue(text.contains("CallManager.micGranted()"),
                       "MemoRecorder.start must use CallManager.micGranted — the deprecated AVAudioSession.requestRecordPermission callback can fail to fire")
+        // Code only: a comment may still name the deprecated API.
+        let code = text
+            .components(separatedBy: "\n")
+            .map { line -> String in
+                guard let range = line.range(of: "//") else { return line }
+                return String(line[..<range.lowerBound])
+            }
+            .joined(separator: "\n")
         XCTAssertFalse(
-            text.contains("requestRecordPermission"),
+            code.contains("requestRecordPermission"),
             "MemoRecorder must not call AVAudioSession.requestRecordPermission")
     }
 
