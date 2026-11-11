@@ -3128,6 +3128,7 @@ struct ChatSession: View {
     /// reaction). The composer is focused again only if it was before the press and the
     /// action leaves the chat on screen (`MessageActionsKeyboard.restoresFocus`).
     private func closeActions(after item: MessageMenuItem? = nil) {
+        ChatGestures.heldIntoMenu = false
         let restore = MessageActionsKeyboard.restoresFocus(wasFocused: actionsRestoresKeyboard, after: item)
         actionsRestoresKeyboard = false
         withAnimation(.easeOut(duration: 0.15)) { actionsRow = nil }

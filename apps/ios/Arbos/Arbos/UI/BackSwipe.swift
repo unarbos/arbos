@@ -165,6 +165,19 @@ enum ChatGestures {
     static let backSwipe = on("back")
     static let longPress = on("longpress")
 
+    /// A hold just opened the message menu. The row's long-press runs alongside the
+    /// picture's tap, and a tap has no time limit, so the finger that held also "taps"
+    /// when it lifts — and the media viewer covered the menu it had just opened. That one
+    /// tap is spent here; closing the menu clears it, so a hold that ended without a tap
+    /// never eats the next real one.
+    static var heldIntoMenu = false
+
+    /// True (once) when this tap is the end of the hold that opened the menu.
+    static func tapEndsHold() -> Bool {
+        defer { heldIntoMenu = false }
+        return heldIntoMenu
+    }
+
     private static func on(_ name: String) -> Bool {
         #if DEBUG
         return !DebugHooks.gesturesOff.contains(name)

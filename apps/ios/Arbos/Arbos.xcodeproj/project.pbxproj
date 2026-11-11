@@ -55,6 +55,7 @@
 		A1F7A0000000000000000002 /* ProfileToggle.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F7A0000000000000000001 /* ProfileToggle.swift */; };
 		A1BB00000000000000000002 /* BackSwipe.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000001 /* BackSwipe.swift */; };
 		A1BB00000000000000000004 /* BackSwipeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000003 /* BackSwipeTests.swift */; };
+		A1D07D075000000000000002 /* MediaViewerDotsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D07D075000000000000001 /* MediaViewerDotsTests.swift */; };
 		A1DA6B00000000000000B002 /* BackDragTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1DA6B00000000000000B001 /* BackDragTests.swift */; };
 		A1DA6B00000000000000B004 /* ChatSwipeTrackingUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1DA6B00000000000000B003 /* ChatSwipeTrackingUITests.swift */; };
 		A1BB00000000000000000006 /* BackSwipeUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000005 /* BackSwipeUITests.swift */; };
@@ -322,6 +323,7 @@
 		A1F7A0000000000000000001 /* ProfileToggle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileToggle.swift; sourceTree = "<group>"; };
 		A1BB00000000000000000001 /* BackSwipe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackSwipe.swift; sourceTree = "<group>"; };
 		A1BB00000000000000000003 /* BackSwipeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackSwipeTests.swift; sourceTree = "<group>"; };
+		A1D07D075000000000000001 /* MediaViewerDotsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaViewerDotsTests.swift; sourceTree = "<group>"; };
 		A1DA6B00000000000000B001 /* BackDragTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackDragTests.swift; sourceTree = "<group>"; };
 		A1DA6B00000000000000B003 /* ChatSwipeTrackingUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatSwipeTrackingUITests.swift; sourceTree = "<group>"; };
 		A1BB00000000000000000005 /* BackSwipeUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackSwipeUITests.swift; sourceTree = "<group>"; };
@@ -809,6 +811,7 @@
 				A15EC9000000000000000103 /* SecretHandoffTests.swift */,
 				A1C5440000000000000003 /* ShellApprovalCardTests.swift */,
 				A1BB00000000000000000003 /* BackSwipeTests.swift */,
+				A1D07D075000000000000001 /* MediaViewerDotsTests.swift */,
 				A1DA6B00000000000000B001 /* BackDragTests.swift */,
 			);
 			path = ArbosTests;
@@ -1198,6 +1201,7 @@
 				A1F200000000000000000002 /* MemoMicReleaseTests.swift in Sources */,
 				A1E100000000000000000052 /* HiddenJobRowAttachmentTests.swift in Sources */,
 				A1BB00000000000000000004 /* BackSwipeTests.swift in Sources */,
+				A1D07D075000000000000002 /* MediaViewerDotsTests.swift in Sources */,
 				A1F100000000000000000002 /* NoAnswerLineTests.swift in Sources */,
 				A1F100000000000000000004 /* MarkdownTableTests.swift in Sources */,
 				A1F100000000000000000008 /* LinkIconTests.swift in Sources */,
