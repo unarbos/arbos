@@ -31,11 +31,14 @@ struct WalletPage: View {
                         .accessibilityLabel("Copy address")
                     }
                 }
-                SettingsGroup(footer: "Anyone you chat with can send you TAO cheques. Off: your address stays private.") {
-                    Toggle("Get paid by @\(model.user?.login ?? "handle")", isOn: Binding(get: { payable }, set: setPayable))
-                        .tint(theme.accent)
-                        .padding(.horizontal, 16)
-                        .frame(minHeight: SettingsRow.height)
+                // The link exists only so people can send cheques to a handle.
+                if Wallet.chequesEnabled {
+                    SettingsGroup(footer: "Anyone you chat with can send you TAO cheques. Off: your address stays private.") {
+                        Toggle("Get paid by @\(model.user?.login ?? "handle")", isOn: Binding(get: { payable }, set: setPayable))
+                            .tint(theme.accent)
+                            .padding(.horizontal, 16)
+                            .frame(minHeight: SettingsRow.height)
+                    }
                 }
                 SettingsGroup(footer: "The phrase opens your encrypted chats on a new device and controls your TAO. It is in your iCloud Keychain; anyone who sees it can take both.") {
                     SettingsValueRow("Chat history backup", value: Self.backupLabel(backup))
@@ -242,7 +245,7 @@ struct ChequeCard: View {
                 Text(note).font(theme.font(Theme.small)).foregroundStyle(theme.muted)
             } else if cashed {
                 Label("Cashed", systemImage: "checkmark.circle.fill").font(theme.font(Theme.small)).foregroundStyle(theme.online)
-            } else if let c = cheque, !mine, c.to == model.walletAddressValue {
+            } else if Wallet.chequesEnabled, let c = cheque, !mine, c.to == model.walletAddressValue {
                 Button(cashing ? "Cashing…" : "Cash it") { cash() }
                     .buttonStyle(.borderedProminent).tint(theme.accent).disabled(cashing)
             } else if mine {

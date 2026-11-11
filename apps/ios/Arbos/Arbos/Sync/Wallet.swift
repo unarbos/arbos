@@ -23,6 +23,17 @@ enum WalletPrompt: Identifiable, Equatable {
     }
 }
 
+enum Wallet {
+    /// TAO cheques are off: nothing in the app signs or cashes one. Turn this on only once
+    /// all three hold:
+    /// 1. the payee address is shown and confirmed before signing (today it comes from the
+    ///    relay's `GET /users/{id}/wallet` unseen, so a compromised relay could redirect funds);
+    /// 2. cheques are mortal (today `arbos-wallet` signs them `.immortal()`, with no expiry);
+    /// 3. the nonce is kept per address and only advances on a sent cheque (today
+    ///    `walletNextNonce` is one global integer, bumped even when the send fails).
+    static let chequesEnabled = false
+}
+
 /// Keychain items for the wallet. The phrase syncs through iCloud Keychain; the Matrix store
 /// key never leaves this device.
 enum WalletVault {
@@ -194,6 +205,7 @@ extension AppModel {
     /// Sign a cheque to the other person in a DM and send it there. Works offline once a
     /// snapshot exists; the address comes from the relay when online. Returns an error to show.
     func sendCheque(chatId: Id, amount: String) async -> String? {
+        guard Wallet.chequesEnabled else { return "Cheques aren't available yet." }
         guard let phrase = walletPhrase else { return "Set up your wallet first." }
         guard let chat = peopleChat(chatId), let me = user,
               let peer = chat.humans.first(where: { $0.id != me.id }) else {
@@ -227,6 +239,7 @@ extension AppModel {
 
     /// Cash a cheque; nil on success, else why it bounced.
     func cashCheque(_ bytes: String) async -> String? {
+        guard Wallet.chequesEnabled else { return "Cheques aren't available yet." }
         do {
             _ = try await walletCashCheque(bytes: bytes)
             var cashed = Set(UserDefaults.standard.stringArray(forKey: "cashedCheques") ?? [])

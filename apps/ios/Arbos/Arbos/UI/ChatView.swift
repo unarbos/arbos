@@ -865,7 +865,7 @@ struct ChatSession: View {
     private var channel: ServerChannel? { projectId == channelSlot ? model.channel(chatId) : nil }
     private var isChannel: Bool { projectId == channelSlot }
     /// Cheques go to one person: a direct chat with exactly one other human and no agents.
-    private var chequeable: Bool { people.map { !$0.isGroup } ?? false }
+    private var chequeable: Bool { Wallet.chequesEnabled && (people.map { !$0.isGroup } ?? false) }
     private var channelServer: Server? { channel.flatMap { model.server($0.serverId) } }
     private var counterpart: ChatMember? { people?.counterpart(me: model.user?.id) }
     /// The DM's other person while they are on my block list ([feedback
