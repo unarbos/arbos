@@ -11,13 +11,16 @@ import UIKit
 /// thing that drives it never landed.
 ///
 /// So the rule lives here, applied by the shared field helpers rather than by each screen, and
-/// the lit overlay carries an accessibility identifier — `HoldHighlight.identifier` — which is
-/// what `ComposerParityUITests` holds onto. A highlight that stops being driven stops
-/// publishing that element, and the test fails; a highlight that is merely *drawable* no longer
-/// passes for one that works.
+/// the overlay publishes `HoldHighlight.identifier` for the whole life of the field — value
+/// `"off"` at rest, `"lit"` under a finger (and through the post-lift tail). Keeping the
+/// element in the tree (rather than mounting it only while drawn) is what lets
+/// `ComposerParityUITests` wait for the light without racing a disappearing wash. Opacity
+/// alone is not enough: a zero-opacity view is often dropped from the accessibility tree.
 enum HoldHighlight {
-    /// Published by the lit overlay, and by nothing else.
+    /// Published by the hold overlay on every field that uses the modifier.
     static let identifier = "input-hold-highlight"
+    static let valueOff = "off"
+    static let valueLit = "lit"
 
     /// How long a finger rests before the box lights. Long enough not to flash under a tap that
     /// is on its way to placing a caret, short enough to arrive with the system's own menu.
@@ -110,10 +113,9 @@ private struct HoldHighlightWash<S: InsettableShape>: View {
             .clipShape(shape)
         }
         .allowsHitTesting(false)
-        // A gradient is not an element on its own, and an identifier on a non-element is not
-        // queryable — which is how a highlight could go missing without a test noticing.
-        .accessibilityElement()
-        .accessibilityIdentifier(HoldHighlight.identifier)
+        // Identifier / value live on the always-mounted sentinel in
+        // `InputHoldHighlightModifier`, not here — the wash comes and goes with the light.
+        .accessibilityHidden(true)
     }
 }
 
@@ -185,7 +187,8 @@ private struct InputHoldHighlightModifier<S: InsettableShape>: ViewModifier {
     @State private var fade: UUID?
 
     func body(content: Content) -> some View {
-        content
+        let active = lit && at != nil
+        return content
             .background(HoldProbe { point in
                 if let point {
                     fade = nil
@@ -198,7 +201,14 @@ private struct InputHoldHighlightModifier<S: InsettableShape>: ViewModifier {
             .overlay {
                 GeometryReader { geo in
                     ZStack {
-                        if lit, let at {
+                        // Always mounted so XCTest can query the identifier at rest and wait
+                        // for value `lit` without racing the wash out of the tree.
+                        Color.clear
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .accessibilityElement()
+                            .accessibilityIdentifier(HoldHighlight.identifier)
+                            .accessibilityValue(active ? HoldHighlight.valueLit : HoldHighlight.valueOff)
+                        if active, let at {
                             HoldHighlightWash(shape: shape, at: at, size: geo.size)
                                 .transition(.opacity)
                         }

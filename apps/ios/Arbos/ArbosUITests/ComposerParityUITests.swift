@@ -158,8 +158,14 @@ final class ComposerParityUITests: XCTestCase {
         let box = field(app)
         XCTAssertTrue(box.waitForExistence(timeout: appear), "the composer is on screen")
 
-        let lit = app.descendants(matching: .any)["input-hold-highlight"].firstMatch
-        XCTAssertFalse(lit.exists, "nothing is lit before a finger is anywhere near it")
+        // The sentinel stays in the tree for the field's life (`off` / `lit`); the wash is
+        // what paints. Querying a mount-only identifier raced the post-lift fade on CI.
+        let probes = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier == %@", "input-hold-highlight"))
+        let probe = probes.firstMatch
+        XCTAssertTrue(probe.waitForExistence(timeout: appear), "the hold overlay is published")
+        XCTAssertFalse(probes.matching(NSPredicate(format: "value == %@", "lit")).firstMatch.exists,
+                       "nothing is lit before a finger is anywhere near it")
 
         // Focus first, and only then measure. A press on an unfocused field raises the
         // keyboard, which lifts the composer by the keyboard's height — the two samples would
@@ -167,49 +173,33 @@ final class ComposerParityUITests: XCTestCase {
         box.tap()
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 10), "the keyboard is up")
         Thread.sleep(forTimeInterval: 1)
-        // Held well past the arming delay, and the press is what raises the system's own
-        // Paste / AutoFill menu too — the highlight must not take that touch away. The light
-        // outlasts the lift on purpose (`HoldHighlight.tail`), which is what makes it
-        // measurable from a still at all. CI still sometimes returns the a11y hit after the
-        // pixels have already gone, so sample while the overlay reports itself and retry the
-        // hold once if the first still is a wash-out.
+        let pill = box.frame
+        let resting = brightness(app, of: pill)
+
+        // Press on a background queue so this thread can wait for value `lit` *while the
+        // finger is down* (and still through the post-lift tail if the wait lands late).
+        // Held well past the arming delay; the press also raises Paste / AutoFill — the
+        // highlight must not take that touch away.
         let finger = box.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
-        var resting = 0.0
-        var delta = 0.0
-        var litSeen = false
-        for attempt in 1...2 {
-            // Re-arm from a quiet pill: a leftover edit menu from the previous hold would
-            // both skew the resting sample and steal the next long-press.
-            if attempt > 1 {
-                app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.35)).tap()
-                box.tap()
-                Thread.sleep(forTimeInterval: 0.5)
-            }
-            let pill = box.frame
-            resting = brightness(app, of: pill)
-            finger.press(forDuration: 1.2)
-            let deadline = Date().addingTimeInterval(2.5)
-            while Date() < deadline {
-                if lit.exists {
-                    litSeen = true
-                    // Prefer the wash's own frame when a11y has sized it; fall back to the
-                    // pre-hold pill if the element is still geometry-less.
-                    let region = lit.frame.width > 1 ? lit.frame : pill
-                    delta = max(delta, abs(brightness(app, of: region) - resting))
-                    if delta > 8 { break }
-                }
-                Thread.sleep(forTimeInterval: 0.12)
-            }
-            if delta > 8 { break }
+        let pressed = expectation(description: "hold finished")
+        DispatchQueue.global(qos: .userInitiated).async {
+            finger.press(forDuration: 1.5)
+            pressed.fulfill()
         }
-        XCTAssertTrue(litSeen, "touch-and-hold lights the box the way Grok's does")
+        let lit = probes.matching(NSPredicate(format: "value == %@", "lit")).firstMatch
+        XCTAssertTrue(lit.waitForExistence(timeout: 5),
+                      "touch-and-hold lights the box the way Grok's does")
+
+        let held = brightness(app, of: pill)
+        let delta = abs(held - resting)
         // Threshold 8 (was 12): #2998 dropped `PillSurface.translucentAlpha` to 0.12, so a
         // good still reads ~10.26 mean delta on CI instead of the older denser-pill figure.
         // Still well above the invisible ~2.7 cut Jacob rejected — held must remain visibly
         // different from idle; this only recalibrates for the intentionally lighter fill.
         XCTAssertGreaterThan(delta, 8,
                              "the light is too faint to see: the pill read \(resting) at rest "
-                             + "and a best held delta of \(delta). Jacob "
+                             + "and \(held) under the finger, a delta of \(delta). Jacob "
                              + "measured the cut that failed review at about 2.7.")
+        wait(for: [pressed], timeout: 10)
     }
 }
