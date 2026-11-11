@@ -11,6 +11,9 @@ description = "Shared Matrix client for the device apps (D88 C1): servers and ch
 # Stage D: end-to-end encryption, keys and room state in SQLite (the workspace's bundled
 # libsqlite3-sys, bundled on every platform: iOS links nothing else). No bundled TLS — the HTTP client below is injected instead.
 matrix-sdk = { version = "0.19.1", default-features = false, features = ["e2e-encryption", "sqlite", "bundled-sqlite"] }
+# Already in the graph through matrix-sdk, which does not re-export the trust settings
+# (`CollectStrategy`, `TrustRequirement`).
+matrix-sdk-crypto = { version = "0.19.1", default-features = false }
 tokio.workspace = true
 futures.workspace = true
 serde.workspace = true

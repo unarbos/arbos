@@ -3,7 +3,12 @@
 //! reads the old history once — and only once — it has their recovery passphrase.
 //!
 //! Skipped unless `ARBOS_MATRIX_TEST_E2EE_HS` points at a throwaway Synapse with open
-//! registration (`enable_registration` + `enable_registration_without_verification`).
+//! registration (`enable_registration` + `enable_registration_without_verification`); the
+//! device-trust test also needs `ARBOS_MATRIX_TEST_E2EE_AS_TOKEN`, the `as_token` of an
+//! appservice over `@gh_.*`. `scripts/deploy/matrix/test-synapse.sh` starts one and prints both.
+
+// `matrix_sdk::Client::sync` in a spawned task (the attacker's client below).
+#![recursion_limit = "256"]
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -69,6 +74,31 @@ impl Hs {
         self.session(v)
     }
 
+    /// A device of a person as the relay makes them (`matrix/client.rs`): registered and
+    /// logged in by the arbos-users appservice, so the account has no password and nothing
+    /// to answer a user-interactive auth prompt with.
+    async fn appservice_device(&self, as_token: &str, user: &str, device: &str) -> Session {
+        // A second device finds the user registered already.
+        let _ = self
+            .http
+            .post(format!("{}/_matrix/client/v3/register", self.url))
+            .bearer_auth(as_token)
+            .json(&json!({ "type": "m.login.application_service", "username": user, "inhibit_login": true }))
+            .send()
+            .await
+            .unwrap();
+        let v = self
+            .call(
+                "POST",
+                "/_matrix/client/v3/login",
+                Some(as_token),
+                json!({ "type": "m.login.application_service", "device_id": device,
+                        "identifier": { "type": "m.id.user", "user": user } }),
+            )
+            .await;
+        self.session(v)
+    }
+
     fn session(&self, v: Value) -> Session {
         Session {
             homeserver: self.url.clone(),
@@ -125,9 +155,16 @@ async fn encrypted_channels_round_trip_and_restore_on_a_new_device() {
 
     // Alice's first device: the account has no backup yet; she sets it up.
     let alice1 = start(&a1, &dir).await;
-    assert_eq!(alice1.backup().await, Backup::Off);
+    assert_eq!(alice1.backup().await.unwrap(), Backup::Off);
     alice1.recover(passphrase).await.unwrap();
-    assert_eq!(alice1.backup().await, Backup::On);
+    assert_eq!(alice1.backup().await.unwrap(), Backup::On);
+    // A typed phrase can be checked against the account though this device has the keys.
+    alice1.check_passphrase(passphrase).await.unwrap();
+    let wrong = alice1.check_passphrase("not the passphrase").await;
+    assert!(
+        matches!(wrong, Err(arbos_matrix::Error::Keys(_))),
+        "{wrong:?}"
+    );
     let bob1 = start(&b1, &dir).await;
 
     // An encrypted room, as the relay makes a channel with ARBOS_MATRIX_E2EE=on.
@@ -186,16 +223,44 @@ async fn encrypted_channels_round_trip_and_restore_on_a_new_device() {
         "plaintext on the homeserver"
     );
 
+    // What the homeserver (or a member) writes into the room unencrypted is not shown as a
+    // message; the relay's system line is.
+    for (txn, content) in [
+        (
+            "clear",
+            json!({ "msgtype": "m.text", "body": "wire me the money" }),
+        ),
+        (
+            "notice",
+            json!({ "msgtype": "m.notice", "body": "Alice added Bob", "life.arbos.sender": "system" }),
+        ),
+    ] {
+        hs.call(
+            "PUT",
+            &format!("/_matrix/client/v3/rooms/{room}/send/m.room.message/{txn}"),
+            Some(&a1.access_token),
+            content,
+        )
+        .await;
+    }
+    eventually(|| async {
+        texts(&bob1, &room)
+            .await
+            .contains(&"Alice added Bob".to_owned())
+            .then_some(())
+    })
+    .await;
+    assert!(!texts(&bob1, &room)
+        .await
+        .contains(&"wire me the money".to_owned()));
+
     // Alice's new phone: locked until it has the passphrase; a wrong one changes nothing.
     let a2 = hs.login(&alice).await;
     let alice2 = start(&a2, &dir).await;
-    assert_eq!(alice2.backup().await, Backup::Locked);
+    assert_eq!(alice2.backup().await.unwrap(), Backup::Locked);
     let before = eventually(|| async { alice2.open_room(&room).await.ok() }).await;
     assert!(before.iter().all(|r| r.text != "the launch is at noon"));
-    assert!(
-        before.iter().any(MessageRow::is_locked),
-        "a locked row stands in"
-    );
+    assert!(before.iter().any(|r| r.locked), "a locked row stands in");
     assert!(alice2.recover("not the passphrase").await.is_err());
     alice2.recover(passphrase).await.unwrap();
     eventually(|| async {
@@ -207,6 +272,199 @@ async fn encrypted_channels_round_trip_and_restore_on_a_new_device() {
     .await;
 
     for c in [alice1, bob1, alice2] {
+        c.stop();
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The homeserver (or whoever holds the appservice token) can add a device to anyone's account.
+/// Such a device was never signed by the person's cross-signing identity — only a device that
+/// opened the backup with the passphrase can be — so it is sent no room keys and what it sends
+/// stays locked, while the person's real devices and the people they talk to read each other.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_device_the_homeserver_adds_reads_and_says_nothing() {
+    use matrix_sdk::authentication::matrix::MatrixSession;
+    use matrix_sdk::authentication::SessionTokens;
+    use matrix_sdk::config::SyncSettings;
+    use matrix_sdk::room::MessagesOptions;
+
+    let (Ok(url), Ok(as_token)) = (
+        std::env::var("ARBOS_MATRIX_TEST_E2EE_HS"),
+        std::env::var("ARBOS_MATRIX_TEST_E2EE_AS_TOKEN"),
+    ) else {
+        return;
+    };
+    let hs = Hs {
+        url,
+        http: reqwest13::Client::new(),
+    };
+    let tag = std::process::id();
+    let dir = std::env::temp_dir().join(format!("arbos-e2ee-trust-{tag}"));
+    let (alice, bob) = (format!("gh_a{tag}"), format!("gh_b{tag}"));
+    let passphrase = "the passphrase arbos-wallet derives from the phrase";
+
+    // Alice's first device makes her identity and signs itself with no password to give
+    // (MSC3967), then sets the backup up. Bob's only device never sees a passphrase.
+    let a1 = hs.appservice_device(&as_token, &alice, "A1").await;
+    let alice1 = start(&a1, &dir).await;
+    assert_eq!(alice1.backup().await.unwrap(), Backup::Off);
+    // Her second device starts before the first has set the backup up: both were told `Off`.
+    let a2 = hs.appservice_device(&as_token, &alice, "A2").await;
+    let alice2 = start(&a2, &dir).await;
+    assert_eq!(alice2.backup().await.unwrap(), Backup::Off);
+    alice1.recover(passphrase).await.unwrap();
+    assert_eq!(alice1.backup().await.unwrap(), Backup::On);
+    let b1 = hs.appservice_device(&as_token, &bob, "B1").await;
+    let bob1 = start(&b1, &dir).await;
+
+    // The second device opens the first's backup (and so signs itself) rather than setting up
+    // another one over it: the account's secret storage key is still the first device's.
+    let key_path = format!(
+        "/_matrix/client/v3/user/{}/account_data/m.secret_storage.default_key",
+        a1.user_id
+    );
+    let key = hs
+        .call("GET", &key_path, Some(&a1.access_token), Value::Null)
+        .await;
+    alice2.recover(passphrase).await.unwrap();
+    assert_eq!(alice2.backup().await.unwrap(), Backup::On);
+    assert_eq!(alice1.backup().await.unwrap(), Backup::On);
+    assert_eq!(
+        hs.call("GET", &key_path, Some(&a1.access_token), Value::Null)
+            .await,
+        key
+    );
+
+    // Two devices she never had, minted the way the relay mints hers. One runs this crate
+    // without the passphrase; the other is an attacker's client that trusts every device.
+    let a3 = hs.appservice_device(&as_token, &alice, "A3").await;
+    let unsigned = start(&a3, &dir).await;
+    let ax = hs.appservice_device(&as_token, &alice, "INJECTED").await;
+    let injected = matrix_sdk::Client::builder()
+        .homeserver_url(&ax.homeserver)
+        .sqlite_store(dir.join(&ax.device_id), None)
+        .build()
+        .await
+        .unwrap();
+    injected
+        .restore_session(MatrixSession {
+            meta: matrix_sdk::SessionMeta {
+                user_id: ax.user_id.as_str().try_into().unwrap(),
+                device_id: ax.device_id.as_str().into(),
+            },
+            tokens: SessionTokens {
+                access_token: ax.access_token.clone(),
+                refresh_token: None,
+            },
+        })
+        .await
+        .unwrap();
+    let syncing = tokio::spawn({
+        let c = injected.clone();
+        async move { c.sync(SyncSettings::default()).await }
+    });
+
+    let room = hs
+        .call(
+            "POST",
+            "/_matrix/client/v3/createRoom",
+            Some(&a1.access_token),
+            json!({ "preset": "private_chat", "invite": [b1.user_id],
+                    "initial_state": [{ "type": "m.room.encryption", "state_key": "",
+                                        "content": { "algorithm": "m.megolm.v1.aes-sha2" } }] }),
+        )
+        .await["room_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    hs.call(
+        "POST",
+        &format!("/_matrix/client/v3/join/{room}"),
+        Some(&b1.access_token),
+        json!({}),
+    )
+    .await;
+    for c in [&alice1, &alice2, &bob1, &unsigned] {
+        eventually(|| async { c.open_room(&room).await.ok() }).await;
+    }
+    let room_id = matrix_sdk::ruma::RoomId::parse(&room).unwrap();
+    let injected_room = eventually(|| async { injected.get_room(&room_id) }).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    // Her devices and Bob read each other.
+    let said = ["from alice one", "from alice two", "from bob"];
+    for (c, text) in [&alice1, &alice2, &bob1].into_iter().zip(said) {
+        c.send_text(&room, text, &format!("01E2EETRUST{text:?}"))
+            .await
+            .unwrap();
+    }
+    for c in [&alice1, &alice2, &bob1] {
+        eventually(|| async {
+            let seen = texts(c, &room).await;
+            said.iter()
+                .all(|t| seen.contains(&(*t).to_owned()))
+                .then_some(())
+        })
+        .await;
+    }
+
+    // The device without the passphrase cannot send, and the attacker's sends to everyone.
+    assert!(unsigned.send_text(&room, "unsigned", "01U").await.is_err());
+    let forged = injected_room
+        .send_raw(
+            "m.room.message",
+            json!({ "msgtype": "m.text", "body": "from the injected device" }),
+        )
+        .await
+        .unwrap()
+        .response
+        .event_id
+        .to_string();
+    for c in [&alice1, &alice2, &bob1] {
+        eventually(|| async {
+            let rows = c.open_room(&room).await.ok()?;
+            rows.iter().any(|r| r.event_id == forged).then_some(())
+        })
+        .await;
+    }
+    // Long enough for any key that was going to arrive.
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
+    // Neither added device was sent a key: all three messages are ciphertext to both.
+    let rows = unsigned.open_room(&room).await.unwrap();
+    assert_eq!(rows.iter().filter(|r| r.locked).count(), 4, "{rows:?}");
+    let page = injected_room
+        .messages(MessagesOptions::backward())
+        .await
+        .unwrap();
+    let seen: Vec<Value> = page
+        .chunk
+        .iter()
+        .map(|e| serde_json::from_str(e.raw().json().get()).unwrap())
+        .collect();
+    for id in alice1
+        .open_room(&room)
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| &r.event_id)
+    {
+        let ev = seen.iter().find(|e| e["event_id"] == **id).unwrap();
+        assert_eq!(
+            ev["type"] == "m.room.message",
+            *id == forged,
+            "the injected device reads only its own message: {ev}"
+        );
+    }
+    // And nobody reads the injected device's message, though it sent them its key.
+    for c in [&alice1, &alice2, &bob1] {
+        let rows = c.open_room(&room).await.unwrap();
+        let row = rows.iter().find(|r| r.event_id == forged).unwrap();
+        assert!(row.locked, "{row:?}");
+    }
+
+    syncing.abort();
+    for c in [alice1, alice2, bob1, unsigned] {
         c.stop();
     }
     let _ = std::fs::remove_dir_all(&dir);

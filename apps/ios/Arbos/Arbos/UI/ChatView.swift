@@ -4334,7 +4334,7 @@ struct AttachSheet: View {
                     .accessibilityIdentifier("attach-fun")
             }
             if let onCheque {
-                row(icon: "signature", title: "Send TAO", subtitle: "A cheque they can cash anytime", action: onCheque)
+                row(icon: "signature", title: "Send TAO", subtitle: "A cheque they can cash for about 7 hours", action: onCheque)
                     .accessibilityIdentifier("attach-cheque")
             }
             Spacer(minLength: 0)

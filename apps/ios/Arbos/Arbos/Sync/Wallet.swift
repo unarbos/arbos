@@ -24,14 +24,58 @@ enum WalletPrompt: Identifiable, Equatable {
 }
 
 enum Wallet {
-    /// TAO cheques are off: nothing in the app signs or cashes one. Turn this on only once
-    /// all three hold:
-    /// 1. the payee address is shown and confirmed before signing (today it comes from the
-    ///    relay's `GET /users/{id}/wallet` unseen, so a compromised relay could redirect funds);
-    /// 2. cheques are mortal (today `arbos-wallet` signs them `.immortal()`, with no expiry);
-    /// 3. the nonce is kept per address and only advances on a sent cheque (today
-    ///    `walletNextNonce` is one global integer, bumped even when the send fails).
+    /// TAO cheques are off: nothing in the app signs or cashes one. What kept them off is fixed
+    /// in code — the payee address is shown, pinned per person and signed exactly as shown;
+    /// cheques expire (`arbos_wallet::chain::CHEQUE_PERIOD`, ~7 h) and their signature is
+    /// checked when read; numbers are kept per address and only used by a sent cheque — but
+    /// none of it has run on a phone. Turn this on only after an end-to-end test on a device
+    /// against a local subtensor: send, cash, cash twice, let one expire, change the payee's
+    /// linked address, kill the app mid-cash and reopen it.
     static let chequesEnabled = false
+
+    /// A cheque this device signed and sent: it holds its number until the chain has moved
+    /// past it or it has expired.
+    struct Issued: Codable, Equatable {
+        let nonce: UInt64
+        /// Unix seconds, estimated from block time.
+        let expiresAt: UInt64
+    }
+
+    /// Expiry is an estimate (blocks can run late): a number is only reused this long after.
+    static let expiryMargin: UInt64 = 3600
+
+    /// The number for the next cheque: the lowest one from the chain's next nonce (`base`,
+    /// as of the last snapshot) that no cheque still cashable holds. The lowest, not one past
+    /// the highest, because the chain cashes an account's cheques in order: an expired cheque
+    /// leaves a gap that would block every later one until something fills it.
+    ///
+    /// Limitation: this is per device. Two devices with the same phrase, both offline, can
+    /// hand out the same number; whichever cheque is cashed second then bounces as already
+    /// used. That is safe (nothing is paid twice) but one payee has to ask again.
+    static func nextNonce(base: UInt64, issued: [Issued], now: UInt64) -> UInt64 {
+        let held = Set(issued.filter { $0.nonce >= base && $0.expiresAt + expiryMargin > now }.map(\.nonce))
+        var nonce = base
+        while held.contains(nonce) { nonce += 1 }
+        return nonce
+    }
+}
+
+/// Who a cheque in a chat would pay: the address this device first saw for them.
+struct ChequePayee: Equatable {
+    let userId: String
+    let name: String
+    let address: String
+    /// The relay now gives this different address for them. Nothing is signed to it until the
+    /// person confirms the change.
+    var changedTo: String?
+}
+
+/// What became of a cheque handed to the chain.
+enum ChequeCashing: Equatable {
+    case paid
+    /// Submitted, not finalized yet: not a bounce.
+    case pending
+    case refused(String)
 }
 
 /// Keychain items for the wallet. The phrase syncs through iCloud Keychain; the Matrix store
@@ -65,6 +109,14 @@ enum WalletVault {
         let status = SecItemAdd(add as CFDictionary, nil)
         if status == errSecDuplicateItem, Self.phrase(user: user) == phrase { return }
         guard status == errSecSuccess else { throw Keychain.KeychainError.status(status) }
+    }
+
+    /// Forget a phrase this device made a moment ago and never showed, when another device's
+    /// backup turned out to be there first. Only that exact phrase: anything else stored here
+    /// may be holding money and is left alone.
+    static func discard(unshown phrase: String, user: String) {
+        guard Self.phrase(user: user) == phrase else { return }
+        SecItemDelete(query(user: user) as CFDictionary)
     }
 
     /// The random key that encrypts this device's Matrix store, made once.
@@ -146,8 +198,15 @@ extension AppModel {
         } else if backup == "off" {
             let phrase = walletNewPhrase()
             guard (try? WalletVault.save(phrase, user: me.id)) != nil else { return }
-            try? await client.recover(passphrase: walletRecoveryPassphrase(phrase: phrase))
-            walletPrompt = .backup(phrase)
+            do {
+                try await client.recover(passphrase: walletRecoveryPassphrase(phrase: phrase))
+                walletPrompt = .backup(phrase)
+            } catch {
+                // Another device set the backup up first: its phrase is the account's, not
+                // this one. Showing this one would have the person write down the wrong words.
+                WalletVault.discard(unshown: phrase, user: me.id)
+                walletPrompt = .restore
+            }
         } else if backup == "locked" {
             walletPrompt = .restore
         }
@@ -160,12 +219,23 @@ extension AppModel {
         guard let phrase = try? walletCheckPhrase(phrase: typed) else {
             return "That isn't a recovery phrase. Check each word."
         }
-        if let client = matrixClient {
-            do {
-                try await client.recover(passphrase: walletRecoveryPassphrase(phrase: phrase))
-            } catch {
-                return "That phrase doesn't belong to this account."
+        // The phrase must open this account's backup before it is kept. A locked backup is
+        // opened with it; one already open on this device is checked without changing anything
+        // (`recover` would accept any phrase there). With no backup, or a state not yet known,
+        // nothing can vouch for the phrase and it is not kept.
+        guard let client = matrixClient else {
+            return "This device can't check that phrase right now. Try again once your chats have loaded."
+        }
+        let passphrase = walletRecoveryPassphrase(phrase: phrase)
+        do {
+            switch await client.backup() {
+            case "locked": try await client.recover(passphrase: passphrase)
+            case "on": try await client.checkPassphrase(passphrase: passphrase)
+            default:
+                return "This device can't check that phrase right now. Try again once your chats have loaded."
             }
+        } catch {
+            return "That phrase doesn't belong to this account."
         }
         do { try WalletVault.save(phrase, user: me.id) } catch { return error.localizedDescription }
         walletPrompt = nil
@@ -174,16 +244,27 @@ extension AppModel {
 
     // MARK: Cheques
 
+    // "-2": the first snapshot format had no anchor block; a file in it is never read.
     private static let snapshotFile = FileManager.default
         .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        .appendingPathComponent("tao-snapshot.json")
+        .appendingPathComponent("tao-snapshot-2.json")
 
     /// The saved chain snapshot (signs and reads cheques offline), if any.
     var chequeSnapshot: String? {
         (try? Data(contentsOf: Self.snapshotFile)).flatMap { String(data: $0, encoding: .utf8) }
     }
 
-    /// Take a fresh snapshot while online; keeps the next free nonce.
+    private func issuedCheques(_ address: String) -> [Wallet.Issued] {
+        UserDefaults.standard.data(forKey: "walletIssued:\(address)")
+            .flatMap { try? JSONDecoder().decode([Wallet.Issued].self, from: $0) } ?? []
+    }
+
+    private func setIssuedCheques(_ issued: [Wallet.Issued], _ address: String) {
+        UserDefaults.standard.set(try? JSONEncoder().encode(issued), forKey: "walletIssued:\(address)")
+    }
+
+    /// Take a fresh snapshot while online: a new block to anchor cheques to, and the chain's
+    /// next nonce for this address (which also retires every sent cheque below it).
     @discardableResult
     func refreshChequeSnapshot() async -> Bool {
         guard let address = walletAddressValue,
@@ -197,61 +278,125 @@ extension AppModel {
         } catch {
             return false
         }
-        let key = "walletNextNonce"
-        UserDefaults.standard.set(max(UInt64(UserDefaults.standard.integer(forKey: key)), snap.nonce), forKey: key)
+        UserDefaults.standard.set(String(snap.nonce), forKey: "walletChainNonce:\(address)")
+        setIssuedCheques(issuedCheques(address).filter { $0.nonce >= snap.nonce }, address)
         return true
     }
 
-    /// Sign a cheque to the other person in a DM and send it there. Works offline once a
-    /// snapshot exists; the address comes from the relay when online. Returns an error to show.
-    func sendCheque(chatId: Id, amount: String) async -> String? {
+    private func payeeKey(_ me: String, _ peer: String) -> String { "walletPayee:\(me):\(peer)" }
+
+    /// Who a cheque in this DM would pay. The relay only says where their address is; this
+    /// device remembers the first one it saw for each person, and a different one later is
+    /// reported (`changedTo`), never silently used. Offline, the remembered address still works.
+    func chequePayee(chatId: Id) async throws -> ChequePayee {
+        guard draftDM?.id != chatId, let chat = peopleChat(chatId), let me = user,
+              let peer = chat.humans.first(where: { $0.id != me.id }) else {
+            throw WalletError.Invalid("Cheques go to one person, in a direct chat you've already started.")
+        }
+        let name = peer.name ?? "@\(peer.handle)"
+        let key = payeeKey(me.id, peer.id)
+        let pinned = UserDefaults.standard.string(forKey: key)
+        let found: String?
+        do {
+            found = try await relay.wallet(of: peer.id)
+        } catch {
+            guard let pinned else {
+                throw WalletError.Invalid("Couldn't look up their wallet. Try again when you're online.")
+            }
+            return ChequePayee(userId: peer.id, name: name, address: pinned)
+        }
+        guard let found, let address = try? walletCheckAddress(address: found) else {
+            throw WalletError.Invalid("\(name) hasn't turned on payments yet.")
+        }
+        guard let pinned else {
+            UserDefaults.standard.set(address, forKey: key)
+            return ChequePayee(userId: peer.id, name: name, address: address)
+        }
+        return ChequePayee(userId: peer.id, name: name, address: pinned, changedTo: address == pinned ? nil : address)
+    }
+
+    /// The person confirmed that `payee` moved to the new address: remember that one instead.
+    func acceptChangedPayee(_ payee: ChequePayee) -> ChequePayee {
+        guard let me = user, let address = payee.changedTo else { return payee }
+        UserDefaults.standard.set(address, forKey: payeeKey(me.id, payee.userId))
+        return ChequePayee(userId: payee.userId, name: payee.name, address: address)
+    }
+
+    /// Sign a cheque to exactly `to` — the address the sheet showed for the other person in
+    /// this DM — and send it there. Works offline for a few hours after a snapshot. Returns an
+    /// error to show.
+    func sendCheque(chatId: Id, amount: String, to: String) async -> String? {
         guard Wallet.chequesEnabled else { return "Cheques aren't available yet." }
-        guard let phrase = walletPhrase else { return "Set up your wallet first." }
-        guard let chat = peopleChat(chatId), let me = user,
+        guard let phrase = walletPhrase, let address = walletAddressValue else { return "Set up your wallet first." }
+        guard draftDM?.id != chatId, let chat = peopleChat(chatId), let me = user,
               let peer = chat.humans.first(where: { $0.id != me.id }) else {
             return "Cheques go to one person, in a direct chat."
         }
-        let to: String
-        do {
-            guard let address = try await relay.wallet(of: peer.id) else {
-                return "\(peer.name ?? "@\(peer.handle)") hasn't turned on payments yet."
-            }
-            to = address
-        } catch {
-            return "Couldn't look up their wallet. Try again when you're online."
+        guard UserDefaults.standard.string(forKey: payeeKey(me.id, peer.id)) == to else {
+            return "Their address changed. Check it before you sign."
         }
-        if chequeSnapshot == nil { await refreshChequeSnapshot() }
-        guard let snapshot = chequeSnapshot else { return "Go online once so this phone can sign cheques." }
-        let key = "walletNextNonce"
-        let nonce = UInt64(UserDefaults.standard.integer(forKey: key))
+        // A newer snapshot when online; the saved one otherwise (signing refuses a stale one).
+        await refreshChequeSnapshot()
+        guard let snapshot = chequeSnapshot,
+              let base = UserDefaults.standard.string(forKey: "walletChainNonce:\(address)").flatMap({ UInt64($0) }) else {
+            return "Go online once so this phone can sign cheques."
+        }
+        let issued = issuedCheques(address)
+        let nonce = Wallet.nextNonce(base: base, issued: issued, now: UInt64(Date().timeIntervalSince1970))
         let cheque: WalletCheque
         do {
             cheque = try walletSignCheque(phrase: phrase, snapshotJson: snapshot, to: to, amount: amount, nonce: nonce)
         } catch {
             return walletWords(error)
         }
-        UserDefaults.standard.set(nonce + 1, forKey: key)
+        guard cheque.to == to, cheque.from == address else { return "That cheque didn't come out right. Nothing was sent." }
         let id = newId()
         sendPeople(chatId: chatId, text: "Sent you a \(walletFormatTao(rao: cheque.rao)) cheque", replyTo: nil,
                    extraParts: [["id": "\(id)-cheque", "kind": "cheque", "cheque": cheque.bytes]])
+        // The number is taken only now, with the cheque in the chat: a signature or a send that
+        // failed above used nothing up.
+        setIssuedCheques(issued + [Wallet.Issued(nonce: cheque.nonce, expiresAt: cheque.expiresAt)], address)
         return nil
     }
 
-    /// Cash a cheque; nil on success, else why it bounced.
-    func cashCheque(_ bytes: String) async -> String? {
-        guard Wallet.chequesEnabled else { return "Cheques aren't available yet." }
+    /// Cash a cheque, or look again at one that was left pending.
+    func cashCheque(_ bytes: String) async -> ChequeCashing {
+        guard Wallet.chequesEnabled else { return .refused("Cheques aren't available yet.") }
+        let defaults = UserDefaults.standard
+        var pending = defaults.dictionary(forKey: "pendingCheques") as? [String: String] ?? [:]
+        defer { defaults.set(pending, forKey: "pendingCheques") }
         do {
-            _ = try await walletCashCheque(bytes: bytes)
-            var cashed = Set(UserDefaults.standard.stringArray(forKey: "cashedCheques") ?? [])
-            cashed.insert(bytes)
-            UserDefaults.standard.set(Array(cashed), forKey: "cashedCheques")
-            return nil
+            switch try await walletCashCheque(bytes: bytes, since: pending[bytes].flatMap({ UInt64($0) })) {
+            case .paid:
+                pending[bytes] = nil
+                defaults.set((defaults.stringArray(forKey: "cashedCheques") ?? []) + [bytes], forKey: "cashedCheques")
+                return .paid
+            case .pending(let since):
+                pending[bytes] = String(since)
+                return .pending
+            }
+        } catch let error as WalletError {
+            // The network failing says nothing about the cheque: a pending one stays pending.
+            if case .Chain = error { return pending[bytes] == nil ? .refused(error.words) : .pending }
+            pending[bytes] = nil
+            return .refused(error.words)
         } catch {
-            return walletWords(error)
+            return .refused(error.localizedDescription)
         }
+    }
+
+    /// The payer's account has moved past this cheque's number (as of the last snapshot): it
+    /// was cashed, or that number went to something else. Only known for this device's address.
+    func chequeNumberSpent(_ cheque: WalletCheque) -> Bool {
+        UserDefaults.standard.string(forKey: "walletChainNonce:\(cheque.from)").flatMap({ UInt64($0) }).map { $0 > cheque.nonce } ?? false
     }
 
     func isCashed(_ bytes: String) -> Bool {
         (UserDefaults.standard.stringArray(forKey: "cashedCheques") ?? []).contains(bytes)
+    }
+
+    /// Submitted earlier and not yet seen finalized.
+    func isChequePending(_ bytes: String) -> Bool {
+        (UserDefaults.standard.dictionary(forKey: "pendingCheques") as? [String: String])?[bytes] != nil
     }
 }

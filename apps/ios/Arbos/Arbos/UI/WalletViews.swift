@@ -34,7 +34,7 @@ struct WalletPage: View {
                 }
                 // The link exists only so people can send cheques to a handle.
                 if Wallet.chequesEnabled {
-                    SettingsGroup(footer: "Anyone you chat with can send you TAO cheques. Off: your address stays private.") {
+                    SettingsGroup(footer: "People you have a direct chat with can see your address and send you TAO cheques. Off: your address stays private.") {
                         Toggle("Get paid by @\(model.user?.login ?? "handle")", isOn: Binding(get: { payable }, set: setPayable))
                             .tint(theme.accent)
                             .padding(.horizontal, 16)
@@ -237,8 +237,9 @@ struct WalletPromptSheet: View {
 
 // MARK: Cheques in a chat
 
-/// A cheque someone sent. Everything shown is read from the signed bytes; the message's text is
-/// never trusted for the amount or the payee.
+/// A cheque someone sent. Everything shown is read from the signed bytes, whose signature is
+/// checked; the message's text is never trusted for the amount or the payee. A cheque is a
+/// promise: the card says "not paid" until the chain has cashed it.
 struct ChequeCard: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
@@ -248,6 +249,7 @@ struct ChequeCard: View {
     @State private var note: String?
     @State private var cashing = false
     @State private var cashed = false
+    @State private var pending = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -257,15 +259,23 @@ struct ChequeCard: View {
             }
             Text(cheque.map { walletFormatTao(rao: $0.rao) } ?? "—")
                 .font(theme.font(28, weight: .semibold)).foregroundStyle(theme.text)
-            if let note {
-                Text(note).font(theme.font(Theme.small)).foregroundStyle(theme.muted)
-            } else if cashed {
+            if cashed {
                 Label("Cashed", systemImage: "checkmark.circle.fill").font(theme.font(Theme.small)).foregroundStyle(theme.online)
-            } else if Wallet.chequesEnabled, let c = cheque, !mine, c.to == model.walletAddressValue {
-                Button(cashing ? "Cashing…" : "Cash it") { cash() }
-                    .buttonStyle(.borderedProminent).tint(theme.accent).disabled(cashing)
-            } else if mine {
-                Text("Signed offline · cashes when either of you is online").font(theme.font(Theme.small)).foregroundStyle(theme.muted)
+            } else if pending {
+                Label("Submitted · waiting for the chain", systemImage: "clock").font(theme.font(Theme.small)).foregroundStyle(theme.muted)
+            } else if let note {
+                Text(note).font(theme.font(Theme.small)).foregroundStyle(theme.muted)
+            } else if let c = cheque, mine, model.chequeNumberSpent(c) {
+                // The payer's side cannot tell which without searching the chain.
+                Text("Cashed, or its number was used for another payment").font(theme.font(Theme.small)).foregroundStyle(theme.muted)
+            } else if let c = cheque {
+                let left = Self.timeLeft(expiresAt: c.expiresAt, now: Date())
+                if Wallet.chequesEnabled, left != nil, !mine, c.to == model.walletAddressValue {
+                    Button(cashing ? "Cashing…" : "Cash it") { cash() }
+                        .buttonStyle(.borderedProminent).tint(theme.accent).disabled(cashing)
+                }
+                Text(left.map { "Not paid until \(mine ? "they cash it" : "cashed") · \($0)" } ?? "Expired · not paid")
+                    .font(theme.font(Theme.small)).foregroundStyle(theme.muted)
             }
         }
         .padding(16)
@@ -277,29 +287,49 @@ struct ChequeCard: View {
         .task { await read() }
     }
 
+    /// "expires in ~5 h" / "expires in ~20 min", or nil once it has expired.
+    static func timeLeft(expiresAt: UInt64, now: Date) -> String? {
+        let seconds = Double(expiresAt) - now.timeIntervalSince1970
+        guard seconds > 0 else { return nil }
+        return seconds >= 3600 ? "expires in ~\(Int(seconds / 3600)) h" : "expires in ~\(max(1, Int(seconds / 60))) min"
+    }
+
     private func read() async {
         cashed = model.isCashed(bytes)
-        if model.chequeSnapshot == nil { await model.refreshChequeSnapshot() }
-        guard let snapshot = model.chequeSnapshot else {
-            note = "Go online once to read cheques."
+        let decode = { model.chequeSnapshot.flatMap { try? walletReadCheque(snapshotJson: $0, bytes: bytes) } }
+        cheque = decode()
+        // No snapshot yet, or the cheque was signed under a runtime newer than the saved one
+        // knows (its signature then doesn't check): take a new one and look again.
+        if cheque == nil, await model.refreshChequeSnapshot() { cheque = decode() }
+        guard cheque != nil else {
+            note = model.chequeSnapshot == nil ? "Go online once to read cheques." : "This cheque can't be read."
             return
         }
-        do {
-            cheque = try walletReadCheque(snapshotJson: snapshot, bytes: bytes)
-        } catch {
-            note = "This cheque can't be read."
+        // Left pending by an earlier attempt (a timeout, the app closed): look again.
+        if !cashed, model.isChequePending(bytes) {
+            pending = true
+            await settle()
         }
     }
 
     private func cash() {
         cashing = true
         Task {
-            if let why = await model.cashCheque(bytes) {
-                note = "Bounced: \(why)"
-            } else {
-                cashed = true
-            }
+            await settle()
             cashing = false
+        }
+    }
+
+    private func settle() async {
+        switch await model.cashCheque(bytes) {
+        case .paid:
+            cashed = true
+            pending = false
+        case .pending:
+            pending = true
+        case .refused(let why):
+            note = "Can't cash: \(why)"
+            pending = false
         }
     }
 }
@@ -311,16 +341,19 @@ struct SendChequeSheet: View {
     @Environment(\.dismiss) private var dismiss
     let chatId: Id
     @State private var amount = ""
+    @State private var payee: ChequePayee?
     @State private var error: String?
     @State private var sending = false
     @FocusState private var focused: Bool
 
     private var valid: Bool { (try? walletParseTao(amount: amount)) != nil }
+    /// Nothing is signed until the address is on screen, and not while it is in question.
+    private var signable: Bool { valid && !sending && payee != nil && payee?.changedTo == nil }
 
     var body: some View {
         VStack(spacing: 20) {
             SheetHeaderBar(title: "Send TAO", leading: .cancel, onLeading: { dismiss() },
-                        action: sending ? "…" : "Sign", actionEnabled: valid && !sending, onAction: send)
+                        action: sending ? "…" : "Sign", actionEnabled: signable, onAction: send)
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 TextField("0", text: $amount)
                     .keyboardType(.decimalPad)
@@ -330,7 +363,32 @@ struct SendChequeSheet: View {
                 Text("τ").font(theme.font(32, weight: .medium)).foregroundStyle(theme.muted)
             }
             .padding(.horizontal, 32)
-            Text("A cheque is signed on this phone, no network needed. They cash it whenever either of you is online.")
+            if let payee {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("To \(payee.name)").font(theme.font(Theme.small, weight: .medium)).foregroundStyle(theme.muted)
+                    // The whole address, never shortened: this is what gets signed.
+                    Text(payee.address).font(.system(.footnote, design: .monospaced)).foregroundStyle(theme.text)
+                        .textSelection(.enabled)
+                        .accessibilityIdentifier("cheque-payee-address")
+                    if let changed = payee.changedTo {
+                        Label("\(payee.name)'s address changed", systemImage: "exclamationmark.triangle.fill")
+                            .font(theme.font(Theme.small, weight: .medium)).foregroundStyle(theme.text)
+                        Text("Above is the address this phone has always used for them. They now list a different one:")
+                            .font(theme.font(Theme.small)).foregroundStyle(theme.muted)
+                        Text(changed).font(.system(.footnote, design: .monospaced)).foregroundStyle(theme.text)
+                            .textSelection(.enabled)
+                        Text("Ask them, outside this app, whether they changed wallets before you pay the new address.")
+                            .font(theme.font(Theme.small)).foregroundStyle(theme.muted)
+                        Button("Address changed — use new address") { self.payee = model.acceptChangedPayee(payee) }
+                            .buttonStyle(.bordered).tint(theme.accent)
+                            .accessibilityIdentifier("cheque-payee-accept-change")
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(14)
+                .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.card))
+            }
+            Text("A cheque is signed on this phone and pays nothing until it is cashed. They have about 7 hours to cash it, while either of you is online.")
                 .font(theme.font(Theme.small)).foregroundStyle(theme.muted).multilineTextAlignment(.center)
             if let error { Text(error).font(theme.font(Theme.small)).foregroundStyle(theme.danger) }
             Spacer(minLength: 0)
@@ -338,12 +396,16 @@ struct SendChequeSheet: View {
         .padding(20)
         .background(theme.bg)
         .onAppear { focused = true }
+        .task {
+            do { payee = try await model.chequePayee(chatId: chatId) } catch { self.error = walletWords(error) }
+        }
     }
 
     private func send() {
+        guard let to = payee?.address else { return }
         sending = true
         Task {
-            error = await model.sendCheque(chatId: chatId, amount: amount)
+            error = await model.sendCheque(chatId: chatId, amount: amount, to: to)
             sending = false
             if error == nil { dismiss() }
         }
