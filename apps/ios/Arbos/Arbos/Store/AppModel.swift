@@ -881,6 +881,14 @@ final class AppModel: ObservableObject {
     @Published var devices: [AuthDevice] = []
     @Published var devicesLoaded = false
     @Published var devicesError: UserError?
+    /// Settings → Agent access link (`GET /me/agent-links`). Holds both the links I minted
+    /// and the older reader tokens, which this page took over from Devices.
+    @Published var agentLinks: [AgentAccessLink] = []
+    @Published var agentLinksLoaded = false
+    @Published var agentLinksError: UserError?
+    /// False while the relay has no mint route yet: the page lists and revokes, but offers
+    /// no Create button that would only fail.
+    @Published var agentLinksMintable = false
     /// Agent profile → Secrets, per project.
     @Published var projectSecrets: [Id: ProjectSecrets] = [:]
     /// Standing shell approvals per agent (#1544), loaded when the agent pane opens.
