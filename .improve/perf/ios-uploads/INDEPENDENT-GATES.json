@@ -1,0 +1,55 @@
+{
+  "scope": "Independent standaloneP6 publiccheck-only; 11perarm+4newhelper+2actualFoundationtransportcontrolsperarm; noownershipclaim onmain-onlyvariant. FullP4+P6 SDKcompiledseparately. Timing samples retained fromproducer, not rerun here.",
+  "gates": {
+    "before-checks": {
+      "passed": 11,
+      "failed": 0,
+      "seconds": 1.2794531249674037,
+      "sources": {
+        "apps/ios/Arbos/Arbos/Store/AppModel.swift": "983a49bac2d6c8844fe342f6723cac2069495632858957c415c017b85575d613",
+        "apps/ios/Arbos/Arbos/Sync/RelayAPI.swift": "c212c5e6eaceaf2498e7e993be364807615a7f549885ee5e8765ccd119923879",
+        ".improve/perf/ios-uploads/serial-main.swift": "59a3f9f64bbe76d7f754b7f73bb1be435ab4217852562dfa48eb88913763f52c"
+      }
+    },
+    "after-checks": {
+      "passed": 11,
+      "failed": 0,
+      "seconds": 0.9528391250642017,
+      "sources": {
+        "apps/ios/Arbos/Arbos/Store/AppModel.swift": "983a49bac2d6c8844fe342f6723cac2069495632858957c415c017b85575d613",
+        "apps/ios/Arbos/Arbos/Sync/RelayAPI.swift": "c212c5e6eaceaf2498e7e993be364807615a7f549885ee5e8765ccd119923879"
+      }
+    },
+    "contract": {
+      "passed": 4,
+      "failed": 0,
+      "seconds": 0.6497873750049621,
+      "sources": {
+        "apps/ios/Arbos/Arbos/Store/AppModel.swift": "983a49bac2d6c8844fe342f6723cac2069495632858957c415c017b85575d613",
+        "apps/ios/Arbos/Arbos/Sync/RelayAPI.swift": "c212c5e6eaceaf2498e7e993be364807615a7f549885ee5e8765ccd119923879"
+      }
+    }
+  },
+  "input_tree": "ba667ea6d7a39aaf09d7bc14a5a042d2b859fd13",
+  "profile_variants": {
+    "before-transport": {
+      "sources": {
+        "apps/ios/Arbos/Arbos/Store/AppModel.swift": "983a49bac2d6c8844fe342f6723cac2069495632858957c415c017b85575d613",
+        "apps/ios/Arbos/Arbos/Sync/RelayAPI.swift": "c212c5e6eaceaf2498e7e993be364807615a7f549885ee5e8765ccd119923879",
+        ".improve/perf/ios-uploads/serial-main.swift": "59a3f9f64bbe76d7f754b7f73bb1be435ab4217852562dfa48eb88913763f52c"
+      },
+      "compile_exit": 0,
+      "seconds": 1.537059084046632,
+      "fixture_sha256": "01b7761a20db6e666d5a3f68cc3f7867241b97cc0561df571e6b7c04684b6985"
+    },
+    "after-transport": {
+      "sources": {
+        "apps/ios/Arbos/Arbos/Store/AppModel.swift": "983a49bac2d6c8844fe342f6723cac2069495632858957c415c017b85575d613",
+        "apps/ios/Arbos/Arbos/Sync/RelayAPI.swift": "c212c5e6eaceaf2498e7e993be364807615a7f549885ee5e8765ccd119923879"
+      },
+      "compile_exit": 0,
+      "seconds": 1.4523368329973891,
+      "fixture_sha256": "4a21d07e142d334d09bf43ececce55658d5c76a36a762e4199f1e72336cacfa7"
+    }
+  }
+}
