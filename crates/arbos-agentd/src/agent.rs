@@ -14130,7 +14130,7 @@ impl Agent {
 
     /// `threads` (T1 index) + `status` in the project doc.
     pub async fn write_threads_index(&self) {
-        let Some(h) = self.sync.host(arbos_core::wire::PROJECT_DOC_CHAT_ID).await else {
+        let Some(h) = self.sync.project_doc().await else {
             return;
         };
         let h = h.lock().await;

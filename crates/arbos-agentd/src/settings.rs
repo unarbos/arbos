@@ -786,7 +786,7 @@ impl Agent {
         if self.settings.state.read().await.last_doc_write.as_ref() == Some(&v) {
             return;
         }
-        let Some(h) = self.sync.host(PROJECT_DOC_CHAT_ID).await else {
+        let Some(h) = self.sync.project_doc().await else {
             return;
         };
         {
@@ -811,7 +811,7 @@ impl Agent {
         if self.settings.state.read().await.last_chats_write.as_ref() == Some(&v) {
             return;
         }
-        let Some(h) = self.sync.host(PROJECT_DOC_CHAT_ID).await else {
+        let Some(h) = self.sync.project_doc().await else {
             return;
         };
         {
@@ -835,7 +835,7 @@ impl Agent {
     /// A client wrote into the project doc: pick up `settings.agentModel` / `agentEffort` (SetModel)
     /// and push it to the registry so every peer converges.
     pub async fn settings_from_doc(self: &Arc<Self>) {
-        let Some(h) = self.sync.host(PROJECT_DOC_CHAT_ID).await else {
+        let Some(h) = self.sync.project_doc().await else {
             return;
         };
         let settings: Value = {
