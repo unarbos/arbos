@@ -108,10 +108,10 @@ impl Worker {
                     .db
                     .set_server_space(&spec.server.id, &room)
                     .map_err(Self::db_err)?;
-                let _ = self
-                    .state
-                    .db
-                    .matrix_insert_room(&spec.server.id, &room, None, "space");
+                let _ =
+                    self.state
+                        .db
+                        .matrix_insert_room(&spec.server.id, &room, None, "space", false);
                 for m in invite {
                     self.client.join(&room, m).await?;
                 }
@@ -207,10 +207,10 @@ impl Worker {
                     .db
                     .set_channel_room(&channel.id, &room)
                     .map_err(Self::db_err)?;
-                let _ = self
-                    .state
-                    .db
-                    .matrix_insert_room(&channel.id, &room, None, "channel");
+                let _ =
+                    self.state
+                        .db
+                        .matrix_insert_room(&channel.id, &room, None, "channel", false);
                 room
             }
         };
@@ -252,20 +252,23 @@ impl Worker {
         Ok(())
     }
 
-    async fn create_channel_room(
+    /// The `createRoom` body of a channel. Channels are never end-to-end encrypted, whatever
+    /// `ARBOS_MATRIX_E2EE` says: server search, `?w=` thumbnails and fast joins need the
+    /// homeserver to read them. Only people chats are (`Worker::create_room`).
+    fn channel_room_body(
         &self,
         spec: &ServerSpec,
         channel: &Channel,
         space: &str,
         events_default: i64,
-    ) -> MxResult<String> {
+    ) -> Value {
         let invite: Vec<&str> = spec
             .members
             .iter()
             .map(|m| m.mxid.as_str())
             .filter(|m| *m != spec.creator)
             .collect();
-        let mut body = json!({
+        json!({
             "preset": "private_chat",
             "visibility": "private",
             "name": channel.name,
@@ -286,21 +289,20 @@ impl Worker {
                 "users": spec.users_pl, "invite": ADMIN_PL, "state_default": ADMIN_PL,
                 "events_default": events_default,
             },
-        });
-        // Stage D: Megolm from the first message. Notices the relay writes stay plaintext
-        // (membership lines carry nothing the member list doesn't).
-        if self.state.matrix.cfg.e2ee {
-            body["initial_state"]
-                .as_array_mut()
-                .expect("array")
-                .push(json!({
-                    "type": "m.room.encryption", "state_key": "",
-                    "content": { "algorithm": "m.megolm.v1.aes-sha2" },
-                }));
-        }
+        })
+    }
+
+    async fn create_channel_room(
+        &self,
+        spec: &ServerSpec,
+        channel: &Channel,
+        space: &str,
+        events_default: i64,
+    ) -> MxResult<String> {
+        let body = self.channel_room_body(spec, channel, space, events_default);
         let room = self.client.create_room(&spec.creator, &body).await?;
-        for m in invite {
-            self.client.join(&room, m).await?;
+        for m in spec.members.iter().filter(|m| m.mxid != spec.creator) {
+            self.client.join(&room, &m.mxid).await?;
         }
         Ok(room)
     }
@@ -325,5 +327,53 @@ impl Worker {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::matrix::{Config, Matrix};
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    #[test]
+    fn a_channel_is_never_created_encrypted() {
+        let mut state = test_state(AuthMode::Github);
+        state.matrix = Matrix::new(Config {
+            e2ee: true,
+            ..Config::off()
+        });
+        let worker = Worker::new(state);
+        let server = Server {
+            id: "s1".into(),
+            name: "Arbos".into(),
+            owner_user_id: "gh_1".into(),
+            image_key: None,
+            invite_code: "code".into(),
+            space_room_id: None,
+            created_at: 1,
+            is_open: false,
+            avatar_leaf: None,
+            avatar_leaf_color: None,
+        };
+        let spec = worker.server_spec(server, &[]);
+        let channel = Channel {
+            id: "c1".into(),
+            server_id: "s1".into(),
+            name: "general".into(),
+            topic: String::new(),
+            restricted: false,
+            position: 0,
+            room_id: None,
+            created_at: 1,
+        };
+        let body = worker.channel_room_body(&spec, &channel, "!space:arbos.life", 0);
+        let initial = body["initial_state"].as_array().expect("initial_state");
+        assert!(initial.iter().any(|e| e["type"] == "m.space.parent"));
+        assert!(
+            initial.iter().all(|e| e["type"] != "m.room.encryption"),
+            "channels stay plaintext with ARBOS_MATRIX_E2EE on: {body}"
+        );
     }
 }

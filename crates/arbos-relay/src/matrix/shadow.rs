@@ -101,13 +101,16 @@ pub async fn run(state: &AppState, only_chat: Option<&str>, with_unread: bool) -
             .map(|(m, _, _)| m)
             .collect();
         d.mirrored_messages = mirrored.len();
-        d.missing = ids
-            .iter()
-            .rev()
-            .take(100)
-            .filter(|id| !mirrored.contains(*id))
-            .cloned()
-            .collect();
+        // An encrypted room is not mirrored into, so its messages are not "missing".
+        if !room.encrypted {
+            d.missing = ids
+                .iter()
+                .rev()
+                .take(100)
+                .filter(|id| !mirrored.contains(*id))
+                .cloned()
+                .collect();
+        }
         match room_spec(state, &room.chat_id, room.project_id.as_deref()) {
             Some(spec) => {
                 d.members_relay = spec.members.iter().map(|m| m.mxid.clone()).collect();

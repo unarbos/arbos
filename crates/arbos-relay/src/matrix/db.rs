@@ -47,6 +47,10 @@ pub fn migrate_matrix(c: &Connection) {
         "ALTER TABLE users ADD COLUMN matrix_reads INTEGER NOT NULL DEFAULT 0",
         [],
     );
+    let _ = c.execute(
+        "ALTER TABLE matrix_rooms ADD COLUMN encrypted INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
 }
 
 /// Backoff after a failed attempt: 2 s, 4 s, … capped at 5 min.
@@ -81,6 +85,9 @@ pub struct MatrixRoom {
     pub kind: String,
     pub created_at: i64,
     pub closed_at: Option<i64>,
+    /// The room carries `m.room.encryption`: the relay holds no keys and mirrors no messages
+    /// into it.
+    pub encrypted: bool,
 }
 
 impl Db {
@@ -272,7 +279,7 @@ impl Db {
     pub fn matrix_room(&self, chat_id: &str) -> Result<Option<MatrixRoom>> {
         self.with(|c| {
             c.query_row(
-                "SELECT chat_id, room_id, project_id, kind, created_at, closed_at FROM matrix_rooms WHERE chat_id = ?1",
+                "SELECT chat_id, room_id, project_id, kind, created_at, closed_at, encrypted FROM matrix_rooms WHERE chat_id = ?1",
                 params![chat_id],
                 room_from_row,
             )
@@ -283,7 +290,7 @@ impl Db {
     pub fn matrix_room_by_room_id(&self, room_id: &str) -> Result<Option<MatrixRoom>> {
         self.with(|c| {
             c.query_row(
-                "SELECT chat_id, room_id, project_id, kind, created_at, closed_at FROM matrix_rooms WHERE room_id = ?1",
+                "SELECT chat_id, room_id, project_id, kind, created_at, closed_at, encrypted FROM matrix_rooms WHERE room_id = ?1",
                 params![room_id],
                 room_from_row,
             )
@@ -297,12 +304,13 @@ impl Db {
         room_id: &str,
         project_id: Option<&str>,
         kind: &str,
+        encrypted: bool,
     ) -> Result<()> {
         self.with(|c| {
             c.execute(
-                "INSERT INTO matrix_rooms(chat_id, room_id, project_id, kind, created_at) VALUES (?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT(chat_id) DO UPDATE SET room_id = excluded.room_id, closed_at = NULL",
-                params![chat_id, room_id, project_id, kind, now_ms()],
+                "INSERT INTO matrix_rooms(chat_id, room_id, project_id, kind, created_at, encrypted) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(chat_id) DO UPDATE SET room_id = excluded.room_id, closed_at = NULL, encrypted = excluded.encrypted",
+                params![chat_id, room_id, project_id, kind, now_ms(), encrypted],
             )?;
             Ok(())
         })
@@ -321,7 +329,7 @@ impl Db {
     pub fn matrix_rooms_all(&self) -> Result<Vec<MatrixRoom>> {
         self.with(|c| {
             let mut st = c.prepare(
-                "SELECT chat_id, room_id, project_id, kind, created_at, closed_at FROM matrix_rooms ORDER BY created_at",
+                "SELECT chat_id, room_id, project_id, kind, created_at, closed_at, encrypted FROM matrix_rooms ORDER BY created_at",
             )?;
             let rows = st.query_map([], room_from_row)?;
             rows.collect()
@@ -650,6 +658,7 @@ fn room_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<MatrixRoom> {
         kind: r.get(3)?,
         created_at: r.get(4)?,
         closed_at: r.get(5)?,
+        encrypted: r.get(6)?,
     })
 }
 
@@ -720,8 +729,13 @@ mod tests {
     #[test]
     fn rooms_events_users_and_flip() {
         let d = db();
-        d.matrix_insert_room("c1", "!r1:arbos.life", None, "dm")
+        d.matrix_insert_room("c1", "!r1:arbos.life", None, "dm", false)
             .unwrap();
+        assert!(!d.matrix_room("c1").unwrap().unwrap().encrypted);
+        // A chat that gets a new room takes that room's encryption, not the old one's.
+        d.matrix_insert_room("c1", "!r1:arbos.life", None, "dm", true)
+            .unwrap();
+        assert!(d.matrix_room("c1").unwrap().unwrap().encrypted);
         assert_eq!(
             d.matrix_room("c1").unwrap().unwrap().room_id,
             "!r1:arbos.life"

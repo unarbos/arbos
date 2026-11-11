@@ -8,10 +8,11 @@
 //! per chat, with retries. A Synapse outage never blocks today's path: the queue just grows.
 //!
 //! Switches: `ARBOS_MATRIX=off|dual|on` (relay env; `off` = nothing is queued, `dual` = stage A
-//! writes, `on` = reads allowed per user, stage B), `ARBOS_MATRIX_E2EE=on` (stage D: new
-//! channels are created end-to-end encrypted; flip it once every shipped app decrypts — an
-//! older app cannot read or post in an encrypted room, and a room never goes back) and the kill
-//! switch file `/etc/arbos/matrix.disabled` (the worker pauses; the outbox keeps queueing).
+//! writes, `on` = reads allowed per user, stage B), `ARBOS_MATRIX_E2EE=on` (stage D: new DMs
+//! and private groups of up to [`E2EE_MEMBER_CAP`] members are created end-to-end encrypted and
+//! the relay stops mirroring messages into them; channels stay plaintext. Flip it once every
+//! shipped app decrypts — an older app cannot read or post in an encrypted room, and a room
+//! never goes back) and the kill switch file `/etc/arbos/matrix.disabled` (the worker pauses; the outbox keeps queueing).
 //!
 //! Identity (design §2.3): `@<user_id>:arbos.life` for people (the relay `user_id` is the
 //! localpart, lower-cased), `@_a_<project_id>:arbos.life` for agents.
@@ -39,6 +40,9 @@ use crate::state::AppState;
 
 /// Kill switch: when this file exists the worker pauses (jobs keep queueing).
 pub const DISABLED_FILE: &str = "/etc/arbos/matrix.disabled";
+/// The most members an end-to-end encrypted people chat may have. Megolm shares each session
+/// key with every member device, so past this a group has to be a plaintext one.
+pub const E2EE_MEMBER_CAP: usize = 200;
 /// How long a `Resync` waits after the first row of a burst.
 const RESYNC_DELAY_MS: i64 = 4_000;
 
@@ -106,7 +110,7 @@ pub struct Config {
     pub hs_token_agents: String,
     pub as_token_bridges: String,
     pub hs_token_bridges: String,
-    /// Stage D: channels made from now on carry `m.room.encryption`.
+    /// Stage D: DMs and private groups made from now on carry `m.room.encryption`.
     pub e2ee: bool,
     pub disabled_file: PathBuf,
 }
