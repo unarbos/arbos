@@ -179,12 +179,22 @@ pub struct MatrixClient {
 }
 
 /// Where this device keeps its encryption keys (see `arbos_matrix::Crypto`).
-#[derive(Debug, Clone, uniffi::Record)]
+#[derive(Clone, uniffi::Record)]
 pub struct MatrixCrypto {
     /// App-private directory, one per Matrix device id.
     pub store_dir: String,
     /// Keychain-held key that encrypts the store at rest.
     pub store_key: Option<String>,
+}
+
+/// The store key never reaches a log line.
+impl std::fmt::Debug for MatrixCrypto {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MatrixCrypto")
+            .field("store_dir", &self.store_dir)
+            .field("store_key", &self.store_key.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 /// Start syncing for this device. Returns once the client exists; the first snapshot comes
@@ -305,5 +315,23 @@ impl MatrixClient {
 
     pub async fn mark_read(&self, room_id: String) -> Result<(), MatrixError> {
         Ok(self.inner.mark_read(&room_id).await?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_does_not_print_the_store_key() {
+        let crypto = MatrixCrypto {
+            store_dir: "/store".into(),
+            store_key: Some("s3cret".into()),
+        };
+        let shown = format!("{crypto:?}");
+        assert!(
+            shown.contains("/store") && !shown.contains("s3cret"),
+            "{shown}"
+        );
     }
 }

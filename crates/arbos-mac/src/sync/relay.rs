@@ -1760,13 +1760,22 @@ async fn start_matrix(shared: &Arc<Shared>) {
     });
     // One key store per Matrix device; the iPhone's phrase backs keys up, this Mac only keeps
     // its own until it can restore from it too.
-    let crypto = arbos_matrix::Crypto {
-        store_dir: credentials::config_dir()
-            .join("matrix")
-            .join(&session.device_id),
-        store_key: credentials::matrix_store_key(&session.device_id),
+    // No store directory or no word from the keychain: no client (the registry poll retries),
+    // rather than room keys in a store nothing encrypts.
+    let crypto = credentials::matrix_store_dir(&session.device_id).and_then(|store_dir| {
+        let store_key = credentials::matrix_store_key(&session.device_id)?;
+        Ok(arbos_matrix::Crypto {
+            store_dir,
+            store_key,
+        })
+    });
+    let started = match crypto {
+        Ok(crypto) => MatrixClient::start(session, crypto, bridge)
+            .await
+            .map_err(|e| e.to_string()),
+        Err(err) => Err(format!("store key: {err:#}")),
     };
-    match MatrixClient::start(session, crypto, bridge).await {
+    match started {
         Ok(client) => {
             let previous = shared.matrix.lock().unwrap().replace(client);
             if let Some(p) = previous {
@@ -1774,7 +1783,7 @@ async fn start_matrix(shared: &Arc<Shared>) {
             }
             let _ = shared.events.send(SyncEvent::ServersAvailable(true));
         }
-        Err(err) => shared.diagnostic("matrix-start", err.to_string()),
+        Err(err) => shared.diagnostic("matrix-start", err),
     }
     refresh_servers_list(shared).await;
 }
