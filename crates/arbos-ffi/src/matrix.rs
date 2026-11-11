@@ -53,6 +53,8 @@ pub struct MatrixMessageRow {
     pub sender_name: String,
     pub text: String,
     pub created_at: i64,
+    /// This device has no key for the message (yet); `text` is a placeholder.
+    pub locked: bool,
     /// Chat-doc message JSON (same shape `CoreChatDoc.readRowsJson` rows have).
     pub json: String,
 }
@@ -102,6 +104,7 @@ fn row(r: CoreMessage) -> MatrixMessageRow {
         sender_name: r.sender_name,
         text: r.text,
         created_at: r.created_at,
+        locked: r.locked,
         json: r.json,
     }
 }

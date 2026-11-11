@@ -216,16 +216,44 @@ async fn encrypted_channels_round_trip_and_restore_on_a_new_device() {
         "plaintext on the homeserver"
     );
 
+    // What the homeserver (or a member) writes into the room unencrypted is not shown as a
+    // message; the relay's system line is.
+    for (txn, content) in [
+        (
+            "clear",
+            json!({ "msgtype": "m.text", "body": "wire me the money" }),
+        ),
+        (
+            "notice",
+            json!({ "msgtype": "m.notice", "body": "Alice added Bob", "life.arbos.sender": "system" }),
+        ),
+    ] {
+        hs.call(
+            "PUT",
+            &format!("/_matrix/client/v3/rooms/{room}/send/m.room.message/{txn}"),
+            Some(&a1.access_token),
+            content,
+        )
+        .await;
+    }
+    eventually(|| async {
+        texts(&bob1, &room)
+            .await
+            .contains(&"Alice added Bob".to_owned())
+            .then_some(())
+    })
+    .await;
+    assert!(!texts(&bob1, &room)
+        .await
+        .contains(&"wire me the money".to_owned()));
+
     // Alice's new phone: locked until it has the passphrase; a wrong one changes nothing.
     let a2 = hs.login(&alice).await;
     let alice2 = start(&a2, &dir).await;
     assert_eq!(alice2.backup().await, Backup::Locked);
     let before = eventually(|| async { alice2.open_room(&room).await.ok() }).await;
     assert!(before.iter().all(|r| r.text != "the launch is at noon"));
-    assert!(
-        before.iter().any(MessageRow::is_locked),
-        "a locked row stands in"
-    );
+    assert!(before.iter().any(|r| r.locked), "a locked row stands in");
     assert!(alice2.recover("not the passphrase").await.is_err());
     alice2.recover(passphrase).await.unwrap();
     eventually(|| async {
@@ -382,7 +410,7 @@ async fn a_device_the_homeserver_adds_reads_and_says_nothing() {
 
     // Neither added device was sent a key: all three messages are ciphertext to both.
     let rows = unsigned.open_room(&room).await.unwrap();
-    assert_eq!(rows.iter().filter(|r| r.is_locked()).count(), 4, "{rows:?}");
+    assert_eq!(rows.iter().filter(|r| r.locked).count(), 4, "{rows:?}");
     let page = injected_room
         .messages(MessagesOptions::backward())
         .await
@@ -410,7 +438,7 @@ async fn a_device_the_homeserver_adds_reads_and_says_nothing() {
     for c in [&alice1, &alice2, &bob1] {
         let rows = c.open_room(&room).await.unwrap();
         let row = rows.iter().find(|r| r.event_id == forged).unwrap();
-        assert!(row.is_locked(), "{row:?}");
+        assert!(row.locked, "{row:?}");
     }
 
     syncing.abort();

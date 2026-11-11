@@ -21,6 +21,8 @@ pub struct MessageRow {
     pub sender_name: String,
     pub text: String,
     pub created_at: i64,
+    /// This device cannot decrypt the event (yet): `text` is [`LOCKED`], never the ciphertext.
+    pub locked: bool,
     /// Full row for the transcript (same shape as a chat-doc message).
     pub json: String,
 }
@@ -83,18 +85,32 @@ pub fn member_of_mxid(mxid: &str) -> String {
 /// What a message this device cannot decrypt (yet) reads as.
 pub const LOCKED: &str = "🔒 Waiting for this message's key";
 
-impl MessageRow {
-    pub fn is_locked(&self) -> bool {
-        self.text == LOCKED
-    }
-}
-
 /// Events that become transcript rows: messages, and encrypted events that did not decrypt.
 pub fn is_message(ev: &Value) -> bool {
     matches!(
         ev["type"].as_str(),
         Some("m.room.message" | "m.room.encrypted")
     )
+}
+
+/// The one message an encrypted room shows although it was not encrypted: the relay's system
+/// line (`matrix/spaces.rs::channel_notice`), which says nothing the member list does not.
+fn is_system_notice(ev: &Value) -> bool {
+    let c = &ev["content"];
+    c["msgtype"] == "m.notice"
+        && c["life.arbos.sender"] == "system"
+        && c["life.arbos.parts"].is_null()
+}
+
+/// Whether an event becomes a row. In an encrypted room a message that did not arrive
+/// encrypted is whatever the homeserver (or any member) chose to write, so it is dropped
+/// rather than drawn like a message its sender's device vouched for.
+pub fn shows(ev: &Value, room_encrypted: bool, decrypted: bool) -> bool {
+    is_message(ev)
+        && (!room_encrypted
+            || decrypted
+            || ev["type"] == "m.room.encrypted"
+            || is_system_notice(ev))
 }
 
 /// Build a [`MessageRow`] from one `m.room.message` event (JSON as the server sent it).
@@ -183,6 +199,7 @@ pub fn message_row(
         sender_name,
         text,
         created_at,
+        locked,
         json: row.to_string(),
     })
 }
@@ -244,7 +261,7 @@ mod tests {
             "content": { "algorithm": "m.megolm.v1.aes-sha2", "ciphertext": "AwgA…", "life.arbos.parts": [{"kind": "x"}] }
         });
         let row = message_row(&enc, &|_| None).unwrap();
-        assert!(row.is_locked());
+        assert!(row.locked);
         assert_eq!(row.sender, "user:gh_7");
         let v: Value = serde_json::from_str(&row.json).unwrap();
         assert_eq!(
@@ -263,5 +280,35 @@ mod tests {
         let v: Value = serde_json::from_str(&row.json).unwrap();
         assert_eq!(v["role"], "system");
         assert_eq!(v["senderHandle"], "");
+        // Anyone can type the locked row's words; that does not make a row locked.
+        let typed = json!({
+            "type": "m.room.message", "event_id": "$e5", "sender": "@gh_7:arbos.life",
+            "content": { "msgtype": "m.text", "body": LOCKED }
+        });
+        assert!(!message_row(&typed, &|_| None).unwrap().locked);
+    }
+
+    #[test]
+    fn an_encrypted_room_shows_no_cleartext_message() {
+        let clear =
+            json!({ "type": "m.room.message", "content": { "msgtype": "m.text", "body": "hi" } });
+        let notice = json!({ "type": "m.room.message",
+            "content": { "msgtype": "m.notice", "body": "Mira K. added Sam Rivera", "life.arbos.sender": "system" } });
+        // A "system" line that carries parts (a cheque card, say) is not the relay's notice.
+        let dressed = json!({ "type": "m.room.message",
+            "content": { "msgtype": "m.notice", "body": "x", "life.arbos.sender": "system", "life.arbos.parts": [{ "kind": "x" }] } });
+        let locked = json!({ "type": "m.room.encrypted", "content": {} });
+        // (event, room encrypted, decrypted) -> shown
+        for (ev, encrypted, decrypted, shown) in [
+            (&clear, false, false, true),
+            (&clear, true, true, true),
+            (&clear, true, false, false),
+            (&dressed, true, false, false),
+            (&notice, true, false, true),
+            (&locked, true, false, true),
+            (&json!({ "type": "m.room.member" }), false, false, false),
+        ] {
+            assert_eq!(shows(ev, encrypted, decrypted), shown, "{ev}");
+        }
     }
 }

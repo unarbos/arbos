@@ -13,6 +13,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use matrix_sdk::authentication::matrix::MatrixSession;
 use matrix_sdk::authentication::SessionTokens;
+use matrix_sdk::deserialized_responses::EncryptionInfo;
 use matrix_sdk::encryption::recovery::RecoveryState;
 use matrix_sdk::encryption::{BackupDownloadStrategy, EncryptionSettings};
 use matrix_sdk::room::MessagesOptions;
@@ -215,23 +216,34 @@ impl MatrixClient {
         self.client
             // Every timeline event: messages, and encrypted ones this device has no key for
             // yet (a locked row, replaced once the key arrives).
-            .add_event_handler(move |ev: Raw<AnySyncTimelineEvent>, room: Room| {
-                let weak = weak.clone();
-                async move {
-                    let Some(this) = weak.upgrade() else { return };
-                    let Ok(mut v) = serde_json::from_str::<Value>(ev.json().get()) else {
-                        return;
-                    };
-                    if v["event_id"].is_null() || !rows::is_message(&v) {
-                        return;
+            .add_event_handler(
+                move |ev: Raw<AnySyncTimelineEvent>, room: Room, info: Option<EncryptionInfo>| {
+                    let weak = weak.clone();
+                    async move {
+                        let Some(this) = weak.upgrade() else { return };
+                        let Ok(mut v) = serde_json::from_str::<Value>(ev.json().get()) else {
+                            return;
+                        };
+                        let encrypted = Self::is_encrypted(&room).await;
+                        if v["event_id"].is_null() || !rows::shows(&v, encrypted, info.is_some()) {
+                            return;
+                        }
+                        v["room_id"] = json!(room.room_id().as_str());
+                        let names = this.names_for(&room, std::slice::from_ref(&v)).await;
+                        if let Some(row) = message_row(&v, &|m| names.get(m).cloned()) {
+                            this.push_rows(room.room_id(), vec![row], true);
+                        }
                     }
-                    v["room_id"] = json!(room.room_id().as_str());
-                    let names = this.names_for(&room, std::slice::from_ref(&v)).await;
-                    if let Some(row) = message_row(&v, &|m| names.get(m).cloned()) {
-                        this.push_rows(room.room_id(), vec![row], true);
-                    }
-                }
-            });
+                },
+            );
+    }
+
+    /// Whether the room is end-to-end encrypted; not knowing counts as encrypted, so a
+    /// cleartext message is never shown on a guess ([`rows::shows`]).
+    async fn is_encrypted(room: &Room) -> bool {
+        room.latest_encryption_state()
+            .await
+            .map_or(true, |s| s.is_encrypted())
     }
 
     async fn sync_loop(self: Arc<Self>, mut stop: watch::Receiver<bool>) {
@@ -548,10 +560,14 @@ impl MatrixClient {
         opts.from = from;
         opts.limit = UInt::from(HISTORY_PAGE);
         let page = room.messages(opts).await?;
+        let encrypted = Self::is_encrypted(room).await;
         let events: Vec<Value> = page
             .chunk
             .iter()
-            .filter_map(|e| serde_json::from_str::<Value>(e.raw().json().get()).ok())
+            .filter_map(|e| {
+                let v = serde_json::from_str::<Value>(e.raw().json().get()).ok()?;
+                rows::shows(&v, encrypted, e.encryption_info().is_some()).then_some(v)
+            })
             .collect();
         let names = self.names_for(room, &events).await;
         let rows: Vec<MessageRow> = events
@@ -569,7 +585,7 @@ impl MatrixClient {
             let tl = self.timelines.lock().unwrap_or_else(|p| p.into_inner());
             // A locked row means keys may have arrived since: read the newest page again.
             tl.get(room.room_id())
-                .is_some_and(|t| t.loaded && !t.rows.iter().any(MessageRow::is_locked))
+                .is_some_and(|t| t.loaded && !t.rows.iter().any(|r| r.locked))
         };
         if loaded {
             return Ok(self.push_rows(room.room_id(), Vec::new(), false));
