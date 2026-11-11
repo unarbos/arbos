@@ -155,9 +155,16 @@ async fn encrypted_channels_round_trip_and_restore_on_a_new_device() {
 
     // Alice's first device: the account has no backup yet; she sets it up.
     let alice1 = start(&a1, &dir).await;
-    assert_eq!(alice1.backup().await, Backup::Off);
+    assert_eq!(alice1.backup().await.unwrap(), Backup::Off);
     alice1.recover(passphrase).await.unwrap();
-    assert_eq!(alice1.backup().await, Backup::On);
+    assert_eq!(alice1.backup().await.unwrap(), Backup::On);
+    // A typed phrase can be checked against the account though this device has the keys.
+    alice1.check_passphrase(passphrase).await.unwrap();
+    let wrong = alice1.check_passphrase("not the passphrase").await;
+    assert!(
+        matches!(wrong, Err(arbos_matrix::Error::Keys(_))),
+        "{wrong:?}"
+    );
     let bob1 = start(&b1, &dir).await;
 
     // An encrypted room, as the relay makes a channel with ARBOS_MATRIX_E2EE=on.
@@ -250,7 +257,7 @@ async fn encrypted_channels_round_trip_and_restore_on_a_new_device() {
     // Alice's new phone: locked until it has the passphrase; a wrong one changes nothing.
     let a2 = hs.login(&alice).await;
     let alice2 = start(&a2, &dir).await;
-    assert_eq!(alice2.backup().await, Backup::Locked);
+    assert_eq!(alice2.backup().await.unwrap(), Backup::Locked);
     let before = eventually(|| async { alice2.open_room(&room).await.ok() }).await;
     assert!(before.iter().all(|r| r.text != "the launch is at noon"));
     assert!(before.iter().any(|r| r.locked), "a locked row stands in");
@@ -300,18 +307,33 @@ async fn a_device_the_homeserver_adds_reads_and_says_nothing() {
     // (MSC3967), then sets the backup up. Bob's only device never sees a passphrase.
     let a1 = hs.appservice_device(&as_token, &alice, "A1").await;
     let alice1 = start(&a1, &dir).await;
-    assert_eq!(alice1.backup().await, Backup::Off);
+    assert_eq!(alice1.backup().await.unwrap(), Backup::Off);
+    // Her second device starts before the first has set the backup up: both were told `Off`.
+    let a2 = hs.appservice_device(&as_token, &alice, "A2").await;
+    let alice2 = start(&a2, &dir).await;
+    assert_eq!(alice2.backup().await.unwrap(), Backup::Off);
     alice1.recover(passphrase).await.unwrap();
-    assert_eq!(alice1.backup().await, Backup::On);
+    assert_eq!(alice1.backup().await.unwrap(), Backup::On);
     let b1 = hs.appservice_device(&as_token, &bob, "B1").await;
     let bob1 = start(&b1, &dir).await;
 
-    // Her second device signs itself by opening the backup.
-    let a2 = hs.appservice_device(&as_token, &alice, "A2").await;
-    let alice2 = start(&a2, &dir).await;
-    assert_eq!(alice2.backup().await, Backup::Locked);
+    // The second device opens the first's backup (and so signs itself) rather than setting up
+    // another one over it: the account's secret storage key is still the first device's.
+    let key_path = format!(
+        "/_matrix/client/v3/user/{}/account_data/m.secret_storage.default_key",
+        a1.user_id
+    );
+    let key = hs
+        .call("GET", &key_path, Some(&a1.access_token), Value::Null)
+        .await;
     alice2.recover(passphrase).await.unwrap();
-    assert_eq!(alice2.backup().await, Backup::On);
+    assert_eq!(alice2.backup().await.unwrap(), Backup::On);
+    assert_eq!(alice1.backup().await.unwrap(), Backup::On);
+    assert_eq!(
+        hs.call("GET", &key_path, Some(&a1.access_token), Value::Null)
+            .await,
+        key
+    );
 
     // Two devices she never had, minted the way the relay mints hers. One runs this crate
     // without the passphrase; the other is an attacker's client that trusts every device.

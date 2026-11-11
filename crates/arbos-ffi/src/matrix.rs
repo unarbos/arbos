@@ -278,14 +278,15 @@ impl MatrixClient {
         Ok(self.inner.send(&room_id, &text, parts, &local_id).await?)
     }
 
-    /// The account's key backup once the first sync answered: `on` (this device has the keys),
+    /// The account's key backup once the homeserver answered: `on` (this device has the keys),
     /// `off` (never set up: make the phrase, then `recover`), `locked` (set up elsewhere: needs
-    /// the person's phrase).
+    /// the person's phrase), or `unknown` when it has not answered in time (ask again).
     pub async fn backup(&self) -> String {
         match self.inner.backup().await {
-            arbos_matrix::Backup::On => "on",
-            arbos_matrix::Backup::Off => "off",
-            arbos_matrix::Backup::Locked => "locked",
+            Ok(arbos_matrix::Backup::On) => "on",
+            Ok(arbos_matrix::Backup::Off) => "off",
+            Ok(arbos_matrix::Backup::Locked) => "locked",
+            Err(_) => "unknown",
         }
         .to_owned()
     }
@@ -294,6 +295,12 @@ impl MatrixClient {
     /// `wallet_recovery_passphrase(phrase)`.
     pub async fn recover(&self, passphrase: String) -> Result<(), MatrixError> {
         Ok(self.inner.recover(&passphrase).await?)
+    }
+
+    /// Whether `wallet_recovery_passphrase(phrase)` opens this account's backup, changing
+    /// nothing. `recover` succeeds without reading the passphrase once `backup` is `on`.
+    pub async fn check_passphrase(&self, passphrase: String) -> Result<(), MatrixError> {
+        Ok(self.inner.check_passphrase(&passphrase).await?)
     }
 
     pub async fn mark_read(&self, room_id: String) -> Result<(), MatrixError> {
