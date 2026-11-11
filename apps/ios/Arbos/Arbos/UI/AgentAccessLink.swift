@@ -52,20 +52,16 @@ struct AgentAccessLinkPage: View {
                                      expiry: .standard,
                                      url: "https://relay.arbos.life/agent-link/open/fxOpen1")
         }
-        // Push, not `.sheet`: a sheet presented from a `navigationDestination` page can
-        // pop that page when it comes down (Connect uses the same push). The copy screen
-        // is the only place the URL exists, so losing the page under it loses the list.
-        .navigationDestination(isPresented: Binding(
-            get: { reveal != nil },
-            set: { if !$0 { reveal = nil } }
-        )) {
-            if let reveal {
-                AgentLinkCopySheet(reveal: reveal, startCopied: landing == "agent-links-copied") {
-                    self.reveal = nil
-                }
-                .environmentObject(model)
-                .environment(\.theme, theme)
+        // `fullScreenCover`, not a nested `navigationDestination` and not a `.sheet`:
+        // this page is itself a Settings `navigationDestination`, so a nested push never
+        // lands, and a sheet on that destination can take the page down with it. Cover
+        // keeps the list underneath and dismisses cleanly on Done.
+        .fullScreenCover(item: $reveal) { made in
+            AgentLinkCopySheet(reveal: made, startCopied: landing == "agent-links-copied") {
+                reveal = nil
             }
+            .environmentObject(model)
+            .environment(\.theme, theme)
         }
     }
 
@@ -143,10 +139,21 @@ struct AgentAccessLinkPage: View {
             separatorInset: PaneKit.inset
         ) {
             nameRow
-            SettingsActionRow(title: scope.createAction, destructive: scope.isDangerous, disabled: creating) {
-                create()
+            // Identifier on the Button itself — wrapping SettingsActionRow left XCTest
+            // tapping a container that did not fire create().
+            Button(action: create) {
+                Text(scope.createAction)
+                    .font(theme.font(Theme.body))
+                    .foregroundStyle(scope.isDangerous ? theme.danger : theme.accent)
+                    .frame(maxWidth: .infinity, minHeight: SettingsRow.height, alignment: .leading)
+                    .padding(.horizontal, 16)
+                    .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            .disabled(creating)
+            .opacity(creating ? 0.5 : 1)
             .accessibilityIdentifier("agent-link-create")
+            .accessibilityLabel(scope.createAction)
         }
     }
 
@@ -256,9 +263,9 @@ struct AgentAccessLinkPage: View {
 }
 
 /// The copy screen, shown once. It is the only place the URL exists on: a Done that waits
-/// for Copy, and a × that is always a way out. Pushed on the Settings stack (same job as
-/// `ConnectRevealView`), not presented as a sheet, so dismissing it cannot take the Agent
-/// access link page with it.
+/// for Copy, and a × that is always a way out. Presented as a `fullScreenCover` over the
+/// Agent access link page (that page is already a Settings `navigationDestination`, so a
+/// nested push never lands and a sheet can take the page down with it).
 ///
 /// The geometry is `ConnectRevealView`'s, to the point. `AvatarSheetPalette` is a fixed dark
 /// palette, so this screen does not follow the Glass / Matte setting — neither does any other
@@ -296,8 +303,7 @@ struct AgentLinkCopySheet: View {
             footer
         }
         .background(sheetBg.ignoresSafeArea())
-        .toolbar(.hidden, for: .navigationBar)
-        .navigationBarBackButtonHidden(true)
+        .interactiveDismissDisabled(!copied)
         .onAppear { copied = startCopied }
     }
 
