@@ -265,7 +265,7 @@ impl Worker {
             .map(|m| m.mxid.as_str())
             .filter(|m| *m != spec.creator)
             .collect();
-        let body = json!({
+        let mut body = json!({
             "preset": "private_chat",
             "visibility": "private",
             "name": channel.name,
@@ -287,6 +287,17 @@ impl Worker {
                 "events_default": events_default,
             },
         });
+        // Stage D: Megolm from the first message. Notices the relay writes stay plaintext
+        // (membership lines carry nothing the member list doesn't).
+        if self.state.matrix.cfg.e2ee {
+            body["initial_state"]
+                .as_array_mut()
+                .expect("array")
+                .push(json!({
+                    "type": "m.room.encryption", "state_key": "",
+                    "content": { "algorithm": "m.megolm.v1.aes-sha2" },
+                }));
+        }
         let room = self.client.create_room(&spec.creator, &body).await?;
         for m in invite {
             self.client.join(&room, m).await?;

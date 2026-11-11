@@ -80,6 +80,23 @@ pub fn member_of_mxid(mxid: &str) -> String {
     }
 }
 
+/// What a message this device cannot decrypt (yet) reads as.
+pub const LOCKED: &str = "🔒 Waiting for this message's key";
+
+impl MessageRow {
+    pub fn is_locked(&self) -> bool {
+        self.text == LOCKED
+    }
+}
+
+/// Events that become transcript rows: messages, and encrypted events that did not decrypt.
+pub fn is_message(ev: &Value) -> bool {
+    matches!(
+        ev["type"].as_str(),
+        Some("m.room.message" | "m.room.encrypted")
+    )
+}
+
 /// Build a [`MessageRow`] from one `m.room.message` event (JSON as the server sent it).
 /// `display_name` resolves the sender's Matrix display name — the relay registers a person
 /// under their **handle** (`matrix/worker.rs::display_name`), an agent under its name. A
@@ -92,9 +109,10 @@ pub fn message_row(
     ev: &Value,
     display_name: &dyn Fn(&str) -> Option<String>,
 ) -> Option<MessageRow> {
-    if ev["type"].as_str() != Some("m.room.message") {
+    if !is_message(ev) {
         return None;
     }
+    let locked = ev["type"] == "m.room.encrypted";
     let content = &ev["content"];
     let event_id = ev["event_id"].as_str()?.to_owned();
     let mxid = ev["sender"].as_str().unwrap_or_default();
@@ -106,7 +124,11 @@ pub fn message_row(
         .as_str()
         .map(str::to_owned)
         .unwrap_or_else(|| event_id.clone());
-    let text = content["body"].as_str().unwrap_or_default().to_owned();
+    let text = if locked {
+        LOCKED.to_owned()
+    } else {
+        content["body"].as_str().unwrap_or_default().to_owned()
+    };
     let created_at = ev["origin_server_ts"].as_i64().unwrap_or(0);
     let role = if sender.starts_with("agent:") {
         "assistant"
@@ -136,7 +158,7 @@ pub fn message_row(
         String::new()
     };
     let mut parts = vec![json!({ "id": format!("{event_id}#text"), "kind": "text", "text": text })];
-    if let Some(extra) = content["life.arbos.parts"].as_array() {
+    if let Some(extra) = content["life.arbos.parts"].as_array().filter(|_| !locked) {
         parts.extend(extra.iter().cloned());
     }
     let mut row = json!({
@@ -216,6 +238,20 @@ mod tests {
         let v: Value = serde_json::from_str(&named.json).unwrap();
         assert_eq!(v["senderName"], "Comms");
         assert!(message_row(&json!({ "type": "m.room.member" }), &|_| None).is_none());
+        // Undecryptable: a locked row in its place, never the ciphertext.
+        let enc = json!({
+            "type": "m.room.encrypted", "event_id": "$e4", "sender": "@gh_7:arbos.life", "origin_server_ts": 2000,
+            "content": { "algorithm": "m.megolm.v1.aes-sha2", "ciphertext": "AwgA…", "life.arbos.parts": [{"kind": "x"}] }
+        });
+        let row = message_row(&enc, &|_| None).unwrap();
+        assert!(row.is_locked());
+        assert_eq!(row.sender, "user:gh_7");
+        let v: Value = serde_json::from_str(&row.json).unwrap();
+        assert_eq!(
+            v["parts"].as_array().unwrap().len(),
+            1,
+            "nothing from the envelope"
+        );
         // A membership notice: the owner sent it, the content names the system.
         let notice = json!({
             "type": "m.room.message", "event_id": "$e3", "sender": "@gh_7:arbos.life", "origin_server_ts": 1900,
