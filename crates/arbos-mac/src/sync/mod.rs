@@ -23,7 +23,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use arbos_matrix::{MessageRow, Snapshot};
+use arbos_matrix::{Backup, MessageRow, Snapshot};
 use futures::future::BoxFuture;
 use tokio::sync::mpsc;
 
@@ -616,6 +616,9 @@ pub enum SyncEvent {
     ChannelHistoryEnd {
         room_id: String,
     },
+    /// D88: where the account's key backup stands, once the homeserver has said (never sent
+    /// on a guess), and again as `On` when a recovery phrase opened it.
+    MatrixBackup(Backup),
     /// D88: homeserver connection state.
     MatrixConnection {
         connected: bool,
@@ -1563,6 +1566,12 @@ pub enum ClientCommand {
     /// D88: read receipt up to the newest row.
     ChannelMarkRead {
         room_id: String,
+    },
+    /// D88: open the account's key backup on this Mac with the recovery phrase the person
+    /// typed; answered by `MatrixBackup(On)` or a `ServerError`. The phrase is used and
+    /// dropped, never stored (`Seed`'s `Debug` prints none of it).
+    MatrixRestore {
+        seed: arbos_wallet::Seed,
     },
 }
 

@@ -106,6 +106,9 @@ enum RenameKind {
 /// backdrop, which hands it to the rename (`rename_from_backdrop`).
 const NAME_CLICK_DELAY: Duration = Duration::from_millis(250);
 
+/// The restore sheet's field hint (the iPhone's).
+const RESTORE_PLACEHOLDER: &str = "twelve words…";
+
 /// Width of my pane's Settings pages that fit the pane; the two wider panels
 /// (`sheet_width`) grow the pane for their page.
 const SETTINGS_WIDTH: f32 = crate::ui::profiles::SHEET_WIDTH;
@@ -615,6 +618,13 @@ impl Shell {
             if let Some(code) = state.update(cx, |s, _| s.pending_join_code.take()) {
                 this.server_input
                     .update(cx, |input, cx| input.set_text(code, cx));
+            }
+            // A locked key backup opened the restore sheet: an empty field, its own hint.
+            if state.update(cx, |s, _| std::mem::take(&mut s.pending_restore_keys)) {
+                this.server_input.update(cx, |input, cx| {
+                    input.clear(cx);
+                    input.set_placeholder(RESTORE_PLACEHOLDER);
+                });
             }
             // The avatar picker: a rig request to open it, and the Generate tab's answer.
             if let Some((target, tab)) = state.update(cx, |s, _| s.avatar_picker_request.take()) {
@@ -1450,6 +1460,10 @@ impl Shell {
         if state.chart_viewer.is_some() {
             return Some(self.viewer_focus.clone());
         }
+        // It opens by itself (no click put the keyboard in its field).
+        if state.server_sheet == Some(ServerSheet::RestoreKeys) {
+            return Some(self.server_input.read(cx).focus_handle(cx));
+        }
         None
     }
 
@@ -2234,6 +2248,7 @@ impl Shell {
             ServerSheet::NewServer => CreateKind::Server.placeholder(),
             ServerSheet::JoinServer => "Invite link or code",
             ServerSheet::NewChannel { .. } => "channel-name",
+            ServerSheet::RestoreKeys => RESTORE_PLACEHOLDER,
         };
         self.menu_open = false;
         self.row_menu = None;
@@ -2302,8 +2317,17 @@ impl Shell {
         // Enter in the Create screen: same as its action button.
         let picture = match sheet {
             ServerSheet::NewServer => self.take_create_picture(cx),
-            ServerSheet::JoinServer | ServerSheet::NewChannel { .. } => None,
+            ServerSheet::JoinServer | ServerSheet::NewChannel { .. } | ServerSheet::RestoreKeys => {
+                None
+            }
         };
+        if sheet == ServerSheet::RestoreKeys {
+            // A phrase on its way to the backup has no more business in the field.
+            if self.state.update(cx, |s, cx| s.restore_keys(&text, cx)) {
+                self.server_input.update(cx, |input, cx| input.clear(cx));
+            }
+            return;
+        }
         self.state.update(cx, |s, cx| match sheet {
             ServerSheet::NewServer => {
                 s.create_server(text, create_entity::stored_disc(), picture, cx)
@@ -2312,6 +2336,7 @@ impl Shell {
             ServerSheet::NewChannel { server_id } => {
                 s.create_channel(server_id, text, restricted, cx)
             }
+            ServerSheet::RestoreKeys => {}
         });
     }
 

@@ -43,12 +43,19 @@ pub fn sheet(shell: &Shell, sheet: &ServerSheet, cx: &mut Context<Shell>) -> Div
             "Create",
             "Letters, digits and dashes; spaces become dashes.",
         ),
+        ServerSheet::RestoreKeys => (
+            "Unlock your chats",
+            "Unlock",
+            "Your encrypted history is locked on this Mac. Enter the 12-word recovery phrase from your iPhone (Settings → Wallet).",
+        ),
     };
     let is_channel = matches!(sheet, ServerSheet::NewChannel { .. });
     let can_go = !busy
         && match sheet {
             ServerSheet::NewChannel { .. } => !AppState::channel_name_clean(&typed).is_empty(),
-            ServerSheet::NewServer | ServerSheet::JoinServer => !typed.is_empty(),
+            ServerSheet::NewServer | ServerSheet::JoinServer | ServerSheet::RestoreKeys => {
+                !typed.is_empty()
+            }
         };
 
     let field = div()
@@ -156,6 +163,7 @@ pub fn sheet(shell: &Shell, sheet: &ServerSheet, cx: &mut Context<Shell>) -> Div
     let label = if busy {
         match sheet {
             ServerSheet::JoinServer => "Joining…",
+            ServerSheet::RestoreKeys => "Unlocking…",
             ServerSheet::NewServer | ServerSheet::NewChannel { .. } => "Creating…",
         }
     } else {
