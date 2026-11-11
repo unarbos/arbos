@@ -110,9 +110,14 @@ impl Hs {
 }
 
 async fn start(s: &Session, dir: &std::path::Path) -> Arc<MatrixClient> {
+    start_as(s, dir, true).await
+}
+
+async fn start_as(s: &Session, dir: &std::path::Path, first_device: bool) -> Arc<MatrixClient> {
     let crypto = Crypto {
         store_dir: dir.join(&s.device_id),
         store_key: Some("test store key".into()),
+        first_device,
     };
     MatrixClient::start(s.clone(), crypto, Arc::new(Quiet(Mutex::new(Vec::new()))))
         .await
@@ -465,6 +470,120 @@ async fn a_device_the_homeserver_adds_reads_and_says_nothing() {
 
     syncing.abort();
     for c in [alice1, alice2, bob1, unsigned] {
+        c.stop();
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A Mac has no wallet to make a recovery phrase with, so it never makes the account's keys
+/// (`Crypto::first_device`). Signed in first, it leaves the account for the phone to set up
+/// (an identity and backup of the Mac's making would shut the phone out: "a backup already
+/// exists"). It is sent no room key until it has opened the phone's backup with the
+/// passphrase, and every one after.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_device_that_cannot_set_up_keys_waits_for_one_that_can() {
+    let (Ok(url), Ok(as_token)) = (
+        std::env::var("ARBOS_MATRIX_TEST_E2EE_HS"),
+        std::env::var("ARBOS_MATRIX_TEST_E2EE_AS_TOKEN"),
+    ) else {
+        return;
+    };
+    let hs = Hs {
+        url,
+        http: reqwest13::Client::new(),
+    };
+    let tag = std::process::id();
+    let dir = std::env::temp_dir().join(format!("arbos-e2ee-later-{tag}"));
+    let (alice, bob) = (format!("gh_c{tag}"), format!("gh_d{tag}"));
+    let passphrase = "the passphrase arbos-wallet derives from the phrase";
+
+    let m = hs.appservice_device(&as_token, &alice, "MAC").await;
+    let mac = start_as(&m, &dir, false).await;
+    assert_eq!(mac.backup().await.unwrap(), Backup::Off);
+    // Long enough for an identity it must not make.
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let p = hs.appservice_device(&as_token, &alice, "PHONE").await;
+    let phone = start(&p, &dir).await;
+    assert_eq!(phone.backup().await.unwrap(), Backup::Off);
+    phone.recover(passphrase).await.unwrap();
+    assert_eq!(phone.backup().await.unwrap(), Backup::On);
+    let b1 = hs.appservice_device(&as_token, &bob, "B1").await;
+    let bob1 = start(&b1, &dir).await;
+
+    let room = hs
+        .call(
+            "POST",
+            "/_matrix/client/v3/createRoom",
+            Some(&p.access_token),
+            json!({ "preset": "private_chat", "invite": [b1.user_id],
+                    "initial_state": [{ "type": "m.room.encryption", "state_key": "",
+                                        "content": { "algorithm": "m.megolm.v1.aes-sha2" } }] }),
+        )
+        .await["room_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    hs.call(
+        "POST",
+        &format!("/_matrix/client/v3/join/{room}"),
+        Some(&b1.access_token),
+        json!({}),
+    )
+    .await;
+    for c in [&phone, &bob1, &mac] {
+        eventually(|| async { c.open_room(&room).await.ok() }).await;
+    }
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    bob1.send_text(&room, "before the phrase", "01E2EELATER0000000000000AA")
+        .await
+        .unwrap();
+    eventually(|| async {
+        texts(&phone, &room)
+            .await
+            .contains(&"before the phrase".to_owned())
+            .then_some(())
+    })
+    .await;
+
+    // The Mac learns the phone set the keys up; without the passphrase it reads and says
+    // nothing.
+    eventually(|| async { (mac.backup().await.ok()? == Backup::Locked).then_some(()) }).await;
+    let rows = eventually(|| async {
+        let rows = mac.open_room(&room).await.ok()?;
+        (!rows.is_empty()).then_some(rows)
+    })
+    .await;
+    assert!(rows.iter().all(|r| r.locked), "{rows:?}");
+    assert!(mac.send_text(&room, "unsigned", "01M").await.is_err());
+    assert!(mac.recover("not the passphrase").await.is_err());
+    assert_eq!(mac.backup().await.unwrap(), Backup::Locked);
+
+    // With it: the old message from the backup, a new one by its own key, and its own sends.
+    mac.recover(passphrase).await.unwrap();
+    assert_eq!(mac.backup().await.unwrap(), Backup::On);
+    bob1.send_text(&room, "after the phrase", "01E2EELATER0000000000000AB")
+        .await
+        .unwrap();
+    eventually(|| async {
+        let seen = texts(&mac, &room).await;
+        ["before the phrase", "after the phrase"]
+            .iter()
+            .all(|t| seen.contains(&(*t).to_owned()))
+            .then_some(())
+    })
+    .await;
+    mac.send_text(&room, "from the mac", "01E2EELATER0000000000000AC")
+        .await
+        .unwrap();
+    eventually(|| async {
+        texts(&bob1, &room)
+            .await
+            .contains(&"from the mac".to_owned())
+            .then_some(())
+    })
+    .await;
+
+    for c in [mac, phone, bob1] {
         c.stop();
     }
     let _ = std::fs::remove_dir_all(&dir);

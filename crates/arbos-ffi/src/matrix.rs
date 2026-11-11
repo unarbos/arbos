@@ -215,6 +215,8 @@ pub async fn matrix_start(
         arbos_matrix::Crypto {
             store_dir: crypto.store_dir.into(),
             store_key: crypto.store_key,
+            // The phone has the wallet: it makes the phrase the keys go under.
+            first_device: true,
         },
         Arc::new(Bridge(listener)),
     )

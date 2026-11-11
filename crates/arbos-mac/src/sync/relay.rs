@@ -1767,6 +1767,8 @@ async fn start_matrix(shared: &Arc<Shared>) {
         Ok(arbos_matrix::Crypto {
             store_dir,
             store_key,
+            // No wallet on the Mac to make a recovery phrase with: the iPhone sets the keys up.
+            first_device: false,
         })
     });
     let started = match crypto {
