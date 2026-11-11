@@ -5783,7 +5783,7 @@ mod roster_batch_tests {
             _statement: *mut std::ffi::c_void,
             _sql: *mut std::ffi::c_void,
         ) -> i32 {
-            if kind == rusqlite::ffi::SQLITE_TRACE_STMT as u32 {
+            if kind == rusqlite::ffi::SQLITE_TRACE_STMT {
                 let _ = STATEMENTS.try_with(|count| count.set(count.get().saturating_add(1)));
             }
             0
@@ -5833,7 +5833,7 @@ mod roster_batch_tests {
                     let result = unsafe {
                         rusqlite::ffi::sqlite3_trace_v2(
                             connection.handle(),
-                            rusqlite::ffi::SQLITE_TRACE_STMT as u32,
+                            rusqlite::ffi::SQLITE_TRACE_STMT,
                             Some(count_statement),
                             std::ptr::null_mut(),
                         )
