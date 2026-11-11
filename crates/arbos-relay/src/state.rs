@@ -209,9 +209,21 @@ impl Room {
         }
     }
 
-    /// Does `user_id`'s box have a socket open on this room right now?
-    pub fn has_box(&self, user_id: &str) -> bool {
-        self.boxes.lock().unwrap().contains_key(user_id)
+    /// How many sockets `user_id`'s box holds on this room.
+    ///
+    /// One box serves every workspace of its user, and a people room is one shared room that
+    /// several of those workspaces can each be an agent of — so the count, not the presence,
+    /// is what says whether every one of them is on the room. The sockets themselves carry no
+    /// workspace: a box dials `/room/people/{chat}` with a `Principal::Box { user_id }` and a
+    /// device id that is the same across workspaces, so there is nothing here to key on but
+    /// the owner.
+    pub fn box_count(&self, user_id: &str) -> u32 {
+        self.boxes
+            .lock()
+            .unwrap()
+            .get(user_id)
+            .copied()
+            .unwrap_or(0)
     }
 }
 

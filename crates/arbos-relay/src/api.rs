@@ -2443,7 +2443,7 @@ mod primary_chat_tests {
         );
         assert!(state.db.take_pushes(&project).unwrap().is_empty());
         room.box_left(&alice);
-        assert!(!room.has_box(&alice));
+        assert_eq!(room.box_count(&alice), 0);
         assert_eq!(
             boxes::after_person_row(&state, &room, &chat, &agents).await,
             1
