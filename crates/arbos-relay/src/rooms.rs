@@ -921,6 +921,11 @@ async fn handle_frame(
                                     .insert(u, arbos_core::ids::now_ms());
                             }
                             boxes::ensure_awake_project(state, project_id, "send").await;
+                            if room_name.rsplit_once('/').map(|(_, c)| c)
+                                == Some(PROJECT_DOC_CHAT_ID)
+                            {
+                                boxes::after_project_doc_row(state, room, project_id);
+                            }
                         }
                     }
                 }
@@ -1584,6 +1589,81 @@ mod ordering_tests {
 
     /// #1347: a planned restart tells every room socket `restart_soon`, then closes it with 1012
     /// (not a dropped stream), drains to zero, and a socket that arrives mid-drain gets 1012 at once.
+    /// A device's row into a project doc the box holds no socket on (a settings change while
+    /// the box has closed the room for being idle) queues the push that reopens it; with the
+    /// box on the room it arrives live and nothing is queued.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_device_row_into_a_project_doc_without_a_box_socket_queues_its_reopen_push() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 1);
+        let project = project_of(&state, &alice, "Doc");
+        let (_, token) = device_with_token(&state, &alice);
+        let addr = serve(state.clone()).await;
+        let doc = arbos_core::wire::PROJECT_DOC_CHAT_ID;
+        let (ws, _) = tokio_tungstenite::connect_async(format!(
+            "ws://{addr}/room/{project}/{doc}?token={token}"
+        ))
+        .await
+        .unwrap();
+        let (mut sink, mut stream) = ws.split();
+        sink.send(TMsg::Binary(
+            Frame::new(
+                FrameType::Hello,
+                json!({ "cursor": 0, "device": "dev:w", "room": format!("{project}/{doc}"), "proto": arbos_core::PROTO_VERSION }),
+                bytes::Bytes::new(),
+            )
+            .encode(),
+        ))
+        .await
+        .unwrap();
+        let _ = state.db.take_pushes(&project).unwrap();
+        let opens = |state: &AppState| {
+            state
+                .db
+                .take_pushes(&project)
+                .unwrap()
+                .into_iter()
+                .filter(|(_, k, _)| k == crate::boxes::PROJECT_DOC_OPEN_PUSH)
+                .count()
+        };
+        for (n, expect) in [(1, 1), (2, 0)] {
+            sink.send(TMsg::Binary(
+                Frame::new(
+                    FrameType::Push,
+                    json!({ "batchId": format!("b{n}") }),
+                    bytes::Bytes::from_static(b"row"),
+                )
+                .encode(),
+            ))
+            .await
+            .unwrap();
+            // Frames are handled in order on the socket task, so the probe's answer means the
+            // row before it has been handled in full (the ack alone is sent mid-way).
+            sink.send(TMsg::Binary(
+                Frame::new(FrameType::Probe, json!({}), bytes::Bytes::new()).encode(),
+            ))
+            .await
+            .unwrap();
+            let handled = tokio::time::timeout(Duration::from_secs(10), async {
+                while let Some(Ok(m)) = stream.next().await {
+                    if decode(m).is_some_and(|f| f.ty == FrameType::ProbeOk) {
+                        return true;
+                    }
+                }
+                false
+            })
+            .await
+            .unwrap_or(false);
+            assert!(handled, "row {n} handled");
+            assert_eq!(opens(&state), expect, "reopen pushes after row {n}");
+            // The box joins the room before the second row.
+            state
+                .room(&format!("{project}/{doc}"))
+                .await
+                .box_joined(&alice);
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn planned_restart_notifies_then_closes_room_sockets_with_1012() {
         let state = test_state(AuthMode::Github);

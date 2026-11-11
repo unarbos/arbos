@@ -721,6 +721,10 @@ pub struct ServingAgent {
 /// box: the rows waiting in the room are the work.
 pub const CHAT_OPEN_PUSH: &str = "chat_open";
 pub const PEOPLE_CHAT_OPEN_PUSH: &str = "people_chat_open";
+/// Tells a box to open one workspace's project-doc room (`{reason}`). The project doc is not a
+/// chat — it has no `chats` row — so `chat_open` cannot name it. A box that still holds every
+/// project doc open never needs this; one that predates the kind logs it as unknown.
+pub const PROJECT_DOC_OPEN_PUSH: &str = "project_doc_open";
 
 /// The `chat_open` payload: the chat row rides along because agentd's `open_listed_chat`
 /// upserts title / pin / created_at from it (a bare id would reset them).
@@ -1547,6 +1551,38 @@ pub async fn provider_status(state: &AppState, user_id: &str) -> Value {
     })
 }
 
+/// A person's row landed in `project_id`'s project doc (a settings change): a box with no socket
+/// on that room is told to open it, the same obligation [`after_person_row`] meets for chats.
+/// Without it a project doc the box closed for being idle would never learn of the row. Returns
+/// whether a push was queued.
+pub fn after_project_doc_row(
+    state: &AppState,
+    room: &crate::state::Room,
+    project_id: &str,
+) -> bool {
+    let Some(owner) = state.user_of(project_id) else {
+        return false;
+    };
+    if room.box_count(&owner) > 0 {
+        return false;
+    }
+    match state.db.enqueue_push_once(
+        project_id,
+        PROJECT_DOC_OPEN_PUSH,
+        &json!({ "reason": "rows_pending" }),
+    ) {
+        Ok(true) => {
+            tracing::info!(project = %project_id, %owner, "row landed with no box socket on the project doc; told the box to open it");
+            true
+        }
+        Ok(false) => false,
+        Err(e) => {
+            tracing::warn!(project = %project_id, error = %e, "project_doc_open push not queued");
+            false
+        }
+    }
+}
+
 #[cfg(test)]
 mod sibling_workspace_reopen_tests {
     //! Whether a box is "on" a people room has to be decided per agent, not per owner. One box
@@ -1725,6 +1761,43 @@ mod sibling_workspace_reopen_tests {
         );
         assert_eq!(state.db.take_pushes(&pa).unwrap().len(), 1);
         assert!(state.db.take_pushes(&pb).unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod project_doc_reopen_tests {
+    use super::*;
+    use crate::people::tests_support::{person, project_of};
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+    use arbos_core::wire::{room_name, PROJECT_DOC_CHAT_ID};
+
+    /// A row into a project doc the box holds no socket on queues exactly one reopen push for
+    /// that workspace; a socket on the room — and only on that room — means it arrives live.
+    #[tokio::test]
+    async fn a_row_into_a_project_doc_with_no_box_socket_tells_the_box_to_open_it() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _dev) = person(&state, 1);
+        let a = project_of(&state, &alice, "WorkspaceA");
+        let b = project_of(&state, &alice, "WorkspaceB");
+        let room_a = state.room(&room_name(&a, PROJECT_DOC_CHAT_ID)).await;
+        let room_b = state.room(&room_name(&b, PROJECT_DOC_CHAT_ID)).await;
+        let _ = state.db.take_pushes(&a).unwrap();
+
+        // The box is on B's project doc only: that says nothing about A's.
+        room_b.box_joined(&alice);
+        assert!(after_project_doc_row(&state, &room_a, &a));
+        assert!(
+            !after_project_doc_row(&state, &room_a, &a),
+            "one is already waiting"
+        );
+        let pushes = state.db.take_pushes(&a).unwrap();
+        assert_eq!(pushes.len(), 1, "{pushes:?}");
+        assert_eq!(pushes[0].1, PROJECT_DOC_OPEN_PUSH);
+        assert!(!after_project_doc_row(&state, &room_b, &b), "B is live");
+
+        room_a.box_joined(&alice);
+        assert!(!after_project_doc_row(&state, &room_a, &a));
     }
 }
 
