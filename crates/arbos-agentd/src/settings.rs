@@ -653,7 +653,8 @@ impl Agent {
             tracing::warn!(error = %e, "models.json rewrite after a model change");
         }
         let mut switched = prev.talking.id == m.talking.id;
-        if let Ok(pi) = self.pi_child().await {
+        if let Ok(mut owner) = self.current_pi().await {
+            let pi = &owner.child;
             if prev.talking.id != m.talking.id {
                 let r = pi
                     .call(RpcCommand::SetModel {
@@ -663,28 +664,32 @@ impl Agent {
                     })
                     .await?;
                 if r.success {
-                    *self.pi_model.lock().await = Some(m.talking.id.clone());
-                    switched = true;
+                    switched = self
+                        .commit_pi_model(&owner, Some(m.talking.id.clone()))
+                        .await;
                 } else {
                     // pi's in-session catalog may not list the new id yet; respawn
                     // with live_models() so the next turn actually uses it.
                     tracing::warn!(model = %m.talking.id, error = ?r.error, "set_model refused; respawning pi");
-                    if let Err(e) = self.respawn_pi_current().await {
-                        tracing::warn!(error = %e, "pi respawn after set_model refused");
-                    } else {
-                        switched = true;
+                    match self.respawn_pi_current_for(&owner).await {
+                        Ok(Some(replacement)) => {
+                            owner = replacement;
+                            switched = true;
+                        }
+                        Ok(None) => {}
+                        Err(e) => tracing::warn!(error = %e, "pi respawn after set_model refused"),
                     }
                 }
             }
-            if prev.talking.effort != m.talking.effort {
-                if let Ok(pi) = self.pi_child().await {
-                    let _ = pi
-                        .call(RpcCommand::SetThinkingLevel {
-                            id: pi.next_id("tl"),
-                            level: effort_to_thinking(&m.talking.effort).into(),
-                        })
-                        .await;
-                }
+            if prev.talking.effort != m.talking.effort && self.pi_is_current(&owner).await {
+                // A delayed completion must never re-capture a replacement child's authority.
+                let pi = &owner.child;
+                let _ = pi
+                    .call(RpcCommand::SetThinkingLevel {
+                        id: pi.next_id("tl"),
+                        level: effort_to_thinking(&m.talking.effort).into(),
+                    })
+                    .await;
             }
         } else if prev.talking.id != m.talking.id {
             // No live pi yet; the next start_pi/respawn picks up live_models().
@@ -726,16 +731,17 @@ impl Agent {
     /// of the box.
     pub(crate) async fn sync_pi_model(self: &Arc<Self>) {
         let want = self.live_models().await.0;
-        match self.pi_model.lock().await.as_deref() {
+        match self.pi_model_snapshot().await.as_deref() {
             // A retry deliberately holds the session on the fallback model.
             None => return,
             Some(on) if on == want => return,
             Some(_) => {}
         }
         // No live child: the next `start_pi` / `respawn_pi` reads `live_models()` itself.
-        let Ok(pi) = self.pi_child().await else {
+        let Ok(owner) = self.current_pi().await else {
             return;
         };
+        let pi = &owner.child;
         let refused = match pi
             .call_timeout(
                 RpcCommand::SetModel {
@@ -748,8 +754,9 @@ impl Agent {
             .await
         {
             Ok(r) if r.success => {
-                *self.pi_model.lock().await = Some(want.clone());
-                tracing::info!(model = %want, "main session put back on the agent's model");
+                if self.commit_pi_model(&owner, Some(want.clone())).await {
+                    tracing::info!(model = %want, "main session put back on the agent's model");
+                }
                 false
             }
             Ok(r) => {
@@ -764,7 +771,7 @@ impl Agent {
         // Same recovery `apply_models` uses: a respawn boots on `live_models()`, so the prompt
         // that follows goes out on the agent's model rather than on the stale one.
         if refused {
-            if let Err(e) = self.respawn_pi_current().await {
+            if let Err(e) = self.respawn_pi_current_for(&owner).await {
                 tracing::warn!(error = %e, "pi respawn after a refused turn-boundary set_model");
             }
         }

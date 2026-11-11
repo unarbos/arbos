@@ -1,0 +1,15 @@
+{
+  "patch_base": "9e50073163c844bd6a4f6393e742e37a37d8d3b6",
+  "patch_sha256": "1fb29a4a1b2ab98f22a1e6b860d34abdbec5ddf04ef0d697a5a661ec0271aa44",
+  "patch_bytes": 1447,
+  "production_rpc_child_sha256_unchanged": "cc277c8e333ec8e3d705ee71d30f6818b2c9950c8bfb187981ea9bcbb5082b69",
+  "source_after_sha256": {
+    "crates/arbos-agentd/src/harness.rs": "62038c2652c070c1448ecbc8994278794806db3a6b74cd3c5e4b3a57d81b6a93",
+    "crates/arbos-agentd/src/sweep_contention_tests.rs": "101e78297a8f16c8f4508399f96899c9daddeeac536214051cbb68294c562c45"
+  },
+  "root_Cargo_lock_sha256_unchanged": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+  "binary_sha256": "2f6c6dc0ad9f4dc62389985edc662957dff0ba618630c6fb0b9445f0070c9fa7",
+  "linux_toolchain": "rustc1.99.1 (58cf8f9c3 2026-10-13)",
+  "image_sha256": "3e2d36085c7a8b65ba041147fa7ef8172869c54c6d6354714f6b84c4068ba767",
+  "scope": "Test-only Ready precondition and portable Python executable lookup; production behavior, four physical assertions and four RPC controls retained."
+}

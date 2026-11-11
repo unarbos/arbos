@@ -204,6 +204,7 @@ enum StarterPack {
 struct StickerBubble: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
+    let account: ChatAccountContext
     let item: MediaItem
     let chatId: Id
 
@@ -212,6 +213,11 @@ struct StickerBubble: View {
     @State private var image: UIImage?
     @State private var failed = false
     @State private var viewer: MediaViewerState?
+
+    private var cacheKey: ChatImageCache.Key? {
+        guard let owner = account.owner, let ref = item.cacheKey else { return nil }
+        return ChatImageCache.Key(owner: owner, slot: item.slot, ref: ref)
+    }
 
     var body: some View {
         ZStack {
@@ -230,29 +236,39 @@ struct StickerBubble: View {
         // A plain tap, no drag gesture of its own: the system's interactive edge pop
         // (#2239) owns horizontal swipes, same as `ImageBubble`.
         .onTapGesture {
+            guard account.accepts(model) else { return }
             viewer = MediaOpen.state(for: item, chatId: chatId, model: model)
         }
         .accessibilityIdentifier("sticker-bubble")
         .accessibilityLabel("Sticker")
         .task(id: item.cacheKey) { await load() }
         .fullScreenCover(item: $viewer) { v in
-            MediaViewer(album: v.items, index: v.index, onClose: { viewer = nil })
+            MediaViewer(album: v.items, index: v.index, onClose: { if account.accepts(model) { viewer = nil } },
+                        origin: MediaOrigin(model, account: account))
                 .environmentObject(model)
                 .environment(\.theme, theme)
         }
     }
 
     private func load() async {
-        if let ref = item.cacheKey, let hit = ChatImageCache.decoded(for: ref) {
+        guard account.accepts(model) else { return }
+        if let cacheKey, let hit = ChatImageCache.decoded(for: cacheKey) {
             image = hit.image
             return
         }
-        guard let (data, _) = await MediaFetch.bytes(for: item, model: model),
-              let decoded = await ChatImageCache.decode(data, maxPixels: CGSize(width: 512, height: 512)) else {
+        guard let (data, _) = await MediaFetch.bytes(for: item, model: model, isCurrent: { account.accepts(model) }) else {
+            guard account.accepts(model) else { return }
             failed = true
             return
         }
-        if let ref = item.cacheKey { ChatImageCache.store(decoded, for: ref) }
+        guard account.accepts(model) else { return }
+        guard let decoded = await ChatImageCache.decode(data, maxPixels: CGSize(width: 512, height: 512)) else {
+            guard account.accepts(model) else { return }
+            failed = true
+            return
+        }
+        guard account.accepts(model) else { return }
+        if let cacheKey { ChatImageCache.store(decoded, for: cacheKey) }
         image = decoded.image
     }
 }
@@ -305,12 +321,13 @@ struct FunPickerSheet: View {
     private var recents: [String] { recentsRaw.isEmpty ? [] : recentsRaw.components(separatedBy: "\u{1F}") }
 
     var body: some View {
+        let work = model.accountWork()
         VStack(spacing: 0) {
-            header
+            header(work: work)
             switch tab {
-            case .emoji: emojiTab
-            case .stickers: stickersTab
-            case .gifs: gifsTab
+            case .emoji: emojiTab(work: work)
+            case .stickers: stickersTab(work: work)
+            case .gifs: gifsTab(work: work)
             }
         }
         .background(theme.bg)
@@ -318,20 +335,21 @@ struct FunPickerSheet: View {
         .presentationDragIndicator(.visible)
         .presentationBackground(theme.bg)
         .onChange(of: tabLabel) { _, new in
+            guard model.acceptsAccountWork(work) else { return }
             guard let t = FunTab(rawValue: new), t != tab else { return }
             tab = t
             query = ""
-            if t == .stickers { Task { await loadPacks() } }
-            if t == .gifs, gifPage == nil { searchGifs("") }
+            if t == .stickers { Task { await loadPacks(work: work) } }
+            if t == .gifs, gifPage == nil { searchGifs("", work: work) }
         }
     }
 
-    private var header: some View {
+    private func header(work: AccountWork?) -> some View {
         HStack {
             PaneTabs(tabs: FunTab.allCases.map(\.rawValue), selected: $tabLabel, hitAbove: 0, hitBelow: 0)
                 .frame(maxWidth: 260)
             Spacer()
-            Button { dismiss() } label: {
+            Button { guard model.acceptsAccountWork(work) else { return }; dismiss() } label: {
                 GlassCircle { Image(systemName: "xmark").font(.system(size: 15, weight: .medium)).foregroundStyle(theme.text) }
             }
             .buttonStyle(.plain)
@@ -342,7 +360,7 @@ struct FunPickerSheet: View {
         .padding(.bottom, 8)
     }
 
-    private func searchField(_ placeholder: String) -> some View {
+    private func searchField(_ placeholder: String, work: AccountWork?) -> some View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass").font(.system(size: 15)).foregroundStyle(theme.muted)
             TextField(placeholder, text: $query)
@@ -353,7 +371,7 @@ struct FunPickerSheet: View {
                 .submitLabel(.search)
                 .accessibilityIdentifier("fun-search")
             if !query.isEmpty {
-                Button { query = "" } label: {
+                Button { guard model.acceptsAccountWork(work) else { return }; query = "" } label: {
                     Image(systemName: "xmark.circle.fill").foregroundStyle(theme.muted)
                 }
                 .buttonStyle(.plain)
@@ -389,26 +407,26 @@ struct FunPickerSheet: View {
 
     // MARK: Emoji
 
-    private var emojiTab: some View {
+    private func emojiTab(work: AccountWork?) -> some View {
         let cols = Array(repeating: GridItem(.flexible(), spacing: 0), count: 8)
         let q = query.trimmingCharacters(in: .whitespaces)
         return VStack(spacing: 0) {
-            searchField("Search emoji")
+            searchField("Search emoji", work: work)
             ScrollView {
                 LazyVStack(spacing: 0) {
                     if !q.isEmpty {
                         let hits = EmojiCatalog.search(q)
                         sectionLabel(hits.isEmpty ? "No emoji match" : "Results")
-                        emojiGrid(hits.map { EmojiCatalog.withTone($0, tone: tone) }, columns: cols)
+                        emojiGrid(hits.map { EmojiCatalog.withTone($0, tone: tone) }, columns: cols, work: work)
                     } else {
                         if !recents.isEmpty {
                             sectionLabel("Recents")
-                            emojiGrid(recents, columns: cols)
+                            emojiGrid(recents, columns: cols, work: work)
                         }
                         let cat = EmojiCatalog.categories[min(category, EmojiCatalog.categories.count - 1)]
                         sectionLabel(cat.label)
                         emojiGrid(EmojiCatalog.all.filter { $0.c == cat.id }.map { EmojiCatalog.withTone($0, tone: tone) },
-                                  columns: cols)
+                                  columns: cols, work: work)
                     }
                 }
                 .padding(.horizontal, 16)
@@ -417,7 +435,7 @@ struct FunPickerSheet: View {
             footer {
                 HStack(spacing: 2) {
                     ForEach(Array(EmojiCatalog.categories.enumerated()), id: \.offset) { i, cat in
-                        Button {
+                        Button { guard model.acceptsAccountWork(work) else { return };
                             category = i
                             query = ""
                         } label: {
@@ -432,7 +450,7 @@ struct FunPickerSheet: View {
                     }
                 }
             } right: {
-                Button {
+                Button { guard model.acceptsAccountWork(work) else { return };
                     tone = (tone + 1) % (EmojiCatalog.tones.count + 1)
                 } label: {
                     HStack(spacing: 4) {
@@ -448,10 +466,10 @@ struct FunPickerSheet: View {
         }
     }
 
-    private func emojiGrid(_ glyphs: [String], columns: [GridItem]) -> some View {
+    private func emojiGrid(_ glyphs: [String], columns: [GridItem], work: AccountWork?) -> some View {
         LazyVGrid(columns: columns, spacing: 0) {
             ForEach(Array(glyphs.enumerated()), id: \.offset) { _, glyph in
-                Button { pickEmoji(glyph) } label: {
+                Button { guard model.acceptsAccountWork(work) else { return }; pickEmoji(glyph, work: work) } label: {
                     Text(glyph).font(.system(size: 28)).frame(height: 42).frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.plain)
@@ -460,7 +478,8 @@ struct FunPickerSheet: View {
         }
     }
 
-    private func pickEmoji(_ glyph: String) {
+    private func pickEmoji(_ glyph: String, work: AccountWork?) {
+        guard let work, model.acceptsAccountWork(work) else { return }
         var list = recents.filter { $0 != glyph }
         list.insert(glyph, at: 0)
         recentsRaw = list.prefix(Self.recentsCap).joined(separator: "\u{1F}")
@@ -476,7 +495,7 @@ struct FunPickerSheet: View {
         return packs
     }
 
-    private var stickersTab: some View {
+    private func stickersTab(work: AccountWork?) -> some View {
         let packs = allPacks
         let pack = packs.first { $0.id == selectedPack } ?? packs.first ?? StarterPack.pack
         let q = query.trimmingCharacters(in: .whitespaces).lowercased()
@@ -486,7 +505,7 @@ struct FunPickerSheet: View {
         return VStack(spacing: 0) {
             HStack(spacing: 6) {
                 ForEach(packs) { p in
-                    Button {
+                    Button { guard model.acceptsAccountWork(work) else { return };
                         selectedPack = p.id
                         stickerPages = 1
                     } label: {
@@ -504,19 +523,19 @@ struct FunPickerSheet: View {
             }
             .padding(.horizontal, 12)
             .padding(.top, 4)
-            searchField("Search stickers")
+            searchField("Search stickers", work: work)
                 .padding(.top, 8)
             ScrollView {
                 LazyVGrid(columns: cols, spacing: 6) {
                     ForEach(page) { item in
-                        Button { pickSticker(pack: pack, item: item) } label: {
+                        Button { guard model.acceptsAccountWork(work) else { return }; pickSticker(pack: pack, item: item, work: work) } label: {
                             ZStack {
                                 if let img = stickerImage(pack: pack, item: item) {
                                     Image(uiImage: img).resizable().scaledToFit().frame(width: 84, height: 84)
                                 } else {
                                     RoundedRectangle(cornerRadius: 12, style: .continuous)
                                         .fill(theme.field).frame(width: 52, height: 52)
-                                        .task(id: item.id) { await loadSticker(pack: pack, item: item) }
+                                        .task(id: item.id) { await loadSticker(pack: pack, item: item, work: work) }
                                 }
                             }
                             .frame(maxWidth: .infinity)
@@ -529,7 +548,7 @@ struct FunPickerSheet: View {
                 .padding(.horizontal, 16)
                 .padding(.top, 8)
                 if shown.count > page.count {
-                    Button("More") { stickerPages += 1 }
+                    Button("More") { guard model.acceptsAccountWork(work) else { return }; stickerPages += 1 }
                         .font(theme.font(Theme.small))
                         .foregroundStyle(theme.muted)
                         .padding(.vertical, 10)
@@ -541,7 +560,7 @@ struct FunPickerSheet: View {
                 Text(relayPacks == nil && !packsFailed ? "Loading packs…" : "Tap to send")
             }
         }
-        .task { await loadPacks() }
+        .task { await loadPacks(work: work) }
     }
 
     @ViewBuilder
@@ -565,24 +584,26 @@ struct FunPickerSheet: View {
         return nil
     }
 
-    private func loadPacks() async {
+    private func loadPacks(work: AccountWork?) async {
+        guard let work, model.acceptsAccountWork(work) else { return }
         guard relayPacks == nil, !packsFailed, !model.isFixture else { return }
-        if let packs = await model.relay.stickerPacks() {
-            relayPacks = packs
-        } else {
-            packsFailed = true
-        }
+        let packs = await work.api.stickerPacks()
+        guard model.acceptsAccountWork(work) else { return }
+        if let packs { relayPacks = packs } else { packsFailed = true }
     }
 
-    private func loadSticker(pack: StickerPack, item: StickerItem) async {
+    private func loadSticker(pack: StickerPack, item: StickerItem, work: AccountWork?) async {
+        guard let work, model.acceptsAccountWork(work) else { return }
         let key = stickerKey(pack: pack, item: item)
         guard stickerImages[key] == nil, !item.path.isEmpty else { return }
-        guard let data = await model.relay.stickerData(path: item.path), let img = UIImage(data: data) else { return }
+        guard let data = await work.api.stickerData(path: item.path), let img = UIImage(data: data) else { return }
+        guard model.acceptsAccountWork(work) else { return }
         stickerData[key] = data
         stickerImages[key] = img
     }
 
-    private func pickSticker(pack: StickerPack, item: StickerItem) {
+    private func pickSticker(pack: StickerPack, item: StickerItem, work: AccountWork?) {
+        guard let work, model.acceptsAccountWork(work) else { return }
         let key = stickerKey(pack: pack, item: item)
         let starterData = pack.id == StarterPack.packId ? StarterPack.data(for: item) : nil
         guard let data = stickerData[key] ?? starterData else { return }
@@ -593,17 +614,18 @@ struct FunPickerSheet: View {
 
     // MARK: GIFs
 
-    private var gifsTab: some View {
+    private func gifsTab(work: AccountWork?) -> some View {
         VStack(spacing: 0) {
             // KLIPY's required attribution: the search placeholder.
-            searchField("Search KLIPY")
+            searchField("Search KLIPY", work: work)
                 .onChange(of: query) { _, new in
+                    guard model.acceptsAccountWork(work) else { return }
                     guard tab == .gifs else { return }
                     gifTask?.cancel()
                     gifTask = Task {
                         try? await Task.sleep(nanoseconds: 400_000_000)
-                        guard !Task.isCancelled else { return }
-                        searchGifs(new)
+                        guard model.acceptsAccountWork(work), !Task.isCancelled else { return }
+                        searchGifs(new, work: work)
                     }
                 }
             ScrollView(.horizontal, showsIndicators: false) {
@@ -611,9 +633,9 @@ struct FunPickerSheet: View {
                     ForEach(Self.gifChips, id: \.self) { chip in
                         let term = chip == "Trending" ? "" : chip
                         let on = gifQuery.caseInsensitiveCompare(term) == .orderedSame
-                        Button {
+                        Button { guard model.acceptsAccountWork(work) else { return };
                             query = term
-                            searchGifs(term)
+                            searchGifs(term, work: work)
                         } label: {
                             Text(chip)
                                 .font(theme.font(Theme.tiny, weight: .medium))
@@ -628,7 +650,7 @@ struct FunPickerSheet: View {
                 .padding(.horizontal, 16)
             }
             .padding(.top, 10)
-            gifBody
+            gifBody(work: work)
             footer {
                 HStack(spacing: 6) {
                     RoundedRectangle(cornerRadius: 2).fill(Color(red: 0.42, green: 0.36, blue: 0.9)).frame(width: 10, height: 14)
@@ -638,11 +660,11 @@ struct FunPickerSheet: View {
                 Text("Searches are sent to KLIPY.")
             }
         }
-        .task { if gifPage == nil { searchGifs("") } }
+        .task { if gifPage == nil { searchGifs("", work: work) } }
     }
 
     @ViewBuilder
-    private var gifBody: some View {
+    private func gifBody(work: AccountWork?) -> some View {
         switch gifPage {
         case .none:
             Spacer()
@@ -663,7 +685,7 @@ struct FunPickerSheet: View {
                     ForEach(0..<2, id: \.self) { col in
                         LazyVStack(spacing: 6) {
                             ForEach(Array(items.enumerated()).filter { $0.offset % 2 == col }, id: \.element.id) { _, gif in
-                                gifTile(gif, width: colW)
+                                gifTile(gif, width: colW, work: work)
                             }
                         }
                     }
@@ -671,7 +693,7 @@ struct FunPickerSheet: View {
                 .padding(.horizontal, 16)
                 .padding(.top, 10)
                 if next != nil {
-                    Button(loadingMore ? "Loading…" : "More") { loadMoreGifs() }
+                    Button(loadingMore ? "Loading…" : "More") { guard model.acceptsAccountWork(work) else { return }; loadMoreGifs(work: work) }
                         .disabled(loadingMore)
                         .font(theme.font(Theme.small))
                         .foregroundStyle(theme.muted)
@@ -693,11 +715,11 @@ struct FunPickerSheet: View {
         .multilineTextAlignment(.center)
     }
 
-    private func gifTile(_ gif: GifItem, width: CGFloat) -> some View {
+    private func gifTile(_ gif: GifItem, width: CGFloat, work: AccountWork?) -> some View {
         let ratio = gif.preview.width > 0 && gif.preview.height > 0
             ? CGFloat(gif.preview.height) / CGFloat(gif.preview.width) : 1
         let h = min(max(width * ratio, 70), 260)
-        return Button {
+        return Button { guard model.acceptsAccountWork(work) else { return };
             Haptics.send()
             var picked = gif
             picked.query = gifQuery
@@ -710,7 +732,7 @@ struct FunPickerSheet: View {
                     Image(uiImage: img).resizable().scaledToFill()
                 } else {
                     ProgressView().tint(theme.muted)
-                        .task(id: gif.id) { await loadPreview(gif) }
+                        .task(id: gif.id) { await loadPreview(gif, work: work) }
                 }
             }
             .frame(width: width, height: h)
@@ -720,30 +742,38 @@ struct FunPickerSheet: View {
         .accessibilityLabel(gif.title)
     }
 
-    private func loadPreview(_ gif: GifItem) async {
+    private func loadPreview(_ gif: GifItem, work: AccountWork?) async {
+        guard let work, model.acceptsAccountWork(work) else { return }
         guard gifPreviews[gif.id] == nil, let url = model.gifMediaURL(gif.preview.url) else { return }
         guard let (data, _) = await MediaFetch.data(url, headers: model.authHeaders) else { return }
+        guard model.acceptsAccountWork(work) else { return }
         // The grid shows the first frame; the thread animates the sent GIF.
         if let img = UIImage(data: data) { gifPreviews[gif.id] = img }
     }
 
-    private func searchGifs(_ text: String) {
+    private func searchGifs(_ text: String, work: AccountWork?) {
+        guard let work, model.acceptsAccountWork(work) else { return }
         let q = text.trimmingCharacters(in: .whitespacesAndNewlines)
         gifQuery = q
         gifPage = nil
         Task {
-            let page = await model.relay.gifSearch(query: q, pos: nil)
+            guard model.acceptsAccountWork(work) else { return }
+            let page = await work.api.gifSearch(query: q, pos: nil)
+            guard model.acceptsAccountWork(work) else { return }
             guard gifQuery == q else { return }
             gifPage = page
         }
     }
 
-    private func loadMoreGifs() {
+    private func loadMoreGifs(work: AccountWork?) {
+        guard let work, model.acceptsAccountWork(work) else { return }
         guard case .items(let items, let next) = gifPage, let pos = next, !loadingMore else { return }
         loadingMore = true
         let q = gifQuery
         Task {
-            let page = await model.relay.gifSearch(query: q, pos: pos)
+            guard model.acceptsAccountWork(work) else { return }
+            let page = await work.api.gifSearch(query: q, pos: pos)
+            guard model.acceptsAccountWork(work) else { return }
             loadingMore = false
             guard gifQuery == q else { return }
             if case .items(let more, let n) = page {

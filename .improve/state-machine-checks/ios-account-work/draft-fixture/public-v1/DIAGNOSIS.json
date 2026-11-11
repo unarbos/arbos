@@ -1,0 +1,40 @@
+{
+  "source_commit": "419d3944cf77a31086b44ee36534864bc5662758",
+  "source_tree": "c19a6e2ab764c53065d8f79e53bbe90f76508c4d",
+  "sources": {
+    "apps/ios/Arbos/Arbos/Store/AppModel.swift": "2fb19532c675bdda31e60e658a032543f5c9178fce185fcd327bcd628aad81ca",
+    "apps/ios/Arbos/Arbos/Store/Fixture.swift": "75c3601d74558cffb14b6ab6fc20a8c18e5958071834e7c200d19bfcb310d2a1",
+    "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f",
+    "apps/ios/Arbos/Arbos/Sync/DraftSendQueue.swift": "0985e595fa179b2919fed2c5b401d8f15a956fed78ce9b9f6ed6d20ecebc9e94",
+    "apps/ios/Arbos/ArbosTests/HomeSearchTests.swift": "f6e7d0a53746ec64d5b9c281359665d2e81b4c649c40fadf15b254e2bf2a51e1"
+  },
+  "actual_xctest": {
+    "case": "DraftDMTests.testTheFirstSendMakesTheDMAndGoesOutThere",
+    "assertion": "HomeSearchTests.swift:487: expected non-nil PeopleChat",
+    "duration_seconds": 1.075,
+    "scope": "actual current running app, unchanged"
+  },
+  "cause": [
+    "Direct loadFixture sets isFixture and user but no credentials.",
+    "sendDraftDM now calls accountWork before queue admission.",
+    "accountWork refuses credentials==nil.",
+    "Thus createDM local DEBUG branch is unreachable for direct fixture loading."
+  ],
+  "existing_test_gap": "Previous draft9 leaf tests had credentials=true,isFixture=false; no DEBUG compilation.",
+  "not_a_network_failure": "Local admission returns before any openDM API request. Log healthz calls are separate AppModel.init auth probe tasks.",
+  "leaf_before": {
+    "total": 14,
+    "passed": 12,
+    "semantic_failures": [
+      "direct-load-fixture-without-credentials-creates-DM-and-delivers",
+      "fixture-same-draft-FIFO-with-no-relay"
+    ],
+    "duration_seconds": 2.6760444999672472
+  },
+  "constraints": [
+    "No change to live accountWork authorization.",
+    "Live bound API must remain captured before Task creation.",
+    "Fixture replacement must revoke old generation and retire queued work.",
+    "No running snapshot or app/test launch modification."
+  ]
+}

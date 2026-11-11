@@ -1,0 +1,127 @@
+{
+  "source": "unchanged Settings ad51f9cd and Confirm eedaf364; current opaque lifetime/acceptance plus local collaborators",
+  "total": 44,
+  "failed": 29,
+  "passed": 15,
+  "groups": [
+    {
+      "view_sha256": "ad51f9cdc343dfdd22f9549912f296b0789c0168e4478b49e2a9e62132e8a69c",
+      "accepts_method_sha256": "d284dc9ab6f3b4a0bb1cc075e547b5bb0190ddd98cf88be97e9da67f6eb170fa",
+      "helper_sha256": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f",
+      "fixture_sha256": "b7ac6483549b9ac1cea3fb08ef4b8ee21f9593f712c57a6050b23061aedab2d5",
+      "compile_exit": 0,
+      "exit_code": 1,
+      "results": {
+        "cases": {
+          "cancelled-current-save-releases-own-busy-without-dismiss": false,
+          "cancelled-profile-task-does-not-dismiss-or-start-rpc": false,
+          "current-profile-save-error-control": true,
+          "current-profile-save-success-control": true,
+          "invalid-form-no-rpc-control": true,
+          "queued-old-profile-refuses-new-account-rpc-and-dismiss": false,
+          "retired-profile-completion-cannot-dismiss-or-clear-B-busy": false
+        },
+        "failed": 4,
+        "passed": 3,
+        "total": 7
+      },
+      "seconds": 1.1282213749364018
+    },
+    {
+      "view_sha256": "ad51f9cdc343dfdd22f9549912f296b0789c0168e4478b49e2a9e62132e8a69c",
+      "method_sha256": "98b5c29c74b98387d53d33f2dabab6fd2fd9a9126b1b515d94fb40804b58ace0",
+      "fixture_sha256": "34095da55fc2d78c166e574f09e849d138028abc17fe9a008d4f08a8cde7e91e",
+      "compile_exit": 0,
+      "exit_code": 1,
+      "results": {
+        "cases": {
+          "cancelled-agent-open-does-not-dismiss-or-schedule": false,
+          "current-agent-open-control": true,
+          "fixture-agent-open-local-policy-control": true,
+          "missing-owner-does-not-open-account-project": false,
+          "queued-old-agent-row-does-not-open-or-dismiss-B": false,
+          "scheduled-old-agent-open-refuses-B": false
+        },
+        "failed": 4,
+        "passed": 2,
+        "total": 6
+      },
+      "seconds": 1.2550262090517208
+    },
+    {
+      "view_sha256": "ad51f9cdc343dfdd22f9549912f296b0789c0168e4478b49e2a9e62132e8a69c",
+      "origin_and_token_source_sha256": "125654506ae0e1b2b87edb44448457848c38c1a83b2e6680c929a146d5d6bd99",
+      "fixture_sha256": "98f914316200d5c99cfceef99be0c52bc91b203ddde0f5dbbdc61bcfb01d4b75",
+      "compile_exit": 0,
+      "exit_code": 1,
+      "results": {
+        "cases": {
+          "current-token-trim-and-send-control": true,
+          "empty-token-no-api-control": true,
+          "new-row-cannot-adopt-retired-token-form": false,
+          "old-rendered-save-cannot-send-A-token-under-B": false,
+          "old-save-cannot-adopt-replacement-B-form": false,
+          "token-stays-bound-to-selected-provider": false,
+          "unpaired-token-no-api-control": true
+        },
+        "failed": 4,
+        "passed": 3,
+        "total": 7
+      },
+      "seconds": 0.5702519579790533
+    },
+    {
+      "view_sha256": "ad51f9cdc343dfdd22f9549912f296b0789c0168e4478b49e2a9e62132e8a69c",
+      "closures_sha256": "4242ba7ef58a5f909fbd7d3f4a96516d447b9286220514f65e1466321c51215b",
+      "compile_exit": 0,
+      "exit_code": 1,
+      "results": {
+        "cases": {
+          "confirm-effect-keeps-reentrant-new-selection": false,
+          "current-cancel-control": true,
+          "current-confirm-control": true,
+          "old-A-confirm-cannot-act-on-same-id-B-selection": false,
+          "old-cancel-preserves-replacement-selection": false,
+          "old-confirm-cannot-adopt-new-same-account-selection": false,
+          "old-dismiss-binding-preserves-replacement-selection": false
+        },
+        "failed": 5,
+        "passed": 2,
+        "total": 7
+      },
+      "seconds": 0.5882484159665182
+    },
+    {
+      "source_sha256": "eedaf364e07013851eeea65760c66ec0051b96ce64427da35aaee5bae4ff16a8",
+      "method_sha256": "b94b903978e3d73be15d4ab574414c2e8d48a34a06dae895da7adbefda53162d",
+      "fixture_sha256": "f43feb397e6d5901fe96309437dc72d55a698823b8b9693c4e6ce2f200211386",
+      "compile_exit": 0,
+      "exit_code": 1,
+      "results": {
+        "cases": {
+          "action-preserves-reentrant-account-same-id-selection": false,
+          "action-preserves-reentrant-new-selection": false,
+          "cancelled-admission-does-not-clear-pending-item": false,
+          "confirm-text-action-style-preserved-control": true,
+          "current-cancel-control": true,
+          "current-confirm-once-control": true,
+          "current-visibility-control": true,
+          "nil-render-does-not-adopt-later-item": false,
+          "old-account-action-cannot-clear-same-id-B-item": false,
+          "old-account-cancel-cannot-clear-same-id-B-item": false,
+          "old-account-setter-cannot-clear-same-id-B-item": false,
+          "old-action-cannot-adopt-replacement-entity": false,
+          "old-cancel-preserves-different-current-item": false,
+          "old-setter-preserves-different-current-item": false,
+          "old-visibility-does-not-follow-new-entity": false,
+          "removed-item-action-is-noop-control": true,
+          "same-identified-entity-uses-observed-payload": false
+        },
+        "failed": 12,
+        "passed": 5,
+        "total": 17
+      },
+      "seconds": 0.784247332951054
+    }
+  ]
+}

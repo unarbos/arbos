@@ -1,0 +1,294 @@
+{
+  "before": {
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-agentd",
+      "approval::delivery_claim_regressions::",
+      "--",
+      "--test-threads=2"
+    ],
+    "exit": 101,
+    "seconds": 24.27330333390273,
+    "results": [
+      [
+        "FAILED",
+        "0",
+        "5",
+        "0"
+      ]
+    ],
+    "source_sha256": "8fdea6f2ae9580109fbac2f5f15138833c591897d53581d4e2beac1a2a32c08c",
+    "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+    "scope": "actual pinned43b839 source plus synthetic tests; own target/workspace packages cleaned; validated loopback-only fence; fresh HOME/no inherited opt-ins",
+    "expected_tests": 5,
+    "count_matches": true,
+    "network": "Validated loopback-only OS fence; synthetic local relay fixtures only."
+  },
+  "nonapproved-before": {
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-agentd",
+      "receiver_lost_after_classification",
+      "--",
+      "--test-threads=2"
+    ],
+    "exit": 101,
+    "seconds": 23.76846479193773,
+    "results": [
+      [
+        "FAILED",
+        "1",
+        "1",
+        "0"
+      ]
+    ],
+    "source_unchanged": true,
+    "source_sha256": "a5202e512f93c447cf3a7aecbe7ec57fb1b4fa8abdf20953960ccf8e5d165242",
+    "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+    "scope": "actual pinned43b839 source plus synthetic tests; own target/workspace packages cleaned; validated loopback-only fence; fresh HOME/no inherited opt-ins",
+    "network": "Validated loopback-only OS fence; synthetic local relay fixtures only."
+  },
+  "after": {
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-agentd",
+      "approval::delivery_claim_regressions::",
+      "--",
+      "--test-threads=2"
+    ],
+    "exit": 0,
+    "seconds": 25.61589941708371,
+    "results": [
+      [
+        "ok",
+        "12",
+        "0",
+        "0"
+      ]
+    ],
+    "source_unchanged": true,
+    "source_sha256": "23eb4017e6bd1ec68288640eeaff6b7ab94bb97c809c6e2b27f7f33e4c88d5df",
+    "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+    "scope": "actual pinned43b839 source plus synthetic tests; own target/workspace packages cleaned; validated loopback-only fence; fresh HOME/no inherited opt-ins",
+    "expected_tests": 12,
+    "count_matches": true,
+    "network": "Validated loopback-only OS fence; synthetic local relay fixtures only."
+  },
+  "park": {
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-agentd",
+      "approval::park_tests::",
+      "--",
+      "--test-threads=2"
+    ],
+    "exit": 0,
+    "seconds": 0.6811861250316724,
+    "results": [
+      [
+        "ok",
+        "6",
+        "0",
+        "0"
+      ]
+    ],
+    "source_unchanged": true,
+    "source_sha256": "23eb4017e6bd1ec68288640eeaff6b7ab94bb97c809c6e2b27f7f33e4c88d5df",
+    "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+    "scope": "actual pinned43b839 source plus synthetic tests; own target/workspace packages cleaned; validated loopback-only fence; fresh HOME/no inherited opt-ins",
+    "network": "Validated loopback-only OS fence; synthetic local relay fixtures only."
+  },
+  "approval": {
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-agentd",
+      "approval::",
+      "--",
+      "--test-threads=2"
+    ],
+    "exit": 101,
+    "seconds": 0.6574687079992145,
+    "results": [
+      [
+        "FAILED",
+        "36",
+        "2",
+        "0"
+      ]
+    ],
+    "source_unchanged": true,
+    "source_sha256": "653df353ed6aefd5b6ac522c6f41162784e796d994530a0f8913fb88ace45d1a",
+    "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+    "scope": "actual pinned43b839 source plus synthetic tests; own target/workspace packages cleaned; validated loopback-only fence; fresh HOME/no inherited opt-ins",
+    "network": "Validated loopback-only OS fence; synthetic local relay fixtures only."
+  },
+  "nospace-approval": {
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-agentd",
+      "approval::",
+      "--",
+      "--test-threads=2"
+    ],
+    "exit": 0,
+    "seconds": 26.869912958005443,
+    "results": [
+      [
+        "ok",
+        "40",
+        "0",
+        "0"
+      ]
+    ],
+    "source_unchanged": true,
+    "source_sha256": "23eb4017e6bd1ec68288640eeaff6b7ab94bb97c809c6e2b27f7f33e4c88d5df",
+    "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+    "scope": "actual pinned43b839 source plus synthetic tests; own target/workspace packages cleaned; validated loopback-only fence; fresh HOME/no inherited opt-ins",
+    "network": "Validated loopback-only OS fence; synthetic local relay fixtures only."
+  },
+  "check": {
+    "command": [
+      "cargo",
+      "check",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-agentd",
+      "--all-targets"
+    ],
+    "exit": 0,
+    "seconds": 17.164501333027147,
+    "results": [],
+    "source_unchanged": true,
+    "source_sha256": "23eb4017e6bd1ec68288640eeaff6b7ab94bb97c809c6e2b27f7f33e4c88d5df",
+    "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+    "scope": "actual pinned43b839 source plus synthetic tests; own target/workspace packages cleaned; validated loopback-only fence; fresh HOME/no inherited opt-ins",
+    "network": "Validated loopback-only OS fence; synthetic local relay fixtures only."
+  },
+  "clippy": {
+    "command": [
+      "cargo",
+      "clippy",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-agentd",
+      "--all-targets",
+      "--",
+      "-D",
+      "warnings"
+    ],
+    "exit": 0,
+    "seconds": 15.38562625006307,
+    "results": [],
+    "source_unchanged": true,
+    "source_sha256": "23eb4017e6bd1ec68288640eeaff6b7ab94bb97c809c6e2b27f7f33e4c88d5df",
+    "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+    "scope": "actual pinned43b839 source plus synthetic tests; own target/workspace packages cleaned; validated loopback-only fence; fresh HOME/no inherited opt-ins",
+    "network": "Validated loopback-only OS fence; synthetic local relay fixtures only."
+  },
+  "build": {
+    "command": [
+      "cargo",
+      "build",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-agentd"
+    ],
+    "exit": 0,
+    "seconds": 19.814457000000402,
+    "results": [],
+    "source_unchanged": true,
+    "source_sha256": "23eb4017e6bd1ec68288640eeaff6b7ab94bb97c809c6e2b27f7f33e4c88d5df",
+    "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+    "scope": "actual pinned43b839 source plus synthetic tests; own target/workspace packages cleaned; validated loopback-only fence; fresh HOME/no inherited opt-ins",
+    "network": "Validated loopback-only OS fence; synthetic local relay fixtures only."
+  },
+  "fmt": {
+    "command": [
+      "cargo",
+      "fmt",
+      "--all",
+      "--check"
+    ],
+    "exit": 0,
+    "seconds": 2.8666047919541597,
+    "results": [],
+    "source_unchanged": true,
+    "source_sha256": "23eb4017e6bd1ec68288640eeaff6b7ab94bb97c809c6e2b27f7f33e4c88d5df",
+    "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+    "scope": "actual pinned43b839 source plus synthetic tests; own target/workspace packages cleaned; validated loopback-only fence; fresh HOME/no inherited opt-ins",
+    "network": "Validated loopback-only OS fence; synthetic local relay fixtures only."
+  },
+  "counts": {
+    "original_baseline_semantic_failures": 5,
+    "candidate_preservation_regression": {
+      "before_passed": 1,
+      "before_failed": 1,
+      "note": "reviewer-found introduced rejection follow-up regression; not an additional original-baseline defect"
+    },
+    "new_final_tests": 12,
+    "all_approval_including_new": 40,
+    "existing_park_subset": 6,
+    "actual_transition_law_cases": 64,
+    "events_per_case": 16,
+    "note": "40 includes12new+6park; finite native laws, no double counting/Effect/exhaustive claim"
+  },
+  "frozen_files": [
+    {
+      "path": "crates/arbos-agentd/src/approval.rs",
+      "base_sha256": "6954914835e1bc571b2ae9758b06683916de021c2eb71594ad9f916464af8b63",
+      "candidate_sha256": "23eb4017e6bd1ec68288640eeaff6b7ab94bb97c809c6e2b27f7f33e4c88d5df",
+      "bytes": 183852
+    },
+    {
+      "path": "crates/arbos-agentd/src/store.rs",
+      "base_sha256": "706067a60cbebd3a1571a4e2c718f98f9bae8791771c24c3cdb1a0ff067b73c2",
+      "candidate_sha256": "2d2049ea8981febdeb644855596de6b354079c436c19cbccc0ebfdf7fc2eb9d3",
+      "bytes": 107156
+    },
+    {
+      "path": "crates/arbos-agentd/src/handoff.rs",
+      "base_sha256": "5861a49d9af58629cc9d9653f107453a0b5a66dec0c9abc8bba55b1618555ef1",
+      "candidate_sha256": "f5a5ea19fe7100cff317c85de07b735c055622c2a3ce0f18b221909bf3245161",
+      "bytes": 35638
+    },
+    {
+      "path": "crates/arbos-agentd/src/vault.rs",
+      "base_sha256": "b475240c02ef28b2201d6b111327e19ff8e5702a17f4e2cc990f4e2c459bce80",
+      "candidate_sha256": "bc7637eabddc55492946001606c63299d21b2dfdc5aa371d1079097ee5b693dc",
+      "bytes": 80970
+    },
+    {
+      "path": "crates/arbos-agentd/src/mcp.rs",
+      "base_sha256": "e2b7b0d9e164c5e4e26682585182d19b9cc8e811286c5cf98d12695ba340e2c0",
+      "candidate_sha256": "6d41169c709705ca5966b2f46a40bcf3eced22761a1de69518cc9aaca0875702",
+      "bytes": 74547
+    }
+  ]
+}

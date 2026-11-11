@@ -1,0 +1,32 @@
+{
+  "review_scope": "UI/control/reset/notification coalescer only; backend relay.rs owned by Map and not frozen",
+  "sources": {
+    "crates/arbos-mac/src/app.rs": "6adb872142aad6c8db71aec2c4a9027bfbbf02a9323c0fad37cf9ae677538b84",
+    "crates/arbos-mac/src/ui/notify.rs": "6cc96cfd91b3cac630e0922c969acac7c57f4e629008b0e81a12e66587587c48",
+    "crates/arbos-mac/src/sync/mod.rs": "75b3179817a263efde415f4115e2f8a56048556ae6a10a487c13ee4a91702eaf",
+    "crates/arbos-mac/src/sync/session_scope.rs": "40bd8659aa21f5dd6225bbab4c604376d617c9f2a98f3bc483958505624889e4",
+    "crates/arbos-mac/src/sync/session_events.rs": "45469bc476e7c59e70d9057778848f368dae272d2699d0f0cafc1f1cc998f5bf",
+    "crates/arbos-mac/src/sync/account_tasks.rs": "b1a314282f340c973ce6debb6c28f39ea9997c44e9db2d73c9aa57e0ecc32cb7",
+    "crates/arbos-mac/src/sync/work_lifetime.rs": "68d6c6fb42aa07499580c74e9ab465dd7d71d049bc76a8bfb67a6674024dde0b",
+    "apps/ios/Arbos/Arbos/Store/ServerStore.swift": "fe3e2d7c9a1549057f1ed8ebec641d1d8470139896d162646bfe2b550e594369"
+  },
+  "gates": {
+    "ui": "UI-AFTER.json (21pass0fail0ignored .652s:17adapters+4UiScopepure)",
+    "cache_before": "UI-CACHE-BEFORE.json (12pass1fail)",
+    "call_scope_before": "UI-CALL-ORIGIN-BEFORE.json (15pass1fail)",
+    "matrix_before": "MATRIX-BEFORE.json (1fail1controlpass)",
+    "matrix_after": "MATRIX-AFTER.json (2pass)",
+    "laws": "LAWS-SOURCES.json +LAWS-AFTER.log (7\u00d7256=1792+protocol8tests4.665s; includes same-control account origin)",
+    "mutants": "mutations-final/RESULTS.json (8falsified/shrunk1/exactreplayfailed)",
+    "local_before": "UI-LOCAL-BEFORE.json (16pass1fail .525s; authenticated local devices retained)",
+    "same_control_before": "UI-SAME-CONTROL-BEFORE.json (18pass2fail .923s; old callbacks survived unchanged control)",
+    "rig_before": "UI-RIG-BEFORE.json (17pass1fail1.064s)"
+  },
+  "limits": [
+    "SDK-free extracted controller body tests",
+    "Notifier reset invoked by real reset controller; its one-line coalescer default assignment reviewed, no OS notification integration claim",
+    "Full broad native compiler/media integration pending backend freeze"
+  ],
+  "amendment": "Captured backend+control for account callbacks; original apply panic comment restored; boxed cold event-send error; explicit fixture envelope noops; backend call_requests module import.",
+  "post_review_import_only_amendment": "sync/mod.rs adds mod store_owner for the final backend module; the seven other UI-reviewed sources remain unchanged"
+}

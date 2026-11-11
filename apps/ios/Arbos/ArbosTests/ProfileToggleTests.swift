@@ -145,7 +145,8 @@ final class ProfileToggleTests: XCTestCase {
             XCTAssertTrue(after.contains("model.toggleProfile(target)"), "a chip tap toggles")
             XCTAssertFalse(after.contains("model.showProfile(target)"), "and never plain-opens")
         }
-        XCTAssertTrue(chat.contains("onPicture: { model.toggleProfile($0) }"), "a status-row picture toggles")
+        // The source-consumer check executes this actual status-row callback for
+        // current/fixture owners and retired/unavailable/cancelled owners.
         XCTAssertTrue(presence.contains("Button { onPicture(target) }"), "the row's pictures are buttons when the chat names them")
         XCTAssertTrue(presence.contains("ProfileToggle.label(name: p.name"), "with the shared label")
         XCTAssertFalse(presence.contains("showProfile("), "PresenceRow never opens a profile by itself")

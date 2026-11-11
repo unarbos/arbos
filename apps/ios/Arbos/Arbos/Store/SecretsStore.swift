@@ -26,11 +26,15 @@ extension AppModel {
         return s.vaultConnect && !s.providers.isEmpty
     }
 
-    func refreshSecrets() async {
-        guard credentials != nil, !isFixture else { return }
+    func refreshSecrets(expectedOwner: WorkLifetime.Ticket? = nil) async {
+        guard credentials != nil, !isFixture,
+              let work = accountWork(expectedOwner: expectedOwner) else { return }
         do {
-            secrets = try await relay.secrets()
+            let overview = try await work.api.secrets()
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
+            secrets = overview
         } catch let e as RelayError where e.status == 404 {
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
             // Older relays have no secrets route.
             secrets = SecretsOverview(paused: false, pausedAt: nil, vaults: [], secrets: [], requestsPending: 0, activity: [])
         } catch {
@@ -38,9 +42,11 @@ extension AppModel {
         }
     }
 
-    func refreshProjectSecrets(_ projectId: Id) async {
-        guard credentials != nil, !isFixture else { return }
-        if let v = try? await relay.projectSecrets(projectId) {
+    func refreshProjectSecrets(_ projectId: Id, expectedOwner: WorkLifetime.Ticket? = nil) async {
+        guard credentials != nil, !isFixture,
+              let work = accountWork(expectedOwner: expectedOwner) else { return }
+        if let v = try? await work.api.projectSecrets(projectId) {
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
             projectSecrets[projectId] = v
         }
     }
@@ -67,16 +73,19 @@ extension AppModel {
     }
 
     @discardableResult
-    func secretsAction(_ what: String, refreshProject: Id? = nil, _ body: @escaping () async throws -> Void) async -> String? {
+    func secretsAction(_ what: String, work: AccountWork, refreshProject: Id? = nil, _ body: @escaping (RelayAPI) async throws -> Void) async -> String? {
+        guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return "Cancelled" }
         guard !secretsBusy else { return "Busy" }
         secretsBusy = true
-        defer { secretsBusy = false }
+        defer { if accountLifetime.accepts(work.owner) { secretsBusy = false } }
         do {
-            try await body()
-            await refreshSecrets()
-            if let p = refreshProject { await refreshProjectSecrets(p) }
+            try await body(work.api)
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return "Cancelled" }
+            await refreshSecrets(expectedOwner: work.owner)
+            if let p = refreshProject { await refreshProjectSecrets(p, expectedOwner: work.owner) }
             return nil
         } catch {
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return "Cancelled" }
             let failure = UserError.classify(Self.secretsVerb(what), error)
             fail(failure)
             return failure.sentence
@@ -84,12 +93,14 @@ extension AppModel {
     }
 
     func setSecretsPaused(_ paused: Bool) {
+        guard let work = accountWork() else { return }
         // Optimistic: the switch flips now, the relay confirms (or the refresh puts it back).
         secrets?.paused = paused
-        Task { await secretsAction(paused ? "Pause all secrets" : "Secrets") { try await self.relay.setSecretsPaused(paused) } }
+        Task { await secretsAction(paused ? "Pause all secrets" : "Secrets", work: work) { api in try await api.setSecretsPaused(paused) } }
     }
 
     func setSecretAccess(secretId: String, projectId: String, enabled: Bool, note: String? = nil, hosts: [String]? = nil, scope: [String: Any]? = nil) {
+        guard let work = accountWork() else { return }
         if let i = secrets?.secrets.firstIndex(where: { $0.id == secretId }),
            let j = secrets?.secrets[i].agents.firstIndex(where: { $0.projectId == projectId }) {
             secrets?.secrets[i].agents[j].enabled = enabled
@@ -98,30 +109,35 @@ extension AppModel {
             projectSecrets[projectId]?.items[i].enabled = enabled
         }
         Task {
-            await secretsAction(enabled ? "Turn on" : "Turn off", refreshProject: projectId) {
-                _ = try await self.relay.setSecretAccess(secretId, projectId: projectId, enabled: enabled, note: note, hosts: hosts, scope: scope)
+            await secretsAction(enabled ? "Turn on" : "Turn off", work: work, refreshProject: projectId) { api in
+                _ = try await api.setSecretAccess(secretId, projectId: projectId, enabled: enabled, note: note, hosts: hosts, scope: scope)
             }
         }
     }
 
     func removeSecretAccess(secretId: String, projectId: String) {
-        Task { await secretsAction("Turn off", refreshProject: projectId) { try await self.relay.deleteSecretAccess(secretId, projectId: projectId) } }
+        guard let work = accountWork() else { return }
+        Task { await secretsAction("Turn off", work: work, refreshProject: projectId) { api in try await api.deleteSecretAccess(secretId, projectId: projectId) } }
     }
 
     func revokeSecretEverywhere(_ secretId: String) {
-        Task { await secretsAction("Remove from all agents") { _ = try await self.relay.revokeSecretEverywhere(secretId) } }
+        guard let work = accountWork() else { return }
+        Task { await secretsAction("Remove from all agents", work: work) { api in _ = try await api.revokeSecretEverywhere(secretId) } }
     }
 
     func scrubSecret(_ secretId: String) {
-        Task { await secretsAction("Scrub from context") { _ = try await self.relay.scrubSecret(secretId) } }
+        guard let work = accountWork() else { return }
+        Task { await secretsAction("Scrub from context", work: work) { api in _ = try await api.scrubSecret(secretId) } }
     }
 
     func deleteSecret(_ secretId: String) {
+        guard let work = accountWork() else { return }
         secrets?.secrets.removeAll { $0.id == secretId }
-        Task { await secretsAction("Delete secret") { try await self.relay.deleteSecret(secretId) } }
+        Task { await secretsAction("Delete secret", work: work) { api in try await api.deleteSecret(secretId) } }
     }
 
     func patchSecret(_ secretId: String, _ body: [String: Any]) {
+        guard let work = accountWork() else { return }
         // The two switches are exclusive on the relay; show that at once.
         if let i = secrets?.secrets.firstIndex(where: { $0.id == secretId }) {
             if let on = body["inject_env"] as? Bool {
@@ -136,19 +152,21 @@ extension AppModel {
                 secrets?.secrets[i].othersAsk = others
             }
         }
-        Task { await secretsAction("Save") { _ = try await self.relay.patchSecret(secretId, body) } }
+        Task { await secretsAction("Save", work: work) { api in _ = try await api.patchSecret(secretId, body) } }
     }
 
     /// One People row's switch (spec §7.7). Optimistic; the relay's reply follows.
     func setSecretPerson(secretId: String, userId: String, enabled: Bool) {
+        guard let work = accountWork() else { return }
         if let i = secrets?.secrets.firstIndex(where: { $0.id == secretId }),
            let j = secrets?.secrets[i].directors.firstIndex(where: { $0.userId == userId }) {
             secrets?.secrets[i].directors[j].enabled = enabled
             secrets?.secrets[i].directors[j].disabledAt = enabled ? nil : Int64(Date().timeIntervalSince1970 * 1000)
         }
         Task {
-            await secretsAction("Save") {
-                let s = try await self.relay.setSecretDirector(secretId, userId: userId, note: nil, enabled: enabled)
+            await secretsAction("Save", work: work) { api in
+                let s = try await api.setSecretDirector(secretId, userId: userId, note: nil, enabled: enabled)
+                guard self.accountLifetime.accepts(work.owner), !Task.isCancelled else { throw CancellationError() }
                 if let i = self.secrets?.secrets.firstIndex(where: { $0.id == s.id }) {
                     self.secrets?.secrets[i] = s
                 }
@@ -158,11 +176,14 @@ extension AppModel {
 
     /// People picked in the member picker join the list (rows on, no note yet). Returns false
     /// when any add failed (the notice says which).
-    func addSecretPeople(secretId: String, handles: [String]) async -> Bool {
+    func addSecretPeople(secretId: String, handles: [String], expectedOwner: WorkLifetime.Ticket? = nil) async -> Bool {
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return false }
         var ok = true
         for handle in handles {
-            if await secretsAction("Give access", {
-                let s = try await self.relay.addSecretDirector(secretId, handle: handle, note: nil)
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return false }
+            if await secretsAction("Give access", work: work, { api in
+                let s = try await api.addSecretDirector(secretId, handle: handle, note: nil)
+                guard self.accountLifetime.accepts(work.owner), !Task.isCancelled else { throw CancellationError() }
                 if let i = self.secrets?.secrets.firstIndex(where: { $0.id == s.id }) {
                     self.secrets?.secrets[i] = s
                 }
@@ -174,9 +195,11 @@ extension AppModel {
     }
 
     func updateSecretDirector(secretId: String, userId: String, note: String) {
+        guard let work = accountWork() else { return }
         Task {
-            await secretsAction("Save") {
-                let s = try await self.relay.setSecretDirector(secretId, userId: userId, note: note)
+            await secretsAction("Save", work: work) { api in
+                let s = try await api.setSecretDirector(secretId, userId: userId, note: note)
+                guard self.accountLifetime.accepts(work.owner), !Task.isCancelled else { throw CancellationError() }
                 if let i = self.secrets?.secrets.firstIndex(where: { $0.id == s.id }) {
                     self.secrets?.secrets[i] = s
                 }
@@ -185,12 +208,14 @@ extension AppModel {
     }
 
     func removeSecretDirector(secretId: String, userId: String) {
+        guard let work = accountWork() else { return }
         if let i = secrets?.secrets.firstIndex(where: { $0.id == secretId }) {
             secrets?.secrets[i].directors.removeAll { $0.userId == userId }
         }
         Task {
-            await secretsAction("Remove director") {
-                let s = try await self.relay.deleteSecretDirector(secretId, userId: userId)
+            await secretsAction("Remove director", work: work) { api in
+                let s = try await api.deleteSecretDirector(secretId, userId: userId)
+                guard self.accountLifetime.accepts(work.owner), !Task.isCancelled else { throw CancellationError() }
                 if let i = self.secrets?.secrets.firstIndex(where: { $0.id == s.id }) {
                     self.secrets?.secrets[i] = s
                 }
@@ -199,21 +224,24 @@ extension AppModel {
     }
 
     func decideSecretRequest(_ id: String, decision: String, projectId: String? = nil) {
+        guard let work = accountWork() else { return }
         Task {
-            await secretsAction("Secrets", refreshProject: projectId) { try await self.relay.decideSecretRequest(id, decision: decision) }
+            await secretsAction("Secrets", work: work, refreshProject: projectId) { api in try await api.decideSecretRequest(id, decision: decision) }
         }
     }
 
     func setVaultAccess(vaultId: String, projectId: String, enabled: Bool, note: String? = nil) {
+        guard let work = accountWork() else { return }
         if let i = projectSecrets[projectId]?.items.firstIndex(where: { $0.vault?.id == vaultId }) {
             projectSecrets[projectId]?.items[i].enabled = enabled
         }
-        Task { await secretsAction(enabled ? "Turn on" : "Turn off", refreshProject: projectId) { try await self.relay.setVaultAccess(vaultId, projectId: projectId, enabled: enabled, note: note) } }
+        Task { await secretsAction(enabled ? "Turn on" : "Turn off", work: work, refreshProject: projectId) { api in try await api.setVaultAccess(vaultId, projectId: projectId, enabled: enabled, note: note) } }
     }
 
     func deleteVault(_ vaultId: String) {
+        guard let work = accountWork() else { return }
         secrets?.vaults.removeAll { $0.id == vaultId }
-        Task { await secretsAction("Disconnect") { try await self.relay.deleteVault(vaultId) } }
+        Task { await secretsAction("Disconnect", work: work) { api in try await api.deleteVault(vaultId) } }
     }
 }
 
@@ -230,11 +258,15 @@ extension AppModel {
 
     var openGoals: [GoalItem] { goals.filter(\.isOpen) }
 
-    func refreshGoals() async {
-        guard credentials != nil, !isFixture else { return }
+    func refreshGoals(expectedOwner: WorkLifetime.Ticket? = nil) async {
+        guard credentials != nil, !isFixture,
+              let work = accountWork(expectedOwner: expectedOwner) else { return }
         do {
-            goals = try await relay.goals()
+            let value = try await work.api.goals()
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
+            goals = value
         } catch let e as RelayError where e.status == 404 {
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
             goals = []
         } catch {
             // Keep the previous list; opening Settings must not alert on a blip.
@@ -242,15 +274,18 @@ extension AppModel {
     }
 
     @discardableResult
-    func goalsAction(_ what: String, _ body: @escaping () async throws -> Void) async -> String? {
+    func goalsAction(_ what: String, work: AccountWork, _ body: @escaping (RelayAPI) async throws -> Void) async -> String? {
+        guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return "Cancelled" }
         guard !goalsBusy else { return "Busy" }
         goalsBusy = true
-        defer { goalsBusy = false }
+        defer { if accountLifetime.accepts(work.owner) { goalsBusy = false } }
         do {
-            try await body()
-            await refreshGoals()
+            try await body(work.api)
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return "Cancelled" }
+            await refreshGoals(expectedOwner: work.owner)
             return nil
         } catch {
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return "Cancelled" }
             let failure = UserError.classify(Self.secretsVerb(what), error)
             fail(failure)
             return failure.sentence
@@ -258,6 +293,7 @@ extension AppModel {
     }
 
     func createGoal(projectId: Id, title: String, outcome: String, nextStep: String, checkInCron: String?, autonomy: String) {
+        guard let work = accountWork() else { return }
         var body: [String: Any] = [
             "title": title,
             "outcome": outcome,
@@ -270,13 +306,14 @@ extension AppModel {
             body["checkInTz"] = TimeZone.current.identifier
         }
         Task {
-            await goalsAction("Create goal") {
-                _ = try await self.relay.createGoal(projectId: projectId, body)
+            await goalsAction("Create goal", work: work) { api in
+                _ = try await api.createGoal(projectId: projectId, body)
             }
         }
     }
 
     func patchGoal(_ goal: GoalItem, _ body: [String: Any]) {
+        guard let work = accountWork() else { return }
         if let i = goals.firstIndex(where: { $0.id == goal.id }) {
             if let s = body["status"] as? String { goals[i].status = s }
             if let t = body["title"] as? String { goals[i].title = t }
@@ -285,8 +322,8 @@ extension AppModel {
             if let c = body["checkInCron"] as? String { goals[i].checkInCron = c.isEmpty ? nil : c }
         }
         Task {
-            await goalsAction("Save goal") {
-                _ = try await self.relay.patchGoal(projectId: goal.projectId, goalId: goal.id, body)
+            await goalsAction("Save goal", work: work) { api in
+                _ = try await api.patchGoal(projectId: goal.projectId, goalId: goal.id, body)
             }
         }
     }
@@ -296,10 +333,11 @@ extension AppModel {
     }
 
     func deleteGoal(_ goal: GoalItem) {
+        guard let work = accountWork() else { return }
         goals.removeAll { $0.id == goal.id }
         Task {
-            await goalsAction("Delete goal") {
-                try await self.relay.deleteGoal(projectId: goal.projectId, goalId: goal.id)
+            await goalsAction("Delete goal", work: work) { api in
+                try await api.deleteGoal(projectId: goal.projectId, goalId: goal.id)
             }
         }
     }

@@ -1,0 +1,32 @@
+{
+  "canonical_sha": "a4d22466f894ec9dc0afc9624eb55996a8fb1e3c",
+  "command": [
+    "sandbox-exec",
+    "deny network*",
+    "node",
+    "--test",
+    "harness/arbos-pi-ext/voice-settlement-laws.test.ts"
+  ],
+  "exit_code": 1,
+  "wall_seconds": 2.160081082955003,
+  "counts": {
+    "tests": 5,
+    "pass": 0,
+    "fail": 5,
+    "cancelled": 0,
+    "skipped": 0,
+    "todo": 0
+  },
+  "hashes_before": {
+    ".improve/state-machine-checks/voice-settlement/extract.py": "2e14bf88f5c753bdba1f926530080ea8c611fb90af8fb0381958f0954049fae9",
+    ".improve/state-machine-checks/voice-settlement/native/src/main.rs": "6e52392c36f532acb34bf07b30a6c84f8ea0bccde77cdd15a6d17cec778f2bd0",
+    "harness/arbos-pi-ext/voice-settlement-laws.test.ts": "56863aa05e7a261cd690494d494a61e88a1216369a7b881b2e347da634e86f45"
+  },
+  "hashes_after": {
+    ".improve/state-machine-checks/voice-settlement/extract.py": "2e14bf88f5c753bdba1f926530080ea8c611fb90af8fb0381958f0954049fae9",
+    ".improve/state-machine-checks/voice-settlement/native/src/main.rs": "6e52392c36f532acb34bf07b30a6c84f8ea0bccde77cdd15a6d17cec778f2bd0",
+    "harness/arbos-pi-ext/voice-settlement-laws.test.ts": "56863aa05e7a261cd690494d494a61e88a1216369a7b881b2e347da634e86f45"
+  },
+  "unchanged": true,
+  "network": "OS sandbox denies all network; no app/provider/service launched"
+}

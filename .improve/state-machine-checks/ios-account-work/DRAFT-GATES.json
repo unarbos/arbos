@@ -1,0 +1,18 @@
+{
+  "laws": {
+    "exit_code": 0,
+    "seconds": 1.4791308749699965,
+    "runs": 768,
+    "tests": 4
+  },
+  "setup_correction": "Private symlinked .bin/tsc wrapper resolves relative to scratch path; used actual cached TypeScript script instead (no source/test failure).",
+  "typecheck": {
+    "exit_code": 0,
+    "seconds": 0.6826589170377702
+  },
+  "mutants": {
+    "exit_code": 0,
+    "count": 2,
+    "seconds": 5.015026208013296
+  }
+}

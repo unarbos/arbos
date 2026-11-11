@@ -1,0 +1,157 @@
+{
+  "scope": "17 actual native Cargo helper regressions in final P3+P4 Mac SDK composition, no GUI/media/HTTP/account execution",
+  "compiler": {
+    "command": [
+      "/usr/bin/sandbox-exec",
+      "-p",
+      "(version 1) (allow default) (deny network*)",
+      "cargo",
+      "clippy",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-mac",
+      "--all-targets",
+      "--",
+      "-D",
+      "warnings"
+    ],
+    "exit_code": 0,
+    "seconds": 27.41214645805303,
+    "workspace_packages_cleaned": 12,
+    "source_unchanged": true
+  },
+  "runtime": [
+    {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*)",
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-mac",
+        "sync::room_docs::tests::",
+        "--",
+        "--test-threads=2",
+        "--nocapture"
+      ],
+      "seconds": 57.84314791695215,
+      "exit_code": 0,
+      "counts": [
+        [
+          7,
+          0,
+          0
+        ]
+      ]
+    },
+    {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*)",
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-mac",
+        "sync::session_scope::tests::",
+        "--",
+        "--test-threads=2",
+        "--nocapture"
+      ],
+      "seconds": 1.7062316660303622,
+      "exit_code": 0,
+      "counts": [
+        [
+          4,
+          0,
+          0
+        ]
+      ]
+    },
+    {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*)",
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-mac",
+        "sync::account_tasks::tests::",
+        "--",
+        "--test-threads=2",
+        "--nocapture"
+      ],
+      "seconds": 0.7273568330565467,
+      "exit_code": 0,
+      "counts": [
+        [
+          3,
+          0,
+          0
+        ]
+      ]
+    },
+    {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*)",
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-mac",
+        "sync::call_requests::tests::",
+        "--",
+        "--test-threads=2",
+        "--nocapture"
+      ],
+      "seconds": 0.7111684998963028,
+      "exit_code": 0,
+      "counts": [
+        [
+          3,
+          0,
+          0
+        ]
+      ]
+    }
+  ],
+  "source_sha256": {
+    "crates/arbos-mac/src/sync/relay.rs": "b190a0b42450828972360a74a2ac02d5fd115a64b75b8d8510bfd551724beb52",
+    "crates/arbos-mac/src/sync/room_docs.rs": "7acd0d7de19f0778cf845bf077b663dd5599d5f10b159017d2fcb8b23697ccb3",
+    "crates/arbos-mac/src/sync/mod.rs": "5bf67a00e819a80415b20f06b293a07533d275d57ac6cce3618b72c912e8a392",
+    "crates/arbos-mac/src/ui/transcript.rs": "36ec19e3d573eb04720a76f6ef641049f3d51ee6651ca9247e76c2ea09e54e59",
+    "crates/arbos-mac/src/app.rs": "6adb872142aad6c8db71aec2c4a9027bfbbf02a9323c0fad37cf9ae677538b84",
+    "crates/arbos-mac/src/sync/fixture.rs": "4d86152064a0d1924fe7e6636a8208338d84b6def808cce67d7b57ae5457c012",
+    "crates/arbos-mac/src/pasteboard.rs": "743d2f5274dca6a380494ff92f5909b4ba17a2d3f2dea46af28a0091f76411b7",
+    "crates/arbos-mac/src/ui/avatars.rs": "39dbb366eada05b2da4dd7c4b74099d0c2a5114386c848aa0db3edb29bcb134c",
+    "crates/arbos-mac/src/ui/sf_symbols.rs": "f04b14aed09c7db0416df0b8de59d1495b84b7afae5381af1a224789883b57bc",
+    "crates/arbos-mac/src/ui/video_player.rs": "5a075858eae1b152de3401d577b42b373d030e278089f3cc9176c468f35b54d1",
+    "crates/arbos-mac/src/calls.rs": "13bc976a1cec45213596ca4324ee6a45d28530bf38026f732de287fc36af5430",
+    "crates/arbos-mac/src/call_attempt.rs": "391483a81860b9abc9def27ccbb0d197ea301a59e6f4ba969c9f8c7fbcaa9bf3",
+    "crates/arbos-mac/src/sync/work_lifetime.rs": "68d6c6fb42aa07499580c74e9ab465dd7d71d049bc76a8bfb67a6674024dde0b",
+    "crates/arbos-mac/src/sync/session_scope.rs": "40bd8659aa21f5dd6225bbab4c604376d617c9f2a98f3bc483958505624889e4",
+    "crates/arbos-mac/src/sync/session_events.rs": "45469bc476e7c59e70d9057778848f368dae272d2699d0f0cafc1f1cc998f5bf",
+    "crates/arbos-mac/src/sync/account_tasks.rs": "b1a314282f340c973ce6debb6c28f39ea9997c44e9db2d73c9aa57e0ecc32cb7",
+    "crates/arbos-mac/src/ui/notify.rs": "6cc96cfd91b3cac630e0922c969acac7c57f4e629008b0e81a12e66587587c48",
+    "crates/arbos-mac/src/sync/call_requests.rs": "801b3e87a9070f7f37711d448296635c3324205578898cf2af9097ea19d66058",
+    "crates/arbos-mac/src/sync/store_owner.rs": "b162091688e62a0b979af140c678ee8d6e797633129e835e96d4407ad4f39875"
+  },
+  "network": "deny network*",
+  "limitations": [
+    "No GUI, media, account, HTTP or existing store execution.",
+    "The full production-link and unfiltered iOS gates are separate.",
+    "Legacy cache provenance remains an owner migration decision."
+  ]
+}

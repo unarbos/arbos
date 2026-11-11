@@ -1,0 +1,117 @@
+{
+  "scope": "Finite actual app-call inventory for the requested three helpers only; source text presence plus separate bounded semantic caller review, not all-API or whole-app runtime proof.",
+  "counts": {
+    "MediaFetch.bytes": 10,
+    "copyAttachment": 2,
+    "copyMessage": 1
+  },
+  "default_predicate_calls": 0,
+  "source_sha256": {
+    "apps/ios/Arbos/Arbos/UI/ChatView.swift": "cebc573edc37875a5740cef582ad2ecace19551b1852e22bb66e30b525c7cccc",
+    "apps/ios/Arbos/Arbos/UI/FunPicker.swift": "ac79b9632d0b9dd20b5fec87f30da04ccd29ff3ecd42b0f6809508728e4b6c45",
+    "apps/ios/Arbos/Arbos/UI/LibraryList.swift": "b56c88fefcb51654b14c04d9c7cb4e35161c73057d5757f446f7af319647fd69",
+    "apps/ios/Arbos/Arbos/UI/LinkPreviewCard.swift": "af175a27584ff0a90200206cd4f6909a46c0dae42853611092350c2d58461a11",
+    "apps/ios/Arbos/Arbos/UI/MediaViewer.swift": "dc0e592f995b1855817b27f20fda5cf234bffd0730df4f60a62f0cde0bf5e66d",
+    "apps/ios/Arbos/Arbos/UI/MessagePasteboard.swift": "ef9a34f53b369046f44e76134641f13ecc2ba1100baab7f8dde00224318459e2",
+    "apps/ios/Arbos/Arbos/UI/Transcript.swift": "a5346472e97eef520e3c7f57b033009940471f0d54a7aae43238b811328530a0"
+  },
+  "calls": [
+    {
+      "kind": "copyMessage",
+      "file": "apps/ios/Arbos/Arbos/UI/ChatView.swift",
+      "line": 3266,
+      "isCurrent_explicit": true,
+      "call": ".copyMessage(m, slot: slot, isCurrent: { account.accepts(model) })"
+    },
+    {
+      "kind": "MediaFetch.bytes",
+      "file": "apps/ios/Arbos/Arbos/UI/FunPicker.swift",
+      "line": 259,
+      "isCurrent_explicit": true,
+      "call": "MediaFetch.bytes(for: item, model: model, isCurrent: { account.accepts(model) })"
+    },
+    {
+      "kind": "copyAttachment",
+      "file": "apps/ios/Arbos/Arbos/UI/LibraryList.swift",
+      "line": 257,
+      "isCurrent_explicit": true,
+      "call": ".copyAttachment(attachment, slot: media.slot, isCurrent: { origin.allowsPrivate(model) })"
+    },
+    {
+      "kind": "MediaFetch.bytes",
+      "file": "apps/ios/Arbos/Arbos/UI/LinkPreviewCard.swift",
+      "line": 246,
+      "isCurrent_explicit": true,
+      "call": "MediaFetch.bytes(for: item, model: model, isCurrent: { origin.allowsPrivate(model) })"
+    },
+    {
+      "kind": "MediaFetch.bytes",
+      "file": "apps/ios/Arbos/Arbos/UI/LinkPreviewCard.swift",
+      "line": 255,
+      "isCurrent_explicit": true,
+      "call": "MediaFetch.bytes(for: item, model: model, isCurrent: { origin.allowsPrivate(model) })"
+    },
+    {
+      "kind": "MediaFetch.bytes",
+      "file": "apps/ios/Arbos/Arbos/UI/MediaViewer.swift",
+      "line": 490,
+      "isCurrent_explicit": true,
+      "call": "MediaFetch.bytes(for: item, model: model, isCurrent: { origin.allowsPrivate(model) })"
+    },
+    {
+      "kind": "MediaFetch.bytes",
+      "file": "apps/ios/Arbos/Arbos/UI/MediaViewer.swift",
+      "line": 843,
+      "isCurrent_explicit": true,
+      "call": "MediaFetch.bytes(for: item, model: model, isCurrent: { origin.allowsReading(item, model) })"
+    },
+    {
+      "kind": "MediaFetch.bytes",
+      "file": "apps/ios/Arbos/Arbos/UI/MediaViewer.swift",
+      "line": 950,
+      "isCurrent_explicit": true,
+      "call": "MediaFetch.bytes(for: item, model: model, isCurrent: { origin.allowsReading(item, model) })"
+    },
+    {
+      "kind": "MediaFetch.bytes",
+      "file": "apps/ios/Arbos/Arbos/UI/MediaViewer.swift",
+      "line": 1030,
+      "isCurrent_explicit": true,
+      "call": "MediaFetch.bytes(for: item, model: model, isCurrent: { origin.allowsReading(item, model) })"
+    },
+    {
+      "kind": "MediaFetch.bytes",
+      "file": "apps/ios/Arbos/Arbos/UI/MediaViewer.swift",
+      "line": 1209,
+      "isCurrent_explicit": true,
+      "call": "MediaFetch.bytes(for: item, model: model, isCurrent: { origin.allowsReading(item, model) })"
+    },
+    {
+      "kind": "copyAttachment",
+      "file": "apps/ios/Arbos/Arbos/UI/MediaViewer.swift",
+      "line": 474,
+      "isCurrent_explicit": true,
+      "call": ".copyAttachment(attachment, slot: item.slot, isCurrent: { origin.allowsPrivate(model) })"
+    },
+    {
+      "kind": "MediaFetch.bytes",
+      "file": "apps/ios/Arbos/Arbos/UI/MessagePasteboard.swift",
+      "line": 300,
+      "isCurrent_explicit": true,
+      "call": "MediaFetch.bytes(for: item, model: self, isCurrent: isCurrent)"
+    },
+    {
+      "kind": "MediaFetch.bytes",
+      "file": "apps/ios/Arbos/Arbos/UI/Transcript.swift",
+      "line": 3357,
+      "isCurrent_explicit": true,
+      "call": "MediaFetch.bytes(for: item, model: model, isCurrent: { account.accepts(model) })"
+    }
+  ],
+  "link_constructors": [
+    "LinkPreviewCard(preview: preview, chatId: chatId, messageId: row.messageId, own: true, origin: MediaOrigin(model, account: account))",
+    "LinkPreviewCard(preview: preview, chatId: chatId, messageId: row.messageId, own: false, origin: MediaOrigin(model, account: account))",
+    "LinkPreviewCard(preview: preview, chatId: chatId, messageId: messageId, own: false, origin: mediaOrigin)"
+  ],
+  "origin_chain": "RowView sends the captured ChatAccountContext to MediaOrigin, direct cards and both BlockView/TypedBody paths; recursive BlockView and TypedBody child retain same optional MediaOrigin. Supplied unavailable/stale origins do not fall back."
+}

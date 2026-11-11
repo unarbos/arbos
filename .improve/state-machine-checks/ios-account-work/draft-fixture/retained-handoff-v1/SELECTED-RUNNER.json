@@ -1,0 +1,25 @@
+{
+  "sources": {
+    "apps/ios/Arbos/Arbos/Store/AppModel.swift": "f0f596d4757209173c3a39141174097cafa9fac4bac52568af0bcfda1b6f9ee7",
+    "apps/ios/Arbos/Arbos/Sync/DraftSendQueue.swift": "0985e595fa179b2919fed2c5b401d8f15a956fed78ce9b9f6ed6d20ecebc9e94",
+    "apps/ios/Arbos/Arbos/Sync/RelayAPI.swift": "79a41459c976e98f3ced1a3fcdba24dda59bb0a755265ac8af40991486a69467",
+    "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f",
+    "apps/ios/Arbos/ArbosTests/HomeSearchTests.swift": "994e3f5de50bcb086b651029aa6a77502ea7fe52613e17326349373305be5084",
+    "apps/ios/Arbos/Arbos.xcodeproj/project.pbxproj": "835d1e3265e273de9a2c2d98ee90f7cff71375cd6c8d1a18b627b50b6ab72657"
+  },
+  "source_stable": true,
+  "gates": [
+    {
+      "name": "draft_sends",
+      "passed": 18,
+      "failed": 0,
+      "expected": 18,
+      "ok": true,
+      "seconds": 1.2377107499632984,
+      "evidence": "draft_sends/GATES.json"
+    }
+  ],
+  "passed": 18,
+  "failed": 0,
+  "seconds": 1.2386097920825705
+}

@@ -1,0 +1,15 @@
+{
+  "exit_code": 0,
+  "compile_exit": 0,
+  "seconds": 0.5283669589553028,
+  "source_sha256": {
+    "crates/arbos-mac/src/sync/store_owner.rs": "b162091688e62a0b979af140c678ee8d6e797633129e835e96d4407ad4f39875",
+    "crates/arbos-mac/src/sync/work_lifetime.rs": "68d6c6fb42aa07499580c74e9ab465dd7d71d049bc76a8bfb67a6674024dde0b",
+    "crates/arbos-mac/src/sync/store.rs": "28d48ea31b86768eafa2233c51e2ff312fc424a03d51ca8ebb2815f5e07dbef0"
+  },
+  "source_unchanged": true,
+  "fixture_sha256": "f37bc16d580c9b35ebe510ac545754739f072b3f1c643e358e65992ee88ff4b8",
+  "case_insensitive_filesystem": true,
+  "tests": 11,
+  "output": "\nrunning 11 tests\ntest store_owner_checks::active_file_cannot_be_taken_by_another_live_owner ... ok\ntest store_owner_checks::actual_case_alias_observation_and_exact_origin_refusal ... CASE_INSENSITIVE=true\nok\ntest store_owner_checks::different_file_is_not_blocked_by_old_connection_close ... ok\ntest store_owner_checks::discovering_known_user_is_retained_after_unknown_lease ... ok\ntest store_owner_checks::duplicate_receipt_does_not_revoke_new_owner ... ok\ntest store_owner_checks::existing_parent_alias_keeps_one_file_owner ... ok\ntest store_owner_checks::known_user_change_refuses_prior_user_cache_without_wipe ... ok\ntest store_owner_checks::late_receipt_cannot_unlink_reincarnated_owner ... ok\ntest store_owner_checks::punctuation_collision_does_not_prove_shared_origin ... ok\ntest store_owner_checks::same_file_opener_waits_through_close_and_unlink ... ok\ntest store_owner_checks::sequential_collision_still_refuses_old_cached_origin ... ok\n\ntest result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s\n\n"
+}

@@ -1,0 +1,48 @@
+{
+  "calls": [
+    {
+      "path": "apps/ios/Arbos/Arbos/UI/SettingsView.swift",
+      "sha256": "8382795bb2f0b389cf9fff49c0d14927813a697f3bb95abec6874ead9a89d139",
+      "calls": [
+        {
+          "line": 173,
+          "has_isCurrent": true
+        },
+        {
+          "line": 1329,
+          "has_isCurrent": true
+        }
+      ]
+    },
+    {
+      "path": "apps/ios/Arbos/Arbos/UI/ProfilePages.swift",
+      "sha256": "5abdc957ed6932d6c3b7e59200cd21e2737dcfd36fd005c9f77b7e9b3eefbab0",
+      "calls": [
+        {
+          "line": 2418,
+          "has_isCurrent": true
+        },
+        {
+          "line": 2428,
+          "has_isCurrent": true
+        },
+        {
+          "line": 2433,
+          "has_isCurrent": true
+        }
+      ]
+    },
+    {
+      "path": "apps/ios/Arbos/Arbos/UI/ServerChannelsView.swift",
+      "sha256": "23d167a1c23206ae5e339fc56a698a365924cd8ddce1680b2b9811c2cb17b335",
+      "calls": [
+        {
+          "line": 198,
+          "has_isCurrent": true
+        }
+      ]
+    }
+  ],
+  "all_gated": true,
+  "total": 6
+}

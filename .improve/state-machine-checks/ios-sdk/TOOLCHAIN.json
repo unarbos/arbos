@@ -1,0 +1,9 @@
+{
+  "compiler": "Apple Swift 6.2.3 (swiftlang-6.2.3.3.21 clang-1700.6.3.2), swift-driver 1.127.14.1",
+  "sdk": "iPhoneSimulator26.2.sdk",
+  "target": "arm64-apple-ios17.0-simulator",
+  "swift_language_mode": "5",
+  "app_package": "Runtime-equivalent private SwiftPM target with actual reviewed FFI/LiveKit packages; no productmanifest edits",
+  "fence": "App build: freshHOME and outer deny-network. Test typechecks: freshHOME, private copied modules/cache, deny-network and denywrite throughout parent SDK subtree.",
+  "warning_scope": "Warnings retained in private logs with hashes; no suppression. Compiler acceptance uses configured Swift5 mode; no Swift6 migration verdict."
+}

@@ -1,0 +1,94 @@
+{
+  "unmodified_tests_passed": 5,
+  "generated_law_cases": 1024,
+  "protocol_test": 1,
+  "original_sources": {
+    "crates/arbos-agentd/src/worker_lifetime.rs": "4be122177185843850e5241e7217bdeb49e2b90192bc282f55386b743ab56243",
+    "harness/arbos-pi-ext/worker-lifetime-laws.test.ts": "9c7c7daff3959f1d4436212dfcb921399beaf6513dbfe8e6c78aca105d3b8656",
+    ".improve/state-machine-checks/worker_lifetime_bridge.rs": "8f27c5644e089ad4e889d59b6902b7ff19528820db3e63c6cdd183109e72b3cc",
+    "harness/arbos-pi-ext/package.json": "e31dde2f526e658d07dda21eff087a52f8e105a29be32865f3224963221c5442"
+  },
+  "source_unchanged": true,
+  "results": [
+    {
+      "name": "shutdown-reopens",
+      "seed": 92001,
+      "original_sha256": "4be122177185843850e5241e7217bdeb49e2b90192bc282f55386b743ab56243",
+      "mutant_sha256": "c5022e357937c6f15615e40df262c6c46178d11f54859209c90f246fc1a0b7f4",
+      "generated": {
+        "exit_code": 1,
+        "seconds": 0.5803847500355914,
+        "detected": true,
+        "accepted_shrinks": 0
+      },
+      "shrunk_input": {
+        "tail": []
+      },
+      "replay": {
+        "exit_code": 1,
+        "seconds": 0.5578555830288678,
+        "detected": true
+      }
+    },
+    {
+      "name": "stale-abort-retires-successor",
+      "seed": 92002,
+      "original_sha256": "4be122177185843850e5241e7217bdeb49e2b90192bc282f55386b743ab56243",
+      "mutant_sha256": "477dbe4cb0fdcdcd938210b451d09555344e46dd13748cabb56d0c3be149ed1c",
+      "generated": {
+        "exit_code": 1,
+        "seconds": 0.6295592919923365,
+        "detected": true,
+        "accepted_shrinks": 0
+      },
+      "shrunk_input": {
+        "tail": []
+      },
+      "replay": {
+        "exit_code": 1,
+        "seconds": 0.5317455829354003,
+        "detected": true
+      }
+    },
+    {
+      "name": "stale-stop-completion-releases-successor",
+      "seed": 92003,
+      "original_sha256": "4be122177185843850e5241e7217bdeb49e2b90192bc282f55386b743ab56243",
+      "mutant_sha256": "d8b6d72250333c539c32fd7a6019778deaafbd502ad49db0fac1e63724859af5",
+      "generated": {
+        "exit_code": 1,
+        "seconds": 0.5744604170322418,
+        "detected": true,
+        "accepted_shrinks": 0
+      },
+      "shrunk_input": {
+        "tail": []
+      },
+      "replay": {
+        "exit_code": 1,
+        "seconds": 0.542582125053741,
+        "detected": true
+      }
+    },
+    {
+      "name": "captured-unpublished-resource-lost",
+      "seed": 92004,
+      "original_sha256": "4be122177185843850e5241e7217bdeb49e2b90192bc282f55386b743ab56243",
+      "mutant_sha256": "51bec78016d7ee071e924cca319c6ec91ab47ec948e79f6a52ef170573db36dc",
+      "generated": {
+        "exit_code": 1,
+        "seconds": 0.5852794169913977,
+        "detected": true,
+        "accepted_shrinks": 0
+      },
+      "shrunk_input": {
+        "tail": []
+      },
+      "replay": {
+        "exit_code": 1,
+        "seconds": 0.5310957919573411,
+        "detected": true
+      }
+    }
+  ]
+}

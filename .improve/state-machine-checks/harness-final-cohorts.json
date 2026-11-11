@@ -1,0 +1,86 @@
+{
+  "scope": "All normal harness testfiles split onlyaroundMacOSnestedSeatbelt restriction; eachfileexactlyonce/no tests removed. Two shellbridges retain their own stricter network/file/processfence. This is not a green unfilteredpnpmcommand; canonicalLinuxnormalcommandremains required.",
+  "all_files": [
+    "approval.test.ts",
+    "deploy-state-laws.test.ts",
+    "feedback-state-laws.test.ts",
+    "index.test.ts",
+    "lease-state-laws.test.ts",
+    "once-claim-laws.test.ts",
+    "pending-owner-laws.test.ts",
+    "publication-state-laws.test.ts",
+    "restart-state-laws.test.ts",
+    "rpc-owner-laws.test.ts",
+    "stop-job-render.test.ts",
+    "voice-settlement-laws.test.ts",
+    "voice-state-laws.test.ts",
+    "worker-lifetime-laws.test.ts"
+  ],
+  "source": {
+    "approval.test.ts": "c85c8ac0e614ca8e894da4b4bbd0345f4d33a6c5b3ea12d1c86745ed31232aa5",
+    "deploy-state-laws.test.ts": "1dc10aa860f1adca7f055e2ef478e505631168653f4f744c354db37f1c0ddaf9",
+    "feedback-state-laws.test.ts": "00d50f35bda5d1dd5ed017c70e28325e6ade7f43b956cfa9cb2262234ff7e983",
+    "index.test.ts": "c72242f22a48469805e53030173430a84569425d29d53b0f5e87232a661f0aa3",
+    "lease-state-laws.test.ts": "e5c0e4d957cfc92464ee4c94b1cfec3dd63b54165f8ce36402fd61bd8ac1e8c6",
+    "once-claim-laws.test.ts": "d0d7b85f15800665128db87033248e67a96cbf26ee543141b050211befe46c67",
+    "pending-owner-laws.test.ts": "2a3d949e92dc3d7a1c1be182b244cf113a0f34a29d475bc4aec9476cc3c4dd5d",
+    "publication-state-laws.test.ts": "61441ca2053419ee7e23bc0f0cb30e2ba49332aec85063d2fdaabeccc8e3f200",
+    "restart-state-laws.test.ts": "c5753656825a8d512b1d3e3f007dd84764d49fe508924a9cbaa495e7e09550fd",
+    "rpc-owner-laws.test.ts": "3f22745ede51edb1cf1b1a69bb67857782d9441acc2b505e3c9a81c0afcdaedb",
+    "stop-job-render.test.ts": "7104e2d9192d2139d80e0547e9dbcc706973da3e9e3b50e3430f74f1c12a815d",
+    "voice-settlement-laws.test.ts": "56863aa05e7a261cd690494d494a61e88a1216369a7b881b2e347da634e86f45",
+    "voice-state-laws.test.ts": "1d81ee6d8019b69c4df01d4d5a6059304a4e5df5bb87f8dadfbf3048cf13e69d",
+    "worker-lifetime-laws.test.ts": "9c7c7daff3959f1d4436212dfcb921399beaf6513dbfe8e6c78aca105d3b8656"
+  },
+  "gates": [
+    {
+      "label": "outer-fenced",
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1)(allow default)(deny network*)(allow network-bind (local ip \"localhost:*\"))(allow network-inbound (local ip \"localhost:*\"))(allow network-outbound (remote ip \"localhost:*\"))",
+        "node",
+        "--test",
+        "approval.test.ts",
+        "feedback-state-laws.test.ts",
+        "index.test.ts",
+        "once-claim-laws.test.ts",
+        "pending-owner-laws.test.ts",
+        "publication-state-laws.test.ts",
+        "restart-state-laws.test.ts",
+        "rpc-owner-laws.test.ts",
+        "stop-job-render.test.ts",
+        "voice-settlement-laws.test.ts",
+        "voice-state-laws.test.ts",
+        "worker-lifetime-laws.test.ts"
+      ],
+      "exit": 0,
+      "seconds": 30.24179404194001,
+      "counts": {
+        "tests": 84,
+        "pass": 84,
+        "fail": 0,
+        "skipped": 0
+      },
+      "log_sha256": "7af56643413ca29feefa714663f0e6f11e5cb293544b808652d81873727d9683"
+    },
+    {
+      "label": "self-fenced-shell",
+      "command": [
+        "node",
+        "--test",
+        "deploy-state-laws.test.ts",
+        "lease-state-laws.test.ts"
+      ],
+      "exit": 0,
+      "seconds": 22.343679790967144,
+      "counts": {
+        "tests": 10,
+        "pass": 10,
+        "fail": 0,
+        "skipped": 0
+      },
+      "log_sha256": "c9cf1f3e7bcafc0dcd2077373319ffd2f335903bc4fa6e604d1d6cd34babae87"
+    }
+  ]
+}

@@ -6,6 +6,7 @@
 
 use crate::mentions::text_has_at_token;
 
+use super::work_lifetime::WorkLifetime;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -204,6 +205,9 @@ impl SyncSource for FixtureSource {
                 .extend(seed_people_projects());
             shared.chats.lock().unwrap().extend(seed_people_chats());
 
+            let _ = events.send(SyncEvent::CallAccount(
+                WorkLifetime::default().ticket().unwrap(),
+            ));
             let _ = events.send(SyncEvent::Link(Link::Connecting));
             // The signed-in user, so Settings shows its profile header and credits.
             let _ = events.send(SyncEvent::Account(Some(crate::model::AccountView {
@@ -1165,6 +1169,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         return;
     }
     match cmd {
+        ClientCommand::BindUi { .. } | ClientCommand::Scoped { .. } => {}
         // Handled above; listed so a new variant still fails to compile here.
         ClientCommand::SearchPeople { .. }
         | ClientCommand::StartDm { .. }
@@ -1249,9 +1254,14 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         }
         // Calls v1 against a local `livekit-server --dev` (devkey/secret):
         // the fixture mints the join token itself.
-        ClientCommand::StartCall { chat_id, kind } => {
+        ClientCommand::StartCall {
+            attempt,
+            chat_id,
+            kind,
+        } => {
             let call = fixture_call(shared, &chat_id, kind);
             let _ = shared.events.send(SyncEvent::CallReady {
+                attempt,
                 call: call.clone(),
                 created: true,
                 reachable: Vec::new(),
@@ -1266,18 +1276,22 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 let _ = shared.events.send(SyncEvent::CallInfo(joined));
             });
         }
-        ClientCommand::JoinCall { call_id } => {
+        ClientCommand::JoinCall { attempt, call_id } => {
             let chat_id = call_id
                 .strip_prefix("call_fixture_")
                 .unwrap_or(DM_SAM)
                 .to_string();
             let _ = shared.events.send(SyncEvent::CallReady {
+                attempt,
                 call: fixture_call(shared, &chat_id, CallKind::Video),
                 created: false,
                 reachable: Vec::new(),
             });
         }
-        ClientCommand::LeaveCall { call_id } => {
+        ClientCommand::LeaveCall {
+            attempt: _,
+            call_id,
+        } => {
             let chat_id = call_id
                 .strip_prefix("call_fixture_")
                 .unwrap_or(DM_SAM)
@@ -2064,6 +2078,9 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             });
         }
         ClientCommand::Pair { .. } | ClientCommand::SignIn { .. } => {
+            let _ = shared.events.send(SyncEvent::CallAccount(
+                WorkLifetime::default().ticket().unwrap(),
+            ));
             let _ = shared.events.send(SyncEvent::Paired {
                 device_id: DEVICE.into(),
             });

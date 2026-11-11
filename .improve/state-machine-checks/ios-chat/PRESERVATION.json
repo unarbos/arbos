@@ -1,0 +1,48 @@
+{
+  "ChatView.swift": {
+    "numeric_tokens_unchanged": false,
+    "before_sha256": "4571bcc26be7bb8fd7ccd39c85939b5ff5d042021b5a597497290fdb1c84273b",
+    "after_sha256": "19142cc76f8381f6114c0ab48ec9a2fff230b49d2eb63c7ca4e5f9f3d4237440",
+    "existing_numeric_tokens_excluding_new_context_tags_unchanged": true,
+    "new_context_numeric_tokens": [
+      "0",
+      "1",
+      "2"
+    ]
+  },
+  "Transcript.swift": {
+    "numeric_tokens_unchanged": true,
+    "before_sha256": "bf14629157d1d230e3dc4fbf69234e39c259b871b72b47b9dc2dfe9dd7630f3d",
+    "after_sha256": "ac6a02d802151f02215b0760e17c832c9b2385dbac21fbf6adcad48960a565ef"
+  },
+  "QuestionCard.swift": {
+    "numeric_tokens_unchanged": true,
+    "before_sha256": "74aedf7a546dd3c6767bad8892530da0e5144cd733addc0869c559b64d2fed85",
+    "after_sha256": "20472d3698cc302cb6789f4d0c3190f807c28add04c52702421e5fa88f19c225"
+  },
+  "FunPicker.swift": {
+    "numeric_tokens_unchanged": true,
+    "before_sha256": "a15f4914c8814e071b5b7965bd20639f00621479e0c6a192c15b485c40ca4537",
+    "after_sha256": "a0e79f32d5fa9c8ea82e46c58b4bb33b520742265061fe375f097618484e4e26"
+  },
+  "MediaViewer.swift": {
+    "numeric_tokens_unchanged": true,
+    "before_sha256": "e824fa221b4834f64d76e36ca53670f9ea5fecf8d75ec32058cd13c299e7dfe8",
+    "after_sha256": "18f2ea2a36ccc5128865bd213346db6461e1a087cade07bacd9be18f6df9e935"
+  },
+  "MessagePasteboard.swift": {
+    "numeric_tokens_unchanged": true,
+    "before_sha256": "a308a47e48fd62abb68d64f314a0cfba4d9f02c05957406663eb66a93b9794a6",
+    "after_sha256": "17ce8f83ef6436247f8d56687ec380808d09a7dd571ed3bb11db7678f784350d"
+  },
+  "StickerBubble_only": true,
+  "sendMemo_unchanged": true,
+  "MemoPlayer_protected_methods_unchanged": {
+    "startPlaying": true,
+    "startTick": true,
+    "stopTick": true,
+    "updateProgress": true,
+    "activatePlayback": true,
+    "format": true
+  }
+}

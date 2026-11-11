@@ -1,0 +1,264 @@
+{
+  "groups": {
+    "CARDS-BEFORE": {
+      "source_sha256": "74aedf7a546dd3c6767bad8892530da0e5144cd733addc0869c559b64d2fed85",
+      "method_sha256": "bccada38f5057e7480e18b371317a9f7c2daa61b2b24fa64518ddbce4cea6c35",
+      "context_sha256": "a04433ef2ef7c1da76e933c27234ddc49afc21dd13e22e3d732a812e1eaf7f6c",
+      "compile_exit": 0,
+      "exit_code": 1,
+      "results": {
+        "cases": {
+          "cancelled-card-answer-has-no-effect": false,
+          "cancelled-card-close-has-no-effect": false,
+          "cancelled-card-save-has-no-effect": false,
+          "current-multi-answer-control": true,
+          "current-secret-close-reject-control": true,
+          "current-secret-normalization-fallback-and-forget-control": true,
+          "current-single-answer-control": true,
+          "empty-secret-no-dispatch-control": true,
+          "fixture-local-answer-control": true,
+          "missing-question-id-no-dispatch-control": true,
+          "old-card-answer-cannot-adopt-B": false,
+          "old-card-close-cannot-adopt-B": false,
+          "old-card-save-cannot-adopt-B": false,
+          "unavailable-card-answer-has-no-model-effect": false,
+          "unavailable-card-close-has-no-model-effect": false,
+          "unavailable-card-save-has-no-model-effect": false
+        },
+        "failed": 9,
+        "passed": 7,
+        "total": 16
+      },
+      "seconds": 1.650301165995188
+    },
+    "EQ-BEFORE": {
+      "source_sha256": "bf14629157d1d230e3dc4fbf69234e39c259b871b72b47b9dc2dfe9dd7630f3d",
+      "method_sha256": "0d52d9c171228088b041f9bbe103e877714bf8c330ab4801859c09e6daa0c44d",
+      "context_sha256": "a04433ef2ef7c1da76e933c27234ddc49afc21dd13e22e3d732a812e1eaf7f6c",
+      "compile_exit": 0,
+      "exit_code": 1,
+      "results": {
+        "cases": {
+          "different-owner-same-generation-row-not-equal": false,
+          "geometry-change-invalidates-control": true,
+          "mention-change-invalidates-control": true,
+          "message-change-invalidates-control": true,
+          "retired-owner-identical-row-not-equal": false,
+          "same-fixture-receipt-cache-control": true,
+          "same-owner-new-API-retains-row-cache": true,
+          "same-owner-refresh-view-identity-hash-stable": true,
+          "same-unavailable-cache-no-new-authority-control": true,
+          "tagged-fixture-and-account-do-not-share-row": false,
+          "unavailable-row-not-equal-to-authenticated": false
+        },
+        "failed": 4,
+        "passed": 7,
+        "total": 11
+      },
+      "seconds": 1.7019198749912903
+    },
+    "SESSION-BEFORE": {
+      "source_sha256": "4571bcc26be7bb8fd7ccd39c85939b5ff5d042021b5a597497290fdb1c84273b",
+      "method_sha256": "539bedf98ab0dc0c222a478400a37f48944f85ca6bd3069d614c2d708487b1f3",
+      "context_sha256": "a04433ef2ef7c1da76e933c27234ddc49afc21dd13e22e3d732a812e1eaf7f6c",
+      "compile_exit": 0,
+      "exit_code": 1,
+      "results": {
+        "cases": {
+          "cancelled-chat-call-cannot-mutate": false,
+          "cancelled-chat-finish-cannot-mutate": false,
+          "cancelled-chat-stop-cannot-mutate": false,
+          "current-call-control": true,
+          "current-draft-call-refusal-preserved-control": true,
+          "current-memo-caller-handoff-control": true,
+          "current-stop-control": true,
+          "fixture-local-stop-control": true,
+          "not-recording-memo-noop-control": true,
+          "old-chat-call-cannot-adopt-B": false,
+          "old-chat-finish-cannot-adopt-B": false,
+          "old-chat-stop-cannot-adopt-B": false,
+          "queued-call-task-retirement-refused": false,
+          "unavailable-chat-call-cannot-mutate": false,
+          "unavailable-chat-finish-cannot-mutate": false,
+          "unavailable-chat-stop-cannot-mutate": false
+        },
+        "failed": 10,
+        "passed": 6,
+        "total": 16
+      },
+      "seconds": 1.824593500001356
+    },
+    "ACTIONS-BEFORE": {
+      "source_sha256": "4571bcc26be7bb8fd7ccd39c85939b5ff5d042021b5a597497290fdb1c84273b",
+      "closures_sha256": "17daa6e3ef93847b3a20e3e276bfa58a72e9ccb05da2da9e823cdef4c8f1c63f",
+      "compile_exit": 0,
+      "exit_code": 1,
+      "results": {
+        "cases": {
+          "callback-0-cancelled": false,
+          "callback-0-current": true,
+          "callback-0-retired": false,
+          "callback-0-unavailable": false,
+          "callback-1-cancelled": false,
+          "callback-1-current": true,
+          "callback-1-retired": false,
+          "callback-1-unavailable": false,
+          "callback-2-cancelled": false,
+          "callback-2-current": true,
+          "callback-2-retired": false,
+          "callback-2-unavailable": false,
+          "callback-3-cancelled": false,
+          "callback-3-current": true,
+          "callback-3-retired": false,
+          "callback-3-unavailable": false,
+          "callback-4-cancelled": false,
+          "callback-4-current": true,
+          "callback-4-retired": false,
+          "callback-4-unavailable": false
+        },
+        "failed": 15,
+        "passed": 5,
+        "total": 20
+      },
+      "seconds": 1.6504030409269035
+    },
+    "IMAGE-BEFORE": {
+      "source_sha256": "bf14629157d1d230e3dc4fbf69234e39c259b871b72b47b9dc2dfe9dd7630f3d",
+      "method_sha256": "1314e81e81cb1937ba170c87b89b5d4270605465e05fce0bb4b4774dc559f1a8",
+      "context_sha256": "a04433ef2ef7c1da76e933c27234ddc49afc21dd13e22e3d732a812e1eaf7f6c",
+      "compile_exit": 0,
+      "exit_code": 1,
+      "results": {
+        "cases": {
+          "cancelled-loader-refuses-fetch": false,
+          "captured-fixture-loader-control": true,
+          "current-decode-error-control": true,
+          "current-fetch-decode-control": true,
+          "current-fetch-error-control": true,
+          "old-loader-refuses-before-fetch": false,
+          "retired-decode-error-cannot-publish": false,
+          "retired-decode-success-cannot-publish": false,
+          "retired-fetch-error-cannot-publish": false,
+          "retired-fetch-success-cannot-publish": false,
+          "unavailable-loader-refuses-before-fetch": false
+        },
+        "failed": 7,
+        "passed": 4,
+        "total": 11
+      },
+      "seconds": 2.066035582916811
+    },
+    "STICKER-BEFORE-EXACT": {
+      "source_sha256": "a15f4914c8814e071b5b7965bd20639f00621479e0c6a192c15b485c40ca4537",
+      "method_sha256": "3fb5edc6af488263634d5433d45cf9bfbdf2eefe029d32dfe96e13072d80d6ff",
+      "context_sha256": "a04433ef2ef7c1da76e933c27234ddc49afc21dd13e22e3d732a812e1eaf7f6c",
+      "compile_exit": 0,
+      "exit_code": 1,
+      "results": {
+        "cases": {
+          "cancelled-loader-refuses-fetch": true,
+          "captured-fixture-loader-control": false,
+          "current-decode-error-control": true,
+          "current-fetch-decode-control": true,
+          "current-fetch-error-control": true,
+          "old-loader-refuses-before-fetch": true,
+          "retired-decode-error-cannot-publish": true,
+          "retired-decode-success-cannot-publish": true,
+          "retired-fetch-error-cannot-publish": true,
+          "retired-fetch-success-cannot-publish": false,
+          "unavailable-loader-refuses-before-fetch": true
+        },
+        "failed": 2,
+        "passed": 9,
+        "total": 11
+      },
+      "seconds": 0.7553783329203725
+    },
+    "PLAYER-BEFORE": {
+      "source_sha256": "bf14629157d1d230e3dc4fbf69234e39c259b871b72b47b9dc2dfe9dd7630f3d",
+      "class_sha256": "acc184fa99529d5d18d72720c799fd870f62ed32f2fef8119e2f9b40dc4185fb",
+      "compile_exit": 0,
+      "exit_code": 1,
+      "results": {
+        "cases": {
+          "current-duration-control": true,
+          "current-pause-control": true,
+          "current-play-control": true,
+          "retired-duration-does-not-publish": false,
+          "retired-duration-refuses-fetch": false,
+          "retired-pending-toggle-does-not-play": false,
+          "retired-toggle-refuses-fetch": false
+        },
+        "failed": 4,
+        "passed": 3,
+        "total": 7
+      },
+      "seconds": 1.458448958932422
+    },
+    "COPY-BEFORE": {
+      "source_sha256": "a308a47e48fd62abb68d64f314a0cfba4d9f02c05957406663eb66a93b9794a6",
+      "methods_sha256": "702597ad2206bf9b94e92ff7d089dc59f2f4eedb3c5e8870ccba4dec21db2fad",
+      "compile_exit": 0,
+      "exit_code": 1,
+      "results": {
+        "cases": {
+          "current-copy-error-control": true,
+          "current-copy-preserves-two-fetch-control": true,
+          "late-copy-error-no-B-notice": false,
+          "late-copy-no-next-B-fetch-or-clipboard": false,
+          "stale-copy-refuses-entry": false,
+          "text-only-copy-control": true
+        },
+        "failed": 3,
+        "passed": 3,
+        "total": 6
+      },
+      "seconds": 1.3997987500624731
+    },
+    "FETCH-BEFORE": {
+      "source_sha256": "e824fa221b4834f64d76e36ca53670f9ea5fecf8d75ec32058cd13c299e7dfe8",
+      "method_sha256": "c02d6296bc67caf562bc80a871e4c5fcc90072a161fcc75667efe3ec0bd81f70",
+      "compile_exit": 0,
+      "exit_code": 1,
+      "results": {
+        "cases": {
+          "cancelled-fetch-boundary-refuses-authority": false,
+          "current-blob-URL-and-bearer-control": true,
+          "current-GIF-relay-pass-through-control": true,
+          "issued-request-keeps-acquired-A-bytes-control": true,
+          "local-pending-no-fetch-control": true,
+          "public-picture-never-sends-device-bearer-control": true,
+          "queued-fetch-boundary-does-not-acquire-B": false,
+          "stale-fetch-boundary-does-not-acquire-current-authority": false
+        },
+        "failed": 3,
+        "passed": 5,
+        "total": 8
+      },
+      "seconds": 1.0426681250100955
+    },
+    "THUMB-BEFORE": {
+      "source_sha256": "bf14629157d1d230e3dc4fbf69234e39c259b871b72b47b9dc2dfe9dd7630f3d",
+      "method_sha256": "f18d9bada6cc991389257e15d4ecce4668fb712114292130598009a15136468c",
+      "compile_exit": 0,
+      "exit_code": 1,
+      "results": {
+        "cases": {
+          "cancelled-thumb-refuses-fetch": false,
+          "current-thumb-load-control": true,
+          "late-thumb-does-not-publish": false,
+          "old-thumb-refuses-B-authority": false,
+          "unavailable-thumb-refuses-fetch": false
+        },
+        "failed": 4,
+        "passed": 1,
+        "total": 5
+      },
+      "seconds": 1.3114131250185892
+    }
+  },
+  "total": 111,
+  "failed": 61,
+  "passed": 50,
+  "note": "Exact original product bodies. The new designed Context is a collaborator for domains absent in original source. Earlier STICKER-BEFORE normalized the original work parameter and is superseded by STICKER-BEFORE-EXACT. Scroll preservation is a separately pinned draft refinement, not claimed an original bug."
+}

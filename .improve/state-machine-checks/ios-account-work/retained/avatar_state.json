@@ -1,0 +1,22 @@
+{
+  "sources": {
+    "apps/ios/Arbos/Arbos/UI/AvatarPickerSheet.swift": "87f2194ba44a773207b90187d2b07574d64e439eb5a1f2d9ff37882863f7f84b",
+    "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f"
+  },
+  "compile_exit": 0,
+  "fixture_sha256": "5909996aca521ea6e021e5d19ff4806a010aa5a31366ba13e43f8b9ba40cdd41",
+  "exit_code": 0,
+  "results": {
+    "cases": {
+      "current-generation-error-control": true,
+      "current-generation-key-control": true,
+      "retired-generation-error-no-B-paint": true,
+      "retired-generation-key-no-B-paint": true,
+      "retired-queued-generation-does-not-start": true
+    },
+    "failed": 0,
+    "passed": 5,
+    "total": 5
+  },
+  "seconds": 0.6238267909502611
+}

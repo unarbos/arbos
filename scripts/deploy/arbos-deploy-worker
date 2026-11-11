@@ -35,6 +35,10 @@
 # loop judges "live" from the deployed shas, not from this script.
 set -euo pipefail
 
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/deploy/deploy-state.sh
+. "$HERE/deploy-state.sh"
+
 STATE="${ARBOS_DEPLOY_STATE:-/var/lib/arbos-deploy}"
 QUEUE="${ARBOS_DEPLOY_QUEUE:-/var/lib/arbos-feedback/deploy-requests}"
 PRIORITY_MERGES="$QUEUE/priority-merges"  # written by the feedback poller when a gate-pinned item merges (hotfix fast path)
@@ -174,12 +178,11 @@ hold_agentd() {
 
 # Lane collision (2026-10-29 00:13): the 0.1.180 canary busy-reply smoke ran while the relay lane restarted
 # the relay for 9c44ba36 (sockets closed 00:12:05, probes arrived via matrix resync 7–8 s late) and the
-# agentd lane was held for a failure the image did not cause. Two markers keep the lanes apart:
-#   $STATE/agentd.canary   — written by roll_image around the canary smokes; the relay lane does not
-#                            deploy (restart) while it exists and is fresh.
-#   $STATE/relay.deploying — written by deploy_relay for the build + restart; a canary smoke waits for
-#                            it to clear (and for RELAY_SETTLE_S after a restart) before it starts.
-# Both are stale after LANE_MARKER_MAX_S so a killed unit cannot wedge the other lane.
+# agentd lane was held for a failure the image did not cause. deploy-state.sh holds one OS lease
+# across relay deploys, canary smokes and Caddy reloads; marker check/publication alone races.
+# agentd.canary, relay.deploying and www.reloading remain observations and legacy blockers.
+# Their expiry never releases a live lease. A canary waits at most CANARY_WAIT_MAX_S, then defers
+# without switching the default or holding an image. RELAY_SETTLE_S still follows a relay restart.
 LANE_MARKER_MAX_S="${LANE_MARKER_MAX_S:-1800}"
 RELAY_SETTLE_S="${RELAY_SETTLE_S:-45}"
 CANARY_WAIT_MAX_S="${CANARY_WAIT_MAX_S:-900}"
@@ -199,29 +202,42 @@ relay_deploying() { marker_fresh "$STATE/relay.deploying"; }
 www_reloading() { marker_fresh "$STATE/www.reloading"; }
 apply_pending_www_reload() {
   [[ -f "$STATE/www.reload-pending" ]] || return 0
-  if canary_running || relay_deploying; then return 0; fi
   dry && { log "dry-run: would apply the deferred arbos-www reload"; return 0; }
+  local rc
+  if deploy_lane_run www apply_pending_www_reload_now; then return 0; else rc=$?; fi
+  (( rc == 75 )) && return 0
+  return "$rc"
+}
+
+apply_pending_www_reload_now() {
   systemctl is-active --quiet arbos-www.service || { rm -f "$STATE/www.reload-pending"; return 0; }
-  printf 'by=%s\nat=%s\n' "arbos-deploy-worker" "$(date -u +%FT%TZ)" > "$STATE/www.reloading"
   systemctl reload arbos-www.service || true
-  rm -f "$STATE/www.reloading" "$STATE/www.reload-pending"
+  rm -f "$STATE/www.reload-pending"
   log "www: applied the arbos-www reload deferred by refresh-mac-download (lanes clear)"
   event relay "$(deployed_sha relay)" www_reload_applied "deferred Caddy reload applied once no canary smoke / relay deploy was in flight"
 }
-wait_for_relay_lane() { # before a canary smoke: no relay deploy / Caddy reload in flight, and the relay up for RELAY_SETTLE_S
-  local waited=0 up last
-  while relay_deploying || www_reloading; do
-    (( waited == 0 )) && log "agentd: canary smoke waits — relay deploy or arbos-www reload in flight ($(cat "$STATE/relay.deploying" "$STATE/www.reloading" 2>/dev/null | tr '\n' ' '))"
-    (( waited >= CANARY_WAIT_MAX_S )) && { log "agentd: relay deploy still in flight after ${waited}s; running the canary anyway"; return 0; }
+
+wait_for_relay_lane() { # bounded admission; a Deferred result never starts a smoke
+  local waited=0 last up rc
+  while :; do
+    if ! relay_deploying && ! www_reloading; then
+      last="$(cat "$STATE/relay.last-deploy" 2>/dev/null || true)"
+      up=0
+      if [[ "$last" =~ ^[0-9]+$ ]] && (( $(date -u +%s) - last < RELAY_SETTLE_S )); then
+        up=$(( RELAY_SETTLE_S - ($(date -u +%s) - last) ))
+      fi
+      if (( up == 0 )); then
+        if deploy_lane_run canary activate_image_default "$@"; then return 0; else rc=$?; fi
+        (( rc == 75 )) || return "$rc"
+      fi
+    fi
+    (( waited >= CANARY_WAIT_MAX_S )) && {
+      log "agentd: canary admission deferred after ${waited}s; no smoke or default switch"
+      return 75
+    }
+    (( waited == 0 )) && log "agentd: canary waits for exclusive relay/www lane and settle interval"
     sleep 10; waited=$((waited + 10))
   done
-  last="$(cat "$STATE/relay.last-deploy" 2>/dev/null || true)"
-  if [[ "$last" =~ ^[0-9]+$ ]] && (( $(date -u +%s) - last < RELAY_SETTLE_S )); then
-    up=$(( RELAY_SETTLE_S - ($(date -u +%s) - last) ))
-    log "agentd: canary smoke waits ${up}s for the relay to settle after its restart"
-    sleep "$up"
-  fi
-  return 0
 }
 
 gh_api() {
@@ -260,7 +276,7 @@ paths_of() {
     # Everything relay-server.sh installs on the host counts as a relay change: the Caddyfile, the
     # download/update mirror script and its units (#1458 — a change to the mirror alone must reach
     # /usr/local/bin/arbos-refresh-mac-download), the site sync and the OAuth secret watch.
-    relay) echo "crates/arbos-relay crates/arbos-core crates/arbosctl scripts/deploy/relay-server.sh scripts/deploy/Caddyfile scripts/deploy/refresh-mac-download.sh scripts/deploy/arbos-refresh-mac-download.path scripts/deploy/site-sync.sh scripts/deploy/oauth-secret-watch.sh" ;;
+    relay) echo "crates/arbos-relay crates/arbos-core crates/arbosctl scripts/deploy/relay-server.sh scripts/deploy/Caddyfile scripts/deploy/refresh-mac-download.sh scripts/deploy/deploy-state.sh scripts/deploy/arbos-refresh-mac-download.path scripts/deploy/site-sync.sh scripts/deploy/oauth-secret-watch.sh" ;;
     voice) echo "voice" ;;
     # agentd compiles arbos-core in (Cargo.toml: arbos-core with chart-png); a core-only merge is
     # an agentd change too (f5ca65887 and #2025 produced no image, 2026-10-27).
@@ -351,16 +367,18 @@ relay_connect_probe() {
 }
 
 deploy_relay() {
+  dry && { log "dry-run: would deploy relay $1"; return 0; }
+  deploy_lane_run relay deploy_relay_now "$@"
+}
+
+deploy_relay_now() {
   local sha="$1" tmp t0
-  dry && { log "dry-run: would deploy relay $sha"; return 0; }
   tmp="$(mktemp -d)"
   git -C "$REPO" show "$sha:scripts/feedback/deploy-relay.sh" > "$tmp/deploy-relay.sh"
   t0=$(date +%s)
   log "relay: deploying $sha (build from source as $BUILD_USER)"
-  printf 'sha=%s\nat=%s\n' "$sha" "$(date -u +%FT%TZ)" > "$STATE/relay.deploying"
   local ok=1
   BUILD_USER="$BUILD_USER" bash "$tmp/deploy-relay.sh" "$sha" > "$STATE/runs/relay-$sha.log" 2>&1 || ok=0
-  rm -f "$STATE/relay.deploying"
   if (( ok )); then
     rm -rf "$tmp"
     local now
@@ -927,6 +945,86 @@ seed_check() {
   return 0
 }
 
+run_canary_smokes() {
+  local sha="$1" version="$2" snapshot="$3" smoke_rc=0
+  if [[ -x "$REPO/scripts/deploy/agentd-canary-smoke.sh" ]]; then
+    RELAY_URL="$RELAY_URL" RELAY_ENV="$RELAY_ENV" STATE="$STATE" EVENTS="$EVENTS" \
+      bash "$REPO/scripts/deploy/agentd-canary-smoke.sh" "$sha" "$version" "$snapshot" || smoke_rc=$?
+  fi
+  if (( smoke_rc == 1 )); then
+    record_failure agentd "$sha" "busy-reply smoke failed on the canary box (image $version); default not switched, nothing rolled"
+    hold_agentd "$sha" "$version" "busy-reply canary failed (turn never started); log $STATE/runs/agentd-$version-smoke.log"
+    return 1
+  elif (( smoke_rc != 0 && smoke_rc != 2 )); then
+    log "agentd: canary could not complete (status $smoke_rc); default unchanged, no image hold"
+    (( smoke_rc == 75 )) && return 76  # 75 is reserved for lane admission deferral.
+    return "$smoke_rc"
+  fi
+  # A second canary box, named by SMOKE_HOST_USER_ID in deploy.env: one box passing says less than two
+  # (2026-10-25 05:10, image 0.1.127 passed on the canary while every host box's upgrade failed with
+  # EACCES in the host /etc refresh — the canary ran on Daytona then, the rest of the fleet did not).
+  # Empty = skipped (logged) until the fleet owner names one. Same script, same gate: upgrade, in-box
+  # seed check, busy-reply smoke.
+  if [[ -n "${SMOKE_HOST_USER_ID:-}" && -x "$REPO/scripts/deploy/agentd-canary-smoke.sh" ]]; then
+    local host_rc=0
+    RELAY_URL="$RELAY_URL" RELAY_ENV="$RELAY_ENV" STATE="$STATE" EVENTS="$EVENTS" SMOKE_USER_ID="$SMOKE_HOST_USER_ID" \
+      bash "$REPO/scripts/deploy/agentd-canary-smoke.sh" "$sha" "$version" "$snapshot" || host_rc=$?
+    if (( host_rc == 1 )); then
+      record_failure agentd "$sha" "host-box canary failed (image $version, user $SMOKE_HOST_USER_ID); default not switched, nothing rolled"
+      hold_agentd "$sha" "$version" "host-box canary failed on $SMOKE_HOST_USER_ID; log $STATE/runs/agentd-$version-smoke.log"
+      return 1
+    elif (( host_rc == 2 )); then
+      log "agentd: host-box canary skipped/inconclusive for $SMOKE_HOST_USER_ID (rc 2); proceeding on the first canary alone"
+    elif (( host_rc != 0 )); then
+      log "agentd: host-box canary could not complete (status $host_rc); default unchanged, no image hold"
+      (( host_rc == 75 )) && return 76
+      return "$host_rc"
+    else
+      log "agentd: host-box canary ok on $SMOKE_HOST_USER_ID"
+    fi
+  else
+    log "agentd: no SMOKE_HOST_USER_ID in deploy.env — host-box canary skipped (set one: a test user whose box runs on the host provider)"
+  fi
+  return 0
+}
+
+activate_image_default() {
+  local sha="$1" version="$2" snapshot="$3" rc code
+  if run_canary_smokes "$sha" "$version" "$snapshot"; then :; else
+    rc=$?; (( rc == 75 )) && rc=76
+    return "$rc"
+  fi
+  # Invalidate automatic decisions before changing config/default outside the queue lock.
+  deploy_queue_transaction "$QUEUE" deploy_request_advance agentd || return 1
+  if grep -q '^ARBOS_DAYTONA_SNAPSHOT=' "$RELAY_ENV"; then
+    sed -i "s|^ARBOS_DAYTONA_SNAPSHOT=.*|ARBOS_DAYTONA_SNAPSHOT=$snapshot|" "$RELAY_ENV" || return 1
+  else
+    echo "ARBOS_DAYTONA_SNAPSHOT=$snapshot" >> "$RELAY_ENV" || return 1
+  fi
+  # Switch the running relay's default snapshot hot (POST /admin/snapshot/default); relay.env above is for
+  # the next start. Only a relay too old for the endpoint (404) gets the restart — every restart dropped
+  # every client's websocket, ~15 times a day from rolls alone (2026-10-22 18:5x, "Reconnecting…" banners).
+  code=$(curl -s -o "$STATE/runs/agentd-$version-switch.json" -w '%{http_code}' --max-time 10 -X POST     -H "Authorization: Bearer $(secret_from "$RELAY_ENV" ARBOS_RELAY_ADMIN_TOKEN)" -H "Content-Type: application/json"     -d "{\"snapshot\":\"$snapshot\"}" "$RELAY_URL/admin/snapshot/default" || echo 000)
+  if [[ "$code" == 200 ]]; then
+    log "agentd: relay default switched to $snapshot without a restart"
+  else
+    log "agentd: hot snapshot switch answered HTTP $code; restarting the relay (old relay without the endpoint)"
+    relay_planned_restart || return 1
+    if systemctl restart arbos-relay.service; then :; else
+      rc=$?; (( rc == 75 )) && rc=76
+      return "$rc"
+    fi
+    sleep 3 || return 1
+    curl -fsS --max-time 10 "$RELAY_URL/healthz" >/dev/null || { record_failure agentd "$sha" "relay did not come back after the snapshot switch"; return 1; }
+  fi
+  [[ "$(curl -fsS --max-time 10 "$RELAY_URL/healthz" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("snapshot",""))' 2>/dev/null)" == "$snapshot" ]] \
+    || log "agentd: WARNING healthz.snapshot does not report $snapshot yet"
+  echo "$sha" > "$STATE/agentd.rolling.sha" || return 1
+  log "agentd: relay default is $snapshot; rolling boxes"
+  event agentd "$sha" image_registered "image $version, snapshot $snapshot is the relay default"
+  return 0
+}
+
 roll_image() {
   need_root
   local sha="$1" version tag t0 st waited=0 image snapshot
@@ -963,67 +1061,14 @@ roll_image() {
   # Busy-reply gate on the canary box first (scripts/deploy/agentd-canary-smoke.sh, from the
   # rolled commit): a failed gate stops here — default unchanged, no real box moves.
   local smoke_rc=0
-  wait_for_relay_lane
-  printf 'image=%s\nsha=%s\nat=%s\n' "$version" "$sha" "$(date -u +%FT%TZ)" > "$STATE/agentd.canary"
-  trap 'rm -f "$STATE/agentd.canary"' EXIT
-  if [[ -x "$REPO/scripts/deploy/agentd-canary-smoke.sh" ]]; then
-    RELAY_URL="$RELAY_URL" RELAY_ENV="$RELAY_ENV" STATE="$STATE" EVENTS="$EVENTS" \
-      bash "$REPO/scripts/deploy/agentd-canary-smoke.sh" "$sha" "$version" "$snapshot" || smoke_rc=$?
+  wait_for_relay_lane "$sha" "$version" "$snapshot" || smoke_rc=$?
+  if (( smoke_rc == 75 )); then
+    event agentd "$sha" roll_deferred "exclusive canary lane unavailable; request retained, default unchanged"
+    return 0
   fi
-  if (( smoke_rc == 1 )); then
-    rm -f "$STATE/agentd.canary"
-    record_failure agentd "$sha" "busy-reply smoke failed on the canary box (image $version); default not switched, nothing rolled"
-    hold_agentd "$sha" "$version" "busy-reply canary failed (turn never started); log $STATE/runs/agentd-$version-smoke.log"
-    exit 1
-  fi
-  # A second canary box, named by SMOKE_HOST_USER_ID in deploy.env: one box passing says less than two
-  # (2026-10-25 05:10, image 0.1.127 passed on the canary while every host box's upgrade failed with
-  # EACCES in the host /etc refresh — the canary ran on Daytona then, the rest of the fleet did not).
-  # Empty = skipped (logged) until the fleet owner names one. Same script, same gate: upgrade, in-box
-  # seed check, busy-reply smoke.
-  if [[ -n "${SMOKE_HOST_USER_ID:-}" && -x "$REPO/scripts/deploy/agentd-canary-smoke.sh" ]]; then
-    local host_rc=0
-    RELAY_URL="$RELAY_URL" RELAY_ENV="$RELAY_ENV" STATE="$STATE" EVENTS="$EVENTS" SMOKE_USER_ID="$SMOKE_HOST_USER_ID" \
-      bash "$REPO/scripts/deploy/agentd-canary-smoke.sh" "$sha" "$version" "$snapshot" || host_rc=$?
-    if (( host_rc == 1 )); then
-      rm -f "$STATE/agentd.canary"
-      record_failure agentd "$sha" "host-box canary failed (image $version, user $SMOKE_HOST_USER_ID); default not switched, nothing rolled"
-      hold_agentd "$sha" "$version" "host-box canary failed on $SMOKE_HOST_USER_ID; log $STATE/runs/agentd-$version-smoke.log"
-      exit 1
-    elif (( host_rc == 2 )); then
-      log "agentd: host-box canary skipped/inconclusive for $SMOKE_HOST_USER_ID (rc 2); proceeding on the first canary alone"
-    else
-      log "agentd: host-box canary ok on $SMOKE_HOST_USER_ID"
-    fi
-  else
-    log "agentd: no SMOKE_HOST_USER_ID in deploy.env — host-box canary skipped (set one: a test user whose box runs on the host provider)"
-  fi
-  rm -f "$STATE/agentd.canary"; trap - EXIT
-  if grep -q '^ARBOS_DAYTONA_SNAPSHOT=' "$RELAY_ENV"; then
-    sed -i "s|^ARBOS_DAYTONA_SNAPSHOT=.*|ARBOS_DAYTONA_SNAPSHOT=$snapshot|" "$RELAY_ENV"
-  else
-    echo "ARBOS_DAYTONA_SNAPSHOT=$snapshot" >> "$RELAY_ENV"
-  fi
-  # Switch the running relay's default snapshot hot (POST /admin/snapshot/default); relay.env above is for
-  # the next start. Only a relay too old for the endpoint (404) gets the restart — every restart dropped
-  # every client's websocket, ~15 times a day from rolls alone (2026-10-22 18:5x, "Reconnecting…" banners).
-  code=$(curl -s -o "$STATE/runs/agentd-$version-switch.json" -w '%{http_code}' --max-time 10 -X POST     -H "Authorization: Bearer $(secret_from "$RELAY_ENV" ARBOS_RELAY_ADMIN_TOKEN)" -H "Content-Type: application/json"     -d "{\"snapshot\":\"$snapshot\"}" "$RELAY_URL/admin/snapshot/default" || echo 000)
-  if [[ "$code" == 200 ]]; then
-    log "agentd: relay default switched to $snapshot without a restart"
-  else
-    log "agentd: hot snapshot switch answered HTTP $code; restarting the relay (old relay without the endpoint)"
-    relay_planned_restart
-    systemctl restart arbos-relay.service
-    sleep 3
-    curl -fsS --max-time 10 "$RELAY_URL/healthz" >/dev/null || { record_failure agentd "$sha" "relay did not come back after the snapshot switch"; exit 1; }
-  fi
-  [[ "$(curl -fsS --max-time 10 "$RELAY_URL/healthz" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("snapshot",""))' 2>/dev/null)" == "$snapshot" ]] \
-    || log "agentd: WARNING healthz.snapshot does not report $snapshot yet"
-  echo "$sha" > "$STATE/agentd.rolling.sha"
-  log "agentd: relay default is $snapshot; rolling boxes"
-  event agentd "$sha" image_registered "image $version, snapshot $snapshot is the relay default"
+  (( smoke_rc == 0 )) || exit "$smoke_rc"
   # The request is served from here on; a newer request supersedes the retry cadence.
-  if [[ "$(sed -n 's/^sha=//p' "$QUEUE/agentd" 2>/dev/null)" == "$sha" ]]; then rm -f "$QUEUE/agentd"; fi
+  deploy_request_ack_commit agentd "$sha"
   roll_boxes "$snapshot" || true
   sleep 30
   finish_roll "$sha" "$snapshot" || true
@@ -1095,19 +1140,23 @@ start_roll_unit() {
 }
 
 auto_requests() {
-  local kind head deployed queued
+  local kind head deployed queued decision _observed_kind _revision _current_default rc
   head="$(newest_green)"
   [[ -n "$head" ]] || return 0
   for kind in relay voice agentd; do
     [[ "$(auto_enabled "$kind")" == 1 ]] || continue
-    deployed="$(deployed_sha "$kind")"
+    if ! decision="$(ARBOS_DEPLOY_QUEUE="$QUEUE" ARBOS_DEPLOY_STATE="$STATE" "$HOOK" --observe "$kind")"; then
+      log "auto: $kind observation unavailable; request deferred"
+      continue
+    fi
+    deploy_receipt_valid "$decision" && [[ "$decision" == "$kind:"* ]] || return 1
+    IFS=: read -r _observed_kind _revision queued deployed _current_default < <(printf '%s\n' "$decision")
+    [[ "$deployed" == - ]] && deployed=""
+    [[ "$queued" == - ]] && queued=""
     [[ -n "$deployed" ]] || continue
     [[ "$deployed" == "$head" ]] && continue
     git -C "$REPO" cat-file -e "$deployed^{commit}" 2>/dev/null || continue
-    # No queue file for this kind (voice, most of the time) → sed exits 2 and, under `set -e`,
-    # ended the whole tick here: no relay/voice/agentd deploy from 04:40 to 07:1x UTC on
-    # 2026-10-26 (every tick "status=2/INVALIDARGUMENT"). An absent file is an empty queue.
-    queued="$(sed -n 's/^sha=//p' "$QUEUE/$kind" 2>/dev/null || true)"
+    # The queue/deployment observation remains bound through the ancestry decision.
     [[ "$queued" == "$head" ]] && continue
     # A queued request that already contains the newest green is NEWER than it (its CI is still
     # running): leave it — overwriting it with the older green started three images one minute
@@ -1119,7 +1168,12 @@ auto_requests() {
     # shellcheck disable=SC2046
     if ! git -C "$REPO" diff --quiet "$deployed" "$head" -- $(paths_of "$kind"); then
       if dry; then log "dry-run: would request $kind $head (newest green)"; continue; fi
-      ARBOS_DEPLOY_QUEUE="$QUEUE" "$HOOK" "$kind" "$head" >/dev/null && log "auto: $kind differs from main in its paths; requested $head (newest green)"
+      if ARBOS_DEPLOY_QUEUE="$QUEUE" ARBOS_DEPLOY_STATE="$STATE" "$HOOK" "$kind" "$head" "$decision" >/dev/null; then
+        log "auto: $kind differs from main in its paths; requested $head (newest green)"
+      else
+        rc=$?
+        if (( rc == 75 )); then log "auto: $kind decision changed; next tick rechecks"; else return "$rc"; fi
+      fi
     fi
   done
 }
@@ -1194,7 +1248,20 @@ auto_enabled() {
 }
 
 handle_request() {
-  local file="$1" kind sha requested first now age_last age_first full state
+  (
+    local queued="$1" snapshot
+    snapshot="$(mktemp "$STATE/runs/request.XXXXXX")" || return 1
+    trap 'rm -f "$snapshot"' EXIT
+    if ! deploy_request_snapshot "$queued" "$snapshot"; then
+      log "request unavailable or invalid: ${queued##*/}; retained for inspection"
+      return 0
+    fi
+    handle_request_snapshot "$snapshot" "$queued"
+  )
+}
+
+handle_request_snapshot() {
+  local file="$1" queued="$2" kind sha requested first now age_last age_first full state
   kind="$(sed -n 's/^kind=//p' "$file")"
   sha="$(sed -n 's/^sha=//p' "$file")"
   if [[ "$(auto_enabled "$kind")" != 1 ]]; then
@@ -1216,7 +1283,7 @@ handle_request() {
   full="$(resolve "$sha" || true)"
   if [[ -z "$full" ]] || ! on_main "$full"; then
     log "$kind: request $sha is not a commit on main; dropped"
-    rm -f "$file"
+    deploy_request_ack "$queued" "$file"
     return 0
   fi
   # A merged branch's tip is an ancestor of main but not main itself: deploy the merge instead
@@ -1246,7 +1313,7 @@ handle_request() {
     if (( ${attempts:-0} >= 2 )); then
       log "$kind: $full failed twice; waiting for the next commit"
       event "$kind" "$full" deploy_given_up "failed twice; waiting for the next commit"
-      rm -f "$file"
+      deploy_request_ack "$queued" "$file"
       return 0
     fi
     if (( now - ${at:-0} < RETRY_AFTER_S )); then
@@ -1262,7 +1329,7 @@ handle_request() {
      && { git -C "$REPO" merge-base --is-ancestor "$full" "$deployed" 2>/dev/null \
           || git -C "$REPO" merge-base --is-ancestor "$requested_full" "$deployed" 2>/dev/null; }; then
     log "$kind: $requested_full is already in the deployed $deployed; nothing to do"
-    rm -f "$file"
+    deploy_request_ack "$queued" "$file"
     return 0
   fi
   # A hotfix marker above the deployed relay commit means "ship now, once": the deploy must carry
@@ -1286,7 +1353,7 @@ handle_request() {
   case "$state" in
     hotfix) log "$kind: hotfix marker ${RELAY_HOTFIX:0:8} on main; not waiting for its CI (the build is the gate)" ;;
     pending) log "$kind: CI for $full still running; waiting"; return 0 ;;
-    failed) log "$kind: CI for $full is red; request dropped (the next green commit will be deployed)"; rm -f "$file"; return 0 ;;
+    failed) log "$kind: CI for $full is red; request dropped (the next green commit will be deployed)"; deploy_request_ack "$queued" "$file"; return 0 ;;
     none)
       if (( $(commit_age_s "$full") < CI_NONE_GRACE_S )); then
         log "$kind: no CI run for $full yet; waiting"; return 0
@@ -1301,16 +1368,16 @@ handle_request() {
       fi
       if relay_deploy_held "$full" "$age_first"; then return 0; fi
       rm -f "$STATE/relay.held"
-      if deploy_relay "$full"; then date -u +%s > "$STATE/relay.last-deploy"; rm -f "$file"; fi ;;
+      if deploy_relay "$full"; then date -u +%s > "$STATE/relay.last-deploy"; deploy_request_ack "$queued" "$file"; fi ;;
     voice)
-      if deploy_voice "$full"; then rm -f "$file"; fi ;;
+      if deploy_voice "$full"; then deploy_request_ack "$queued" "$file"; fi ;;
     agentd)
       if roll_unit_running; then
         return 0
       fi
       if [[ "$(sed -n 's/^sha=//p' "$STATE/agentd.rolling" 2>/dev/null)" == "$full" ]]; then
         # Its image is registered and the default; only boxes are still pending (roll_continue).
-        rm -f "$file"
+        deploy_request_ack "$queued" "$file"
         return 0
       fi
       if disk_low; then
@@ -1384,7 +1451,6 @@ prune_agent_image_tags() {
 
 tick() {
   need_root
-  apply_pending_www_reload
   if dry; then
     # Throwaway state: the real metadata files and queue are copied, the repo clone is shared read-only
     # (fetch only), the lock is private so a live tick is never blocked, nothing is removed or written
@@ -1404,6 +1470,7 @@ tick() {
   mkdir -p "$STATE"
   exec 9> "$STATE/.lock"
   flock -n 9 || exit 0
+  apply_pending_www_reload
   ensure_repo
   mkdir -p "$QUEUE"
   auto_requests

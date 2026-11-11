@@ -1,0 +1,121 @@
+{
+  "mutations_are_isolated": true,
+  "actual_functions": true,
+  "original_sha256": "58cec985ecbd03a2e2fc034a04a8a651c952fb1ecb829544855113c42c681824",
+  "control": {
+    "exit_code": 0,
+    "tests": 5,
+    "laws": 4,
+    "cases": 1024,
+    "seconds": 15.758857917040586,
+    "log": "control.log"
+  },
+  "results": [
+    {
+      "name": "superseded-request-acknowledged",
+      "seed": 89701,
+      "original_sha256": "58cec985ecbd03a2e2fc034a04a8a651c952fb1ecb829544855113c42c681824",
+      "mutant_sha256": "aa5fe5816e4eab7cd6fbc2162679161b8d3a0f7a9540e282ab6537c613532a1e",
+      "replace": {
+        "before": "    Observed:Changed) echo Superseded ;;",
+        "after": "    Observed:Changed) echo Acknowledged ;;"
+      },
+      "accepted_shrinks": 1,
+      "generated": {
+        "exit_code": 1,
+        "wall_seconds": 0.24310129100922495,
+        "log": "mutants/superseded-request-acknowledged-generated.log"
+      },
+      "replay": {
+        "exit_code": 1,
+        "wall_seconds": 0.21035954100079834,
+        "log": "mutants/superseded-request-acknowledged-replay.log"
+      },
+      "counterexample": {
+        "outcome": "Unchanged",
+        "terminal": "Released",
+        "tail": []
+      }
+    },
+    {
+      "name": "busy-lane-granted",
+      "seed": 89702,
+      "original_sha256": "58cec985ecbd03a2e2fc034a04a8a651c952fb1ecb829544855113c42c681824",
+      "mutant_sha256": "f5b636cf5aea7a428a38903c6d93c8825012035bca6c37712cb624e29bfd724e",
+      "replace": {
+        "before": "    Checking:Busy|Inspecting:Blocked) echo Deferred ;;",
+        "after": "    Checking:Busy|Inspecting:Blocked) echo Granted ;;"
+      },
+      "accepted_shrinks": 1,
+      "generated": {
+        "exit_code": 1,
+        "wall_seconds": 0.21307337493635714,
+        "log": "mutants/busy-lane-granted-generated.log"
+      },
+      "replay": {
+        "exit_code": 1,
+        "wall_seconds": 0.20802575000561774,
+        "log": "mutants/busy-lane-granted-replay.log"
+      },
+      "counterexample": {
+        "outcome": "Unchanged",
+        "terminal": "Released",
+        "tail": []
+      }
+    },
+    {
+      "name": "terminal-lane-reopened",
+      "seed": 89703,
+      "original_sha256": "58cec985ecbd03a2e2fc034a04a8a651c952fb1ecb829544855113c42c681824",
+      "mutant_sha256": "517a7bb6cd7a66aa79bc215d4de20f9822a9d7996c159503b91ce1797db00c3d",
+      "replace": {
+        "before": "    Deferred:*|Released:*) echo \"$1\" ;;",
+        "after": "    Deferred:*|Released:*) echo Granted ;;"
+      },
+      "accepted_shrinks": 0,
+      "generated": {
+        "exit_code": 1,
+        "wall_seconds": 0.20975291705690324,
+        "log": "mutants/terminal-lane-reopened-generated.log"
+      },
+      "replay": {
+        "exit_code": 1,
+        "wall_seconds": 0.21146233298350126,
+        "log": "mutants/terminal-lane-reopened-replay.log"
+      },
+      "counterexample": {
+        "outcome": "Unchanged",
+        "terminal": "Released",
+        "tail": []
+      }
+    },
+    {
+      "name": "changed-publication-receipt-granted",
+      "seed": 89704,
+      "original_sha256": "58cec985ecbd03a2e2fc034a04a8a651c952fb1ecb829544855113c42c681824",
+      "mutant_sha256": "11c6be8efdb40e2ed2c7e6d64fda0735fc0380a0ca2b5c1d317bbdd495df3348",
+      "replace": {
+        "before": "  if [[ \"$1\" == \"$2\" ]]; then echo Publish; else echo Superseded; fi",
+        "after": "  echo Publish"
+      },
+      "accepted_shrinks": 1,
+      "generated": {
+        "exit_code": 1,
+        "wall_seconds": 0.23421512509230524,
+        "log": "mutants/changed-publication-receipt-granted-generated.log"
+      },
+      "replay": {
+        "exit_code": 1,
+        "wall_seconds": 0.22300600004382432,
+        "log": "mutants/changed-publication-receipt-granted-replay.log"
+      },
+      "counterexample": {
+        "kind": "relay",
+        "revision": 0,
+        "queued": "-",
+        "installed": "-",
+        "currentDefault": "-"
+      }
+    }
+  ]
+}

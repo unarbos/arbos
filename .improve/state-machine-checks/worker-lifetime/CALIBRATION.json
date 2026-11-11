@@ -1,0 +1,11 @@
+{
+  "harness_production_duration_calls_equal": true,
+  "before": [
+    "std::time::Duration::from_secs(60)"
+  ],
+  "after": [
+    "std::time::Duration::from_secs(60)"
+  ],
+  "rpc_child_byte_identical_sha256": "6c04c73a2f7732aff681b46c4c5aa6c4a7b39c9c8acaa43b07a83451e0ff6c0c",
+  "no_new_provider_timing_or_physical_calibration": true
+}

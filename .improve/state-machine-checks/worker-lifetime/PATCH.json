@@ -1,0 +1,46 @@
+{
+  "base": "frozen rpc-metadata candidate da05a88e3eb6b5e1656268ddac27d38cf4ab00793d9c06dbe0010e8bc434e8b6",
+  "patch": "rpc-sessions.patch",
+  "bytes": 74923,
+  "sha256": "698b476e47a61aea0835ffa099069ee70fc5b3ec2656a891f7681a38ed4ab16e",
+  "files": [
+    {
+      "path": "crates/arbos-agentd/src/main.rs",
+      "base_sha256": "ca6cf2afa054929f40122d553dec09bd310955449796b6735f29cd812065834c",
+      "candidate_sha256": "f8809de9659abbe2e1884078b74fc8d303b53f111642679782d6459ce40960ba",
+      "bytes": 22774
+    },
+    {
+      "path": "crates/arbos-agentd/src/harness.rs",
+      "base_sha256": "74f3fef8cce5ac1bb201b37581095a3dcfcba402704c7a281266c33a715ad5a0",
+      "candidate_sha256": "4b4aaad6d24e32448d0c74a6cb66dbb8cea1aaf57199b619b093c26d46209e6b",
+      "bytes": 82608
+    },
+    {
+      "path": "crates/arbos-agentd/src/worker_lifetime.rs",
+      "base_sha256": null,
+      "candidate_sha256": "4be122177185843850e5241e7217bdeb49e2b90192bc282f55386b743ab56243",
+      "bytes": 10068
+    },
+    {
+      "path": ".improve/state-machine-checks/worker_lifetime_bridge.rs",
+      "base_sha256": null,
+      "candidate_sha256": "8f27c5644e089ad4e889d59b6902b7ff19528820db3e63c6cdd183109e72b3cc",
+      "bytes": 5607
+    },
+    {
+      "path": ".improve/state-machine-checks/check_worker_mutants.py",
+      "base_sha256": null,
+      "candidate_sha256": "33f653367e5756949245022047865b0faa852fc8622a9832ad634c2e33938b1f",
+      "bytes": 4130
+    },
+    {
+      "path": "harness/arbos-pi-ext/worker-lifetime-laws.test.ts",
+      "base_sha256": null,
+      "candidate_sha256": "9c7c7daff3959f1d4436212dfcb921399beaf6513dbfe8e6c78aca105d3b8656",
+      "bytes": 12402
+    }
+  ],
+  "pure_module_frozen_sha256": "4be122177185843850e5241e7217bdeb49e2b90192bc282f55386b743ab56243",
+  "target": "<owned-checkout>/.improve/evidence/rpc-sessions/target"
+}

@@ -1,0 +1,16 @@
+{
+  "exit_code": 1,
+  "tests": 3,
+  "semantic_failed": 2,
+  "positive_passed": 1,
+  "errors": 0,
+  "seconds": 0.9910060829715803,
+  "source_sha256": {
+    "deploy-state.sh": "58cec985ecbd03a2e2fc034a04a8a651c952fb1ecb829544855113c42c681824",
+    "test_deploy_lanes.py": "918ca556dd810186c3595d23b6c9ada6552fcf856d39f00d51c056a0aacde560",
+    "arbos-deploy-worker": "8dd898e346d9b9e80bf06150da3e1e5fc8567ab8970fa63ba2b2ac9ad348c45b",
+    "test_image_activation.py": "5b42a26094433d602a4452dff3e928fac3e619080c67bdd4529b8ae1b54cb354",
+    "arbos-deploy-hook": "a7d5981e53822f07c69835681ecd172a765bb62f52d31cfca2b402bc5b8f0e19"
+  },
+  "source_unchanged": true
+}

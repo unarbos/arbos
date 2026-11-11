@@ -15,43 +15,48 @@
 set -euo pipefail
 
 QUEUE="${ARBOS_DEPLOY_QUEUE:-/var/lib/arbos-feedback/deploy-requests}"
-kind="${1:-}"
-sha="${2:-}"
-case "$kind" in
-  relay|agentd|voice) ;;
-  *) echo "usage: arbos-deploy-hook <relay|agentd|voice> <sha>" >&2; exit 2 ;;
-esac
-if ! [[ "$sha" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
-  echo "arbos-deploy-hook: '$sha' is not a commit id" >&2
-  exit 2
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/deploy/deploy-state.sh
+. "$HERE/deploy-state.sh"
+
+if [[ "${1:-}" == --observe ]]; then
+  [[ $# == 2 ]] || exit 2
+  case "$2" in relay|agentd|voice) ;; *) exit 2 ;; esac
+  deploy_request_observe "$2"
+  exit
 fi
-sha="${sha,,}"
-mkdir -p "$QUEUE" 2>/dev/null || true
-if [[ ! -w "$QUEUE" ]]; then
-  echo "arbos-deploy-hook: cannot write $QUEUE" >&2
-  exit 1
+[[ $# == 2 || $# == 3 ]] || { echo "usage: arbos-deploy-hook <relay|agentd|voice> <sha> [receipt] | --observe <kind>" >&2; exit 2; }
+kind="$1"; sha="$2"; expected="${3:-}"
+case "$kind" in relay|agentd|voice) ;; *) echo "invalid deploy kind" >&2; exit 2 ;; esac
+[[ "$sha" =~ ^[0-9a-fA-F]{7,40}$ ]] || { echo "invalid commit id" >&2; exit 2; }
+sha="$(printf '%s' "$sha" | tr 'A-F' 'a-f')"
+if [[ $# == 3 ]]; then
+  deploy_receipt_valid "$expected" && [[ "$expected" == "$kind:"* ]] || { echo "invalid deploy receipt" >&2; exit 2; }
 fi
-now="$(date -u +%s)"
-file="$QUEUE/$kind"
-first="$now"
-if [[ -f "$file" ]]; then
-  # Keep the first request time: the 5-minute cap counts from it.
-  prev_first="$(sed -n 's/^first_requested_at=//p' "$file" | head -1)"
-  if [[ "$prev_first" =~ ^[0-9]+$ ]]; then first="$prev_first"; fi
-  prev_sha="$(sed -n 's/^sha=//p' "$file" | head -1)"
-  if [[ "$prev_sha" == "$sha" ]]; then
-    echo "queued already: $kind $sha"
-    exit 0
-fi
-fi
-tmp="$(mktemp "$QUEUE/.$kind.XXXXXX")"
-{
-  echo "kind=$kind"
-  echo "sha=$sha"
-  echo "requested_at=$now"
-  echo "first_requested_at=$first"
-  echo "requested_by=$(id -un)"
-} > "$tmp"
-chmod 0644 "$tmp"
-mv -f "$tmp" "$file"
-echo "queued: $kind $sha"
+
+queue_request_locked() {
+  local kind="$1" sha="$2" expected="${3:-}" now file first prev_first prev_sha tmp current state by
+  if [[ -n "$expected" ]]; then
+    current="$(deploy_request_observe_locked "$kind")" || return 1
+    state="$(deploy_publication_state "$expected" "$current")" || return 1
+    [[ "$state" == Publish ]] || { echo "deferred: $kind decision changed"; return 75; }
+  fi
+  now="$(date -u +%s)"; file="$QUEUE/$kind"; first="$now"
+  if deploy_request_valid "$file" "$kind"; then
+    prev_first="$(sed -n 's/^first_requested_at=//p' "$file" | head -1)"
+    first="$prev_first"
+    prev_sha="$(sed -n 's/^sha=//p' "$file" | head -1)"
+    if [[ "$prev_sha" == "$sha" ]]; then echo "queued already: $kind $sha"; return 0; fi
+  fi
+  by="$(id -un)" || return 1
+  [[ "$by" =~ ^[A-Za-z0-9_.-]{1,64}$ ]] || return 1
+  tmp="$(mktemp "$QUEUE/.$kind.XXXXXX")" || return 1
+  if ! { printf 'kind=%s\nsha=%s\nrequested_at=%s\nfirst_requested_at=%s\nrequested_by=%s\n' "$kind" "$sha" "$now" "$first" "$by" > "$tmp" && chmod 0644 "$tmp"; }; then
+    rm -f "$tmp"; return 1
+  fi
+  if ! deploy_request_advance "$kind" || ! mv -f "$tmp" "$file"; then
+    rm -f "$tmp"; return 1
+  fi
+  echo "queued: $kind $sha"
+}
+deploy_queue_transaction "$QUEUE" queue_request_locked "$kind" "$sha" "$expected"

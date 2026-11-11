@@ -1,0 +1,233 @@
+{
+  "source_manifest": "SOURCE.json",
+  "packages_cleaned": 12,
+  "network": "validated loopback-only Seatbelt",
+  "gates": [
+    {
+      "label": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-agentd",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": 0,
+      "seconds": 19.78990887501277,
+      "counts": [],
+      "expected": null,
+      "source_unchanged": true
+    },
+    {
+      "label": "tests-0",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-agentd",
+        "harness::claude_worker_owner_regressions::",
+        "--",
+        "--test-threads=2"
+      ],
+      "exit_code": 0,
+      "seconds": 38.52020095905755,
+      "counts": [
+        [
+          11,
+          0,
+          0
+        ]
+      ],
+      "expected": 11,
+      "source_unchanged": true
+    },
+    {
+      "label": "tests-1",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-agentd",
+        "harness::worker_owner_regressions::",
+        "--",
+        "--test-threads=2"
+      ],
+      "exit_code": 0,
+      "seconds": 3.7524162910412997,
+      "counts": [
+        [
+          18,
+          0,
+          0
+        ]
+      ],
+      "expected": 18,
+      "source_unchanged": true
+    },
+    {
+      "label": "tests-2",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-agentd",
+        "worker_lifetime::tests::",
+        "--",
+        "--test-threads=2"
+      ],
+      "exit_code": 0,
+      "seconds": 0.3993773749098182,
+      "counts": [
+        [
+          3,
+          0,
+          0
+        ]
+      ],
+      "expected": 3,
+      "source_unchanged": true
+    },
+    {
+      "label": "tests-3",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-agentd",
+        "agent::metadata_owner_regressions::",
+        "--",
+        "--test-threads=2"
+      ],
+      "exit_code": 0,
+      "seconds": 3.420033083995804,
+      "counts": [
+        [
+          17,
+          0,
+          0
+        ]
+      ],
+      "expected": 17,
+      "source_unchanged": true
+    },
+    {
+      "label": "tests-4",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-agentd",
+        "agent::shutdown_boot_regressions::",
+        "--",
+        "--test-threads=2"
+      ],
+      "exit_code": 0,
+      "seconds": 1.9973008329980075,
+      "counts": [
+        [
+          7,
+          0,
+          0
+        ]
+      ],
+      "expected": 7,
+      "source_unchanged": true
+    },
+    {
+      "label": "tests-5",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-agentd",
+        "pi_slot::tests::",
+        "--",
+        "--test-threads=2"
+      ],
+      "exit_code": 0,
+      "seconds": 0.4737911670235917,
+      "counts": [
+        [
+          4,
+          0,
+          0
+        ]
+      ],
+      "expected": 4,
+      "source_unchanged": true
+    },
+    {
+      "label": "tests-6",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-agentd",
+        "approval::delivery_claim_regressions::",
+        "--",
+        "--test-threads=2"
+      ],
+      "exit_code": 0,
+      "seconds": 0.4961801250465214,
+      "counts": [
+        [
+          12,
+          0,
+          0
+        ]
+      ],
+      "expected": 12,
+      "source_unchanged": true
+    },
+    {
+      "label": "tests-7",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-agentd",
+        "approval::park_tests::",
+        "--",
+        "--test-threads=2"
+      ],
+      "exit_code": 0,
+      "seconds": 0.4304555830312893,
+      "counts": [
+        [
+          6,
+          0,
+          0
+        ]
+      ],
+      "expected": 6,
+      "source_unchanged": true
+    }
+  ],
+  "selected_total": 78,
+  "composition": "Root00168454a plus c8186385, harnessa088fa2d; actual Root approval/metadata source retained",
+  "source_hashes": {
+    "harness.rs": "a088fa2d87b44fe16b1ea16e50a8e5648ce869b451cb2370d82cdccf12b68594",
+    "worker_lifetime.rs": "4be122177185843850e5241e7217bdeb49e2b90192bc282f55386b743ab56243"
+  }
+}

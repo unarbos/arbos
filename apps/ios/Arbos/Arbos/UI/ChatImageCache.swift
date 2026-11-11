@@ -5,7 +5,7 @@
 // placeholder until the bytes came back (a layout jump under the reader's finger).
 //
 // Now: one decode per blob, on a background task, with the bitmap prepared for display
-// (`preparingForDisplay`), kept in an `NSCache` by blob ref with the picture's natural size
+// (`preparingForDisplay`), kept in an `NSCache` by account, blob slot and ref with the picture's natural size
 // beside it. A re-realised row paints at its final size at once from the cache; a row whose
 // picture is not cached yet still lays out at the remembered size while the bytes load.
 
@@ -13,6 +13,21 @@ import Foundation
 import UIKit
 
 enum ChatImageCache {
+    struct Key: Hashable, Sendable {
+        let owner: WorkLifetime.Ticket
+        let slot: String
+        let ref: String
+    }
+
+    private final class WrappedKey: NSObject {
+        let value: Key
+        init(_ value: Key) { self.value = value }
+        override var hash: Int { value.hashValue }
+        override func isEqual(_ object: Any?) -> Bool {
+            (object as? WrappedKey)?.value == value
+        }
+    }
+
     /// What a bubble shows: the picture (all frames for an animated one), the first frame
     /// to hold while the row is off screen, whether it animates.
     struct Decoded: @unchecked Sendable {
@@ -24,8 +39,8 @@ enum ChatImageCache {
         let naturalSize: CGSize
     }
 
-    private static let images: NSCache<NSString, Entry> = {
-        let c = NSCache<NSString, Entry>()
+    private static let images: NSCache<WrappedKey, Entry> = {
+        let c = NSCache<WrappedKey, Entry>()
         c.totalCostLimit = 48 * 1024 * 1024
         return c
     }()
@@ -37,25 +52,25 @@ enum ChatImageCache {
 
     /// Natural sizes outlive the bitmaps (a few bytes each): a picture evicted from the
     /// bitmap cache still lays out at its real size while it reloads.
-    @MainActor private static var sizes: [String: CGSize] = [:]
+    @MainActor private static var sizes: [Key: CGSize] = [:]
 
     @MainActor
-    static func decoded(for ref: String) -> Decoded? {
-        images.object(forKey: ref as NSString)?.decoded
+    static func decoded(for key: Key) -> Decoded? {
+        images.object(forKey: WrappedKey(key))?.decoded
     }
 
     @MainActor
-    static func naturalSize(for ref: String) -> CGSize? {
-        if let hit = images.object(forKey: ref as NSString) { return hit.decoded.naturalSize }
-        return sizes[ref]
+    static func naturalSize(for key: Key) -> CGSize? {
+        if let hit = images.object(forKey: WrappedKey(key)) { return hit.decoded.naturalSize }
+        return sizes[key]
     }
 
     @MainActor
-    static func store(_ decoded: Decoded, for ref: String) {
+    static func store(_ decoded: Decoded, for key: Key) {
         let cost = Int(decoded.image.size.width * decoded.image.scale * decoded.image.size.height * decoded.image.scale * 4)
             * max(1, decoded.image.images?.count ?? 1)
-        images.setObject(Entry(decoded), forKey: ref as NSString, cost: cost)
-        sizes[ref] = decoded.naturalSize
+        images.setObject(Entry(decoded), forKey: WrappedKey(key), cost: cost)
+        sizes[key] = decoded.naturalSize
     }
 
     /// Decode the bytes away from the main actor. Still pictures are trimmed (`ImageTrim`)

@@ -1,0 +1,92 @@
+{
+  "sources": {
+    "apps/ios/Arbos/Arbos/Store/AppModel.swift": "f73b529139a3ba6d630740a6e22172a30fe66906e55260bf7943851593bcad38",
+    "apps/ios/Arbos/Arbos/Sync/RelayAPI.swift": "0d50ec56055a25ad6cb7f595a679a03e33b14b9aeb7eacb887008ac592ca2985",
+    "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f",
+    "apps/ios/Arbos/Arbos/Store/ServerStore.swift": "44df2eeb3bbf93d8b9f65e597cf2feeffb79e342734ddfdd2e9f42735142c932"
+  },
+  "helper_fixture_sha256": "886adf414729eb612ddfc9d23572e392510897cd64d8fd17f895eb69511cc815",
+  "fixture_sha256": "ecf32412033bbf0aaa83d91ee8a3fb968f3d60fa110a5558b2c507d5a1537bef",
+  "compile_exit": 0,
+  "exit_code": 0,
+  "results": {
+    "failed": 0,
+    "passed": 18,
+    "results": [
+      {
+        "name": "queued-join-cannot-mint-B-authority",
+        "pass": true
+      },
+      {
+        "name": "late-join-no-B-open-upsert-or-Matrix",
+        "pass": true
+      },
+      {
+        "name": "late-join-error-silent",
+        "pass": true
+      },
+      {
+        "name": "current-join-control",
+        "pass": true
+      },
+      {
+        "name": "late-delete-cannot-forget-B",
+        "pass": true
+      },
+      {
+        "name": "current-delete-control",
+        "pass": true
+      },
+      {
+        "name": "retired-member-loop-no-next-effect",
+        "pass": true
+      },
+      {
+        "name": "member-FIFO-error-continues-control",
+        "pass": true
+      },
+      {
+        "name": "retired-admin-error-no-B-refresh",
+        "pass": true
+      },
+      {
+        "name": "retired-server-photo-no-B-upload-or-publish",
+        "pass": true
+      },
+      {
+        "name": "current-create-photo-control",
+        "pass": true
+      },
+      {
+        "name": "retired-Matrix-open-no-publish-read-or-busy-release",
+        "pass": true
+      },
+      {
+        "name": "same-account-replaced-Matrix-no-stale-page-or-busy-release",
+        "pass": true
+      },
+      {
+        "name": "queued-retired-Matrix-read-no-effect",
+        "pass": true
+      },
+      {
+        "name": "current-Matrix-open-control",
+        "pass": true
+      },
+      {
+        "name": "retired-Matrix-send-error-silent",
+        "pass": true
+      },
+      {
+        "name": "current-Matrix-send-control",
+        "pass": true
+      },
+      {
+        "name": "fixture-picture-without-credentials-control",
+        "pass": true
+      }
+    ],
+    "total": 18
+  },
+  "seconds": 1.1328171669738367
+}

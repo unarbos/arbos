@@ -349,6 +349,7 @@ final class SessionRoom {
                     if let status = socket.httpStatus, status == 403 || status == 404 {
                         // Chat unknown or not a member: do not reconnect.
                         self.stopped = true
+                        self.generation += 1
                         self.cancelTasks()
                         self.socket?.cancel()
                         self.socket = nil

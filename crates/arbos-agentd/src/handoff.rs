@@ -24,7 +24,7 @@ use arbos_core::approval::{ApprovalOutcome, ApprovalRequest, Risk};
 use arbos_core::redact::{asks_to_save, find_key_like, key_hint, KeyLike};
 
 use crate::agent::Agent;
-use crate::approval::WaitMode;
+use crate::approval::WaitDelivery;
 use crate::mcp::{err_result, text_result};
 use crate::vault::{relay_post, scrub_now, wait_budget};
 
@@ -118,7 +118,7 @@ pub async fn request_secret(agent: &Arc<Agent>, args: &Value, chat_id: &str) -> 
             "answers": [] }),
     };
     let approval_id = match agent
-        .begin_approval(chat_id, req, WaitMode::Inline, Some(tx))
+        .begin_approval(chat_id, req, WaitDelivery::Inline(tx))
         .await
     {
         Ok(id) => id,
@@ -379,7 +379,7 @@ pub async fn on_user_message(
             ] }),
     };
     if let Err(e) = agent
-        .begin_approval(chat_id, req, WaitMode::Deferred, None)
+        .begin_approval(chat_id, req, WaitDelivery::Deferred)
         .await
     {
         tracing::warn!(error = %e, chat_id, "secret hand-off: offer card could not be posted");

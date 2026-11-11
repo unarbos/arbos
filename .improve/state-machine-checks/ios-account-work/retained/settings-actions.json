@@ -1,0 +1,96 @@
+{
+  "sources": {
+    "apps/ios/Arbos/Arbos/Store/AppModel.swift": "f73b529139a3ba6d630740a6e22172a30fe66906e55260bf7943851593bcad38",
+    "apps/ios/Arbos/Arbos/Sync/RelayAPI.swift": "0d50ec56055a25ad6cb7f595a679a03e33b14b9aeb7eacb887008ac592ca2985",
+    "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f",
+    "apps/ios/Arbos/Arbos/Store/SecretsStore.swift": "2f9b7b30b54c748f470b9d4a8879cc9ec54f467623940f7bb4d82586a7a9e3d4",
+    "apps/ios/Arbos/Arbos/Store/DevicesStore.swift": "ccb7a61bb096d639cc28c35c93fa5895ca77b0b299641c98d208f6868cb4583c"
+  },
+  "fixture_sha256": "886adf414729eb612ddfc9d23572e392510897cd64d8fd17f895eb69511cc815",
+  "compile_exit": 0,
+  "exit_code": 0,
+  "results": {
+    "failed": 0,
+    "passed": 19,
+    "results": [
+      {
+        "name": "secret-task-cannot-mint-B-authority",
+        "pass": true
+      },
+      {
+        "name": "secret-reply-no-B-write-refresh-or-busy-release",
+        "pass": true
+      },
+      {
+        "name": "late-secret-error-cannot-notify-B",
+        "pass": true
+      },
+      {
+        "name": "current-secret-mutation-refresh-control",
+        "pass": true
+      },
+      {
+        "name": "multi-handle-retirement-stops-next-effect",
+        "pass": true
+      },
+      {
+        "name": "current-multi-handle-FIFO-control",
+        "pass": true
+      },
+      {
+        "name": "per-handle-error-continues-control",
+        "pass": true
+      },
+      {
+        "name": "goal-task-cannot-mint-B-authority",
+        "pass": true
+      },
+      {
+        "name": "late-goals-cannot-paint-B",
+        "pass": true
+      },
+      {
+        "name": "late-goals404-cannot-clear-B",
+        "pass": true
+      },
+      {
+        "name": "current-goal-control",
+        "pass": true
+      },
+      {
+        "name": "late-goal-error-busy-owner",
+        "pass": true
+      },
+      {
+        "name": "late-devices-cannot-paint-B",
+        "pass": true
+      },
+      {
+        "name": "late-device-error-cannot-paint-B",
+        "pass": true
+      },
+      {
+        "name": "revoke-task-cannot-mint-B-authority",
+        "pass": true
+      },
+      {
+        "name": "retired-revoke-no-B-error-or-refresh",
+        "pass": true
+      },
+      {
+        "name": "current-device-refused-control",
+        "pass": true
+      },
+      {
+        "name": "fixture-local-device-control",
+        "pass": true
+      },
+      {
+        "name": "current-device-load-control",
+        "pass": true
+      }
+    ],
+    "total": 19
+  },
+  "seconds": 1.1327014999696985
+}

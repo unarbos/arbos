@@ -90,6 +90,7 @@ struct NewChatSheet: View {
     }
 
     var body: some View {
+        let work = model.accountWork()
         NavigationStack {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
@@ -135,7 +136,7 @@ struct NewChatSheet: View {
                         sectionHeader(trimmed.isEmpty ? "Your agents" : "Agents")
                         card {
                             ForEach(Array(agents.enumerated()), id: \.element.id) { i, p in
-                                Button { openAgent(p) } label: { AgentPickRow(project: p) }
+                                Button { openAgent(p, work: work) } label: { AgentPickRow(project: p) }
                                     .buttonStyle(.plain)
                                 if i < agents.count - 1 { rowDivider }
                             }
@@ -148,7 +149,7 @@ struct NewChatSheet: View {
                         sectionHeader("Servers")
                         card {
                             ForEach(Array(servers.enumerated()), id: \.element.id) { i, s in
-                                Button { openServer(s) } label: { ServerPickRow(server: s) }
+                                Button { openServer(s, work: work) } label: { ServerPickRow(server: s) }
                                     .buttonStyle(.plain)
                                 if i < servers.count - 1 { rowDivider }
                             }
@@ -166,7 +167,7 @@ struct NewChatSheet: View {
                         } else {
                             card {
                                 ForEach(Array(people.enumerated()), id: \.element.id) { i, p in
-                                    Button { open(p) } label: { PersonRow(person: p) }
+                                    Button { open(p, work: work) } label: { PersonRow(person: p) }
                                         .buttonStyle(.plain)
                                     if i < people.count - 1 { rowDivider }
                                 }
@@ -194,11 +195,13 @@ struct NewChatSheet: View {
             .toolbarBackground(theme.bg, for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
             .task {
+                guard model.acceptsAccountWork(work) else { return }
                 loadingDirectory = model.directory.isEmpty
-                await model.loadDirectory()
+                await model.loadDirectory(expectedOwner: work?.owner)
+                guard model.acceptsAccountWork(work) else { return }
                 loadingDirectory = false
             }
-            .onChange(of: query) { _, _ in search() }
+            .onChange(of: query) { _, _ in search(work: work) }
         }
         .tint(theme.text)
         .presentationDetents([.large])
@@ -211,7 +214,8 @@ struct NewChatSheet: View {
     // MARK: Pieces
 
     private var searchField: some View {
-        HStack(spacing: 8) {
+        let work = model.accountWork()
+        return HStack(spacing: 8) {
             Image(systemName: "magnifyingglass").font(.system(size: SheetSearchField.iconSize, weight: .medium)).foregroundStyle(theme.muted)
             TextField("", text: $query, prompt: Text("Search people, agents or servers").foregroundStyle(theme.placeholder))
                 .textInputAutocapitalization(.never)
@@ -221,10 +225,10 @@ struct NewChatSheet: View {
                 .focused($focused)
                 .submitLabel(.go)
                 .onSubmit {
-                    if let first = agents.first { openAgent(first) }
-                    else if let first = servers.first { openServer(first) }
-                    else if let first = people.first { open(first) }
-                    else if !trimmed.isEmpty { openHandle(trimmed) }
+                    if let first = agents.first { openAgent(first, work: work) }
+                    else if let first = servers.first { openServer(first, work: work) }
+                    else if let first = people.first { open(first, work: work) }
+                    else if !trimmed.isEmpty { openHandle(trimmed, work: work) }
                 }
             if searching {
                 ProgressView().controlSize(.small).tint(theme.muted)
@@ -274,7 +278,8 @@ struct NewChatSheet: View {
     }
 
     private var peopleEmpty: some View {
-        Group {
+        let work = model.accountWork()
+        return Group {
             if loadingDirectory || searching {
                 HStack { Spacer(); ProgressView().tint(theme.muted); Spacer() }.padding(.top, 28)
             } else if trimmed.isEmpty {
@@ -290,7 +295,7 @@ struct NewChatSheet: View {
                     Text("No one on Arbos or GitHub matches @\(trimmed).")
                         .font(theme.font(Theme.small)).foregroundStyle(theme.muted)
                     if trimmed.count >= 2 {
-                        Button { openHandle(trimmed) } label: {
+                        Button { openHandle(trimmed, work: work) } label: {
                             Text("Invite @\(trimmed)")
                                 .font(theme.font(Theme.small, weight: .semibold)).foregroundStyle(theme.onPrimary)
                                 .padding(.horizontal, 18).frame(height: 38)
@@ -307,24 +312,30 @@ struct NewChatSheet: View {
 
     // MARK: Actions
 
-    private func search() {
+    private func search(work: AccountWork?) {
+        guard model.acceptsAccountWork(work) else { return }
         let q = trimmed
         guard q.count >= 2 else { remote = []; remoteServers = []; searching = false; return }
         searching = true
         Task {
             try? await Task.sleep(nanoseconds: 250_000_000)
-            guard q == trimmed else { return }
-            async let peopleHits = model.searchPeople(q)
-            async let serverHits = model.searchOpenServers(q)
-            remote = await peopleHits
-            remoteServers = await serverHits
+            guard model.acceptsAccountWork(work), q == trimmed else { return }
+            async let peopleHits = model.searchPeople(q, expectedOwner: work?.owner)
+            async let serverHits = model.searchOpenServers(q, expectedOwner: work?.owner)
+            let people = await peopleHits
+            guard model.acceptsAccountWork(work), q == trimmed else { return }
+            remote = people
+            let servers = await serverHits
+            guard model.acceptsAccountWork(work), q == trimmed else { return }
+            remoteServers = servers
             if q == trimmed { searching = false }
         }
     }
 
-    private func open(_ p: Person) { openHandle(p.handle) }
+    private func open(_ p: Person, work: AccountWork?) { openHandle(p.handle, work: work) }
 
-    private func openAgent(_ p: Project) {
+    private func openAgent(_ p: Project, work: AccountWork?) {
+        guard model.acceptsAccountWork(work) else { return }
         guard !opening else { return }
         opening = true
         model.open(project: p)
@@ -332,7 +343,8 @@ struct NewChatSheet: View {
         opening = false
     }
 
-    private func openServer(_ s: Server) {
+    private func openServer(_ s: Server, work: AccountWork?) {
+        guard model.acceptsAccountWork(work) else { return }
         guard !opening else { return }
         opening = true
         if s.isMember {
@@ -342,16 +354,23 @@ struct NewChatSheet: View {
             return
         }
         Task {
-            if await model.joinOpenServer(s.id) { dismiss() }
+            guard model.acceptsAccountWork(work) else { return }
+            let opened = await model.joinOpenServer(s.id, expectedOwner: work?.owner)
+            guard model.acceptsAccountWork(work) else { return }
+            if opened { dismiss() }
             opening = false
         }
     }
 
-    private func openHandle(_ handle: String) {
+    private func openHandle(_ handle: String, work: AccountWork?) {
+        guard model.acceptsAccountWork(work) else { return }
         guard !opening else { return }
         opening = true
         Task {
-            if await model.openDM(handle: handle) != nil { dismiss() }
+            guard model.acceptsAccountWork(work) else { return }
+            let opened = await model.openDM(handle: handle)
+            guard model.acceptsAccountWork(work) else { return }
+            if opened != nil { dismiss() }
             opening = false
         }
     }
@@ -581,6 +600,7 @@ struct CreateEntityView: View {
     private let createText = AvatarSheetPalette.disabledText
 
     var body: some View {
+        let work = model.accountWork()
         VStack(spacing: 0) {
             header
             // The sheet's note (Jacob 2026-10-26): under the header, before the hero — a refused
@@ -588,11 +608,11 @@ struct CreateEntityView: View {
             if let error = source.error ?? localError {
                 ErrorNote(id: "create-entity-error", error: error,
                           detailsOpen: Binding(get: { source.detailsOpen }, set: { source.detailsOpen = $0 }),
-                          onTryAgain: source.error != nil ? generate : nil)
+                          onTryAgain: source.error != nil ? { generate(work: work) } : nil)
                     .padding(.horizontal, 16.5)
                     .padding(.top, 12)
             } else {
-                SheetErrorNote(id: "create-entity-error", onTryAgain: go)
+                SheetErrorNote(id: "create-entity-error", onTryAgain: { go(work: work) })
                     .padding(.horizontal, 16.5)
                     .padding(.top, 12)
             }
@@ -629,7 +649,7 @@ struct CreateEntityView: View {
                         AvatarTabPill(tabs: Self.options, tab: $option) { source.error = nil }
                             .padding(.top, 246 - 218)
                             .accessibilityIdentifier("create-entity-options")
-                        AvatarSourceBody(state: source, tab: option, keepsLine: "Create keeps this one.", uploadsLine: "Create uploads it.", generate: generate) {
+                        AvatarSourceBody(state: source, tab: option, keepsLine: "Create keeps this one.", uploadsLine: "Create uploads it.", generate: { generate(work: work) }) {
                             EmptyView()
                         }
                         .padding(.top, 16)
@@ -661,13 +681,14 @@ struct CreateEntityView: View {
     }
 
     private var header: some View {
-        HStack {
+        let work = model.accountWork()
+        return HStack {
             Text(kind.title)
                 .font(.system(size: 14.2, weight: .semibold))
                 .foregroundStyle(Color(white: 0xF5 / 255))
                 .padding(.leading, 17.5)
             Spacer()
-            Button(action: onDone) {
+            Button(action: { guard model.acceptsAccountWork(work) else { return }; onDone() }) {
                 Image(systemName: "xmark")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(Color(white: 0xD2 / 255))
@@ -727,14 +748,15 @@ struct CreateEntityView: View {
     }
 
     private var field: some View {
-        TextField("", text: $name, prompt: Text(kind.placeholder).foregroundStyle(placeholder))
+        let work = model.accountWork()
+        return TextField("", text: $name, prompt: Text(kind.placeholder).foregroundStyle(placeholder))
             .font(.system(size: 15.5))
             .foregroundStyle(Color(white: 0xF5 / 255))
             .multilineTextAlignment(.center)
             .autocorrectionDisabled()
             .focused($focused)
             .submitLabel(kind == .group ? .next : .done)
-            .onSubmit(go)
+            .onSubmit { go(work: work) }
             .padding(.horizontal, 12)
             .frame(height: 35)
             .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(line, lineWidth: 1))
@@ -742,14 +764,15 @@ struct CreateEntityView: View {
     }
 
     private var footer: some View {
-        HStack(spacing: 10) {
+        let work = model.accountWork()
+        return HStack(spacing: 10) {
             Spacer()
-            Button(action: onDone) {
+            Button(action: { guard model.acceptsAccountWork(work) else { return }; onDone() }) {
                 Text("Cancel").font(.system(size: 15, weight: .semibold)).foregroundStyle(Color(white: 0xF5 / 255))
                     .frame(width: 84, height: 44).background(Capsule().fill(cancelBg))
             }
             .buttonStyle(.plain)
-            Button(action: go) {
+            Button(action: { go(work: work) }) {
                 Text(creating ? "Creating…" : kind.action).font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(canGo ? theme.onPrimary : createText)
                     .frame(width: 92, height: 44).background(Capsule().fill(canGo ? theme.primary : createBg))
@@ -764,14 +787,16 @@ struct CreateEntityView: View {
     }
 
     /// Generate into my own slot (`POST /me/avatar/generate`): the entity does not exist yet.
-    private func generate() {
+    private func generate(work: AccountWork?) {
+        guard model.acceptsAccountWork(work) else { return }
         let text = source.prompt.trimmingCharacters(in: .whitespaces)
         guard !text.isEmpty, !source.generating else { return }
         let model = model
-        source.run { try await model.generateDraftAvatar(prompt: text) }
+        source.run(isCurrent: { model.acceptsAccountWork(work) }) { try await model.generateDraftAvatar(prompt: text, expectedOwner: work?.owner) }
     }
 
-    private func go() {
+    private func go(work: AccountWork?) {
+        guard model.acceptsAccountWork(work) else { return }
         guard canGo else { return }
         let picture = source.draftPicture(for: option)
         switch kind {
@@ -784,7 +809,10 @@ struct CreateEntityView: View {
             creating = true
             localError = nil
             Task {
-                if await model.createServer(name: clean, discColor: Self.storedDisc, picture: picture) {
+                guard model.acceptsAccountWork(work) else { return }
+                let created = await model.createServer(name: clean, discColor: Self.storedDisc, picture: picture, expectedOwner: work?.owner)
+                guard model.acceptsAccountWork(work) else { return }
+                if created {
                     onDone()
                 }
                 // A refusal is the claimed failure drawn by the note above the hero.
@@ -795,7 +823,10 @@ struct CreateEntityView: View {
             localError = nil
             let transport = transport
             Task {
-                if let r = await model.connectAgent(name: clean, transport: transport.rawValue) {
+                guard model.acceptsAccountWork(work) else { return }
+                let connected = await model.connectAgent(name: clean, transport: transport.rawValue, expectedOwner: work?.owner)
+                guard model.acceptsAccountWork(work) else { return }
+                if let r = connected {
                     reveal = r
                 }
                 creating = false
@@ -829,8 +860,9 @@ struct ConnectRevealView: View {
     private let tileBg = AvatarSheetPalette.ring
 
     var body: some View {
+        let work = model.accountWork()
         VStack(spacing: 0) {
-            header
+            header(work: work)
             ScrollView(showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 0) {
                     NeutralAvatar(name: reveal.name, size: 92)
@@ -843,9 +875,9 @@ struct ConnectRevealView: View {
                         .padding(.top, 12)
                     sectionTitle("Give this to your agent")
                     card {
-                        copyRow(id: "connect-link", glyph: "link", label: "Link", shown: shortLink(reveal.link), full: reveal.link)
+                        copyRow(id: "connect-link", glyph: "link", label: "Link", shown: shortLink(reveal.link), full: reveal.link, work: work)
                         Rectangle().fill(line).frame(height: 0.5).padding(.leading, 16)
-                        copyRow(id: "connect-key", glyph: "key", label: "Key", shown: shortKey(reveal.key), full: reveal.key)
+                        copyRow(id: "connect-key", glyph: "key", label: "Key", shown: shortKey(reveal.key), full: reveal.key, work: work)
                     }
                     footnote(reveal.rotated
                         ? "The old key stopped working. This one is shown once."
@@ -856,21 +888,23 @@ struct ConnectRevealView: View {
                 }
                 .padding(.bottom, 24)
             }
-            footer
+            footer(work: work)
         }
         .background(sheetBg.ignoresSafeArea())
         .toolbar(.hidden, for: .navigationBar)
         .task(id: reveal.projectId) {
             // Poll the relay while the screen is up; stop once connected.
-            while !Task.isCancelled {
-                if let fresh = await model.refreshOutsideInfo(reveal.projectId) { info = fresh }
+            while model.acceptsAccountWork(work) {
+                let fresh = await model.refreshOutsideInfo(reveal.projectId, expectedOwner: work?.owner)
+                guard model.acceptsAccountWork(work) else { return }
+                if let fresh { info = fresh }
                 if connected { return }
                 try? await Task.sleep(nanoseconds: 3_000_000_000)
             }
         }
     }
 
-    private var header: some View {
+    private func header(work: AccountWork?) -> some View {
         HStack {
             Text(reveal.rotated ? "New key for \(reveal.name)" : "Connect \(reveal.name)")
                 .font(.system(size: 14.2, weight: .semibold))
@@ -878,7 +912,7 @@ struct ConnectRevealView: View {
                 .lineLimit(1)
                 .padding(.leading, 17.5)
             Spacer()
-            Button(action: onDone) {
+            Button { guard model.acceptsAccountWork(work) else { return }; onDone() } label: {
                 Image(systemName: "xmark")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(Color(white: 0xD2 / 255))
@@ -918,7 +952,7 @@ struct ConnectRevealView: View {
             .padding(.horizontal, 16)
     }
 
-    private func copyRow(id: String, glyph: String, label: String, shown: String, full: String) -> some View {
+    private func copyRow(id: String, glyph: String, label: String, shown: String, full: String, work: AccountWork?) -> some View {
         HStack(spacing: 14) {
             Image(systemName: glyph)
                 .font(.system(size: 17, weight: .medium))
@@ -935,6 +969,7 @@ struct ConnectRevealView: View {
             }
             Spacer(minLength: 8)
             Button {
+                guard model.acceptsAccountWork(work) else { return }
                 UIPasteboard.general.string = full
                 copied = id
             } label: {
@@ -973,10 +1008,10 @@ struct ConnectRevealView: View {
         .accessibilityIdentifier(connected ? "connect-status-connected" : "connect-status-waiting")
     }
 
-    private var footer: some View {
+    private func footer(work: AccountWork?) -> some View {
         HStack(spacing: 10) {
             Spacer()
-            Button(action: onDone) {
+            Button { guard model.acceptsAccountWork(work) else { return }; onDone() } label: {
                 Text("Done").font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(theme.onPrimary)
                     .frame(width: 92, height: 44).background(Capsule().fill(theme.primary))
@@ -1142,6 +1177,7 @@ struct NewGroupView: View {
     }
 
     var body: some View {
+        let work = model.accountWork()
         VStack(spacing: 0) {
             if !picked.isEmpty || !pickedAgents.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
@@ -1169,7 +1205,7 @@ struct NewGroupView: View {
             }
             .sheetSearchFieldChrome(theme)
             .padding(.horizontal, SheetSearchField.inset).padding(.vertical, 10)
-            .onChange(of: query) { _, _ in search() }
+            .onChange(of: query) { _, _ in search(work: work) }
 
             // The sheet's note: under the search field, before the list (a refused add, nobody
             // picked, the relay's reason) — the shared element.
@@ -1223,24 +1259,29 @@ struct NewGroupView: View {
         // with it. The controls keep their width; the title shrinks, then truncates.
         .sheetHeader(title: title,
                      leading: adding ? .cancel : .back,
-                     onLeading: { if adding { onDone() } else { dismiss() } },
+                     onLeading: { guard model.acceptsAccountWork(work) else { return }; if adding { onDone() } else { dismiss() } },
                      action: actionLabel,
                      actionEnabled: canSubmit && !creating,
-                     onAction: { if adding { add() } else { create() } })
-        .task { await model.loadDirectory() }
+                     onAction: { if adding { add(work: work) } else { create(work: work) } })
+        .task {
+            guard model.acceptsAccountWork(work) else { return }
+            await model.loadDirectory(expectedOwner: work?.owner)
+        }
         .onAppear {
             // Rig: `ARBOS_RIG_PICK=<agent name>,@<handle>,…` pre-picks rows; `ARBOS_RIG_AUTO_ADD=<ms>`
-            // then taps Add — the same `add()` the pill runs ([feedback iphone-add-members-2026-10-26] proof).
+            // then taps Add — the same `add(work: work)` the pill runs ([feedback iphone-add-members-2026-10-26] proof).
             guard adding, let picks = DebugHooks.rigPick else { return }
             Task {
                 try? await Task.sleep(nanoseconds: 1_500_000_000)
+                guard model.acceptsAccountWork(work) else { return }
                 for pick in picks {
                     if pick.hasPrefix("@"), let p = candidates.first(where: { "@\($0.handle)".caseInsensitiveCompare(pick) == .orderedSame }) { toggle(p) }
                     else if let a = agentCandidates.first(where: { $0.name.caseInsensitiveCompare(pick) == .orderedSame }) { toggleAgent(a) }
                 }
                 if let ms = DebugHooks.rigAutoAddMs {
                     try? await Task.sleep(nanoseconds: UInt64(ms) * 1_000_000)
-                    add()
+                    guard model.acceptsAccountWork(work) else { return }
+                    add(work: work)
                 }
             }
         }
@@ -1264,14 +1305,18 @@ struct NewGroupView: View {
     }
 
     /// Add members: every pick goes to the group — or server, or secret — this picker was opened for.
-    private func add() {
+    private func add(work: AccountWork?) {
+        guard model.acceptsAccountWork(work) else { return }
         if let secret {
             let new = picked.filter { !isIn($0) }
             guard !new.isEmpty else { localError = UserError.refused("add them", "Pick someone who is not on the list yet."); return }
             creating = true
             localError = nil
             Task {
-                if await model.addSecretPeople(secretId: secret.id, handles: new.map(\.handle)) {
+                guard model.acceptsAccountWork(work) else { return }
+                let accepted = await model.addSecretPeople(secretId: secret.id, handles: new.map(\.handle), expectedOwner: work?.owner)
+                guard model.acceptsAccountWork(work) else { return }
+                if accepted {
                     onDone()
                 }
                 creating = false
@@ -1284,7 +1329,10 @@ struct NewGroupView: View {
             creating = true
             localError = nil
             Task {
-                if await model.addServerMembers(serverId: s.id, userIds: new.map(\.id)) {
+                guard model.acceptsAccountWork(work) else { return }
+                let accepted = await model.addServerMembers(serverId: s.id, userIds: new.map(\.id), expectedOwner: work?.owner)
+                guard model.acceptsAccountWork(work) else { return }
+                if accepted {
                     onDone()
                 }
                 creating = false
@@ -1299,24 +1347,31 @@ struct NewGroupView: View {
         creating = true
         localError = nil
         Task {
-            if await model.addMembers(chatId: plan.chatId, handles: plan.handles, agentIds: plan.agentIds) {
+            guard model.acceptsAccountWork(work) else { return }
+            let accepted = await model.addMembers(chatId: plan.chatId, handles: plan.handles, agentIds: plan.agentIds, expectedOwner: work?.owner)
+            guard model.acceptsAccountWork(work) else { return }
+            if accepted {
                 onDone()
             }
             creating = false
         }
     }
 
-    private func search() {
+    private func search(work: AccountWork?) {
+        guard model.acceptsAccountWork(work) else { return }
         let q = trimmed
         guard q.count >= 2 else { remote = []; return }
         Task {
             try? await Task.sleep(nanoseconds: 250_000_000)
-            guard q == trimmed else { return }
-            remote = await model.searchPeople(q)
+            guard model.acceptsAccountWork(work), q == trimmed else { return }
+            let hits = await model.searchPeople(q, expectedOwner: work?.owner)
+            guard model.acceptsAccountWork(work), q == trimmed else { return }
+            remote = hits
         }
     }
 
-    private func create() {
+    private func create(work: AccountWork?) {
+        guard model.acceptsAccountWork(work) else { return }
         guard canSubmit, !creating else { return }
         creating = true
         localError = nil
@@ -1324,7 +1379,9 @@ struct NewGroupView: View {
         Task {
             // `draft?.discColor` is a double optional now that the draft stores no colour;
             // `?? nil` flattens it to the one `UInt8?` the call takes.
-            if await model.createGroup(handles: picked.map(\.handle), agentIds: agentIds, title: draft?.title, discColor: draft?.discColor ?? nil, picture: draft?.picture) {
+            let accepted = await model.createGroup(handles: picked.map(\.handle), agentIds: agentIds, title: draft?.title, discColor: draft?.discColor ?? nil, picture: draft?.picture, expectedOwner: work?.owner)
+            guard model.acceptsAccountWork(work) else { return }
+            if accepted {
                 onDone()
             }
             creating = false
@@ -1359,6 +1416,7 @@ struct ProjectMembersSheet: View {
     }
 
     var body: some View {
+        let work = model.accountWork()
         NavigationStack {
             List {
                 if !project.shared {
@@ -1367,17 +1425,17 @@ struct ProjectMembersSheet: View {
                             Text("@").foregroundStyle(theme.muted)
                             TextField("", text: $handle, prompt: Text("GitHub username").foregroundStyle(theme.placeholder))
                                 .textInputAutocapitalization(.never).autocorrectionDisabled()
-                                .onSubmit { invite() }
+                                .onSubmit { invite(work: work) }
                             if searching {
                                 ProgressView().controlSize(.small).tint(theme.muted)
                             }
-                            Button(busy ? "…" : "Invite") { invite() }
+                            Button(busy ? "…" : "Invite") { invite(work: work) }
                                 .font(theme.font(Theme.small, weight: .semibold))
                                 .disabled(busy || trimmed.isEmpty)
                         }
                         if !trimmed.isEmpty {
                             ForEach(suggestions) { p in
-                                Button { invite(p.handle) } label: {
+                                Button { invite(p.handle, work: work) } label: {
                                     HStack(spacing: PaneKit.gap) {
                                         PersonAvatar(url: p.avatarUrl, handle: p.handle, size: 40, name: p.name, id: p.id, colorIndex: p.avatarColorIndex)
                                         VStack(alignment: .leading, spacing: 2) {
@@ -1417,7 +1475,11 @@ struct ProjectMembersSheet: View {
                         .swipeActions {
                             if !project.shared && m.role != "owner" {
                                 Button("Remove", role: .destructive) {
-                                    Task { await model.removeProjectMember(project.id, userId: m.id); await load() }
+                                    Task {
+                                        guard model.acceptsAccountWork(work) else { return }
+                                        await model.removeProjectMember(project.id, userId: m.id, expectedOwner: work?.owner)
+                                        await load(work: work)
+                                    }
                                 }
                             }
                         }
@@ -1431,36 +1493,49 @@ struct ProjectMembersSheet: View {
             .sheetHeader(title: "Share \(project.name)", leading: .none,
                          action: "Done", actionStyle: .text, onAction: { dismiss() })
             .task {
-                await load()
-                await model.loadDirectory()
+                await load(work: work)
+                guard model.acceptsAccountWork(work) else { return }
+                await model.loadDirectory(expectedOwner: work?.owner)
             }
-            .onChange(of: handle) { _, _ in search() }
+            .onChange(of: handle) { _, _ in search(work: work) }
         }
         .presentationDetents([.medium, .large])
     }
 
-    private func load() async { members = await model.projectMembers(project.id) }
+    private func load(work: AccountWork?) async {
+        guard model.acceptsAccountWork(work) else { return }
+        let list = await model.projectMembers(project.id, expectedOwner: work?.owner)
+        guard model.acceptsAccountWork(work) else { return }
+        members = list
+    }
 
-    private func search() {
+    private func search(work: AccountWork?) {
+        guard model.acceptsAccountWork(work) else { return }
         let q = trimmed
         guard q.count >= 2 else { remote = []; searching = false; return }
         searching = true
         Task {
             try? await Task.sleep(nanoseconds: 250_000_000)
-            guard q == trimmed else { return }
-            remote = await model.searchPeople(q)
+            guard model.acceptsAccountWork(work), q == trimmed else { return }
+            let hits = await model.searchPeople(q, expectedOwner: work?.owner)
+            guard model.acceptsAccountWork(work), q == trimmed else { return }
+            remote = hits
             if q == trimmed { searching = false }
         }
     }
 
-    private func invite(_ raw: String? = nil) {
+    private func invite(_ raw: String? = nil, work: AccountWork?) {
+        guard model.acceptsAccountWork(work) else { return }
         let h = (raw ?? trimmed)
             .trimmingCharacters(in: .whitespaces)
             .trimmingCharacters(in: CharacterSet(charactersIn: "@"))
         guard !h.isEmpty, !busy else { return }
         busy = true
         Task {
-            if let list = await model.inviteToProject(project.id, handle: h) {
+            guard model.acceptsAccountWork(work) else { return }
+            let invited = await model.inviteToProject(project.id, handle: h, expectedOwner: work?.owner)
+            guard model.acceptsAccountWork(work) else { return }
+            if let list = invited {
                 members = list
                 handle = ""
                 remote = []

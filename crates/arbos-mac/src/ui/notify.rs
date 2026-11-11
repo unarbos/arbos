@@ -1175,6 +1175,10 @@ impl Default for Notifier {
 }
 
 impl Notifier {
+    pub(crate) fn reset_account(&mut self) {
+        self.coalescer = Coalescer::default();
+    }
+
     pub fn new() -> Self {
         Self {
             coalescer: Coalescer::default(),

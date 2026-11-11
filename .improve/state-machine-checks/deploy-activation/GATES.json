@@ -1,0 +1,37 @@
+{
+  "source_unchanged": true,
+  "source_sha256": {
+    "scripts/deploy/arbos-deploy-worker": "07afc1fe02ec69d0d311074257e8d3b0b2bb7c446b56fd571025bd95f5974d3b",
+    "scripts/deploy/test_deploy_lanes.py": "3f426c4125e26567e8751dc479d6eab68a7607b9f3126f7462473a841289a66a",
+    "scripts/deploy/test_image_activation.py": "86b9db6c59ba982a3630c21686b37279ad325af57727aec6a1762f52fb77ffe3",
+    "docs/deployment-lanes.md": "981a2856527cedb7003f8767cee6a64a5290bd7bdba8101eb858a5f84a18a35b"
+  },
+  "adapters": [
+    {
+      "command": "test_image_activation.py",
+      "tests": 5,
+      "exit_code": 0,
+      "seconds": 1.907424833974801
+    },
+    {
+      "command": "test_deploy_lanes.py",
+      "tests": 22,
+      "exit_code": 0,
+      "seconds": 8.485251709003933
+    },
+    {
+      "command": "test_deploy_publication.py",
+      "tests": 19,
+      "exit_code": 0,
+      "seconds": 10.882429582998157
+    }
+  ],
+  "tests": 46,
+  "bash_syntax": 1,
+  "unchanged_pure_helper_sha256": "58cec985ecbd03a2e2fc034a04a8a651c952fb1ecb829544855113c42c681824",
+  "pure_laws": "../deploy-publication/mutants/RESULTS.json",
+  "unchanged_laws": 4,
+  "unchanged_generated_cases": 1024,
+  "unchanged_mutants": 4,
+  "limits": "Actual selected activation plus real local FD/queue operations and synthetic HTTP/config/service collaborators; no deployment or real configuration accessed."
+}

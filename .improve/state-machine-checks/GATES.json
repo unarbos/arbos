@@ -1,0 +1,243 @@
+{
+  "scope": "AUX-H2 approval plus AUX-H3/H4/H5 voice controller changes; finite local checks, not full native/live verification",
+  "voice_sdk": {
+    "counts": {
+      "passed": 84,
+      "failed": 0,
+      "skipped": 0
+    },
+    "breakdown": {
+      "unchanged_original": 10,
+      "worker": 53,
+      "vision": 21
+    },
+    "wall_seconds": 6.202760083018802,
+    "pytest_seconds": 5.21,
+    "source_sha256": {
+      "voice/arbos_voice/worker.py": "dbae3cf0df16897feb159d9be9a5e72761bb52b4a177d4fd733f8918e2ee9548",
+      "voice/arbos_voice/call_state.py": "6ada1e75f963c13a6b679a97ce054df98360ae7da1715110dc26fe0e93c7af6e",
+      "voice/arbos_voice/vision.py": "0a32b6df229abbc4c4a379e554776fbfdc309e55d88320683f53aeb45c8ab663",
+      "voice/arbos_voice/vision_state.py": "b0f2b22c884c002323b71fe738a217934e8352f15b1be819e0c885f4d4f86785",
+      "voice/tests/test_worker_lifecycle.py": "572d102afd8471d5048f2f942f2bbc3b926b513d6a13d0ac1cd584c10b12a7ae",
+      "voice/tests/test_vision_consent.py": "eee4583cc12f525057d8b3610c6af6e4bb053312b063015798bad99e93827ed8"
+    },
+    "isolation": {
+      "macos_network_denied": true,
+      "clean_private_home_and_environment": true,
+      "python_network_credential_subprocess_audit": true,
+      "blocked_access_attempts": {},
+      "sdk_imports_actual": true,
+      "effects_synthetic": true,
+      "providers_models_devices_called": false
+    },
+    "portable_rerun": "See README.md and voice/tests/README.md; retained timings used an isolated private SDK environment."
+  },
+  "voice_generated": {
+    "gates": [
+      {
+        "name": "voice-laws",
+        "command": [
+          "node",
+          "--test",
+          "voice-state-laws.test.ts"
+        ],
+        "cwd": "harness/arbos-pi-ext",
+        "exit_code": 0,
+        "wall_seconds": 1.3077185419388115
+      },
+      {
+        "name": "harness-typecheck",
+        "command": [
+          "pnpm",
+          "-r",
+          "typecheck"
+        ],
+        "cwd": "harness",
+        "exit_code": 0,
+        "wall_seconds": 2.5580265840981156
+      },
+      {
+        "name": "harness-tests",
+        "command": [
+          "pnpm",
+          "-r",
+          "test"
+        ],
+        "cwd": "harness",
+        "exit_code": 0,
+        "wall_seconds": 7.300221750047058
+      }
+    ],
+    "sources": {
+      "harness/arbos-pi-ext/voice-state-laws.test.ts": "1d81ee6d8019b69c4df01d4d5a6059304a4e5df5bb87f8dadfbf3048cf13e69d",
+      "voice/tests/state_bridge.py": "22191c113026fa378e2e26a68e25ea04ca14a8b482811b4082c60cc7c10868a6",
+      "voice/arbos_voice/call_state.py": "6ada1e75f963c13a6b679a97ce054df98360ae7da1715110dc26fe0e93c7af6e",
+      "voice/arbos_voice/vision_state.py": "b0f2b22c884c002323b71fe738a217934e8352f15b1be819e0c885f4d4f86785"
+    },
+    "required_laws": 6,
+    "cases_per_law": 256,
+    "generated_voice_cases": 1536,
+    "protocol_rejection_cases": 7
+  },
+  "approval_previous_gate": {
+    "counts": {
+      "passed": 37,
+      "failed": 0,
+      "skipped": 0
+    },
+    "wall_seconds": 1.424,
+    "original_tests_retained": 14,
+    "terminal_generated_cases": 256,
+    "note": "Separate from the 1536 new voice cases; retained original approval gate."
+  },
+  "final_harness": {
+    "counts": {
+      "passed": 44,
+      "failed": 0,
+      "skipped": 0
+    },
+    "wall_seconds": 7.300221750047058,
+    "includes": "37 prior tests + six voice laws + one seven-request protocol test"
+  },
+  "red_stages": [
+    {
+      "scope": "worker",
+      "stage": "before-red",
+      "counts": {
+        "passed": 2,
+        "failed": 6,
+        "skipped": 0
+      },
+      "wall_seconds": 3.069685040973127,
+      "exit_code": 1
+    },
+    {
+      "scope": "worker",
+      "stage": "startup-stale-red",
+      "counts": {
+        "passed": 22,
+        "failed": 3,
+        "skipped": 0
+      },
+      "wall_seconds": 3.2559198749950156,
+      "exit_code": 1
+    },
+    {
+      "scope": "worker",
+      "stage": "late-speech-red",
+      "counts": {
+        "passed": 26,
+        "failed": 8,
+        "skipped": 0
+      },
+      "wall_seconds": 4.083857416990213,
+      "exit_code": 1
+    },
+    {
+      "scope": "worker",
+      "stage": "tool-speech-ownership-red",
+      "counts": {
+        "passed": 27,
+        "failed": 16,
+        "skipped": 0
+      },
+      "wall_seconds": 4.797745874966495,
+      "exit_code": 1
+    },
+    {
+      "scope": "worker",
+      "stage": "final-ownership-red",
+      "counts": {
+        "passed": 27,
+        "failed": 19,
+        "skipped": 0
+      },
+      "wall_seconds": 5.339506957912818,
+      "exit_code": 1
+    },
+    {
+      "scope": "worker",
+      "stage": "queued-dispatch-red",
+      "counts": {
+        "passed": 52,
+        "failed": 1,
+        "skipped": 0
+      },
+      "wall_seconds": 4.533833166002296,
+      "exit_code": 1
+    },
+    {
+      "scope": "vision",
+      "stage": "initial-six",
+      "counts": {
+        "failed": 4,
+        "passed": 2,
+        "skipped": 0
+      },
+      "pytest_seconds": 1.73,
+      "exit_code": 1
+    },
+    {
+      "scope": "vision",
+      "stage": "expanded-baseline",
+      "counts": {
+        "failed": 7,
+        "passed": 2,
+        "skipped": 0
+      },
+      "pytest_seconds": 1.42,
+      "exit_code": 1
+    },
+    {
+      "scope": "vision",
+      "stage": "same-turn-mute",
+      "counts": {
+        "failed": 1,
+        "passed": 14,
+        "skipped": 0
+      },
+      "pytest_seconds": 1.44,
+      "exit_code": 1
+    },
+    {
+      "scope": "vision",
+      "stage": "resource-retry",
+      "counts": {
+        "failed": 2,
+        "passed": 14,
+        "skipped": 0
+      },
+      "pytest_seconds": 1.84,
+      "exit_code": 1
+    },
+    {
+      "scope": "vision",
+      "stage": "seeing-retirement",
+      "counts": {
+        "failed": 1,
+        "passed": 16,
+        "skipped": 0
+      },
+      "pytest_seconds": 2.04,
+      "exit_code": 1
+    },
+    {
+      "scope": "vision",
+      "stage": "cleanup-cancellation",
+      "counts": {
+        "failed": 1,
+        "passed": 18,
+        "skipped": 0
+      },
+      "pytest_seconds": 1.38,
+      "exit_code": 1
+    }
+  ],
+  "red_interpretation": "Different test sets at different pre-fix stages; parameterized failing cases are not counts of distinct vulnerabilities. Initial six vision stage4/2 precedes expanded stage7/2; do not conflate.",
+  "limitations": [
+    "Full native Rust/Swift/app gates remain blocked.",
+    "SDK fakes do not prove live provider/device/media or native billing/durability contracts.",
+    "Five-second wait_for cleanup requires cooperative cancellation, not arbitrary hard-wall completion.",
+    "Final usage/event flush are one best-effort first-attempt operation; no financial or durable-event retry was introduced."
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "toolchain": {
+    "node": "v22.22.3",
+    "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18) (Homebrew)",
+    "cargo": "cargo 1.98.0 (797e8a9bc 2026-08-05) (Homebrew)",
+    "python3": "Python 3.14.2"
+  },
+  "sqlite_version": "3.46.0",
+  "valid_synthetic_observation": "Committed",
+  "sources_canonical": "a4d22466f894ec9dc0afc9624eb55996a8fb1e3c"
+}

@@ -1,0 +1,29 @@
+{
+  "command": [
+    "/usr/bin/sandbox-exec",
+    "-p",
+    "(version 1)(allow default)(deny network*)",
+    "node",
+    "--test",
+    "harness/arbos-pi-ext/pending-owner-laws.test.ts"
+  ],
+  "exit_code": 0,
+  "seconds": 14.803502041962929,
+  "scope": "Root independent actual-source five laws1280+boundedprotocol undernetworkdeny; wholeRust/testhandlercoverage notclaimed",
+  "tail": [
+    "ok 6 - bounded ownership bridge rejects invalid requests, drains oversized lines and handles EOF",
+    "  ---",
+    "  duration_ms: 7.751667",
+    "  type: 'test'",
+    "  ...",
+    "1..6",
+    "# tests 6",
+    "# suites 0",
+    "# pass 6",
+    "# fail 0",
+    "# cancelled 0",
+    "# skipped 0",
+    "# todo 0",
+    "# duration_ms 14755.850667"
+  ]
+}

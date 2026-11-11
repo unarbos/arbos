@@ -1,0 +1,32 @@
+{
+  "source_sha256": "3d869eaff2f4baa09f83c2bebd6dc8994fbeb6b9c8d3b443cca0e415b6472a90",
+  "fixture_sha256": "af9f46b35637d23c8b87d3c5d278d19903e6c9d83837af4612d0cbd3bb19c835",
+  "compile_exit": 0,
+  "scope": "Actual Foundation NSCache and size methods +actual WorkLifetime; UIImage size/identity collaborator; excludes decoder/UIKit/UI runtime, no model/network/userdata",
+  "exit_code": 1,
+  "results": {
+    "cases": {
+      "B-store-preserves-A": false,
+      "bitmap-eviction-control": true,
+      "current-B-progress": true,
+      "current-decoded-hit": true,
+      "current-other-slot-progress": true,
+      "current-size-hit": true,
+      "foreign-account-decoded-miss": false,
+      "foreign-account-size-miss": false,
+      "foreign-slot-decoded-miss": false,
+      "foreign-slot-size-miss": false,
+      "new-generation-does-not-reuse-other-slot-size": false,
+      "readoption-does-not-reuse-private-size": false,
+      "same-owner-refresh-key-control": true,
+      "size-survives-bitmap-eviction": false,
+      "slot-store-preserves-A": false,
+      "slot-store-preserves-B": false
+    },
+    "failed": 10,
+    "passed": 6,
+    "total": 16
+  },
+  "seconds": 1.4097935419995338,
+  "source_unchanged": true
+}

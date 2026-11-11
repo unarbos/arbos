@@ -1,0 +1,563 @@
+{
+  "final_distinct_native_selected": 73,
+  "claude11_rpc18_related44": true,
+  "final": {
+    "claude-after": {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-f",
+        "/Users/cister/arbos life/arbos-codex/.improve/evidence/claude-kill-order/loopback-only.sb",
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-agentd",
+        "harness::claude_worker_owner_regressions::",
+        "--",
+        "--test-threads=2"
+      ],
+      "exit": 0,
+      "seconds": 26.712247958988883,
+      "results": [
+        [
+          "ok",
+          "11",
+          "0",
+          "0"
+        ]
+      ],
+      "source_unchanged": true,
+      "source_sha256": "89c5c13e47f92db6287a1a3f545cf69e12e1436dc16d6b5c909cdb69abf2ef17",
+      "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+      "scope": "actual pinned43b839 source plus synthetic tests; own target/workspace packages cleaned; validated loopback-only fence; fresh HOME/no inherited opt-ins"
+    },
+    "sessions-after": {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-f",
+        "/Users/cister/arbos life/arbos-codex/.improve/evidence/claude-kill-order/loopback-only.sb",
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-agentd",
+        "harness::worker_owner_regressions::",
+        "--",
+        "--test-threads=2"
+      ],
+      "exit": 0,
+      "seconds": 3.148111707996577,
+      "results": [
+        [
+          "ok",
+          "18",
+          "0",
+          "0"
+        ]
+      ],
+      "source_unchanged": true,
+      "source_sha256": "89c5c13e47f92db6287a1a3f545cf69e12e1436dc16d6b5c909cdb69abf2ef17",
+      "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+      "scope": "actual pinned43b839 source plus synthetic tests; own target/workspace packages cleaned; validated loopback-only fence; fresh HOME/no inherited opt-ins"
+    },
+    "registry": {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-f",
+        "/Users/cister/arbos life/arbos-codex/.improve/evidence/claude-kill-order/loopback-only.sb",
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-agentd",
+        "worker_lifetime::tests::",
+        "--",
+        "--test-threads=2"
+      ],
+      "exit": 0,
+      "seconds": 0.2520918749505654,
+      "results": [
+        [
+          "ok",
+          "3",
+          "0",
+          "0"
+        ]
+      ],
+      "source_unchanged": true,
+      "source_sha256": "89c5c13e47f92db6287a1a3f545cf69e12e1436dc16d6b5c909cdb69abf2ef17",
+      "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+      "scope": "actual pinned43b839 source plus synthetic tests; own target/workspace packages cleaned; validated loopback-only fence; fresh HOME/no inherited opt-ins"
+    },
+    "worker-models": {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-f",
+        "/Users/cister/arbos life/arbos-codex/.improve/evidence/claude-kill-order/loopback-only.sb",
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-agentd",
+        "worker_model_refusal_tests::",
+        "--",
+        "--test-threads=2"
+      ],
+      "exit": 0,
+      "seconds": 0.5458219589199871,
+      "results": [
+        [
+          "ok",
+          "5",
+          "0",
+          "0"
+        ]
+      ],
+      "source_unchanged": true,
+      "source_sha256": "89c5c13e47f92db6287a1a3f545cf69e12e1436dc16d6b5c909cdb69abf2ef17",
+      "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+      "scope": "actual pinned43b839 source plus synthetic tests; own target/workspace packages cleaned; validated loopback-only fence; fresh HOME/no inherited opt-ins"
+    },
+    "metadata-after": {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-f",
+        "/Users/cister/arbos life/arbos-codex/.improve/evidence/claude-kill-order/loopback-only.sb",
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-agentd",
+        "agent::metadata_owner_regressions::",
+        "--",
+        "--test-threads=2"
+      ],
+      "exit": 0,
+      "seconds": 3.0421627919422463,
+      "results": [
+        [
+          "ok",
+          "17",
+          "0",
+          "0"
+        ]
+      ],
+      "source_unchanged": true,
+      "source_sha256": "89c5c13e47f92db6287a1a3f545cf69e12e1436dc16d6b5c909cdb69abf2ef17",
+      "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+      "scope": "actual pinned43b839 source plus synthetic tests; own target/workspace packages cleaned; validated loopback-only fence; fresh HOME/no inherited opt-ins"
+    },
+    "after": {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-f",
+        "/Users/cister/arbos life/arbos-codex/.improve/evidence/claude-kill-order/loopback-only.sb",
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-agentd",
+        "agent::shutdown_boot_regressions::",
+        "--",
+        "--test-threads=2"
+      ],
+      "exit": 0,
+      "seconds": 1.719983333023265,
+      "results": [
+        [
+          "ok",
+          "7",
+          "0",
+          "0"
+        ]
+      ],
+      "source_unchanged": true,
+      "source_sha256": "89c5c13e47f92db6287a1a3f545cf69e12e1436dc16d6b5c909cdb69abf2ef17",
+      "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+      "scope": "actual pinned43b839 source plus synthetic tests; own target/workspace packages cleaned; validated loopback-only fence; fresh HOME/no inherited opt-ins",
+      "expected_tests": 7,
+      "count_matches": true
+    },
+    "slot": {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-f",
+        "/Users/cister/arbos life/arbos-codex/.improve/evidence/claude-kill-order/loopback-only.sb",
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-agentd",
+        "pi_slot::tests::",
+        "--",
+        "--test-threads=2"
+      ],
+      "exit": 0,
+      "seconds": 0.26072645792737603,
+      "results": [
+        [
+          "ok",
+          "4",
+          "0",
+          "0"
+        ]
+      ],
+      "source_unchanged": true,
+      "source_sha256": "89c5c13e47f92db6287a1a3f545cf69e12e1436dc16d6b5c909cdb69abf2ef17",
+      "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+      "scope": "actual pinned43b839 source plus synthetic tests; own target/workspace packages cleaned; validated loopback-only fence; fresh HOME/no inherited opt-ins"
+    },
+    "models": {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-f",
+        "/Users/cister/arbos life/arbos-codex/.improve/evidence/claude-kill-order/loopback-only.sb",
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-agentd",
+        "model_switch_tests::",
+        "--",
+        "--test-threads=2"
+      ],
+      "exit": 0,
+      "seconds": 2.6267831660807133,
+      "results": [
+        [
+          "ok",
+          "2",
+          "0",
+          "0"
+        ]
+      ],
+      "source_unchanged": true,
+      "source_sha256": "89c5c13e47f92db6287a1a3f545cf69e12e1436dc16d6b5c909cdb69abf2ef17",
+      "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+      "scope": "actual pinned43b839 source plus synthetic tests; own target/workspace packages cleaned; validated loopback-only fence; fresh HOME/no inherited opt-ins"
+    },
+    "turn-end": {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-f",
+        "/Users/cister/arbos life/arbos-codex/.improve/evidence/claude-kill-order/loopback-only.sb",
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-agentd",
+        "turn_end_race_tests::",
+        "--",
+        "--test-threads=2"
+      ],
+      "exit": 0,
+      "seconds": 5.4732935830252245,
+      "results": [
+        [
+          "ok",
+          "4",
+          "0",
+          "0"
+        ]
+      ],
+      "source_unchanged": true,
+      "source_sha256": "89c5c13e47f92db6287a1a3f545cf69e12e1436dc16d6b5c909cdb69abf2ef17",
+      "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+      "scope": "actual pinned43b839 source plus synthetic tests; own target/workspace packages cleaned; validated loopback-only fence; fresh HOME/no inherited opt-ins"
+    },
+    "compact-window": {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-f",
+        "/Users/cister/arbos life/arbos-codex/.improve/evidence/claude-kill-order/loopback-only.sb",
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-agentd",
+        "agent::tests::a_window_the_provider_will_not_compact",
+        "--",
+        "--test-threads=1"
+      ],
+      "exit": 0,
+      "seconds": 0.2818372920155525,
+      "results": [
+        [
+          "ok",
+          "1",
+          "0",
+          "0"
+        ]
+      ],
+      "source_unchanged": true,
+      "source_sha256": "89c5c13e47f92db6287a1a3f545cf69e12e1436dc16d6b5c909cdb69abf2ef17",
+      "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+      "scope": "actual pinned43b839 source plus synthetic tests; own target/workspace packages cleaned; validated loopback-only fence; fresh HOME/no inherited opt-ins"
+    },
+    "compact-strike": {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-f",
+        "/Users/cister/arbos life/arbos-codex/.improve/evidence/claude-kill-order/loopback-only.sb",
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-agentd",
+        "agent::tests::a_compaction_that_merely_failed",
+        "--",
+        "--test-threads=1"
+      ],
+      "exit": 0,
+      "seconds": 0.2767454170389101,
+      "results": [
+        [
+          "ok",
+          "1",
+          "0",
+          "0"
+        ]
+      ],
+      "source_unchanged": true,
+      "source_sha256": "89c5c13e47f92db6287a1a3f545cf69e12e1436dc16d6b5c909cdb69abf2ef17",
+      "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+      "scope": "actual pinned43b839 source plus synthetic tests; own target/workspace packages cleaned; validated loopback-only fence; fresh HOME/no inherited opt-ins"
+    },
+    "check": {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-f",
+        "/Users/cister/arbos life/arbos-codex/.improve/evidence/claude-kill-order/loopback-only.sb",
+        "cargo",
+        "check",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-agentd",
+        "--all-targets"
+      ],
+      "exit": 0,
+      "seconds": 13.03844045905862,
+      "results": [],
+      "source_unchanged": true,
+      "source_sha256": "89c5c13e47f92db6287a1a3f545cf69e12e1436dc16d6b5c909cdb69abf2ef17",
+      "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+      "scope": "actual pinned43b839 source plus synthetic tests; own target/workspace packages cleaned; validated loopback-only fence; fresh HOME/no inherited opt-ins"
+    },
+    "clippy": {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-f",
+        "/Users/cister/arbos life/arbos-codex/.improve/evidence/claude-kill-order/loopback-only.sb",
+        "cargo",
+        "clippy",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-agentd",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit": 0,
+      "seconds": 12.335406959056854,
+      "results": [],
+      "source_unchanged": true,
+      "source_sha256": "89c5c13e47f92db6287a1a3f545cf69e12e1436dc16d6b5c909cdb69abf2ef17",
+      "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+      "scope": "actual pinned43b839 source plus synthetic tests; own target/workspace packages cleaned; validated loopback-only fence; fresh HOME/no inherited opt-ins"
+    },
+    "build": {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-f",
+        "/Users/cister/arbos life/arbos-codex/.improve/evidence/claude-kill-order/loopback-only.sb",
+        "cargo",
+        "build",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-agentd"
+      ],
+      "exit": 0,
+      "seconds": 16.66565820807591,
+      "results": [],
+      "source_unchanged": true,
+      "source_sha256": "89c5c13e47f92db6287a1a3f545cf69e12e1436dc16d6b5c909cdb69abf2ef17",
+      "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+      "scope": "actual pinned43b839 source plus synthetic tests; own target/workspace packages cleaned; validated loopback-only fence; fresh HOME/no inherited opt-ins"
+    },
+    "fmt": {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-f",
+        "/Users/cister/arbos life/arbos-codex/.improve/evidence/claude-kill-order/loopback-only.sb",
+        "cargo",
+        "fmt",
+        "--all",
+        "--check"
+      ],
+      "exit": 0,
+      "seconds": 2.3320531249046326,
+      "results": [],
+      "source_unchanged": true,
+      "source_sha256": "89c5c13e47f92db6287a1a3f545cf69e12e1436dc16d6b5c909cdb69abf2ef17",
+      "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+      "scope": "actual pinned43b839 source plus synthetic tests; own target/workspace packages cleaned; validated loopback-only fence; fresh HOME/no inherited opt-ins"
+    }
+  },
+  "original_4semantic_red_1control": {
+    "command": [
+      "/usr/bin/sandbox-exec",
+      "-f",
+      "/Users/cister/arbos life/arbos-codex/.improve/evidence/claude-worker-owner/loopback-only.sb",
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-agentd",
+      "harness::claude_worker_owner_regressions::",
+      "--",
+      "--test-threads=2"
+    ],
+    "exit": 101,
+    "seconds": 36.090441999956965,
+    "results": [
+      [
+        "FAILED",
+        "1",
+        "4",
+        "0"
+      ]
+    ],
+    "source_unchanged": true,
+    "source_sha256": "89c5c13e47f92db6287a1a3f545cf69e12e1436dc16d6b5c909cdb69abf2ef17",
+    "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+    "scope": "actual pinned43b839 source plus synthetic tests; own target/workspace packages cleaned; validated loopback-only fence; fresh HOME/no inherited opt-ins"
+  },
+  "introduced_regression_red": {
+    "command": [
+      "/usr/bin/sandbox-exec",
+      "-f",
+      "/Users/cister/arbos life/arbos-codex/.improve/evidence/claude-kill-order/loopback-only.sb",
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-agentd",
+      "blocked_claude_writer_",
+      "--",
+      "--test-threads=2"
+    ],
+    "exit": 101,
+    "seconds": 37.37874641700182,
+    "results": [
+      [
+        "FAILED",
+        "0",
+        "2",
+        "0"
+      ]
+    ],
+    "source_unchanged": true,
+    "source_sha256": "89c5c13e47f92db6287a1a3f545cf69e12e1436dc16d6b5c909cdb69abf2ef17",
+    "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+    "scope": "actual pinned43b839 source plus synthetic tests; own target/workspace packages cleaned; validated loopback-only fence; fresh HOME/no inherited opt-ins"
+  },
+  "original_immediate_kill_positive": {
+    "command": [
+      "/usr/bin/sandbox-exec",
+      "-f",
+      "/Users/cister/arbos life/arbos-codex/.improve/evidence/claude-kill-order/original/loopback-only.sb",
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-agentd",
+      "blocked_claude_writer_",
+      "--",
+      "--test-threads=2"
+    ],
+    "exit": 0,
+    "seconds": 31.603432917036116,
+    "results": [
+      [
+        "ok",
+        "2",
+        "0",
+        "0"
+      ]
+    ],
+    "source_unchanged": true,
+    "source_sha256": "89c5c13e47f92db6287a1a3f545cf69e12e1436dc16d6b5c909cdb69abf2ef17",
+    "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+    "scope": "actual pinned43b839 source plus synthetic tests; own target/workspace packages cleaned; validated loopback-only fence; fresh HOME/no inherited opt-ins"
+  },
+  "laws": {
+    "command": [
+      "/usr/bin/sandbox-exec",
+      "-f",
+      "/Users/cister/arbos life/arbos-codex/.improve/evidence/claude-kill-order/loopback-only.sb",
+      "node",
+      "--test",
+      "worker-lifetime-laws.test.ts"
+    ],
+    "exit": 0,
+    "seconds": 0.8554188330890611,
+    "source_unchanged": true
+  },
+  "typecheck": {
+    "command": [
+      "/usr/bin/sandbox-exec",
+      "-f",
+      "/Users/cister/arbos life/arbos-codex/.improve/evidence/claude-kill-order/loopback-only.sb",
+      "node",
+      "node_modules/typescript/bin/tsc",
+      "--noEmit"
+    ],
+    "exit": 0,
+    "seconds": 2.5686134580755606,
+    "source_unchanged": true
+  },
+  "source_state_module_unchanged": "4be122177185843850e5241e7217bdeb49e2b90192bc282f55386b743ab56243",
+  "development_barrier_adjustment": "first kill-first gate10P/1F because old fixture waited stdin EOF while holding Child lock; final test observes actual Stopping while captured Child mutex held, preserving same exact-owner assertions",
+  "source_manifest": {
+    "base": "frozen RPC698b476e (do NOT apply held Claude7cab)",
+    "patch": "claude-ownership.patch",
+    "bytes": 40607,
+    "sha256": "c8186385e575f98c404cb216fe099a82baf05eb36028efe3580f48e0a90abe03",
+    "files": [
+      {
+        "path": "crates/arbos-agentd/src/harness.rs",
+        "base_sha256": "4b4aaad6d24e32448d0c74a6cb66dbb8cea1aaf57199b619b093c26d46209e6b",
+        "candidate_sha256": "a088fa2d87b44fe16b1ea16e50a8e5648ce869b451cb2370d82cdccf12b68594"
+      }
+    ],
+    "held_regression_patch": "7cabeb95c73ee5b86ce46ec455cad15bd8a53a2b3e1e3ea4d996ce36a28629a7",
+    "review_diff_against_held_candidate": "kill-order-review.patch",
+    "worker_lifetime_sha256": "4be122177185843850e5241e7217bdeb49e2b90192bc282f55386b743ab56243",
+    "target": "/Users/cister/arbos life/arbos-codex/.improve/evidence/claude-kill-order/target"
+  },
+  "calibration": {
+    "rpc_runtime_byte_identical": true,
+    "claude_translation_byte_identical": true,
+    "uuid_byte_identical": true,
+    "duration_calls_identical": true,
+    "argv_env_uid_stdio_identical_except_kill_on_drop": true
+  }
+}

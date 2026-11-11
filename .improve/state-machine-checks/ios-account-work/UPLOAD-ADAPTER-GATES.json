@@ -1,0 +1,13 @@
+{
+  "scope": "Same eleven actual upload ownership cases retained; adapter supports multiple pending calls and matches immutable payloads by key. Full296 checkpoint precedes adapter update; this exact11-case source replay follows it. No product source changed.",
+  "passed": 11,
+  "failed": 0,
+  "seconds": 1.1754581249551848,
+  "source_stable": true,
+  "driver_sha256": "883a459b1748a60a31cfafc90095d93b5058da4a0c7a32016dbb739a2136f5cd",
+  "sources": {
+    "apps/ios/Arbos/Arbos/Store/AppModel.swift": "7c944e04f8483f0d5e0c19a26d9414f8a50cba79462b08bdae3c704af91e2b0c",
+    "apps/ios/Arbos/Arbos/Sync/RelayAPI.swift": "850917e53fe86ddfd655f8ef85fcfab1808a6d6f4c9d5506dda83ed6d9d95616",
+    "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f"
+  }
+}
