@@ -841,6 +841,17 @@ pub const RAIL_GAP: f32 = 2.0;
 /// inset all round keeps each button's round hover wash inside the capsule's
 /// rim and concentric with its rounded ends ([feedback hover-bar-highlight-mac-2026-10-29]).
 pub const RAIL_PLATE_PAD: f32 = 2.0;
+/// The rail's widest box: three buttons, their gaps and the Glass capsule's insets.
+pub const RAIL_WIDTH: f32 = 3.0 * RAIL_BUTTON + 2.0 * RAIL_GAP + 2.0 * RAIL_PLATE_PAD;
+/// Room for the widest 11 pt hover time ("12:44 PM": 49 pt in the Mac system
+/// font, 53 in the Linux test font).
+pub const HOVER_TIME_WIDTH: f32 = 56.0;
+/// The lane on my bubble's outer (left) edge that holds the hover time and the
+/// rail. It is reserved at rest too, so a narrow column (a scaled display, a
+/// small window) narrows the bubble instead of pushing the time out past the
+/// column's left edge into the sidebar — and hovering never re-wraps the text
+/// ([feedback scaled-timestamp-clip-mac-2026-10-29] / #2310).
+pub const OWN_RAIL_LANE: f32 = HOVER_TIME_WIDTH + 8.0 + RAIL_WIDTH + 6.0;
 
 /// A reaction chip under a bubble (iPhone `reactionChips`: 14 pt emoji, 12 pt
 /// medium count, 8 pt side pads, 4 pt vertical pads, 1 pt rim). The height is
@@ -3077,8 +3088,7 @@ impl Transcript {
                             let delivery = delivery.unwrap_or(Delivery::Delivered);
                             row_el
                                 .justify_end()
-                                .children(hover_time(time, reveal, &theme).map(|t| t.mr(px(8.0))))
-                                .child(actions.mr(px(6.0)))
+                                .child(own_rail_lane(hover_time(time, reveal, &theme), actions))
                                 .children((delivery == Delivery::Failed).then(|| {
                                     self.failed_retry(&row.id, &row.message_id, &theme, cx)
                                         .mr(px(8.0))
@@ -3089,7 +3099,9 @@ impl Transcript {
                                 )
                                 .child(own_bubble(
                                     // One selector per element: a ghost keeps "secret-ghost".
-                                    bubble.when(ghost.is_none(), |b| {
+                                    // `min_w_0` lets the bubble narrow beside the reserved
+                                    // rail lane on a scaled / narrow pane (#2310).
+                                    bubble.min_w_0().when(ghost.is_none(), |b| {
                                         b.debug_selector(|| format!("own-bubble#{}", row.id))
                                     }),
                                     delivery,
@@ -3417,8 +3429,7 @@ impl Transcript {
                             row_el
                                 .justify_end()
                                 .items_center()
-                                .children(hover_time(time, reveal, &theme).map(|t| t.mr(px(8.0))))
-                                .child(actions.mr(px(6.0)))
+                                .child(own_rail_lane(hover_time(time, reveal, &theme), actions))
                                 .child(card),
                         )
                         .into_any_element()
@@ -4121,6 +4132,21 @@ fn hover_time(time: Option<String>, opacity: f32, theme: &Theme) -> Option<Div> 
             .debug_selector(|| "bubble-time".into())
             .child(label)
     })
+}
+
+/// The [`OWN_RAIL_LANE`] left of my bubble or card: the hover time, then the
+/// rail, right-aligned against the bubble. It never shrinks; the bubble beside
+/// it does (`min_w_0`), so the lane always stays inside the column (#2310).
+fn own_rail_lane(time: Option<Div>, rail: Div) -> Div {
+    div()
+        .flex_shrink_0()
+        .min_w(px(OWN_RAIL_LANE))
+        .flex()
+        .items_center()
+        .justify_end()
+        .debug_selector(|| "own-rail-lane".into())
+        .children(time.map(|t| t.mr(px(8.0))))
+        .child(rail.mr(px(6.0)))
 }
 
 /// My own bubble at its delivery opacity (see [`Delivery::opacity`]). Applied
@@ -8308,6 +8334,8 @@ mod layout_tests {
     struct BubbleRow {
         pane: f32,
         who: Who,
+        /// A people chat (DM / group): my bubble takes the people share.
+        people: bool,
         text: &'static str,
         /// The row's hover opacity this frame (0 = at rest, 1 = hovered).
         hover: f32,
@@ -8329,7 +8357,7 @@ mod layout_tests {
         ) -> impl IntoElement {
             let theme = Theme::dark(crate::ui::theme::Surface::Matte);
             let selectable = Selectable::new(&self.selection, theme.accent_soft, cx);
-            let time = || hover_time(Some("1:52 PM".to_string()), self.hover, &theme);
+            let time = || hover_time(Some("12:52 PM".to_string()), self.hover, &theme);
             let name = |name: &'static str| {
                 div()
                     .text_size(px(CHAT_BODY))
@@ -8388,13 +8416,13 @@ mod layout_tests {
                         &CodeCopy::default(),
                     );
                     let other = matches!(self.who, Who::Other);
-                    // Another person's bubble: a people chat; mine: an agent chat here.
+                    // Another person's bubble: a people chat; mine: agent or people per `self.people`.
                     let bubble = div()
                         .debug_selector(|| "test-bubble".into())
                         .max_w(relative_width(if other {
                             PEOPLE_BUBBLE_FRACTION
                         } else {
-                            own_bubble_fraction(false)
+                            own_bubble_fraction(self.people)
                         }))
                         .px(px(BUBBLE_PAD_X))
                         .py(px(BUBBLE_PAD_Y))
@@ -8429,11 +8457,13 @@ mod layout_tests {
                             .items_end()
                             .justify_end()
                             .debug_selector(|| "test-bubble-parent".into())
-                            .children(time().map(|t| t.mr(px(8.0))))
-                            .child(div().size(px(16.0)).mr(px(6.0)))
+                            .child(own_rail_lane(
+                                time(),
+                                div().w(px(RAIL_WIDTH)).h(px(RAIL_BUTTON)),
+                            ))
                             // Through the real delivery wrapper: a sent bubble must
                             // keep the same cap as a seen one (v0.6.223 regression).
-                            .child(own_bubble(bubble, Delivery::Delivered))
+                            .child(own_bubble(bubble.min_w_0(), Delivery::Delivered))
                     }
                 }
             };
@@ -8448,9 +8478,10 @@ mod layout_tests {
 
     /// The cap a [`BubbleRow`] bubble may reach: the people share of the slot
     /// for an agent in a group (it has a lane); 72 % of the row for my own
-    /// bubble in an agent chat; the people share of the lane beside the disc
-    /// for another person — `relative_width` is relative to the parent.
-    fn bubble_cap(vcx: &mut gpui::VisualTestContext, who: Who) -> f32 {
+    /// bubble in an agent chat (80 % in a people chat), never into the
+    /// [`OWN_RAIL_LANE`]; the people share of the lane beside the disc for
+    /// another person — `relative_width` is relative to the parent.
+    fn bubble_cap(vcx: &mut gpui::VisualTestContext, who: Who, people: bool) -> f32 {
         match who {
             Who::Agent => {
                 let slot = vcx.debug_bounds("chat-bubble-slot").expect("slot drawn");
@@ -8460,12 +8491,13 @@ mod layout_tests {
                 let parent = vcx
                     .debug_bounds("test-bubble-parent")
                     .expect("bubble parent drawn");
-                let share = if matches!(who, Who::Other) {
-                    PEOPLE_BUBBLE_FRACTION
+                let width = f32::from(parent.size.width);
+                if matches!(who, Who::Other) {
+                    width * PEOPLE_BUBBLE_FRACTION
                 } else {
-                    own_bubble_fraction(false)
-                };
-                f32::from(parent.size.width) * share
+                    // Mine also leaves the rail lane free on its left.
+                    (width * own_bubble_fraction(people)).min(width - OWN_RAIL_LANE)
+                }
             }
         }
     }
@@ -8487,6 +8519,7 @@ mod layout_tests {
                 let (_view, vcx) = cx.add_window_view(|_, cx| BubbleRow {
                     pane,
                     who,
+                    people: false,
                     text: OVERFLOWING_LINE,
                     hover: 0.0,
                     selection: cx.new(TextSelection::new),
@@ -8497,7 +8530,7 @@ mod layout_tests {
                 let text = vcx.debug_bounds("bubble-text").expect("text drawn");
                 let right = |b: gpui::Bounds<Pixels>| f32::from(b.origin.x + b.size.width);
                 let left = |b: gpui::Bounds<Pixels>| f32::from(b.origin.x);
-                let cap = bubble_cap(vcx, who);
+                let cap = bubble_cap(vcx, who, false);
                 let bw = f32::from(bubble.size.width);
                 assert!(
                     right(bubble) <= right(column) + 0.5 && left(bubble) >= left(column) - 0.5,
@@ -8540,6 +8573,7 @@ mod layout_tests {
             let (_view, vcx) = cx.add_window_view(|_, cx| BubbleRow {
                 pane: REFERENCE_PANE,
                 who,
+                people: false,
                 text: SHORT_LINE,
                 hover: 0.0,
                 selection: cx.new(TextSelection::new),
@@ -8550,7 +8584,7 @@ mod layout_tests {
             let bw = f32::from(bubble.size.width);
             let tw = f32::from(text.size.width);
             let th = f32::from(text.size.height);
-            let cap = bubble_cap(vcx, who);
+            let cap = bubble_cap(vcx, who, false);
             assert!(
                 th <= CHAT_LINE_HEIGHT + 0.5,
                 "{who:?}: a short line stays on one line ({th} pt tall)"
@@ -8579,6 +8613,7 @@ mod layout_tests {
             let (_view, vcx) = cx.add_window_view(|_, cx| BubbleRow {
                 pane: REFERENCE_PANE,
                 who,
+                people: false,
                 text: SHORT_LINE,
                 hover: 0.0,
                 selection: cx.new(TextSelection::new),
@@ -8593,6 +8628,7 @@ mod layout_tests {
             let (_view, vcx) = cx.add_window_view(|_, cx| BubbleRow {
                 pane: REFERENCE_PANE,
                 who,
+                people: false,
                 text: SHORT_LINE,
                 hover: 1.0,
                 selection: cx.new(TextSelection::new),
@@ -8624,6 +8660,74 @@ mod layout_tests {
                         <= f32::from(bubble.origin.y + bubble.size.height),
                 "{who:?}: the time is not on the bubble's line"
             );
+        }
+    }
+
+    /// Scout, Arbonites, 2026-10-29 ("the time stamp on the message is
+    /// clipping into the left column when the app window is custom scaled"):
+    /// my bubble took its whole share of the column and the time + rail went
+    /// left of it, so below a ~700 pt column (a scaled display, a small
+    /// window) the time ran past the column's left edge into the sidebar.
+    /// Mine, in an agent chat and in a group, from a full 1440 pt window down
+    /// to 820 pt and the 400 pt sidebar-less pane: the hovered time stays in
+    /// the column, outside the bubble, and hovering does not re-wrap the text.
+    #[gpui::test]
+    fn my_hover_time_stays_in_the_column_when_the_window_is_scaled_down(cx: &mut TestAppContext) {
+        let sidebar = crate::ui::theme::SIDEBAR_WIDTH;
+        for pane in [
+            1440.0 - sidebar,
+            1152.0 - sidebar,
+            960.0 - sidebar,
+            820.0 - sidebar,
+            400.0,
+        ] {
+            for people in [false, true] {
+                let mut bubbles = Vec::new();
+                for hover in [0.0, 1.0] {
+                    let (_view, vcx) = cx.add_window_view(|_, cx| BubbleRow {
+                        pane,
+                        who: Who::Mine,
+                        people,
+                        text: OVERFLOWING_LINE,
+                        hover,
+                        selection: cx.new(TextSelection::new),
+                    });
+                    vcx.run_until_parked();
+                    let column = vcx.debug_bounds("chat-column").expect("column drawn");
+                    let bubble = vcx.debug_bounds("test-bubble").expect("bubble drawn");
+                    let left = |b: gpui::Bounds<Pixels>| f32::from(b.origin.x);
+                    let right = |b: gpui::Bounds<Pixels>| f32::from(b.origin.x + b.size.width);
+                    let cap = bubble_cap(vcx, Who::Mine, people);
+                    let bw = f32::from(bubble.size.width);
+                    assert!(
+                        (bw - cap).abs() <= 1.0,
+                        "pane {pane} people {people}: a long line fills the cap: bubble {bw}, cap {cap}"
+                    );
+                    if hover > 0.0 {
+                        let time = vcx.debug_bounds("bubble-time").expect("time on hover");
+                        assert!(
+                            time.size.width <= px(HOVER_TIME_WIDTH),
+                            "the time is wider than its room: {}",
+                            f32::from(time.size.width)
+                        );
+                        assert!(
+                            left(time) >= left(column) - 0.5,
+                            "pane {pane} people {people}: the time starts at {} left of the column {}",
+                            left(time),
+                            left(column)
+                        );
+                        assert!(
+                            right(time) <= left(bubble),
+                            "pane {pane} people {people}: the time overlaps the bubble"
+                        );
+                    }
+                    bubbles.push(bubble.size);
+                }
+                assert_eq!(
+                    bubbles[0], bubbles[1],
+                    "pane {pane} people {people}: hovering resized my bubble"
+                );
+            }
         }
     }
 
