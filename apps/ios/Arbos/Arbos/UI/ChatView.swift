@@ -5251,13 +5251,17 @@ private struct ComposerField<Leading: View>: View {
         } else {
             // The field with mention chips (#1596): one to eight lines, the
             // chips as attachments; `draft.text` stays the plain `@handle` text.
+            // Beside the `+` the HStack's 8 pt is the only gap; the full-width
+            // 17 pt inset is for channels and the stacked text row above the
+            // controls ([feedback AJuVf-Tv2c-WhHzsKiVmi9U]).
             MentionTextView(text: $draft.text, mentions: $draft.mentions, caret: $draft.caret, isFocused: $focus,
                             placeholder: prompt(draft.text), theme: theme,
                             agentProject: { model.agent(member: $0, chatId: chatId) },
                             onPasteMedia: onPasteMedia,
                             onDeleteBackwardEmpty: onDeleteBackwardEmpty,
                             onPasteImage: onPasteImage,
-                            onLines: { lines = $0 })
+                            onLines: { lines = $0 },
+                            leftInset: (stacked || isChannel) ? Theme.composerTextInset : Theme.composerTextInsetBesidePlus)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
