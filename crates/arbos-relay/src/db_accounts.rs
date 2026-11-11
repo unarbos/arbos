@@ -318,7 +318,7 @@ impl Db {
     }
 
     pub fn list_users(&self) -> Result<Vec<User>> {
-        self.with(|c| {
+        self.read(|c| {
             let mut st = c.prepare(&format!(
                 "SELECT {USER_COLS} FROM users ORDER BY created_at"
             ))?;
@@ -957,7 +957,7 @@ impl Db {
 
     /// Debits across every user since `since_ms` (the global cap).
     pub fn debited_since_all(&self, since_ms: i64) -> Result<f64> {
-        self.with(|c| {
+        self.read(|c| {
             c.query_row(
                 "SELECT COALESCE(-SUM(usd), 0.0) FROM credit_ledger WHERE usd < 0 AND kind != 'machine' AND at >= ?1",
                 params![since_ms],
@@ -1107,7 +1107,7 @@ impl Db {
 
     /// Relay-wide machine cost since `since_ms` (informational alert threshold).
     pub fn machine_cost_since_all(&self, since_ms: i64) -> Result<f64> {
-        self.with(|c| {
+        self.read(|c| {
             c.query_row(
                 "SELECT COALESCE(-SUM(usd), 0.0) FROM credit_ledger WHERE kind = 'machine' AND at >= ?1",
                 params![since_ms],
