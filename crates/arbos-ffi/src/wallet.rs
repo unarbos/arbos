@@ -84,12 +84,13 @@ pub async fn wallet_balance(address: String) -> Result<String, WalletError> {
     Ok(chain::balance(Net::Main, &address).await?.to_string())
 }
 
-/// Taken while online, kept by the app (it signs every cheque until the next runtime upgrade).
+/// Taken while online, kept by the app. It signs cheques for a few hours
+/// (`arbos_wallet::chain::CHEQUE_PERIOD`), then a newer one is needed; it reads them for longer.
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct WalletSnapshot {
     /// Opaque JSON for `wallet_sign_cheque` / `wallet_read_cheque`.
     pub json: String,
-    /// The account's next nonce when it was taken.
+    /// The account's next nonce on chain when it was taken.
     pub nonce: u64,
 }
 
@@ -110,6 +111,10 @@ pub struct WalletCheque {
     /// Decimal rao.
     pub rao: String,
     pub tx: String,
+    /// The payer's account nonce it spends.
+    pub nonce: u64,
+    /// When it stops being cashable, unix seconds (estimated from block time).
+    pub expires_at: u64,
 }
 
 fn snapshot(json: &str) -> Result<Snapshot, WalletError> {
@@ -123,6 +128,8 @@ fn cheque(bytes: Vec<u8>, c: chain::Cheque) -> WalletCheque {
         to: c.to,
         rao: c.rao.to_string(),
         tx: c.tx,
+        nonce: c.nonce,
+        expires_at: c.expires_at,
     }
 }
 
@@ -135,7 +142,8 @@ fn unhex(s: &str) -> Result<Vec<u8>, WalletError> {
         .ok_or_else(|| WalletError::Invalid("not a cheque".into()))
 }
 
-/// Sign a cheque with no network, at `nonce` (the app hands them out: snapshot nonce, then +1).
+/// Sign a cheque with no network, at `nonce` (the app hands them out: the chain's next nonce,
+/// then the lowest number no outstanding cheque of this address holds).
 #[uniffi::export]
 pub fn wallet_sign_cheque(
     phrase: String,
@@ -149,7 +157,8 @@ pub fn wallet_sign_cheque(
     Ok(cheque(bytes, c))
 }
 
-/// Read a cheque from a message. Show only what this returns, never the message's own text.
+/// Read a cheque from a message: its signature is verified. Show only what this returns, never
+/// the message's own text, and never as paid: only cashing moves money.
 #[uniffi::export]
 pub fn wallet_read_cheque(
     snapshot_json: String,
@@ -160,8 +169,28 @@ pub fn wallet_read_cheque(
     Ok(cheque(raw, c))
 }
 
-/// Cash a cheque (either side may); returns the block hash once it succeeded.
+/// What became of a cheque handed to the chain.
+#[derive(Debug, Clone, uniffi::Enum)]
+pub enum WalletCashed {
+    /// It succeeded in this finalized block.
+    Paid { block: String },
+    /// Submitted, not seen finalized yet: not a bounce. Call again later with `since`.
+    Pending { since: u64 },
+}
+
+/// Cash a cheque (either side may). `since` is what an earlier `Pending` returned for it. An
+/// error is a real refusal, in words for the person.
 #[uniffi::export(async_runtime = "tokio")]
-pub async fn wallet_cash_cheque(bytes: String) -> Result<String, WalletError> {
-    Ok(chain::cash(Net::Main, &unhex(&bytes)?).await?.block)
+pub async fn wallet_cash_cheque(
+    bytes: String,
+    since: Option<u64>,
+) -> Result<WalletCashed, WalletError> {
+    Ok(
+        match chain::cash(Net::Main, &unhex(&bytes)?, since).await? {
+            chain::Cashed::Paid(receipt) => WalletCashed::Paid {
+                block: receipt.block,
+            },
+            chain::Cashed::Pending { since } => WalletCashed::Pending { since },
+        },
+    )
 }
