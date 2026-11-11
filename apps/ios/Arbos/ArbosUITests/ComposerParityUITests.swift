@@ -113,7 +113,10 @@ final class ComposerParityUITests: XCTestCase {
                              "the controls stay on the bottom row of the grown card")
 
         let remove = app.descendants(matching: .any)["composer-remove-attachment"].firstMatch
-        XCTAssertTrue(remove.exists, "the ✕ badge is on the thumbnail's corner")
+        XCTAssertTrue(remove.waitForExistence(timeout: appear), "the ✕ badge is on the thumbnail's corner")
+        let removeReady = expectation(for: NSPredicate(format: "isHittable == true"),
+                                      evaluatedWith: remove, handler: nil)
+        wait(for: [removeReady], timeout: 5)
         XCTAssertGreaterThan(remove.frame.midX, thumb.frame.midX, "top-right of the picture")
         XCTAssertLessThan(remove.frame.midY, thumb.frame.midY, "top-right of the picture")
 
@@ -176,16 +179,12 @@ final class ComposerParityUITests: XCTestCase {
         let pill = box.frame
         let resting = brightness(app, of: pill)
 
-        // Press on a background queue so this thread can wait for value `lit` *while the
-        // finger is down* (and still through the post-lift tail if the wait lands late).
-        // Held well past the arming delay; the press also raises Paste / AutoFill — the
-        // highlight must not take that touch away.
+        // All XCUI work stays on the test thread. Held well past the arming delay; the press
+        // also raises Paste / AutoFill — the highlight must not take that touch away. The
+        // sentinel stays `lit` through `HoldHighlight.tail` after lift, so the wait and the
+        // brightness sample run after press returns without a background queue.
         let finger = box.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
-        let pressed = expectation(description: "hold finished")
-        DispatchQueue.global(qos: .userInitiated).async {
-            finger.press(forDuration: 1.5)
-            pressed.fulfill()
-        }
+        finger.press(forDuration: 1.2)
         let lit = probes.matching(NSPredicate(format: "value == %@", "lit")).firstMatch
         XCTAssertTrue(lit.waitForExistence(timeout: 5),
                       "touch-and-hold lights the box the way Grok's does")
@@ -200,6 +199,5 @@ final class ComposerParityUITests: XCTestCase {
                              "the light is too faint to see: the pill read \(resting) at rest "
                              + "and \(held) under the finger, a delta of \(delta). Jacob "
                              + "measured the cut that failed review at about 2.7.")
-        wait(for: [pressed], timeout: 10)
     }
 }
