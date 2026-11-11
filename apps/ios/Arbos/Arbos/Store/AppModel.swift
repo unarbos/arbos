@@ -446,6 +446,11 @@ final class AppModel: ObservableObject {
         /// below it, so it never replaces the chat on screen: `PerfSignpost.pathChanged`
         /// skips it for exactly that reason.
         case profile(ProfileTarget)
+        /// My own pane — the Settings screen behind Home's account circle (Jacob,
+        /// 2026-11-04: my own profile comes in from the right like every other profile
+        /// item, instead of rising as a bottom sheet). `landing` is the page it opens
+        /// on: a Settings row tapped in search, or the rig's `ARBOS_SETTINGS_PAGE`.
+        case ownProfile(landing: String?)
     }
 
     // MARK: Servers (D88)
@@ -4498,10 +4503,6 @@ final class AppModel: ObservableObject {
     /// A message the next ChatView should scroll to and tint (a search result opened
     /// from the bottom bar, [feedback iphone-bottom-search-bar-2026-10-25]).
     @Published var pendingReveal: MessageReveal?
-    /// The Settings page the next Settings sheet lands on (a Settings row opened
-    /// from search, [feedback search-settings-ios-2026-10-26]): Home presents the
-    /// sheet when this is set and clears it when the sheet closes.
-    @Published var pendingSettingsLanding: String?
     /// The agent pane's settings row to drop open once the pane shows (a search
     /// result for "voice" / "model" / "reasoning").
     @Published var pendingAgentSetting: GlobalSearch.AgentSetting?
@@ -4546,6 +4547,16 @@ final class AppModel: ObservableObject {
         case .sheet:
             showProfileInSheet(target)
         }
+    }
+
+    /// Open my own pane — Settings. Like every other profile item it is a push, so it
+    /// comes in from the right and the stack's back swipe takes it away. `landing` is
+    /// the page it opens on and travels in the route rather than in the model, so a
+    /// second open cannot inherit the first one's page.
+    func showOwnProfile(landing: String? = nil) {
+        // The pane is already on top: a second tap would push a duplicate of it.
+        if case .ownProfile? = path.last { return }
+        path.append(.ownProfile(landing: landing))
     }
 
     /// The sheet-local presentation, for a profile opened from inside another sheet.

@@ -199,6 +199,7 @@ struct RootView: View {
         switch model.path.last {
         case .none: screen = "home"
         case .profile?: screen = "profile"
+        case .ownProfile?: screen = "settings"
         case .chat?, .server?: screen = "chat"
         }
         let chat = model.path.last(where: { (route: AppModel.Route) -> Bool in

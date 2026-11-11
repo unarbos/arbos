@@ -39,8 +39,8 @@ enum PerfSignpost {
         case send
         /// A long press opened a message's actions → the overlay is in a committed frame.
         case messageMenu
-        /// The home account button → the Settings sheet's content is in a committed frame.
-        case settingsSheet
+        /// The home account button → the pushed Settings page is in a committed frame.
+        case settingsPage
 
         var name: StaticString {
             switch self {
@@ -51,7 +51,7 @@ enum PerfSignpost {
             case .keystroke: return "keystroke"
             case .send: return "send"
             case .messageMenu: return "message-menu"
-            case .settingsSheet: return "settings-sheet"
+            case .settingsPage: return "settings-page"
             }
         }
 
@@ -59,7 +59,7 @@ enum PerfSignpost {
         var waitsForSettle: Bool {
             switch self {
             case .openChatSettled, .backSettled: return true
-            case .openChat, .keyboardUp, .keystroke, .send, .messageMenu, .settingsSheet: return false
+            case .openChat, .keyboardUp, .keystroke, .send, .messageMenu, .settingsPage: return false
             }
         }
     }
@@ -158,8 +158,8 @@ enum PerfSignpost {
     /// The route the open / back measurements are about, which is not always `path.last`.
     ///
     /// `open-chat` and `back-settled` measure one thing: the stack swapping the chat on
-    /// screen for another screen, or for nothing. A `.profile` is pushed *over* whatever is
-    /// below it (Jacob's 2026-11-01 profile push) and tears nothing down — the chat's
+    /// screen for another screen, or for nothing. A `.profile` or `.ownProfile` is pushed
+    /// *over* whatever is below it (Jacob's profile push) and tears nothing down — the chat's
     /// controller stays in the stack with its view laid out — so a profile push is neither
     /// an open nor a back and must not start or stop a measurement. Read through it rather
     /// than letting it fall into the "no chat on top" branch, which would have recorded
@@ -172,7 +172,7 @@ enum PerfSignpost {
         path.last(where: { (route: AppModel.Route) -> Bool in
             switch route {
             case .chat, .server: return true
-            case .profile: return false
+            case .profile, .ownProfile: return false
             }
         })
     }
@@ -183,7 +183,7 @@ enum PerfSignpost {
         case .server: return nil
         // Never reached: `measuredTop` reads through a profile. Spelled out so a new
         // route cannot silently join the "not a chat" branch.
-        case .profile: return nil
+        case .profile, .ownProfile: return nil
         }
     }
 
