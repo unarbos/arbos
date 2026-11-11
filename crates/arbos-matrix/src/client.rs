@@ -13,6 +13,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use matrix_sdk::authentication::matrix::MatrixSession;
 use matrix_sdk::authentication::SessionTokens;
+use matrix_sdk::deserialized_responses::EncryptionInfo;
 use matrix_sdk::encryption::recovery::RecoveryState;
 use matrix_sdk::encryption::{BackupDownloadStrategy, EncryptionSettings};
 use matrix_sdk::room::MessagesOptions;
@@ -23,6 +24,7 @@ use matrix_sdk::ruma::events::{AnySyncTimelineEvent, MessageLikeEventType, State
 use matrix_sdk::ruma::serde::Raw;
 use matrix_sdk::ruma::{OwnedRoomId, OwnedUserId, RoomId, TransactionId, UInt, UserId};
 use matrix_sdk::{Client, Room, SessionMeta, SlidingSyncList, SlidingSyncMode};
+use matrix_sdk_crypto::{CollectStrategy, DecryptionSettings, TrustRequirement};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::watch;
@@ -92,6 +94,7 @@ const RECEIPT_KIND: ReceiptType = ReceiptType::ReadPrivate;
 const HISTORY_PAGE: u32 = 50;
 const ROOM_RANGE_END: u32 = 1999;
 const POLL_TIMEOUT: Duration = Duration::from_secs(30);
+const BACKUP_STATE_WAIT: Duration = Duration::from_secs(30);
 
 pub struct MatrixClient {
     client: Client,
@@ -123,6 +126,13 @@ impl MatrixClient {
                 auto_enable_cross_signing: true,
                 backup_download_strategy: BackupDownloadStrategy::OneShot,
                 auto_enable_backups: true,
+            })
+            // The homeserver can add a device to anyone's account. Only a device signed by
+            // its owner's cross-signing identity is sent room keys, and a message from one
+            // that is not stays locked.
+            .with_room_key_recipient_strategy(CollectStrategy::IdentityBasedStrategy)
+            .with_decryption_settings(DecryptionSettings {
+                sender_device_trust_requirement: TrustRequirement::CrossSignedOrLegacy,
             })
             .build()
             .await
@@ -167,18 +177,28 @@ impl MatrixClient {
         member_of_mxid(self.me.as_str())
     }
 
-    /// The account's key backup, once the first sync has said where it stands.
-    pub async fn backup(&self) -> Backup {
+    /// The account's key backup, once the homeserver has said where it stands; an error when
+    /// it has not within [`BACKUP_STATE_WAIT`] (offline, or the homeserver is not answering).
+    pub async fn backup(&self) -> Result<Backup> {
+        self.backup_within(BACKUP_STATE_WAIT).await
+    }
+
+    async fn backup_within(&self, wait: Duration) -> Result<Backup> {
         let mut states = self.client.encryption().recovery().state_stream();
-        while let Some(state) = states.next().await {
-            match state {
-                RecoveryState::Unknown => continue,
-                RecoveryState::Enabled => return Backup::On,
-                RecoveryState::Disabled => return Backup::Off,
-                RecoveryState::Incomplete => return Backup::Locked,
+        let known = async {
+            while let Some(state) = states.next().await {
+                match state {
+                    RecoveryState::Unknown => continue,
+                    RecoveryState::Enabled => return Backup::On,
+                    RecoveryState::Disabled => return Backup::Off,
+                    RecoveryState::Incomplete => return Backup::Locked,
+                }
             }
-        }
-        Backup::Locked
+            Backup::Locked
+        };
+        tokio::time::timeout(wait, known).await.map_err(|_| {
+            Error::Keys("the homeserver has not said where the key backup stands".into())
+        })
     }
 
     /// Back the room keys up under the person's recovery passphrase
@@ -187,17 +207,36 @@ impl MatrixClient {
     /// the room keys ([`BackupDownloadStrategy::OneShot`]), so a new phone reads the old
     /// history. A wrong passphrase on a later device is an error and changes nothing.
     pub async fn recover(&self, passphrase: &str) -> Result<()> {
-        let recovery = self.client.encryption().recovery();
-        let done = match self.backup().await {
+        let encryption = self.client.encryption();
+        let recovery = encryption.recovery();
+        let done = match self.backup().await? {
             Backup::On => Ok(()),
-            Backup::Off => recovery
+            // `Off` is what this device last heard. Another device of the account may have set
+            // the backup up since (two new devices, both told `Off`), and enabling again would
+            // replace its secret storage: ask the homeserver, and open what is there instead.
+            // The homeserver has no compare-and-set for account data, so two devices inside
+            // the same few round trips of `enable` can still both win.
+            Backup::Off if !encryption.secret_storage().is_enabled().await? => recovery
                 .enable()
                 .with_passphrase(passphrase)
                 .await
                 .map(drop),
-            Backup::Locked => recovery.recover(passphrase).await,
+            Backup::Off | Backup::Locked => recovery.recover(passphrase).await,
         };
         done.map_err(|e| Error::Keys(e.to_string()))
+    }
+
+    /// Whether `passphrase` opens the account's secret storage; nothing is imported or
+    /// changed. [`Self::recover`] does not look at the passphrase once this device holds the
+    /// keys ([`Backup::On`]), so this is how a typed phrase is checked against the account.
+    pub async fn check_passphrase(&self, passphrase: &str) -> Result<()> {
+        self.client
+            .encryption()
+            .secret_storage()
+            .open_secret_store(passphrase)
+            .await
+            .map(drop)
+            .map_err(|e| Error::Keys(e.to_string()))
     }
 
     // ---- sync ---------------------------------------------------------------------------------
@@ -207,23 +246,34 @@ impl MatrixClient {
         self.client
             // Every timeline event: messages, and encrypted ones this device has no key for
             // yet (a locked row, replaced once the key arrives).
-            .add_event_handler(move |ev: Raw<AnySyncTimelineEvent>, room: Room| {
-                let weak = weak.clone();
-                async move {
-                    let Some(this) = weak.upgrade() else { return };
-                    let Ok(mut v) = serde_json::from_str::<Value>(ev.json().get()) else {
-                        return;
-                    };
-                    if v["event_id"].is_null() || !rows::is_message(&v) {
-                        return;
+            .add_event_handler(
+                move |ev: Raw<AnySyncTimelineEvent>, room: Room, info: Option<EncryptionInfo>| {
+                    let weak = weak.clone();
+                    async move {
+                        let Some(this) = weak.upgrade() else { return };
+                        let Ok(mut v) = serde_json::from_str::<Value>(ev.json().get()) else {
+                            return;
+                        };
+                        let encrypted = Self::is_encrypted(&room).await;
+                        if v["event_id"].is_null() || !rows::shows(&v, encrypted, info.is_some()) {
+                            return;
+                        }
+                        v["room_id"] = json!(room.room_id().as_str());
+                        let names = this.names_for(&room, std::slice::from_ref(&v)).await;
+                        if let Some(row) = message_row(&v, &|m| names.get(m).cloned()) {
+                            this.push_rows(room.room_id(), vec![row], true);
+                        }
                     }
-                    v["room_id"] = json!(room.room_id().as_str());
-                    let names = this.names_for(&room, std::slice::from_ref(&v)).await;
-                    if let Some(row) = message_row(&v, &|m| names.get(m).cloned()) {
-                        this.push_rows(room.room_id(), vec![row], true);
-                    }
-                }
-            });
+                },
+            );
+    }
+
+    /// Whether the room is end-to-end encrypted; not knowing counts as encrypted, so a
+    /// cleartext message is never shown on a guess ([`rows::shows`]).
+    async fn is_encrypted(room: &Room) -> bool {
+        room.latest_encryption_state()
+            .await
+            .map_or(true, |s| s.is_encrypted())
     }
 
     async fn sync_loop(self: Arc<Self>, mut stop: watch::Receiver<bool>) {
@@ -540,10 +590,14 @@ impl MatrixClient {
         opts.from = from;
         opts.limit = UInt::from(HISTORY_PAGE);
         let page = room.messages(opts).await?;
+        let encrypted = Self::is_encrypted(room).await;
         let events: Vec<Value> = page
             .chunk
             .iter()
-            .filter_map(|e| serde_json::from_str::<Value>(e.raw().json().get()).ok())
+            .filter_map(|e| {
+                let v = serde_json::from_str::<Value>(e.raw().json().get()).ok()?;
+                rows::shows(&v, encrypted, e.encryption_info().is_some()).then_some(v)
+            })
             .collect();
         let names = self.names_for(room, &events).await;
         let rows: Vec<MessageRow> = events
@@ -561,7 +615,7 @@ impl MatrixClient {
             let tl = self.timelines.lock().unwrap_or_else(|p| p.into_inner());
             // A locked row means keys may have arrived since: read the newest page again.
             tl.get(room.room_id())
-                .is_some_and(|t| t.loaded && !t.rows.iter().any(MessageRow::is_locked))
+                .is_some_and(|t| t.loaded && !t.rows.iter().any(|r| r.locked))
         };
         if loaded {
             return Ok(self.push_rows(room.room_id(), Vec::new(), false));
@@ -655,5 +709,43 @@ mod receipt_kind_tests {
         // reads, and it is what decides whether other members see the read.
         assert_eq!(RECEIPT_KIND.as_str(), "m.read.private");
         assert_ne!(RECEIPT_KIND.as_str(), ReceiptType::Read.as_str());
+    }
+}
+
+#[cfg(test)]
+mod backup_tests {
+    use super::*;
+
+    struct Quiet;
+
+    impl Listener for Quiet {
+        fn on_rooms(&self, _: Snapshot) {}
+        fn on_timeline(&self, _: String, _: Vec<MessageRow>) {}
+        fn on_connection(&self, _: bool, _: Option<String>) {}
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_homeserver_that_never_answers_is_an_error_not_a_hang() {
+        let dir = std::env::temp_dir().join(format!("arbos-backup-wait-{}", std::process::id()));
+        let client = MatrixClient::start(
+            Session {
+                // Nothing listens on the discard port.
+                homeserver: "http://127.0.0.1:9".into(),
+                user_id: "@gh_1:arbos.test".into(),
+                access_token: "t".into(),
+                device_id: "D".into(),
+            },
+            Crypto {
+                store_dir: dir.clone(),
+                store_key: None,
+            },
+            Arc::new(Quiet),
+        )
+        .await
+        .unwrap();
+        let waited = client.backup_within(Duration::from_millis(300)).await;
+        assert!(matches!(waited, Err(Error::Keys(_))), "{waited:?}");
+        client.stop();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
