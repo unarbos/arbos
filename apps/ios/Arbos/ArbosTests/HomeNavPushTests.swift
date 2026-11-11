@@ -8,6 +8,7 @@ import XCTest
 ///
 /// The UI tests exercise the gesture; these cases pin the route helpers so a regression
 /// that puts the sheet presentation back fails at compile/unit time too.
+@MainActor
 final class HomeNavPushTests: XCTestCase {
     func testShowOwnProfilePushesOwnProfileRoute() {
         let model = AppModel()
