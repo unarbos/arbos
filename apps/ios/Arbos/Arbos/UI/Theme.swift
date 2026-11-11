@@ -960,9 +960,13 @@ struct PillSurface<S: InsettableShape>: View {
     @Environment(\.theme) private var theme
     let shape: S
     /// How much of `field` sits over the transcript. Lower than the `0.22` that still read as
-    /// too opaque on the phone ([feedback AN3UriU0uCgR4fM7ShS16cc]), and lower than the `0.3`
-    /// the rig used — the rig only had to be *legible* as an alternative; this has to let text
-    /// through.
+    /// too opaque on the phone ([feedback iphone-composer-less-opaque-2026-11-11], TestFlight
+    /// AN3UriU0uCgR4fM7ShS16cc), and lower than the `0.3` the rig used — the rig only had to be
+    /// *legible* as an alternative; this has to let text through.
+    ///
+    /// Scoped to this surface (the composer field pill). The chat header's name pill is
+    /// `GlassPill` / `HeaderGlassBackground` Liquid Glass, not this fill — same complaint
+    /// does not move that path.
     static var translucentAlpha: Double { 0.12 }
 
     var body: some View {
