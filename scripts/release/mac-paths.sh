@@ -9,7 +9,7 @@
 #
 # ── the list is the binary's closure, not a guess at it ─────────────────────────────────────────
 # The crates are `cargo tree -p arbos-mac`: arbos-mac, arbos-core, arbos-client, arbos-matrix,
-# arbos-update. If the linker puts it in Arbos.app, a change to it must reach Mac users.
+# arbos-update, arbos-wallet. If the linker puts it in Arbos.app, a change to it must reach Mac users.
 #
 # arbos-client and arbos-matrix were missing from this list until 2026-11-04, and the gap was a
 # silent ship rather than a late one: a fix in either crate is compiled into the shipped binary
@@ -40,4 +40,4 @@
 # everything here.
 set -euo pipefail
 
-echo "${ARBOS_MAC_PATHS:-crates/arbos-mac crates/arbos-core crates/arbos-client crates/arbos-matrix crates/arbos-update Cargo.lock scripts/bundle-mac.sh site/assets/logo}"
+echo "${ARBOS_MAC_PATHS:-crates/arbos-mac crates/arbos-core crates/arbos-client crates/arbos-matrix crates/arbos-update crates/arbos-wallet Cargo.lock scripts/bundle-mac.sh site/assets/logo}"
