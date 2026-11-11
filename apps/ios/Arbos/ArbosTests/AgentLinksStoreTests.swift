@@ -52,8 +52,19 @@ final class AgentLinksStoreTests: XCTestCase {
     }
 
     func testShortUrlShowsHostAndTailNeverABearer() {
+        // Long open-secret: host + last 6 only (Mac `short_url`).
+        XCTAssertEqual(
+            AgentLinkReveal.shortUrl("https://relay.arbos.life/agent-link/open/Kq2vB7xZ9kT2vQ"),
+            "relay.arbos.life/…/9kT2vQ"
+        )
+        // Fixture tail `fxOpen1` is 7 characters — still capped at 6, never the full open secret.
         let shown = AgentLinkReveal.shortUrl("https://relay.arbos.life/agent-link/open/fxOpen1")
-        XCTAssertEqual(shown, "relay.arbos.life/…/fxOpen1")
+        XCTAssertEqual(shown, "relay.arbos.life/…/xOpen1")
+        // Short tails stay whole.
+        XCTAssertEqual(
+            AgentLinkReveal.shortUrl("http://127.0.0.1:7700/agent-link/open/abc"),
+            "127.0.0.1:7700/…/abc"
+        )
         XCTAssertFalse(shown.contains("arbl_"))
         XCTAssertFalse(AgentAccessLink.fixture(now: now).contains { $0.label.contains("arbl_") })
     }

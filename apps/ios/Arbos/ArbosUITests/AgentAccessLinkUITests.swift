@@ -6,7 +6,8 @@ import XCTest
 /// create / copy / revoke flow against the Mac's Agent access link page.
 ///
 /// Fixture only (`ARBOS_FIXTURE=1`). The mint URL is a short open-secret tail
-/// (`…/fxOpen1`) — never a real bearer (`arbl_…`), and never logged here.
+/// (`…/xOpen1` on the copy row; full open URL still ends in `fxOpen1`) — never a real
+/// bearer (`arbl_…`), and never logged here.
 final class AgentAccessLinkUITests: XCTestCase {
     private let appear: TimeInterval = 90
 

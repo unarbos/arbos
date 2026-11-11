@@ -302,14 +302,16 @@ struct AgentLinkReveal: Identifiable, Equatable {
         )
     }
 
-    /// `relay.arbos.life/…/9kT2vQ`: the host, then the tail of the secret. The full URL is
-    /// what Copy writes; this is only what the row can fit.
+    /// `relay.arbos.life/…/9kT2vQ`: the host, then at most the last 6 characters of the
+    /// open-secret tail (Mac `short_url`). Enough to tell two copies apart; never the whole
+    /// secret, and never a bearer (`arbl_…`). Copy writes the full URL; this is only the row.
     static func shortUrl(_ raw: String) -> String {
         var s = raw
         for p in ["https://", "http://"] where s.hasPrefix(p) { s.removeFirst(p.count) }
         let parts = s.split(separator: "/")
         guard let host = parts.first, parts.count > 1, let tail = parts.last else { return s }
-        return "\(host)/…/\(tail.suffix(6))"
+        let shown = tail.count > 6 ? tail.suffix(6) : tail
+        return "\(host)/…/\(shown)"
     }
 }
 
