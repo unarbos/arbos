@@ -44,7 +44,11 @@ struct AgentAccessLinkPage: View {
             listCard
         }
         .task {
-            await model.refreshAgentLinks()
+            // Only the first load. A fullScreenCover cancels and restarts `.task` on
+            // dismiss; refreshing then would race the list the test just asserted on.
+            if !model.agentLinksLoaded {
+                await model.refreshAgentLinks()
+            }
             guard let landing, landing.hasPrefix("agent-links-cop") else { return }
             scope = .reply
             // Rig URL: a short open-secret tail only — never a real bearer.

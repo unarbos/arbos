@@ -207,15 +207,16 @@ struct SettingsView: View {
         if model.credentials != nil || model.isFixture {
             // Agent access link (Nov 3): the one place an outside agent is given a way in,
             // and the one place every agent token is listed — including the reader tokens
-            // that used to show under Devices.
-            // Button → the same `showAgentLinksPage` destination the rig lands on. A
-            // NavigationLink under PaneCard was present in XCTest but taps did not push.
-            account.append(AnyView(Button { showAgentLinksPage = true } label: {
+            // that used to show under Devices. A Button drives the same
+            // `showAgentLinksPage` destination the rig lands on (NavigationLink taps under
+            // PaneCard were visible to XCTest but did not push).
+            account.append(AnyView(Button {
+                showAgentLinksPage = true
+            } label: {
                 SettingsRow(icon: "link", title: "Agent access link", value: agentLinksSummary)
             }
             .buttonStyle(.plain)
-            .accessibilityIdentifier("settings-agent-links")
-            .accessibilityLabel("Agent access link")))
+            .accessibilityIdentifier("settings-agent-links")))
             // Devices (Oct 23): every GitHub sign-in is one; sign another out here.
             account.append(AnyView(NavigationLink { DevicesPage() } label: {
                 SettingsRow(icon: "laptopcomputer", title: "Devices", value: devicesSummary)

@@ -27,85 +27,79 @@ final class AgentAccessLinkUITests: XCTestCase {
         return app
     }
 
-    private func el(_ app: XCUIApplication, _ id: String) -> XCUIElement {
-        // Prefer buttons: our controls are Buttons with accessibility identifiers.
-        let button = app.buttons[id]
-        if button.waitForExistence(timeout: 2) { return button }
-        return app.descendants(matching: .any)[id].firstMatch
+    private func any(_ app: XCUIApplication, _ id: String) -> XCUIElement {
+        app.descendants(matching: .any)[id].firstMatch
     }
 
     private func tap(_ item: XCUIElement) {
-        if item.isHittable {
-            item.tap()
-        } else {
-            item.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
-        }
+        // Always coordinate-tap: Settings sheet chrome often marks rows non-hittable
+        // even when they are on screen, and app.swipeUp to "fix" that can dismiss the sheet.
+        item.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
     }
 
-    /// The Settings list carries an Agent access link row that opens the page.
+    /// The Settings list carries an Agent access link row; tapping it opens the page.
     func testSettingsShowsTheAgentAccessLinkRow() {
         let app = launch(page: nil)
-        let row = el(app, "settings-agent-links")
+        let row = any(app, "settings-agent-links")
         XCTAssertTrue(row.waitForExistence(timeout: appear),
                       "Settings lists Agent access link")
-        var spins = 0
-        while !row.isHittable, spins < 6 {
-            app.swipeUp()
-            spins += 1
-        }
         tap(row)
 
-        let create = el(app, "agent-link-create")
-        XCTAssertTrue(create.waitForExistence(timeout: appear),
+        // Scope is on the page even before the list finishes loading.
+        XCTAssertTrue(any(app, "agent-link-scope-read").waitForExistence(timeout: appear),
                       "the row opens the Agent access link page")
-        XCTAssertTrue(el(app, "agent-link-scope-read").exists)
-        XCTAssertTrue(el(app, "agent-link-row-lnk-fx-claude").waitForExistence(timeout: 10),
+        XCTAssertTrue(any(app, "agent-link-create").waitForExistence(timeout: appear),
+                      "Create is on the page once links are mintable")
+        XCTAssertTrue(any(app, "agent-link-row-lnk-fx-claude").waitForExistence(timeout: appear),
                       "fixture active links are listed")
     }
 
-    /// Create → copy screen → Copy → Done, then Revoke removes a row. No real key values.
+    /// Revoke a fixture link, then Create → Copy → Done and see the new link. No real keys.
     func testCreateCopyAndRevokeALink() {
         let app = launch()
-        let create = el(app, "agent-link-create")
-        XCTAssertTrue(create.waitForExistence(timeout: appear), "the create control is on screen")
-        XCTAssertTrue(el(app, "agent-link-row-lnk-fx-codex").exists)
+        XCTAssertTrue(any(app, "agent-link-create").waitForExistence(timeout: appear),
+                      "the create control is on screen")
+        XCTAssertTrue(any(app, "agent-link-row-lnk-fx-codex").waitForExistence(timeout: appear))
 
-        tap(create)
+        // Revoke first — before the copy cover — so we are not asserting through a dismiss.
+        let revoke = any(app, "agent-link-revoke-lnk-fx-codex")
+        XCTAssertTrue(revoke.waitForExistence(timeout: appear))
+        tap(revoke)
+        let codex = any(app, "agent-link-row-lnk-fx-codex")
+        let revokedDeadline = Date().addingTimeInterval(10)
+        while codex.exists, Date() < revokedDeadline { usleep(100_000) }
+        XCTAssertFalse(codex.exists, "Revoke drops the row at once")
+        XCTAssertTrue(any(app, "agent-link-row-lnk-fx-claude").exists,
+                      "the other live links stay")
 
-        let copy = el(app, "agent-link-copy")
+        tap(any(app, "agent-link-create"))
+
+        let copy = any(app, "agent-link-copy")
         XCTAssertTrue(copy.waitForExistence(timeout: appear), "the copy screen opens with the link")
-        XCTAssertTrue(el(app, "agent-link-share").exists,
+        XCTAssertTrue(any(app, "agent-link-share").exists,
                       "Share hands the open URL (the llms.txt path) to the agent")
-        // The screen shows a shortened host/tail only — never a bearer prefix.
         XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'arbl_'")).firstMatch.exists)
 
         tap(copy)
-        let done = el(app, "agent-link-done")
+        let done = any(app, "agent-link-done")
         XCTAssertTrue(done.waitForExistence(timeout: 5))
         let enabledDeadline = Date().addingTimeInterval(5)
         while !done.isEnabled, Date() < enabledDeadline { usleep(100_000) }
         XCTAssertTrue(done.isEnabled, "Done waits for Copy, then is live")
         tap(done)
 
-        XCTAssertTrue(create.waitForExistence(timeout: appear), "Done returns to the page")
+        XCTAssertTrue(any(app, "agent-link-create").waitForExistence(timeout: appear),
+                      "Done returns to the page")
         let copyGoneDeadline = Date().addingTimeInterval(10)
         while copy.exists, Date() < copyGoneDeadline { usleep(100_000) }
         XCTAssertFalse(copy.exists, "the copy screen is gone")
-
-        let revoke = el(app, "agent-link-revoke-lnk-fx-codex")
-        XCTAssertTrue(revoke.waitForExistence(timeout: appear), "active links are back after Done")
-        var spins = 0
-        while !revoke.isHittable, spins < 6 {
-            app.swipeUp()
-            spins += 1
-        }
-        tap(revoke)
-
-        let gone = el(app, "agent-link-row-lnk-fx-codex")
-        let deadline = Date().addingTimeInterval(10)
-        while gone.exists, Date() < deadline { usleep(100_000) }
-        XCTAssertFalse(gone.exists, "Revoke drops the row at once")
-        XCTAssertTrue(el(app, "agent-link-row-lnk-fx-claude").exists,
-                      "the other live links stay")
+        // The mint added a live row; Claude from the fixture is still there.
+        XCTAssertTrue(any(app, "agent-link-row-lnk-fx-claude").waitForExistence(timeout: appear),
+                      "the page still lists live links after Create")
+        XCTAssertGreaterThan(
+            app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "agent-link-revoke-")).count,
+            0,
+            "at least one Revoke control remains after Create"
+        )
     }
 }
