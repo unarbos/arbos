@@ -346,6 +346,11 @@ enum Transcript {
     static let turnGap: CGFloat = 13
     /// Space around a centred system line (dates, hand-offs, membership notices).
     static let systemGap: CGFloat = 20
+    /// Extra air above a centred stamp's glyphs. `systemGap` alone left "Today …"
+    /// hard against the bubble above it ([feedback AGgL7fykRs0BE9uiHscNCvk]); the
+    /// bubble below already opens `Theme.bubbleVPad` before its text, so only the
+    /// stamp's top needs this pad.
+    static let stampTopPad: CGFloat = 16
 
     /// Whether a message from `sender` at `at` continues the run that ended with
     /// `prevSender` at `prevAt`: the same sender, within `runWindowMs` of the run's last
@@ -1824,6 +1829,7 @@ struct RowView: View, Equatable {
             .foregroundStyle(theme.muted)
             .frame(maxWidth: .infinity)
             .multilineTextAlignment(.center)
+            .padding(.top, Transcript.stampTopPad)
         case .hidden(let count, _, let handle, let name):
             // The blocker's folded line ([feedback blocked-state-ios-2026-10-26]); Unblock
             // opens the person's sheet (its Unblock asks first).
