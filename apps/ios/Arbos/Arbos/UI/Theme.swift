@@ -887,7 +887,7 @@ struct ControlSurface<S: InsettableShape>: View {
         ZStack {
             if theme.isGlass {
                 // Not `PillSurface`: that one is now the see-through field pill, and a button
-                // flattened to a 22 % fill would be a change nobody asked for.
+                // flattened to a 12 % fill would be a change nobody asked for.
                 SystemPillGlass(shape: shape)
             } else {
                 shape.fill(theme.field)
@@ -959,9 +959,11 @@ struct SystemPillGlass<S: InsettableShape>: View {
 struct PillSurface<S: InsettableShape>: View {
     @Environment(\.theme) private var theme
     let shape: S
-    /// How much of `field` sits over the transcript. Lower than the `0.3` the rig used, because
-    /// the rig only had to be *legible* as an alternative and this has to let text through.
-    static var translucentAlpha: Double { 0.22 }
+    /// How much of `field` sits over the transcript. Lower than the `0.22` that still read as
+    /// too opaque on the phone ([feedback AN3UriU0uCgR4fM7ShS16cc]), and lower than the `0.3`
+    /// the rig used — the rig only had to be *legible* as an alternative; this has to let text
+    /// through.
+    static var translucentAlpha: Double { 0.12 }
 
     var body: some View {
         if !theme.isGlass {
