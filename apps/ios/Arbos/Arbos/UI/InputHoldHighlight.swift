@@ -11,11 +11,11 @@ import UIKit
 /// thing that drives it never landed.
 ///
 /// So the rule lives here, applied by the shared field helpers rather than by each screen, and
-/// the overlay publishes `HoldHighlight.identifier` for the whole life of the field — value
-/// `"off"` at rest, `"lit"` under a finger (and through the post-lift tail). Keeping the
-/// element in the tree (rather than mounting it only while drawn) is what lets
-/// `ComposerParityUITests` wait for the light without racing a disappearing wash. Opacity
-/// alone is not enough: a zero-opacity view is often dropped from the accessibility tree.
+/// a zero-size probe behind the field publishes `HoldHighlight.identifier` for the whole
+/// life of the field — value `"off"` at rest, `"lit"` under a finger (and through the
+/// post-lift tail). Keeping that element in the tree (rather than mounting it only while
+/// drawn) lets `ComposerParityUITests` wait for the light without racing a disappearing
+/// wash, without covering siblings such as the staged-picture ✕.
 enum HoldHighlight {
     /// Published by the hold overlay on every field that uses the modifier.
     static let identifier = "input-hold-highlight"
@@ -198,16 +198,20 @@ private struct InputHoldHighlightModifier<S: InsettableShape>: ViewModifier {
                     startFade()
                 }
             })
+            // Zero-size a11y probe behind the field: always queryable (`off` / `lit`) without
+            // covering siblings such as the staged-picture ✕ (a full-bleed clear overlay made
+            // `composer-remove-attachment` report not hittable to XCTest and to hit-testing).
+            .background(alignment: .topLeading) {
+                Color.clear
+                    .frame(width: 0, height: 0)
+                    .allowsHitTesting(false)
+                    .accessibilityElement()
+                    .accessibilityIdentifier(HoldHighlight.identifier)
+                    .accessibilityValue(active ? HoldHighlight.valueLit : HoldHighlight.valueOff)
+            }
             .overlay {
                 GeometryReader { geo in
                     ZStack {
-                        // Always mounted so XCTest can query the identifier at rest and wait
-                        // for value `lit` without racing the wash out of the tree.
-                        Color.clear
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                            .accessibilityElement()
-                            .accessibilityIdentifier(HoldHighlight.identifier)
-                            .accessibilityValue(active ? HoldHighlight.valueLit : HoldHighlight.valueOff)
                         if active, let at {
                             HoldHighlightWash(shape: shape, at: at, size: geo.size)
                                 .transition(.opacity)

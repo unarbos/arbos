@@ -114,9 +114,6 @@ final class ComposerParityUITests: XCTestCase {
 
         let remove = app.descendants(matching: .any)["composer-remove-attachment"].firstMatch
         XCTAssertTrue(remove.waitForExistence(timeout: appear), "the ✕ badge is on the thumbnail's corner")
-        let removeReady = expectation(for: NSPredicate(format: "isHittable == true"),
-                                      evaluatedWith: remove, handler: nil)
-        wait(for: [removeReady], timeout: 5)
         XCTAssertGreaterThan(remove.frame.midX, thumb.frame.midX, "top-right of the picture")
         XCTAssertLessThan(remove.frame.midY, thumb.frame.midY, "top-right of the picture")
 
