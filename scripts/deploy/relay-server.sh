@@ -156,6 +156,9 @@ opread() { HOME=/root XDG_CONFIG_HOME=/root/.config op read "$1" 2>/dev/null </d
 if command -v op >/dev/null 2>&1 && [[ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]]; then
   : "${OPENROUTER_API_KEY:=$(opread 'op://Arbos/xbirrctuljw2m6aieoway2szom/credential')}"
   : "${OPENAI_API_KEY:=$(opread 'op://Arbos/6k3kuhvc3xxwpgao4mblskj45e/notesPlain' | tr -d '[:space:]')}"
+  # Daytona is retired as a box provider (2026-11-09). The key is still read and written so the
+  # operator's one-off cleanup of the sandboxes that are left has it in relay.env; the relay itself
+  # no longer looks at it. Drop both once those sandboxes are gone.
   : "${DAYTONA_API_KEY:=$(opread 'op://Arbos/fywmj6vtq5delybw5c7a53l2qa/notesPlain' | tr -d '[:space:]')}"
   : "${ARBOS_RELAY_ADMIN_TOKEN:=$(opread 'op://Arbos/pjwsl7tjrhcbzbqos2masde2u4/credential')}"
   : "${ARBOS_RELAY_KEY:=$(opread 'op://Arbos/t5a4ugctkgljhb3t6f732cxbeu/credential')}"
@@ -266,7 +269,6 @@ fi
 # default; without it the relay answers 400 bad_redirect. $SITE_URL is already an origin
 # (https://arbos.life); if you point ARBOS_SITE_URL at a path, only its origin counts here.
 : "${ARBOS_AUTH_REDIRECTS:=$SITE_URL}"
-[[ -n "${DAYTONA_API_KEY:-}" ]] || echo "WARNING: DAYTONA_API_KEY is empty — new projects will get process boxes"
 [[ -n "${OPENROUTER_API_KEY:-}${OPENAI_API_KEY:-}" ]] || echo "WARNING: no model provider key"
 : "${ARBOS_RELAY_ADMIN_TOKEN:=adm_$(openssl rand -hex 32)}"
 : "${ARBOS_RELAY_KEY:=$(openssl rand -hex 32)}"
@@ -294,15 +296,17 @@ ARBOS_GITHUB_OAUTH_CLIENT_SECRET=${ARBOS_GITHUB_CLIENT_SECRET:-}
 ARBOS_OAUTH_REDIRECT_URL=$PUBLIC_URL/auth/github/callback
 RUST_LOG=info,arbos_relay=info
 EOF
-# Daytona snapshot for NEW boxes (the relay's compiled-in default otherwise). Never written empty:
-# clap takes an empty env value literally. Export ARBOS_DAYTONA_SNAPSHOT for one run to set it; it
-# is kept on later runs.
+# Snapshot NEW boxes are made from (the relay's compiled-in default otherwise); the deploy worker
+# rewrites it on every image roll. The variable keeps Daytona's name, which every live relay already
+# reads. Never written empty: clap takes an empty env value literally. Export ARBOS_DAYTONA_SNAPSHOT
+# for one run to set it; it is kept on later runs.
 [[ -z "${ARBOS_DAYTONA_SNAPSHOT:-}" ]] || echo "ARBOS_DAYTONA_SNAPSHOT=$ARBOS_DAYTONA_SNAPSHOT" >> "$ENV_FILE"
 # LiveKit (calls): only when configured, so a relay without an SFU keeps calls disabled.
 if [[ -n "${LIVEKIT_API_KEY:-}" && -n "${LIVEKIT_API_SECRET:-}" ]]; then
   printf 'LIVEKIT_URL=%s\nLIVEKIT_API_KEY=%s\nLIVEKIT_API_SECRET=%s\n' "${LIVEKIT_URL:-wss://livekit.arbos.life}" "$LIVEKIT_API_KEY" "$LIVEKIT_API_SECRET" >> "$ENV_FILE"
 fi
-# Host fleet (D89): only the keys that have a value; ARBOS_DEFAULT_PROVIDER unset means Daytona.
+# Host fleet (D89): only the keys that have a value. ARBOS_DEFAULT_PROVIDER=gvisor is what puts new
+# boxes on this host; unset means a local process box, never Daytona (retired 2026-11-09).
 for k in "${FLEET_KEYS[@]}"; do
   [[ -z "${!k:-}" ]] || printf '%s=%s\n' "$k" "${!k}" >> "$ENV_FILE"
 done
@@ -343,7 +347,7 @@ umask 022
 say "systemd"
 cat > /etc/systemd/system/arbos-relay.service <<EOF
 [Unit]
-Description=Arbos relay (registry, pairing, sync rooms, model proxy, Daytona)
+Description=Arbos relay (registry, pairing, sync rooms, model proxy, boxes)
 After=network-online.target
 Wants=network-online.target
 

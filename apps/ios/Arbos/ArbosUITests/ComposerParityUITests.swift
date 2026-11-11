@@ -5,9 +5,10 @@ import XCTest
 /// (Jacob, 2026-11-09). The pure rules are in `ComposerParityTests`; these are the claims that
 /// only the laid-out box can answer, including the one Jacob has now asked for twice.
 ///
-/// `testTheBoxLightsUnderAHoldingFinger` is the regression guard for the touch-and-hold
-/// highlight ([feedback attachment-in-composer-2026-11-09] is the staged picture; the
-/// highlight is Jacob, 2026-11-09 11:55). It went missing once already in a way worth
+/// `testTheBoxVisiblyLightsUnderAHoldingFinger` is the regression guard for the touch-and-hold
+/// highlight ([feedback composer-hold-highlight-2026-11-09], Jacob 2026-11-09 11:55;
+/// [feedback attachment-in-composer-2026-11-09] is the staged picture). It went missing once
+/// already in a way worth
 /// knowing about: `ControlSurface` has always taken a `pressed` flag and `Theme.controlPill`
 /// has always plumbed it, but nothing ever passed `true`. A test that only checked the flag
 /// existed would have passed throughout. This one holds a finger on the real field and looks

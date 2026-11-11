@@ -21,6 +21,7 @@ use crate::db::Db;
 
 pub const ACCOUNTS_SCHEMA: &str = r#"
 CREATE UNIQUE INDEX IF NOT EXISTS users_github ON users(github_id) WHERE github_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS devices_user_live ON devices(user_id) WHERE revoked_at IS NULL;
 CREATE TABLE IF NOT EXISTS auth_flows (
   state TEXT PRIMARY KEY, code_verifier TEXT NOT NULL, redirect TEXT NOT NULL,
   device_name TEXT NOT NULL, invite TEXT, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL
@@ -40,6 +41,9 @@ CREATE TABLE IF NOT EXISTS credit_ledger (
 );
 CREATE INDEX IF NOT EXISTS credit_ledger_user_at ON credit_ledger(user_id, at);
 CREATE INDEX IF NOT EXISTS credit_ledger_at ON credit_ledger(at);
+-- Old sandboxes an upgrade left behind. Only the retired Daytona provider ever kept one (a gVisor
+-- roll re-creates the container over the same /work), so nothing writes this table any more; the
+-- rows that are in it stay for the operator-run deletion of those sandboxes.
 CREATE TABLE IF NOT EXISTS box_history (
   sandbox_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, snapshot TEXT, replaced_at INTEGER NOT NULL,
   delete_after INTEGER NOT NULL, deleted_at INTEGER, row_json TEXT, archived_at INTEGER,
@@ -65,8 +69,6 @@ pub fn migrate_accounts(c: &Connection) {
         "ALTER TABLE boxes ADD COLUMN held_stopped INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE box_history ADD COLUMN row_json TEXT",
         "ALTER TABLE box_history ADD COLUMN archived_at INTEGER",
-        // 1 = the new box of a rolled-back upgrade (half-carried /work): kept so the sweeper
-        // deletes it after the window, never re-adopted by a repair.
         "ALTER TABLE box_history ADD COLUMN partial INTEGER NOT NULL DEFAULT 0",
         // Who may add this person to a people group: anyone | people_i_know | nobody.
         "ALTER TABLE users ADD COLUMN group_add TEXT NOT NULL DEFAULT 'anyone'",
@@ -185,14 +187,6 @@ impl std::fmt::Display for DebitRefused {
             DebitRefused::ReadOnly { reason } => write!(f, "read-only: {reason}"),
         }
     }
-}
-
-/// An old sandbox kept after an upgrade, with the `boxes` row it had.
-#[derive(Debug, Clone)]
-pub struct RetainedBox {
-    pub sandbox_id: String,
-    pub snapshot: Option<String>,
-    pub row: Option<crate::db::Sandbox>,
 }
 
 /// Kill switch record kept in `meta` under `kill_switch`.
@@ -1174,156 +1168,6 @@ impl Db {
         })
     }
 
-    // ---- box history (old sandboxes kept as fallback after an upgrade) -------------------------
-
-    /// Keep an old sandbox as a fallback after an upgrade; `row_json` is the full `boxes` row at
-    /// that time (token hash, mcp token, device id, urls) so it can be re-adopted.
-    pub fn insert_box_history(&self, row: &crate::db::Sandbox, delete_after: i64) -> Result<()> {
-        let sandbox_id = row.sandbox_id.clone().unwrap_or_default();
-        self.with(|c| {
-            c.execute(
-                "INSERT INTO box_history(sandbox_id, user_id, snapshot, replaced_at, delete_after, row_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                 ON CONFLICT(sandbox_id) DO UPDATE SET delete_after = excluded.delete_after, deleted_at = NULL, row_json = excluded.row_json",
-                params![sandbox_id, row.user_id, row.snapshot, now_ms(), delete_after, serde_json::to_string(row).unwrap_or_default()],
-            )
-            .map(|_| ())
-        })
-    }
-
-    /// Record the new sandbox of a rolled-back upgrade so the history sweeper deletes it after
-    /// `delete_after` (retrying until Daytona agrees) — never left running unrecorded. It holds a
-    /// half-carried `/work`, so [`Db::latest_box_history`] never offers it for repair.
-    pub fn insert_partial_box_history(
-        &self,
-        row: &crate::db::Sandbox,
-        delete_after: i64,
-    ) -> Result<()> {
-        let sandbox_id = row.sandbox_id.clone().unwrap_or_default();
-        self.with(|c| {
-            c.execute(
-                "INSERT INTO box_history(sandbox_id, user_id, snapshot, replaced_at, delete_after, row_json, partial) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1)
-                 ON CONFLICT(sandbox_id) DO UPDATE SET delete_after = excluded.delete_after, deleted_at = NULL, row_json = excluded.row_json, partial = 1",
-                params![sandbox_id, row.user_id, row.snapshot, now_ms(), delete_after, serde_json::to_string(row).unwrap_or_default()],
-            )
-            .map(|_| ())
-        })
-    }
-
-    #[cfg(test)]
-    pub fn box_history_entry(&self, sandbox_id: &str) -> Result<Option<(i64, bool)>> {
-        self.with(|c| {
-            c.query_row(
-                "SELECT delete_after, partial FROM box_history WHERE sandbox_id = ?1 AND deleted_at IS NULL",
-                params![sandbox_id],
-                |r| Ok((r.get(0)?, r.get::<_, i64>(1)? == 1)),
-            )
-            .optional()
-        })
-    }
-
-    #[cfg(test)]
-    pub fn insert_box_history_at(
-        &self,
-        user_id: &str,
-        sandbox_id: &str,
-        replaced_at: i64,
-    ) -> Result<()> {
-        self.with(|c| {
-            c.execute(
-                "INSERT INTO box_history(sandbox_id, user_id, snapshot, replaced_at, delete_after) VALUES (?1, ?2, NULL, ?3, ?3 + 1000)",
-                params![sandbox_id, user_id, replaced_at],
-            )
-            .map(|_| ())
-        })
-    }
-
-    /// Forget a history entry (the upgrade that made it was rolled back).
-    pub fn remove_box_history(&self, sandbox_id: &str) -> Result<()> {
-        self.with(|c| {
-            c.execute(
-                "DELETE FROM box_history WHERE sandbox_id = ?1",
-                params![sandbox_id],
-            )
-            .map(|_| ())
-        })
-    }
-
-    /// The newest retained sandbox of a user that has not been deleted: `(sandbox_id, snapshot, row)`.
-    pub fn latest_box_history(&self, user_id: &str) -> Result<Option<RetainedBox>> {
-        self.with(|c| {
-            c.query_row(
-                "SELECT sandbox_id, snapshot, row_json FROM box_history WHERE user_id = ?1 AND deleted_at IS NULL AND partial = 0 ORDER BY replaced_at DESC LIMIT 1",
-                params![user_id],
-                |r| {
-                    let row: Option<String> = r.get(2)?;
-                    Ok(RetainedBox {
-                        sandbox_id: r.get(0)?,
-                        snapshot: r.get(1)?,
-                        row: row.and_then(|j| serde_json::from_str(&j).ok()),
-                    })
-                },
-            )
-            .optional()
-        })
-    }
-
-    /// `(user_id, sandbox_id)` of old sandboxes past their fallback window. A sandbox a box row
-    /// names again (an upgrade cut short after the old box went into history) is never due.
-    pub fn box_history_due(&self) -> Result<Vec<(String, String)>> {
-        self.with(|c| {
-            let mut st = c.prepare(
-                "SELECT user_id, sandbox_id FROM box_history WHERE deleted_at IS NULL AND delete_after <= ?1
-                   AND sandbox_id NOT IN (SELECT sandbox_id FROM boxes WHERE sandbox_id IS NOT NULL)",
-            )?;
-            let rows = st.query_map(params![now_ms()], |r| Ok((r.get(0)?, r.get(1)?)))?;
-            rows.collect()
-        })
-    }
-
-    /// Retained sandboxes to Daytona-archive now: per user, every live (not deleted, not yet archived)
-    /// history row beyond the `keep` newest by `replaced_at`. The newest `keep` stay unarchived so a
-    /// rollback / repair restarts in seconds; the rest sit archived (cold, no disk quota) until their
-    /// fallback window ends. 2026-10-22: 308 retained 10 GiB sandboxes filled the org's 5000 GiB quota.
-    pub fn box_history_to_archive(
-        &self,
-        user_id: Option<&str>,
-        keep: usize,
-    ) -> Result<Vec<(String, String)>> {
-        self.with(|c| {
-            let mut st = c.prepare(
-                "SELECT user_id, sandbox_id FROM (
-                   SELECT user_id, sandbox_id,
-                          ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY replaced_at DESC, sandbox_id DESC) AS rn
-                   FROM box_history WHERE deleted_at IS NULL AND archived_at IS NULL
-                     AND (?1 IS NULL OR user_id = ?1)
-                     AND sandbox_id NOT IN (SELECT sandbox_id FROM boxes WHERE sandbox_id IS NOT NULL)
-                 ) WHERE rn > ?2 ORDER BY user_id, rn",
-            )?;
-            let rows = st.query_map(params![user_id, keep as i64], |r| Ok((r.get(0)?, r.get(1)?)))?;
-            rows.collect()
-        })
-    }
-
-    pub fn mark_box_history_archived(&self, sandbox_id: &str) -> Result<()> {
-        self.with(|c| {
-            c.execute(
-                "UPDATE box_history SET archived_at = ?2 WHERE sandbox_id = ?1",
-                params![sandbox_id, now_ms()],
-            )
-            .map(|_| ())
-        })
-    }
-
-    pub fn mark_box_history_deleted(&self, sandbox_id: &str) -> Result<()> {
-        self.with(|c| {
-            c.execute(
-                "UPDATE box_history SET deleted_at = ?2 WHERE sandbox_id = ?1",
-                params![sandbox_id, now_ms()],
-            )
-            .map(|_| ())
-        })
-    }
-
     // ---- machine metering ---------------------------------------------------------------------
 
     /// Last metering tick for a user's box: `(at_ms, state)`.
@@ -1347,63 +1191,6 @@ impl Db {
             )
             .map(|_| ())
         })
-    }
-}
-
-#[cfg(test)]
-mod box_history_archive_tests {
-    use crate::db::Db;
-
-    fn temp_db() -> std::path::PathBuf {
-        std::env::temp_dir().join(format!(
-            "arbos-boxhist-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ))
-    }
-
-    /// Invariant: per user, the 2 newest retained sandboxes stay unarchived (fast rollback); older ones
-    /// are archived; archived and deleted rows are never returned again.
-    #[test]
-    fn keeps_two_newest_per_user_and_archives_the_rest() {
-        let dir = temp_db();
-        let db = Db::open(&dir.join("relay.db")).expect("db");
-        for (i, id) in ["a-old1", "a-old2", "a-new1", "a-new2"].iter().enumerate() {
-            db.insert_box_history_at("gh_a", id, 1000 + i as i64)
-                .unwrap();
-        }
-        db.insert_box_history_at("gh_b", "b-only", 5000).unwrap();
-        db.insert_box_history_at("test_x", "t-old", 100).unwrap();
-        db.insert_box_history_at("test_x", "t-mid", 200).unwrap();
-        db.insert_box_history_at("test_x", "t-new", 300).unwrap();
-
-        let all = db.box_history_to_archive(None, 2).unwrap();
-        assert_eq!(
-            all,
-            vec![
-                ("gh_a".into(), "a-old2".into()),
-                ("gh_a".into(), "a-old1".into()),
-                ("test_x".into(), "t-old".into())
-            ]
-        );
-
-        let only_a = db.box_history_to_archive(Some("gh_a"), 2).unwrap();
-        assert_eq!(only_a.len(), 2);
-        assert!(only_a.iter().all(|(u, _)| u == "gh_a"));
-
-        db.mark_box_history_archived("a-old1").unwrap();
-        db.mark_box_history_archived("a-old2").unwrap();
-        db.mark_box_history_deleted("t-old").unwrap();
-        assert!(db.box_history_to_archive(None, 2).unwrap().is_empty());
-
-        // A new upgrade pushes one of the kept two out: it becomes the next to archive.
-        db.insert_box_history_at("gh_a", "a-new3", 9000).unwrap();
-        assert_eq!(
-            db.box_history_to_archive(Some("gh_a"), 2).unwrap(),
-            vec![("gh_a".into(), "a-new1".into())]
-        );
     }
 }
 

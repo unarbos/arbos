@@ -1,0 +1,2912 @@
+{
+  "protocol": 1,
+  "seed": 20261109,
+  "repetitions": 101,
+  "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+  "python_sqlite_seed_oracle": "3.53.4",
+  "source_before": {
+    "crates/arbos-relay/src/db.rs": "11e5d8533bce86040f900e29726c9310295f63379f6a1e61b4f9417761c54c22",
+    "crates/arbos-relay/src/db_people.rs": "215d752611f892c3e41554b2c9636a8e86fdcac26fec12cea58e1b6c3b76b007"
+  },
+  "source_after": {
+    "crates/arbos-relay/src/db.rs": "11e5d8533bce86040f900e29726c9310295f63379f6a1e61b4f9417761c54c22",
+    "crates/arbos-relay/src/db_people.rs": "35429ec348f14fece33f302f99187f281ea7d9486bf3598f0b70417d7cefb28c"
+  },
+  "queries": {
+    "before": [
+      "SELECT p.id, p.kind, p.created_by, p.created_at, p.title, p.image_key, p.avatar_leaf, p.avatar_leaf_color, p.description FROM people_chats p\n                 JOIN people_members m ON m.chat_id = p.id\n                 WHERE m.member = ?1 AND m.left_at IS NULL AND p.deleted_at IS NULL\n                 ORDER BY p.created_at DESC",
+      "SELECT chat_id, member, role, added_by, joined_at, settings, muted, silenced, silenced_until FROM people_members WHERE chat_id = ?1 AND left_at IS NULL\n                 ORDER BY joined_at, CASE WHEN member LIKE 'user:%' THEN 0 ELSE 1 END, member"
+    ],
+    "after": [
+      "SELECT p.id, p.kind, p.created_by, p.created_at, p.title, p.image_key, p.avatar_leaf, p.avatar_leaf_color, p.description FROM people_chats p\n                 JOIN people_members m ON m.chat_id = p.id\n                 WHERE m.member = ?1 AND m.left_at IS NULL AND p.deleted_at IS NULL\n                 ORDER BY p.created_at DESC",
+      "SELECT chat_id, member, role, added_by, joined_at, settings, muted, silenced, silenced_until FROM people_members\n                 WHERE left_at IS NULL AND chat_id IN (\n                   SELECT p.id FROM people_chats p JOIN people_members m ON m.chat_id = p.id\n                   WHERE m.member = ?1 AND m.left_at IS NULL AND p.deleted_at IS NULL\n                 )\n                 ORDER BY chat_id, joined_at, CASE WHEN member LIKE 'user:%' THEN 0 ELSE 1 END, member"
+    ]
+  },
+  "experiments": [
+    {
+      "scale": 1,
+      "fixture": {
+        "experiment": "registry",
+        "scale": 1,
+        "rooms": 10,
+        "rows_per_room": 100,
+        "counts": {
+          "users": 7,
+          "devices": 7,
+          "projects": 10,
+          "chats": 10,
+          "people_chats": 10,
+          "people_members": 50,
+          "project_members": 10,
+          "people_reads": 10,
+          "room_seq": 10,
+          "checkpoints": 10,
+          "rows": 1000
+        },
+        "database_bytes": 712704
+      },
+      "fixture_seconds": 0.022209541988559067,
+      "equivalence": {
+        "complete_ordered_rows": "PASS",
+        "sha256_per_member": {
+          "user:u_owner": "e46ee87be04f8c0fc1973b08b2072467806982bc85808769f7bf7cb0eff31220",
+          "user:u_peer_0": "e46ee87be04f8c0fc1973b08b2072467806982bc85808769f7bf7cb0eff31220",
+          "agent:p_00001": "89003c5e45ac1284510f60199f1d15dfa002317b20dae2f4ef5d62d876e5f5b9",
+          "user:absent": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+        }
+      },
+      "samples_ns": {
+        "before": [
+          91000,
+          85000,
+          89000,
+          90000,
+          85000,
+          83000,
+          84000,
+          84000,
+          84000,
+          83000,
+          84000,
+          88000,
+          83000,
+          84000,
+          83000,
+          84000,
+          84000,
+          85000,
+          85000,
+          88000,
+          85000,
+          83000,
+          88000,
+          84000,
+          84000,
+          90000,
+          84000,
+          90000,
+          88000,
+          82000,
+          84000,
+          83000,
+          84000,
+          84000,
+          95000,
+          97000,
+          84000,
+          83000,
+          84000,
+          83000,
+          85000,
+          84000,
+          86000,
+          87000,
+          84000,
+          83000,
+          84000,
+          90000,
+          83000,
+          91000,
+          83000,
+          83000,
+          83000,
+          84000,
+          82000,
+          83000,
+          88000,
+          84000,
+          91000,
+          103000,
+          88000,
+          136000,
+          96000,
+          86000,
+          87000,
+          84000,
+          83000,
+          83000,
+          84000,
+          83000,
+          83000,
+          83000,
+          83000,
+          94000,
+          87000,
+          85000,
+          84000,
+          85000,
+          85000,
+          86000,
+          83000,
+          90000,
+          84000,
+          83000,
+          91000,
+          83000,
+          82000,
+          83000,
+          83000,
+          84000,
+          97000,
+          82000,
+          84000,
+          83000,
+          84000,
+          83000,
+          82000,
+          83000,
+          83000,
+          85000,
+          84000
+        ],
+        "after": [
+          41000,
+          47000,
+          42000,
+          39000,
+          39000,
+          39000,
+          39000,
+          43000,
+          39000,
+          51000,
+          40000,
+          39000,
+          38000,
+          39000,
+          38000,
+          39000,
+          39000,
+          39000,
+          38000,
+          39000,
+          39000,
+          38000,
+          46000,
+          39000,
+          38000,
+          39000,
+          42000,
+          42000,
+          51000,
+          38000,
+          39000,
+          39000,
+          38000,
+          39000,
+          43000,
+          45000,
+          39000,
+          38000,
+          45000,
+          38000,
+          39000,
+          39000,
+          57000,
+          47000,
+          39000,
+          38000,
+          38000,
+          45000,
+          39000,
+          39000,
+          39000,
+          39000,
+          38000,
+          41000,
+          38000,
+          41000,
+          39000,
+          41000,
+          39000,
+          43000,
+          39000,
+          39000,
+          56000,
+          44000,
+          41000,
+          40000,
+          39000,
+          39000,
+          39000,
+          39000,
+          39000,
+          39000,
+          39000,
+          39000,
+          39000,
+          39000,
+          39000,
+          40000,
+          39000,
+          39000,
+          42000,
+          40000,
+          39000,
+          39000,
+          38000,
+          38000,
+          38000,
+          38000,
+          38000,
+          49000,
+          41000,
+          39000,
+          39000,
+          39000,
+          41000,
+          38000,
+          38000,
+          39000,
+          39000,
+          40000,
+          39000
+        ]
+      },
+      "order": [
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ]
+      ],
+      "summary": {
+        "before": {
+          "n": 101,
+          "p50_ns": 84000.0,
+          "p95_ns": 95000.0,
+          "p99_ns": 103000.0,
+          "min_ns": 82000,
+          "max_ns": 136000
+        },
+        "after": {
+          "n": 101,
+          "p50_ns": 39000.0,
+          "p95_ns": 47000.0,
+          "p99_ns": 56000.0,
+          "min_ns": 38000,
+          "max_ns": 57000
+        },
+        "median_saved_ns": 45000,
+        "paired_median_saved_95_ci_ns": [
+          45000.0,
+          45000.0
+        ],
+        "two_sided_sign_test_p": 7.888609052210118e-31,
+        "non_tied_pairs": 101
+      },
+      "counters": {
+        "before": {
+          "elapsed_ns": 113000,
+          "visits": 70,
+          "vm_steps": 2180,
+          "returned": 60,
+          "statements": 11
+        },
+        "after": {
+          "elapsed_ns": 39000,
+          "visits": 90,
+          "vm_steps": 2504,
+          "returned": 60,
+          "statements": 2
+        }
+      },
+      "plans": {
+        "before": [
+          [
+            "SEARCH m USING INDEX people_members_member (member=?)",
+            "SEARCH p USING INDEX sqlite_autoindex_people_chats_1 (id=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ],
+          [
+            "SEARCH people_members USING INDEX sqlite_autoindex_people_members_1 (chat_id=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ]
+        ],
+        "after": [
+          [
+            "SEARCH m USING INDEX people_members_member (member=?)",
+            "SEARCH p USING INDEX sqlite_autoindex_people_chats_1 (id=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ],
+          [
+            "SEARCH people_members USING INDEX sqlite_autoindex_people_members_1 (chat_id=?)",
+            "LIST SUBQUERY 1",
+            "SEARCH m USING INDEX people_members_member (member=?)",
+            "SEARCH p USING INDEX sqlite_autoindex_people_chats_1 (id=?)",
+            "USE TEMP B-TREE FOR LAST 3 TERMS OF ORDER BY"
+          ]
+        ]
+      }
+    },
+    {
+      "scale": 10,
+      "fixture": {
+        "experiment": "registry",
+        "scale": 10,
+        "rooms": 100,
+        "rows_per_room": 100,
+        "counts": {
+          "users": 7,
+          "devices": 7,
+          "projects": 100,
+          "chats": 100,
+          "people_chats": 100,
+          "people_members": 500,
+          "project_members": 100,
+          "people_reads": 100,
+          "room_seq": 100,
+          "checkpoints": 100,
+          "rows": 10000
+        },
+        "database_bytes": 2228224
+      },
+      "fixture_seconds": 0.04020449996460229,
+      "equivalence": {
+        "complete_ordered_rows": "PASS",
+        "sha256_per_member": {
+          "user:u_owner": "cd7cc9f01306bcfd2d4d0584a50097ab56c005f8f535f37337106d66ce8113fb",
+          "user:u_peer_0": "cd7cc9f01306bcfd2d4d0584a50097ab56c005f8f535f37337106d66ce8113fb",
+          "agent:p_00001": "89003c5e45ac1284510f60199f1d15dfa002317b20dae2f4ef5d62d876e5f5b9",
+          "user:absent": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+        }
+      },
+      "samples_ns": {
+        "before": [
+          790000,
+          807000,
+          794000,
+          856000,
+          844000,
+          844000,
+          817000,
+          860000,
+          811000,
+          793000,
+          854000,
+          808000,
+          821000,
+          825000,
+          800000,
+          854000,
+          825000,
+          824000,
+          790000,
+          836000,
+          821000,
+          824000,
+          812000,
+          817000,
+          874000,
+          796000,
+          838000,
+          809000,
+          793000,
+          807000,
+          814000,
+          789000,
+          865000,
+          883000,
+          811000,
+          884000,
+          985000,
+          780000,
+          823000,
+          775000,
+          833000,
+          845000,
+          803000,
+          843000,
+          897000,
+          785000,
+          792000,
+          830000,
+          777000,
+          830000,
+          816000,
+          810000,
+          845000,
+          862000,
+          787000,
+          812000,
+          832000,
+          784000,
+          838000,
+          796000,
+          799000,
+          853000,
+          801000,
+          809000,
+          808000,
+          843000,
+          816000,
+          811000,
+          861000,
+          795000,
+          851000,
+          844000,
+          786000,
+          814000,
+          823000,
+          775000,
+          797000,
+          774000,
+          804000,
+          818000,
+          803000,
+          856000,
+          800000,
+          782000,
+          813000,
+          789000,
+          823000,
+          828000,
+          818000,
+          814000,
+          831000,
+          828000,
+          824000,
+          793000,
+          805000,
+          795000,
+          803000,
+          835000,
+          832000,
+          818000,
+          837000
+        ],
+        "after": [
+          242000,
+          242000,
+          245000,
+          258000,
+          257000,
+          252000,
+          250000,
+          257000,
+          251000,
+          245000,
+          248000,
+          243000,
+          242000,
+          264000,
+          248000,
+          250000,
+          298000,
+          250000,
+          259000,
+          245000,
+          251000,
+          253000,
+          244000,
+          245000,
+          258000,
+          253000,
+          328000,
+          252000,
+          252000,
+          242000,
+          254000,
+          250000,
+          244000,
+          263000,
+          242000,
+          272000,
+          259000,
+          262000,
+          245000,
+          269000,
+          244000,
+          244000,
+          251000,
+          269000,
+          243000,
+          241000,
+          241000,
+          241000,
+          243000,
+          245000,
+          260000,
+          246000,
+          251000,
+          255000,
+          244000,
+          245000,
+          246000,
+          251000,
+          240000,
+          251000,
+          263000,
+          247000,
+          289000,
+          252000,
+          252000,
+          241000,
+          266000,
+          270000,
+          240000,
+          246000,
+          248000,
+          244000,
+          281000,
+          239000,
+          239000,
+          266000,
+          238000,
+          241000,
+          246000,
+          243000,
+          241000,
+          249000,
+          240000,
+          240000,
+          243000,
+          247000,
+          242000,
+          247000,
+          249000,
+          254000,
+          253000,
+          243000,
+          246000,
+          241000,
+          252000,
+          241000,
+          245000,
+          246000,
+          259000,
+          249000,
+          254000
+        ]
+      },
+      "order": [
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ]
+      ],
+      "summary": {
+        "before": {
+          "n": 101,
+          "p50_ns": 816000.0,
+          "p95_ns": 865000.0,
+          "p99_ns": 897000.0,
+          "min_ns": 774000,
+          "max_ns": 985000
+        },
+        "after": {
+          "n": 101,
+          "p50_ns": 248000.0,
+          "p95_ns": 270000.0,
+          "p99_ns": 298000.0,
+          "min_ns": 238000,
+          "max_ns": 328000
+        },
+        "median_saved_ns": 567000,
+        "paired_median_saved_95_ci_ns": [
+          560000.0,
+          574000.0
+        ],
+        "two_sided_sign_test_p": 7.888609052210118e-31,
+        "non_tied_pairs": 101
+      },
+      "counters": {
+        "before": {
+          "elapsed_ns": 776000,
+          "visits": 700,
+          "vm_steps": 21665,
+          "returned": 600,
+          "statements": 101
+        },
+        "after": {
+          "elapsed_ns": 241000,
+          "visits": 900,
+          "vm_steps": 24689,
+          "returned": 600,
+          "statements": 2
+        }
+      },
+      "plans": {
+        "before": [
+          [
+            "SEARCH m USING INDEX people_members_member (member=?)",
+            "SEARCH p USING INDEX sqlite_autoindex_people_chats_1 (id=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ],
+          [
+            "SEARCH people_members USING INDEX sqlite_autoindex_people_members_1 (chat_id=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ]
+        ],
+        "after": [
+          [
+            "SEARCH m USING INDEX people_members_member (member=?)",
+            "SEARCH p USING INDEX sqlite_autoindex_people_chats_1 (id=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ],
+          [
+            "SEARCH people_members USING INDEX sqlite_autoindex_people_members_1 (chat_id=?)",
+            "LIST SUBQUERY 1",
+            "SEARCH m USING INDEX people_members_member (member=?)",
+            "SEARCH p USING INDEX sqlite_autoindex_people_chats_1 (id=?)",
+            "USE TEMP B-TREE FOR LAST 3 TERMS OF ORDER BY"
+          ]
+        ]
+      }
+    },
+    {
+      "scale": 100,
+      "fixture": {
+        "experiment": "registry",
+        "scale": 100,
+        "rooms": 1000,
+        "rows_per_room": 100,
+        "counts": {
+          "users": 7,
+          "devices": 7,
+          "projects": 1000,
+          "chats": 1000,
+          "people_chats": 1000,
+          "people_members": 5000,
+          "project_members": 1000,
+          "people_reads": 1000,
+          "room_seq": 1000,
+          "checkpoints": 1000,
+          "rows": 100000
+        },
+        "database_bytes": 18001920
+      },
+      "fixture_seconds": 0.26337400008924305,
+      "equivalence": {
+        "complete_ordered_rows": "PASS",
+        "sha256_per_member": {
+          "user:u_owner": "d54ea4f658b3ddcfa40f35394e68a606935475f4b0236363e30e7104c6239483",
+          "user:u_peer_0": "d54ea4f658b3ddcfa40f35394e68a606935475f4b0236363e30e7104c6239483",
+          "agent:p_00001": "89003c5e45ac1284510f60199f1d15dfa002317b20dae2f4ef5d62d876e5f5b9",
+          "user:absent": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+        }
+      },
+      "samples_ns": {
+        "before": [
+          8212000,
+          8267000,
+          8279000,
+          8067000,
+          8027000,
+          8027000,
+          8120000,
+          7894000,
+          7992000,
+          8036000,
+          7963000,
+          8072000,
+          8117000,
+          8054000,
+          8093000,
+          8004000,
+          7972000,
+          8123000,
+          8178000,
+          7958000,
+          8085000,
+          8220000,
+          7999000,
+          8073000,
+          8120000,
+          7966000,
+          8213000,
+          7950000,
+          7921000,
+          8042000,
+          8092000,
+          8187000,
+          8038000,
+          8036000,
+          8211000,
+          8069000,
+          8037000,
+          8122000,
+          8045000,
+          7966000,
+          8148000,
+          8109000,
+          8432000,
+          8156000,
+          8156000,
+          8110000,
+          8102000,
+          8000000,
+          7941000,
+          8004000,
+          7984000,
+          8096000,
+          8067000,
+          8146000,
+          7885000,
+          8088000,
+          8148000,
+          8184000,
+          8081000,
+          8018000,
+          7908000,
+          8362000,
+          8314000,
+          8196000,
+          8142000,
+          8354000,
+          8261000,
+          8108000,
+          8050000,
+          8122000,
+          7942000,
+          8068000,
+          8002000,
+          8060000,
+          8212000,
+          8093000,
+          8022000,
+          8076000,
+          8104000,
+          8091000,
+          8186000,
+          8155000,
+          8076000,
+          8377000,
+          8366000,
+          8473000,
+          8559000,
+          8504000,
+          8535000,
+          8558000,
+          8501000,
+          8362000,
+          8350000,
+          8615000,
+          8587000,
+          10439000,
+          9055000,
+          8327000,
+          8160000,
+          8330000,
+          8435000
+        ],
+        "after": [
+          2465000,
+          2449000,
+          2454000,
+          2585000,
+          2514000,
+          2470000,
+          2475000,
+          2523000,
+          2445000,
+          2484000,
+          2445000,
+          2447000,
+          2425000,
+          2345000,
+          2363000,
+          2403000,
+          2439000,
+          2424000,
+          2401000,
+          2338000,
+          2483000,
+          2383000,
+          2444000,
+          2444000,
+          2414000,
+          2487000,
+          2438000,
+          2489000,
+          2522000,
+          2498000,
+          2483000,
+          2492000,
+          2415000,
+          2375000,
+          2396000,
+          2391000,
+          2343000,
+          2373000,
+          2367000,
+          2414000,
+          2446000,
+          2386000,
+          2597000,
+          2555000,
+          2426000,
+          2438000,
+          2496000,
+          2445000,
+          2415000,
+          2467000,
+          2454000,
+          2594000,
+          2396000,
+          2391000,
+          2393000,
+          2365000,
+          2366000,
+          2460000,
+          2373000,
+          2412000,
+          2366000,
+          2449000,
+          2448000,
+          2504000,
+          2425000,
+          2498000,
+          2528000,
+          2576000,
+          2417000,
+          2386000,
+          2308000,
+          2363000,
+          2405000,
+          2433000,
+          2399000,
+          2501000,
+          2345000,
+          2445000,
+          2382000,
+          2431000,
+          2464000,
+          2361000,
+          2500000,
+          2513000,
+          2557000,
+          2556000,
+          2537000,
+          2516000,
+          2543000,
+          2526000,
+          2617000,
+          2552000,
+          2683000,
+          2598000,
+          2598000,
+          2565000,
+          2584000,
+          2580000,
+          2546000,
+          2491000,
+          2534000
+        ]
+      },
+      "order": [
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ]
+      ],
+      "summary": {
+        "before": {
+          "n": 101,
+          "p50_ns": 8108000.0,
+          "p95_ns": 8558000.0,
+          "p99_ns": 9055000.0,
+          "min_ns": 7885000,
+          "max_ns": 10439000
+        },
+        "after": {
+          "n": 101,
+          "p50_ns": 2447000.0,
+          "p95_ns": 2594000.0,
+          "p99_ns": 2617000.0,
+          "min_ns": 2308000,
+          "max_ns": 2683000
+        },
+        "median_saved_ns": 5692000,
+        "paired_median_saved_95_ci_ns": [
+          5645000.0,
+          5722000.0
+        ],
+        "two_sided_sign_test_p": 7.888609052210118e-31,
+        "non_tied_pairs": 101
+      },
+      "counters": {
+        "before": {
+          "elapsed_ns": 8514000,
+          "visits": 7000,
+          "vm_steps": 216515,
+          "returned": 6000,
+          "statements": 1001
+        },
+        "after": {
+          "elapsed_ns": 2423000,
+          "visits": 9000,
+          "vm_steps": 246539,
+          "returned": 6000,
+          "statements": 2
+        }
+      },
+      "plans": {
+        "before": [
+          [
+            "SEARCH m USING INDEX people_members_member (member=?)",
+            "SEARCH p USING INDEX sqlite_autoindex_people_chats_1 (id=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ],
+          [
+            "SEARCH people_members USING INDEX sqlite_autoindex_people_members_1 (chat_id=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ]
+        ],
+        "after": [
+          [
+            "SEARCH m USING INDEX people_members_member (member=?)",
+            "SEARCH p USING INDEX sqlite_autoindex_people_chats_1 (id=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ],
+          [
+            "SEARCH people_members USING INDEX sqlite_autoindex_people_members_1 (chat_id=?)",
+            "LIST SUBQUERY 1",
+            "SEARCH m USING INDEX people_members_member (member=?)",
+            "SEARCH p USING INDEX sqlite_autoindex_people_chats_1 (id=?)",
+            "USE TEMP B-TREE FOR LAST 3 TERMS OF ORDER BY"
+          ]
+        ]
+      }
+    },
+    {
+      "scale": 1000,
+      "fixture": {
+        "experiment": "registry",
+        "scale": 1000,
+        "rooms": 10000,
+        "rows_per_room": 100,
+        "counts": {
+          "users": 7,
+          "devices": 7,
+          "projects": 10000,
+          "chats": 10000,
+          "people_chats": 10000,
+          "people_members": 50000,
+          "project_members": 10000,
+          "people_reads": 10000,
+          "room_seq": 10000,
+          "checkpoints": 10000,
+          "rows": 1000000
+        },
+        "database_bytes": 175943680
+      },
+      "fixture_seconds": 2.5950270420871675,
+      "equivalence": {
+        "complete_ordered_rows": "PASS",
+        "sha256_per_member": {
+          "user:u_owner": "7cc7192f68ddcb9ed2a504785720ebe19206bb6a50ac22a4f20dc4f9c9232708",
+          "user:u_peer_0": "7cc7192f68ddcb9ed2a504785720ebe19206bb6a50ac22a4f20dc4f9c9232708",
+          "agent:p_00001": "89003c5e45ac1284510f60199f1d15dfa002317b20dae2f4ef5d62d876e5f5b9",
+          "user:absent": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+        }
+      },
+      "samples_ns": {
+        "before": [
+          83712000,
+          82842000,
+          84540000,
+          82464000,
+          83082000,
+          86875000,
+          89861000,
+          89806000,
+          84569000,
+          82984000,
+          82600000,
+          82946000,
+          84028000,
+          87703000,
+          85687000,
+          83902000,
+          84096000,
+          84110000,
+          83473000,
+          83519000,
+          83608000,
+          83972000,
+          83965000,
+          84856000,
+          84706000,
+          84055000,
+          83512000,
+          84348000,
+          83731000,
+          83663000,
+          83670000,
+          83643000,
+          86718000,
+          87944000,
+          84351000,
+          83954000,
+          83671000,
+          83676000,
+          83655000,
+          83894000,
+          84132000,
+          83766000,
+          83282000,
+          88211000,
+          91242000,
+          85941000,
+          84352000,
+          84502000,
+          84271000,
+          83537000,
+          83860000,
+          85415000,
+          90180000,
+          85624000,
+          83990000,
+          83917000,
+          83899000,
+          83918000,
+          84341000,
+          84318000,
+          83792000,
+          83728000,
+          83978000,
+          84014000,
+          84036000,
+          84780000,
+          84753000,
+          85058000,
+          84359000,
+          89277000,
+          94355000,
+          89208000,
+          85361000,
+          85146000,
+          84185000,
+          84459000,
+          84997000,
+          84887000,
+          84520000,
+          87489000,
+          85066000,
+          84266000,
+          86832000,
+          85166000,
+          84028000,
+          84561000,
+          84308000,
+          85103000,
+          85219000,
+          84688000,
+          87854000,
+          84914000,
+          84512000,
+          84195000,
+          84312000,
+          84122000,
+          85106000,
+          84279000,
+          84071000,
+          84514000,
+          84176000
+        ],
+        "after": [
+          27871000,
+          27020000,
+          27997000,
+          27720000,
+          27356000,
+          27416000,
+          29614000,
+          28443000,
+          27927000,
+          27036000,
+          27448000,
+          27479000,
+          27085000,
+          28802000,
+          28779000,
+          27257000,
+          27385000,
+          27175000,
+          27387000,
+          27481000,
+          27076000,
+          28584000,
+          27528000,
+          28694000,
+          27630000,
+          27706000,
+          27114000,
+          27081000,
+          27637000,
+          27687000,
+          27435000,
+          27369000,
+          29275000,
+          27649000,
+          27624000,
+          27724000,
+          27278000,
+          27344000,
+          27412000,
+          27104000,
+          27553000,
+          27199000,
+          26892000,
+          29311000,
+          29555000,
+          27776000,
+          28014000,
+          27343000,
+          27768000,
+          27452000,
+          27434000,
+          27602000,
+          27429000,
+          27766000,
+          27437000,
+          27681000,
+          27361000,
+          28120000,
+          27380000,
+          27466000,
+          27736000,
+          27555000,
+          27327000,
+          27329000,
+          27548000,
+          27937000,
+          27579000,
+          27791000,
+          27995000,
+          28300000,
+          30919000,
+          28807000,
+          29274000,
+          27888000,
+          28035000,
+          28090000,
+          28190000,
+          27562000,
+          27994000,
+          27657000,
+          27852000,
+          27185000,
+          28636000,
+          27371000,
+          27483000,
+          27393000,
+          27445000,
+          28164000,
+          27970000,
+          27570000,
+          29702000,
+          28062000,
+          27614000,
+          27615000,
+          27653000,
+          27690000,
+          27519000,
+          27632000,
+          27640000,
+          27545000,
+          27565000
+        ]
+      },
+      "order": [
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "after",
+          "before"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ],
+        [
+          "before",
+          "after"
+        ]
+      ],
+      "summary": {
+        "before": {
+          "n": 101,
+          "p50_ns": 84308000.0,
+          "p95_ns": 89277000.0,
+          "p99_ns": 91242000.0,
+          "min_ns": 82464000,
+          "max_ns": 94355000
+        },
+        "after": {
+          "n": 101,
+          "p50_ns": 27615000.0,
+          "p95_ns": 29275000.0,
+          "p99_ns": 29702000.0,
+          "min_ns": 26892000,
+          "max_ns": 30919000
+        },
+        "median_saved_ns": 56647000,
+        "paired_median_saved_95_ci_ns": [
+          56538000.0,
+          56852000.0
+        ],
+        "two_sided_sign_test_p": 7.888609052210118e-31,
+        "non_tied_pairs": 101
+      },
+      "counters": {
+        "before": {
+          "elapsed_ns": 85146000,
+          "visits": 70000,
+          "vm_steps": 2165015,
+          "returned": 60000,
+          "statements": 10001
+        },
+        "after": {
+          "elapsed_ns": 27443000,
+          "visits": 90000,
+          "vm_steps": 2465039,
+          "returned": 60000,
+          "statements": 2
+        }
+      },
+      "plans": {
+        "before": [
+          [
+            "SEARCH m USING INDEX people_members_member (member=?)",
+            "SEARCH p USING INDEX sqlite_autoindex_people_chats_1 (id=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ],
+          [
+            "SEARCH people_members USING INDEX sqlite_autoindex_people_members_1 (chat_id=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ]
+        ],
+        "after": [
+          [
+            "SEARCH m USING INDEX people_members_member (member=?)",
+            "SEARCH p USING INDEX sqlite_autoindex_people_chats_1 (id=?)",
+            "USE TEMP B-TREE FOR ORDER BY"
+          ],
+          [
+            "SEARCH people_members USING INDEX sqlite_autoindex_people_members_1 (chat_id=?)",
+            "LIST SUBQUERY 1",
+            "SEARCH m USING INDEX people_members_member (member=?)",
+            "SEARCH p USING INDEX sqlite_autoindex_people_chats_1 (id=?)",
+            "USE TEMP B-TREE FOR LAST 3 TERMS OF ORDER BY"
+          ]
+        ]
+      }
+    }
+  ],
+  "assumptions": {
+    "data": "The original registry axis:10rooms\u00d7scale,100retained opaque rows/room, half DM2human owners/half group7humans+1agent; one declared synthetic owner sees every room.",
+    "relationships": "Original source DDL/ownership migrations/unique project names and independent project-chat IDs; SQL-only blobs/checkpoints are not valid Loro.",
+    "scope": "Warm readonly single-reader SQLite; no writers, native relay mutex wait, Rust HashMap/DTO mapping or rendering. No production proportions or app-latency claim.",
+    "instrumentation": "Same cached bundled SQLite3.46 scanstatus driver for both arms. Actual SELECT preparation, execution and column consumption included. Baseline Cdriver copies chat IDs to issue its N queries; new arm consumes2SELECTs without native mapping.",
+    "rows_read": "Logical summed SQLite NVISIT loop visits, not physical disk reads."
+  },
+  "measurement_engine": {
+    "sqlite_version": "3.46.0",
+    "libsqlite3_sys": "0.30.1",
+    "sqlite_source_sha256": "c01235302fe80da901fb70c7622c39147e29d9f29b7f6eb746b23517f320c90d",
+    "compile_flags": [
+      "cc",
+      "-O2",
+      "-fPIC",
+      "-dynamiclib",
+      "-DSQLITE_ENABLE_STMT_SCANSTATUS",
+      "-DSQLITE_ENABLE_FTS5",
+      "-DSQLITE_THREADSAFE=1",
+      "-I",
+      "-o"
+    ],
+    "library_bytes": 1341688,
+    "build_content_sha256": "297787c1d9c34e3d4bd34ea0b1f58f5b634d99734218f16da4ac01ba109961c4"
+  }
+}

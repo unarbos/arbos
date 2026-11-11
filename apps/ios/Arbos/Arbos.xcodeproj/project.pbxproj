@@ -155,6 +155,7 @@
 		A1C100000000000000000002 /* SenderNameRowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C100000000000000000001 /* SenderNameRowTests.swift */; };
 		A1C1000000000000000000D2 /* ServerChannelSenderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C1000000000000000000D1 /* ServerChannelSenderTests.swift */; };
 		A1D100000000000000000072 /* ReplyInDMTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D100000000000000000071 /* ReplyInDMTests.swift */; };
+		A1D100000000000000000092 /* ReplyCountBadgeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D100000000000000000091 /* ReplyCountBadgeTests.swift */; };
 		A1D100000000000000000002 /* DeliveryStateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D100000000000000000001 /* DeliveryStateTests.swift */; };
 		A1D100000000000000000012 /* OptimisticSendTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D100000000000000000011 /* OptimisticSendTests.swift */; };
 		A1D100000000000000000082 /* OptimisticNoticeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D100000000000000000081 /* OptimisticNoticeTests.swift */; };
@@ -167,6 +168,7 @@
 		A1E100000000000000000032 /* JobTabsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1E100000000000000000031 /* JobTabsTests.swift */; };
 		A1E100000000000000000042 /* ComposerMetricsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1E100000000000000000041 /* ComposerMetricsTests.swift */; };
 		A1F000000000000000000106 /* ComposerParityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F000000000000000000105 /* ComposerParityTests.swift */; };
+		A1F200000000000000000002 /* MemoMicReleaseTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F200000000000000000001 /* MemoMicReleaseTests.swift */; };
 		A1E100000000000000000052 /* HiddenJobRowAttachmentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1E100000000000000000051 /* HiddenJobRowAttachmentTests.swift */; };
 		A1F100000000000000000002 /* NoAnswerLineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F100000000000000000001 /* NoAnswerLineTests.swift */; };
 		A1F100000000000000000004 /* MarkdownTableTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F100000000000000000003 /* MarkdownTableTests.swift */; };
@@ -194,6 +196,7 @@
 		A1AD0000000000000000B006 /* AddMembersActionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1AD0000000000000000B005 /* AddMembersActionTests.swift */; };
 		A1670000000000000000A051 /* ControlTokenLintTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1670000000000000000A050 /* ControlTokenLintTests.swift */; };
 		A1680000000000000000A061 /* ListTopFadeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1680000000000000000A060 /* ListTopFadeTests.swift */; };
+		A1CC0000000000000000JA02 /* JacobAskGuardTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1CC0000000000000000JA01 /* JacobAskGuardTests.swift */; };
 		A1CF0000000000000000B081 /* PillGlassTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1CF0000000000000000B080 /* PillGlassTests.swift */; };
 		A1CF0000000000000000B091 /* HomePreviewWhoTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1CF0000000000000000B090 /* HomePreviewWhoTests.swift */; };
 		A1D0C10500000000000000A1 /* ViewerChromeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D0C10500000000000000A0 /* ViewerChromeTests.swift */; };
@@ -420,6 +423,7 @@
 		A1C100000000000000000001 /* SenderNameRowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SenderNameRowTests.swift; sourceTree = "<group>"; };
 		A1C1000000000000000000D1 /* ServerChannelSenderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerChannelSenderTests.swift; sourceTree = "<group>"; };
 		A1D100000000000000000071 /* ReplyInDMTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReplyInDMTests.swift; sourceTree = "<group>"; };
+		A1D100000000000000000091 /* ReplyCountBadgeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReplyCountBadgeTests.swift; sourceTree = "<group>"; };
 		A1D100000000000000000001 /* DeliveryStateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeliveryStateTests.swift; sourceTree = "<group>"; };
 		A1D100000000000000000011 /* OptimisticSendTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OptimisticSendTests.swift; sourceTree = "<group>"; };
 		A1D100000000000000000081 /* OptimisticNoticeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OptimisticNoticeTests.swift; sourceTree = "<group>"; };
@@ -432,6 +436,7 @@
 		A1E100000000000000000031 /* JobTabsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JobTabsTests.swift; sourceTree = "<group>"; };
 		A1E100000000000000000041 /* ComposerMetricsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerMetricsTests.swift; sourceTree = "<group>"; };
 		A1F000000000000000000105 /* ComposerParityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerParityTests.swift; sourceTree = "<group>"; };
+		A1F200000000000000000001 /* MemoMicReleaseTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemoMicReleaseTests.swift; sourceTree = "<group>"; };
 		A1E100000000000000000051 /* HiddenJobRowAttachmentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HiddenJobRowAttachmentTests.swift; sourceTree = "<group>"; };
 		A1F100000000000000000001 /* NoAnswerLineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoAnswerLineTests.swift; sourceTree = "<group>"; };
 		A1F100000000000000000003 /* MarkdownTableTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownTableTests.swift; sourceTree = "<group>"; };
@@ -459,6 +464,7 @@
 		A1AD0000000000000000B005 /* AddMembersActionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AddMembersActionTests.swift; sourceTree = "<group>"; };
 		A1670000000000000000A050 /* ControlTokenLintTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlTokenLintTests.swift; sourceTree = "<group>"; };
 		A1680000000000000000A060 /* ListTopFadeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ListTopFadeTests.swift; sourceTree = "<group>"; };
+		A1CC0000000000000000JA01 /* JacobAskGuardTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JacobAskGuardTests.swift; sourceTree = "<group>"; };
 		A1CF0000000000000000B080 /* PillGlassTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PillGlassTests.swift; sourceTree = "<group>"; };
 		A1CF0000000000000000B090 /* HomePreviewWhoTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomePreviewWhoTests.swift; sourceTree = "<group>"; };
 		A1D0C10500000000000000A0 /* ViewerChromeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewerChromeTests.swift; sourceTree = "<group>"; };
@@ -733,6 +739,7 @@
 				A1AD0000000000000000B005 /* AddMembersActionTests.swift */,
 				A1670000000000000000A050 /* ControlTokenLintTests.swift */,
 				A1680000000000000000A060 /* ListTopFadeTests.swift */,
+				A1CC0000000000000000JA01 /* JacobAskGuardTests.swift */,
 				A1CF0000000000000000B080 /* PillGlassTests.swift */,
 				A1CF0000000000000000B090 /* HomePreviewWhoTests.swift */,
 				A1D0C10500000000000000A0 /* ViewerChromeTests.swift */,
@@ -771,6 +778,7 @@
 				A1C100000000000000000001 /* SenderNameRowTests.swift */,
 				A1C1000000000000000000D1 /* ServerChannelSenderTests.swift */,
 				A1D100000000000000000071 /* ReplyInDMTests.swift */,
+				A1D100000000000000000091 /* ReplyCountBadgeTests.swift */,
 				A1D100000000000000000001 /* DeliveryStateTests.swift */,
 				A1D100000000000000000011 /* OptimisticSendTests.swift */,
 				A1D100000000000000000081 /* OptimisticNoticeTests.swift */,
@@ -783,6 +791,7 @@
 				A1E100000000000000000031 /* JobTabsTests.swift */,
 				A1E100000000000000000041 /* ComposerMetricsTests.swift */,
 				A1F000000000000000000105 /* ComposerParityTests.swift */,
+				A1F200000000000000000001 /* MemoMicReleaseTests.swift */,
 				A1E100000000000000000051 /* HiddenJobRowAttachmentTests.swift */,
 				A1F100000000000000000001 /* NoAnswerLineTests.swift */,
 				A1F100000000000000000003 /* MarkdownTableTests.swift */,
@@ -1136,6 +1145,7 @@
 				A1AD0000000000000000B006 /* AddMembersActionTests.swift in Sources */,
 				A1670000000000000000A051 /* ControlTokenLintTests.swift in Sources */,
 				A1680000000000000000A061 /* ListTopFadeTests.swift in Sources */,
+				A1CC0000000000000000JA02 /* JacobAskGuardTests.swift in Sources */,
 				A1CF0000000000000000B081 /* PillGlassTests.swift in Sources */,
 				A1CF0000000000000000B091 /* HomePreviewWhoTests.swift in Sources */,
 				A1D0C10500000000000000A1 /* ViewerChromeTests.swift in Sources */,
@@ -1172,6 +1182,7 @@
 				A1C100000000000000000002 /* SenderNameRowTests.swift in Sources */,
 				A1C1000000000000000000D2 /* ServerChannelSenderTests.swift in Sources */,
 				A1D100000000000000000072 /* ReplyInDMTests.swift in Sources */,
+				A1D100000000000000000092 /* ReplyCountBadgeTests.swift in Sources */,
 				A1D100000000000000000002 /* DeliveryStateTests.swift in Sources */,
 				A1D100000000000000000012 /* OptimisticSendTests.swift in Sources */,
 				A1D100000000000000000082 /* OptimisticNoticeTests.swift in Sources */,
@@ -1184,6 +1195,7 @@
 				A1E100000000000000000032 /* JobTabsTests.swift in Sources */,
 				A1E100000000000000000042 /* ComposerMetricsTests.swift in Sources */,
 				A1F000000000000000000106 /* ComposerParityTests.swift in Sources */,
+				A1F200000000000000000002 /* MemoMicReleaseTests.swift in Sources */,
 				A1E100000000000000000052 /* HiddenJobRowAttachmentTests.swift in Sources */,
 				A1BB00000000000000000004 /* BackSwipeTests.swift in Sources */,
 				A1F100000000000000000002 /* NoAnswerLineTests.swift in Sources */,

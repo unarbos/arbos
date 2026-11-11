@@ -46,11 +46,12 @@ struct FaultGlyph: View {
 struct StatusMarkView: View {
     let mark: StatusMark
     var size: CGFloat = WorkingSpinnerFrames.cell
+    var whileScrolling = false
 
     var body: some View {
         switch mark {
         case .working:
-            WorkingSpinner(size: size, glyphSize: min(size * 1.3, WorkingSpinnerFrames.glyphSize))
+            WorkingSpinner(size: size, glyphSize: min(size * 1.3, WorkingSpinnerFrames.glyphSize), whileScrolling: whileScrolling)
         case .fault:
             FaultGlyph(size: size)
         }

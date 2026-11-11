@@ -3648,14 +3648,14 @@ final class AppModel: ObservableObject {
             return
         }
         markUnacked(chatId: chatId, messageId: messageId)
+        let api = api
         Task {
+            guard let outcomes = await uploadAttachments(attachments, slot: "\(peopleSlot):\(chatId)", api: api) else { return }
             var uploaded: [Attachment] = []
-            for a in attachments {
-                let key = AppModel.blobKey(for: a.name)
-                do {
-                    _ = try await api.putBlob(projectId: "\(peopleSlot):\(chatId)", key: key, mime: a.mime, data: a.data)
-                    uploaded.append(Attachment(name: a.name, mime: a.mime, blobRef: key, kind: Self.attachmentKind(mime: a.mime, name: a.name)))
-                } catch {
+            for outcome in outcomes {
+                switch outcome {
+                case .uploaded(let attachment): uploaded.append(attachment)
+                case .failed(_, let error):
                     setSendError(chatId, UserError.classify("upload the attachment", error))
                 }
             }
@@ -5534,17 +5534,16 @@ final class AppModel: ObservableObject {
             }, replyTo: replyTo)
             return
         }
+        let api = api
         Task {
+            guard let outcomes = await uploadAttachments(attachments, slot: chat.projectId, api: api) else { return }
             var uploaded: [Attachment] = []
-            for a in attachments {
-                let key = AppModel.blobKey(for: a.name)
-                let kind = Self.attachmentKind(mime: a.mime, name: a.name)
-                do {
-                    _ = try await api.putBlob(projectId: chat.projectId, key: key, mime: a.mime, data: a.data)
-                    uploaded.append(Attachment(name: a.name, mime: a.mime, blobRef: key, kind: kind))
-                } catch {
+            for outcome in outcomes {
+                switch outcome {
+                case .uploaded(let attachment): uploaded.append(attachment)
+                case .failed(let attachment, let error):
                     setSendError(chatId, UserError.classify("upload the attachment", error))
-                    uploaded.append(Attachment(name: a.name, mime: a.mime, blobRef: nil, kind: kind))
+                    uploaded.append(attachment)
                 }
             }
             // The forward header rides along with the pictures ([feedback
@@ -5638,6 +5637,61 @@ final class AppModel: ObservableObject {
                 fail("transcribe your memo", error)
             }
             return nil
+        }
+    }
+
+    private enum AttachmentUpload {
+        case uploaded(Attachment)
+        case failed(Attachment, Error)
+    }
+
+    /// Keep two bodies in flight; preserve key/row/error order independently of
+    /// completion order. The caller owns account admission and the final commit.
+    private func uploadAttachments(_ attachments: [PendingAttachment], slot: String, api: RelayAPI) async -> [AttachmentUpload]? {
+        guard !Task.isCancelled else { return nil }
+        let plans = attachments.map { input in
+            let key = Self.blobKey(for: input.name)
+            let row = Attachment(name: input.name, mime: input.mime, blobRef: key,
+                                 kind: Self.attachmentKind(mime: input.mime, name: input.name))
+            return (input: input, key: key, row: row)
+        }
+        return await withTaskGroup(of: (Int, AttachmentUpload).self) { group in
+            var results = [AttachmentUpload?](repeating: nil, count: plans.count)
+            var next = min(2, plans.count)
+            for index in 0..<next {
+                let plan = plans[index]
+                group.addTask {
+                    do {
+                        _ = try await api.putBlob(projectId: slot, key: plan.key, mime: plan.input.mime, data: plan.input.data)
+                        return (index, .uploaded(plan.row))
+                    } catch {
+                        var row = plan.row
+                        row.blobRef = nil
+                        return (index, .failed(row, error))
+                    }
+                }
+            }
+            while let (index, result) = await group.next() {
+                results[index] = result
+                if Task.isCancelled { group.cancelAll() }
+                if !group.isCancelled, next < plans.count {
+                    let index = next
+                    let plan = plans[index]
+                    next += 1
+                    group.addTask {
+                        do {
+                            _ = try await api.putBlob(projectId: slot, key: plan.key, mime: plan.input.mime, data: plan.input.data)
+                            return (index, .uploaded(plan.row))
+                        } catch {
+                            var row = plan.row
+                            row.blobRef = nil
+                            return (index, .failed(row, error))
+                        }
+                    }
+                }
+            }
+            guard !Task.isCancelled, !group.isCancelled, results.allSatisfy({ $0 != nil }) else { return nil }
+            return results.compactMap { $0 }
         }
     }
 

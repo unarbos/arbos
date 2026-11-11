@@ -1,0 +1,47 @@
+{
+  "python_unittest": {
+    "passed": 12,
+    "failed": 0,
+    "skipped": 0,
+    "seconds": 10.778
+  },
+  "checks": [
+    {
+      "name": "unread-contract",
+      "command": [
+        "python3",
+        ".improve/load-test/unread_index.py",
+        "--check"
+      ],
+      "exit_code": 0,
+      "seconds": 0.22322958300355822,
+      "output": ""
+    },
+    {
+      "name": "coverage",
+      "command": [
+        "python3",
+        ".improve/load-test/coverage.py",
+        "--check"
+      ],
+      "exit_code": 0,
+      "seconds": 0.09684883302543312,
+      "output": "{\"checks_passed\": 6, \"checks\": [\"relay extracted queries and relationship/results\", \"relay existing path rejected\", \"relay readonly bound queries/plans/counters\", \"box extracted queries and relationship/results\", \"box existing path rejected\", \"box readonly bound queries/plans/counters\"]}"
+    },
+    {
+      "name": "job-index",
+      "command": [
+        "python3",
+        ".improve/load-test/job_index.py",
+        "--check"
+      ],
+      "exit_code": 0,
+      "seconds": 0.11096758395433426,
+      "output": "{\"checks_passed\": 6, \"checks\": [\"old fresh and replay\", \"new fresh and replay\", \"exact full-row latest equivalence\", \"equal timestamp first-insertion equivalence\", \"NULL and missing worker equivalence\", \"existing old data upgrade and idempotent index replay\"]}"
+    }
+  ],
+  "chart_qa": {
+    "roster": "inspected, clear, unclipped",
+    "unread-index": "inspected, clear, unclipped; all four workload panels retained"
+  }
+}

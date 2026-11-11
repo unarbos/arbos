@@ -583,7 +583,7 @@ struct AgentProfileView: View {
                 }
             }
         )))
-        let shown = Array(entries.reversed().filter(\.shown).prefix(4))
+        let shown = OutsideLogEntry.newestShown(entries)
         var rows: [AnyView] = shown.map { e in
             AnyView(SessionLogRow(entry: e, chatTitle: e.chat.map { model.outsideLogChatTitle($0, agent: project.id) } ?? ""))
         }
