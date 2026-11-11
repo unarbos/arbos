@@ -1316,6 +1316,7 @@
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Arbos uses the microphone for voice memos and calls.";
 				INFOPLIST_KEY_NSCameraUsageDescription = "Arbos uses the camera for video calls.";
+				INFOPLIST_KEY_NSFaceIDUsageDescription = "Arbos uses Face ID before showing your recovery phrase.";
 				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Arbos saves pictures and videos you download to your Photos.";
 				INFOPLIST_KEY_NSAppTransportSecurity_NSAllowsArbitraryLoads = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -1350,6 +1351,7 @@
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Arbos uses the microphone for voice memos and calls.";
 				INFOPLIST_KEY_NSCameraUsageDescription = "Arbos uses the camera for video calls.";
+				INFOPLIST_KEY_NSFaceIDUsageDescription = "Arbos uses Face ID before showing your recovery phrase.";
 				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Arbos saves pictures and videos you download to your Photos.";
 				INFOPLIST_KEY_NSAppTransportSecurity_NSAllowsArbitraryLoads = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;

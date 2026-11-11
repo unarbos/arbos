@@ -1,6 +1,7 @@
 // Wallet surfaces: the Settings page, the once-only phrase sheet, the restore sheet, the cheque
 // card in a chat and the sheet that writes one. The model side is Sync/Wallet.swift.
 
+import LocalAuthentication
 import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
@@ -42,7 +43,7 @@ struct WalletPage: View {
                 }
                 SettingsGroup(footer: "The phrase opens your encrypted chats on a new device and controls your TAO. It is in your iCloud Keychain; anyone who sees it can take both.") {
                     SettingsValueRow("Chat history backup", value: Self.backupLabel(backup))
-                    SettingsActionRow(title: showPhrase ? "Hide recovery phrase" : "Show recovery phrase") { showPhrase.toggle() }
+                    SettingsActionRow(title: showPhrase ? "Hide recovery phrase" : "Show recovery phrase") { showPhrase ? (showPhrase = false) : revealPhrase() }
                 }
                 if showPhrase, let phrase = model.walletPhrase {
                     PhraseGrid(phrase: phrase).padding(.horizontal, 16)
@@ -62,6 +63,21 @@ struct WalletPage: View {
                 await model.refreshChequeSnapshot()
             }
             backup = await model.matrixClient?.backup()
+        }
+    }
+
+    /// The phrase (and its Copy button) only appears to the phone's owner: Face ID, Touch ID or
+    /// the passcode. A phone with no passcode cannot show it.
+    private func revealPhrase() {
+        error = nil
+        let context = LAContext()
+        guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: nil) else {
+            error = "Set a passcode on this iPhone to see your recovery phrase."
+            return
+        }
+        Task {
+            showPhrase = (try? await context.evaluatePolicy(.deviceOwnerAuthentication,
+                                                            localizedReason: "Show your recovery phrase")) ?? false
         }
     }
 
