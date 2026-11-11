@@ -35,13 +35,30 @@ struct AuthDevice: Identifiable, Equatable {
     /// Whether this row is still a session (nothing signed it out).
     var isLive: Bool { revokedAt == nil }
 
-    /// What Settings → Devices shows: live rows only, this iPhone first, the
-    /// rest in the relay's order (oldest sign-in first). A tester who had
-    /// signed four Macs out still saw "9 devices" before this filter. The
-    /// relay also collapses same-name GitHub reinstall leftovers to one row.
+    /// A token somebody gave an agent, not a device I signed in on. Settings →
+    /// Agent access link owns these; Devices leaves them out.
+    var isAgentToken: Bool { kind == "reader" }
+
+    /// Every live row of the account, this iPhone first, the rest in the relay's
+    /// order (oldest sign-in first). A tester who had signed four Macs out still
+    /// saw "9 devices" before this filter. The relay also collapses same-name
+    /// GitHub reinstall leftovers to one row.
     static func visible(_ list: [AuthDevice]) -> [AuthDevice] {
         let live = list.filter(\.isLive)
         return live.filter(\.current) + live.filter { !$0.current }
+    }
+
+    /// What Settings → Devices shows and counts: the devices I am signed in on.
+    /// A reader token is a grant to somebody else, so it reads as a device only
+    /// because the relay stores it in the same table; its home is Agent access link.
+    static func signedIn(_ list: [AuthDevice]) -> [AuthDevice] {
+        visible(list).filter { !$0.isAgentToken }
+    }
+
+    /// The reader tokens, for the Agent access link list to show when the relay's
+    /// own union is not available to send them (`AgentAccessLink.fromReaderDevice`).
+    static func agentTokens(_ list: [AuthDevice]) -> [AuthDevice] {
+        visible(list).filter(\.isAgentToken)
     }
 
     /// The row's name, never empty.
