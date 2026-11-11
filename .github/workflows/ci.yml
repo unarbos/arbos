@@ -66,6 +66,7 @@ jobs:
         run: |
           python3 -B scripts/ci/test_no_egress_runner.py -v
           python3 -B scripts/ci/test_netns_smoke.py -v
+          python3 -B scripts/ci/test_xctestrun_env.py -v
       - name: The tree is the monorepo, and the old pipeline is gone
         run: |
           set -euo pipefail
