@@ -1294,7 +1294,8 @@ mod render_tests {
                 },
                 cx,
             );
-            s.set_profile_tab(1, cx);
+            // Library is an overview drill-in now (tab pill gone on group).
+            s.set_profile_subpage(Some(super::group::TAB_LIBRARY), cx);
             cx.notify();
         });
         let (shell, vcx) = cx.add_window_view(|window, cx| Shell::new(state.clone(), window, cx));

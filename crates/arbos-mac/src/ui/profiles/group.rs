@@ -812,8 +812,19 @@ mod render_tests {
 
     fn open(state: &Entity<AppState>, vcx: &mut VisualTestContext, page: ProfilePage, tab: usize) {
         state.update(vcx, |s, cx| {
+            // Agent / group / server land on an overview; Members / Library /
+            // … are `profile_subpage` drill-ins. Person / channel panes still
+            // use the tab pill (`profile_tab`).
+            let overview = matches!(
+                page,
+                ProfilePage::Group { .. } | ProfilePage::Server { .. } | ProfilePage::Agent { .. }
+            );
             s.open_profile(page, cx);
-            s.set_profile_tab(tab, cx);
+            if overview {
+                s.set_profile_subpage(Some(tab), cx);
+            } else {
+                s.set_profile_tab(tab, cx);
+            }
         });
     }
 
