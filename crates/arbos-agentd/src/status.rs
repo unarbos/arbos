@@ -1180,7 +1180,8 @@ pub(crate) mod tests {
     pub(crate) const LONG_STATUS_QUICK_FRAGMENT: &str = "[status]\nI'm still on the sleep you started — bash has been running for about ninety seconds with no output yet and the turn is waiting on that tool call to finish before I can say more about";
 
     /// What `write_job_result` must post for [`LONG_STATUS_QUICK_ASK`] once the ask runs as a job.
-    pub(crate) const LONG_STATUS_JOB_ANSWER: &str = "The sleep is still running — about a minute in. Nothing else is open in this chat.";
+    pub(crate) const LONG_STATUS_JOB_ANSWER: &str =
+        "The sleep is still running — about a minute in. Nothing else is open in this chat.";
 
     /// The ask that makes the stub answer a job-result call with round 14's r14notes draft: an
     /// opening sentence in the register `ProseFilter::strip_leading_thought_paragraphs` judges
