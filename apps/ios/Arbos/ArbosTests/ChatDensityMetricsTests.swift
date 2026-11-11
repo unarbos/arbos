@@ -85,4 +85,21 @@ final class ChatDensityMetricsTests: XCTestCase {
         let people = RowView.maxBubble(width: screen, people: true) - Theme.memberLane(composerInset: Theme.composerInset)
         XCTAssertEqual(min(280, people), 280)
     }
+
+    /// [feedback scaled-timestamp-clip-mac-2026-10-29] / #2310: the swipe-to-peek
+    /// time column was a fixed 56 pt and wrapped at Larger / Largest Text Size.
+    /// It now tracks `theme.pt(56)` so "12:59 PM" stays on one line.
+    func testSwipeTimeColumnGrowsWithTextSize() {
+        var base = Theme.dark
+        base.textScale = 1
+        XCTAssertEqual(RowView.timeRevealWidth(base), 56)
+        var larger = Theme.dark
+        larger.textScale = 1.2
+        XCTAssertEqual(RowView.timeRevealWidth(larger), larger.pt(56))
+        XCTAssertGreaterThan(RowView.timeRevealWidth(larger), 56)
+        var largest = Theme.dark
+        largest.textScale = 1.3
+        XCTAssertEqual(RowView.timeRevealWidth(largest), largest.pt(56))
+        XCTAssertGreaterThanOrEqual(RowView.timeRevealWidth(largest), 64)
+    }
 }
