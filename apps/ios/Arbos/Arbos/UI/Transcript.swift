@@ -347,8 +347,9 @@ enum Transcript {
     /// Space around a centred system line (dates, hand-offs, membership notices).
     static let systemGap: CGFloat = 20
     /// Extra air above a centred stamp inside its row. `systemGap` alone was landing
-    /// "Today …" on the bubble above it ([feedback AGgL7fykRs0BE9uiHscNCvk] / #2962).
-    /// The Mac already pads the stamp itself (`STAMP_PAD_TOP`); this is the iPhone match.
+    /// "Today …" on the bubble above it ([feedback today-stamp-gap-ios-2026-11-10] /
+    /// #2962 / AGgL7fykRs0BE9uiHscNCvk). The Mac already pads the stamp itself
+    /// (`STAMP_PAD_TOP`); this is the iPhone match.
     static let systemStampTopPad: CGFloat = 16
 
     /// Whether a message from `sender` at `at` continues the run that ended with
@@ -1816,7 +1817,7 @@ struct RowView: View, Equatable {
             }
         case .system(let icon, let text, let avatarProject):
             // Extra air above the stamp: `systemGap` alone was landing "Today …"
-            // on the bubble above it ([feedback AGgL7fykRs0BE9uiHscNCvk] / #2962).
+            // on the bubble above it ([feedback today-stamp-gap-ios-2026-11-10] / #2962).
             HStack(spacing: 5) {
                 if let icon {
                     Image(systemName: icon).font(.system(size: 13, weight: .regular))

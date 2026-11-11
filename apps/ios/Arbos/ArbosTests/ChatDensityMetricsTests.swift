@@ -86,7 +86,7 @@ final class ChatDensityMetricsTests: XCTestCase {
         XCTAssertEqual(min(280, people), 280)
     }
 
-    /// #2310 / [feedback scaled-timestamp-clip-mac-2026-10-29]: the swipe-to-peek
+    /// [feedback scaled-timestamp-clip-mac-2026-10-29] / #2310: the swipe-to-peek
     /// time column was a fixed 56 pt and wrapped at Larger / Largest Text Size.
     /// It now tracks `theme.pt(56)` so "12:59 PM" stays on one line.
     func testSwipeTimeColumnGrowsWithTextSize() {

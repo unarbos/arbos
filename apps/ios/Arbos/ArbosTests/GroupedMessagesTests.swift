@@ -56,8 +56,8 @@ final class GroupedMessagesTests: XCTestCase {
         XCTAssertEqual(Transcript.runGap, 2, "Jacob's 2026-11-01 reference measures 4–5 px at 2.03 px/pt; was 4")
         XCTAssertEqual(Transcript.turnGap, 13, "the same reference measures 24–28 px between runs; was 16")
         XCTAssertEqual(Transcript.systemGap, 20)
-        // [feedback AGgL7fykRs0BE9uiHscNCvk] / #2962: systemGap alone left "Today …" on the
-        // bubble above; the stamp row adds this top pad so the glyphs clear it.
+        // [feedback today-stamp-gap-ios-2026-11-10] / #2962: systemGap alone left "Today …"
+        // on the bubble above; the stamp row adds this top pad so the glyphs clear it.
         XCTAssertEqual(Transcript.systemStampTopPad, 16)
         XCTAssertGreaterThan(Transcript.systemGap + Transcript.systemStampTopPad, Transcript.systemGap)
         XCTAssertLessThan(Transcript.runGap, Transcript.turnGap)
