@@ -22,6 +22,39 @@ use arbos_core::STREAM_COMMIT_MS;
 use crate::config::Config;
 use crate::store::Store;
 
+/// Bumped by [`drop_relay_http_pools`]; a [`RelayHttp`] behind it builds itself a new client.
+static HTTP_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// An HTTP client for the relay whose connection pool can be thrown away.
+///
+/// After `runsc restore` every socket in the sandbox is dead on the wire while its descriptor
+/// still looks open (docs/box-scaling.md §4.3.1), and a pooled connection is exactly such a
+/// socket: the next request written to it waits on a peer that is not there, and most calls
+/// here carry no timeout. `reqwest` has no way to empty a pool, so the client is replaced —
+/// lazily, on the first use after the bump, so no holder has to be told and none can be
+/// forgotten. A request already in flight keeps the client it was built from.
+#[derive(Clone, Default)]
+pub struct RelayHttp(Arc<std::sync::Mutex<(u64, reqwest::Client)>>);
+
+impl RelayHttp {
+    pub fn get(&self) -> reqwest::Client {
+        self.at(HTTP_GENERATION.load(std::sync::atomic::Ordering::SeqCst))
+    }
+
+    fn at(&self, generation: u64) -> reqwest::Client {
+        let mut held = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if held.0 != generation {
+            *held = (generation, reqwest::Client::new());
+        }
+        held.1.clone()
+    }
+}
+
+/// Every [`RelayHttp`] in the process opens new connections from its next request on.
+pub fn drop_relay_http_pools() {
+    HTTP_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+}
+
 /// Something the agent loop must act on.
 #[derive(Debug, Clone)]
 pub enum Incoming {
@@ -780,6 +813,9 @@ pub struct SyncHub {
     /// as the removal path first; today both come from the same relay list, but only while the
     /// process lives.
     no_reopen: Arc<Mutex<std::collections::HashSet<String>>>,
+    /// Counts [`SyncHub::kick`]s. Every room task watches it, so a kick is seen by a task
+    /// wherever it is — inside a session, in its backoff, or between the two.
+    kick: Arc<tokio::sync::watch::Sender<u64>>,
 }
 
 /// Backoff while the relay refuses a room outright (HTTP 403 / 404: the project was deleted,
@@ -818,7 +854,19 @@ impl SyncHub {
             room_tasks: Arc::new(Mutex::new(HashMap::new())),
             closed_cold: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             no_reopen: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            kick: Arc::new(tokio::sync::watch::Sender::new(0)),
         }
+    }
+
+    /// Drop every room socket of this hub and dial again at once (docs/box-scaling.md §4.3.1).
+    ///
+    /// For a sandbox restored from a checkpoint: its sockets are dead on the wire, and left
+    /// alone a room finds that out only when a push goes unacked for `PUSH_ACK_TIMEOUT` or the
+    /// relay has been silent for two probes. Nothing is lost by cutting a session that was
+    /// alive after all — a session ending is the ordinary case `run_room` already handles, and
+    /// what was unacked is offered again on the next one.
+    pub fn kick(&self) {
+        self.kick.send_modify(|n| *n += 1);
     }
 
     /// Open (or re-open) a room: load the local snapshot + cursor, start the client task.
@@ -1242,6 +1290,10 @@ impl SyncHub {
 
     async fn run_room(&self, host: SharedHost) {
         let mut backoff = Duration::from_millis(250);
+        let mut kicked = self.kick.subscribe();
+        // Set by a kick: the next dial skips the jitter and the backoff. Both exist to spare a
+        // relay that has just come back, and a kick says it is this box that went away.
+        let mut redial_now = false;
         loop {
             if host.lock().await.closed {
                 return;
@@ -1255,9 +1307,22 @@ impl SyncHub {
                 // inside `room_session` around the handshake only — holding it for the whole
                 // session capped a box at 16 live rooms (images 0.1.101–0.1.103: the canary's
                 // chat never connected, its turn never started).
-                let jitter = Duration::from_millis(rand::random::<u64>() % 750);
-                tokio::time::sleep(jitter).await;
-                self.room_session(&host, &mut handshook).await
+                let jitter = match std::mem::take(&mut redial_now) {
+                    true => Duration::ZERO,
+                    false => Duration::from_millis(rand::random::<u64>() % 750),
+                };
+                let session = async {
+                    tokio::time::sleep(jitter).await;
+                    self.room_session(&host, &mut handshook).await
+                };
+                // Dropping the session drops its socket, which is the point of a kick.
+                tokio::select! {
+                    r = session => r,
+                    _ = kicked.changed() => {
+                        redial_now = true;
+                        Ok(())
+                    }
+                }
             };
             match result {
                 Ok(()) => tracing::info!(room = %room_name, "room session closed"),
@@ -1288,7 +1353,16 @@ impl SyncHub {
                 // The relay answered: this was a restart or a dropped link, not a dead relay.
                 backoff = Duration::from_millis(250);
             }
-            tokio::time::sleep(backoff).await;
+            if !redial_now {
+                tokio::select! {
+                    _ = tokio::time::sleep(backoff) => {}
+                    _ = kicked.changed() => redial_now = true,
+                }
+            }
+            if redial_now {
+                backoff = Duration::from_millis(250);
+                continue;
+            }
             if !refused {
                 backoff = (backoff * 2).min(ROOM_BACKOFF_MAX);
             }
@@ -1686,6 +1760,9 @@ mod tests {
     #[derive(Default)]
     struct FakeRelay {
         rooms: std::sync::Mutex<HashMap<String, FakeRoom>>,
+        /// Bumped by [`FakeRelay::kill_wire`]: a session from before the bump stays open and
+        /// reads everything it is sent into the void, which is a socket after `runsc restore`.
+        wire: std::sync::atomic::AtomicU64,
     }
 
     #[derive(Default)]
@@ -1729,6 +1806,9 @@ mod tests {
         /// Reopen pushes queued for this room.
         fn pushes(&self, room: &str) -> Vec<String> {
             self.with(room, |r| r.pushes.clone())
+        }
+        fn kill_wire(&self) {
+            self.wire.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
         fn sockets(&self, room: &str) -> i64 {
             self.with(room, |r| r.sockets)
@@ -1786,7 +1866,11 @@ mod tests {
                 .await
                 .is_ok()
         }
+        let wire = relay.wire.load(std::sync::atomic::Ordering::SeqCst);
         while let Some(Ok(msg)) = socket.next().await {
+            if wire != relay.wire.load(std::sync::atomic::Ordering::SeqCst) {
+                continue;
+            }
             let axum::extract::ws::Message::Binary(b) = msg else {
                 continue;
             };
@@ -3400,6 +3484,100 @@ mod tests {
             "the reply written after the reopen is in the room the relay is reading"
         );
         bx.stop().await;
+    }
+
+    /// docs/box-scaling.md §4.3.1: after `runsc restore` a room's socket is open at both ends
+    /// and carries nothing. Left alone the box learns that from a push going unacked for
+    /// `PUSH_ACK_TIMEOUT`; a kick replaces the socket at once, and the row written into the
+    /// dead one is offered again on the new one.
+    #[tokio::test]
+    async fn a_kick_replaces_a_dead_socket_and_delivers_what_was_written_into_it() {
+        let bx = TestBox::start("01TESTPROJECTRESTORE0000").await;
+        let chat = "chat-restored";
+        let room = bx.room(chat);
+        let host = bx.hub.open_room(chat).await.unwrap();
+        bx.wait_caught_up(chat).await;
+        wait_for("the room to settle", || async {
+            host.lock().await.settled()
+        })
+        .await;
+        let rows_before = bx.relay.with(&room, |r| r.rows.len());
+
+        bx.relay.kill_wire();
+        let reply = ulid();
+        {
+            let h = host.lock().await;
+            h.doc.start_assistant_message(&reply, "m1", "box:test");
+            h.doc
+                .finish_message(&reply, arbos_core::doc::MessageStatus::Done);
+        }
+        // Several commit ticks: the push has gone out, into a socket nobody is reading.
+        tokio::time::sleep(Duration::from_millis(5 * STREAM_COMMIT_MS)).await;
+        assert_eq!(
+            bx.relay.with(&room, |r| r.rows.len()),
+            rows_before,
+            "the premise: a dead socket delivers nothing"
+        );
+        assert!(host.lock().await.link.connected, "and still looks open");
+        assert_eq!(host.lock().await.link.sessions, 1);
+
+        let kicked = std::time::Instant::now();
+        bx.hub.kick();
+        wait_for("the row to arrive on a new socket", || async {
+            host.lock().await.settled() && bx.relay.with(&room, |r| r.rows.len()) > rows_before
+        })
+        .await;
+        assert!(
+            kicked.elapsed() < PUSH_ACK_TIMEOUT / 2,
+            "the kick delivered it, not the dead-link timeout: {:?}",
+            kicked.elapsed()
+        );
+        let mut relayed = ChatDoc::new(Some(0xFEED), true);
+        for row in bx.relay.with(&room, |r| r.rows.clone()) {
+            relayed.import(&row).unwrap();
+        }
+        assert!(relayed.message(&reply).is_some(), "the relay holds the row");
+        assert_eq!(host.lock().await.link.sessions, 2, "on one new socket");
+        wait_for("the dead socket to be gone", || async {
+            bx.relay.sockets(&room) == 1
+        })
+        .await;
+        bx.stop().await;
+    }
+
+    /// What dropping a pool is on the wire: a [`RelayHttp`] keeps one connection for as long as
+    /// its generation stands, and opens a new one the first time it is asked after a bump.
+    #[tokio::test]
+    async fn a_relay_client_opens_a_new_connection_once_its_pool_is_dropped() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let connections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = connections.clone();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    while matches!(sock.read(&mut buf).await, Ok(n) if n > 0) {
+                        let reply = "HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n{}";
+                        if sock.write_all(reply.as_bytes()).await.is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+        let http = RelayHttp::default();
+        for (generation, expected) in [(7, 1), (7, 1), (8, 2), (8, 2)] {
+            let r = http.at(generation).get(&url).send().await.unwrap();
+            r.bytes().await.unwrap();
+            assert_eq!(
+                connections.load(std::sync::atomic::Ordering::SeqCst),
+                expected,
+                "generation {generation}"
+            );
+        }
     }
 
     /// Why the record lives in the hub and not on the host. `close_room` takes the host out of
