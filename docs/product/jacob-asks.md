@@ -120,6 +120,7 @@ Deleting a row, or the test it names, needs sign-off — see **Changing a guard*
 | `in-call-bar` | — | iPhone | The in-call strip's chip stays 36 pt, a recorded exception to the one app-wide control height. | `JacobAskGuardTests.testTheInCallChipKeepsItsRecordedException` |
 | `reply-preview-fixed-height` | — | iPhone | The reply bar above the field is one row high whatever it quotes: the quote is flattened to a line and capped. | `JacobAskGuardTests.testTheReplyPreviewIsOneRowWhateverItQuotes` |
 | `2005` | — | iPhone | After an unblock, the rooms standing refused are asked to resend; a room that is not refused ignores the nudge. | `SessionRoomTests.testChatToRetryNamesOnlyMembershipAndSettingsChanges` |
+| `closed-app-call-ring-2026-11-11` | 2026-11-11 | iPhone | VoIP and APNs tokens re-upload on every foreground pass so a closed iPhone can still ring after the relay drops a dead Apple token (TestFlight AFjyB3HHRZ7GzKtZHyvxIUw / #2995). | `JacobAskGuardTests.testForcedTokenUploadRunsEvenWhenTheHexIsUnchanged` |
 
 ## Superseded
 
