@@ -2630,7 +2630,7 @@ mod claude_worker_owner_regressions {
                 statement: *mut std::ffi::c_void,
                 _: *mut std::ffi::c_void,
             ) -> i32 {
-                if event != rusqlite::ffi::SQLITE_TRACE_PROFILE as u32 {
+                if event != rusqlite::ffi::SQLITE_TRACE_PROFILE {
                     return 0;
                 }
                 let sql = unsafe { rusqlite::ffi::sqlite3_sql(statement.cast()) };
@@ -2667,7 +2667,7 @@ mod claude_worker_owner_regressions {
                     let rc = unsafe {
                         rusqlite::ffi::sqlite3_trace_v2(
                             c.handle(),
-                            rusqlite::ffi::SQLITE_TRACE_PROFILE as u32,
+                            rusqlite::ffi::SQLITE_TRACE_PROFILE,
                             Some(observed),
                             pointer.cast_mut().cast(),
                         )

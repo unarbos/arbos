@@ -2373,7 +2373,7 @@ mod charge_receipt_regressions {
             statement: *mut std::ffi::c_void,
             _elapsed: *mut std::ffi::c_void,
         ) -> i32 {
-            if kind != rusqlite::ffi::SQLITE_TRACE_PROFILE as u32
+            if kind != rusqlite::ffi::SQLITE_TRACE_PROFILE
                 || context.is_null()
                 || statement.is_null()
             {
@@ -2424,7 +2424,7 @@ mod charge_receipt_regressions {
                     let code = unsafe {
                         rusqlite::ffi::sqlite3_trace_v2(
                             connection.handle(),
-                            rusqlite::ffi::SQLITE_TRACE_PROFILE as u32,
+                            rusqlite::ffi::SQLITE_TRACE_PROFILE,
                             Some(pause_unsettled_snapshot),
                             Arc::as_ptr(context).cast_mut().cast(),
                         )
