@@ -136,6 +136,27 @@ enum BackSwipe {
     static func sharesTouch(with other: UIGestureRecognizer) -> Bool {
         !(other is UIPanGestureRecognizer) && !(other is DirectionalSwipeRecognizer)
     }
+
+    /// Must `other` wait for a back gesture to decide? Only a scroll view's own pan, and only
+    /// while that scroll view is still gliding, so "back" works on a chat that is moving
+    /// (2026-11-09: "this should be able to swipe out while moving").
+    ///
+    /// A finger on a decelerating scroll view catches it, and UIKit then begins the scroll's
+    /// pan on the first move (translation 0, ~30 ms after touch-down) instead of after its usual
+    /// ~10 pt. That is before either back recognizer has moved `lockDistance`, so the pan
+    /// prevented them both, and the system's edge pop too, until the list stood still.
+    /// Measured with `ARBOS_SWIPE_LOG=1`: `scroll pan began t=(0,0) decel=true` 32 ms in, and
+    /// no back recognizer ever reached its decision.
+    ///
+    /// Waiting costs a vertical drag at most `lockDistance` (a back gesture fails there), and
+    /// only on a list that was already moving. At rest nothing waits, as before.
+    static func waitsForBack(_ other: UIGestureRecognizer) -> Bool {
+        guard let scroll = other.view as? UIScrollView, other === scroll.panGestureRecognizer else { return false }
+        // A markdown table gliding sideways keeps its own pan: a second flick scrolls it on,
+        // it does not leave the chat.
+        if scroll.contentSize.width > scroll.bounds.width + 1 { return false }
+        return scroll.isDecelerating
+    }
 }
 
 /// Which optional chat-screen gestures are installed. All of them in Release; the Debug
@@ -146,6 +167,19 @@ enum ChatGestures {
     /// The full-screen swipe-right (the system edge pop is never off).
     static let backSwipe = on("back")
     static let longPress = on("longpress")
+
+    /// A hold just opened the message menu. The row's long-press runs alongside the
+    /// picture's tap, and a tap has no time limit, so the finger that held also "taps"
+    /// when it lifts — and the media viewer covered the menu it had just opened. That one
+    /// tap is spent here; closing the menu clears it, so a hold that ended without a tap
+    /// never eats the next real one.
+    static var heldIntoMenu = false
+
+    /// True (once) when this tap is the end of the hold that opened the menu.
+    static func tapEndsHold() -> Bool {
+        defer { heldIntoMenu = false }
+        return heldIntoMenu
+    }
 
     private static func on(_ name: String) -> Bool {
         #if DEBUG
@@ -250,6 +284,7 @@ struct BackDrag: Equatable {
 /// `UIPanGestureRecognizer`: that one begins at its own ~10 pt in any direction, before the
 /// direction is known. Exclusive with the scroll view's pan (no `require(toFail:)` either way):
 /// a vertical pan scrolls the instant the scroll view says so; this one has failed by then.
+/// The one exception is a scroll view that is still gliding (`BackSwipe.waitsForBack`).
 final class DirectionalSwipeRecognizer: UIGestureRecognizer {
     /// Decide once the finger has moved `minimumDistance` (`start` in the recognizer's view):
     /// `.claimed` begins, `.declined` fails, `.undecided` asks again on the next move.
@@ -871,6 +906,11 @@ struct TranscriptSwipeHost: UIViewRepresentable {
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
             BackSwipe.sharesTouch(with: other)
         }
+
+        /// A gliding scroll waits for this one to decide (`BackSwipe.waitsForBack`).
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldBeRequiredToFailBy other: UIGestureRecognizer) -> Bool {
+            BackSwipe.waitsForBack(other)
+        }
     }
 }
 
@@ -968,6 +1008,11 @@ private struct NativePopEnabler: UIViewControllerRepresentable {
             SwipeLog.event("system pop shouldBegin depth=\(depth)")
             #endif
             return depth > 1
+        }
+
+        /// A gliding scroll waits for the edge pop too (`BackSwipe.waitsForBack`).
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldBeRequiredToFailBy other: UIGestureRecognizer) -> Bool {
+            BackSwipe.waitsForBack(other)
         }
 
         /// Background representables sometimes have a nil `navigationController`; walk the
@@ -1087,6 +1132,11 @@ private struct FullScreenBackHost: UIViewRepresentable {
         /// (`BackSwipe.sharesTouch`).
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
             BackSwipe.sharesTouch(with: other)
+        }
+
+        /// A gliding scroll waits for this one to decide (`BackSwipe.waitsForBack`).
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldBeRequiredToFailBy other: UIGestureRecognizer) -> Bool {
+            BackSwipe.waitsForBack(other)
         }
     }
 }

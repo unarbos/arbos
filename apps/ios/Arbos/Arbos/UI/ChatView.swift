@@ -276,6 +276,9 @@ struct ChatSession: View {
     @State private var pinnedToBottom = true
     /// When this chat screen appeared (the history window does not grow in its first second).
     @State private var appearedAt = Date()
+    /// The transcript has been put on its newest row once. A page pushed over the chat (a
+    /// sender's profile) re-runs `onAppear` on the way back, and that must keep the reader's place.
+    @State private var settledOnOpen = false
     /// `chat-first-row` has been marked for this open (lazy rows re-appear when scrolled back to).
     @State private var firstRowMarked = false
     /// When the history window last grew (the near-top reporter fires per scroll sample).
@@ -2544,6 +2547,8 @@ struct ChatSession: View {
             // forced an offscreen pass of every row on each scroll frame and made
             // long / group chats feel sticky (feedback app-01M5MQ2GFB1681YXNJMZV4EK7J).
             .onAppear {
+                guard !settledOnOpen else { return }
+                settledOnOpen = true
                 settleToBottom(proxy)
                 let rigged = DebugHooks.fixtureComposerAttachments
                 if rigged > 0, pending.isEmpty {
@@ -3123,6 +3128,7 @@ struct ChatSession: View {
     /// reaction). The composer is focused again only if it was before the press and the
     /// action leaves the chat on screen (`MessageActionsKeyboard.restoresFocus`).
     private func closeActions(after item: MessageMenuItem? = nil) {
+        ChatGestures.heldIntoMenu = false
         let restore = MessageActionsKeyboard.restoresFocus(wasFocused: actionsRestoresKeyboard, after: item)
         actionsRestoresKeyboard = false
         withAnimation(.easeOut(duration: 0.15)) { actionsRow = nil }
