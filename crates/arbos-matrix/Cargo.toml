@@ -8,9 +8,9 @@ rust-version.workspace = true
 description = "Shared Matrix client for the device apps (D88 C1): servers and channels through the relay's homeserver proxy"
 
 [dependencies]
-# matrix-sdk without its defaults: no E2EE until stage D, no SQLite store (the workspace pins
-# another libsqlite3-sys), no bundled TLS — the HTTP client below is injected instead.
-matrix-sdk = { version = "0.19.1", default-features = false }
+# Stage D: end-to-end encryption, keys and room state in SQLite (the workspace's bundled
+# libsqlite3-sys, bundled on every platform: iOS links nothing else). No bundled TLS — the HTTP client below is injected instead.
+matrix-sdk = { version = "0.19.1", default-features = false, features = ["e2e-encryption", "sqlite", "bundled-sqlite"] }
 tokio.workspace = true
 futures.workspace = true
 serde.workspace = true

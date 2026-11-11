@@ -724,7 +724,15 @@ extension AppModel {
             let listener = MatrixBridgeListener(model: self)
             let session = ArbosFFI.MatrixSession(homeserver: creds.homeserver, userId: creds.userId,
                                                  accessToken: creds.accessToken, deviceId: creds.deviceId)
-            let client = try await matrixStart(session: session, listener: listener)
+            // No key, no client: without it the store holding the room keys would be written
+            // unencrypted. The next call tries again (the Keychain may only have been locked).
+            guard let storeKey = WalletVault.storeKey(device: creds.deviceId) else {
+                matrixLog.notice("matrix start skipped: the store key is not available")
+                return
+            }
+            let crypto = ArbosFFI.MatrixCrypto(storeDir: WalletVault.storeDir(device: creds.deviceId),
+                                               storeKey: storeKey)
+            let client = try await matrixStart(session: session, crypto: crypto, listener: listener)
             // Signed out (or started twice) while the handshake ran.
             guard credentials != nil, matrixClient == nil else {
                 client.stop()
@@ -734,6 +742,8 @@ extension AppModel {
             matrixClient = client
             matrixConnected = true
             applyMatrixSnapshot(await client.snapshot())
+            // Waits for the first sync's word on the key backup; never holds up the start.
+            Task { await ensureKeys(client) }
         } catch {
             matrixLog.notice("matrix start failed: \(error.localizedDescription, privacy: .public)")
         }

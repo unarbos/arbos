@@ -32,6 +32,7 @@ use crate::blobs::{no_such_image, not_an_image, stored_image, StoredImage};
 use crate::db_people::{
     ChatWithMembers, GroupInvite, Invite, MemberProject, Membership, PeopleChat, UserPresence,
 };
+use crate::matrix::E2EE_MEMBER_CAP;
 use crate::notices;
 use crate::signin::api_error;
 use crate::state::AppState;
@@ -1772,6 +1773,25 @@ pub struct AddAgentBody {
     pub project_id: String,
 }
 
+/// An end-to-end encrypted chat is capped at [`E2EE_MEMBER_CAP`] members, agents included (a
+/// room can never drop its encryption, and Megolm shares every key with every member device).
+/// Growing past it means converting to a plaintext group, which is not built yet.
+fn over_e2ee_cap(state: &AppState, chat_id: &str, members_after: usize) -> Option<Response> {
+    let encrypted = state
+        .db
+        .matrix_room(chat_id)
+        .ok()
+        .flatten()
+        .is_some_and(|r| r.encrypted && r.closed_at.is_none());
+    (encrypted && members_after > E2EE_MEMBER_CAP).then(|| {
+        api_error(
+            StatusCode::CONFLICT,
+            "encrypted_chat_full",
+            format!("an end-to-end encrypted chat holds up to {E2EE_MEMBER_CAP} members"),
+        )
+    })
+}
+
 /// `POST /chats/{id}/agents {"project_id"}` — any member adds their OWN Project's agent. The
 /// owner's box is told (push) and woken so the agent joins the room.
 pub async fn agent_add(
@@ -1797,6 +1817,10 @@ pub async fn agent_add(
         );
     }
     let member = format!("agent:{}", project.id);
+    let joining = usize::from(!cm.members.iter().any(|m| m.member == member));
+    if let Some(r) = over_e2ee_cap(&state, &id, cm.members.len() + joining) {
+        return r;
+    }
     if let Err(e) = state
         .db
         .add_member(&id, &member, "agent", &me, &default_agent_settings())
@@ -2266,6 +2290,9 @@ pub async fn member_add(
             "need_members",
             "name at least one person or one of your agents",
         );
+    }
+    if let Some(r) = over_e2ee_cap(&state, &id, cm.members.len() + people.len() + agents.len()) {
+        return r;
     }
     let mut names: Vec<String> = Vec::new();
     let mut subjects: Vec<serde_json::Value> = Vec::new();
@@ -5756,7 +5783,7 @@ mod roster_batch_tests {
             _statement: *mut std::ffi::c_void,
             _sql: *mut std::ffi::c_void,
         ) -> i32 {
-            if kind == rusqlite::ffi::SQLITE_TRACE_STMT as u32 {
+            if kind == rusqlite::ffi::SQLITE_TRACE_STMT {
                 let _ = STATEMENTS.try_with(|count| count.set(count.get().saturating_add(1)));
             }
             0
@@ -5806,7 +5833,7 @@ mod roster_batch_tests {
                     let result = unsafe {
                         rusqlite::ffi::sqlite3_trace_v2(
                             connection.handle(),
-                            rusqlite::ffi::SQLITE_TRACE_STMT as u32,
+                            rusqlite::ffi::SQLITE_TRACE_STMT,
                             Some(count_statement),
                             std::ptr::null_mut(),
                         )
@@ -6410,6 +6437,58 @@ mod group_add_privacy_tests {
         )
         .await;
         assert_eq!(r.status(), StatusCode::OK);
+    }
+
+    /// Spec §2: an encrypted chat stops at the cap; a plaintext one of the same size does not.
+    #[tokio::test]
+    async fn an_encrypted_chat_refuses_the_member_past_the_cap() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 1);
+        let (bob, _) = person(&state, 2);
+        let bob_handle = state.db.user(&bob).unwrap().unwrap().login.unwrap();
+        let chat = super::tests_support::group(&state, &[&alice]);
+        for i in 1..E2EE_MEMBER_CAP {
+            state
+                .db
+                .add_member(
+                    &chat,
+                    &format!("user:filler{i}"),
+                    "member",
+                    &alice,
+                    &json!({}),
+                )
+                .unwrap();
+        }
+        assert_eq!(state.db.members_of(&chat).unwrap().len(), E2EE_MEMBER_CAP);
+        let add = || {
+            member_add(
+                State(state.clone()),
+                alice_dev.clone(),
+                Path(chat.clone()),
+                Json(AddMemberBody {
+                    handle: Some(bob_handle.clone()),
+                    handles: vec![],
+                    agent_ids: vec![],
+                }),
+            )
+        };
+
+        state
+            .db
+            .matrix_insert_room(&chat, "!r:arbos.life", None, "group", true)
+            .unwrap();
+        assert_eq!(add().await.status(), StatusCode::CONFLICT);
+        assert_eq!(state.db.members_of(&chat).unwrap().len(), E2EE_MEMBER_CAP);
+
+        state
+            .db
+            .matrix_insert_room(&chat, "!r:arbos.life", None, "group", false)
+            .unwrap();
+        assert_eq!(add().await.status(), StatusCode::OK);
+        assert_eq!(
+            state.db.members_of(&chat).unwrap().len(),
+            E2EE_MEMBER_CAP + 1
+        );
     }
 }
 

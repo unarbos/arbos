@@ -3,21 +3,23 @@
 //! The apps see three things: a [`Snapshot`] of servers and channels whenever the room list
 //! changes, the timeline rows of a room they opened (and every new row after), and the result
 //! of their own sends. Everything else — tokens, retries, pagination tokens, the state events
-//! that say which room is a channel of which server — stays in here.
+//! that say which room is a channel of which server, encryption keys — stays in here.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::StreamExt;
 use matrix_sdk::authentication::matrix::MatrixSession;
 use matrix_sdk::authentication::SessionTokens;
+use matrix_sdk::encryption::recovery::RecoveryState;
+use matrix_sdk::encryption::{BackupDownloadStrategy, EncryptionSettings};
 use matrix_sdk::room::MessagesOptions;
 use matrix_sdk::ruma::api::client::receipt::create_receipt::v3::ReceiptType;
 use matrix_sdk::ruma::api::client::sync::sync_events::v5 as sliding;
 use matrix_sdk::ruma::events::receipt::ReceiptThread;
-use matrix_sdk::ruma::events::room::message::OriginalSyncRoomMessageEvent;
-use matrix_sdk::ruma::events::{MessageLikeEventType, StateEventType};
+use matrix_sdk::ruma::events::{AnySyncTimelineEvent, MessageLikeEventType, StateEventType};
 use matrix_sdk::ruma::serde::Raw;
 use matrix_sdk::ruma::{OwnedRoomId, OwnedUserId, RoomId, TransactionId, UInt, UserId};
 use matrix_sdk::{Client, Room, SessionMeta, SlidingSyncList, SlidingSyncMode};
@@ -25,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::watch;
 
-use crate::rows::{member_of_mxid, message_row, ChannelRow, MessageRow, SpaceRow};
+use crate::rows::{self, member_of_mxid, message_row, ChannelRow, MessageRow, SpaceRow};
 use crate::{Error, Result};
 
 /// What `GET /me/matrix` returns.
@@ -35,6 +37,26 @@ pub struct Session {
     pub user_id: String,
     pub access_token: String,
     pub device_id: String,
+}
+
+/// Where this device keeps its encryption keys.
+#[derive(Clone)]
+pub struct Crypto {
+    /// This device's store (keys and room state). One directory per Matrix device id.
+    pub store_dir: PathBuf,
+    /// Encrypts the store at rest; the app keeps it in the keychain.
+    pub store_key: Option<String>,
+}
+
+/// The account's key backup, as the first sync reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Backup {
+    /// Set up, and this device holds the keys.
+    On,
+    /// Never set up: this is the account's first encrypting device.
+    Off,
+    /// Set up on another device; this one needs the passphrase ([`MatrixClient::recover`]).
+    Locked,
 }
 
 /// Servers and channels this device is in, as the left list shows them.
@@ -82,7 +104,11 @@ pub struct MatrixClient {
 impl MatrixClient {
     /// Build the client, restore the device session and start syncing. Must run on a tokio
     /// runtime; returns once the client exists (the first snapshot arrives through the listener).
-    pub async fn start(session: Session, listener: Arc<dyn Listener>) -> Result<Arc<Self>> {
+    pub async fn start(
+        session: Session,
+        crypto: Crypto,
+        listener: Arc<dyn Listener>,
+    ) -> Result<Arc<Self>> {
         let user_id = UserId::parse(&session.user_id).map_err(|e| Error::Session(e.to_string()))?;
         let http = reqwest13::Client::builder()
             .timeout(Duration::from_secs(60))
@@ -92,6 +118,12 @@ impl MatrixClient {
         let client = Client::builder()
             .homeserver_url(&session.homeserver)
             .http_client(http)
+            .sqlite_store(&crypto.store_dir, crypto.store_key.as_deref())
+            .with_encryption_settings(EncryptionSettings {
+                auto_enable_cross_signing: true,
+                backup_download_strategy: BackupDownloadStrategy::OneShot,
+                auto_enable_backups: true,
+            })
             .build()
             .await
             .map_err(|e| Error::Homeserver(e.to_string()))?;
@@ -135,19 +167,54 @@ impl MatrixClient {
         member_of_mxid(self.me.as_str())
     }
 
+    /// The account's key backup, once the first sync has said where it stands.
+    pub async fn backup(&self) -> Backup {
+        let mut states = self.client.encryption().recovery().state_stream();
+        while let Some(state) = states.next().await {
+            match state {
+                RecoveryState::Unknown => continue,
+                RecoveryState::Enabled => return Backup::On,
+                RecoveryState::Disabled => return Backup::Off,
+                RecoveryState::Incomplete => return Backup::Locked,
+            }
+        }
+        Backup::Locked
+    }
+
+    /// Back the room keys up under the person's recovery passphrase
+    /// (`arbos_wallet::Seed::recovery_passphrase`): the account's first device sets up secret
+    /// storage and key backup with it; every later device imports from it and then downloads
+    /// the room keys ([`BackupDownloadStrategy::OneShot`]), so a new phone reads the old
+    /// history. A wrong passphrase on a later device is an error and changes nothing.
+    pub async fn recover(&self, passphrase: &str) -> Result<()> {
+        let recovery = self.client.encryption().recovery();
+        let done = match self.backup().await {
+            Backup::On => Ok(()),
+            Backup::Off => recovery
+                .enable()
+                .with_passphrase(passphrase)
+                .await
+                .map(drop),
+            Backup::Locked => recovery.recover(passphrase).await,
+        };
+        done.map_err(|e| Error::Keys(e.to_string()))
+    }
+
     // ---- sync ---------------------------------------------------------------------------------
 
     fn install_event_handler(self: &Arc<Self>) {
         let weak = Arc::downgrade(self);
         self.client
-            .add_event_handler(move |ev: Raw<OriginalSyncRoomMessageEvent>, room: Room| {
+            // Every timeline event: messages, and encrypted ones this device has no key for
+            // yet (a locked row, replaced once the key arrives).
+            .add_event_handler(move |ev: Raw<AnySyncTimelineEvent>, room: Room| {
                 let weak = weak.clone();
                 async move {
                     let Some(this) = weak.upgrade() else { return };
                     let Ok(mut v) = serde_json::from_str::<Value>(ev.json().get()) else {
                         return;
                     };
-                    if v["event_id"].is_null() {
+                    if v["event_id"].is_null() || !rows::is_message(&v) {
                         return;
                     }
                     v["room_id"] = json!(room.room_id().as_str());
@@ -173,6 +240,23 @@ impl MatrixClient {
                         r.enabled = Some(true);
                         r
                     })
+                    // Keys travel as to-device messages and account data; device lists and
+                    // one-time key counts ride the e2ee extension.
+                    .with_e2ee_extension({
+                        let mut e = sliding::request::E2EE::default();
+                        e.enabled = Some(true);
+                        e
+                    })
+                    .with_to_device_extension({
+                        let mut t = sliding::request::ToDevice::default();
+                        t.enabled = Some(true);
+                        t
+                    })
+                    .with_account_data_extension({
+                        let mut a = sliding::request::AccountData::default();
+                        a.enabled = Some(true);
+                        a
+                    })
                     .add_list(
                         SlidingSyncList::builder("all")
                             .sync_mode(
@@ -188,6 +272,7 @@ impl MatrixClient {
                                 (StateEventType::SpaceParent, "*".to_owned()),
                                 (StateEventType::SpaceChild, "*".to_owned()),
                                 (StateEventType::RoomMember, me_key.clone()),
+                                (StateEventType::RoomEncryption, String::new()),
                             ]),
                     )
             });
@@ -418,7 +503,13 @@ impl MatrixClient {
         let t = tl.entry(room_id.to_owned()).or_default();
         let mut changed = false;
         for r in rows {
-            if t.rows.iter().any(|x| x.event_id == r.event_id) {
+            // Same event again: keep the newest reading (a locked row becomes the message once
+            // its key arrives).
+            if let Some(x) = t.rows.iter_mut().find(|x| x.event_id == r.event_id) {
+                if *x != r {
+                    *x = r;
+                    changed = true;
+                }
                 continue;
             }
             t.rows.push(r);
@@ -468,7 +559,9 @@ impl MatrixClient {
         let room = self.room(room_id)?;
         let loaded = {
             let tl = self.timelines.lock().unwrap_or_else(|p| p.into_inner());
-            tl.get(room.room_id()).is_some_and(|t| t.loaded)
+            // A locked row means keys may have arrived since: read the newest page again.
+            tl.get(room.room_id())
+                .is_some_and(|t| t.loaded && !t.rows.iter().any(MessageRow::is_locked))
         };
         if loaded {
             return Ok(self.push_rows(room.room_id(), Vec::new(), false));
@@ -509,8 +602,23 @@ impl MatrixClient {
     /// Send a text message; `local_id` (a ULID the app made) becomes `life.arbos.id` and the
     /// transaction id, so a retry never doubles it. Returns the event id.
     pub async fn send_text(&self, room_id: &str, text: &str, local_id: &str) -> Result<String> {
+        self.send(room_id, text, Vec::new(), local_id).await
+    }
+
+    /// [`Self::send_text`] with extra transcript parts (`life.arbos.parts`, e.g. a cheque);
+    /// `text` is what other Matrix clients and the notification show.
+    pub async fn send(
+        &self,
+        room_id: &str,
+        text: &str,
+        parts: Vec<Value>,
+        local_id: &str,
+    ) -> Result<String> {
         let room = self.room(room_id)?;
-        let content = json!({ "msgtype": "m.text", "body": text, "life.arbos.id": local_id });
+        let mut content = json!({ "msgtype": "m.text", "body": text, "life.arbos.id": local_id });
+        if !parts.is_empty() {
+            content["life.arbos.parts"] = Value::Array(parts);
+        }
         let txn: &TransactionId = local_id.into();
         let r = room
             .send_raw("m.room.message", content)

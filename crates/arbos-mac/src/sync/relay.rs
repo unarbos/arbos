@@ -1758,7 +1758,15 @@ async fn start_matrix(shared: &Arc<Shared>) {
         events: shared.events.clone(),
         shared: Arc::downgrade(shared),
     });
-    match MatrixClient::start(session, bridge).await {
+    // One key store per Matrix device; the iPhone's phrase backs keys up, this Mac only keeps
+    // its own until it can restore from it too.
+    let crypto = arbos_matrix::Crypto {
+        store_dir: credentials::config_dir()
+            .join("matrix")
+            .join(&session.device_id),
+        store_key: credentials::matrix_store_key(&session.device_id),
+    };
+    match MatrixClient::start(session, crypto, bridge).await {
         Ok(client) => {
             let previous = shared.matrix.lock().unwrap().replace(client);
             if let Some(p) = previous {

@@ -92,6 +92,7 @@ mod upgrade;
 mod vault;
 mod vaults;
 mod voice;
+mod wallets;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -653,6 +654,11 @@ async fn main() -> anyhow::Result<()> {
         .route("/users/search", get(people::users_search))
         .route("/users", get(people::users_directory))
         .route("/users/{id}", get(people::user_profile))
+        .route("/users/{id}/wallet", get(wallets::user_wallet))
+        .route(
+            "/me/wallet",
+            put(wallets::put_wallet).delete(wallets::delete_wallet),
+        )
         .route("/avatar-colors", get(people::avatar_colors))
         .route("/avatar-discs", get(people::avatar_discs))
         .route(
