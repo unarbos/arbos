@@ -5,9 +5,12 @@
 //! `PUT /me/wallet {address, proof}`, where `proof` is an sr25519 signature by that address over
 //! [`link_message`] — so nobody can point someone else's handle at an address they don't hold,
 //! or claim an address that isn't theirs. Linking is idempotent, so a replayed proof can only
-//! re-link the same address to the same user. `GET /users/{id}/wallet` answers `{address}` to
-//! any signed-in user; `DELETE /me/wallet` unlinks (the address stays on chain, the handle stops
-//! pointing at it).
+//! re-link the same address to the same user. `GET /users/{id}/wallet` answers `{address}` only
+//! to someone in a direct chat with that user, neither blocking the other; `DELETE /me/wallet`
+//! unlinks (the address stays on chain, the handle stops pointing at it).
+//!
+//! The relay is not the authority on who gets paid: a client shows the address it was given and
+//! pins it per person, so a relay that swaps one is noticed.
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -111,9 +114,18 @@ fn user_of(principal: &Principal) -> Result<String, Box<Response>> {
     }
 }
 
+/// The detail goes to the log, never to the client.
 fn internal(e: impl std::fmt::Display) -> Response {
-    api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string())
+    tracing::error!(error = %e, "wallet link storage");
+    api_error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "db",
+        "something went wrong",
+    )
 }
+
+/// Address lookups one user may make a minute: a person paying people, not a crawler.
+const LOOKUPS_PER_MIN: i64 = 30;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -158,16 +170,32 @@ pub async fn delete_wallet(State(state): State<AppState>, principal: Principal) 
     }
 }
 
-/// `GET /users/{id}/wallet` → `{address}`, or 404 when they have not linked one.
+/// `GET /users/{id}/wallet` → `{address}` for someone the caller has a direct chat with. One
+/// 404 covers everything else — no such user, no chat, a block either way, nothing linked — so
+/// the answer says nothing about which.
 pub async fn user_wallet(
     State(state): State<AppState>,
     principal: Principal,
     Path(id): Path<String>,
 ) -> Response {
-    if let Err(r) = user_of(&principal) {
-        return *r;
+    let me = match user_of(&principal) {
+        Ok(u) => u,
+        Err(r) => return *r,
+    };
+    match state.db.rate_event(&me, "wallet_lookup", 60_000) {
+        Ok(n) if n > LOOKUPS_PER_MIN => {
+            return api_error(StatusCode::TOO_MANY_REQUESTS, "rate_limited", "slow down");
+        }
+        Ok(_) => {}
+        Err(e) => return internal(e),
     }
-    match state.db.wallet(&id) {
+    let address = (|| -> anyhow::Result<Option<String>> {
+        if state.db.dm_between(&me, &id)?.is_none() || state.db.blocked_either_way(&me, &id)? {
+            return Ok(None);
+        }
+        state.db.wallet(&id)
+    })();
+    match address {
         Ok(Some(address)) => Json(json!({ "address": address })).into_response(),
         Ok(None) => api_error(StatusCode::NOT_FOUND, "not_found", "no linked wallet"),
         Err(e) => internal(e),
@@ -220,5 +248,29 @@ mod tests {
             "another address"
         );
         assert!(!verify("gh_1", DEV, "00"), "junk");
+    }
+
+    #[tokio::test]
+    async fn an_address_is_only_told_to_a_direct_chat_partner() {
+        use crate::people::tests_support::{dm, person};
+        let state = crate::state::test_support::test_state(crate::state::AuthMode::Github);
+        let (alice, _) = person(&state, 1);
+        let (bob, bob_dev) = person(&state, 2);
+        state.db.set_wallet(&alice, Some(DEV)).unwrap();
+        let ask = || async {
+            user_wallet(State(state.clone()), bob_dev.clone(), Path(alice.clone()))
+                .await
+                .status()
+        };
+        assert_eq!(ask().await, StatusCode::NOT_FOUND, "strangers");
+        dm(&state, &alice, &bob);
+        assert_eq!(ask().await, StatusCode::OK);
+        state.db.block(&alice, &bob).unwrap();
+        assert_eq!(ask().await, StatusCode::NOT_FOUND, "blocked");
+        state.db.unblock(&alice, &bob).unwrap();
+        for _ in 3..LOOKUPS_PER_MIN {
+            assert_eq!(ask().await, StatusCode::OK);
+        }
+        assert_eq!(ask().await, StatusCode::TOO_MANY_REQUESTS);
     }
 }
