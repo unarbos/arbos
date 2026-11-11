@@ -1201,7 +1201,11 @@ mod tests {
             "Connected apps must not appear in Mac Settings until implemented"
         );
         assert!(setting_target(SettingsItem::ConnectedApps).is_none());
-        assert!(settings_search::index(Platform::Mac).all(|e| e.item != SettingsItem::ConnectedApps));
-        assert!(settings_entries(&crate::search::normalize_query("connected apps"), &[]).is_empty());
+        assert!(
+            settings_search::index(Platform::Mac).all(|e| e.item != SettingsItem::ConnectedApps)
+        );
+        assert!(
+            settings_entries(&crate::search::normalize_query("connected apps"), &[]).is_empty()
+        );
     }
 }
