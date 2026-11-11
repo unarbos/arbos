@@ -1528,8 +1528,10 @@ struct RowView: View, Equatable {
     /// The agent-error note's Details disclosure.
     @State private var errorDetailsOpen = false
 
-    /// Trailing column width for swipe-revealed times (fits "12:59 PM").
-    static let timeRevealWidth: CGFloat = 56
+    /// Trailing column width for swipe-revealed times: fits "12:59 PM" at the design size and
+    /// grows with the Text Size slider (the 11 pt label is 57 pt wide at Larger, 64 at Largest).
+    /// Fixed 56 pt wrapped at Largest ([feedback scaled-timestamp-clip-mac-2026-10-29] / #2310).
+    static func timeRevealWidth(_ theme: Theme) -> CGFloat { theme.pt(56) }
 
     /// Reply-count digit inset from the bubble's top-trailing corner
     /// ([feedback ADc6sZtZP2moU0knIJ_ifHs]). Must clear `Theme.bubbleRadius`'s continuous
@@ -1635,12 +1637,15 @@ struct RowView: View, Equatable {
         .offset(x: -timeReveal)
         .overlay(alignment: .trailing) {
             if let time = swipeTimeLabel, timeReveal > 0.5 {
+                let column = Self.timeRevealWidth(theme)
                 Text(time)
                     .font(theme.font(11))
                     .foregroundStyle(theme.muted)
-                    .frame(width: Self.timeRevealWidth, alignment: .trailing)
-                    .offset(x: Self.timeRevealWidth - timeReveal)
-                    .opacity(Double(min(1, timeReveal / (Self.timeRevealWidth * 0.55))))
+                    .lineLimit(1)
+                    .fixedSize()
+                    .frame(width: column, alignment: .trailing)
+                    .offset(x: column - timeReveal)
+                    .opacity(Double(min(1, timeReveal / (column * 0.55))))
                     .allowsHitTesting(false)
                     .accessibilityHidden(timeReveal < 12)
             }
