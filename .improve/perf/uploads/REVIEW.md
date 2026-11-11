@@ -1,0 +1,9 @@
+# Bounded source review: reachable upload allocation change
+
+Reviewed exact relay SHA973433f5b9eb4e0731180ae6a818130d44882dd0d5508fed13035b38fb419dbc against compositional preimagea8c95f914e9036e5ff8f4cfb4a2f694cfd2665497769c453b276e8ce0d66dc7a. The preimage retains the pinned final native account/store owners and overlays only the three separately proven metadata hydration helpers.
+
+The final delta preserves the complete serial send tranche, chart fallback/voice ordering, immediate error publication, missing-ref behavior, blob key/mime/kind/source construction, Path Vec reads and existing GET-refresh-once/PUT-no-refresh policies. Fetching a reusable Response separates unchanged GET authority/retry handling from its callers' representation needs. Downloads still decode the same mime and Vec. Forwarded Copy passes the received Bytes directly into a reusable reqwest Body; Sticker/voice use Arc::unwrap_or_clone, moving only unique buffers and retaining the old clone for shared buffers. Body::from Vec/Bytes preserves reusable bodies and inferred length; no streaming body, hand-written redirect, bearer replay logic or new dependency was introduced.
+
+Earlier529 batch machinery was withheld because the actual producer graph sends one Sticker or homogeneous Path/Copy batches, so constructed multi-owned-image concurrency was not a demonstrated production throughput win. Streaming was separately withheld because the actual307 fixture showed a replay regression and the large-file sample was slower. These are not shipped speedups or additional owner decisions.
+
+No new issue found in this source review. Accept only the final source-pinned native SDK/all-target Clippy and actual HTTP/queue/307 controls plus measured reachable Copy allocation results; old529/streaming/mutable-binary evidence does not verify this final source. No claim of whole-app latency or physical-device runtime follows from this bounded review.
