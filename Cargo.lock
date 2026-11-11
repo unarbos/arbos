@@ -610,7 +610,7 @@ dependencies = [
 
 [[package]]
 name = "arbos-wallet"
-version = "0.6.405"
+version = "0.6.409"
 dependencies = [
  "futures",
  "hex",
