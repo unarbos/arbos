@@ -1512,6 +1512,7 @@ pub async fn spawn_sandboxless_box_check(state: AppState) {
 /// Wake-job runner: 3 attempts with backoff, then S13 error (crdt-sync §8.4 step 5).
 pub async fn spawn_wake_runner(state: AppState) {
     tokio::spawn(async move {
+        let mut waking = Waking::new();
         loop {
             // A job just queued is run now: a user is waiting on it. The timer is for the jobs
             // that come due by themselves (a retry, a cold box on its way back).
@@ -1519,63 +1520,97 @@ pub async fn spawn_wake_runner(state: AppState) {
                 _ = state.wake_kick.notified() => {}
                 _ = tokio::time::sleep(Duration::from_millis(750)) => {}
             }
-            run_wake_jobs(&state).await;
+            start_wake_jobs(&state, &mut waking).await;
         }
     });
 }
 
-/// One pass over the wake jobs that are due.
+/// The `boxd` wakes under way, by user.
+type Waking = HashMap<String, tokio::task::JoinHandle<()>>;
+
+/// One pass over the wake jobs that are due, to the end of each.
+#[cfg(test)]
 pub(crate) async fn run_wake_jobs(state: &AppState) {
+    let mut waking = Waking::new();
+    start_wake_jobs(state, &mut waking).await;
+    for (_, wake) in waking {
+        let _ = wake.await;
+    }
+}
+
+/// Start the wake jobs that are due. The wake of a `boxd` box runs on a task of its own, so no
+/// box waits for another's: how many a node wakes at once is the node's to say
+/// (`boxd::WAKES_PER_NODE`), and a box whose wake is still under way is not started again. Every
+/// other wake runs here, one after another, as it always has; so does the making of a box, whose
+/// placement reads each node's free disk and must see the box made before it.
+async fn start_wake_jobs(state: &AppState, waking: &mut Waking) {
     let jobs = match state.db.due_wake_jobs() {
         Ok(j) => j,
         Err(_) => return,
     };
-    for (user_id, reason, attempts) in jobs {
-        let (st, _) = state.box_state(&user_id).await;
-        if st == BoxState::Awake || st == BoxState::Error {
-            // Awake: the dial finished it. Error: the stale-box detector gave up; only an
-            // explicit wake/start re-arms it.
-            let _ = state.db.finish_wake_job(&user_id);
+    waking.retain(|_, wake| !wake.is_finished());
+    for job in jobs {
+        if waking.contains_key(&job.0) {
             continue;
         }
-        if read_only_box(state, &user_id) {
-            // A job queued before the provider was retired. It can only fail three times and end
-            // as `error`, which says nothing true about that box, so it ends here and the state is
-            // left as it stands.
-            let _ = state.db.finish_wake_job(&user_id);
-            continue;
+        let on_boxd = matches!(state.db.user_box(&job.0), Ok(Some(sb)) if sb.provider == Provider::Boxd.as_str());
+        if on_boxd {
+            let state = state.clone();
+            let user_id = job.0.clone();
+            let wake = tokio::spawn(async move { run_wake_job(&state, job).await });
+            waking.insert(user_id, wake);
+        } else {
+            run_wake_job(state, job).await;
         }
-        if state.upgrading.lock().await.contains_key(&user_id) {
-            // The upgrade starts the box it ends on. A start from here would bounce a box mid-roll
-            // and write back a row read before the new sandbox landed in it (#2262); the job waits
-            // for the upgrade.
-            continue;
+    }
+}
+
+/// One wake job that is due.
+async fn run_wake_job(state: &AppState, (user_id, reason, attempts): (String, String, i64)) {
+    let (st, _) = state.box_state(&user_id).await;
+    if st == BoxState::Awake || st == BoxState::Error {
+        // Awake: the dial finished it. Error: the stale-box detector gave up; only an
+        // explicit wake/start re-arms it.
+        let _ = state.db.finish_wake_job(&user_id);
+        return;
+    }
+    if read_only_box(state, &user_id) {
+        // A job queued before the provider was retired. It can only fail three times and end
+        // as `error`, which says nothing true about that box, so it ends here and the state is
+        // left as it stands.
+        let _ = state.db.finish_wake_job(&user_id);
+        return;
+    }
+    if state.upgrading.lock().await.contains_key(&user_id) {
+        // The upgrade starts the box it ends on. A start from here would bounce a box mid-roll
+        // and write back a row read before the new sandbox landed in it (#2262); the job waits
+        // for the upgrade.
+        return;
+    }
+    // Mark the job as in flight by pushing its due time out; the box dial finishes it.
+    let _ = state.db.retry_wake_job(&user_id, 120_000, "in flight");
+    tracing::info!(%user_id, %reason, attempts, "waking box");
+    match start_box(state, &user_id).await {
+        Ok(()) => {}
+        Err(e) if e.to_string() == crate::boxd::FETCHING => {
+            // Not a failed wake: the daemon is bringing a cold box back from the object
+            // store. Look again shortly. Each look restarts the waking clock (`start_box`
+            // does), so the box is not called unreachable for not having dialled in yet.
+            let _ = state
+                .db
+                .retry_wake_job(&user_id, 3_000, crate::boxd::FETCHING);
         }
-        // Mark the job as in flight by pushing its due time out; the box dial finishes it.
-        let _ = state.db.retry_wake_job(&user_id, 120_000, "in flight");
-        tracing::info!(%user_id, %reason, attempts, "waking box");
-        match start_box(state, &user_id).await {
-            Ok(()) => {}
-            Err(e) if e.to_string() == crate::boxd::FETCHING => {
-                // Not a failed wake: the daemon is bringing a cold box back from the object
-                // store. Look again shortly. Each look restarts the waking clock (`start_box`
-                // does), so the box is not called unreachable for not having dialled in yet.
-                let _ = state
-                    .db
-                    .retry_wake_job(&user_id, 3_000, crate::boxd::FETCHING);
-            }
-            Err(e) => {
-                tracing::warn!(%user_id, error = %e, "wake failed");
-                let n = state
-                    .db
-                    .retry_wake_job(&user_id, 5_000 * (attempts + 1), &e.to_string())
-                    .unwrap_or(99);
-                if n >= 3 {
-                    let _ = state.db.finish_wake_job(&user_id);
-                    state
-                        .set_box_state(&user_id, BoxState::Error, Some(&e.to_string()))
-                        .await;
-                }
+        Err(e) => {
+            tracing::warn!(%user_id, error = %e, "wake failed");
+            let n = state
+                .db
+                .retry_wake_job(&user_id, 5_000 * (attempts + 1), &e.to_string())
+                .unwrap_or(99);
+            if n >= 3 {
+                let _ = state.db.finish_wake_job(&user_id);
+                state
+                    .set_box_state(&user_id, BoxState::Error, Some(&e.to_string()))
+                    .await;
             }
         }
     }

@@ -16,6 +16,7 @@
 #
 #   ARBOS_LOAD_BOXES=1000  ARBOS_LOAD_SOCKETS=2500  ARBOS_LOAD_NODES=2  ARBOS_LOAD_NODE_CAP=160
 #   ARBOS_LOAD_WARM=150  ARBOS_LOAD_WAKES_PER_MIN=30  ARBOS_LOAD_MINUTES=10
+#   ARBOS_LOAD_BURST=0     sleeping boxes woken at one instant as the clock starts, on full nodes
 #   ARBOS_LOAD_CLEAN_WAKE_MS=200  ARBOS_LOAD_RESTORE_MS=220    a daemon's wake, measured
 #   ARBOS_LOAD_SLEEP_MS=500  ARBOS_LOAD_CKPT_MS=1200  ARBOS_LOAD_FETCH_MS=8000   assumed
 #   ARBOS_LOAD_THINK_MS=10000  ARBOS_LOAD_ROWS_PER_MIN=60  ARBOS_LOAD_IDLE_SPEEDUP=30  ARBOS_LOAD_SEED=1
@@ -31,8 +32,9 @@
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
-# Both ends of every socket are in this process, and so are the fake daemons' connections.
-want=$(( ${ARBOS_LOAD_SOCKETS:-2500} * 2 + 2048 ))
+# Both ends of every socket are in this process, the awake boxes' sockets too, and so are the
+# fake daemons' connections.
+want=$(( (${ARBOS_LOAD_SOCKETS:-2500} + ${ARBOS_LOAD_NODES:-2} * ${ARBOS_LOAD_NODE_CAP:-160}) * 2 + 2048 ))
 if (( $(ulimit -n) < want )); then
   ulimit -n "$want" || { echo "raise the open-file limit to $want (ulimit -n)" >&2; exit 2; }
 fi

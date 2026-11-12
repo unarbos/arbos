@@ -186,6 +186,19 @@ cap, its memory floor and its cold tier are that node's, and nothing moves a box
 While a node is down its boxes fail to wake with `boxd node-1 did not answer ...`, and are not
 made anew anywhere else.
 
+Boxes wake side by side: the relay asks a node for at most eight wakes at once, and no node's
+wakes wait for another's. A slot on a node is taken before its daemon is asked and given back
+if the wake fails, so a node is never over its cap however many wake at once. A node also keeps
+eight of its slots free (a quarter of a cap below 32): when fewer are, the relay puts the boxes
+their users left longest to sleep ahead of the next wake, never one with a turn running, one
+agentd calls busy, or one still on its way up. A box that wakes on a busy node therefore takes a
+free slot at once instead of waiting for another box's sleep, and a node with more wanted than
+it holds runs at most `max_resident` less eight boxes awake, 152 of 160. Only when the free
+slots are all taken does a wake wait for the sleep of the box it takes the place of.
+A sleeping box is woken when its user types in its chat or sends, and already when the chat
+comes on screen if its node is at or below that soft ceiling; a box its user stopped is woken
+by neither.
+
 **Certificates.** One private CA for the pool, kept off the hosts; from it a certificate for
 each node, naming the address the relay dials, and one for the relay:
 
@@ -230,10 +243,12 @@ TLS is 1.3 only. No file may be a link or writable by anyone but its owner.
 relay's copy of that node's token and `key_file` the relay's key, both mode 0600. The node's
 certificate must chain to `ca_file` and name the host in `url`; no other CA is trusted for it,
 and a node that fails the check is a node that did not answer. `max_resident` defaults to 160.
-An `http://127.0.0.1:<port>` url with no certificate files is taken too, for a second daemon on
-the relay's own host; that daemon runs in a network namespace of its own, because the bridge
-`arbos-boxd0` and the veth names are the same for every daemon. Anything else in the file stops
-the relay at start.
+A second daemon on the relay's own host runs in a network namespace of its own, because the
+bridge `arbos-boxd0` and the veth names are one per namespace. Its loopback is then its own, so
+the relay reaches it like any other node: over a link between the two namespaces, at its
+`ARBOS_BOXD_TLS_LISTEN` address, with certificates. An `http://127.0.0.1:<port>` url with no
+certificate files is still taken, for what does end on the relay's loopback: the load gate's
+daemons, or a tunnel to a node. Anything else in the file stops the relay at start.
 
 **The network between them** is the operator's (the spec's WireGuard link), and three things
 have to route over it:
@@ -311,7 +326,11 @@ its step. The summary at the end has one line per box (`moved`, `done`, `skip` w
 A Linux host with Docker, `runsc`, a relay on `ARBOS_DEFAULT_PROVIDER=gvisor` with
 `ARBOS_BOXD_URL` set, and the daemon, all as in the sections above. The relay listens on the
 bridge, so every `boxd-migrate.py` below takes `--relay http://10.207.0.1:7700`. The gvisor
-side needs four things the sections above do not name:
+side needs four things the sections above do not name, and the agent image: the relay runs
+`ghcr.io/unarbos/arbos/arbos-agent:<version>`, which Docker pulls when it does not have it. On
+a host that cannot pull it, set `ARBOS_BOX_IMAGE_REPO` to a repository it can, or
+`docker import` the daemon's `rootfs.tar` under that tag, giving back the entrypoint and
+environment of `image.json` with `--change` (an import carries neither).
 
 - `ARBOS_BOX_WORK_GB=8` on the relay. Its default is 2, and a 2 GiB `work.img` is no tier: the
   tool would skip the box.

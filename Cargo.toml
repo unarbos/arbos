@@ -81,7 +81,7 @@ base64 = "0.22"
 url = "2"
 regex-lite = "0.1"
 async-trait = "0.1"
-nix = { version = "0.29", features = ["signal", "process", "user", "fs"] }
+nix = { version = "0.29", features = ["signal", "process", "user", "fs", "resource"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 roxmltree = "0.20"
 dirs = "6"

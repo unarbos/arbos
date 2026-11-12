@@ -326,6 +326,13 @@ class Moves(unittest.TestCase):
                       ("--relay", "http://0.0.0.0:7700"), ("--user", "../etc"), ("--all",)]:
             code, out = self.run_tool("--yes", *flags)
             self.assertEqual(code, 2, (flags, out))
+        # The scheme is told apart from the address: https to the bridge is refused for the scheme.
+        code, out = self.run_tool("--yes", "--relay", "https://10.207.0.1:7700")
+        self.assertEqual(code, 2, out)
+        self.assertIn("not an http:// address", out)
+        self.assertNotIn("not an address of this host", out)
+        code, out = self.run_tool("--yes", "--relay", "http://192.0.2.5:7700")
+        self.assertIn("not an address of this host", out)
         # An address an interface of this host has is this host: the relay on the bridge.
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             try:
