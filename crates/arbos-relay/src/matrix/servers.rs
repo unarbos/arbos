@@ -1593,9 +1593,11 @@ pub async fn leave(
 
 // ---- the device's Matrix identity and the proxy ---------------------------------------------------
 
-/// `GET /me/matrix` → `{homeserver, user_id, access_token, device_id}` for this device. The
-/// token is minted once through the appservice login (`m.login.application_service`), stored
-/// encrypted, and handed back on every call; sign-out revokes it with the device.
+/// `GET /me/matrix` → `{homeserver, user_id, access_token, device_id, people_native}` for this
+/// device. The token is minted once through the appservice login
+/// (`m.login.application_service`), stored encrypted, and handed back on every call; sign-out
+/// revokes it with the device. `people_native` is the user's `users.matrix_people_native`
+/// (`PUT /admin/matrix/people/{user}`); a failed lookup reads as off.
 pub async fn me_matrix(State(state): State<AppState>, principal: Principal) -> Response {
     let me = match user_of(&principal) {
         Ok(u) => u,
@@ -1609,9 +1611,13 @@ pub async fn me_matrix(State(state): State<AppState>, principal: Principal) -> R
     }
     let homeserver = state.cfg.public_url.trim_end_matches('/').to_owned();
     let mxid = state.matrix.cfg.user_mxid(&me);
+    let people_native = state
+        .db
+        .matrix_people_native_users()
+        .is_ok_and(|u| u.contains(&me));
     if let Ok(Some((mx_device, enc))) = state.db.matrix_device(&device_id) {
         if let Ok(token) = state.relay_key.decrypt(&enc) {
-            return Json(json!({ "homeserver": homeserver, "user_id": mxid, "access_token": token, "device_id": mx_device }))
+            return Json(json!({ "homeserver": homeserver, "user_id": mxid, "access_token": token, "device_id": mx_device, "people_native": people_native }))
                 .into_response();
         }
     }
@@ -1636,7 +1642,7 @@ pub async fn me_matrix(State(state): State<AppState>, principal: Principal) -> R
     // A device that can read channels can be told about them: the relay becomes this user's
     // push gateway (every live device; reads.rs `on_notify` fans channel messages out).
     state.matrix.pushers(&state, &me, true);
-    Json(json!({ "homeserver": homeserver, "user_id": mxid, "access_token": token, "device_id": mx_device }))
+    Json(json!({ "homeserver": homeserver, "user_id": mxid, "access_token": token, "device_id": mx_device, "people_native": people_native }))
         .into_response()
 }
 

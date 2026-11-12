@@ -558,6 +558,10 @@ async fn main() -> anyhow::Result<()> {
             put(matrix::appservice::set_reads),
         )
         .route(
+            "/admin/matrix/people/{user}",
+            put(matrix::appservice::set_people_native),
+        )
+        .route(
             "/admin/matrix/pushers",
             post(matrix::appservice::backfill_pushers),
         )
