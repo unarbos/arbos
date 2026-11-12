@@ -41,9 +41,9 @@ SKIP='^crates/arbos-mac/src/ui/theme.rs:'
 # The opaque surface tokens of `ui::theme::Theme` — the ones painted behind content, where the
 # desktop would otherwise show. Longest first so the alternation cannot stop at a prefix.
 # Each one's Glass-aware accessor, where it has one:
-#   bubble_assistant -> filter_on_fill()   pane_card -> pane_card_fill()   sidebar -> chrome()
-#   surface_1        -> card() / popup()   surface_2 -> control_fill()     field   -> field_fill()
-#   bubble           -> segment_on_fill()
+#   pane_card -> pane_card_fill()   sidebar -> chrome()
+#   surface_1 -> card() / popup()   surface_2 -> control_fill()   field -> field_fill()
+#   bubble    -> segment_on_fill()
 # `bg` (the page colour) and `code_bg` have none, so a site painting either needs its own call.
 TOK='bubble_assistant|surface_1|surface_2|pane_card|code_bg|sidebar|bubble|field|bg'
 
@@ -159,7 +159,7 @@ if [[ -n "$drift" ]]; then
   echo "glass-lint: the opaque fills in crates/arbos-mac/src no longer match $BASELINE."
   echo "  A \`+\` line is a new opaque fill where the desktop can show through. Paint it with the"
   echo "  token's Glass-aware accessor (ui/theme.rs: control_fill / field_fill / card / popup /"
-  echo "  pane_card_fill / chrome / filter_on_fill / segment_on_fill), or say why this one must be"
+  echo "  pane_card_fill / chrome / segment_on_fill), or say why this one must be"
   echo "  opaque with \`// glass-lint: allow (<why>)\` on the line or the line above it."
   echo "  A \`-\` line is a site that has gone or been converted: rerun with --write-baseline and"
   echo "  commit the smaller file with the change that earned it."

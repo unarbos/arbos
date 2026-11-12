@@ -1167,18 +1167,6 @@ impl Theme {
         (self.is_frost() && !self.is_light()).then(|| self.popup())
     }
 
-    /// The sidebar filter's selected capsule ("All" · Agents · People ·
-    /// Servers): Grok's `bubble_assistant` on Matte; on Glass the round-button
-    /// family's wash ([`Self::control_fill`]), so the one opaque chip left on
-    /// the frosted sidebar goes glass with the discs beside it (Jacob,
-    /// 2026-10-28 18:17).
-    pub fn filter_on_fill(&self) -> Hsla {
-        if !self.is_frost() {
-            return self.bubble_assistant;
-        }
-        self.control_fill()
-    }
-
     /// A text field inside the pane (the description editor, a secret's
     /// value, the inline name editor): `field` on Matte; on Glass white 6 %
     /// (dark) / white 60 % (light) — a step *under* the card in dark, a step
@@ -1702,7 +1690,6 @@ mod glass_contrast_tests {
             for (name, fill) in [
                 ("card", theme.pane_card_fill()),
                 ("control", theme.control_fill()),
-                ("filter capsule", theme.filter_on_fill()),
                 ("field", theme.field_fill()),
                 ("icon tile", theme.tile_fill()),
                 ("segment", theme.segment_on_fill()),
@@ -1745,7 +1732,6 @@ mod glass_contrast_tests {
             assert_eq!(theme.pane_card_fill(), theme.pane_card);
             assert_eq!(theme.pane_card_rim(), gpui::transparent_black());
             assert_eq!(theme.control_fill(), theme.surface_2);
-            assert_eq!(theme.filter_on_fill(), theme.bubble_assistant);
             assert_eq!(theme.field_fill(), theme.field);
             assert_eq!(theme.segment_on_fill(), theme.bubble);
             assert_eq!(theme.label_muted(), theme.text_muted);

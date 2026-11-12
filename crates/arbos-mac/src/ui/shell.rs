@@ -59,7 +59,6 @@ use crate::ui::secrets::{SecretsEvent, SecretsPanel};
 use crate::ui::servers;
 use crate::ui::sf_symbols;
 use crate::ui::sidebar;
-use crate::ui::sidebar_fit;
 use crate::ui::skills::{self, SkillsPanel};
 use crate::ui::slide::{self, ChatSlide, PaneSlides};
 use crate::ui::theme::{
@@ -349,10 +348,6 @@ pub struct Shell {
     /// app-01M5ATBWSY9E1HHBKH2QQVDEZX). Nothing renders it; escapes and
     /// click-outside still clear it so leftover true never sticks.
     pub(crate) menu_open: bool,
-    /// Which segment of the chat list's All · Agents · People · Servers
-    /// filter is selected ([feedback sidebar-strip-filter-2026-10-24]);
-    /// persisted with the rail state ([feedback mac-sidebar-rail-2026-10-26]).
-    pub(crate) list_filter: sidebar::ListFilter,
     /// Where the expanded sidebar's discs, pictures and footer picture rest,
     /// recorded every frame they are painted; the rail morph reads it.
     pub(crate) morph: rail::Morph,
@@ -363,13 +358,6 @@ pub struct Shell {
     pub(crate) split_drag: crate::ui::split_handle::DragState,
     /// The rail's picture list scroll (the tip and the morph follow it).
     pub(crate) rail_scroll: ScrollHandle,
-    /// The sidebar filter capsules' horizontal scroll (a narrow column,
-    /// [feedback sidebar-narrow-wrap-2026-10-27]).
-    pub(crate) filter_scroll: ScrollHandle,
-    /// Scrolls the selected capsule into view once per selection / width, so
-    /// the strip stays scrollable back to "All" ([feedback
-    /// server-strip-scroll-2026-10-28]).
-    pub(crate) filter_pin: sidebar_fit::FilterPin,
     /// Rig: `ARBOS_RIG_FULLSCREEN=1` lays the chrome out as native full
     /// screen (no layout difference since the rail keeps the lights' slot) where the platform
     /// cannot report it (headless Linux renders).
@@ -1147,6 +1135,10 @@ impl Shell {
         let feedback = cx.new(|cx| FeedbackSheet::new(state.clone(), cx));
         cx.observe(&feedback, |_, _, cx| cx.notify()).detach();
 
+        // Drop the stale All · Agents · People · Servers pref so old segment
+        // choices do not linger ([feedback chat-list-no-filter-mac-2026-11-10]).
+        let _ = std::fs::remove_file(crate::sync::credentials::config_dir().join("sidebar_filter"));
+
         let shell = Self {
             state,
             transcript,
@@ -1247,15 +1239,10 @@ impl Shell {
             signing_in: false,
             fullscreen: false,
             menu_open: false,
-            // The saved segment; the rig's `ARBOS_SIDEBAR_FILTER=all|agents|people|servers`
-            // wins at launch.
-            list_filter: sidebar::ListFilter::load(),
             morph: Default::default(),
             rail_hover: None,
             split_drag: Default::default(),
             rail_scroll: ScrollHandle::new(),
-            filter_scroll: ScrollHandle::new(),
-            filter_pin: sidebar_fit::FilterPin::default(),
             rig_fullscreen: std::env::var("ARBOS_RIG_FULLSCREEN").is_ok_and(|v| v == "1"),
             rig_rail_t: std::env::var("ARBOS_RIG_RAIL_T")
                 .ok()

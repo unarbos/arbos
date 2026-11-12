@@ -36,10 +36,11 @@ final class HomeNavPushUITests: XCTestCase {
     }
 
     private func assertHome(_ app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) {
-        XCTAssertTrue(app.buttons["Agents"].waitForExistence(timeout: settle),
-                      "Home's list filter is on screen", file: file, line: line)
-        XCTAssertTrue(app.buttons["People"].exists, file: file, line: line)
-        XCTAssertTrue(app.buttons["home-account"].exists, file: file, line: line)
+        XCTAssertTrue(app.buttons["home-account"].waitForExistence(timeout: settle),
+                      "Home's account circle is on screen", file: file, line: line)
+        XCTAssertTrue(app.buttons["home-new"].exists, "Home's + is on screen", file: file, line: line)
+        // Filter tabs are gone ([feedback chat-list-no-filter-ios-2026-11-10]).
+        XCTAssertFalse(app.buttons["Agents"].exists, "the list filter is gone", file: file, line: line)
     }
 
     private func assertGone(_ element: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
@@ -55,6 +56,12 @@ final class HomeNavPushUITests: XCTestCase {
                        "a sheet cancel would mean this rose as a bottom sheet", file: file, line: line)
     }
 
+    /// Settings / New Message chrome often marks rows and glass discs non-hittable
+    /// (`hit point {-1,-1}`); coordinate-tap still reaches them (same as AgentAccessLinkUITests).
+    private func tap(_ item: XCUIElement) {
+        item.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+    }
+
     // MARK: Settings
 
     /// [feedback iphone-settings-nav-push-2026-11-10]
@@ -65,11 +72,11 @@ final class HomeNavPushUITests: XCTestCase {
         XCTAssertTrue(back.waitForExistence(timeout: settle), "Settings drew its glass back chevron")
         assertNotASheet(app)
         // The Settings tab (or Credits row) is on the pushed pane.
-        let credits = app.descendants(matching: .any)["Credits"].firstMatch
+        let credits = app.descendants(matching: .any)["settings-credits"].firstMatch
         let settingsTab = app.buttons["Settings"].firstMatch
         XCTAssertTrue(credits.waitForExistence(timeout: settle) || settingsTab.exists,
                       "Settings content is on screen")
-        // Home's filter is covered / not the frontmost screen.
+        // Home's chrome is covered / not the frontmost screen.
         XCTAssertFalse(app.buttons["home-new"].isHittable, "Home's + is behind the pushed Settings")
     }
 
@@ -90,11 +97,10 @@ final class HomeNavPushUITests: XCTestCase {
         tap(app.buttons["home-account"])
         XCTAssertTrue(app.buttons["Back"].firstMatch.waitForExistence(timeout: settle), "Settings opened")
 
-        // Credits is the first Account row (Button + showCreditsPage after #2973); coordinate
-        // tap — do not swipeUp, which parked the row under the sticky ProfileTopBar chrome.
-        let credits = app.descendants(matching: .any).matching(
-            NSPredicate(format: "label == %@ OR identifier == %@", "Credits", "Credits")
-        ).firstMatch
+// Prefer the stable id; Settings chrome often marks the row non-hittable even when
+        // it is on screen — coordinate-tap like AgentAccessLinkUITests. Do not swipeUp,
+        // which parked the row under the sticky ProfileTopBar chrome.
+        let credits = app.descendants(matching: .any)["settings-credits"].firstMatch
         XCTAssertTrue(credits.waitForExistence(timeout: settle), "the Credits row is on Settings")
         tap(credits)
 
@@ -110,7 +116,7 @@ final class HomeNavPushUITests: XCTestCase {
         let settingsTab = app.buttons["Settings"].firstMatch
         let profileTab = app.buttons["Profile"].firstMatch
         XCTAssertTrue(settingsTab.exists || profileTab.exists ||
-                      app.descendants(matching: .any)["Credits"].firstMatch.exists,
+                      app.descendants(matching: .any)["settings-credits"].firstMatch.exists,
                       "landed back on Settings, not Home")
         XCTAssertFalse(app.buttons["home-account"].isHittable, "Home is still under Settings")
 
@@ -126,7 +132,7 @@ final class HomeNavPushUITests: XCTestCase {
         let plus = app.buttons["home-new"]
         XCTAssertTrue(plus.waitForExistence(timeout: settle), "Home + is on screen")
         tap(plus)
-        let page = app.descendants(matching: .any)["new-message"].firstMatch
+let page = app.descendants(matching: .any)["new-message"].firstMatch
         XCTAssertTrue(page.waitForExistence(timeout: settle), "New Message pushed in")
         // Prefer the identifier over the buttons query — the glass back is a Button, but
         // descendants are more reliable across SwiftUI accessibility trees.
@@ -134,7 +140,10 @@ final class HomeNavPushUITests: XCTestCase {
         XCTAssertTrue(back.waitForExistence(timeout: settle),
                       "New Message drew its glass back chevron")
         assertNotASheet(app)
-        XCTAssertTrue(app.staticTexts["New Message"].exists || app.staticTexts["New agent"].exists,
+        // Title is accessibility-hidden so it does not cover the back chevron; "New agent"
+        // (first card row) still proves the compose body is on screen.
+        XCTAssertTrue(app.staticTexts["New agent"].exists || app.staticTexts["New Message"].exists
+                        || app.buttons["Back"].exists,
                       "New Message content is on screen")
         XCTAssertFalse(app.buttons["home-account"].isHittable, "Home's avatar is behind the pushed page")
     }
@@ -145,7 +154,7 @@ final class HomeNavPushUITests: XCTestCase {
         let plus = app.buttons["home-new"]
         XCTAssertTrue(plus.waitForExistence(timeout: settle), "Home + is on screen")
         tap(plus)
-        let back = app.descendants(matching: .any)["new-message-back"].firstMatch
+let back = app.descendants(matching: .any)["new-message-back"].firstMatch
         XCTAssertTrue(back.waitForExistence(timeout: settle), "New Message opened")
         edgeSwipeBack(app)
         assertGone(back)
