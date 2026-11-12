@@ -929,7 +929,8 @@ fn is_cold(state: &AppState, user_id: &str) -> bool {
 /// `boxes.lifecycle_state`: where the daemon last left the box. It is a record of what the
 /// daemon said, not what is counted or acted on: a box that died by itself still reads `warm`
 /// here until its next wake or sleep, and the relay's own view of it (`AppState::box_state`)
-/// is what admission and the idle supervisor go by.
+/// is what admission and the idle supervisor go by. The one thing admission reads off it is
+/// whether a box told to wake has been started yet ([`see`]).
 fn record(
     state: &AppState,
     user_id: &str,
@@ -1046,6 +1047,8 @@ pub fn room_to_wake(resident: usize, max: usize, mem_gb: Option<f64>, min_mem_gb
 struct Seen {
     /// The boxes that have a slot on it, but for the one that asks.
     resident: usize,
+    /// Told to wake and not started: on their way to a slot, not in one.
+    waiting: usize,
     here: HashMap<String, String>,
     coming: HashSet<String>,
     going: HashSet<String>,
@@ -1060,19 +1063,34 @@ async fn see(state: &AppState, node: &Node, user_id: &str) -> Result<Seen> {
     };
     let here = state.db.boxd_box_nodes()?;
     let mut up: HashSet<&str> = coming.iter().map(String::as_str).collect();
+    let mut waiting = 0;
     for (user, on) in &here {
-        if *on == node.id
-            && matches!(
-                state.box_state(user).await.0,
-                BoxState::Awake | BoxState::Waking
+        if *on != node.id {
+            continue;
+        }
+        // A box told to wake is on the host once the daemon has been asked, and it is in
+        // `coming` from then. One whose row still says it sleeps is waiting for its slot:
+        // counted, a burst's wakers each saw the others in the free slots and put a box to
+        // sleep apiece with room to spare. A row that cannot be read counts: fail closed.
+        let asleep_on_its_row = || {
+            matches!(
+                state.db.box_lifecycle(user),
+                Ok(Some((_, at, _))) if !matches!(at.as_str(), "warm" | "waking" | "error")
             )
-        {
-            up.insert(user);
+        };
+        match state.box_state(user).await.0 {
+            BoxState::Awake => drop(up.insert(user)),
+            BoxState::Waking if coming.contains(user) || !asleep_on_its_row() => {
+                up.insert(user);
+            }
+            BoxState::Waking if user != user_id => waiting += 1,
+            _ => {}
         }
     }
     up.remove(user_id);
     Ok(Seen {
         resident: up.len(),
+        waiting,
         here,
         coming,
         going,
@@ -1398,7 +1416,8 @@ pub async fn wake_for_focus(state: &AppState, project_id: &str) {
         return;
     };
     let spare = match see(state, node, &user_id).await {
-        Ok(seen) => seen.resident + node.headroom() <= node.max_resident,
+        // The boxes already told to wake will each take a slot: they count here.
+        Ok(seen) => seen.resident + seen.waiting + node.headroom() <= node.max_resident,
         Err(_) => false,
     };
     if spare {
@@ -3657,6 +3676,40 @@ mod tests {
         // The slot it took is made up from the next longest idle.
         keep_headroom(&state, node).await;
         assert_eq!(slept(&fake, &users)[3..5], [true, false]);
+        assert!(fake.most_up.load(Ordering::SeqCst) <= 12);
+    }
+
+    /// Wakes that arrive together do not count each other: five on a node with three slots
+    /// free take those three, and only the two left over have a box put to sleep for them.
+    #[tokio::test]
+    async fn a_burst_of_wakes_takes_the_free_slots_before_any_box_is_put_to_sleep() {
+        let (mut state, fake, first) = relay().await;
+        let cfg = Arc::get_mut(&mut state.cfg).expect("one holder");
+        cfg.boxd.as_mut().unwrap().nodes[0].max_resident = 12;
+        let mut users = vec![first];
+        users.extend((0..13).map(|i| person(&state, 9800 + i).0));
+        let (asleep, awake) = users.split_at(5);
+        for user in asleep {
+            make_awake(&state, user).await;
+            boxes::stop_box(&state, user, false).await.unwrap();
+        }
+        for user in awake {
+            make_awake(&state, user).await;
+        }
+        *fake.takes.lock().unwrap() = Duration::from_millis(100);
+        let before = fake.paths().len();
+        for user in asleep {
+            state.set_box_state(user, BoxState::Waking, None).await;
+        }
+        let wakes = asleep.iter().map(|user| boxes::start_box(&state, user));
+        for woken in futures::future::join_all(wakes).await {
+            woken.unwrap();
+        }
+        let sleeps = fake.paths()[before..]
+            .iter()
+            .filter(|p| p.ends_with("/sleep"))
+            .count();
+        assert_eq!(sleeps, 2, "three slots were free for five wakes");
         assert!(fake.most_up.load(Ordering::SeqCst) <= 12);
     }
 
