@@ -1,0 +1,92 @@
+{
+  "scope": "three existing pure actual agentd tests; no network or agent/process execution",
+  "source_unchanged": true,
+  "source_sha256": {
+    "crates/arbos-agentd/src/web.rs": "9a5f62fa25c5c68295b2ec6f2576ce09efc3f1c24e74ca0f4a76797f819b35d7",
+    "crates/arbos-agentd/src/tree.rs": "4a67551dfc6b0959b77a4c429a1770bb422270dbeae530e7698af97d1db6757c",
+    "crates/arbos-agentd/src/llm.rs": "442ebe8b66318db8a0db5c0a9c6f51f77d5fb2664b4e6e82b27680274f772fa6",
+    "crates/arbos-core/src/approval.rs": "e96b5fea2e78d3b78b59717f8a980b3c772ddc3b9ded4afa7b4d2e3afad770b6",
+    "crates/arbos-core/src/redact.rs": "aeebd4d52c2cec5fc7cd32f23e5cf51a371e011caf735b8462282aa98f48b568"
+  },
+  "gates": [
+    {
+      "seconds": 174.26119283295702,
+      "exit_code": 0,
+      "counts": [
+        [
+          1,
+          0,
+          0
+        ]
+      ],
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-agentd",
+        "--bin",
+        "arbos-agentd",
+        "web::tests::html_becomes_readable_text_with_links",
+        "--",
+        "--exact",
+        "--nocapture"
+      ]
+    },
+    {
+      "seconds": 0.7886928750667721,
+      "exit_code": 0,
+      "counts": [
+        [
+          1,
+          0,
+          0
+        ]
+      ],
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-agentd",
+        "--bin",
+        "arbos-agentd",
+        "web::tests::entities_decode",
+        "--",
+        "--exact",
+        "--nocapture"
+      ]
+    },
+    {
+      "seconds": 0.2593219999689609,
+      "exit_code": 0,
+      "counts": [
+        [
+          1,
+          0,
+          0
+        ]
+      ],
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-agentd",
+        "--bin",
+        "arbos-agentd",
+        "tree::tests::card_parses_truncated_json",
+        "--",
+        "--exact",
+        "--nocapture"
+      ]
+    }
+  ],
+  "test_count": 3,
+  "network": "deny network*",
+  "private_HOME": true,
+  "limits": "selected existing pure runtime tests; full combined workspace test gate remains separate"
+}

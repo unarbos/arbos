@@ -104,6 +104,10 @@ impl Sender {
             .ok()
             .flatten()
             .unwrap_or_default();
+        Self::from_user_card(user_id, card)
+    }
+
+    pub(crate) fn from_user_card(user_id: &str, card: arbos_core::api::UserCardDto) -> Self {
         let handle = if card.handle.is_empty() {
             user_id.to_owned()
         } else {

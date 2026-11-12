@@ -32,7 +32,7 @@ const HEALS_PER_CONNECTION: u32 = 1;
 /// `spawn_blocking` on a cold cache.
 fn build_room_doc(state: &AppState, room_name: &str) -> anyhow::Result<crate::state::RoomDocCache> {
     use arbos_core::doc::ChatDoc;
-    let st = state.db.room_state(room_name)?;
+    let key = state.db.room_position(room_name)?;
     let mut doc = match state.db.checkpoint_bytes(room_name)? {
         Some((_, bytes)) => ChatDoc::from_snapshot(None, false, &bytes)?,
         None => ChatDoc::new(None, false),
@@ -51,7 +51,7 @@ fn build_room_doc(state: &AppState, room_name: &str) -> anyhow::Result<crate::st
     }
     let message_ids = doc.message_identities();
     Ok(crate::state::RoomDocCache {
-        key: (st.head, st.floor),
+        key,
         doc,
         message_ids,
     })
@@ -63,12 +63,11 @@ fn advance_room_doc(
     room_name: &str,
     cached: &mut crate::state::RoomDocCache,
 ) -> anyhow::Result<()> {
-    let st = state.db.room_state(room_name)?;
-    let key = (st.head, st.floor);
+    let key = state.db.room_position(room_name)?;
     if cached.key == key {
         return Ok(());
     }
-    if cached.key.1 != st.floor || st.head < cached.key.0 {
+    if cached.key.1 != key.1 || key.0 < cached.key.0 {
         *cached = build_room_doc(state, room_name)?;
         return Ok(());
     }

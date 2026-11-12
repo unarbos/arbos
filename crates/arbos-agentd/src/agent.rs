@@ -7959,8 +7959,8 @@ impl Agent {
                     .add_status_part(assistant_msg_id, "working", "Working…");
                 // The platform reply (quote header) on the row this answers: always
                 // where attribution matters (groups, channels, people chats, a row
-                // another agent sent), in a 1:1 only when the answer is to an earlier
-                // message than the latest (#1521).
+                // another agent sent); never in a solo 1:1 agent chat (#1521, revised
+                // Jacob 2026-11-10 — duplex is full-duplex, no quote on every answer).
                 if self.reply_to_wanted_for(&h.doc, chat_id, user_msg_id) {
                     h.doc
                         .set_message_fields(assistant_msg_id, &[("replyTo", json!(user_msg_id))]);
@@ -7984,16 +7984,15 @@ impl Agent {
                 );
             }
             TurnKind::JobFallback { job_id, title } => {
-                // The agent picks the job's work up itself; the row threads under the
-                // ask and names the job for the Details drawer.
+                // The agent picks the job's work up itself; the row names the job for
+                // the Details drawer. Quote the ask only in shared chats (same #1521
+                // rule as a normal answer — never in a solo 1:1).
                 h.doc.add_status_part(assistant_msg_id, "working", title);
-                h.doc.set_message_fields(
-                    assistant_msg_id,
-                    &[
-                        ("replyTo", json!(user_msg_id)),
-                        ("jobFallback", json!(job_id)),
-                    ],
-                );
+                let mut fields = vec![("jobFallback", json!(job_id))];
+                if self.reply_to_wanted_for(&h.doc, chat_id, user_msg_id) {
+                    fields.push(("replyTo", json!(user_msg_id)));
+                }
+                h.doc.set_message_fields(assistant_msg_id, &fields);
             }
             TurnKind::ApprovalOutcome { approval_id, title } => {
                 h.doc.add_status_part(
@@ -10147,8 +10146,9 @@ impl Agent {
     }
 
     /// The #1521 rule for one answer row: quote the message it answers always in a shared chat
-    /// (groups, channels, people chats, a row another agent sent), in a 1:1 only when a later
-    /// user message exists — so every bubble of a turn threads under its ask (duplex design D6).
+    /// (groups, channels, people chats, a row another agent sent). Never in a solo 1:1 agent
+    /// chat — Jacob 2026-11-10: the chat should feel full duplex and multitasking, so agent
+    /// answers never wear a reply/quote header there (duplex design D6, revised).
     pub(crate) fn reply_to_wanted_for(
         &self,
         doc: &arbos_core::doc::ChatDoc,
@@ -10160,17 +10160,7 @@ impl Agent {
         };
         let shared = self.people.is_people_chat(chat_id)
             || self.groups.kind_of(chat_id).is_some_and(|k| k != "chat");
-        let later_exists = doc
-            .messages()
-            .iter()
-            .skip_while(|m| m.id != source.id)
-            .skip(1)
-            .any(|m| m.role == "user" || m.role == "project");
-        reply_to_wanted(
-            shared,
-            later_exists,
-            source.rest.get("agentMessage").is_some(),
-        )
+        reply_to_wanted(shared, source.rest.get("agentMessage").is_some())
     }
 
     /// An `act` ack is working-row status while the work is quick. When the turn is still at it
@@ -12540,8 +12530,9 @@ impl Agent {
                 if has_row {
                     return;
                 }
-                // Even the failure line is a reply to this message and waits its turn.
-                me.await_send_order(&chat, &user_msg_id, "job_failed").await;
+                // Ask-beside-busy: do not wait behind the turn this ask is answering about
+                // (same rule as `write_job_result` for `ask-…` names). A failure line that sits
+                // on send order for up to two minutes is another wordless wait for the user.
                 let live = me.room_for_reply(&chat, &host2).await;
                 let h = live.lock().await;
                 let id = ulid();
@@ -12819,6 +12810,12 @@ impl Agent {
                     h.doc.set_activity(&msg_id, Some(&j.title));
                 }
                 None => {
+                    // `ask-…` workers answer beside a busy turn (`start_job_for_send`). Their
+                    // prose is a separate `write_job_result` row; the spawn row itself is only a
+                    // progress carrier. Without `hidden`, it finishes as a wordless Done the
+                    // client can see — busy-reply smoke on 0.1.204 / #2985+#2986. Same hide as
+                    // a JobSpec worker above.
+                    let hide_ask_worker = is_job_name(&sub_name);
                     h.doc.set_message_fields(
                         &msg_id,
                         &[
@@ -12836,6 +12833,7 @@ impl Agent {
                             // A background worker the user never named (traits 15): clients hide
                             // this row; an agent-to-agent send keeps its "Messaged ◉ X" line.
                             ("worker", json!(true)),
+                            ("hidden", json!(hide_ask_worker)),
                         ],
                     );
                 }
@@ -14006,6 +14004,24 @@ impl Agent {
         // Whichever branch wrote it: the summariser is given the worker's notes, contract and
         // all, so a model that echoes the block is the same leak by another route.
         let text = crate::store::redact(&crate::llm::strip_return_contract(&text));
+        // Never a wordless Done: strips above can empty a draft that logged as written. The
+        // fallback is the same one an empty model call already uses (#2964 / busy-reply smoke).
+        let text = if text.trim().is_empty() {
+            tracing::warn!(
+                chat_id,
+                name,
+                "job result text empty after strip; plain line"
+            );
+            let again = crate::store::redact(&crate::llm::strip_return_contract(&fallback()));
+            if again.trim().is_empty() {
+                "I finished that, but had nothing to report. Ask me again if you need more."
+                    .to_owned()
+            } else {
+                again
+            }
+        } else {
+            text
+        };
         // The answer is written; where it lands in the chat is the chat's send order to decide
         // (bug O). A job that overtook an older message waits here, after its own model call, so
         // the hold costs nothing once the older answer is posted. A job whose ask is not queued
@@ -14014,17 +14030,25 @@ impl Agent {
         // cancel can land anywhere in it (bug S). Here, so a cancelled answer does not sit at
         // the head of its chat's queue holding every message behind it for a row it will never
         // write; the wait would be spent to reach a `return` either way.
+        //
+        // Exception: `ask-…` jobs from `start_job_for_send` (#2986 silent-queue fallback). They
+        // exist to answer *beside* the busy turn — the same urgency as a status quick reply,
+        // which skips send order on purpose. Waiting here parked their prose behind the long
+        // turn for up to two minutes while the worker row finished as a wordless Done
+        // (0.1.204 busy-reply smoke / #2964).
         if let Some(job_id) = self.cancelled_job_for_ask(chat_id, in_reply_to) {
             tracing::info!(chat_id, job = %job_id, "the job was cancelled before its answer took its turn; not posted");
             return Ok(());
         }
-        self.await_send_order(chat_id, in_reply_to, "job").await;
-        // And again on the far side: the worker had already finished, so the check in
-        // `run_subagent` ran before the cancel and caught nothing, and this is the last moment
-        // the question can be asked before the row exists.
-        if let Some(job_id) = self.cancelled_job_for_ask(chat_id, in_reply_to) {
-            tracing::info!(chat_id, job = %job_id, "the job was cancelled while its answer waited its turn; not posted");
-            return Ok(());
+        if !is_job_name(name) {
+            self.await_send_order(chat_id, in_reply_to, "job").await;
+            // And again on the far side: the worker had already finished, so the check in
+            // `run_subagent` ran before the cancel and caught nothing, and this is the last moment
+            // the question can be asked before the row exists.
+            if let Some(job_id) = self.cancelled_job_for_ask(chat_id, in_reply_to) {
+                tracing::info!(chat_id, job = %job_id, "the job was cancelled while its answer waited its turn; not posted");
+                return Ok(());
+            }
         }
         // This task resolved its handle before the job ran, which is minutes ago and a wait ago.
         let host = &self.room_for_reply(chat_id, host).await;
@@ -14764,10 +14788,10 @@ fn message_from_voice(m: &arbos_core::doc::MessageView) -> bool {
 /// The user row was written by a routine fire (`routines.rs`: `sender = routine:<id>`,
 /// `routineRunId`), i.e. the agent's own scheduled check-in — no person sent it.
 /// Whether an agent's reply row carries `replyTo` = the message it answers (#1521): always in
-/// a shared chat (group, channel, people chat) and for a row another agent sent in, else only
-/// when a newer user message already sits below the one being answered.
-pub(crate) fn reply_to_wanted(shared: bool, later_exists: bool, from_agent: bool) -> bool {
-    shared || from_agent || later_exists
+/// a shared chat (group, channel, people chat) and for a row another agent sent in; never in a
+/// solo 1:1 agent chat (Jacob 2026-11-10 — no quote headers on every duplex answer).
+pub(crate) fn reply_to_wanted(shared: bool, from_agent: bool) -> bool {
+    shared || from_agent
 }
 
 fn message_from_routine(m: &arbos_core::doc::MessageView) -> bool {
@@ -17408,15 +17432,14 @@ mod tests {
     }
 
     #[test]
-    fn reply_to_follows_the_shared_or_earlier_rule() {
-        // 1:1, answering the latest message: a plain bubble.
-        assert!(!reply_to_wanted(false, false, false));
-        // 1:1, a newer message already arrived: quote what is being answered.
-        assert!(reply_to_wanted(false, true, false));
+    fn reply_to_follows_the_shared_or_agent_rule() {
+        // Solo 1:1 agent chat: never a quote header, even when a later user message
+        // already sits below the one being answered (Jacob 2026-11-10).
+        assert!(!reply_to_wanted(false, false));
         // group / channel / people chat: always.
-        assert!(reply_to_wanted(true, false, false));
+        assert!(reply_to_wanted(true, false));
         // a row another agent sent in (agent-to-agent messaging): always.
-        assert!(reply_to_wanted(false, false, true));
+        assert!(reply_to_wanted(false, true));
     }
 
     /// Jacob's rule (2026-10-23): status lives in the working row, never as a chat bubble.
