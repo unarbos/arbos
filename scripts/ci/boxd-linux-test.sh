@@ -98,6 +98,8 @@ trap 'echo usr1 >> /work/signals' USR1
 [ -e /work/pids ] || echo 0 > /work/pids
 /tick &
 (while :; do nc -l -p 7788 -e /respond; done) &
+# The box reaches itself on 127.0.0.1, as agentd's workspaces do: marked once it has.
+(until wget -q -O /dev/null http://127.0.0.1:7788/; do sleep 0.2; done; echo ok > /work/loopback) &
 while :; do wait; done
 EOF
 chmod +x "$rootfs"/{tick,respond,init}
@@ -145,6 +147,8 @@ t=$(date +%s%N)
 url="$(api 200 POST "/v1/boxes/$user/wake" | jq -r .box_url)"
 healthy "$url"; log "  healthy in $(ms "$t") ms"
 [[ -f "$box/mnt/.etc/passwd" ]] || fail "/etc was not seeded"
+for _ in $(seq 100); do [[ -f "$box/mnt/loopback" ]] && break; sleep 0.1; done
+[[ -f "$box/mnt/loopback" ]] || fail "nothing in the box reaches 127.0.0.1: its loopback is down"
 [[ "$(api 200 POST "/v1/boxes/$user/wake" | jq -r .restored)" == false ]] || fail "second wake"
 cgroup="/sys/fs/cgroup/arbos-boxd/arbos-box-$user"
 [[ "$(cat "$cgroup/memory.max")" == $((16 << 30)) && "$(cat "$cgroup/cpu.max")" == "800000 100000" ]] \

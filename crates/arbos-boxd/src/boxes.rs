@@ -531,6 +531,9 @@ impl Boxd {
                 "ip", "link", "add", &veth, "type", "veth", "peer", "name", "eth0", "netns", ns,
             ],
             &["ip", "link", "set", &veth, "master", BRIDGE, "up"],
+            // A new namespace's loopback is down, and runsc gives the sandbox only the
+            // interfaces that are up: without it nothing in the box can bind 127.0.0.1.
+            &["ip", "-n", ns, "link", "set", "lo", "up"],
             &["ip", "-n", ns, "addr", "add", &addr, "dev", "eth0"],
             &["ip", "-n", ns, "link", "set", "eth0", "up"],
             &["ip", "-n", ns, "route", "add", "default", "via", &gateway],
@@ -980,6 +983,7 @@ pub mod tests {
         assert_eq!(fake.ran("mount -o discard,nosuid,nodev /dev/loop0"), 1);
         assert_eq!(fake.ran("arbos-seed-01JABCDEFGHJKMNPQRSTVWXYZ0"), 2);
         assert_eq!(fake.ran(&format!("ip netns add {id}")), 1);
+        assert_eq!(fake.ran(&format!("ip -n {id} link set lo up")), 1);
         assert_eq!(fake.ran("addr add 10.207.0.2/16 dev eth0"), 1);
         assert_eq!(fake.ran(&format!("--detach {id}")), 1);
         assert_eq!(fake.ran(" restore "), 0);
