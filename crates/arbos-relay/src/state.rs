@@ -356,6 +356,9 @@ pub struct AppState {
     pub box_http_seen: Arc<Mutex<HashMap<String, i64>>>,
     /// Users whose box said "turn running" in its last keepalive, with the time (D89: eviction skips them).
     pub turn_running: Arc<Mutex<HashMap<String, i64>>>,
+    /// user_id → the last keepalive that said a turn was running. Unlike `turn_running` it stays
+    /// once the turn ends: it ranks `boxd` boxes by use (`fleet::last_active_ms`).
+    pub last_turn: Arc<Mutex<HashMap<String, i64>>>,
     /// Sandboxes evicted under host pressure (D89), with the time; only the user's own activity wakes them.
     pub evicted: Arc<Mutex<HashMap<String, i64>>>,
     /// Last host pressure sample (D89), for `/admin/fleet`.
@@ -717,6 +720,7 @@ pub(crate) mod test_support {
             activity: Arc::new(Mutex::new(HashMap::new())),
             box_http_seen: Arc::new(Mutex::new(HashMap::new())),
             turn_running: Arc::new(Mutex::new(HashMap::new())),
+            last_turn: Arc::new(Mutex::new(HashMap::new())),
             evicted: Arc::new(Mutex::new(HashMap::new())),
             fleet_pressure: Arc::new(Mutex::new(None)),
             voice: Arc::new(crate::voice::VoiceCfg::default()),

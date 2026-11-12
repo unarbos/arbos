@@ -331,6 +331,13 @@ pub fn of(state: &AppState) -> Result<&Boxd> {
         .ok_or_else(|| anyhow!("the boxd provider is off: ARBOS_BOXD_URL is not set"))
 }
 
+/// `arbos-agent-0.6.409` → `0.6.409`, the image version the operator installed on the host. A
+/// snapshot is named `arbos-agent-<version>` (the deploy worker's `snapshot="arbos-agent-$version"`),
+/// and a version may hold a `-` itself (`0.6.397-pr3005`). Any other name is taken whole.
+fn image_version(snapshot: &str) -> &str {
+    snapshot.strip_prefix("arbos-agent-").unwrap_or(snapshot)
+}
+
 /// Create the user's box on the daemon and start it. The row is written once, when the box is
 /// up (`boxes::create_on_provider`, #2262).
 pub async fn create_box(
@@ -349,11 +356,7 @@ pub async fn create_box(
         .snapshot
         .clone()
         .unwrap_or_else(|| state.default_snapshot());
-    // `arbos-agent-0.6.409` → `0.6.409`, the image version the operator installed on the host.
-    let version = snapshot
-        .rsplit_once('-')
-        .map(|(_, v)| v)
-        .unwrap_or(&snapshot);
+    let version = image_version(&snapshot);
     // The id the daemon runs the sandbox under. The dot ends it: runsc takes the start of an
     // id for the whole of it, and no user id holds a dot.
     let name = format!("arbos-box-{user_id}.");
@@ -947,6 +950,17 @@ mod tests {
         assert_eq!(idle_step(None, &old, late), (Some(late), false));
     }
 
+    #[test]
+    fn the_image_version_is_what_follows_the_snapshot_prefix() {
+        assert_eq!(image_version("arbos-agent-0.6.409"), "0.6.409");
+        assert_eq!(
+            image_version("arbos-agent-0.6.397-pr3005"),
+            "0.6.397-pr3005"
+        );
+        assert_eq!(image_version("0.6.409"), "0.6.409");
+        assert_eq!(image_version("other-1.0"), "other-1.0");
+    }
+
     /// Create, stop and start through the same `boxes` calls every provider goes through.
     #[tokio::test]
     async fn a_box_on_the_provider_is_made_slept_and_woken_through_the_daemon() {
@@ -1383,6 +1397,34 @@ mod tests {
         fake.answer("status", 500, json!({ "error": "runsc list failed" }));
         assert!(boxes::start_box(&state, &c).await.is_err());
         assert!(!fake.paths()[wakes..].iter().any(|p| p.ends_with("/wake")));
+    }
+
+    /// What ranks a box for the sleep at the cap is its user's last turn, kept after the turn
+    /// ends, and never the stamp the box's own requests leave on its row.
+    #[tokio::test]
+    async fn a_box_is_ranked_by_its_last_turn_and_not_by_its_own_requests() {
+        let (state, _fake, user) = relay().await;
+        boxes::create_box(&state, &user, Provider::Boxd, None)
+            .await
+            .unwrap();
+        let mut row = state.db.user_box(&user).unwrap().unwrap();
+        row.last_started_at = Some(1);
+        state.db.upsert_box(&row).unwrap();
+        let ranked = |state: &AppState| {
+            let state = state.clone();
+            async move { crate::fleet::candidates(&state, Provider::Boxd).await[0].last_active_ms }
+        };
+        // A keepalive with no turn is the box talking: it stamps the row and ranks nothing.
+        boxes::keepalive(&state, &user, false).await.unwrap();
+        let seen = state.db.user_box(&user).unwrap().unwrap().last_seen_at;
+        assert!(seen.is_some_and(|t| t > 1), "{seen:?}");
+        assert_eq!(ranked(&state).await, 1);
+
+        boxes::keepalive(&state, &user, true).await.unwrap();
+        boxes::keepalive(&state, &user, false).await.unwrap();
+        assert!(state.turn_running.lock().await.is_empty());
+        let turn = state.last_turn.lock().await[&user];
+        assert_eq!(ranked(&state).await, turn);
     }
 
     /// A routine due within the minute wakes its user's sleeping box; one further off, a box

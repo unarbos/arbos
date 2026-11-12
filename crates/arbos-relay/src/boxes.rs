@@ -1574,6 +1574,8 @@ pub async fn keepalive(state: &AppState, user_id: &str, turn_running: bool) -> R
         let mut t = state.turn_running.lock().await;
         if turn_running {
             t.insert(user_id.to_owned(), now_ms());
+            let mut last = state.last_turn.lock().await;
+            last.insert(user_id.to_owned(), now_ms());
         } else {
             t.remove(user_id);
         }

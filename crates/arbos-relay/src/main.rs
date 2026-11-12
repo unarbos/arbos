@@ -348,6 +348,7 @@ async fn main() -> anyhow::Result<()> {
         activity: Arc::new(Mutex::new(HashMap::new())),
         box_http_seen: Arc::new(Mutex::new(HashMap::new())),
         turn_running: Arc::new(Mutex::new(HashMap::new())),
+        last_turn: Arc::new(Mutex::new(HashMap::new())),
         evicted: Arc::new(Mutex::new(HashMap::new())),
         fleet_pressure: Arc::new(Mutex::new(None)),
         voice: Arc::new(voice::cfg_from_env(&data_dir_for_voice)),

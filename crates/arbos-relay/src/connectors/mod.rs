@@ -934,6 +934,7 @@ mod tests {
             activity: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             box_http_seen: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             turn_running: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            last_turn: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             evicted: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             fleet_pressure: Arc::new(tokio::sync::Mutex::new(None)),
             voice: Arc::new(crate::voice::VoiceCfg::default()),
