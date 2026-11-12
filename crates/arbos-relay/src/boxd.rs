@@ -32,6 +32,8 @@ pub const BUSY: &str = "box is busy";
 const IDLE_MS: i64 = 15 * 60_000;
 /// §3.1 condition 3: a routine due this soon keeps the box up.
 const ROUTINE_HORIZON_MS: i64 = 20 * 60_000;
+/// §4.2: an asleep box is woken this long before its routine is due, so the run finds it up.
+const ROUTINE_HEAD_START_MS: i64 = 60_000;
 /// §4.2: below this much free disk on the daemon's host no new box is made.
 const MIN_FREE_DISK_GB: f64 = 80.0;
 /// §4.2 `max_resident_boxes`: awake and waking boxes on the spec's 503 GB host.
@@ -560,6 +562,29 @@ async fn idle_tick(state: &AppState, idle_since: &mut HashMap<String, i64>) {
     *idle_since = kept;
 }
 
+/// The routine lookahead (§4.2), on the routine scheduler's tick: wake each asleep `boxd` box
+/// whose user has a routine due within [`ROUTINE_HEAD_START_MS`]. The same routine then holds
+/// it up (`Sample::routine_soon`). The five-minute prefetch of a cold box is Phase 3.
+pub async fn wake_ahead_of_routines(state: &AppState, now: i64) {
+    if state.cfg.boxd.is_none() {
+        return;
+    }
+    let Ok(due) = state.db.due_routines(now + ROUTINE_HEAD_START_MS) else {
+        return;
+    };
+    let users: HashSet<String> = due
+        .iter()
+        .filter_map(|rt| state.user_of(&rt.project_id))
+        .collect();
+    for user_id in users {
+        let on_boxd = matches!(state.db.user_box(&user_id), Ok(Some(sb)) if sb.provider == boxes::Provider::Boxd.as_str());
+        if on_boxd && state.box_state(&user_id).await.0 == BoxState::Asleep {
+            tracing::info!(%user_id, "boxd: waking ahead of a routine");
+            boxes::ensure_awake(state, &user_id, "routine lookahead").await;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1062,6 +1087,74 @@ mod tests {
         fake.answer("status", 500, json!({ "error": "runsc list failed" }));
         assert!(boxes::start_box(&state, &c).await.is_err());
         assert!(!fake.paths()[wakes..].iter().any(|p| p.ends_with("/wake")));
+    }
+
+    /// A routine due within the minute wakes its user's sleeping box; one further off, a box
+    /// that is not asleep, a box on another provider or a relay without the provider does not.
+    #[tokio::test]
+    async fn an_asleep_box_is_woken_a_minute_ahead_of_its_routine() {
+        let (mut state, _fake, user) = relay().await;
+        let project_id = crate::people::tests_support::project_of(&state, &user, "First");
+        boxes::create_box(&state, &user, Provider::Boxd, None)
+            .await
+            .unwrap();
+        let now = now_ms();
+        let due = |id: &str, at: i64| crate::db::Routine {
+            id: id.into(),
+            project_id: project_id.clone(),
+            chat_id: "c".into(),
+            name: "n".into(),
+            prompt: "p".into(),
+            trigger: json!({ "kind": "cron", "expr": "0 9 * * *", "tz": "UTC" }),
+            enabled: true,
+            created_at: now,
+            last_run_at: None,
+            next_run_at: Some(at),
+        };
+        let waking = |state: &AppState| {
+            let (state, user) = (state.clone(), user.clone());
+            async move {
+                let job = state.db.due_wake_jobs().unwrap();
+                let st = state.box_state(&user).await.0;
+                let _ = state.db.finish_wake_job(&user);
+                (st, job.len())
+            }
+        };
+
+        state
+            .db
+            .insert_routine(&due("far", now + ROUTINE_HEAD_START_MS + 1))
+            .unwrap();
+        state.set_box_state(&user, BoxState::Asleep, None).await;
+        wake_ahead_of_routines(&state, now).await;
+        assert_eq!(waking(&state).await, (BoxState::Asleep, 0), "too early");
+
+        state
+            .db
+            .insert_routine(&due("near", now + ROUTINE_HEAD_START_MS))
+            .unwrap();
+        for st in [BoxState::Awake, BoxState::Error] {
+            state.set_box_state(&user, st, None).await;
+            wake_ahead_of_routines(&state, now).await;
+            assert_eq!(waking(&state).await, (st, 0));
+        }
+        state.set_box_state(&user, BoxState::Asleep, None).await;
+        wake_ahead_of_routines(&state, now).await;
+        assert_eq!(waking(&state).await, (BoxState::Waking, 1));
+
+        // The same routine and the same sleeping box, on a relay that has no `boxd` provider
+        // and on a box of another provider.
+        state.set_box_state(&user, BoxState::Asleep, None).await;
+        let mut row = state.db.user_box(&user).unwrap().unwrap();
+        row.provider = "gvisor".into();
+        state.db.upsert_box(&row).unwrap();
+        wake_ahead_of_routines(&state, now).await;
+        assert_eq!(waking(&state).await, (BoxState::Asleep, 0));
+        row.provider = "boxd".into();
+        state.db.upsert_box(&row).unwrap();
+        Arc::get_mut(&mut state.cfg).expect("one holder").boxd = None;
+        wake_ahead_of_routines(&state, now).await;
+        assert_eq!(waking(&state).await, (BoxState::Asleep, 0));
     }
 
     /// One supervisor tick: the idle box sleeps, the one mid-turn does not and loses its clock,
