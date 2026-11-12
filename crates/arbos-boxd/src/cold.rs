@@ -225,17 +225,17 @@ impl Store {
         method: &Method,
         key: &str,
         body: &[u8],
+        payload_hash: &str,
         max_reply: usize,
     ) -> Result<(StatusCode, Vec<u8>)> {
         let uri = format!("/{}/{key}", self.bucket);
         let amz_date = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
-        let payload_hash = sha256_hex(body);
         let mut r = self
             .http
             .request(method.clone(), format!("{}{uri}", self.endpoint))
             .header(
                 "authorization",
-                self.authorization(method.as_str(), &uri, &payload_hash, &amz_date),
+                self.authorization(method.as_str(), &uri, payload_hash, &amz_date),
             )
             .header("x-amz-content-sha256", payload_hash)
             .header("x-amz-date", amz_date)
@@ -266,10 +266,23 @@ impl Store {
         body: &[u8],
         max_reply: usize,
     ) -> Result<(StatusCode, Vec<u8>)> {
+        self.send_hashed(method, key, body, &sha256_hex(body), max_reply)
+            .await
+    }
+
+    /// `send`, for a body whose SHA-256 the caller already has: a chunk is hashed once.
+    async fn send_hashed(
+        &self,
+        method: Method,
+        key: &str,
+        body: &[u8],
+        payload_hash: &str,
+        max_reply: usize,
+    ) -> Result<(StatusCode, Vec<u8>)> {
         let mut failed = anyhow!("not tried");
         for attempt in 0..TRIES {
             tokio::time::sleep(Duration::from_millis(500) * attempt).await;
-            match self.once(&method, key, body, max_reply).await {
+            match self.once(&method, key, body, payload_hash, max_reply).await {
                 Ok((s, _)) if s.is_server_error() || s == StatusCode::TOO_MANY_REQUESTS => {
                     failed = anyhow!("object store {method} {key}: {s}");
                 }
@@ -280,12 +293,14 @@ impl Store {
         Err(failed)
     }
 
-    async fn put(&self, key: &str, body: &[u8]) -> Result<()> {
-        let (status, _) = self.send(Method::PUT, key, body, 0).await?;
+    /// Store `body` at `key`, and say its SHA-256.
+    async fn put(&self, key: &str, body: &[u8]) -> Result<String> {
+        let sha256 = sha256_hex(body);
+        let (status, _) = self.send_hashed(Method::PUT, key, body, &sha256, 0).await?;
         if !status.is_success() {
             bail!("object store PUT {key}: {status}");
         }
-        Ok(())
+        Ok(sha256)
     }
 
     /// The object, if it is exactly `len` bytes that hash to `sha256`.
@@ -325,10 +340,11 @@ impl Store {
             if m.chunks.len() == MAX_CHUNKS {
                 bail!("{file} is more than {MAX_CHUNKS} chunks");
             }
-            self.put(&Self::chunk_key(prefix, m.chunks.len()), &buf)
+            let sha256 = self
+                .put(&Self::chunk_key(prefix, m.chunks.len()), &buf)
                 .await?;
             m.bytes += buf.len() as u64;
-            m.chunks.push(sha256_hex(&buf));
+            m.chunks.push(sha256);
         }
         for (i, sha) in m.chunks.iter().enumerate() {
             self.get(&Self::chunk_key(prefix, i), m.len(i), sha).await?;
@@ -336,6 +352,25 @@ impl Store {
         self.put(&format!("{prefix}.json"), &serde_json::to_vec(&m)?)
             .await?;
         Ok(m)
+    }
+
+    /// The manifest written beside `prefix`'s chunks, if the store has one: how a host that
+    /// lost its own record learns a part is in the store. `None` only on the store's 404.
+    pub async fn manifest(&self, prefix: &str) -> Result<Option<Manifest>> {
+        let key = format!("{prefix}.json");
+        // A full manifest is 4096 hashes of 64 hex digits, quoted and comma'd.
+        let (status, body) = self
+            .send(Method::GET, &key, &[], MAX_CHUNKS * 68 + 256)
+            .await?;
+        match status {
+            StatusCode::NOT_FOUND => Ok(None),
+            StatusCode::OK => {
+                Ok(Some(Manifest::parse(&body).with_context(|| {
+                    format!("object store GET {key}: not a manifest")
+                })?))
+            }
+            s => bail!("object store GET {key}: {s}"),
+        }
     }
 
     /// Download what `m` records to `file`, which only root reads. Every chunk is checked

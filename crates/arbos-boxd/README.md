@@ -151,7 +151,7 @@ disk after 14 days and below 250 GB free) and archives only on a host whose stat
 
 | Variable | |
 | --- | --- |
-| `ARBOS_BOXD_S3_ENDPOINT` | `https://<account>.r2.cloudflarestorage.com`. Setting it turns the tier on; the daemon does not start if the rest is missing. HTTPS only. |
+| `ARBOS_BOXD_S3_ENDPOINT` | `https://<account>.r2.cloudflarestorage.com`. Setting it turns the tier on; the daemon does not start if the rest is missing. HTTPS only, except plain HTTP to a loopback IPv4 address for a store on the same host. The credentials must get a 404, not a 403, for an object that is not there (on S3 that is `s3:ListBucket`): the daemon asks whether a box with no disk on the host has one in the store before it makes one. |
 | `ARBOS_BOXD_S3_BUCKET` | A bucket for this host alone. |
 | `ARBOS_BOXD_S3_REGION` | Default `auto` (R2). |
 | `ARBOS_BOXD_S3_CREDENTIALS_FILE` | A file only root reads, mode 0600, of two lines: the access key id, then the secret. Or `ARBOS_BOXD_S3_ACCESS_KEY_ID` and `ARBOS_BOXD_S3_SECRET_ACCESS_KEY` in the environment. |

@@ -316,6 +316,12 @@ impl Boxd {
         let root = &self.cfg.root;
         std::fs::create_dir_all(root)?;
         mkdir_private(&format!("{root}/boxes"))?;
+        // A pack exists only mid-archive or mid-fetch: one here at start is a killed daemon's.
+        for e in std::fs::read_dir(format!("{root}/boxes"))?.flatten() {
+            for pack in ["work.pack", "ckpt.pack"] {
+                let _ = std::fs::remove_file(e.path().join(pack));
+            }
+        }
         mkdir_private(&format!("{root}/images"))?;
         std::fs::write(format!("{root}/resolv.conf"), RESOLV_CONF)?;
         std::fs::write(format!("{root}/hosts"), HOSTS)?;
@@ -464,7 +470,25 @@ impl Boxd {
         mkdir_private(&p.dir)?;
         mkdir_private(&p.mnt)?;
         // A disk in the cold tier is a disk: no empty one is made in its place.
-        let cold_work = self.record(&p, Part::Work)?;
+        let mut cold_work = self.record(&p, Part::Work)?;
+        if cold_work.is_none() && !Path::new(&p.img).exists() {
+            if let Some(store) = &self.cfg.store {
+                // No disk and no record of one here: a new box, or a host that lost its
+                // record of an archived disk. The store says which, and a store that cannot
+                // say is a refusal, never an empty disk over a user's files.
+                let found = store.manifest(&p.prefix(Part::Work)).await.map_err(|e| {
+                    let why = format!("the store did not say whether the box has a disk: {e:#}");
+                    refuse(StatusCode::BAD_GATEWAY, why)
+                })?;
+                if let Some(m) = &found {
+                    write_private(&p.record(Part::Work), &serde_json::to_vec(m)?)?;
+                    sync(&p.record(Part::Work))?;
+                    sync(&p.dir)?;
+                    tracing::warn!(id = %p.id, "box disk found in the store; its record is back");
+                }
+                cold_work = found;
+            }
+        }
         let created = !Path::new(&p.img).exists() && cold_work.is_none();
         if created {
             // Formatted beside it and renamed, so a `work.img` is always a filesystem.
@@ -1629,6 +1653,34 @@ pub mod tests {
         fake.answer(200, CKPT);
         assert_eq!(b.sleep(&u, false).await.unwrap()["state"], "asleep_ckpt");
         (b, fake, bucket, root, u)
+    }
+
+    /// A host that lost its record of an archived disk finds it in the store instead of
+    /// making an empty one, and a store that cannot say refuses the box.
+    #[tokio::test]
+    async fn a_lost_record_of_an_archived_disk_comes_back_from_the_store() {
+        let (b, fake, bucket, root, u) = asleep_with_a_store("lost-record").await;
+        let dir = format!("{root}/boxes/u_cold");
+        let (img, record) = (format!("{dir}/work.img"), format!("{dir}/work.cold.json"));
+        b.archive(&u, Part::Ckpt).await.unwrap();
+        b.archive(&u, Part::Work).await.unwrap();
+        let written = std::fs::read(&record).unwrap();
+        std::fs::remove_file(&record).unwrap();
+
+        *bucket.fail.lock().unwrap() = Some((403, 99, "work.json"));
+        let e = b.ensure(&u, "1.0", &env("t")).await.unwrap_err();
+        assert_eq!(e.status, StatusCode::BAD_GATEWAY);
+        assert!(!there(&img) && !there(&record));
+        *bucket.fail.lock().unwrap() = None;
+
+        assert_eq!(
+            b.ensure(&u, "1.0", &env("t")).await.unwrap(),
+            json!({ "created": false, "size_gb": 8 })
+        );
+        assert_eq!(std::fs::read(&record).unwrap(), written);
+        assert_eq!(fake.ran("mkfs.ext4"), 1);
+        assert_eq!(b.wake(&u).await.unwrap()["restored"], true);
+        assert_eq!(std::fs::metadata(&img).unwrap().len(), 8 * GIB);
     }
 
     /// What happens off the request's clock (a prefetch, the deletes after a wake) happens.

@@ -55,6 +55,8 @@ impl Host {
     pub fn new() -> Result<Self> {
         let http = reqwest::Client::builder()
             .no_proxy()
+            // A box checkpointed or stopped since the last call has dead sockets: none is kept.
+            .pool_max_idle_per_host(0)
             .timeout(PREPARE_SLEEP_TIMEOUT)
             .build()?;
         Ok(Self { http })
