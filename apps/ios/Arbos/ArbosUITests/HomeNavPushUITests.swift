@@ -85,19 +85,13 @@ final class HomeNavPushUITests: XCTestCase {
         app.buttons["home-account"].tap()
         XCTAssertTrue(app.buttons["Back"].firstMatch.waitForExistence(timeout: settle), "Settings opened")
 
-        // Agent access (#2965) and other Settings rows push Credits below the first
-        // viewport on smaller sims — scroll until the row is hittable.
+        // Settings chrome often marks pane rows non-hittable even when they are on
+        // screen (same as AgentAccessLinkUITests): coordinate-tap, do not swipeUp.
         let credits = app.descendants(matching: .any).matching(
             NSPredicate(format: "label == %@ OR identifier == %@", "Credits", "Credits")
         ).firstMatch
         XCTAssertTrue(credits.waitForExistence(timeout: settle), "the Credits row is on Settings")
-        if !credits.isHittable {
-            app.swipeUp()
-            app.swipeUp()
-        }
-        XCTAssertTrue(credits.waitForExistence(timeout: settle) && (credits.isHittable || credits.exists),
-                      "Credits is reachable after scrolling Settings")
-        credits.tap()
+        credits.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
 
         // Credits page title is on screen; Settings root chrome is under it.
         let creditsTitle = app.staticTexts["Credits"].firstMatch

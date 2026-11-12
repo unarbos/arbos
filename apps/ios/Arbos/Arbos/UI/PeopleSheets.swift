@@ -219,31 +219,20 @@ struct NewChatSheet: View {
         .onChange(of: query) { _, _ in search() }
         .tint(theme.text)
         .preferredColorScheme(theme.isDark ? .dark : .light)
-        .accessibilityIdentifier("new-message")
+        // Page id on a zero-size marker — not on this container. Putting
+        // `.accessibilityIdentifier` on the pushed root collapsed every child
+        // (including `new-message-back`) out of the XCTest tree.
+        .background {
+            Color.clear
+                .frame(width: 0, height: 0)
+                .accessibilityIdentifier("new-message")
+        }
     }
 
-    /// Glass back chevron + centred title — same chrome as Settings / profile pages.
-    /// Title is a ZStack sibling (not an HStack `.overlay`): overlaying the title on the
-    /// bar collapsed the back button out of the accessibility tree, so UI tests could not
-    /// find `new-message-back` even though the page itself was on screen.
+    /// Same glass back as Settings (`ProfileTopBar`) plus a centred title.
     private var topBar: some View {
         ZStack(alignment: .top) {
-            ListTopFade(screen: .newMessage)
-            HStack {
-                Button { dismiss() } label: {
-                    GlassCircle {
-                        Image(systemName: "chevron.left")
-                            .font(.system(size: 17, weight: .semibold))
-                            .foregroundStyle(theme.text)
-                    }
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Back")
-                .accessibilityIdentifier("new-message-back")
-                Spacer()
-            }
-            .padding(.horizontal, 16)
-            .padding(.top, 16)
+            ProfileTopBar(screen: .newMessage, backIdentifier: "new-message-back") { EmptyView() }
             Text("New Message")
                 .font(.system(size: Theme.body, weight: .semibold))
                 .foregroundStyle(theme.text)
