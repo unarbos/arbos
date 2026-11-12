@@ -23,6 +23,10 @@ pub struct MessageRow {
     pub created_at: i64,
     /// This device cannot decrypt the event (yet): `text` is [`LOCKED`], never the ciphertext.
     pub locked: bool,
+    /// This device's own send, shown before the homeserver has it ([`echo_row`]); the event
+    /// replaces it. Its `event_id` is not an event's.
+    #[serde(default)]
+    pub pending: bool,
     /// Full row for the transcript (same shape as a chat-doc message).
     pub json: String,
 }
@@ -168,6 +172,7 @@ fn is_system_notice(ev: &Value) -> bool {
 /// rather than drawn like a message its sender's device vouched for.
 pub fn shows(ev: &Value, room_encrypted: bool, decrypted: bool) -> bool {
     is_message(ev)
+        && !is_redacted(ev)
         && (!room_encrypted
             || decrypted
             || ev["type"] == "m.room.encrypted"
@@ -189,6 +194,96 @@ pub fn sender_is_own(ev: &Value) -> bool {
                 || claimed.as_str() == ev["sender"].as_str().map(member_of_mxid).as_deref()
         }
     }
+}
+
+/// A removed event as the homeserver hands it out afterwards: its content stripped.
+fn is_redacted(ev: &Value) -> bool {
+    ev["unsigned"]["redacted_because"].is_object()
+}
+
+/// The longest reaction an app sends or draws (bytes): an emoji with its modifiers, not text.
+pub const REACTION_KEY_MAX: usize = 64;
+
+pub fn is_reaction_key(key: &str) -> bool {
+    (1..=REACTION_KEY_MAX).contains(&key.len()) && !key.chars().any(char::is_control)
+}
+
+/// One member's reaction on a row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reaction {
+    /// The row reacted to, by event id.
+    pub target: String,
+    pub key: String,
+    /// Who reacted: the account that sent the event ([`member_of_mxid`]), nothing it says.
+    pub sender: String,
+}
+
+/// `(the reaction's own event id, the reaction)` when `ev` is a well-formed `m.reaction`.
+pub fn reaction(ev: &Value) -> Option<(String, Reaction)> {
+    let rel = &ev["content"]["m.relates_to"];
+    let key = rel["key"].as_str().filter(|k| is_reaction_key(k))?;
+    (ev["type"] == "m.reaction" && rel["rel_type"] == "m.annotation").then_some(())?;
+    Some((
+        ev["event_id"].as_str()?.to_owned(),
+        Reaction {
+            target: rel["event_id"].as_str()?.to_owned(),
+            key: key.to_owned(),
+            sender: member_of_mxid(ev["sender"].as_str()?),
+        },
+    ))
+}
+
+/// The event an `m.room.redaction` removes (top level before room version 11, in the content
+/// from it on).
+pub fn redacts(ev: &Value) -> Option<String> {
+    (ev["type"] == "m.room.redaction").then_some(())?;
+    ev["redacts"]
+        .as_str()
+        .or_else(|| ev["content"]["redacts"].as_str())
+        .map(str::to_owned)
+}
+
+/// The event id a row answers (`replyToEvent`, from the event's `m.in_reply_to`).
+pub fn reply_target(row: &MessageRow) -> Option<String> {
+    row.json.contains("\"replyToEvent\"").then_some(())?;
+    serde_json::from_str::<Value>(&row.json).ok()?["replyToEvent"]
+        .as_str()
+        .map(str::to_owned)
+}
+
+/// What [`echo_row`] puts before the local id to make a pending row's `event_id`; no event id
+/// starts with it (they start with `$`).
+const ECHO: &str = "~";
+
+/// The row of a message this device is sending, as it will read once the homeserver has it:
+/// `content` is the event content, `local_id` its `life.arbos.id`.
+pub fn echo_row(me: &str, content: &Value, local_id: &str, now_ms: i64) -> Option<MessageRow> {
+    let ev = json!({ "type": "m.room.message", "event_id": format!("{ECHO}{local_id}"),
+                     "sender": me, "origin_server_ts": now_ms, "content": content });
+    let mut row = message_row(&ev, &|_| None)?;
+    let mut v: Value = serde_json::from_str(&row.json).ok()?;
+    v["pending"] = json!(true);
+    row.json = v.to_string();
+    row.pending = true;
+    Some(row)
+}
+
+/// Write what the room's other events say about a row into its JSON: `reactions` in the
+/// chat-doc's projected shape (`emoji → { member → true }`) and `replyTo`, the id of the row
+/// it answers.
+pub fn decorate(
+    row: &mut MessageRow,
+    reactions: &std::collections::BTreeMap<&str, std::collections::BTreeMap<&str, bool>>,
+    reply_to: Option<&str>,
+) {
+    let Ok(mut v) = serde_json::from_str::<Value>(&row.json) else {
+        return;
+    };
+    v["reactions"] = json!(reactions);
+    if let Some(id) = reply_to {
+        v["replyTo"] = json!(id);
+    }
+    row.json = v.to_string();
 }
 
 /// Build a [`MessageRow`] from one `m.room.message` event (JSON as the server sent it).
@@ -270,6 +365,13 @@ pub fn message_row(
     if !person {
         row["senderName"] = json!(sender_name);
     }
+    // Nothing from an undecrypted event's envelope.
+    if let Some(e) = content["m.relates_to"]["m.in_reply_to"]["event_id"]
+        .as_str()
+        .filter(|_| !locked)
+    {
+        row["replyToEvent"] = json!(e);
+    }
     Some(MessageRow {
         event_id,
         id,
@@ -278,6 +380,7 @@ pub fn message_row(
         text,
         created_at,
         locked,
+        pending: false,
         json: row.to_string(),
     })
 }
@@ -513,6 +616,119 @@ mod tests {
         ] {
             assert_eq!(sender_is_own(&e), own, "{why}");
         }
+    }
+
+    #[test]
+    fn reactions_removals_and_replies_are_read_from_the_event_not_its_claims() {
+        let react = |content: Value| json!({ "type": "m.reaction", "event_id": "$r", "sender": "@gh_7:arbos.life", "content": content });
+        let rel = |key: Value| json!({ "m.relates_to": { "rel_type": "m.annotation", "event_id": "$m", "key": key } });
+        assert_eq!(
+            reaction(&react(rel(json!("👍")))),
+            Some((
+                "$r".to_owned(),
+                Reaction {
+                    target: "$m".into(),
+                    key: "👍".into(),
+                    sender: "user:gh_7".into()
+                }
+            ))
+        );
+        // Who reacted is the account that sent it, whatever the content adds.
+        let mut claims = rel(json!("👍"));
+        claims["life.arbos.sender"] = json!("user:gh_8");
+        assert_eq!(reaction(&react(claims)).unwrap().1.sender, "user:gh_7");
+        for (why, ev) in [
+            ("an empty key", react(rel(json!("")))),
+            ("a key that is not a string", react(rel(json!(7)))),
+            (
+                "an essay",
+                react(rel(json!("a".repeat(REACTION_KEY_MAX + 1)))),
+            ),
+            ("a control character", react(rel(json!("a\nb")))),
+            (
+                "another relation",
+                react(
+                    json!({ "m.relates_to": { "rel_type": "m.thread", "event_id": "$m", "key": "👍" } }),
+                ),
+            ),
+            (
+                "no target",
+                react(json!({ "m.relates_to": { "rel_type": "m.annotation", "key": "👍" } })),
+            ),
+            // A removed reaction comes back with its content stripped.
+            ("removed", react(json!({}))),
+            (
+                "a message dressed as a reaction",
+                json!({ "type": "m.room.message", "event_id": "$r", "sender": "@gh_7:arbos.life", "content": rel(json!("👍")) }),
+            ),
+        ] {
+            assert_eq!(reaction(&ev), None, "{why}");
+        }
+        assert_eq!(
+            redacts(&json!({ "type": "m.room.redaction", "redacts": "$m", "content": {} })),
+            Some("$m".to_owned())
+        );
+        assert_eq!(
+            redacts(&json!({ "type": "m.room.redaction", "content": { "redacts": "$m" } })),
+            Some("$m".to_owned()),
+            "room version 11 on"
+        );
+        assert_eq!(
+            redacts(
+                &json!({ "type": "m.room.message", "redacts": "$m", "content": { "redacts": "$m" } })
+            ),
+            None
+        );
+        // A removed message is not a row, encrypted or not.
+        let gone = json!({ "type": "m.room.message", "content": {}, "unsigned": { "redacted_because": { "type": "m.room.redaction" } } });
+        assert!(!shows(&gone, false, false));
+        let mut gone_locked = gone.clone();
+        gone_locked["type"] = json!("m.room.encrypted");
+        assert!(!shows(&gone_locked, true, false));
+        let answer = |relates: Value, kind: &str| {
+            let ev = json!({ "type": kind, "event_id": "$a", "sender": "@gh_7:arbos.life",
+                             "content": { "body": "\"replyToEvent\"", "m.relates_to": relates } });
+            reply_target(&message_row(&ev, &|_| None).unwrap())
+        };
+        let to = |id: Value| json!({ "m.in_reply_to": { "event_id": id } });
+        assert_eq!(
+            answer(to(json!("$m")), "m.room.message"),
+            Some("$m".to_owned())
+        );
+        assert_eq!(answer(to(json!(7)), "m.room.message"), None);
+        assert_eq!(answer(json!({}), "m.room.message"), None);
+        // An undecrypted event's envelope says nothing the row repeats.
+        assert_eq!(answer(to(json!("$m")), "m.room.encrypted"), None);
+    }
+
+    #[test]
+    fn a_pending_row_reads_like_the_message_it_becomes() {
+        let content =
+            json!({ "msgtype": "m.text", "body": "on my way", "life.arbos.id": "01LOCAL" });
+        let mut row = echo_row("@gh_7:arbos.life", &content, "01LOCAL", 1700).unwrap();
+        assert!(row.pending && !row.locked);
+        assert_eq!(
+            (row.id.as_str(), row.sender.as_str(), row.text.as_str()),
+            ("01LOCAL", "user:gh_7", "on my way")
+        );
+        assert!(!row.event_id.starts_with('$'), "not an event id");
+        let v: Value = serde_json::from_str(&row.json).unwrap();
+        assert_eq!(v["pending"], true);
+        let sent = json!({ "type": "m.room.message", "event_id": "$e", "sender": "@gh_7:arbos.life",
+                           "origin_server_ts": 1800, "content": content });
+        let sent = message_row(&sent, &|_| None).unwrap();
+        assert!(!sent.pending);
+        assert_eq!(
+            (sent.id.as_str(), sent.sender.as_str()),
+            ("01LOCAL", "user:gh_7")
+        );
+        // Reactions and the row it answers are written in the chat-doc's shape.
+        let reactions = [("👍", [("user:gh_8", true)].into())].into();
+        decorate(&mut row, &reactions, Some("01TARGET"));
+        let v: Value = serde_json::from_str(&row.json).unwrap();
+        assert_eq!(v["reactions"], json!({ "👍": { "user:gh_8": true } }));
+        assert_eq!(v["replyTo"], "01TARGET");
+        assert_eq!(v["parts"][0]["text"], "on my way");
     }
 
     #[test]

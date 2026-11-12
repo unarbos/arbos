@@ -758,3 +758,339 @@ async fn people_chats_are_listed_and_read_from_the_homeserver() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Records every timeline the client hands the app, to see a pending row come and go.
+struct Seen(Mutex<Vec<Vec<MessageRow>>>);
+
+impl Listener for Seen {
+    fn on_rooms(&self, _: Snapshot) {}
+    fn on_timeline(&self, _: String, rows: Vec<MessageRow>) {
+        self.0.lock().unwrap().push(rows);
+    }
+    fn on_connection(&self, _: bool, _: Option<String>) {}
+}
+
+fn row_json(r: &MessageRow) -> Value {
+    serde_json::from_str(&r.json).unwrap()
+}
+
+/// Phase 3 verbs in a people chat, two native devices: a send shows before the homeserver has
+/// it, a reply names the row it answers, a reaction is the reacting account's and comes off
+/// again, a removed message leaves both timelines, and a receipt lands on the row asked for.
+/// In an encrypted chat the reply is ciphertext on the homeserver and a reaction is refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn people_chats_reply_react_remove_and_read() {
+    let Ok(url) = std::env::var("ARBOS_MATRIX_TEST_E2EE_HS") else {
+        return;
+    };
+    let hs = Hs {
+        url,
+        http: reqwest13::Client::new(),
+    };
+    let dir = std::env::temp_dir().join(format!("arbos-verbs-{}", std::process::id()));
+    let tag = std::process::id();
+    let (alice, bob) = (format!("va{tag}"), format!("vb{tag}"));
+    let native = |s: Session| Session {
+        people_native: true,
+        ..s
+    };
+    let a = native(hs.register(&alice).await);
+    let b = native(hs.register(&bob).await);
+    let seen = Arc::new(Seen(Mutex::new(Vec::new())));
+    let alice1 = MatrixClient::start(
+        a.clone(),
+        Crypto {
+            store_dir: dir.join(&a.device_id),
+            store_key: Some("test store key".into()),
+            first_device: true,
+        },
+        seen.clone(),
+    )
+    .await
+    .unwrap();
+    let bob1 = start(&b, &dir).await;
+    // Cross-signed devices: an encrypted room's keys go to no other kind.
+    alice1.recover("alice's passphrase").await.unwrap();
+    bob1.recover("bob's passphrase").await.unwrap();
+
+    let room = |chat_id: &'static str, kind: &'static str, encrypted: bool| {
+        let (hs, a, b) = (&hs, &a, &b);
+        async move {
+            let mut state = vec![json!({ "type": "life.arbos.chat", "state_key": "",
+                "content": { "chat_id": chat_id, "kind": kind, "project_id": null,
+                             "created_by": a.user_id, "created_at": 1700, "epoch": 1 } })];
+            if encrypted {
+                state.push(json!({ "type": "m.room.encryption", "state_key": "",
+                                   "content": { "algorithm": "m.megolm.v1.aes-sha2" } }));
+            }
+            let id = hs
+                .call(
+                    "POST",
+                    "/_matrix/client/v3/createRoom",
+                    Some(&a.access_token),
+                    json!({ "preset": "private_chat", "invite": [b.user_id],
+                            "creation_content": { "life.arbos.chat_id": chat_id },
+                            "initial_state": state }),
+                )
+                .await["room_id"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            hs.call(
+                "POST",
+                &format!("/_matrix/client/v3/join/{id}"),
+                Some(&b.access_token),
+                json!({}),
+            )
+            .await;
+            id
+        }
+    };
+    let dm = room("01P3VERBS", "dm", false).await;
+    let group = room("01P3SECRET", "group", true).await;
+    // A room that is not a people chat takes none of the new verbs.
+    let plain = hs
+        .call(
+            "POST",
+            "/_matrix/client/v3/createRoom",
+            Some(&a.access_token),
+            json!({ "preset": "private_chat" }),
+        )
+        .await["room_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    for r in [&dm, &group, &plain] {
+        eventually(|| async { alice1.open_room(r).await.ok() }).await;
+    }
+    for r in [&dm, &group] {
+        eventually(|| async { bob1.open_room(r).await.ok() }).await;
+    }
+    let row_of = |c: Arc<MatrixClient>, room: String, id: &'static str| async move {
+        eventually(|| async {
+            let rows = c.open_room(&room).await.ok()?;
+            rows.into_iter().find(|r| r.id == id && !r.pending)
+        })
+        .await
+    };
+
+    // Send: the row is there, pending, before the event; then the event, once.
+    let first = alice1
+        .send_text(&dm, "lunch at noon?", "01P3VERBSFIRST000000000000")
+        .await
+        .unwrap();
+    {
+        let seen = seen.0.lock().unwrap();
+        let echo = &seen[0];
+        let row = echo.last().unwrap();
+        assert!(row.pending && row.id == "01P3VERBSFIRST000000000000");
+        assert_eq!(row.text, "lunch at noon?");
+    }
+    let sent = row_of(alice1.clone(), dm.clone(), "01P3VERBSFIRST000000000000").await;
+    assert_eq!(sent.event_id, first);
+    let rows = alice1.open_room(&dm).await.unwrap();
+    assert_eq!(
+        rows.iter().filter(|r| r.text == "lunch at noon?").count(),
+        1
+    );
+    // A send the homeserver refuses leaves no row behind.
+    hs.call(
+        "PUT",
+        &format!("/_matrix/client/v3/rooms/{dm}/state/m.room.power_levels"),
+        Some(&a.access_token),
+        json!({ "events_default": 50 }),
+    )
+    .await;
+    eventually(|| async {
+        bob1.send_text(&dm, "can't", "01P3VERBSREFUSED0000000000")
+            .await
+            .is_err()
+            .then_some(())
+    })
+    .await;
+    assert!(bob1
+        .open_room(&dm)
+        .await
+        .unwrap()
+        .iter()
+        .all(|r| r.text != "can't"));
+    hs.call(
+        "PUT",
+        &format!("/_matrix/client/v3/rooms/{dm}/state/m.room.power_levels"),
+        Some(&a.access_token),
+        json!({ "events_default": 0 }),
+    )
+    .await;
+
+    // Reply: Bob answers the row; Alice's copy names it by its id.
+    row_of(bob1.clone(), dm.clone(), "01P3VERBSFIRST000000000000").await;
+    eventually(|| async {
+        bob1.send(
+            &dm,
+            "noon works",
+            Vec::new(),
+            Some(&first),
+            "01P3VERBSREPLY000000000000",
+        )
+        .await
+        .ok()
+    })
+    .await;
+    let reply = row_of(alice1.clone(), dm.clone(), "01P3VERBSREPLY000000000000").await;
+    assert_eq!(row_json(&reply)["replyTo"], "01P3VERBSFIRST000000000000");
+    assert_eq!(reply.sender, format!("user:{bob}"));
+    // Not to an event this device never read in this room, and not in a room that is no chat.
+    assert!(bob1
+        .send(
+            &dm,
+            "x",
+            Vec::new(),
+            Some("$nope"),
+            "01P3VERBSNOPE0000000000000"
+        )
+        .await
+        .is_err());
+    assert!(alice1.react(&plain, &first, "👍", true).await.is_err());
+    assert!(alice1.redact(&plain, &first).await.is_err());
+
+    // React: Bob's reaction reads as Bob's on both devices; asking twice sends it once.
+    bob1.react(&dm, &first, "👍", true).await.unwrap();
+    let reacted = |c: Arc<MatrixClient>, on: bool| {
+        let (dm, first, bob) = (dm.clone(), first.clone(), bob.clone());
+        async move {
+            eventually(|| async {
+                let rows = c.open_room(&dm).await.ok()?;
+                let v = row_json(rows.iter().find(|r| r.event_id == first)?);
+                (v["reactions"]["👍"][format!("user:{bob}")].as_bool() == on.then_some(true))
+                    .then_some(v)
+            })
+            .await
+        }
+    };
+    for c in [&alice1, &bob1] {
+        let v = reacted(c.clone(), true).await;
+        assert_eq!(v["reactions"].as_object().unwrap().len(), 1, "{v}");
+    }
+    bob1.react(&dm, &first, "👍", true).await.unwrap();
+    assert!(bob1.react(&dm, &first, "", true).await.is_err());
+    assert!(bob1.react(&dm, "$nope", "👍", true).await.is_err());
+    let raw = hs
+        .call(
+            "GET",
+            &format!("/_matrix/client/v3/rooms/{dm}/messages?dir=b&limit=50"),
+            Some(&a.access_token),
+            Value::Null,
+        )
+        .await;
+    let reactions = raw["chunk"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["type"] == "m.reaction")
+        .count();
+    assert_eq!(reactions, 1, "the second ask sent nothing");
+    bob1.react(&dm, &first, "👍", false).await.unwrap();
+    for c in [&alice1, &bob1] {
+        reacted(c.clone(), false).await;
+    }
+
+    // Read: a private receipt on the row asked for, and a bad id is refused here.
+    bob1.mark_read_at(&dm, &first).await.unwrap();
+    assert!(bob1.mark_read_at(&dm, "not an event id").await.is_err());
+    let synced = hs
+        .call(
+            "GET",
+            "/_matrix/client/v3/sync?timeout=0",
+            Some(&b.access_token),
+            Value::Null,
+        )
+        .await;
+    let receipts = synced["rooms"]["join"][&dm]["ephemeral"]["events"].to_string();
+    assert!(
+        receipts.contains(&first) && receipts.contains("m.read.private"),
+        "{receipts}"
+    );
+
+    // Remove: Bob cannot remove Alice's message; Alice can, and it leaves both timelines.
+    assert!(bob1.redact(&dm, &first).await.is_err());
+    alice1.redact(&dm, &first).await.unwrap();
+    for c in [&alice1, &bob1] {
+        eventually(|| async {
+            let rows = c.open_room(&dm).await.ok()?;
+            rows.iter().all(|r| r.event_id != first).then_some(())
+        })
+        .await;
+    }
+    // The answer stays, without a row to name.
+    let reply = row_of(alice1.clone(), dm.clone(), "01P3VERBSREPLY000000000000").await;
+    assert!(row_json(&reply)["replyTo"].is_null());
+
+    // Encrypted chat: the message and its reply are ciphertext on the homeserver, the reply
+    // still names its row, and a reaction is refused rather than sent in the clear.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let secret = alice1
+        .send_text(
+            &group,
+            "the door code is 4417",
+            "01P3SECRETFIRST00000000000",
+        )
+        .await
+        .unwrap();
+    let got = row_of(bob1.clone(), group.clone(), "01P3SECRETFIRST00000000000").await;
+    assert_eq!(got.text, "the door code is 4417");
+    bob1.send(
+        &group,
+        "got the code",
+        Vec::new(),
+        Some(&secret),
+        "01P3SECRETREPLY00000000000",
+    )
+    .await
+    .unwrap();
+    let reply = row_of(alice1.clone(), group.clone(), "01P3SECRETREPLY00000000000").await;
+    assert_eq!(reply.text, "got the code");
+    assert_eq!(row_json(&reply)["replyTo"], "01P3SECRETFIRST00000000000");
+    assert!(bob1.react(&group, &secret, "👍", true).await.is_err());
+    let raw = hs
+        .call(
+            "GET",
+            &format!("/_matrix/client/v3/rooms/{group}/messages?dir=b&limit=50"),
+            Some(&a.access_token),
+            Value::Null,
+        )
+        .await
+        .to_string();
+    assert!(raw.contains("m.room.encrypted"));
+    for clear in ["door code", "got the code", "m.reaction", "m.room.message"] {
+        assert!(
+            !raw.contains(clear),
+            "{clear} in the clear on the homeserver"
+        );
+    }
+    // A reaction the homeserver (or a member's other client) writes there in the clear is
+    // nobody's reaction.
+    hs.call(
+        "PUT",
+        &format!("/_matrix/client/v3/rooms/{group}/send/m.reaction/forged"),
+        Some(&b.access_token),
+        json!({ "m.relates_to": { "rel_type": "m.annotation", "event_id": secret, "key": "👎" } }),
+    )
+    .await;
+    alice1
+        .send_text(&group, "after", "01P3SECRETAFTER00000000000")
+        .await
+        .unwrap();
+    row_of(alice1.clone(), group.clone(), "01P3SECRETAFTER00000000000").await;
+    let rows = alice1.open_room(&group).await.unwrap();
+    let first_row = rows.iter().find(|r| r.event_id == secret).unwrap();
+    assert_eq!(row_json(first_row)["reactions"], json!({}));
+    assert!(
+        rows.iter().all(|r| !r.locked),
+        "no locked row for it either"
+    );
+
+    for c in [alice1, bob1] {
+        c.stop();
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

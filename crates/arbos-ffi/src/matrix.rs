@@ -58,6 +58,10 @@ pub struct MatrixMessageRow {
     pub created_at: i64,
     /// This device has no key for the message (yet); `text` is a placeholder.
     pub locked: bool,
+    /// This device's own send, shown before the homeserver has it; `event_id` is not an
+    /// event's until the row comes again without this.
+    #[uniffi(default = false)]
+    pub pending: bool,
     /// Chat-doc message JSON (same shape `CoreChatDoc.readRowsJson` rows have).
     pub json: String,
 }
@@ -127,6 +131,7 @@ fn row(r: CoreMessage) -> MatrixMessageRow {
         text: r.text,
         created_at: r.created_at,
         locked: r.locked,
+        pending: r.pending,
         json: r.json,
     }
 }
@@ -326,7 +331,46 @@ impl MatrixClient {
             .map(|p| serde_json::from_str(p))
             .collect::<Result<Vec<serde_json::Value>, _>>()
             .map_err(|e| MatrixError::Homeserver(format!("bad part: {e}")))?;
-        Ok(self.inner.send(&room_id, &text, parts, &local_id).await?)
+        Ok(self
+            .inner
+            .send(&room_id, &text, parts, None, &local_id)
+            .await?)
+    }
+
+    /// A text message answering the row `reply_to` (its event id) in a people chat.
+    pub async fn send_reply(
+        &self,
+        room_id: String,
+        text: String,
+        reply_to: String,
+        local_id: String,
+    ) -> Result<String, MatrixError> {
+        Ok(self
+            .inner
+            .send(&room_id, &text, Vec::new(), Some(&reply_to), &local_id)
+            .await?)
+    }
+
+    /// Put (`on`) or take back my reaction `key` on a row of a people chat. Refused in an
+    /// end-to-end encrypted chat (see `arbos_matrix::MatrixClient::react`).
+    pub async fn react(
+        &self,
+        room_id: String,
+        event_id: String,
+        key: String,
+        on: bool,
+    ) -> Result<(), MatrixError> {
+        Ok(self.inner.react(&room_id, &event_id, &key, on).await?)
+    }
+
+    /// Remove a message of a people chat (the homeserver decides who may).
+    pub async fn redact(&self, room_id: String, event_id: String) -> Result<(), MatrixError> {
+        Ok(self.inner.redact(&room_id, &event_id).await?)
+    }
+
+    /// Private read receipt on one row.
+    pub async fn mark_read_at(&self, room_id: String, event_id: String) -> Result<(), MatrixError> {
+        Ok(self.inner.mark_read_at(&room_id, &event_id).await?)
     }
 
     /// The account's key backup once the homeserver answered: `on` (this device has the keys),
