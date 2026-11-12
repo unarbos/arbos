@@ -478,6 +478,9 @@ impl MatrixClient {
                                 (StateEventType::SpaceParent, "*".to_owned()),
                                 (StateEventType::SpaceChild, "*".to_owned()),
                                 (StateEventType::RoomMember, me_key.clone()),
+                                // Who joined and who left, as it happens: an encrypted
+                                // room's next key goes to the members this device knows of.
+                                (StateEventType::RoomMember, "$LAZY".to_owned()),
                                 (StateEventType::RoomEncryption, String::new()),
                             ]),
                     )

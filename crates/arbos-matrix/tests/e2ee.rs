@@ -1259,3 +1259,245 @@ async fn a_key_that_arrives_after_its_message_opens_the_row() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// An encrypted group of three native devices, as the relay makes and changes it: a member
+/// added later reads what is said from then on (and nothing of before, which stays locked),
+/// reactions and replies cross all three, and once a member is removed the next message is
+/// under a new key and never reaches them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_encrypted_group_takes_a_late_member_and_loses_one() {
+    let Ok(url) = std::env::var("ARBOS_MATRIX_TEST_E2EE_HS") else {
+        return;
+    };
+    let hs = Hs {
+        url,
+        http: reqwest13::Client::new(),
+    };
+    let tag = std::process::id();
+    let dir = std::env::temp_dir().join(format!("arbos-group-{tag}"));
+    let mut people = Vec::new();
+    for name in ["ga", "gb", "gc"] {
+        let s = Session {
+            people_native: true,
+            ..hs.register(&format!("{name}{tag}")).await
+        };
+        let c = start(&s, &dir).await;
+        // Cross-signed devices: an encrypted room's keys go to no other kind.
+        c.recover(&format!("{name}'s passphrase")).await.unwrap();
+        people.push((s, c));
+    }
+    let [(a, alice), (b, bob), (c, carol)] = &people[..] else {
+        unreachable!()
+    };
+
+    // The room as `matrix/worker.rs::create_room_body` makes an encrypted group.
+    let group = hs
+        .call(
+            "POST",
+            "/_matrix/client/v3/createRoom",
+            Some(&a.access_token),
+            json!({ "preset": "private_chat", "visibility": "private", "is_direct": false,
+                    "invite": [b.user_id],
+                    "creation_content": { "life.arbos.chat_id": "01P3TRIO" },
+                    "initial_state": [
+                        { "type": "life.arbos.chat", "state_key": "",
+                          "content": { "chat_id": "01P3TRIO", "kind": "group", "project_id": null,
+                                       "created_by": a.user_id, "created_at": 1700, "epoch": 1 } },
+                        { "type": "m.room.history_visibility", "state_key": "",
+                          "content": { "history_visibility": "shared" } },
+                        { "type": "m.room.encryption", "state_key": "",
+                          "content": { "algorithm": "m.megolm.v1.aes-sha2" } },
+                    ],
+                    "power_level_content_override": { "users": {}, "invite": 0 } }),
+        )
+        .await["room_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let join = |s: &Session| {
+        let (hs, group, token) = (&hs, group.clone(), s.access_token.clone());
+        async move {
+            hs.call(
+                "POST",
+                &format!("/_matrix/client/v3/join/{group}"),
+                Some(&token),
+                json!({}),
+            )
+            .await;
+        }
+    };
+    join(b).await;
+    let listed = |c: &Arc<MatrixClient>, on: bool| {
+        let c = c.clone();
+        async move {
+            eventually(|| async {
+                (c.snapshot()
+                    .await
+                    .people
+                    .iter()
+                    .any(|p| p.chat_id == "01P3TRIO")
+                    == on)
+                    .then_some(())
+            })
+            .await
+        }
+    };
+    let reads = |c: &Arc<MatrixClient>, id: &'static str| {
+        let (c, group) = (c.clone(), group.clone());
+        async move {
+            eventually(|| async {
+                let rows = c.open_room(&group).await.ok()?;
+                rows.into_iter()
+                    .find(|r| r.id == id && !r.pending && !r.locked)
+            })
+            .await
+        }
+    };
+    for c in [alice, bob] {
+        listed(c, true).await;
+    }
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    // Two of them talk.
+    let one = alice
+        .send_text(&group, "one: just us two", "01P3TRIOONE000000000000000")
+        .await
+        .unwrap();
+    reads(bob, "01P3TRIOONE000000000000000").await;
+    bob.send(
+        &group,
+        "two: still two",
+        Vec::new(),
+        Some(&one),
+        "01P3TRIOTWO000000000000000",
+    )
+    .await
+    .unwrap();
+    reads(alice, "01P3TRIOTWO000000000000000").await;
+
+    // Carol is added, as the relay adds a member (the creator invites, she joins).
+    hs.call(
+        "POST",
+        &format!("/_matrix/client/v3/rooms/{group}/invite"),
+        Some(&a.access_token),
+        json!({ "user_id": c.user_id }),
+    )
+    .await;
+    join(c).await;
+    listed(carol, true).await;
+    // What was said before she came is not hers to read: locked rows, no content.
+    let before = eventually(|| async {
+        let rows = carol.open_room(&group).await.ok()?;
+        (rows.len() >= 2).then_some(rows)
+    })
+    .await;
+    assert!(before.iter().all(|r| r.locked), "{before:?}");
+    assert!(!format!("{before:?}").contains("just us two"));
+
+    // From then on all three read each other, replies and reactions included.
+    let three = eventually(|| async {
+        alice
+            .send_text(&group, "three: welcome", "01P3TRIOTHREE0000000000000")
+            .await
+            .ok()
+    })
+    .await;
+    for c in [bob, carol] {
+        assert_eq!(
+            reads(c, "01P3TRIOTHREE0000000000000").await.text,
+            "three: welcome"
+        );
+    }
+    carol
+        .send(
+            &group,
+            "four: glad to be here",
+            Vec::new(),
+            Some(&three),
+            "01P3TRIOFOUR00000000000000",
+        )
+        .await
+        .unwrap();
+    for c in [alice, bob] {
+        let row = reads(c, "01P3TRIOFOUR00000000000000").await;
+        assert_eq!(row.sender, format!("user:gc{tag}"));
+        assert_eq!(row_json(&row)["replyTo"], "01P3TRIOTHREE0000000000000");
+    }
+    carol.react(&group, &three, "🎉", true).await.unwrap();
+    for c in [alice, bob, carol] {
+        eventually(|| async {
+            let rows = c.open_room(&group).await.ok()?;
+            let v = row_json(rows.iter().find(|r| r.event_id == three)?);
+            v["reactions"]["🎉"][format!("user:gc{tag}")]
+                .as_bool()
+                .map(drop)
+        })
+        .await;
+    }
+    // Her earlier rows are still locked: nobody sent her those keys.
+    let rows = carol.open_room(&group).await.unwrap();
+    assert_eq!(rows.iter().filter(|r| r.locked).count(), 2, "{rows:?}");
+
+    // Bob is removed, as the relay removes a member. His list drops the chat, and what Alice
+    // says next is under a new key that is not sent to him.
+    hs.call(
+        "POST",
+        &format!("/_matrix/client/v3/rooms/{group}/kick"),
+        Some(&a.access_token),
+        json!({ "user_id": b.user_id, "reason": "left the chat" }),
+    )
+    .await;
+    listed(bob, false).await;
+    // Alice's device has seen him go before she speaks.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let five = alice
+        .send_text(&group, "five: without bob", "01P3TRIOFIVE00000000000000")
+        .await
+        .unwrap();
+    assert_eq!(
+        reads(carol, "01P3TRIOFIVE00000000000000").await.text,
+        "five: without bob"
+    );
+    let raw = hs
+        .call(
+            "GET",
+            &format!("/_matrix/client/v3/rooms/{group}/messages?dir=b&limit=50"),
+            Some(&a.access_token),
+            Value::Null,
+        )
+        .await;
+    let events = raw["chunk"].as_array().unwrap();
+    let session = |id: &str| {
+        let e = events.iter().find(|e| e["event_id"] == id).unwrap();
+        assert_eq!(e["type"], "m.room.encrypted");
+        e["content"]["session_id"].as_str().unwrap().to_owned()
+    };
+    assert_ne!(
+        session(&three),
+        session(&five),
+        "no new key after a removal"
+    );
+    for e in events.iter().filter(|e| e["state_key"].is_null()) {
+        assert_eq!(e["type"], "m.room.encrypted", "{e}");
+    }
+    // The homeserver hands him nothing from after he left, and his device shows no such row.
+    let his = hs
+        .call(
+            "GET",
+            &format!("/_matrix/client/v3/rooms/{group}/messages?dir=b&limit=50"),
+            Some(&b.access_token),
+            Value::Null,
+        )
+        .await
+        .to_string();
+    assert!(!his.contains(&five));
+    assert!(bob
+        .send_text(&group, "still here?", "01P3TRIOGONE00000000000000")
+        .await
+        .is_err());
+
+    for (_, c) in &people {
+        c.stop();
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
