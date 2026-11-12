@@ -25,6 +25,17 @@ multi-node are later phases.
   iptables -t nat -A POSTROUTING -s 10.207.0.0/16 ! -o arbos-boxd0 -j MASQUERADE
   ```
 
+  Where the firewall drops by default (ufw does: `FORWARD` and `INPUT` are `DROP`), those two
+  are not enough: a box resolves no name and reaches nothing until its traffic may be
+  forwarded, and it cannot reach a relay on this host until the bridge may come in on the
+  relay's port:
+
+  ```sh
+  iptables -I FORWARD -i arbos-boxd0 ! -o arbos-boxd0 -s 10.207.0.0/16 -j ACCEPT
+  iptables -I FORWARD -o arbos-boxd0 -d 10.207.0.0/16 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+  iptables -I INPUT -i arbos-boxd0 -d 10.207.0.1 -p tcp --dport <relay port> -j ACCEPT
+  ```
+
 ## Installing an image version
 
 A box's root is `/var/lib/arbos-boxd/images/<version>/rootfs`, shared read-only by every box
@@ -56,6 +67,26 @@ Settings are environment variables, all optional:
 | `ARBOS_BOXD_PORT` | `7790` (always on `127.0.0.1`) |
 | `ARBOS_BOXD_PLATFORM` | `systrap` |
 
+A box's sandbox, network namespace and cgroup are all named `arbos-box-<user_id>.`, with the
+dot: runsc takes an id that is the start of exactly one sandbox's as that sandbox, and no user
+id holds a dot.
+
+### What it leaves on the host
+
+The daemon does not undo its host setup when it exits, and there is no call that deletes a
+box. Stopping it for good, after every box is asleep, leaves these to remove by hand:
+
+- the bridge `arbos-boxd0` (`ip link del arbos-boxd0`), and the firewall rules above;
+- the tmpfs `ip netns` mounts on `/run/netns`;
+- runsc's own mount at `<ARBOS_BOXD_RUNSC_ROOT>/null-netns`;
+- the controllers runsc turned on in the root's `cgroup.subtree_control` (`cpuset io hugetlb
+  rdma misc` beside systemd's own), and the cgroup `/sys/fs/cgroup/arbos-boxd` itself if a
+  sandbox did not exit clean;
+- the files under `ARBOS_BOXD_ROOT`.
+
+Making or removing the bridge is a link change every network daemon on the host sees:
+tailscaled rebinds on it and restarts `systemd-resolved`.
+
 ## HTTP
 
 Every request carries `Authorization: Bearer <token>`; anything else is a bare 401. Errors
@@ -69,6 +100,10 @@ are `{"error": "..."}`.
 | `POST /v1/boxes/{user_id}/sleep?force=true` | The same answer, always `asleep_clean` and with a null split. agentd is not asked: a busy box is stopped too, and no checkpoint is written or kept, so every process in the box ends. `/work` is untouched. This is the user's Stop and an operator's delete of the box. |
 | `POST /v1/boxes/{user_id}/grow` | `{"size_gb"}`: 8 → 32 → 128. 409 at 128, or while the box is asleep. |
 | `GET /v1/host/status` | `mem_available_gb`, `swap_used_gb`, `load5`, `disk_free_gb`, `resident_boxes`, `present_boxes`, and `boxes[]` with `user_id`, `running`, `size_gb`, `work_bytes`, `ckpt_bytes`. |
+
+Known limit: a box with any workspace is always checkpointed, never stopped clean. Inside
+gVisor agentd has no writable cgroup v2, so it cannot count a workspace's processes and
+reports `active_user_pids: null`, which is not zero. Only a box with no workspace sleeps clean.
 
 `env` is the box's environment (the relay's `boxes::box_env`). `ARBOS_MCP_TOKEN` in it is the
 bearer the daemon uses for agentd's `POST /box/prepare-sleep`. `box_url` is the box's own
