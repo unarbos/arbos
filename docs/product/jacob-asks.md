@@ -88,7 +88,6 @@ Deleting a row, or the test it names, needs sign-off — see **Changing a guard*
 | `iphone-composer-glass-2026-10-28` | 2026-10-28 | iPhone | The composer's pills are Liquid Glass. | `PillGlassTests` |
 | `iphone-composer-see-through-2026-10-28` | 2026-10-28 | iPhone | Rows scrolling under the chat bar stay readable through and between the glass pills — a fade, never an opaque band. | `BottomBarFadeTests` |
 | `iphone-emoji-picker-reaction-2026-10-28` | 2026-10-28 | iPhone | A pick from the emoji keyboard sets the reaction once; the repeat reports that used to toggle it straight off are dropped. | `ReactionPickTests` |
-| `iphone-filter-tab-taps-2026-10-28` | 2026-10-28 | iPhone | A filter tab is Apple's full 44 pt tall to the finger, whatever the capsule's height. | `HomeFilterTabsUITests` |
 | `iphone-home-bar-fades-2026-10-28` | 2026-10-28 | iPhone | Home's search bar floats over the rows on the shared fade, with no background of its own. | `HomeBarFadeTests` |
 | `iphone-search-close-2026-10-28` | 2026-10-28 | iPhone | The ✕, a tap on the messages area and a swipe on an empty query all close the search bar through one path. | `ChatSearchCloseTests` |
 | `mention-chip-highlight-2026-10-28` | 2026-10-28 | iPhone | A mention chip is one pill with even insets and its picture on the centre line, wherever it falls. | `MentionChipSnapshotTests` |
@@ -118,6 +117,8 @@ Deleting a row, or the test it names, needs sign-off — see **Changing a guard*
 | `attachment-in-composer-2026-11-09` | 2026-11-09 | iPhone | A picked image shows as a thumbnail inside the composer box, Grok-style, before it is sent. | `ComposerParityUITests.testAStagedPicturePreviewsInsideTheComposer` |
 | `composer-hold-highlight-2026-11-09` | 2026-11-09 | iPhone | Resting a finger on the composer lights the box, as Grok's does, while the system menu comes up. | `ComposerParityUITests.testTheBoxVisiblyLightsUnderAHoldingFinger` |
 | `agent-access-link-ios-2026-11-10` | 2026-11-10 | iPhone | Settings → Agent access link creates, copies/shares and revokes the same agent links as the Mac, so a phone can hand an agent a key. | `AgentAccessLinkUITests` |
+| `chat-list-no-filter-ios-2026-11-10` | 2026-11-10 | iPhone | Home's chat list has no All / Agents / People / Servers selector; agents, people and servers sit in one linear list. | `HomeChatListNoFilterUITests` |
+| `chat-list-no-filter-mac-2026-11-10` | 2026-11-10 | Mac | The Mac sidebar has the same rule: no filter capsules, one linear list of every chat kind. | `HomeChatListNoFilterTests` |
 | `connected-apps-hidden-until-implemented-2026-11-10` | 2026-11-10 | iPhone | Settings lists no Connected apps row until the feature ships (Mac already omits it; `connected_apps_stays_off_the_settings_list_until_implemented` holds that side). | `ConnectedAppsHiddenUITests` |
 | `solo-1to1-no-agent-reply-quote-ios-2026-11-10` | 2026-11-10 | iPhone | In a solo 1:1 agent chat, an agent bubble never shows a reply quote header — even when the row still carries replyTo from an older box. A group or channel still quotes. A human's own reply still quotes. | `SoloAgentReplyQuoteTests` |
 | `solo-1to1-no-agent-reply-quote-mac-2026-11-10` | 2026-11-10 | Mac | Same rule on Mac: solo 1:1 agent bubbles never quote; groups and channels still do; a human's own reply still does. Guarded in-tree by `crates/arbos-mac` `solo_agent_reply_quote_tests`; the iPhone suite is the named twin. | `SoloAgentReplyQuoteTests` |
@@ -135,6 +136,7 @@ Kept so the tag in the code resolves, and so nobody re-adds the behaviour by mis
 | ask | asked | why | what replaced it |
 | --- | --- | --- | --- |
 | `iphone-composer-bottom-fade-2026-10-28` | 2026-10-28 | Jacob, on TestFlight 202610281715985037: "we should actually see the text behind the search bar". The opaque band this asked for was the wrong answer. | `iphone-composer-see-through-2026-10-28`, guarded by `BottomBarFadeTests` |
+| `iphone-filter-tab-taps-2026-10-28` | 2026-10-28 | Jacob asked for the Home filter tabs to go away entirely (2026-11-10). A 44 pt hit target on a control that no longer exists is not the ask. | `chat-list-no-filter-ios-2026-11-10`, guarded by `HomeChatListNoFilterUITests` |
 
 ## Changing a guard
 

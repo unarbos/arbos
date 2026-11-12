@@ -1,45 +1,14 @@
 // Home, Grok Bot layout: top bar with the account circle (GitHub avatar, left)
-// and the "+" circle (right), then All | Agents | People | Servers and the chat
-// list (avatar, name, time, preview). One machine: its state is the small dot
-// on the account circle; the machine details live in Settings. The bottom edge
-// holds one app-wide search bar and nothing else (Jacob, 2026-10-25, [feedback
-// iphone-bottom-search-bar-2026-10-25]; `GlobalSearchView.swift`).
+// and the "+" circle (right), then one linear chat list — agents, people and
+// servers together (avatar, name, time, preview). No All / Agents / People /
+// Servers selector ([feedback chat-list-no-filter-ios-2026-11-10]). One machine:
+// its state is the small dot on the account circle; the machine details live in
+// Settings. The bottom edge holds one app-wide search bar and nothing else
+// (Jacob, 2026-10-25, [feedback iphone-bottom-search-bar-2026-10-25];
+// `GlobalSearchView.swift`).
 
 import ArbosFFI
 import SwiftUI
-
-/// Selection above the home list: All | Agents | People | Servers. The Mac
-/// sidebar carries the same four segments (`sidebar::ListFilter` in
-/// crates/arbos-mac); the scope rules here are the shared contract.
-enum HomeListFilter: String, CaseIterable, Identifiable {
-    case all = "All"
-    case agents = "Agents"
-    case people = "People"
-    case servers = "Servers"
-    var id: String { rawValue }
-
-    /// Agent (project) rows are listed under All and Agents.
-    var showsProjects: Bool { self == .all || self == .agents }
-    /// People chats (DMs, groups) are listed under All and People.
-    var showsPeople: Bool { self == .all || self == .people }
-    /// Servers are listed under All and Servers.
-    var showsServers: Bool { self == .all || self == .servers }
-
-    /// Agents: my agents only — an agent shared in by someone else stays out.
-    func admitsProject(shared: Bool) -> Bool {
-        showsProjects && !(self == .agents && shared)
-    }
-
-    /// Copy for an empty list under this segment (no query typed).
-    var emptyCopy: String {
-        switch self {
-        case .all: return "No conversations yet"
-        case .agents: return "No agents yet"
-        case .people: return "No people chats yet"
-        case .servers: return "No servers yet"
-        }
-    }
-}
 
 struct HomeView: View {
     @EnvironmentObject private var model: AppModel
@@ -61,9 +30,6 @@ struct HomeView: View {
     /// Goals list (long-running objectives) from the home sidebar section.
     @State private var showGoals = false
     @State private var openGoalId: String?
-    /// Home list scope: All mixes agents, people and servers; Agents is your
-    /// own agents only (no people chats / other users); People is DMs and groups.
-    @State private var listFilter: HomeListFilter = .all
 
     private var hiddenProjects: [Project] {
         model.projects.filter { model.isArchived($0.id) }.sorted { lastActivity($0) > lastActivity($1) }
@@ -201,11 +167,6 @@ struct HomeView: View {
             }
             if DebugHooks.show == "settings", DebugHooks.openProject == nil {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { showSettings = true }
-            }
-            // Rig: `ARBOS_HOME_FILTER=all|agents|people|servers` selects a segment at launch.
-            if let raw = DebugHooks.homeFilter,
-               let f = HomeListFilter.allCases.first(where: { $0.rawValue.lowercased() == raw.lowercased() }) {
-                listFilter = f
             }
             // Rig: `ARBOS_SEARCH=<text>` opens the bottom search with that query
             // (`ARBOS_SEARCH=-` focuses the empty bar).
@@ -549,7 +510,7 @@ struct HomeView: View {
     private var homeList: some View {
             ScrollViewReader { proxy in
                 List {
-                    Color.clear.frame(height: showsFilterBar ? HomeChrome.listTop : HomeChrome.barOnlyListTop)
+                    Color.clear.frame(height: HomeChrome.barOnlyListTop)
                         .listRowInsets(EdgeInsets())
                         .listRowSeparator(.hidden)
                         .listRowBackground(Color.clear)
@@ -560,7 +521,9 @@ struct HomeView: View {
                             .listRowSeparator(.hidden)
                             .listRowBackground(Color.clear)
                     } else if homeRows.isEmpty {
-                        Text(listFilter.emptyCopy)
+                        // Everything is archived: the list itself is empty, Hidden chats
+                        // still holds the rows.
+                        Text("No conversations yet")
                             .font(theme.font(Theme.small))
                             .foregroundStyle(theme.muted)
                             .frame(maxWidth: .infinity)
@@ -568,7 +531,7 @@ struct HomeView: View {
                             .listRowInsets(EdgeInsets())
                             .listRowSeparator(.hidden)
                             .listRowBackground(Color.clear)
-                            .accessibilityIdentifier("home-filter-empty")
+                            .accessibilityIdentifier("home-list-empty")
                     } else {
                         if let update = model.availableUpdate {
                             UpdateCard(update: update)
@@ -752,26 +715,12 @@ struct HomeView: View {
         .accessibilityLabel("Hidden chats, \(hiddenCount)")
     }
 
-    /// The filter tabs are fixed chrome under the bar (not a list row) whenever there is
-    /// anything to filter; the search results replace them.
-    private var showsFilterBar: Bool {
-        !searching && !(model.projects.isEmpty && model.peopleChats.isEmpty && model.servers.isEmpty)
-    }
-
-    /// Account circle (→ Settings) left, the + circle right, the All · Agents · People ·
-    /// Servers tabs under them. Search lives in the bottom bar, so the header carries no
-    /// search disc.
+    /// Account circle (→ Settings) left, the + circle right. Search lives in the bottom
+    /// bar, so the header carries no search disc and no list filter
+    /// ([feedback chat-list-no-filter-ios-2026-11-10]).
     private var topBar: some View {
-        VStack(spacing: 0) {
-            topBarRow
-            if showsFilterBar {
-                // The tabs' hit bands are the chrome's own 8 over / 4 under
-                // (`HomeChrome.filterBand`), so every tab is 44 pt tall end to end.
-                listFilterBar
-                    .padding(.horizontal, 20)
-            }
-        }
-        .zIndex(1)
+        topBarRow
+            .zIndex(1)
     }
 
     private var topBarRow: some View {
@@ -881,8 +830,7 @@ struct HomeView: View {
     }
 
     /// One home row. Every row is a plain `title` hit: the list is no longer
-    /// narrowed by typed text (search is the bottom bar, as the Mac's palette);
-    /// the segment alone scopes it.
+    /// narrowed by typed text (search is the bottom bar, as the Mac's palette).
     struct HomeEntry: Identifiable {
         var row: HomeRow
         var hit: HomeSearch.Hit
@@ -890,13 +838,13 @@ struct HomeView: View {
     }
 
     /// Projects, DMs and servers in one list: pinned first (in the user's pin
-    /// order), then newest activity. `listFilter` scopes the rows: Agents hides
-    /// people and servers, People hides agents and servers, Servers shows only
-    /// servers (`HomeListFilter`). Archived rows stay out (Hidden chats).
+    /// order), then newest activity. Archived rows stay out (Hidden chats).
+    /// No segment filter — agents, people and servers always sit together
+    /// ([feedback chat-list-no-filter-ios-2026-11-10]).
     private var homeRows: [HomeEntry] { pinnedRows + restRows }
 
-    /// The Pinned section: the pins the filter admits, in the user's order (never re-sorted
-    /// by activity); empty → no header, no hairline.
+    /// The Pinned section: every pin, in the user's order (never re-sorted by
+    /// activity); empty → no header, no hairline.
     private var pinnedRows: [HomeEntry] {
         rankedRows.filter { $0.0 != Int.max }.sorted { $0.0 < $1.0 }.map(\.2)
     }
@@ -910,45 +858,21 @@ struct HomeView: View {
         // pinRank: strip index when pinned (0 = top), Int.max when not.
         var rows: [(Int, Int64, HomeEntry)] = []
         let hit = HomeSearch.Hit(kind: .title)
-        if listFilter.showsProjects {
-            for p in model.projects {
-                // Agents: my agents only (`!shared`) — no shared-in agents.
-                if !listFilter.admitsProject(shared: p.shared) { continue }
-                if model.isArchived(p.id) { continue }
-                let pinRank = model.homePinIndex(projectId: p.id) ?? Int.max
-                rows.append((pinRank, lastActivity(p), HomeEntry(row: .project(p), hit: hit)))
-            }
+        for p in model.projects {
+            if model.isArchived(p.id) { continue }
+            let pinRank = model.homePinIndex(projectId: p.id) ?? Int.max
+            rows.append((pinRank, lastActivity(p), HomeEntry(row: .project(p), hit: hit)))
         }
-        if listFilter.showsPeople {
-            for c in model.peopleChats where !model.isArchived(peopleChatId: c.id) {
-                let pinRank = model.homePinIndex(peopleChatId: c.id) ?? Int.max
-                rows.append((pinRank, peopleActivity(c), HomeEntry(row: .people(c), hit: hit)))
-            }
+        for c in model.peopleChats where !model.isArchived(peopleChatId: c.id) {
+            let pinRank = model.homePinIndex(peopleChatId: c.id) ?? Int.max
+            rows.append((pinRank, peopleActivity(c), HomeEntry(row: .people(c), hit: hit)))
         }
-        if listFilter.showsServers {
-            // D88: servers sort among the chats by last activity (rule 1); the
-            // Servers segment shows them alone (Mac parity, 2026-10-24).
-            for s in model.servers where !model.isArchived(serverId: s.id) {
-                let pinRank = model.homePinIndex(serverId: s.id) ?? Int.max
-                rows.append((pinRank, model.serverActivity(s), HomeEntry(row: .server(s), hit: hit)))
-            }
+        // D88: servers sort among the chats by last activity (rule 1).
+        for s in model.servers where !model.isArchived(serverId: s.id) {
+            let pinRank = model.homePinIndex(serverId: s.id) ?? Int.max
+            rows.append((pinRank, model.serverActivity(s), HomeEntry(row: .server(s), hit: hit)))
         }
         return rows
-    }
-
-    /// All | Agents | People | Servers — same capsule pill as profile panes (`PaneTabs`).
-    private var listFilterBar: some View {
-        let selected = Binding(
-            get: { listFilter.rawValue },
-            set: { raw in
-                guard let next = HomeListFilter(rawValue: raw) else { return }
-                Haptics.pick()
-                withAnimation(.snappy(duration: 0.2)) { listFilter = next }
-            }
-        )
-        return PaneTabs(tabs: HomeListFilter.allCases.map(\.rawValue), selected: selected,
-                        hitAbove: HomeChrome.filterTop, hitBelow: HomeChrome.filterBottom)
-            .accessibilityIdentifier("home-list-filter")
     }
 
     /// Open the chat the row points at, else the agent's landing chat.
