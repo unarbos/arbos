@@ -19,12 +19,17 @@ final class MessagedNoticeNavUITests: XCTestCase {
 
     private func launch() -> XCUIApplication {
         let app = XCUIApplication()
+        // `openChat` is only read inside the `openProject` branch (HomeView), so both
+        // are needed — same launch shape as PresenceAnchor / ComposerParity.
         app.launchEnvironment = [
             "ARBOS_FIXTURE": "1",
+            "ARBOS_NO_STORE": "1",
+            "ARBOS_OPEN_PROJECT": "fx-comms",
             "ARBOS_OPEN_CHAT": sourceChat,
         ]
         app.launch()
-        XCTAssertTrue(app.buttons["chat-back:\(sourceChat)"].waitForExistence(timeout: appear),
+        let back = app.descendants(matching: .any)["chat-back:\(sourceChat)"].firstMatch
+        XCTAssertTrue(back.waitForExistence(timeout: appear),
                       "Comms's chat opened")
         return app
     }
