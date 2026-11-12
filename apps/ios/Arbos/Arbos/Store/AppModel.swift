@@ -5524,6 +5524,12 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// How long after the user's last line we keep the working cheat before the
+    /// agent has opened a streaming row. The old 15 s bridge went blank on a
+    /// cold workspace start and left a dead transcript with no "didn't answer"
+    /// line ([feedback AG5fMKSEGcm19R9A3FU1oKw]).
+    static let awaitingReplyMs: Int64 = 60_000
+
     /// Visual cheat: the last row is the user's and no assistant turn has
     /// started yet — show the working line immediately so a simple first
     /// question does not sit on a dead transcript while the box wakes.
@@ -5534,9 +5540,34 @@ final class AppModel: ObservableObject {
         // Nobody "works" in a server channel; a sent line is just a line.
         if channel(chatId) != nil { return false }
         guard let at = activity(chatId).lastUserAt else { return false }
-        // Short bridge until the agent opens a streaming row (cold wake).
+        // Always-on collapses the shown machine state to awake; rawState still
+        // says waking, and a project can be waking on its own.
+        if machineWaiting(for: chatId) { return true }
+        // Bridge until the agent opens a streaming row (cold workspace start).
         // ChatView ticks this once a second so it can expire cleanly.
-        return nowMs() - at < 15_000
+        return nowMs() - at < Self.awaitingReplyMs
+    }
+
+    /// The machine (or this chat's project) is still coming up — presence says
+    /// "waiting for the machine" and the awaiting cheat must not expire.
+    func machineWaiting(for chatId: Id) -> Bool {
+        if machine.rawState == .waking { return true }
+        if let chat = chat(chatId), let p = project(chat.projectId), p.state == .waking {
+            return true
+        }
+        return false
+    }
+
+    /// Awaiting expired and the last row is still the user's: the chat would
+    /// otherwise go silent with no assistant row for Transcript's stock line.
+    /// ChatView draws "{name} didn't answer. Ask again." until a reply lands
+    /// or the user sends again ([feedback AG5fMKSEGcm19R9A3FU1oKw]).
+    func missedReply(_ chatId: Id) -> Bool {
+        if isStreaming(chatId) || hasOpenSubagent(chatId) { return false }
+        if isAwaitingReply(chatId) { return false }
+        if peopleChat(chatId) != nil { return false }
+        if channel(chatId) != nil { return false }
+        return activity(chatId).lastUserAt != nil
     }
 
     // MARK: Commands (crdt-sync §6.2: the client writes rows and commands)
