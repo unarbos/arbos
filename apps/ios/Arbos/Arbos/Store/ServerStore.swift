@@ -865,9 +865,14 @@ extension AppModel {
             }
             matrixConnected = true
             peopleNative = creds.peopleNative
-            // Switched off (the rollback): every people chat is its Loro room again from the
-            // next `refreshPeople` on.
-            if !peopleNative { applyNativeRooms([:]) }
+            // Switched off (the rollback): every people chat is its Loro room again, dialled
+            // here. The launch loop's `refreshPeople` ran before this, while the chats still
+            // counted as native, and dialled none; its next turn is 15 s away.
+            if !peopleNative, !nativeRooms.isEmpty {
+                applyNativeRooms([:])
+                await refreshPeople()
+                guard acceptsMatrix(owner) else { return }
+            }
             let snapshot = await client.snapshot()
             guard acceptsMatrix(owner) else { return }
             applyMatrixSnapshot(snapshot)
