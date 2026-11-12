@@ -126,7 +126,7 @@ fn sender_of(row: &Value, owner: Option<&str>, project_id: Option<&str>) -> Stri
 
 /// Parts worth carrying besides the text: attachments and visible status/error lines. Tool
 /// calls, reasoning and hidden parts stay in the Loro doc (the agent control plane).
-fn carried_parts(row: &Value) -> Option<Value> {
+pub(super) fn carried_parts(row: &Value) -> Option<Value> {
     let parts = row["parts"].as_array()?;
     let keep: Vec<Value> = parts
         .iter()
@@ -215,6 +215,16 @@ pub struct Resync {
 /// tell"), rows from older apps. Rows whose announce job is still queued are left to it.
 pub fn resync_chat(state: &AppState, chat_id: &str, project_id: Option<&str>) -> Resync {
     let mut rep = Resync::default();
+    // An encrypted room takes no mirror (`Worker::message`), so there is nothing to catch up.
+    if state
+        .db
+        .matrix_room(chat_id)
+        .ok()
+        .flatten()
+        .is_some_and(|r| r.encrypted && r.closed_at.is_none())
+    {
+        return rep;
+    }
     let Ok(Some(doc)) = load_doc(state, chat_id, project_id) else {
         return rep;
     };
@@ -577,7 +587,7 @@ mod doc_tests {
         // The room exists and the first message was mirrored (announced earlier).
         state
             .db
-            .matrix_insert_room(&chat_id, "!r:arbos.life", Some(&project), "chat")
+            .matrix_insert_room(&chat_id, "!r:arbos.life", Some(&project), "chat", false)
             .expect("room");
         state
             .db

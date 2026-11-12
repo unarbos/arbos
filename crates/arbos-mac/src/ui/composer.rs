@@ -3986,6 +3986,8 @@ impl Render for Composer {
 
         let plus = div()
             .id("composer-attach")
+            .debug_selector(|| "composer-attach".into())
+            .on_hover(cx.listener(|this, hovered, _, _| this.fun.plus_hovered = *hovered))
             .size(px(PLUS_BUTTON))
             .flex_shrink_0()
             .rounded_full()
@@ -7141,6 +7143,40 @@ mod overlay_tests {
         );
         let gap = f32::from(closed.field.top() - picker.bottom());
         assert!((gap - MENTION_MENU_GAP).abs() <= 0.5, "picker gap {gap}");
+    }
+
+    #[gpui::test]
+    fn a_press_outside_the_plus_menu_closes_it_and_plus_still_toggles(cx: &mut TestAppContext) {
+        let Mounted {
+            state, shell, vcx, ..
+        } = mount(cx);
+        let none = gpui::Modifiers::default();
+        settle(&state, &shell, vcx);
+        let plus = vcx
+            .debug_bounds("composer-attach")
+            .expect("+ is drawn")
+            .center();
+        let open = |vcx: &mut VisualTestContext| vcx.debug_bounds("composer-attach-menu");
+
+        vcx.simulate_mouse_move(plus, None, none);
+        vcx.simulate_click(plus, none);
+        settle(&state, &shell, vcx);
+        let menu = open(vcx).expect("+ opens its menu");
+        vcx.simulate_click(plus, none);
+        settle(&state, &shell, vcx);
+        assert!(
+            open(vcx).is_none(),
+            "a second + closes it, and does not reopen it"
+        );
+
+        vcx.simulate_click(plus, none);
+        settle(&state, &shell, vcx);
+        assert!(open(vcx).is_some());
+        let elsewhere = gpui::point(menu.right() + px(40.0), menu.top() - px(40.0));
+        vcx.simulate_mouse_move(elsewhere, None, none);
+        vcx.simulate_click(elsewhere, none);
+        settle(&state, &shell, vcx);
+        assert!(open(vcx).is_none(), "a press outside the menu closes it");
     }
 
     /// The text row inside the pill — the one thing Jacob said must not move.

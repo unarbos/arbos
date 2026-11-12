@@ -1,0 +1,23 @@
+{
+  "client-sdk-swift": {
+    "upstream_manifest_sha256": "1a5c817cd3d7b40585443273e8e903472e369be5dc6737af4c47ac94fe9c5bd3",
+    "compile_harness_manifest_sha256": "b367cb9a56b022024a8fdaf678559c9489601d4b914fbf49e4759d56ac2fbdcf"
+  },
+  "webrtc-xcframework": {
+    "upstream_manifest_sha256": "7fdf1fb1cb894d1c064dc21d1ff57f1c203b282071c1ac511aab01a4dfefad47",
+    "compile_harness_manifest_sha256": "1df626860e2c3c71f986a5a84385fcac3d95ccca51d9e6a6b99f06fec16de2bf"
+  },
+  "livekit-uniffi-xcframework": {
+    "upstream_manifest_sha256": "d29b4b8e2b00b4528d58f08e72bc411f112b5c4282d6a3db8ee90840bb3ea831",
+    "compile_harness_manifest_sha256": "ab8d08394ad426fda4c7999d3f230bba7d8570d3b3cb99b77ba48ff825a02e39"
+  },
+  "scope": "Private compile-only manifest: unchanged runtime source and exact reviewed artifacts, local dependencies avoid network; upstream test/doc targets omitted; no product manifest edits, application launch, signing or accounts.",
+  "client-sdk-swift/Package@swift-6.2.swift": {
+    "upstream_manifest_sha256": "450a62728d61cd5e33833d6403806602994996d3ade1993178bb9286cabcd4ac",
+    "compile_harness_manifest_sha256": "f603636f9e909beadabb4dbbff4472e997cdc1c01931f5632184255c05399cf3"
+  },
+  "livekit-uniffi-xcframework/Package@swift-6.2.swift": {
+    "upstream_manifest_sha256": "e327a4ef9cc50379383ba10be31ac810b09575d31e744f44ddc341505d78eefb",
+    "compile_harness_manifest_sha256": "dca7af4d96cda19b8a0950406e20a67ad3c91fd02d738542a5278a1c36bf233c"
+  }
+}

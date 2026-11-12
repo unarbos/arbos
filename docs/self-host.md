@@ -75,6 +75,8 @@ All optional unless noted.
 | `ARBOS_OPENAI_AUDIO_BASE`, `ARBOS_VOICE_MOCK` | speech-to-text / text-to-speech upstream (default `https://api.openai.com/v1`, needs `OPENAI_API_KEY`); `ARBOS_VOICE_MOCK=1` answers without a key |
 | `ARBOS_OPENAI_IMAGES_BASE`, `ARBOS_IMAGE_MODEL`, `ARBOS_IMAGE_MOCK` | image generation upstream and model; `ARBOS_IMAGE_MOCK=1` returns a labelled placeholder PNG |
 | `ARBOS_DEFAULT_PROVIDER` | where a user without a machine gets one: `gvisor` (a sandbox on this host, §5), `docker`, or `process`; unset = `process`. Daytona was retired as a provider on 2026-11-09 and is refused here |
+| `ARBOS_BOXD_URL`, `ARBOS_BOXD_TOKEN_FILE` | off unless set. The host's `arbos-boxd` daemon (`http://127.0.0.1:7790`, loopback only) and a mode-0600 file, readable by the relay's user, holding the daemon's token. With both, `boxd` is a provider (`ARBOS_DEFAULT_PROVIDER=boxd`, or one user through `PUT /admin/users/{id}/box`): such a box is slept after 15 idle minutes and woken on demand instead of being kept always on (`crates/arbos-boxd/README.md`). Its user is never waitlisted: at most `ARBOS_BOXD_MAX_RESIDENT` (default 160) of these boxes are awake at once, and one waking past that puts the least recently active idle one to sleep. The relay must listen where a box can reach it (the daemon's bridge, `ARBOS_RELAY_LISTEN=10.207.0.1:7700` with `ARBOS_RELAY_PUBLIC_URL` to match) and start after the daemon; no box is made under 80 GB of free disk, and none wakes under `ARBOS_HOST_EVICT_MIN_AVAILABLE_GB` (default 64) of available memory, so set that on a smaller host (the README's "The relay beside it") |
+| `ARBOS_BOXD_NODES_FILE` | off unless set, and only with `ARBOS_BOXD_URL`. A JSON file only its owner can write, listing the `arbos-boxd` daemons of other hosts: for each an `id`, an `https://` `url`, a `token_file`, the `ca_file` its certificate must chain to, the relay's own `cert_file` and `key_file`, its `box_subnet`, and optionally `max_resident`. A new box goes to the node with the most free resident slots; `boxes.node_id` records it and every later call for the box goes there. A node that is down fails its own boxes' wakes and takes no new box; nothing is moved (the README's "More than one host") |
 | `ARBOS_DAYTONA_SNAPSHOT` | the image version new machines are made from (`arbos-agent-<version>`; the name is historical). The relay turns it into the image tag `…/arbos-agent:<version>` |
 | `ARBOS_HOST_MAX_BOXES`, `ARBOS_HOST_MIN_FREE_DISK_GB`, `ARBOS_HOST_EVICT_MIN_AVAILABLE_GB`, `ARBOS_HOST_EVICT_MAX_SWAP_GB`, `ARBOS_HOST_EVICT_LOAD` | host fleet limits: resident sandboxes before sign-ups go on the waitlist, the disk floor, and the memory/swap/load triggers for eviction (§5) |
 | `ARBOS_BOX_CPUS`, `ARBOS_BOX_MEM_GB`, `ARBOS_BOX_WORK_GB`, `ARBOS_BOX_PIDS`, `ARBOS_BOX_NETWORK`, `ARBOS_BOX_DNS`, `ARBOS_BOX_RUNTIME`, `ARBOS_LOCAL_BOX_IMAGE` | per-sandbox spec and the container runtime (`runsc`) / image override (§5) |
@@ -106,6 +108,36 @@ ARBOS_RELAY_LISTEN=0.0.0.0:7700 ARBOS_RELAY_PUBLIC_URL=https://relay.example.com
 
 If the public URL changes, the relay writes the new one into every machine at the next wake (`/work/.arbos/relay-url`) and agentd prefers that file; a machine that still cannot say hello within 60 s is bounced once and then shown as `error · box cannot reach relay`.
 
+Model usage is recorded once per upstream response on the relay, including failed responses
+whose usage is unknown. Use `arbosctl usage <project>`
+for today's and all-time project totals, or query individual agent sessions:
+
+```bash
+arbosctl usage <project> --sessions
+arbosctl usage <project> --session <chat-id> --include-children
+arbosctl usage <project> --session <subagent-id> --from 1794412800000 --to 1794499200000
+```
+
+The corresponding endpoints are `GET /projects/{id}/sessions/usage` and
+`GET /projects/{id}/sessions/{session}/usage?include_children=true`. `from` and `to` are
+Unix milliseconds, inclusive/exclusive respectively. A main session uses its chat id;
+a worker uses its subagent id. Resuming preserves the logical session's totals, and context
+rotation is recorded as a separate `session_run_id` in request details (`inspect`).
+`include_children` adds workers attributed to that chat, counting each request once.
+
+`input`, `output`, `cache_read` and `cache_write` are disjoint token buckets; `total_tokens`
+is their sum. `actual_usd` sums only costs explicitly reported by the upstream and is `null`
+when none were reported; `reported_cost_calls` identifies how many calls that subtotal covers.
+`estimated_usd` and `estimated_cost_calls` describe the relay's local price estimates.
+`usd` retains the existing combined accounting amount. None of these fields represents an
+account's credit-ledger debit or a reconciled provider invoice. `unknown_cost_calls` and
+`incomplete_calls` expose missing provenance or incomplete streams, including cancellation.
+Historical calls, old harness processes during upgrades, and project-wide background work
+remain in the `session_id: null` bucket; dedicated image and voice endpoints retain their
+project-level accounting. Calls made by outside agents using their own provider
+credentials do not pass through this meter. Upgrade the relay before agentd; the relay migrates
+the existing database additively and agentd rewrites provider configuration at workspace start.
+
 ## 5. Real machines: gVisor sandboxes on the relay host
 
 With `ARBOS_DEFAULT_PROVIDER=gvisor`, `project create` (without `--local-box`) gives the user a gVisor (`runsc`) container on the relay host, made from the image version in `ARBOS_DAYTONA_SNAPSHOT`, with the spec in `ARBOS_BOX_CPUS` / `ARBOS_BOX_MEM_GB` / `ARBOS_BOX_WORK_GB`. The relay needs Docker with the `runsc` runtime, and must be reachable from the sandbox (`ARBOS_RELAY_PUBLIC_URL`).
@@ -129,6 +161,15 @@ CC_x86_64_unknown_linux_musl=musl-gcc cargo build --release -p arbos-agentd --ta
 mkdir -p dist && cp target/x86_64-unknown-linux-musl/release/arbos-agentd dist/
 docker build --platform linux/amd64 -f image/Dockerfile -t arbos-agent:<v> .
 ```
+
+The extension needs its `package.json` beside its TypeScript sources in `arbos-pi-ext.tar`,
+from the same checkout as agentd. The full image installs the manifest-pinned Effect
+runtime during its build; the dev image installs it once at boot and reuses a matching
+version. Both link the shared runtime into the extension so each project keeps links
+instead of a separate dependency tree. Starting the extension itself installs nothing.
+Run `python3 image/tests/test_runtime_packaging.py` to check packaging locally without
+building an image or contacting a registry; `pnpm install` in `harness/` also enables
+the check that imports the real Effect runtime through two workspace links.
 
 ## 7. Pointing the apps at your relay
 
@@ -210,6 +251,12 @@ Ring 0 runs [Synapse](https://github.com/element-hq/synapse) (community edition,
 | secrets | vault item **Arbos Matrix** (one field per `ARBOS_MATRIX_*` name); `relay-server.sh` carries the homeserver URL, server name and the six appservice tokens into `/etc/arbos/relay.env` | `ARBOS_MATRIX=off|dual|on` is an operator switch in `relay.env`, never read from the vault; default off |
 
 Checks after `setup.sh`: `curl http://127.0.0.1:7708/health` prints `OK`; `curl http://127.0.0.1:7708/_matrix/client/versions` lists the spec versions; `docker logs arbos-matrix-synapse` shows the three appservices; a `POST /_matrix/client/v3/register {type: m.login.application_service, username: gh_x}` with the users `as_token` returns a user id, token and device id.
+
+End-to-end encryption (stage D): `ARBOS_MATRIX_E2EE=on` in `relay.env` makes every DM and private group of up to 200 members created from then on encrypted (`m.room.encryption`, Megolm), and the relay stops mirroring messages into those rooms; an encrypted chat refuses a 201st member, by invitation or by link, and says so (a bigger group is a new one; a room cannot drop its encryption, so nothing is converted). While such a chat is read on the homeserver (below), it also refuses an agent and any person whose apps do not read it there (`encrypted_chat_members`): they would send every member back to a Loro room that has none of what was said. A group made with more than 200 members, channels, project chats and existing rooms are unchanged: nothing already there is migrated. An older app can neither read nor post in an encrypted room, and a room never goes back, so name the oldest app of each platform that decrypts: `ARBOS_MATRIX_E2EE_MIN_CLIENTS="mac/0.6.420, ios/1.0.0 (202611200000)"` (what the apps send as `X-Arbos-Client`; the build in brackets is optional). A chat is then created encrypted only when every person in it has a signed-in device and each of their devices seen in the last 30 days (or, with none, the one seen last) last reported at least that; otherwise it is created unencrypted and stays so. A value that does not read as `platform/version (build)` stops the relay at start. Unset, nobody is checked: turn the switch on without it only once every shipped app decrypts. The apps keep their keys per device and back them up to the homeserver under the person's recovery passphrase (their wallet phrase), so the relay and Synapse only ever hold ciphertext. The iPhone app makes that phrase and sets the keys up; the Mac app has no wallet, so it only asks for the phrase once a phone has, and until then it reads and sends nothing encrypted.
+
+People chats read from the homeserver (phase 3, first step): `PUT /admin/matrix/people/{user_id} {"on": true}` (admin token) sets `users.matrix_people_native` for one person, off by default; `GET /admin/matrix/status` lists who has it as `people_native_users`. `GET /me/matrix` then answers `people_native: true` and the shared client lists that person's DMs and groups beside their servers and reads them as transcript rows (a row's author is the Matrix sender; a room counts only as the chat its create event names). Nothing is migrated. Rollback is the same call with `"on": false`; an app picks either up when it next asks for its session.
+
+Which chats that moves (phase 3): `GET /me/matrix/people` answers `{"rooms": {"<chat_id>": "<room_id>"}}` for the caller, naming a people chat only when every member is a flagged person (no agent, nobody unflagged) and the chat has an open room. The Mac and the iPhone read and write exactly those chats on the homeserver (text, files, replies, reactions, removing a message, read state; a file of an end-to-end encrypted chat is encrypted on the device and kept on the homeserver as ciphertext, any other file is a relay blob as in a Loro room) and opens no Loro room for them; every other chat stays its Loro room. Turning the flag off again loses nothing in a chat that is not end-to-end encrypted: the relay writes every message a device sends on the homeserver into the chat's Loro room as well (same id, sender, time, reply and parts; a message removed there is removed here), so flipping a member back, or adding an agent or an unflagged person, returns the chat to a Loro room that has it all. A reaction put on a message there is put on the Loro row too, and what was sent before the relay carried such things back is read from each room once, when the relay first starts with this build. One thing is not carried back: anything said in an end-to-end encrypted chat (`ARBOS_MATRIX_E2EE=on`), which the relay cannot read and is not handed; those messages stay on the homeserver and are read there again once every member is flagged. The other direction is the mirror that has run since stage A: a chat's earlier Loro history is in its room already (`POST /admin/matrix/backfill` fills a gap), except in an encrypted room, which takes no mirror, and except messages of people who have since left the chat, which the apps do not show under a name the room cannot prove. Those rows a member's device carries in: `GET /chats/{id}/matrix/history` hands a member of a chat read on the homeserver the next 50 missing rows, each signed with the relay's history key (Ed25519, derived from the relay key; its public half is `history_key` of `GET /me/matrix`, which an app pins the first time it is told) over the room, the chat and the row's id, sender, time and content; the device sends them into the room, encrypted where the room is, and reports the events (`POST`, recorded once the homeserver confirms the caller sent them there). The apps show a carried row as its signed sender's at its signed time, and only with that key's signature for that room, so no member can write history. One device carries a chat at a time; the relay first sets a push rule on every member's account so old history is neither counted unread nor announced. `GET /admin/matrix/shadow` lists the rows still waiting as `missing`. Changing `ARBOS_RELAY_KEY` changes the history key, and devices that pinned the old one show no carried row signed with the new. Pushes for a message sent on the homeserver go through its push gateway to every device of a member of such a chat (the `matrix_reads` flag is not needed for these chats). The alert of an end-to-end encrypted message names its sender and says "New message": the relay cannot read more. It carries the event as the homeserver holds it (when the alert stays under APNs' 4 kB), and the iPhone's notification extension reads the words from it with the device's own keys; that needs the app and the extension to share the App Group `group.com.unarbos.arbos`, and anything that fails leaves "New message". Reactions and carried history alert nobody.
 
 Kill switch for the relay side: `sudo touch /etc/arbos/matrix.disabled` stops dual-writes (the outbox keeps queueing); `sudo rm` it to resume.
 

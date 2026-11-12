@@ -570,7 +570,9 @@ pub async fn announce_with(
 }
 
 /// One alert to one device (the Matrix push-gateway path, stage B): same payload, focus and
-/// archive rules as [`announce`], for a message the homeserver told us about.
+/// archive rules as [`announce`], for a message the homeserver told us about. `sealed` is
+/// the room and the event when it is encrypted ([`payload::with_sealed`]).
+#[allow(clippy::too_many_arguments)]
 pub async fn alert_device(
     state: &AppState,
     chat: &ChatRef,
@@ -579,6 +581,7 @@ pub async fn alert_device(
     text: &str,
     badge: i64,
     device_id: &str,
+    sealed: Option<(&str, &Value)>,
 ) {
     if !state.push.is_on() || device_focused(state, device_id, &chat.chat_id).await {
         return;
@@ -612,6 +615,10 @@ pub async fn alert_device(
         badge,
         &chat_meta(state, chat, &user_id),
     );
+    let p = match sealed {
+        Some((room_id, ev)) => payload::with_sealed(p, room_id, ev),
+        None => p,
+    };
     state
         .push
         .enqueue(vec![message_push(&t, chat, message_id, p)]);

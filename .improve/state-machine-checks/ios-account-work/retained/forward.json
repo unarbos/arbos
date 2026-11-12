@@ -1,0 +1,25 @@
+{
+  "sources": {
+    "apps/ios/Arbos/Arbos/Store/AppModel.swift": "f73b529139a3ba6d630740a6e22172a30fe66906e55260bf7943851593bcad38",
+    "apps/ios/Arbos/Arbos/Sync/RelayAPI.swift": "0d50ec56055a25ad6cb7f595a679a03e33b14b9aeb7eacb887008ac592ca2985",
+    "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f",
+    "apps/ios/Arbos/Arbos/UI/MediaViewer.swift": "e824fa221b4834f64d76e36ca53670f9ea5fecf8d75ec32058cd13c299e7dfe8"
+  },
+  "compile_exit": 0,
+  "fixture_sha256": "0958611c2a4cf657f4541bdd45f937e84d58beb7648f4bedad7813b77a8bcb66",
+  "exit_code": 0,
+  "results": {
+    "cases": {
+      "current-forward-order-chart-control": true,
+      "current-partial-failure-chart-preserved": true,
+      "late-chart-upload-no-B-error": true,
+      "late-chart-upload-no-B-send": true,
+      "late-forward-fetch-cannot-copy-as-B": true,
+      "queued-forward-no-B-fetch-or-send": true
+    },
+    "failed": 0,
+    "passed": 6,
+    "total": 6
+  },
+  "seconds": 0.8113515840377659
+}

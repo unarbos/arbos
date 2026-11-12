@@ -1,0 +1,225 @@
+{
+  "before_and_after": {
+    "historical": {
+      "exit": 101,
+      "seconds": 11.477624458028004,
+      "counts": [
+        [
+          3,
+          1,
+          0
+        ]
+      ],
+      "source_unchanged": true,
+      "binary_sha256": "8cbf76f06a21cfdc4208aa449517e03b74928fa886918383a1da07a8ab49c373",
+      "log_sha256": "aab2baf5b4538f0b473121ef797d3b4ff451c35f3b4f04f1809a3bef74a35c77",
+      "fence_verified": true,
+      "meaning": "Original cancellation fixture used an invalid elapsed-time/EOF premise:3PASS/1FAIL, cancel already returned.",
+      "source_sha256": {
+        "crates/arbos-agentd/src/rpc_child.rs": "6c04c73a2f7732aff681b46c4c5aa6c4a7b39c9c8acaa43b07a83451e0ff6c0c",
+        "crates/arbos-agentd/src/harness.rs": "69c8c25bd04306b13a997461eba9886f88efd5af311d9edb5b4134e7c4837f68",
+        "crates/arbos-agentd/src/sweep_contention_tests.rs": "faeb0a99ace2ceb6d8041a6deae24403d27dd73996861021e4ea073a6814364f"
+      }
+    },
+    "v2": {
+      "exit": 101,
+      "seconds": 10.237914458033629,
+      "counts": [
+        [
+          3,
+          1,
+          0
+        ]
+      ],
+      "source_unchanged": true,
+      "binary_sha256": "2cfb7a6a3c2b22189f8927386bb969ebe6d7ea670035cb0f65f06fbc7f998721",
+      "log_sha256": "37aab72fe888e46cb34a437538769d3c014dc8271d76803a5c9dd36a1b45df65",
+      "fence_verified": true,
+      "meaning": "Process barrier added, but /proc observation raced Starting\u2192Ready:3PASS/1setupFAIL; RPC group not reached.",
+      "source_sha256": {
+        "crates/arbos-agentd/src/rpc_child.rs": "cc277c8e333ec8e3d705ee71d30f6818b2c9950c8bfb187981ea9bcbb5082b69",
+        "crates/arbos-agentd/src/harness.rs": "8e19c6d511157928040d50f4ca0cb1022f24bcc11741d23a8f17be0153077442",
+        "crates/arbos-agentd/src/sweep_contention_tests.rs": "f063691c4b2f661163ce07c8894c6c65cdbaaf7fa1a951c6f7e33bd47edc5929"
+      }
+    },
+    "v3": {
+      "exit": 101,
+      "seconds": 15.71008874999825,
+      "counts": [
+        [
+          4,
+          0,
+          0
+        ],
+        [
+          0,
+          4,
+          0
+        ]
+      ],
+      "source_unchanged": true,
+      "binary_sha256": "9ca5fc705cd71ca61c4709370a7e47afeb3e95c5628657f650ff5433d52d8e32",
+      "log_sha256": "00975d1e7730eafd61c249a105e9175508d5795e33b8623579e934aa0f32035d",
+      "fence_verified": true,
+      "meaning": "Actual Ready wait fixes physical group:4PASS. RPC group0PASS/4setupFAIL because this image has no /usr/bin/python3.",
+      "source_sha256": {
+        "crates/arbos-agentd/src/rpc_child.rs": "cc277c8e333ec8e3d705ee71d30f6818b2c9950c8bfb187981ea9bcbb5082b69",
+        "crates/arbos-agentd/src/harness.rs": "8e19c6d511157928040d50f4ca0cb1022f24bcc11741d23a8f17be0153077442",
+        "crates/arbos-agentd/src/sweep_contention_tests.rs": "101e78297a8f16c8f4508399f96899c9daddeeac536214051cbb68294c562c45"
+      }
+    },
+    "v4": {
+      "exit": 0,
+      "seconds": 28.077756542013958,
+      "counts": [
+        [
+          4,
+          0,
+          0
+        ],
+        [
+          4,
+          0,
+          0
+        ]
+      ],
+      "source_unchanged": true,
+      "binary_sha256": "2f6c6dc0ad9f4dc62389985edc662957dff0ba618630c6fb0b9445f0070c9fa7",
+      "log_sha256": "5fcb44724f723ec15c151be82858348f8911bc5b027150e9b1cf6e82669abb8a",
+      "fence_verified": true,
+      "meaning": "Literal python3 uses the same clean runner PATH as existing project fake-Pi fixtures:4physicalPASS+4RPCPASS.",
+      "source_sha256": {
+        "crates/arbos-agentd/src/rpc_child.rs": "cc277c8e333ec8e3d705ee71d30f6818b2c9950c8bfb187981ea9bcbb5082b69",
+        "crates/arbos-agentd/src/harness.rs": "62038c2652c070c1448ecbc8994278794806db3a6b74cd3c5e4b3a57d81b6a93",
+        "crates/arbos-agentd/src/sweep_contention_tests.rs": "101e78297a8f16c8f4508399f96899c9daddeeac536214051cbb68294c562c45"
+      }
+    }
+  },
+  "final_no_run_build": {
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "--no-run",
+      "--message-format=json",
+      "-p",
+      "arbos-agentd"
+    ],
+    "exit": 0,
+    "seconds": 227.63568499998655,
+    "source_unchanged": true,
+    "log_sha256": "9f87e3b37807033077729298f992203c69409f9b49f8039b6e9a25d9feaf93cc",
+    "scope": "Own unique target/cache cloned from completed public-only Linux artifacts; all12workspace packages cleaned inside clone. Nonroot/caps0, networknone, read-only source/root, fresh HOME, locked/offline."
+  },
+  "final_runtime": {
+    "exit": 0,
+    "seconds": 28.077756542013958,
+    "groups": [
+      {
+        "gate": "physical4",
+        "exit": 0,
+        "seconds": 15.024029090999647
+      },
+      {
+        "gate": "rpc4",
+        "exit": 0,
+        "seconds": 12.048058255000342
+      }
+    ],
+    "counts": [
+      [
+        4,
+        0,
+        0
+      ],
+      [
+        4,
+        0,
+        0
+      ]
+    ],
+    "source_unchanged": true,
+    "binary_sha256": "2f6c6dc0ad9f4dc62389985edc662957dff0ba618630c6fb0b9445f0070c9fa7",
+    "log_sha256": "5fcb44724f723ec15c151be82858348f8911bc5b027150e9b1cf6e82669abb8a",
+    "kernel": {
+      "uid": 501,
+      "gid": 20,
+      "groups": [],
+      "capability_sets_zero": true,
+      "no_new_privs": 1,
+      "interfaces": [
+        "lo",
+        "tunl0",
+        "gre0",
+        "gretap0",
+        "erspan0",
+        "ip_vti0",
+        "ip6_vti0",
+        "sit0",
+        "ip6tnl0",
+        "ip6gre0"
+      ],
+      "inactive_fallbacks": {
+        "erspan0": {
+          "flags": 4098,
+          "up": false,
+          "ipv4_address": false
+        },
+        "gre0": {
+          "flags": 128,
+          "up": false,
+          "ipv4_address": false
+        },
+        "gretap0": {
+          "flags": 4098,
+          "up": false,
+          "ipv4_address": false
+        },
+        "ip6_vti0": {
+          "flags": 128,
+          "up": false,
+          "ipv4_address": false
+        },
+        "ip6gre0": {
+          "flags": 128,
+          "up": false,
+          "ipv4_address": false
+        },
+        "ip6tnl0": {
+          "flags": 128,
+          "up": false,
+          "ipv4_address": false
+        },
+        "ip_vti0": {
+          "flags": 128,
+          "up": false,
+          "ipv4_address": false
+        },
+        "sit0": {
+          "flags": 128,
+          "up": false,
+          "ipv4_address": false
+        },
+        "tunl0": {
+          "flags": 128,
+          "up": false,
+          "ipv4_address": false
+        }
+      },
+      "loopback_fixture": "ok",
+      "nonloopback_errno": 101
+    },
+    "tmpfs_executable": true,
+    "root_source_target_read_only": true,
+    "fresh_home_and_allowlisted_environment": true
+  },
+  "patch_checks": {
+    "private_index_exact_blob_apply": "PASS",
+    "rustfmt": "PASS",
+    "production_code": "unchanged",
+    "physical_testcases_and_assertions": "all4retained; only actualReady setupwait added",
+    "RPC_fixture": "only executable lookup /usr/bin/python3\u2192python3; flags/std-onlyscript unchanged"
+  },
+  "limits": "Eight selected actual-source Linux tests. Compilation includes the package test target; this is not a full workspace test-suite result. Prior Mac harness33 includes the four RPC definitions, so do not add them as distinct definitions."
+}

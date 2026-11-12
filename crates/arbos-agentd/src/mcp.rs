@@ -23,7 +23,7 @@ use arbos_core::approval::{ApprovalRequest, Risk};
 use arbos_core::widget::WIDGET_SCHEMA_JSON;
 
 use crate::agent::Agent;
-use crate::approval::WaitMode;
+use crate::approval::WaitDelivery;
 
 type S = Arc<Agent>;
 
@@ -730,17 +730,24 @@ async fn call_tool(
             let mut parts = Vec::new();
             // `sub_llm` is the agent reading something for itself, so it reads on the agent's
             // own model, not on the id the box booted with (Jacob, 2026-11-04).
+            let context = match a
+                .model_usage_context((role == SessionRole::Subagent).then_some(session))
+                .await
+            {
+                Ok(context) => context,
+                Err(e) => return err_result(e),
+            };
+            let llm = a.llm.with_context(context).with_purpose("sub-llm");
             let model = a.model_for(crate::settings::ModelRole::Talking).await;
             for (i, c) in chunks.iter().enumerate().take(32) {
-                match a.llm.complete(&model, &instruction, c, 1500).await {
+                match llm.complete(&model, &instruction, c, 1500).await {
                     Ok((t, _)) => parts.push(format!("[chunk {}]\n{t}", i + 1)),
                     Err(e) => return err_result(e),
                 }
             }
             let mut joined = parts.join("\n\n");
             if parts.len() > 1 && joined.len() > 8000 {
-                if let Ok((t, _)) = a
-                    .llm
+                if let Ok((t, _)) = llm
                     .complete(
                         &model,
                         &format!(
@@ -968,7 +975,7 @@ async fn call_tool(
                 payload: json!({ "kind": "draft_message", "channel": channel, "to": to, "subject": subject, "body": body }),
             };
             match a
-                .begin_approval(&chat_for_scratch, req, WaitMode::Deferred, None)
+                .begin_approval(&chat_for_scratch, req, WaitDelivery::Deferred)
                 .await
             {
                 Ok(id) => text_result(format!(

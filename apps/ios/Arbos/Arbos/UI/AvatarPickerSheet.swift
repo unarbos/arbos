@@ -82,18 +82,23 @@ final class AvatarSourceState: ObservableObject {
 
     /// One generation: progress on, then the key or the (sentence, detail) of the failure.
     /// Both sheets call this so the wording is the same everywhere.
-    func run(_ work: @escaping () async throws -> String) {
-        guard !generating else { return }
+    func run(isCurrent: @escaping () -> Bool = { true }, _ work: @escaping () async throws -> String) {
+        guard isCurrent(), !generating else { return }
         generating = true
         startedAt = Date()
         error = nil
         detailsOpen = false
         Task { @MainActor in
+            guard isCurrent() else { return }
             do {
-                generatedKey = try await work()
+                let key = try await work()
+                guard isCurrent() else { return }
+                generatedKey = key
             } catch {
+                guard isCurrent() else { return }
                 self.error = Self.failure(error)
             }
+            guard isCurrent() else { return }
             generating = false
             startedAt = nil
         }
@@ -410,17 +415,18 @@ struct AvatarPickerSheet: View {
     private var canSet: Bool { dirty && !generating && !saving }
 
     var body: some View {
+        let work = model.accountWork()
         VStack(spacing: 0) {
             bar
             ScrollView(showsIndicators: false) {
                 // The note first (Jacob 2026-10-26): under the bar, before the field; the body
                 // below moves down, the footer never moves.
-                AvatarSourceBody<EmptyView>.errorNote(source, generate: generate)
+                AvatarSourceBody<EmptyView>.errorNote(source, generate: { generate(work: work) })
                     .padding(.top, tab == .generate ? 12 : 0)
                 switch tab {
                 case .bot: botBody
                 case .generate, .upload:
-                    AvatarSourceBody(state: source, tab: tab, generate: generate) {
+                    AvatarSourceBody(state: source, tab: tab, generate: { generate(work: work) }) {
                         preview.padding(.top, tab == .upload ? 24 : 16).padding(.bottom, tab == .upload ? 16 : 0)
                     }
                     .padding(.top, tab == .generate ? 16 : 0)
@@ -438,10 +444,11 @@ struct AvatarPickerSheet: View {
             // Rig: a prefilled prompt runs Generate at once; `ARBOS_VIEW_PICTURE=1` presses View.
             if tab == .generate, let text = DebugHooks.avatarPrompt, !text.isEmpty {
                 source.prompt = text
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { generate() }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { generate(work: work) }
             }
             if DebugHooks.viewPicture, let picture = Self.viewablePicture(target: target, model: model) {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                    guard model.acceptsAccountWork(work) else { return }
                     viewer = MediaViewerState(items: [MediaAlbum.picture(name: picture.name, url: picture.url)], index: 0)
                 }
             }
@@ -480,11 +487,13 @@ struct AvatarPickerSheet: View {
     // MARK: bar — Bot | Generate | Upload …… Reset
 
     private var bar: some View {
-        HStack(spacing: 2) {
+        let work = model.accountWork()
+        return HStack(spacing: 2) {
             AvatarTabPill(tabs: tabs, tab: $tab) { errorText = nil }
             Spacer()
             if let picture = Self.viewablePicture(target: target, model: model) {
                 Button {
+                    guard model.acceptsAccountWork(work) else { return }
                     viewer = MediaViewerState(items: [MediaAlbum.picture(name: picture.name, url: picture.url)], index: 0)
                 } label: {
                     Text("View")
@@ -498,6 +507,7 @@ struct AvatarPickerSheet: View {
                 .accessibilityIdentifier("avatar-view")
             }
             Button {
+                guard model.acceptsAccountWork(work) else { return }
                 reset = true
                 pickedColor = nil
                 source.uploadJpeg = nil
@@ -556,18 +566,19 @@ struct AvatarPickerSheet: View {
 
     // MARK: Generate
 
-    private func generate() {
+    private func generate(work: AccountWork?) {
+        guard model.acceptsAccountWork(work) else { return }
         let text = source.prompt.trimmingCharacters(in: .whitespaces)
         guard !text.isEmpty, !source.generating else { return }
         reset = false
         let target = target
         let model = model
-        source.run {
+        source.run(isCurrent: { model.acceptsAccountWork(work) }) {
             switch target {
-            case .agent(let id): return try await model.generateProjectAvatar(projectId: id, prompt: text)
-            case .group(let id): return try await model.generateGroupAvatar(chatId: id, prompt: text)
-            case .server(let id): return try await model.generateServerAvatar(id, prompt: text)
-            case .me: return try await model.generateMyAvatar(prompt: text)
+            case .agent(let id): return try await model.generateProjectAvatar(projectId: id, prompt: text, expectedOwner: work?.owner)
+            case .group(let id): return try await model.generateGroupAvatar(chatId: id, prompt: text, expectedOwner: work?.owner)
+            case .server(let id): return try await model.generateServerAvatar(id, prompt: text, expectedOwner: work?.owner)
+            case .me: return try await model.generateMyAvatar(prompt: text, expectedOwner: work?.owner)
             }
         }
     }
@@ -646,13 +657,14 @@ struct AvatarPickerSheet: View {
     // MARK: footer — Cancel | Set avatar
 
     private var footer: some View {
-        HStack(spacing: 8) {
+        let work = model.accountWork()
+        return HStack(spacing: 8) {
             Button { dismiss() } label: {
                 Text("Cancel").font(.system(size: 15, weight: .semibold)).foregroundStyle(title)
                     .frame(maxWidth: .infinity).frame(height: 44).background(Capsule().fill(pillBg))
             }
             .buttonStyle(.plain)
-            Button(action: setAvatar) {
+            Button(action: { setAvatar(work: work) }) {
                 Text(saving ? "Saving…" : "Set avatar").font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(canSet ? Color(red: 0x1F / 255, green: 0x1F / 255, blue: 0x1F / 255) : disabledText)
                     .frame(maxWidth: .infinity).frame(height: 44)
@@ -667,10 +679,12 @@ struct AvatarPickerSheet: View {
         .overlay(alignment: .top) { Rectangle().fill(line).frame(height: 1) }
     }
 
-    private func setAvatar() {
+    private func setAvatar(work: AccountWork?) {
+        guard model.acceptsAccountWork(work) else { return }
         guard canSet else { return }
         saving = true
         Task {
+            guard model.acceptsAccountWork(work) else { return }
             var ok = true
             switch target {
             case .agent(let id):
@@ -679,43 +693,44 @@ struct AvatarPickerSheet: View {
                 } else {
                     switch tab {
                     case .bot: model.pickAvatarDisc(id, color: Int(pick))
-                    case .generate: if let generatedKey { ok = await model.setProjectImageKey(projectId: id, key: generatedKey) }
-                    case .upload: if let uploadJpeg { ok = await model.setProjectImage(projectId: id, jpeg: uploadJpeg) }
+                    case .generate: if let generatedKey { ok = await model.setProjectImageKey(projectId: id, key: generatedKey, expectedOwner: work?.owner) }
+                    case .upload: if let uploadJpeg { ok = await model.setProjectImage(projectId: id, jpeg: uploadJpeg, expectedOwner: work?.owner) }
                     }
                 }
             case .group(let id):
                 if reset {
-                    ok = await model.setGroupDisc(chatId: id, color: nil)
+                    ok = await model.setGroupDisc(chatId: id, color: nil, expectedOwner: work?.owner)
                 } else {
                     switch tab {
-                    case .bot: ok = await model.setGroupDisc(chatId: id, color: pick)
-                    case .upload: if let uploadJpeg { ok = await model.setGroupImage(chatId: id, jpeg: uploadJpeg) }
-                    case .generate: if let generatedKey { ok = await model.setGroupImageKey(chatId: id, key: generatedKey) }
+                    case .bot: ok = await model.setGroupDisc(chatId: id, color: pick, expectedOwner: work?.owner)
+                    case .upload: if let uploadJpeg { ok = await model.setGroupImage(chatId: id, jpeg: uploadJpeg, expectedOwner: work?.owner) }
+                    case .generate: if let generatedKey { ok = await model.setGroupImageKey(chatId: id, key: generatedKey, expectedOwner: work?.owner) }
                     }
                 }
             case .server(let id):
                 if reset {
-                    ok = await model.setServerDisc(id, color: nil)
+                    ok = await model.setServerDisc(id, color: nil, expectedOwner: work?.owner)
                 } else {
                     switch tab {
-                    case .bot: ok = await model.setServerDisc(id, color: pick)
-                    case .upload: if let uploadJpeg { ok = await model.setServerImage(id, jpeg: uploadJpeg) }
-                    case .generate: if let generatedKey { ok = await model.setServerImageKey(id, key: generatedKey) }
+                    case .bot: ok = await model.setServerDisc(id, color: pick, expectedOwner: work?.owner)
+                    case .upload: if let uploadJpeg { ok = await model.setServerImage(id, jpeg: uploadJpeg, expectedOwner: work?.owner) }
+                    case .generate: if let generatedKey { ok = await model.setServerImageKey(id, key: generatedKey, expectedOwner: work?.owner) }
                     }
                 }
             case .me:
                 // Reset = the GitHub picture again (`DELETE /me/avatar`); a photo goes up as
                 // `PUT /me/avatar`; a generated preview is set by its key.
                 if reset {
-                    ok = await model.removeUserAvatar()
+                    ok = await model.removeUserAvatar(expectedOwner: work?.owner)
                 } else {
                     switch tab {
                     case .bot: break
-                    case .upload: if let uploadJpeg { ok = await model.setUserAvatar(jpeg: uploadJpeg) }
-                    case .generate: if let generatedKey { ok = await model.setUserAvatarKey(generatedKey) }
+                    case .upload: if let uploadJpeg { ok = await model.setUserAvatar(jpeg: uploadJpeg, expectedOwner: work?.owner) }
+                    case .generate: if let generatedKey { ok = await model.setUserAvatarKey(generatedKey, expectedOwner: work?.owner) }
                     }
                 }
             }
+            guard model.acceptsAccountWork(work) else { return }
             saving = false
             if ok { dismiss() }
         }

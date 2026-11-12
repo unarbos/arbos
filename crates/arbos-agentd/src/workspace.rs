@@ -163,7 +163,9 @@ pub struct Supervisor {
     pub boot: BootProgress,
     /// Result of the cross-workspace read check (`None` until two workspaces exist).
     pub cross_read_blocked: RwLock<Option<bool>>,
-    http: reqwest::Client,
+    http: sync::RelayHttp,
+    /// Woken by [`Supervisor::reconnect`] for the links that are not rooms (the voice link).
+    pub(crate) relinked: tokio::sync::Notify,
     /// At most one listing is applied at a time. The first listing (`/box/hello`) now runs on
     /// its own task so boot does not wait for every workspace to start, which puts it beside
     /// the 3 s registry poll for as long as it takes; two passes starting the same project
@@ -186,7 +188,8 @@ impl Supervisor {
             box_slots: Arc::new(Semaphore::new(BOX_MAX_SUBAGENTS)),
             booted_at: arbos_core::ids::now_ms(),
             boot: BootProgress::default(),
-            http: reqwest::Client::new(),
+            http: sync::RelayHttp::default(),
+            relinked: tokio::sync::Notify::new(),
             listing_lock: tokio::sync::Mutex::new(()),
             next_index: std::sync::atomic::AtomicU16::new(0),
         })
@@ -200,19 +203,13 @@ impl Supervisor {
         self.workspaces.read().await.values().cloned().collect()
     }
 
-    /// How many chat rooms this box holds open: non-exempt ones, which the ceiling bounds, and
-    /// `keep_open` ones, which neither bound can touch. Cheap — no room's doc is read.
-    ///
-    /// The second number is the one worth watching. Nobody has measured what share of a loaded
-    /// box's rooms are exempt, and it decides how much of that box's socket count the ceiling can
-    /// reach at all, so the box reports it rather than leaving it to be inferred from the
-    /// workspace count.
-    pub async fn room_counts(&self) -> (usize, usize) {
+    /// How many rooms this box holds open. Cheap — no room's doc is read.
+    pub async fn room_count(&self) -> usize {
         let hubs: Vec<SyncHub> = self.list().await.iter().map(|w| w.sync.clone()).collect();
-        sync::box_room_counts(&hubs).await
+        sync::box_room_count(&hubs).await
     }
 
-    /// Hold the box to [`sync::max_box_rooms`] non-exempt rooms, closing the coldest that hold
+    /// Hold the box to [`sync::max_box_rooms`] rooms, closing the coldest that hold
     /// no work wherever on the box they are. `workspaces` is the registry that makes it possible:
     /// no hub can see its siblings, so no hub can enforce a bound on their sum.
     pub async fn enforce_box_room_ceiling(&self) -> (usize, usize) {
@@ -234,12 +231,69 @@ impl Supervisor {
         self.list().await.iter().any(|w| w.agent.any_turn_running())
     }
 
+    /// `POST /box/hello`: the box announces itself, and the answer lists every project of its
+    /// user as a workspace.
+    pub async fn hello(&self) -> reqwest::Result<reqwest::Response> {
+        self.http
+            .get()
+            .post(format!("{}/box/hello", self.cfg.relay_url))
+            .bearer_auth(&self.cfg.box_token)
+            .json(&json!({
+                "url": format!("http://127.0.0.1:{}", self.cfg.port),
+                "version": env!("CARGO_PKG_VERSION"),
+                "proto": arbos_core::PROTO_VERSION,
+                // Baked by image.yml (ARBOS_AGENTD_SHA / ARBOS_IMAGE_VERSION): which commit this
+                // box runs, so the relay admin can tell what is shipped.
+                "sha": std::env::var("ARBOS_AGENTD_SHA").ok().filter(|v| !v.is_empty() && v != "unknown"),
+                "image": std::env::var("ARBOS_IMAGE_VERSION").ok().filter(|v| !v.is_empty() && v != "unknown"),
+                // The pi-ext seed this box actually copies into its projects (#1708): on a host
+                // sandbox /etc is persisted, so it can lag behind the image.
+                "seed_sha": std::fs::read_to_string("/etc/arbos/pi-seed/extensions/arbos-pi-ext/.source-sha")
+                    .ok()
+                    .map(|s| s.trim().to_owned())
+                    .filter(|s| !s.is_empty()),
+            }))
+            .send()
+            .await
+    }
+
+    /// The sandbox was restored from a checkpoint and says so with SIGUSR1
+    /// (docs/box-scaling.md §4.3.1): every connection to the relay is dead on the wire, though
+    /// each still looks open from here. Drop them all and dial again now, without restarting —
+    /// the HTTP pools, every room socket, the voice link — then say hello, which is how the
+    /// relay learns the box is back and how the box learns what changed while it was frozen.
+    ///
+    /// A hello that fails is left to the 3 s registry poll, which brings the same listing.
+    pub async fn reconnect(self: &Arc<Self>) {
+        sync::drop_relay_http_pools();
+        self.relinked.notify_waiters();
+        let workspaces = self.list().await;
+        for w in &workspaces {
+            w.sync.kick();
+        }
+        tracing::info!(
+            workspaces = workspaces.len(),
+            "relay reconnect: every relay socket dropped and redialed"
+        );
+        match self.hello().await {
+            Ok(r) if r.status().is_success() => {
+                self.apply_listing(&r.json::<Value>().await.unwrap_or_default())
+                    .await;
+            }
+            Ok(r) => tracing::warn!(status = %r.status(), "relay reconnect: box hello refused"),
+            Err(e) => tracing::warn!(error = %e, "relay reconnect: box hello failed"),
+        }
+    }
+
     /// Box-level keep-alive: any workspace mid-turn keeps the box awake.
     pub async fn keepalive(&self, turn_running: bool) -> Result<()> {
         self.http
+            .get()
             .post(format!("{}/box/keepalive", self.cfg.relay_url))
             .bearer_auth(&self.cfg.box_token)
             .json(&json!({ "turn_running": turn_running }))
+            // Bounded for the reason the push poll is (`routines.rs`): it runs in a loop.
+            .timeout(REGISTRY_CALL_TIMEOUT)
             .send()
             .await?;
         Ok(())
@@ -258,6 +312,14 @@ impl Supervisor {
             .context("project without id")?
             .to_owned();
         if let Some(w) = self.get(&project_id).await {
+            // A hello after a restore (`reconnect`) carries what the relay queued while the box
+            // was frozen, and the relay has taken it off its queue: this is the only delivery.
+            // A row that woke the box is among them, as the `chat_open` for its closed room.
+            // The 3 s registry poll carries none.
+            for p in pushes {
+                tracing::info!(project = %project_id, push = %p, "queued push delivered to a running workspace");
+                w.agent.dispatch_push(p.clone());
+            }
             if let Some(owner) = project.get("user_id").and_then(Value::as_str) {
                 w.agent.people.set_project_owner(owner);
             }
@@ -380,8 +442,8 @@ impl Supervisor {
             .first()
             .map(|c| c.id.clone())
             .unwrap_or_else(|| "default".to_owned());
-        // The project doc carries this workspace's status and settings, and `write_status`
-        // below needs it, so it opens here.
+        // The project doc carries this workspace's status and settings, so it opens here; it
+        // closes when idle like any other room and its writers reopen it.
         sync.open_room(PROJECT_DOC_CHAT_ID).await?;
         // The chat rooms do not (2026-11-09). Opening one reads that chat's document out of SQLite
         // and decodes the Loro snapshot, which is where a loaded box's boot time goes: up to
@@ -570,6 +632,7 @@ impl Supervisor {
     pub async fn report_workspace_state(&self, project_id: &str, state: &str) {
         let _ = self
             .http
+            .get()
             .post(format!(
                 "{}/projects/{}/workspace",
                 self.cfg.relay_url, project_id
@@ -1137,11 +1200,11 @@ pub fn write_models_json(cfg: &Config, talking: &str, subagent: &str) -> Result<
     }
     let mut models = json!({
         "providers": {
-            "openrouter": { "baseUrl": format!("{}/v1", cfg.proxy_base()), "apiKey": cfg.box_token },
+            "openrouter": { "baseUrl": format!("{}/v1", cfg.proxy_base()), "apiKey": "ARBOS_MODEL_TOKEN" },
             "arbos-relay": {
                 "baseUrl": format!("{}/v1", cfg.proxy_base()),
                 "api": "openai-completions",
-                "apiKey": cfg.box_token,
+                "apiKey": "ARBOS_MODEL_TOKEN",
                 "models": relay_models
             }
         }
@@ -1151,6 +1214,10 @@ pub fn write_models_json(cfg: &Config, talking: &str, subagent: &str) -> Result<
         cfg.prime_dir().join("models.json"),
         serde_json::to_string_pretty(&models)?,
     )?;
+    // Prime 0.10 resolves a bare environment variable name; pi 1.2 uses ${VAR}.
+    for provider in ["openrouter", "arbos-relay"] {
+        models["providers"][provider]["apiKey"] = json!("${ARBOS_MODEL_TOKEN}");
+    }
     models["providers"]["openrouter"]["modelOverrides"] = Value::Object(window_overrides);
     std::fs::write(
         cfg.pi_dir().join("models.json"),
@@ -1408,6 +1475,88 @@ pub(crate) mod tests {
         sup.apply_listing(&serde_json::json!({ "workspaces": [] }))
             .await;
         assert!(sup.boot.ready());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The pushes a listing carries reach the workspace once each, whichever way it meets them.
+    /// The listing that starts a workspace hands them over at the end of the start. A later
+    /// hello (the one a restored box says on SIGUSR1) finds the workspace running, and used to
+    /// drop them: the relay had already taken them off its queue, so the `chat_open` for the
+    /// row that woke an idle-slept box never arrived and that message went unanswered.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_queued_push_is_delivered_once_at_the_start_and_once_to_a_running_workspace() {
+        let root = scratch("queued-push");
+        std::fs::create_dir_all(&root).unwrap();
+        // A pi that answers every command with success: the workspace only has to start.
+        let script = root.join("fake-pi.py");
+        std::fs::write(
+            &script,
+            "import sys, json\nfor line in sys.stdin:\n    try:\n        c = json.loads(line)\n    except ValueError:\n        continue\n    sys.stdout.write(json.dumps({'type': 'response', 'id': c.get('id'), 'command': c.get('type'), 'success': True}) + '\\n')\n    sys.stdout.flush()\n",
+        )
+        .unwrap();
+        let pi = root.join("fake-pi");
+        std::fs::write(
+            &pi,
+            format!("#!/bin/sh\nexec python3 {}\n", script.display()),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&pi, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        // The workspace's four loopback servers sit just above a port nothing holds right now.
+        let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = free.local_addr().unwrap().port().min(u16::MAX - 100);
+        let mut cfg = test_supervisor(&root.join("work")).cfg.clone();
+        cfg.port = port;
+        cfg.pi_bin = pi.display().to_string();
+        let sup = Supervisor::new(cfg);
+
+        let project = "01JQUEUEDPUSH0000000000000";
+        let listing = |pushes: serde_json::Value| {
+            serde_json::json!({ "workspaces": [{
+                "project": { "id": project, "name": "queued", "user_id": "u-test" },
+                "chats": [], "pushes": pushes,
+            }] })
+        };
+        let push =
+            |n: u32| serde_json::json!({ "id": n, "kind": "test_note", "payload": { "n": n } });
+        // An unknown kind is written to the workspace's store, one row per delivery.
+        let delivered = |sup: Arc<Supervisor>| async move {
+            let w = sup.get(project).await.expect("the workspace started");
+            let mut seen: Vec<u64> = Vec::new();
+            for _ in 0..100 {
+                seen = w
+                    .store
+                    .t3_thread("projects", None, None, 100)
+                    .unwrap()
+                    .iter()
+                    .filter(|r| r.kind == "push")
+                    .filter_map(|r| serde_json::from_str::<serde_json::Value>(&r.text).ok())
+                    .filter_map(|v| v["payload"]["n"].as_u64())
+                    .collect();
+                seen.sort_unstable();
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            seen
+        };
+
+        // The listing that starts the workspace.
+        sup.apply_listing(&listing(serde_json::json!([push(1)])))
+            .await;
+        assert_eq!(delivered(sup.clone()).await, [1]);
+        // A hello after a restore: the workspace is running.
+        sup.apply_listing(&listing(serde_json::json!([push(2)])))
+            .await;
+        assert_eq!(delivered(sup.clone()).await, [1, 2]);
+        // The registry poll: no pushes, and nothing is delivered again.
+        sup.apply_listing(&serde_json::json!({ "workspaces": [{
+            "project": { "id": project, "name": "queued", "user_id": "u-test" }, "chats": [],
+        }] }))
+        .await;
+        assert_eq!(delivered(sup.clone()).await, [1, 2]);
+
+        sup.shutdown().await;
         let _ = std::fs::remove_dir_all(&root);
     }
 

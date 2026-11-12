@@ -1340,6 +1340,10 @@ pub async fn machine(State(state): State<AppState>, principal: Principal) -> Api
         .credits(&user_id, start_of_day())
         .map(|c| c.machine_today_usd)
         .unwrap_or(0.0);
+    // docs/box-scaling.md §3.3: where the daemon last left a `boxd` box, and the storage split
+    // of its last sleep, both from the row. Nothing here asks the box or the daemon, so the
+    // card of a sleeping or cold machine wakes and fetches nothing.
+    let lifecycle = state.db.box_lifecycle(&user_id).map_err(internal)?;
     Ok(Json(MachineStatusDto {
         user_id,
         state: bs,
@@ -1372,6 +1376,11 @@ pub async fn machine(State(state): State<AppState>, principal: Principal) -> Api
         always_on: state.cfg.always_on,
         held,
         machine_today_usd,
+        lifecycle_state: lifecycle.as_ref().map(|l| l.1.clone()),
+        // Unreadable is absent: the card draws no numbers rather than wrong ones.
+        storage: lifecycle
+            .and_then(|l| l.2)
+            .and_then(|json| serde_json::from_str(&json).ok()),
     })
     .into_response())
 }
@@ -1431,11 +1440,28 @@ pub async fn machine_stop(
     }
     // A manual Stop holds the box down until the user starts it (or sends a message): the
     // always-on sweep leaves held boxes alone. It also pauses every secret (D83 decision 8).
+    let was_held = state.db.box_held(&user_id).unwrap_or(false);
+    let secrets = state.db.secrets_settings(&user_id).unwrap_or_default();
     let _ = state.db.set_box_held(&user_id, true);
     crate::secrets::set_paused(&state, &user_id, true, "stop_machine").await;
-    boxes::stop_box(&state, &user_id, q.force)
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+    if let Err(e) = boxes::stop_box(&state, &user_id, q.force).await {
+        if e.to_string() != crate::boxd::BUSY {
+            return Err((StatusCode::BAD_GATEWAY, e.to_string()));
+        }
+        // agentd refused an unforced sleep (only a boxd box is asked) and the box runs on. It is
+        // not stopped, so it is not held down and its secrets are as they were before the Stop.
+        let _ = state.db.set_box_held(&user_id, was_held);
+        match secrets.paused_by.as_deref() {
+            Some(by) if secrets.paused => {
+                let _ = state.db.set_secrets_paused(&user_id, true, by);
+            }
+            _ => drop(crate::secrets::set_paused(&state, &user_id, false, "stop_refused").await),
+        }
+        return Err((
+            StatusCode::CONFLICT,
+            "the machine is busy: a turn or a job is still running on it".into(),
+        ));
+    }
     let (bs, since) = state.box_state(&user_id).await;
     Ok(Json(MachineStateDto {
         state: bs,
@@ -1503,7 +1529,14 @@ pub async fn admin_delete_user_box(
     // A row left on the retired provider loses its row here and nothing else: deleting the
     // sandbox itself is an operator step, outside the relay.
     if sb.provider != boxes::RETIRED_PROVIDER {
-        let _ = boxes::stop_box(&state, &id, true).await;
+        let stopped = boxes::stop_box(&state, &id, true).await;
+        if sb.provider == Provider::Boxd.as_str() {
+            // Only the daemon can stop this box, and it finds it by the user id in this row: a
+            // box that did not stop keeps its row. Stopped, it holds no memory, no checkpoint
+            // and no loop device; its /work image stays on the host, as a gVisor box's does.
+            stopped.map_err(|e| (StatusCode::BAD_GATEWAY, format!("box stop: {e}")))?;
+            deleted_sandbox = sb.sandbox_id.clone();
+        }
     }
     if sb.provider == "gvisor" {
         // The container goes; the user's /work image stays on disk (D89: never delete user data).
@@ -1564,7 +1597,7 @@ pub async fn machine_restart(State(state): State<AppState>, principal: Principal
         .into_response())
 }
 
-/// `PUT /admin/users/{id}/box {"snapshot"?: name|null, "provider"?: process|docker|gvisor|null}`:
+/// `PUT /admin/users/{id}/box {"snapshot"?: name|null, "provider"?: process|docker|gvisor|boxd|null}`:
 /// per-user box class and/or provider. Both apply to the NEXT box create (stop and delete the
 /// current sandbox to re-create); a key that is absent is left as it is, `null` clears it. The
 /// retired provider is refused here, so no box can be sent back to it by hand.
@@ -2106,6 +2139,72 @@ pub async fn usage(
     Ok(Json(json!({ "today": today, "all": all })).into_response())
 }
 
+#[derive(Default, Deserialize)]
+pub struct SessionUsageQuery {
+    pub from: Option<i64>,
+    pub to: Option<i64>,
+    #[serde(default)]
+    pub include_children: bool,
+}
+
+impl SessionUsageQuery {
+    fn window(&self) -> Result<(i64, i64), (StatusCode, String)> {
+        let (from, to) = (self.from.unwrap_or(0), self.to.unwrap_or(i64::MAX));
+        if from < 0 || to <= from {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "expected 0 <= from < to (Unix milliseconds)".into(),
+            ));
+        }
+        Ok((from, to))
+    }
+}
+
+pub async fn sessions_usage(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+    Query(q): Query<SessionUsageQuery>,
+) -> ApiResult {
+    let id = resolve_project_id(&state, &principal, &id)?;
+    let (from, to) = q.window()?;
+    if q.include_children {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "include_children requires a session id".into(),
+        ));
+    }
+    let sessions = state
+        .db
+        .session_usage(&id, None, from, to, false)
+        .map_err(internal)?;
+    Ok(Json(json!({ "from": from, "to": to, "sessions": sessions })).into_response())
+}
+
+pub async fn session_usage(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path((id, session)): Path<(String, String)>,
+    Query(q): Query<SessionUsageQuery>,
+) -> ApiResult {
+    let id = resolve_project_id(&state, &principal, &id)?;
+    let (from, to) = q.window()?;
+    let summary = state
+        .db
+        .session_usage(&id, Some(&session), from, to, q.include_children)
+        .map_err(internal)?;
+    let usage = summary
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| crate::usage::SessionUsage {
+            session_id: Some(session.clone()),
+            ..Default::default()
+        });
+    Ok(Json(json!({ "session_id": session, "from": from, "to": to,
+        "include_children": q.include_children, "usage": usage }))
+    .into_response())
+}
+
 #[derive(Deserialize)]
 pub struct TimingBody {
     pub kind: String,
@@ -2438,7 +2537,7 @@ mod primary_chat_tests {
         );
         assert!(state.db.take_pushes(&project).unwrap().is_empty());
         room.box_left(&alice);
-        assert!(!room.has_box(&alice));
+        assert_eq!(room.box_count(&alice), 0);
         assert_eq!(
             boxes::after_person_row(&state, &room, &chat, &agents).await,
             1

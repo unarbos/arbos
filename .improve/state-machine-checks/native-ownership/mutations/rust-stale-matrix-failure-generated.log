@@ -1,0 +1,54 @@
+TAP version 13
+# Subtest: rust old Matrix completions cannot retire or replace a newer attempt: 256 seeded cases
+not ok 1 - rust old Matrix completions cannot retire or replace a newer attempt: 256 seeded cases
+  ---
+  duration_ms: 359.481333
+  type: 'test'
+  location: '/private<isolated-tree>/harness/arbos-pi-ext/native-ownership.laws.ts:116:3'
+  failureType: 'testCodeFailure'
+  error: |-
+    Property falsified after 1 run(s) and 1 shrink(s)
+    Shrunk input: {
+      "noise": [],
+      "late": [],
+      "closed": true,
+      "foreign": false,
+      "disposed": false,
+      "sameDoc": true,
+      "empty": true,
+      "revision": 0,
+      "latest": 1
+    }
+    Failure: returned false
+    Replay: [0,"90005",0,0,[0],"ReturnedFalse"]
+    + actual - expected
+    
+    + 'Falsified'
+    - 'Passed'
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 'Passed'
+  actual: 'Falsified'
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///private<isolated-tree>/harness/arbos-pi-ext/native-ownership.laws.ts:125:12)
+    process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async startSubtestAfterBootstrap (node:internal/test_runner/harness:296:3)
+  ...
+# Subtest: native observation boundary rejects bad frames and recovers
+ok 2 - native observation boundary rejects bad frames and recovers
+  ---
+  duration_ms: 109.308042
+  type: 'test'
+  ...
+1..2
+# tests 2
+# suites 0
+# pass 1
+# fail 1
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 3085.312666

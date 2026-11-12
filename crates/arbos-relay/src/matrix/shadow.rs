@@ -23,7 +23,8 @@ pub struct ChatDiff {
     pub relay_messages: usize,
     /// Events the relay has recorded as mirrored.
     pub mirrored_messages: usize,
-    /// Of the newest 100 relay messages, which are not in the room.
+    /// Of the newest 100 relay messages, which are not in the room; and, for a chat read on
+    /// the homeserver, the earlier rows no device has carried in yet.
     pub missing: Vec<String>,
     pub members_relay: Vec<String>,
     pub members_room: Vec<String>,
@@ -101,13 +102,30 @@ pub async fn run(state: &AppState, only_chat: Option<&str>, with_unread: bool) -
             .map(|(m, _, _)| m)
             .collect();
         d.mirrored_messages = mirrored.len();
-        d.missing = ids
-            .iter()
-            .rev()
-            .take(100)
-            .filter(|id| !mirrored.contains(*id))
-            .cloned()
-            .collect();
+        // An encrypted room is not mirrored into, so its messages are not "missing".
+        if !room.encrypted {
+            d.missing = ids
+                .iter()
+                .rev()
+                .take(100)
+                .filter(|id| !mirrored.contains(*id))
+                .cloned()
+                .collect();
+        }
+        // A chat its members read on the homeserver is whole there once its earlier rows have
+        // been carried in (`history.rs`); the ones still waiting are missing.
+        let native = room.project_id.is_none()
+            && crate::people::load_chat(state, &room.chat_id)
+                .ok()
+                .and_then(|cm| super::people_native_room(state, &cm))
+                .is_some();
+        if native {
+            for id in super::history::missing(state, &room.chat_id, room.encrypted) {
+                if d.missing.len() < 100 && !d.missing.contains(&id) {
+                    d.missing.push(id);
+                }
+            }
+        }
         match room_spec(state, &room.chat_id, room.project_id.as_deref()) {
             Some(spec) => {
                 d.members_relay = spec.members.iter().map(|m| m.mxid.clone()).collect();

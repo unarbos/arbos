@@ -8,14 +8,20 @@
 //! render, sending, read receipts. The Mac uses it directly on its tokio runtime; the iPhone
 //! through `arbos-ffi` (UniFFI). No app talks Matrix on its own. Users never see the word.
 //!
-//! Nothing here is encrypted (stage D) and nothing is persisted between launches: the memory
-//! store plus sliding sync rebuilds the (small) room list in one round trip.
+//! Stage D: rooms with `m.room.encryption` are end-to-end encrypted (Megolm, keys never leave
+//! the devices). Each device keeps its keys and room state in SQLite under the app's
+//! [`Crypto::store_dir`]; [`MatrixClient::recover`] backs the room keys up to the homeserver,
+//! encrypted under the person's recovery passphrase, so another device of theirs reads the same
+//! history. A message this
+//! device cannot decrypt shows as a locked row ([`rows::LOCKED`]) until its key arrives.
 
 pub mod client;
+pub mod preview;
 pub mod rows;
 
-pub use client::{Listener, MatrixClient, Session, Snapshot};
-pub use rows::{ChannelRow, MessageRow, SpaceRow};
+pub use client::{Backup, Crypto, Listener, MatrixClient, Session, Snapshot, Upload};
+pub use preview::{preview, Preview};
+pub use rows::{ChannelRow, MessageRow, PeopleRoomRow, SpaceRow};
 
 /// Anything that can go wrong talking to the homeserver, flattened for the apps and the FFI.
 #[derive(Debug, Clone, thiserror::Error)]
@@ -26,6 +32,9 @@ pub enum Error {
     Homeserver(String),
     #[error("no such room: {0}")]
     NoRoom(String),
+    /// Key backup: the passphrase did not open it, or the homeserver refused to store it.
+    #[error("keys: {0}")]
+    Keys(String),
     #[error("stopped")]
     Stopped,
 }

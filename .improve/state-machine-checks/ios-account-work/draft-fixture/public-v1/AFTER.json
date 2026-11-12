@@ -1,0 +1,91 @@
+{
+  "sources": {
+    "apps/ios/Arbos/Arbos/Store/AppModel.swift": "f0f596d4757209173c3a39141174097cafa9fac4bac52568af0bcfda1b6f9ee7",
+    "apps/ios/Arbos/Arbos/Sync/RelayAPI.swift": "79a41459c976e98f3ced1a3fcdba24dda59bb0a755265ac8af40991486a69467",
+    "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f",
+    "apps/ios/Arbos/Arbos/Sync/DraftSendQueue.swift": "0985e595fa179b2919fed2c5b401d8f15a956fed78ce9b9f6ed6d20ecebc9e94"
+  },
+  "fixture_sha256": "b887f57337d8ff1b808ce7760b0d41cc676074b58d33e42baea659b0fa0bdc28",
+  "compile_exit": 0,
+  "exit_code": 0,
+  "results": {
+    "failed": 0,
+    "passed": 18,
+    "results": [
+      {
+        "name": "same-draft-single-create-FIFO-control",
+        "pass": true
+      },
+      {
+        "name": "different-drafts-route-only-to-own-recipients",
+        "pass": true
+      },
+      {
+        "name": "A-completion-preserves-B-current-draft-and-pending-state",
+        "pass": true
+      },
+      {
+        "name": "current-failure-keeps-draft-and-retry-policy",
+        "pass": true
+      },
+      {
+        "name": "retired-A-success-cannot-drain-or-clear-B",
+        "pass": true
+      },
+      {
+        "name": "retired-A-error-cannot-fail-or-clear-B",
+        "pass": true
+      },
+      {
+        "name": "queued-old-draft-task-cannot-originate-as-B",
+        "pass": true
+      },
+      {
+        "name": "same-draft-new-account-starts-independent-current-request",
+        "pass": true
+      },
+      {
+        "name": "admitted-same-account-send-finishes-after-caller-cancellation",
+        "pass": true
+      },
+      {
+        "name": "direct-load-fixture-without-credentials-creates-DM-and-delivers",
+        "pass": true
+      },
+      {
+        "name": "fixture-same-draft-FIFO-with-no-relay",
+        "pass": true
+      },
+      {
+        "name": "fixture-queued-retirement-cannot-create-or-drain",
+        "pass": true
+      },
+      {
+        "name": "unpaired-live-path-remains-refused",
+        "pass": true
+      },
+      {
+        "name": "same-owner-api-rebind-still-uses-admitted-API",
+        "pass": true
+      },
+      {
+        "name": "already-cancelled-fixture-caller-is-not-admitted",
+        "pass": true
+      },
+      {
+        "name": "closed-fixture-lifetime-is-not-admitted",
+        "pass": true
+      },
+      {
+        "name": "admitted-fixture-send-finishes-after-caller-cancellation",
+        "pass": true
+      },
+      {
+        "name": "queued-fixture-work-keeps-captured-local-tag",
+        "pass": true
+      }
+    ],
+    "total": 18
+  },
+  "seconds": 2.6979110001120716
+}

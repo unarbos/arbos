@@ -1,0 +1,427 @@
+{
+  "native_distinct_passes": 47,
+  "new_metadata_regressions_and_controls": 17,
+  "existing_h3_related_passes": 30,
+  "gates": {
+    "metadata-after": {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-f",
+        "<owned-checkout>/.improve/evidence/rpc-metadata/loopback-only.sb",
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-agentd",
+        "agent::metadata_owner_regressions::",
+        "--",
+        "--test-threads=2"
+      ],
+      "exit": 0,
+      "seconds": 25.223744082963094,
+      "results": [
+        [
+          "ok",
+          "17",
+          "0",
+          "0"
+        ]
+      ],
+      "source_unchanged": true,
+      "source_sha256": "89c5c13e47f92db6287a1a3f545cf69e12e1436dc16d6b5c909cdb69abf2ef17",
+      "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+      "scope": "actual pinned43b839 source plus synthetic tests; own target/workspace packages cleaned; validated loopback-only fence; fresh HOME/no inherited opt-ins"
+    },
+    "after": {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-f",
+        "<owned-checkout>/.improve/evidence/rpc-metadata/loopback-only.sb",
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-agentd",
+        "agent::shutdown_boot_regressions::",
+        "--",
+        "--test-threads=2"
+      ],
+      "exit": 0,
+      "seconds": 2.032459915964864,
+      "results": [
+        [
+          "ok",
+          "7",
+          "0",
+          "0"
+        ]
+      ],
+      "source_unchanged": true,
+      "source_sha256": "89c5c13e47f92db6287a1a3f545cf69e12e1436dc16d6b5c909cdb69abf2ef17",
+      "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+      "scope": "actual pinned43b839 source plus synthetic tests; own target/workspace packages cleaned; validated loopback-only fence; fresh HOME/no inherited opt-ins",
+      "expected_tests": 7,
+      "count_matches": true
+    },
+    "slot": {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-f",
+        "<owned-checkout>/.improve/evidence/rpc-metadata/loopback-only.sb",
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-agentd",
+        "pi_slot::tests::",
+        "--",
+        "--test-threads=2"
+      ],
+      "exit": 0,
+      "seconds": 0.23766229196917266,
+      "results": [
+        [
+          "ok",
+          "4",
+          "0",
+          "0"
+        ]
+      ],
+      "source_unchanged": true,
+      "source_sha256": "89c5c13e47f92db6287a1a3f545cf69e12e1436dc16d6b5c909cdb69abf2ef17",
+      "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+      "scope": "actual pinned43b839 source plus synthetic tests; own target/workspace packages cleaned; validated loopback-only fence; fresh HOME/no inherited opt-ins"
+    },
+    "models": {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-f",
+        "<owned-checkout>/.improve/evidence/rpc-metadata/loopback-only.sb",
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-agentd",
+        "model_switch_tests::",
+        "--",
+        "--test-threads=2"
+      ],
+      "exit": 0,
+      "seconds": 2.625167666003108,
+      "results": [
+        [
+          "ok",
+          "2",
+          "0",
+          "0"
+        ]
+      ],
+      "source_unchanged": true,
+      "source_sha256": "89c5c13e47f92db6287a1a3f545cf69e12e1436dc16d6b5c909cdb69abf2ef17",
+      "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+      "scope": "actual pinned43b839 source plus synthetic tests; own target/workspace packages cleaned; validated loopback-only fence; fresh HOME/no inherited opt-ins"
+    },
+    "turn-end": {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-f",
+        "<owned-checkout>/.improve/evidence/rpc-metadata/loopback-only.sb",
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-agentd",
+        "turn_end_race_tests::",
+        "--",
+        "--test-threads=2"
+      ],
+      "exit": 0,
+      "seconds": 5.589633332914673,
+      "results": [
+        [
+          "ok",
+          "4",
+          "0",
+          "0"
+        ]
+      ],
+      "source_unchanged": true,
+      "source_sha256": "89c5c13e47f92db6287a1a3f545cf69e12e1436dc16d6b5c909cdb69abf2ef17",
+      "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+      "scope": "actual pinned43b839 source plus synthetic tests; own target/workspace packages cleaned; validated loopback-only fence; fresh HOME/no inherited opt-ins"
+    },
+    "compact-window": {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-f",
+        "<owned-checkout>/.improve/evidence/rpc-metadata/loopback-only.sb",
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-agentd",
+        "agent::tests::a_window_the_provider_will_not_compact",
+        "--",
+        "--test-threads=1"
+      ],
+      "exit": 0,
+      "seconds": 0.2918134580831975,
+      "results": [
+        [
+          "ok",
+          "1",
+          "0",
+          "0"
+        ]
+      ],
+      "source_unchanged": true,
+      "source_sha256": "89c5c13e47f92db6287a1a3f545cf69e12e1436dc16d6b5c909cdb69abf2ef17",
+      "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+      "scope": "actual pinned43b839 source plus synthetic tests; own target/workspace packages cleaned; validated loopback-only fence; fresh HOME/no inherited opt-ins"
+    },
+    "compact-strike": {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-f",
+        "<owned-checkout>/.improve/evidence/rpc-metadata/loopback-only.sb",
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-agentd",
+        "agent::tests::a_compaction_that_merely_failed",
+        "--",
+        "--test-threads=1"
+      ],
+      "exit": 0,
+      "seconds": 0.29290212504565716,
+      "results": [
+        [
+          "ok",
+          "1",
+          "0",
+          "0"
+        ]
+      ],
+      "source_unchanged": true,
+      "source_sha256": "89c5c13e47f92db6287a1a3f545cf69e12e1436dc16d6b5c909cdb69abf2ef17",
+      "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+      "scope": "actual pinned43b839 source plus synthetic tests; own target/workspace packages cleaned; validated loopback-only fence; fresh HOME/no inherited opt-ins"
+    },
+    "crash-runnable": {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-f",
+        "<owned-checkout>/.improve/evidence/rpc-metadata/loopback-only.sb",
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-agentd",
+        "pi_crash_loop_tests::",
+        "--",
+        "--test-threads=2",
+        "--skip",
+        "a_pi_size_reading_is_never_read_as_another_childs"
+      ],
+      "exit": 0,
+      "seconds": 57.443534291000105,
+      "results": [
+        [
+          "ok",
+          "11",
+          "0",
+          "0"
+        ]
+      ],
+      "source_unchanged": true,
+      "source_sha256": "89c5c13e47f92db6287a1a3f545cf69e12e1436dc16d6b5c909cdb69abf2ef17",
+      "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+      "scope": "actual pinned43b839 source plus synthetic tests; own target/workspace packages cleaned; validated loopback-only fence; fresh HOME/no inherited opt-ins"
+    },
+    "check": {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-f",
+        "<owned-checkout>/.improve/evidence/rpc-metadata/loopback-only.sb",
+        "cargo",
+        "check",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-agentd",
+        "--all-targets"
+      ],
+      "exit": 0,
+      "seconds": 16.918882375000976,
+      "results": [],
+      "source_unchanged": true,
+      "source_sha256": "89c5c13e47f92db6287a1a3f545cf69e12e1436dc16d6b5c909cdb69abf2ef17",
+      "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+      "scope": "actual pinned43b839 source plus synthetic tests; own target/workspace packages cleaned; validated loopback-only fence; fresh HOME/no inherited opt-ins"
+    },
+    "clippy": {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-f",
+        "<owned-checkout>/.improve/evidence/rpc-metadata/loopback-only.sb",
+        "cargo",
+        "clippy",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-agentd",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit": 0,
+      "seconds": 20.260250916937366,
+      "results": [],
+      "source_unchanged": true,
+      "source_sha256": "89c5c13e47f92db6287a1a3f545cf69e12e1436dc16d6b5c909cdb69abf2ef17",
+      "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+      "scope": "actual pinned43b839 source plus synthetic tests; own target/workspace packages cleaned; validated loopback-only fence; fresh HOME/no inherited opt-ins"
+    },
+    "build": {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-f",
+        "<owned-checkout>/.improve/evidence/rpc-metadata/loopback-only.sb",
+        "cargo",
+        "build",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-agentd"
+      ],
+      "exit": 0,
+      "seconds": 18.19121758302208,
+      "results": [],
+      "source_unchanged": true,
+      "source_sha256": "89c5c13e47f92db6287a1a3f545cf69e12e1436dc16d6b5c909cdb69abf2ef17",
+      "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+      "scope": "actual pinned43b839 source plus synthetic tests; own target/workspace packages cleaned; validated loopback-only fence; fresh HOME/no inherited opt-ins"
+    },
+    "fmt": {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-f",
+        "<owned-checkout>/.improve/evidence/rpc-metadata/loopback-only.sb",
+        "cargo",
+        "fmt",
+        "--all",
+        "--check"
+      ],
+      "exit": 0,
+      "seconds": 2.4528125829529017,
+      "results": [],
+      "source_unchanged": true,
+      "source_sha256": "89c5c13e47f92db6287a1a3f545cf69e12e1436dc16d6b5c909cdb69abf2ef17",
+      "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+      "scope": "actual pinned43b839 source plus synthetic tests; own target/workspace packages cleaned; validated loopback-only fence; fresh HOME/no inherited opt-ins"
+    }
+  },
+  "before": {
+    "metadata-before": {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-f",
+        "<owned-checkout>/.improve/evidence/rpc-metadata/loopback-only.sb",
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-agentd",
+        "agent::metadata_owner_regressions::",
+        "--",
+        "--test-threads=2"
+      ],
+      "exit": 101,
+      "seconds": 32.969538582954556,
+      "results": [
+        [
+          "FAILED",
+          "5",
+          "5",
+          "0"
+        ]
+      ],
+      "source_unchanged": true,
+      "source_sha256": "877d31dff140b9c576fe2f7586e738370e98114d0274e1176a335ae642e90510",
+      "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+      "scope": "actual pinned43b839 source plus synthetic tests; own target/workspace packages cleaned; validated loopback-only fence; fresh HOME/no inherited opt-ins"
+    },
+    "metadata-before-expanded": {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-f",
+        "<owned-checkout>/.improve/evidence/rpc-metadata/loopback-only.sb",
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-agentd",
+        "agent::metadata_owner_regressions::",
+        "--",
+        "--test-threads=2"
+      ],
+      "exit": 101,
+      "seconds": 26.12884970905725,
+      "results": [
+        [
+          "FAILED",
+          "7",
+          "7",
+          "0"
+        ]
+      ],
+      "source_unchanged": true,
+      "source_sha256": "15ffcd7e160d8c40cce230690758242aaca125751c66d8d25de2420953f70e78",
+      "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+      "scope": "actual pinned43b839 source plus synthetic tests; own target/workspace packages cleaned; validated loopback-only fence; fresh HOME/no inherited opt-ins"
+    },
+    "thinking-before": {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-f",
+        "<owned-checkout>/.improve/evidence/rpc-metadata/loopback-only.sb",
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-agentd",
+        "settings_continuation_",
+        "--",
+        "--test-threads=2"
+      ],
+      "exit": 101,
+      "seconds": 23.46071320795454,
+      "results": [
+        [
+          "FAILED",
+          "1",
+          "1",
+          "0"
+        ]
+      ],
+      "source_unchanged": true,
+      "source_sha256": "4035f8160212621d3264e733735d48bd3202978e086058a093977cc65291195e",
+      "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+      "scope": "actual pinned43b839 source plus synthetic tests; own target/workspace packages cleaned; validated loopback-only fence; fresh HOME/no inherited opt-ins"
+    }
+  },
+  "platform_limit": "unchanged Linux /proc RSS test excluded only in crash-runnable Darwin gate; no test source ignore or assertion weakened"
+}

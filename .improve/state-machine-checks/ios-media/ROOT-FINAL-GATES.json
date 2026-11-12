@@ -1,0 +1,62 @@
+{
+  "passed": 80,
+  "failed": 0,
+  "groups": [
+    {
+      "file": "check_copy.py",
+      "expected": 8,
+      "seconds": 1.2348623339785263,
+      "fixture_sha256": "8d19a73c8e90d4cef8f12394e457d3db74d260f7c4100ef95de6855c5abe28f3"
+    },
+    {
+      "file": "check_media.py",
+      "expected": 20,
+      "seconds": 0.9133662909734994,
+      "fixture_sha256": "d61c120dc107cf7fed5b094a1a8933be6669fd6de4383550f61698fc9766a247"
+    },
+    {
+      "file": "check_bindings.py",
+      "expected": 8,
+      "seconds": 0.6578359169652686,
+      "fixture_sha256": "12c498d4ecb1e555bab88c790c0d3104927855eca77e8ce5a292a1f51631a849"
+    },
+    {
+      "file": "check_origin.py",
+      "expected": 12,
+      "seconds": 0.641890041064471,
+      "fixture_sha256": "f0a250c20eefe102530b3680436137f77f17a443f9274e10f6cde87fae60ae71"
+    },
+    {
+      "file": "check_link.py",
+      "expected": 8,
+      "seconds": 0.7884980000089854,
+      "fixture_sha256": "c24ea0a5fc3db76ccdbdffc764da2f1031657ea05fe7b5ae3d5e57ff71739a2f"
+    },
+    {
+      "file": "check_link_bindings.py",
+      "expected": 18,
+      "seconds": 0.587542042019777,
+      "fixture_sha256": "a1c7bae68d68358fdbb9d61176acfcd4c6d920e1f939889958118a2b7b8d00a8"
+    },
+    {
+      "file": "check_link_actions.py",
+      "expected": 6,
+      "seconds": 0.6482709579868242,
+      "fixture_sha256": "b6ee4d507d5e1acc776659884ac0a6b48e7948c11a87f70c94bcf31fe1387891"
+    }
+  ],
+  "seconds": 5.85065812501125,
+  "sources": {
+    "apps/ios/Arbos/Arbos/UI/MediaViewer.swift": "dc0e592f995b1855817b27f20fda5cf234bffd0730df4f60a62f0cde0bf5e66d",
+    "apps/ios/Arbos/Arbos/UI/MessagePasteboard.swift": "ef9a34f53b369046f44e76134641f13ecc2ba1100baab7f8dde00224318459e2",
+    "apps/ios/Arbos/Arbos/UI/LibraryList.swift": "b56c88fefcb51654b14c04d9c7cb4e35161c73057d5757f446f7af319647fd69",
+    "apps/ios/Arbos/Arbos/UI/ChatView.swift": "cebc573edc37875a5740cef582ad2ecace19551b1852e22bb66e30b525c7cccc",
+    "apps/ios/Arbos/Arbos/UI/Transcript.swift": "a5346472e97eef520e3c7f57b033009940471f0d54a7aae43238b811328530a0",
+    "apps/ios/Arbos/Arbos/UI/FunPicker.swift": "ac79b9632d0b9dd20b5fec87f30da04ccd29ff3ecd42b0f6809508728e4b6c45",
+    "apps/ios/Arbos/Arbos/UI/LinkPreviewCard.swift": "af175a27584ff0a90200206cd4f6909a46c0dae42853611092350c2d58461a11",
+    "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f",
+    "apps/ios/Arbos/Arbos/Store/AppModel.swift": "7c944e04f8483f0d5e0c19a26d9414f8a50cba79462b08bdae3c704af91e2b0c"
+  },
+  "source_unchanged": true,
+  "scope": "Actual selected production methods, constructors and existing receipt predicates with inert collaborators. No real HTTP, Photos, media playback, clipboard, app runtime or device effects."
+}

@@ -46,7 +46,13 @@ pub fn spawn_voice_link(sup: Arc<Supervisor>) {
         let mut backoff = Duration::from_secs(1);
         loop {
             let started = std::time::Instant::now();
-            match session(&sup).await {
+            // A restored sandbox's link is dead with nothing to say so (`Supervisor::reconnect`):
+            // dropping the session drops the socket, and the loop below dials a new one.
+            let ended = tokio::select! {
+                r = session(&sup) => r,
+                _ = sup.relinked.notified() => Ok(()),
+            };
+            match ended {
                 Ok(()) => tracing::info!("voice link closed"),
                 Err(e) => tracing::warn!(error = %e, "voice link failed"),
             }

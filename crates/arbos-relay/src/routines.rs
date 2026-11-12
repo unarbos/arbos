@@ -266,6 +266,7 @@ pub async fn spawn_scheduler(state: AppState) {
         loop {
             tokio::time::sleep(SCHEDULER_TICK).await;
             let now = now_ms();
+            crate::boxd::wake_ahead_of_routines(&state, now).await;
             let due = match state.db.due_routines(now) {
                 Ok(d) => d,
                 Err(e) => {

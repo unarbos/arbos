@@ -1,0 +1,21 @@
+{
+  "sources": {
+    "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f",
+    "apps/ios/Arbos/Arbos/App/ArbosApp.swift": "0220b554379a02bc94eda77be44484106e2c0d91f29dd67d8c7136efd3d6f6aa"
+  },
+  "compile_exit": 0,
+  "fixture_sha256": "9ff5e27e043e173cd94a82c7d81e02e3cfcd7a102d5ef9300e020dc4bf84e9fe",
+  "exit_code": 0,
+  "results": {
+    "cases": {
+      "ordinary-refresh-identity-stable": true,
+      "production-shell-bound-to-account-owner": true,
+      "retirement-and-foreign-owner-identity-distinct": true,
+      "ticket-valid-SwiftUI-hashable-identity": true
+    },
+    "failed": 0,
+    "passed": 4,
+    "total": 4
+  },
+  "seconds": 0.5595388329820707
+}

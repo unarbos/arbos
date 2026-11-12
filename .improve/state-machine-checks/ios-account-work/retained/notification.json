@@ -1,0 +1,38 @@
+{
+  "source_sha256": "8ec8066333559fce83bde2b9e2a1456fa61bd6ccb2a42fc0c9e35adbcd55bd01",
+  "fixture_sha256": "0b06e452a3caf6edabd52946288d2885aa313ea1c4b8ffce520fe2304652a1b1",
+  "compile_exit": 0,
+  "exit_code": 0,
+  "results": {
+    "failed": 0,
+    "passed": 6,
+    "results": [
+      {
+        "name": "retired-content-cannot-submit-local-notification",
+        "pass": true
+      },
+      {
+        "name": "retired-notification-entry-cannot-prepare-or-submit",
+        "pass": true
+      },
+      {
+        "name": "current-notification-sound-context-control",
+        "pass": true
+      },
+      {
+        "name": "eight-second-twin-suppression-control",
+        "pass": true
+      },
+      {
+        "name": "expired-twin-window-control",
+        "pass": true
+      },
+      {
+        "name": "muted-notification-control",
+        "pass": true
+      }
+    ],
+    "total": 6
+  },
+  "seconds": 0.5367613330017775
+}

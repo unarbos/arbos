@@ -1,0 +1,39 @@
+{
+  "source_sha256": "306ef5fdbd9ea16fd06056b0ea32cfed6263e86e2769bfc73e68377c28849303",
+  "fixture_sha256": "9292ffa6409f07f5a1e4279455f207137d737720f14cd7996363054059999b52",
+  "compile_exit": 0,
+  "scope": "Actual complete MemoRecorder +WorkLifetime with fake AV session/recorder/timer, synthetic owned tempbytes; only injecteddefer observespermissioncallbacksettlement andprivatefilenameclockfixed; no UIKit/audio/mic/device/userdata",
+  "exit_code": 1,
+  "results": {
+    "cases": {
+      "cancel-revokes-late-denial": false,
+      "cancel-revokes-pending-grant": false,
+      "current-denial-published": true,
+      "current-grant-starts-once": true,
+      "discarded-short-memo-releases-temp-file": false,
+      "each-capture-owns-a-distinct-file": false,
+      "failed-construction-releases-partial-file": false,
+      "failed-record-effect-cannot-claim-recording": false,
+      "failed-record-releases-file-and-installs-no-meter": false,
+      "format-and-meter-calibration-control": true,
+      "meter-shape-and-formula-control": true,
+      "old-cancel-preserves-current-file": false,
+      "old-denial-does-not-mark-current-request": false,
+      "one-second-memo-bytes-and-name-control": true,
+      "only-latest-pending-request-starts": false,
+      "other-capture-bytes-survive-old-cancel": false,
+      "recorder-construction-failure-control": true,
+      "retired-context-cannot-publish-denial": false,
+      "retired-context-cannot-start-microphone": false,
+      "short-memo-remains-discarded": true,
+      "stop-revokes-late-denial": false,
+      "stop-revokes-pending-grant": false,
+      "successful-stop-releases-private-temp-file": false
+    },
+    "failed": 16,
+    "passed": 7,
+    "total": 23
+  },
+  "seconds": 1.0078619580017403,
+  "source_unchanged": true
+}

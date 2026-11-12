@@ -1,0 +1,216 @@
+{
+  "native_distinct_passes": 13,
+  "new7_included_in_box_row13_do_not_add": true,
+  "gates": {
+    "after": {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-f",
+        "<owned-checkout>/.improve/evidence/create-admission/loopback-only.sb",
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-relay",
+        "box_row_tests::create_admission_regressions::",
+        "--",
+        "--test-threads=2"
+      ],
+      "exit": 0,
+      "seconds": 31.569894291926175,
+      "results": [
+        [
+          "ok",
+          "7",
+          "0",
+          "0"
+        ]
+      ],
+      "source_unchanged": true,
+      "source_sha256": "9ebb61bda4d185afb66635c952fdfaa118ef786be5fb21fe4ada9deabf787d2c",
+      "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+      "scope": "actual pinned28bc source plus synthetic tests; own target/workspace artifacts cleaned; validated loopback-only network; fresh HOME/no inherited opt-ins",
+      "expected_tests": 7,
+      "count_matches": true
+    },
+    "box-row": {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-f",
+        "<owned-checkout>/.improve/evidence/create-admission/loopback-only.sb",
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-relay",
+        "box_row_tests::",
+        "--",
+        "--test-threads=2"
+      ],
+      "exit": 0,
+      "seconds": 3.047127791098319,
+      "results": [
+        [
+          "ok",
+          "13",
+          "0",
+          "0"
+        ]
+      ],
+      "source_unchanged": true,
+      "source_sha256": "9ebb61bda4d185afb66635c952fdfaa118ef786be5fb21fe4ada9deabf787d2c",
+      "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+      "scope": "actual pinned28bc source plus synthetic tests; own target/workspace artifacts cleaned; validated loopback-only network; fresh HOME/no inherited opt-ins"
+    },
+    "check": {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-f",
+        "<owned-checkout>/.improve/evidence/create-admission/loopback-only.sb",
+        "cargo",
+        "check",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-relay",
+        "--all-targets"
+      ],
+      "exit": 0,
+      "seconds": 17.30328841705341,
+      "results": [],
+      "source_unchanged": true,
+      "source_sha256": "9ebb61bda4d185afb66635c952fdfaa118ef786be5fb21fe4ada9deabf787d2c",
+      "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+      "scope": "actual pinned28bc source plus synthetic tests; own target/workspace artifacts cleaned; validated loopback-only network; fresh HOME/no inherited opt-ins"
+    },
+    "clippy": {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-f",
+        "<owned-checkout>/.improve/evidence/create-admission/loopback-only.sb",
+        "cargo",
+        "clippy",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-relay",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit": 0,
+      "seconds": 16.13578641600907,
+      "results": [],
+      "source_unchanged": true,
+      "source_sha256": "9ebb61bda4d185afb66635c952fdfaa118ef786be5fb21fe4ada9deabf787d2c",
+      "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+      "scope": "actual pinned28bc source plus synthetic tests; own target/workspace artifacts cleaned; validated loopback-only network; fresh HOME/no inherited opt-ins"
+    },
+    "build": {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-f",
+        "<owned-checkout>/.improve/evidence/create-admission/loopback-only.sb",
+        "cargo",
+        "build",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-relay"
+      ],
+      "exit": 0,
+      "seconds": 41.7942754579708,
+      "results": [],
+      "source_unchanged": true,
+      "source_sha256": "9ebb61bda4d185afb66635c952fdfaa118ef786be5fb21fe4ada9deabf787d2c",
+      "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+      "scope": "actual pinned28bc source plus synthetic tests; own target/workspace artifacts cleaned; validated loopback-only network; fresh HOME/no inherited opt-ins"
+    },
+    "fmt": {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-f",
+        "<owned-checkout>/.improve/evidence/create-admission/loopback-only.sb",
+        "cargo",
+        "fmt",
+        "--all",
+        "--check"
+      ],
+      "exit": 0,
+      "seconds": 2.366317375097424,
+      "results": [],
+      "source_unchanged": true,
+      "source_sha256": "9ebb61bda4d185afb66635c952fdfaa118ef786be5fb21fe4ada9deabf787d2c",
+      "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+      "scope": "actual pinned28bc source plus synthetic tests; own target/workspace artifacts cleaned; validated loopback-only network; fresh HOME/no inherited opt-ins"
+    }
+  },
+  "original_source_baselines": {
+    "before": {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-f",
+        "<owned-checkout>/.improve/evidence/create-admission/loopback-only.sb",
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-relay",
+        "box_row_tests::create_admission_regressions::",
+        "--",
+        "--test-threads=2"
+      ],
+      "exit": 101,
+      "seconds": 39.07589441607706,
+      "results": [
+        [
+          "FAILED",
+          "1",
+          "2",
+          "0"
+        ]
+      ],
+      "source_unchanged": true,
+      "source_sha256": "34b2746c42590932e5b6c6ebca4d255a385854dc3d8bc76e1eab89449250ac09",
+      "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+      "scope": "actual pinned28bc source plus synthetic tests; own target/workspace artifacts cleaned; validated loopback-only network; fresh HOME/no inherited opt-ins",
+      "expected_tests": 3,
+      "count_matches": true
+    },
+    "before-expanded": {
+      "command": [
+        "/usr/bin/sandbox-exec",
+        "-f",
+        "<owned-checkout>/.improve/evidence/create-admission/loopback-only.sb",
+        "cargo",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "arbos-relay",
+        "box_row_tests::create_admission_regressions::",
+        "--",
+        "--test-threads=2"
+      ],
+      "exit": 101,
+      "seconds": 29.23592995898798,
+      "results": [
+        [
+          "FAILED",
+          "3",
+          "2",
+          "0"
+        ]
+      ],
+      "source_unchanged": true,
+      "source_sha256": "f49738fe2ed43d83e00231c607bad7256e0cc438b102cba4e8e00365b3edd4b1",
+      "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+      "scope": "actual pinned28bc source plus synthetic tests; own target/workspace artifacts cleaned; validated loopback-only network; fresh HOME/no inherited opt-ins"
+    }
+  },
+  "superseded_development": "initial5pass gate had stale expected3 runner guard and correctly exited2; later Clippy identified unused wrapper and Pin-reference drop, both fixed before these final source-stable gates"
+}

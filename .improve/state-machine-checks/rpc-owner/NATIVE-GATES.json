@@ -1,0 +1,420 @@
+{
+  "before-respawn-two": {
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-agentd",
+      "agent::shutdown_boot_regressions::",
+      "--",
+      "--test-threads=2"
+    ],
+    "exit": 101,
+    "seconds": 28.008856958011165,
+    "results": [
+      [
+        "FAILED",
+        "0",
+        "2",
+        "0"
+      ]
+    ],
+    "source_unchanged": true,
+    "source_sha256": "e3ce7f8326fb5377e2f299935bb25ad3420e02098f5fa09fe6767028581e8504",
+    "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+    "scope": "actual pinned43b839 source plus synthetic tests; own target/workspace packages cleaned; validated loopback-only fence; fresh HOME/no inherited opt-ins",
+    "expected_tests": 2,
+    "count_matches": true
+  },
+  "before-four": {
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-agentd",
+      "agent::shutdown_boot_regressions::",
+      "--",
+      "--test-threads=2"
+    ],
+    "exit": 101,
+    "seconds": 37.79958550003357,
+    "results": [
+      [
+        "FAILED",
+        "1",
+        "3",
+        "0"
+      ]
+    ],
+    "source_unchanged": true,
+    "source_sha256": "319cf07bc03f501ee969a1957d91fc14209329534cb5c72dc3106aa28a92e1a3",
+    "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+    "scope": "actual pinned43b839 source plus synthetic tests; own target/workspace packages cleaned; validated loopback-only fence; fresh HOME/no inherited opt-ins",
+    "expected_tests": 4,
+    "count_matches": true
+  },
+  "before": {
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-agentd",
+      "agent::shutdown_boot_regressions::",
+      "--",
+      "--test-threads=2"
+    ],
+    "exit": 101,
+    "seconds": 34.01085341593716,
+    "results": [
+      [
+        "FAILED",
+        "1",
+        "5",
+        "0"
+      ]
+    ],
+    "source_unchanged": true,
+    "source_sha256": "87d22e46f7f6153cdf858789f2b971e40120d7a6d3cb43197fc6cba74a82672b",
+    "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+    "scope": "actual pinned43b839 source plus synthetic tests; own target/workspace packages cleaned; validated loopback-only fence; fresh HOME/no inherited opt-ins",
+    "expected_tests": 6,
+    "count_matches": true
+  },
+  "after": {
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-agentd",
+      "agent::shutdown_boot_regressions::",
+      "--",
+      "--test-threads=2"
+    ],
+    "exit": 0,
+    "seconds": 28.186523749958724,
+    "results": [
+      [
+        "ok",
+        "7",
+        "0",
+        "0"
+      ]
+    ],
+    "source_unchanged": true,
+    "source_sha256": "3324182907db26f1ea4f4549c89b059ea85358b264e33e23d77d1f7d04f58e4a",
+    "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+    "scope": "actual pinned43b839 source plus synthetic tests; own target/workspace packages cleaned; validated loopback-only fence; fresh HOME/no inherited opt-ins",
+    "expected_tests": 7,
+    "count_matches": true
+  },
+  "slot": {
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-agentd",
+      "pi_slot::tests::",
+      "--",
+      "--test-threads=2"
+    ],
+    "exit": 0,
+    "seconds": 0.6295471669873223,
+    "results": [
+      [
+        "ok",
+        "4",
+        "0",
+        "0"
+      ]
+    ],
+    "source_unchanged": true,
+    "source_sha256": "3324182907db26f1ea4f4549c89b059ea85358b264e33e23d77d1f7d04f58e4a",
+    "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+    "scope": "actual pinned43b839 source plus synthetic tests; own target/workspace packages cleaned; validated loopback-only fence; fresh HOME/no inherited opt-ins"
+  },
+  "crash": {
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-agentd",
+      "pi_crash_loop_tests::",
+      "--",
+      "--test-threads=2"
+    ],
+    "exit": 101,
+    "seconds": 57.57562304206658,
+    "results": [
+      [
+        "FAILED",
+        "11",
+        "1",
+        "0"
+      ]
+    ],
+    "source_unchanged": true,
+    "source_sha256": "710e4a896707caf1a38abca4c85109600db4fbfcf7ee684f0048b47e75452460",
+    "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+    "scope": "actual pinned43b839 source plus synthetic tests; own target/workspace packages cleaned; validated loopback-only fence; fresh HOME/no inherited opt-ins"
+  },
+  "crash-runnable": {
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-agentd",
+      "pi_crash_loop_tests::",
+      "--",
+      "--test-threads=2",
+      "--skip",
+      "a_pi_size_reading_is_never_read_as_another_childs"
+    ],
+    "exit": 0,
+    "seconds": 57.51818408397958,
+    "results": [
+      [
+        "ok",
+        "11",
+        "0",
+        "0"
+      ]
+    ],
+    "source_unchanged": true,
+    "source_sha256": "3324182907db26f1ea4f4549c89b059ea85358b264e33e23d77d1f7d04f58e4a",
+    "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+    "scope": "actual pinned43b839 source plus synthetic tests; own target/workspace packages cleaned; validated loopback-only fence; fresh HOME/no inherited opt-ins"
+  },
+  "models": {
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-agentd",
+      "model_switch_tests::",
+      "--",
+      "--test-threads=2"
+    ],
+    "exit": 0,
+    "seconds": 3.0817477910313755,
+    "results": [
+      [
+        "ok",
+        "2",
+        "0",
+        "0"
+      ]
+    ],
+    "source_unchanged": true,
+    "source_sha256": "3324182907db26f1ea4f4549c89b059ea85358b264e33e23d77d1f7d04f58e4a",
+    "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+    "scope": "actual pinned43b839 source plus synthetic tests; own target/workspace packages cleaned; validated loopback-only fence; fresh HOME/no inherited opt-ins"
+  },
+  "turn-end": {
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-agentd",
+      "turn_end_race_tests::",
+      "--",
+      "--test-threads=2"
+    ],
+    "exit": 0,
+    "seconds": 5.713810082990676,
+    "results": [
+      [
+        "ok",
+        "4",
+        "0",
+        "0"
+      ]
+    ],
+    "source_unchanged": true,
+    "source_sha256": "3324182907db26f1ea4f4549c89b059ea85358b264e33e23d77d1f7d04f58e4a",
+    "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+    "scope": "actual pinned43b839 source plus synthetic tests; own target/workspace packages cleaned; validated loopback-only fence; fresh HOME/no inherited opt-ins"
+  },
+  "compact-window": {
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-agentd",
+      "agent::tests::a_window_the_provider_will_not_compact",
+      "--",
+      "--test-threads=1"
+    ],
+    "exit": 0,
+    "seconds": 0.7831369999330491,
+    "results": [
+      [
+        "ok",
+        "1",
+        "0",
+        "0"
+      ]
+    ],
+    "source_unchanged": true,
+    "source_sha256": "3324182907db26f1ea4f4549c89b059ea85358b264e33e23d77d1f7d04f58e4a",
+    "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+    "scope": "actual pinned43b839 source plus synthetic tests; own target/workspace packages cleaned; validated loopback-only fence; fresh HOME/no inherited opt-ins"
+  },
+  "compact-strike": {
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-agentd",
+      "agent::tests::a_compaction_that_merely_failed",
+      "--",
+      "--test-threads=1"
+    ],
+    "exit": 0,
+    "seconds": 0.975733167026192,
+    "results": [
+      [
+        "ok",
+        "1",
+        "0",
+        "0"
+      ]
+    ],
+    "source_unchanged": true,
+    "source_sha256": "3324182907db26f1ea4f4549c89b059ea85358b264e33e23d77d1f7d04f58e4a",
+    "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+    "scope": "actual pinned43b839 source plus synthetic tests; own target/workspace packages cleaned; validated loopback-only fence; fresh HOME/no inherited opt-ins"
+  },
+  "check": {
+    "command": [
+      "cargo",
+      "check",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-agentd",
+      "--all-targets"
+    ],
+    "exit": 0,
+    "seconds": 16.92436320905108,
+    "results": [],
+    "source_unchanged": true,
+    "source_sha256": "3324182907db26f1ea4f4549c89b059ea85358b264e33e23d77d1f7d04f58e4a",
+    "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+    "scope": "actual pinned43b839 source plus synthetic tests; own target/workspace packages cleaned; validated loopback-only fence; fresh HOME/no inherited opt-ins"
+  },
+  "clippy": {
+    "command": [
+      "cargo",
+      "clippy",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-agentd",
+      "--all-targets",
+      "--",
+      "-D",
+      "warnings"
+    ],
+    "exit": 0,
+    "seconds": 12.910896499990486,
+    "results": [],
+    "source_unchanged": true,
+    "source_sha256": "3324182907db26f1ea4f4549c89b059ea85358b264e33e23d77d1f7d04f58e4a",
+    "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+    "scope": "actual pinned43b839 source plus synthetic tests; own target/workspace packages cleaned; validated loopback-only fence; fresh HOME/no inherited opt-ins"
+  },
+  "build": {
+    "command": [
+      "cargo",
+      "build",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-agentd"
+    ],
+    "exit": 0,
+    "seconds": 17.772802332998253,
+    "results": [],
+    "source_unchanged": true,
+    "source_sha256": "3324182907db26f1ea4f4549c89b059ea85358b264e33e23d77d1f7d04f58e4a",
+    "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+    "scope": "actual pinned43b839 source plus synthetic tests; own target/workspace packages cleaned; validated loopback-only fence; fresh HOME/no inherited opt-ins"
+  },
+  "fmt": {
+    "command": [
+      "cargo",
+      "fmt",
+      "--all",
+      "--check"
+    ],
+    "exit": 0,
+    "seconds": 2.4351065419614315,
+    "results": [],
+    "source_unchanged": true,
+    "source_sha256": "3324182907db26f1ea4f4549c89b059ea85358b264e33e23d77d1f7d04f58e4a",
+    "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+    "scope": "actual pinned43b839 source plus synthetic tests; own target/workspace packages cleaned; validated loopback-only fence; fresh HOME/no inherited opt-ins"
+  },
+  "count_relation": {
+    "original_baseline_cases": 6,
+    "baseline_passed": 1,
+    "baseline_semantic_failed": 5,
+    "new_native_owner_cases": 7,
+    "new_actual_slot_tests": 4,
+    "crash_runnable": 11,
+    "model_switch": 2,
+    "turn_end": 4,
+    "compaction": 2,
+    "distinct_final_passed": 30,
+    "known_existing_linux_only_case": 1,
+    "note": "standalone rustc Slot4 duplicates Cargo Slot4; do not double-count; preexisting RSS test is not reported passed/skipped by source mutation"
+  },
+  "frozen_files": [
+    {
+      "path": "crates/arbos-agentd/src/agent.rs",
+      "base_sha256": "eea3dba7450ccba2f4356e1eedfbf3286b3835459df6d5fa4c4dfe109507c89a",
+      "candidate_sha256": "3324182907db26f1ea4f4549c89b059ea85358b264e33e23d77d1f7d04f58e4a",
+      "bytes": 897280
+    },
+    {
+      "path": "crates/arbos-agentd/src/rpc_child.rs",
+      "base_sha256": "8eaf5bbdd1e0dcc8b732abecd6a722c0805fb936a7df170ce142c01c3d628b62",
+      "candidate_sha256": "6c04c73a2f7732aff681b46c4c5aa6c4a7b39c9c8acaa43b07a83451e0ff6c0c",
+      "bytes": 15467
+    },
+    {
+      "path": "crates/arbos-agentd/src/main.rs",
+      "base_sha256": "a70513e90ac6e68d5b328603bbd0d8ce517e34cc947d3c963fcd6b4d0338a91b",
+      "candidate_sha256": "ca6cf2afa054929f40122d553dec09bd310955449796b6735f29cd812065834c",
+      "bytes": 22753
+    },
+    {
+      "path": "crates/arbos-agentd/src/pi_slot.rs",
+      "base_sha256": null,
+      "candidate_sha256": "7923dd3f2b2cd4feb68912eabd7e65ed948abd6f878278d609ca830a0e3565b0",
+      "bytes": 9755
+    }
+  ]
+}

@@ -193,12 +193,42 @@ enum MachineMetrics {
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
+    /// The State row's word for a machine that sleeps by itself (one with a `lifecycle`): awake,
+    /// sleeping, or cold once its files have moved to cold storage. The relay's own view
+    /// (`rawState`) decides awake and waking; `lifecycle` only tells a cold sleep from a plain
+    /// one. Nil for any other machine, which reads as it does everywhere (`Machine.label`).
+    static func stateWord(_ m: Machine) -> String? {
+        guard let lifecycle = m.lifecycle else { return nil }
+        switch m.rawState {
+        case .awake: return "Awake"
+        case .waking: return "Waking…"
+        case .error: return "Needs attention"
+        case .hibernatedLight, .hibernatedDeep, .stoppedByUser:
+            return lifecycle == "cold" ? "Cold" : "Sleeping"
+        }
+    }
+
+    /// A Storage row's value, when the relay has that number.
+    static func storageValue(_ m: Machine, _ row: Row) -> String? {
+        guard let s = m.storage else { return nil }
+        let n: Int64?
+        switch row {
+        case .files: n = s.files
+        case .scratch: n = s.scratch
+        case .trash: n = s.trash
+        default: n = nil
+        }
+        return n.flatMap { $0 >= 0 ? bytes($0) : nil }
+    }
+
     /// Everything the page may draw, in order, by card.
     enum Row: Equatable {
         // warning card
         case warning, askToFreeSpace, requestBiggerMachineInWarning
         // machine card
         case whereItRuns, inLine, state, spec, machineTime, workspaces, sandbox
+        // storage card
+        case files, scratch, trash
         // resources card
         case disk, memory, cpu, network, notAnswering
         // agents card
@@ -210,6 +240,7 @@ enum MachineMetrics {
     struct Plan: Equatable {
         var warning: [Row] = []
         var machine: [Row] = []
+        var storage: [Row] = []
         var resources: [Row] = []
         var agents: [Row] = []
         var actions: [Row] = []
@@ -234,6 +265,9 @@ enum MachineMetrics {
             if live == nil { p.machine.append(.workspaces) }
             if let id = m.sandboxId, !id.isEmpty { p.machine.append(.sandbox) }
         }
+        p.storage = [Row.files, .scratch, .trash].filter { storageValue(m, $0) != nil }
+        // A machine that sleeps by itself and is down is asleep, not failing to answer.
+        let sleeping = m.lifecycle != nil && m.rawState != .awake && m.rawState != .waking
         if let r = live {
             if diskGauge(r) != nil { p.resources.append(.disk) }
             if memGauge(r) != nil { p.resources.append(.memory) }
@@ -246,7 +280,7 @@ enum MachineMetrics {
                 p.agents.append(.breakdown)
                 if breakdownOpen { p.agents.append(contentsOf: usage.map { .agent($0.projectId) }) }
             }
-        } else if report != nil, m.alwaysOn, !m.held {
+        } else if report != nil, m.alwaysOn, !m.held, !sleeping {
             p.resources.append(.notAnswering)
         }
         if m.alwaysOn {

@@ -416,6 +416,31 @@ impl Client {
         Ok(v["chunk"].as_array().cloned().unwrap_or_default())
     }
 
+    /// One page of a room's events going back from `from` (the newest when `None`), newest
+    /// first, and the token of the page before it (`None` at the room's beginning).
+    pub async fn messages_page(
+        &self,
+        room_id: &str,
+        as_user: &str,
+        from: Option<&str>,
+        limit: usize,
+    ) -> MxResult<(Vec<Value>, Option<String>)> {
+        let mut path = format!(
+            "/_matrix/client/v3/rooms/{}/messages?dir=b&limit={limit}",
+            enc(room_id)
+        );
+        if let Some(from) = from {
+            path.push_str(&format!("&from={}", enc(from)));
+        }
+        let v = self
+            .call(Method::GET, &path, Some(as_user), None, None)
+            .await?;
+        Ok((
+            v["chunk"].as_array().cloned().unwrap_or_default(),
+            v["end"].as_str().map(str::to_owned),
+        ))
+    }
+
     /// One event, as seen by `as_user` (who must be in the room).
     pub async fn event(&self, room_id: &str, as_user: &str, event_id: &str) -> MxResult<Value> {
         let path = format!(
@@ -437,6 +462,20 @@ impl Client {
             Some(body),
         )
         .await?;
+        Ok(())
+    }
+
+    /// An override push rule of the user's: an event whose unencrypted
+    /// `m.relates_to.rel_type` is `rel_type` is neither counted nor announced to them.
+    pub async fn quiet_rel_type(&self, who: &str, rel_type: &str) -> MxResult<()> {
+        let path = format!(
+            "/_matrix/client/v3/pushrules/global/override/{}",
+            enc(rel_type)
+        );
+        let rule = json!({ "actions": [], "conditions": [{ "kind": "event_property_is",
+            "key": "content.m\\.relates_to.rel_type", "value": rel_type }] });
+        self.call(Method::PUT, &path, Some(who), None, Some(&rule))
+            .await?;
         Ok(())
     }
 

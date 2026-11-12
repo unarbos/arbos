@@ -32,6 +32,7 @@ use crate::blobs::{no_such_image, not_an_image, stored_image, StoredImage};
 use crate::db_people::{
     ChatWithMembers, GroupInvite, Invite, MemberProject, Membership, PeopleChat, UserPresence,
 };
+use crate::matrix::E2EE_MEMBER_CAP;
 use crate::notices;
 use crate::signin::api_error;
 use crate::state::AppState;
@@ -1875,6 +1876,56 @@ pub struct AddAgentBody {
     pub project_id: String,
 }
 
+/// An end-to-end encrypted chat is capped at [`E2EE_MEMBER_CAP`] members, agents included (a
+/// room can never drop its encryption, and Megolm shares every key with every member device).
+/// It does not grow past that, by any way in: what its members said stays between the people
+/// it was said to, and a bigger group is a new one.
+fn over_e2ee_cap(state: &AppState, chat_id: &str, members_after: usize) -> Option<Response> {
+    let encrypted = state
+        .db
+        .matrix_room(chat_id)
+        .ok()
+        .flatten()
+        .is_some_and(|r| r.encrypted && r.closed_at.is_none());
+    (encrypted && members_after > E2EE_MEMBER_CAP).then(|| {
+        api_error(
+            StatusCode::CONFLICT,
+            "encrypted_chat_full",
+            format!("This chat is end-to-end encrypted and holds up to {E2EE_MEMBER_CAP} people. Start a new group for more."),
+        )
+    })
+}
+
+/// What its members say in a chat they read on the homeserver in an end-to-end encrypted room
+/// is on the homeserver only: the relay cannot read it, so it is in no Loro room. An agent,
+/// or a person whose apps are not switched over, reads the Loro room, and adding one sends
+/// every member back to it (`matrix::people_native_room`), to a chat without those messages.
+/// So neither is added to such a chat; `people` are the people joining, `agent` whether an
+/// agent is.
+fn keeps_encrypted_chat_readable<'a>(
+    state: &AppState,
+    cm: &ChatWithMembers,
+    agent: bool,
+    mut people: impl Iterator<Item = &'a str>,
+) -> Option<Response> {
+    let sealed = state
+        .db
+        .matrix_room(&cm.chat.id)
+        .ok()
+        .flatten()
+        .is_some_and(|r| r.encrypted && r.closed_at.is_none())
+        && crate::matrix::people_native_room(state, cm).is_some();
+    let reads_elsewhere =
+        agent || people.any(|u| !state.db.matrix_people_native(u).unwrap_or(false));
+    (sealed && reads_elsewhere).then(|| {
+        api_error(
+            StatusCode::CONFLICT,
+            "encrypted_chat_members",
+            "This chat is end-to-end encrypted. An agent, or someone whose apps cannot read it yet, cannot join. Start a new chat with them.",
+        )
+    })
+}
+
 /// `POST /chats/{id}/agents {"project_id"}` — any member adds their OWN Project's agent. The
 /// owner's box is told (push) and woken so the agent joins the room.
 pub async fn agent_add(
@@ -1900,6 +1951,13 @@ pub async fn agent_add(
         );
     }
     let member = format!("agent:{}", project.id);
+    let joining = usize::from(!cm.members.iter().any(|m| m.member == member));
+    if let Some(r) = over_e2ee_cap(&state, &id, cm.members.len() + joining) {
+        return r;
+    }
+    if let Some(r) = keeps_encrypted_chat_readable(&state, &cm, true, std::iter::empty()) {
+        return r;
+    }
     if let Err(e) = state
         .db
         .add_member(&id, &member, "agent", &me, &default_agent_settings())
@@ -2369,6 +2427,13 @@ pub async fn member_add(
             "need_members",
             "name at least one person or one of your agents",
         );
+    }
+    if let Some(r) = over_e2ee_cap(&state, &id, cm.members.len() + people.len() + agents.len()) {
+        return r;
+    }
+    let joining = people.iter().map(|p| p.id.as_str());
+    if let Some(r) = keeps_encrypted_chat_readable(&state, &cm, !agents.is_empty(), joining) {
+        return r;
     }
     let mut names: Vec<String> = Vec::new();
     let mut subjects: Vec<serde_json::Value> = Vec::new();
@@ -3763,6 +3828,14 @@ pub async fn group_join(
     // Already a member: return the chat (re-tapping the link).
     if cm.members.iter().any(|m| m.user_id() == Some(me.as_str())) {
         return Json(chat_json(&state, &cm, &me, &device_of(&principal))).into_response();
+    }
+    // A link is one more way in, not a way past the cap.
+    if let Some(r) = over_e2ee_cap(&state, &inv.chat_id, cm.members.len() + 1) {
+        return r;
+    }
+    if let Some(r) = keeps_encrypted_chat_readable(&state, &cm, false, std::iter::once(me.as_str()))
+    {
+        return r;
     }
     if state
         .db
@@ -5864,7 +5937,7 @@ mod roster_batch_tests {
             _statement: *mut std::ffi::c_void,
             _sql: *mut std::ffi::c_void,
         ) -> i32 {
-            if kind == rusqlite::ffi::SQLITE_TRACE_STMT as u32 {
+            if kind == rusqlite::ffi::SQLITE_TRACE_STMT {
                 let _ = STATEMENTS.try_with(|count| count.set(count.get().saturating_add(1)));
             }
             0
@@ -5914,7 +5987,7 @@ mod roster_batch_tests {
                     let result = unsafe {
                         rusqlite::ffi::sqlite3_trace_v2(
                             connection.handle(),
-                            rusqlite::ffi::SQLITE_TRACE_STMT as u32,
+                            rusqlite::ffi::SQLITE_TRACE_STMT,
                             Some(count_statement),
                             std::ptr::null_mut(),
                         )
@@ -6518,6 +6591,190 @@ mod group_add_privacy_tests {
         )
         .await;
         assert_eq!(r.status(), StatusCode::OK);
+    }
+
+    /// A chat read on the homeserver in an encrypted room takes nobody who reads the Loro room
+    /// instead: what was said there is in no Loro room to go back to.
+    #[tokio::test]
+    async fn an_encrypted_chat_read_on_the_homeserver_takes_only_people_who_read_it_there() {
+        let mut state = test_state(AuthMode::Github);
+        state.matrix = crate::matrix::Matrix::new(crate::matrix::Config {
+            mode: crate::matrix::Mode::Dual,
+            hs_url: "http://127.0.0.1:9".into(),
+            ..crate::matrix::Config::off()
+        });
+        let (alice, alice_dev) = person(&state, 11);
+        let (bob, _) = person(&state, 12);
+        let (carol, carol_dev) = person(&state, 13);
+        let (dave, _) = person(&state, 14);
+        let handle = |u: &str| state.db.user(u).unwrap().unwrap().login.unwrap();
+        for u in [&alice, &bob, &dave] {
+            assert!(state.db.set_matrix_people_native(u, true).unwrap());
+        }
+        let chat = super::tests_support::group(&state, &[&alice, &bob]);
+        let project = super::tests_support::project_of(&state, &alice, "Research");
+        let add = |who: &str| {
+            member_add(
+                State(state.clone()),
+                alice_dev.clone(),
+                Path(chat.clone()),
+                Json(AddMemberBody {
+                    handle: Some(handle(who)),
+                    handles: vec![],
+                    agent_ids: vec![],
+                }),
+            )
+        };
+        let add_agent = || {
+            agent_add(
+                State(state.clone()),
+                alice_dev.clone(),
+                Path(chat.clone()),
+                Json(AddAgentBody {
+                    project_id: project.clone(),
+                }),
+            )
+        };
+        state
+            .db
+            .matrix_insert_room(&chat, "!sealed:arbos.life", None, "group", true)
+            .unwrap();
+        // Carol's apps read the Loro room; so does an agent. Neither joins, by any way in.
+        assert_eq!(add(&carol).await.status(), StatusCode::CONFLICT);
+        assert_eq!(add_agent().await.status(), StatusCode::CONFLICT);
+        let link = GroupInvite {
+            id: ulid(),
+            chat_id: chat.clone(),
+            code: "sealedcode".into(),
+            created_by: alice.clone(),
+            created_at: now_ms(),
+            expires_at: None,
+            uses_left: None,
+            revoked_at: None,
+        };
+        state.db.insert_group_invite(&link).unwrap();
+        let join = group_join(
+            State(state.clone()),
+            carol_dev.clone(),
+            Json(GroupJoinBody {
+                code: "sealedcode".into(),
+            }),
+        );
+        assert_eq!(join.await.status(), StatusCode::CONFLICT);
+        assert_eq!(state.db.members_of(&chat).unwrap().len(), 2);
+        // Dave reads it there too: he joins.
+        assert_eq!(add(&dave).await.status(), StatusCode::OK);
+        // Once Carol does, so does she. (The chat is native again only with all four flagged.)
+        assert!(state.db.set_matrix_people_native(&carol, true).unwrap());
+        assert_eq!(add(&carol).await.status(), StatusCode::OK);
+
+        // An unencrypted chat read on the homeserver is carried back to its Loro room, so
+        // anyone joins it; and so is an encrypted one that is still read in its Loro room.
+        let plain = super::tests_support::group(&state, &[&alice, &bob]);
+        state
+            .db
+            .matrix_insert_room(&plain, "!plain:arbos.life", None, "group", false)
+            .unwrap();
+        let (erin, _) = person(&state, 15);
+        let add_to = |chat: &str, who: &str| {
+            member_add(
+                State(state.clone()),
+                alice_dev.clone(),
+                Path(chat.to_owned()),
+                Json(AddMemberBody {
+                    handle: Some(handle(who)),
+                    handles: vec![],
+                    agent_ids: vec![],
+                }),
+            )
+        };
+        assert_eq!(add_to(&plain, &erin).await.status(), StatusCode::OK);
+        let loro = super::tests_support::group(&state, &[&alice, &erin]);
+        state
+            .db
+            .matrix_insert_room(&loro, "!loro:arbos.life", None, "group", true)
+            .unwrap();
+        let (frank, _) = person(&state, 16);
+        assert_eq!(add_to(&loro, &frank).await.status(), StatusCode::OK);
+    }
+
+    /// Spec §2: an encrypted chat stops at the cap; a plaintext one of the same size does not.
+    #[tokio::test]
+    async fn an_encrypted_chat_refuses_the_member_past_the_cap() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 1);
+        let (bob, _) = person(&state, 2);
+        let bob_handle = state.db.user(&bob).unwrap().unwrap().login.unwrap();
+        let chat = super::tests_support::group(&state, &[&alice]);
+        for i in 1..E2EE_MEMBER_CAP {
+            state
+                .db
+                .add_member(
+                    &chat,
+                    &format!("user:filler{i}"),
+                    "member",
+                    &alice,
+                    &json!({}),
+                )
+                .unwrap();
+        }
+        assert_eq!(state.db.members_of(&chat).unwrap().len(), E2EE_MEMBER_CAP);
+        let add = || {
+            member_add(
+                State(state.clone()),
+                alice_dev.clone(),
+                Path(chat.clone()),
+                Json(AddMemberBody {
+                    handle: Some(bob_handle.clone()),
+                    handles: vec![],
+                    agent_ids: vec![],
+                }),
+            )
+        };
+
+        state
+            .db
+            .matrix_insert_room(&chat, "!r:arbos.life", None, "group", true)
+            .unwrap();
+        assert_eq!(add().await.status(), StatusCode::CONFLICT);
+        assert_eq!(state.db.members_of(&chat).unwrap().len(), E2EE_MEMBER_CAP);
+
+        // An invite link is no way past it either, and a refused join does not use the link up.
+        let (_, carol_dev) = person(&state, 3);
+        let link = GroupInvite {
+            id: ulid(),
+            chat_id: chat.clone(),
+            code: "capcode".into(),
+            created_by: alice.clone(),
+            created_at: now_ms(),
+            expires_at: None,
+            uses_left: Some(1),
+            revoked_at: None,
+        };
+        state.db.insert_group_invite(&link).unwrap();
+        let join = || {
+            group_join(
+                State(state.clone()),
+                carol_dev.clone(),
+                Json(GroupJoinBody {
+                    code: "capcode".into(),
+                }),
+            )
+        };
+        assert_eq!(join().await.status(), StatusCode::CONFLICT);
+        assert_eq!(state.db.members_of(&chat).unwrap().len(), E2EE_MEMBER_CAP);
+        let left = state.db.group_invite_by_code("capcode").unwrap().unwrap();
+        assert_eq!(left.uses_left, Some(1));
+
+        state
+            .db
+            .matrix_insert_room(&chat, "!r:arbos.life", None, "group", false)
+            .unwrap();
+        assert_eq!(add().await.status(), StatusCode::OK);
+        assert_eq!(
+            state.db.members_of(&chat).unwrap().len(),
+            E2EE_MEMBER_CAP + 1
+        );
     }
 
     #[derive(Clone, Copy)]

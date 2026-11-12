@@ -198,6 +198,9 @@ exit code; `axbin/osascript` is a shim on `runner.sh`'s PATH that forwards every
 - One issue per release; a hotfix marker (`[hotfix]`) is for P0s only.
 - Mockups before any new UI; the `mockups-first` label marks items that wait for them.
 - The malicious-intent screen, the kill switch and the CI gate stay as they are.
-- Image rolls pause after a failed canary until a tagged fix lands or an operator lifts the hold.
+- Image rolls pause after a failed canary until an operator lifts the hold; a commit subject never
+  clears it. Contention for the relay/Caddy/canary lease defers the roll after 900 seconds without
+  smoking, switching the default or holding the image. Unexpected smoke execution failures stop
+  that attempt; the existing rc 2 inconclusive policy remains separate from an image failure.
 
 Runbook (how the loop implements this): the project store's `docs/feedback-loop.md`.

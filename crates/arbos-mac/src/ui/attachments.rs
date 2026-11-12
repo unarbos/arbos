@@ -168,10 +168,13 @@ fn sticker_tile(row_id: &str, preview: Preview, open: Option<OpenFn>, theme: &Th
         .justify_center();
     tile = match preview {
         Preview::Ready(image) => tile.child(
+            // The id is what lets GPUI keep a frame clock: an `img` without one draws the
+            // first frame of a GIF and never the next.
             img(image)
                 .w(px(STICKER_SIZE))
                 .h(px(STICKER_SIZE))
-                .object_fit(ObjectFit::Contain),
+                .object_fit(ObjectFit::Contain)
+                .id(SharedString::from(format!("{row_id}-img"))),
         ),
         Preview::Loading => tile.child(
             div()
@@ -229,11 +232,13 @@ fn picture_bubble(
         .justify_center();
     bubble = match preview {
         Preview::Ready(image) => bubble.child(
+            // With an id, so a GIF plays (see the sticker tile).
             img(image)
                 .w(px(w))
                 .h(px(h))
                 .rounded(px(BUBBLE_RADIUS))
-                .object_fit(ObjectFit::Contain),
+                .object_fit(ObjectFit::Contain)
+                .id(SharedString::from(format!("{row_id}-img"))),
         ),
         Preview::Loading => bubble.child(
             div()

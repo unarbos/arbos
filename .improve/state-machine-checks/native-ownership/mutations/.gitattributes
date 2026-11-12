@@ -1,0 +1,2 @@
+# Preserve exact TAP failure/replay output, including formatter whitespace.
+*.log -whitespace

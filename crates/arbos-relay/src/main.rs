@@ -15,6 +15,7 @@ mod avatar_image;
 mod blobs;
 #[cfg(test)]
 mod box_row_tests;
+mod boxd;
 mod boxes;
 mod browser;
 mod calls;
@@ -49,6 +50,8 @@ mod images;
 mod inspect;
 mod link_icons;
 mod livekit;
+#[cfg(test)]
+mod load_gate;
 mod local;
 mod matrix;
 mod moderation;
@@ -75,6 +78,7 @@ mod push;
 mod push_guard;
 mod releases;
 mod restart;
+mod restart_lifetime;
 mod room_health;
 mod rooms;
 mod routines;
@@ -89,9 +93,11 @@ mod state;
 mod stickers;
 mod unfurl;
 mod upgrade;
+mod usage;
 mod vault;
 mod vaults;
 mod voice;
+mod wallets;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -259,6 +265,7 @@ async fn main() -> anyhow::Result<()> {
         local_box_image: args.local_box_image.clone(),
         box_idle_grace_ms: 30_000,
         default_provider: env_nonempty("ARBOS_DEFAULT_PROVIDER"),
+        boxd: boxd::Boxd::from_env()?,
         fleet: fleet::FleetCfg::from_env(),
         connectors_mock: std::env::var("ARBOS_CONNECTORS_MOCK").is_ok_and(|v| v == "1"),
         channels_mock: std::env::var("ARBOS_CHANNELS_MOCK").is_ok_and(|v| v == "1"),
@@ -327,6 +334,7 @@ async fn main() -> anyhow::Result<()> {
         local_children: Arc::new(Mutex::new(HashMap::new())),
         box_conns: Arc::new(Mutex::new(HashMap::new())),
         wake_started: Arc::new(Mutex::new(HashMap::new())),
+        wake_kick: Arc::default(),
         last_client_push: Arc::new(Mutex::new(HashMap::new())),
         decisions_cache: Arc::new(std::sync::Mutex::new(Default::default())),
         decisions_inflight: Arc::new(Mutex::new(HashMap::new())),
@@ -346,6 +354,7 @@ async fn main() -> anyhow::Result<()> {
         activity: Arc::new(Mutex::new(HashMap::new())),
         box_http_seen: Arc::new(Mutex::new(HashMap::new())),
         turn_running: Arc::new(Mutex::new(HashMap::new())),
+        last_turn: Arc::new(Mutex::new(HashMap::new())),
         evicted: Arc::new(Mutex::new(HashMap::new())),
         fleet_pressure: Arc::new(Mutex::new(None)),
         voice: Arc::new(voice::cfg_from_env(&data_dir_for_voice)),
@@ -402,6 +411,8 @@ async fn main() -> anyhow::Result<()> {
     credits::spawn_meter(state.clone()).await;
     fleet::spawn_fleet_tasks(state.clone()).await;
     boxes::spawn_always_on(state.clone()).await;
+    boxd::spawn_idle_sleeper(state.clone()).await;
+    boxd::spawn_cold_tier(state.clone()).await;
     boxes::spawn_sandboxless_box_check(state.clone()).await;
     secrets::spawn_sweeper(state.clone()).await;
     outside::spawn_sweeper(state.clone()).await;
@@ -493,10 +504,18 @@ async fn main() -> anyhow::Result<()> {
             post(matrix::appservice::push_notify),
         )
         .route("/me/matrix", get(matrix::servers::me_matrix))
+        .route("/me/matrix/people", get(matrix::servers::me_matrix_people))
+        .route(
+            "/chats/{id}/matrix/history",
+            get(matrix::history::page).post(matrix::history::report),
+        )
         .route(
             "/_matrix/client/{*rest}",
             axum::routing::any(matrix::servers::proxy),
         )
+        // A file of an encrypted people chat is uploaded as ciphertext; the SDK has only this
+        // path for it (downloads are under /_matrix/client/v1/media).
+        .route("/_matrix/media/v3/upload", post(matrix::servers::proxy))
         .route(
             "/servers",
             get(matrix::servers::list).post(matrix::servers::create),
@@ -555,6 +574,10 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/admin/matrix/reads/{user}",
             put(matrix::appservice::set_reads),
+        )
+        .route(
+            "/admin/matrix/people/{user}",
+            put(matrix::appservice::set_people_native),
         )
         .route(
             "/admin/matrix/pushers",
@@ -653,6 +676,11 @@ async fn main() -> anyhow::Result<()> {
         .route("/users/search", get(people::users_search))
         .route("/users", get(people::users_directory))
         .route("/users/{id}", get(people::user_profile))
+        .route("/users/{id}/wallet", get(wallets::user_wallet))
+        .route(
+            "/me/wallet",
+            put(wallets::put_wallet).delete(wallets::delete_wallet),
+        )
         .route("/avatar-colors", get(people::avatar_colors))
         .route("/avatar-discs", get(people::avatar_discs))
         .route(
@@ -850,6 +878,11 @@ async fn main() -> anyhow::Result<()> {
         .route("/projects/{id}/push", post(api::push))
         .route("/projects/{id}/pushes", get(api::take_pushes))
         .route("/projects/{id}/usage", get(api::usage))
+        .route("/projects/{id}/sessions/usage", get(api::sessions_usage))
+        .route(
+            "/projects/{id}/sessions/{session}/usage",
+            get(api::session_usage),
+        )
         .route("/projects/{id}/timings", post(api::record_timing))
         .route("/projects/{id}/activity", post(api::set_activity))
         .route(

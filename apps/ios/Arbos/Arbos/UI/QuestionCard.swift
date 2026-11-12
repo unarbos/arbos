@@ -17,6 +17,7 @@ struct QuestionCard: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
 
+    let account: ChatAccountContext
     let rowId: String
     let chatId: Id
     /// nil for a legacy `waiting_user` status line: title only, the composer answers.
@@ -239,6 +240,7 @@ struct QuestionCard: View {
     }
 
     private func saveOffer() {
+        guard account.accepts(model) else { return }
         guard let offer, let questionId, let approvalId = questionId.stripping(prefix: "approval:") else { return }
         let value = offerValue
         let env = offerName.trimmingCharacters(in: .whitespaces).uppercased()
@@ -263,6 +265,7 @@ struct QuestionCard: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             if offer == nil ? open : offerOpen {
                 Button {
+                    guard account.accepts(model) else { return }
                     withAnimation(.easeOut(duration: 0.15)) { dismissed = true }
                     // The request card's × declines: the agent learns "not saved", nothing else.
                     if offer != nil, let questionId, let approvalId = questionId.stripping(prefix: "approval:") {
@@ -347,6 +350,7 @@ struct QuestionCard: View {
 
     private var sendRow: some View {
         Button {
+            guard account.accepts(model) else { return }
             let labels = options.filter { selected.contains($0.id) }.map(\.label)
             guard !labels.isEmpty else { return }
             answer(ids: options.map(\.id).filter { selected.contains($0) }, label: labels.joined(separator: ", "))
@@ -366,6 +370,7 @@ struct QuestionCard: View {
     }
 
     private func answer(ids: [String], label: String) {
+        guard account.accepts(model) else { return }
         guard let questionId else { return }
         let value: Any = multi ? ids : (ids.first ?? "")
         model.answerQuestion(chatId: chatId, questionId: questionId, value: value, label: label)

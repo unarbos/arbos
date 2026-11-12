@@ -1,0 +1,22 @@
+{
+  "sources": {
+    "apps/ios/Arbos/Arbos/Store/FirstLogin.swift": "0e9e95cece6f8b5febfe90fe3b495727321c6ffd7bf1c0f09fabc3a6351b7632",
+    "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f"
+  },
+  "compile_exit": 0,
+  "fixture_sha256": "d24eca5f0fb4787f8adbcfe83b4cd8f432a9cf5c780ee9d84d32d794a3705807",
+  "exit_code": 0,
+  "results": {
+    "cases": {
+      "current-poll-control": true,
+      "current-retry-order-control": true,
+      "late-poll-cannot-tick-B": true,
+      "late-retry-cannot-refresh-or-tick-B": true,
+      "queued-first-login-retry-no-B-work": true
+    },
+    "failed": 0,
+    "passed": 5,
+    "total": 5
+  },
+  "seconds": 0.617572334012948
+}

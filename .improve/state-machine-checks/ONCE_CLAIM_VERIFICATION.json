@@ -1,0 +1,554 @@
+{
+  "before": {
+    "gate": "before",
+    "command": [
+      "/usr/bin/sandbox-exec",
+      "-p",
+      "(version 1) (allow default) (deny network*)",
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-relay",
+      "one_use_regressions::",
+      "--",
+      "--test-threads=2"
+    ],
+    "exit": 101,
+    "seconds": 36.11687979195267,
+    "results": [
+      [
+        "FAILED",
+        "3",
+        "3",
+        "0"
+      ]
+    ],
+    "target": "<checkout>/.improve/evidence/once-claim/target",
+    "scope": "actual55ea sources plus tests; unique clone with all workspace artifacts cleaned; locked/offline and OS network denied; no live services/keys/config",
+    "expected_tests": 6,
+    "count_matches": true,
+    "failed_tests": [
+      "secrets::tests::one_use_regressions::a_failed_consume_cannot_return_plaintext",
+      "secrets::tests::one_use_regressions::answered_once_card_with_an_asker_allows_only_one_concurrent_disclosure",
+      "secrets::tests::one_use_regressions::browser_fill_consumes_the_exact_answered_request_not_a_newer_card"
+    ],
+    "actual_source_sha256": "a8233ac6f29672e8edead2fdad3173fb9166c5b4667fdfca9641cad00f813176",
+    "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435"
+  },
+  "builder-before": {
+    "gate": "builder-before",
+    "command": [
+      "/usr/bin/sandbox-exec",
+      "-p",
+      "(version 1) (allow default) (deny network*)",
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-relay",
+      "local_request_validation_precedes_one_use_admission",
+      "--",
+      "--test-threads=1"
+    ],
+    "exit": 101,
+    "seconds": 36.36437129206024,
+    "results": [
+      [
+        "FAILED",
+        "0",
+        "1",
+        "0"
+      ]
+    ],
+    "target": "<checkout>/.improve/evidence/once-claim/target",
+    "scope": "actual55ea sources plus tests; unique clone with all workspace artifacts cleaned; locked/offline and OS network denied; no live services/keys/config",
+    "expected_tests": 1,
+    "count_matches": true
+  },
+  "batch-before": {
+    "gate": "batch-before",
+    "command": [
+      "/usr/bin/sandbox-exec",
+      "-p",
+      "(version 1) (allow default) (deny network*)",
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-relay",
+      "batch_claim_",
+      "--",
+      "--test-threads=2"
+    ],
+    "exit": 101,
+    "seconds": 57.23393441597,
+    "results": [
+      [
+        "FAILED",
+        "0",
+        "3",
+        "0"
+      ]
+    ],
+    "target": "<checkout>/.improve/evidence/once-claim/target",
+    "scope": "actual55ea sources plus tests; unique clone with all workspace artifacts cleaned; locked/offline and OS network denied; no live services/keys/config",
+    "expected_tests": 3,
+    "count_matches": true,
+    "source_sha256": {
+      "db_secrets.rs": "fa1e3328d61ef8b91bf38ac8f0dc4f1a4b5bfaddddaf35a891700517271a1dfa",
+      "secrets.rs": "75c4d2389f1753e2ddce8790da73e1e3864af26c06c3126e259117360d50b6fa",
+      "vaults.rs": "0e371f6134b38d944ba5e720f1513f4d91c7175b5e17fc6949b3d3ef225f1f30",
+      "vault.rs": "aa417adefe9110e9d586eb85f209c1c08c87553face1515fb916062f56d5253e"
+    }
+  },
+  "after": {
+    "gate": "after",
+    "command": [
+      "/usr/bin/sandbox-exec",
+      "-p",
+      "(version 1) (allow default) (deny network*)",
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-relay",
+      "one_use_regressions::",
+      "--",
+      "--test-threads=2"
+    ],
+    "exit": 0,
+    "seconds": 1.7020952500170097,
+    "results": [
+      [
+        "ok",
+        "16",
+        "0",
+        "0"
+      ]
+    ],
+    "target": "<checkout>/.improve/evidence/once-claim/target",
+    "scope": "actual55ea sources plus tests; unique clone with all workspace artifacts cleaned; locked/offline and OS network denied; no live services/keys/config",
+    "expected_tests": 16,
+    "count_matches": true
+  },
+  "secrets-tests": {
+    "gate": "secrets-tests",
+    "command": [
+      "/usr/bin/sandbox-exec",
+      "-p",
+      "(version 1) (allow default) (deny network*)",
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-relay",
+      "secrets::tests::",
+      "--",
+      "--test-threads=2"
+    ],
+    "exit": 0,
+    "seconds": 31.500959625001997,
+    "results": [
+      [
+        "ok",
+        "39",
+        "0",
+        "0"
+      ]
+    ],
+    "target": "<checkout>/.improve/evidence/once-claim/target",
+    "scope": "actual55ea sources plus tests; unique clone with all workspace artifacts cleaned; locked/offline and OS network denied; no live services/keys/config"
+  },
+  "vaults-tests": {
+    "gate": "vaults-tests",
+    "command": [
+      "/usr/bin/sandbox-exec",
+      "-p",
+      "(version 1) (allow default) (deny network*)",
+      "cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-relay",
+      "vaults::tests::",
+      "--",
+      "--test-threads=2"
+    ],
+    "exit": 0,
+    "seconds": 0.8974845840130001,
+    "results": [
+      [
+        "ok",
+        "3",
+        "0",
+        "0"
+      ]
+    ],
+    "target": "<checkout>/.improve/evidence/once-claim/target",
+    "scope": "actual55ea sources plus tests; unique clone with all workspace artifacts cleaned; locked/offline and OS network denied; no live services/keys/config"
+  },
+  "check": {
+    "gate": "check",
+    "command": [
+      "/usr/bin/sandbox-exec",
+      "-p",
+      "(version 1) (allow default) (deny network*)",
+      "cargo",
+      "check",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-relay",
+      "--all-targets"
+    ],
+    "exit": 0,
+    "seconds": 24.497273624991067,
+    "results": [],
+    "target": "<checkout>/.improve/evidence/once-claim/target",
+    "scope": "actual55ea sources plus tests; unique clone with all workspace artifacts cleaned; locked/offline and OS network denied; no live services/keys/config"
+  },
+  "clippy": {
+    "gate": "clippy",
+    "command": [
+      "/usr/bin/sandbox-exec",
+      "-p",
+      "(version 1) (allow default) (deny network*)",
+      "cargo",
+      "clippy",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-relay",
+      "--all-targets",
+      "--",
+      "-D",
+      "warnings"
+    ],
+    "exit": 0,
+    "seconds": 19.75028408295475,
+    "results": [],
+    "target": "<checkout>/.improve/evidence/once-claim/target",
+    "scope": "actual55ea sources plus tests; unique clone with all workspace artifacts cleaned; locked/offline and OS network denied; no live services/keys/config"
+  },
+  "build": {
+    "gate": "build",
+    "command": [
+      "/usr/bin/sandbox-exec",
+      "-p",
+      "(version 1) (allow default) (deny network*)",
+      "cargo",
+      "build",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-relay"
+    ],
+    "exit": 0,
+    "seconds": 49.15705445792992,
+    "results": [],
+    "target": "<checkout>/.improve/evidence/once-claim/target",
+    "scope": "actual55ea sources plus tests; unique clone with all workspace artifacts cleaned; locked/offline and OS network denied; no live services/keys/config"
+  },
+  "fmt": {
+    "gate": "fmt",
+    "command": [
+      "/usr/bin/sandbox-exec",
+      "-p",
+      "(version 1) (allow default) (deny network*)",
+      "cargo",
+      "fmt",
+      "--all",
+      "--check"
+    ],
+    "exit": 0,
+    "seconds": 2.7187711249571294,
+    "results": [],
+    "target": "<checkout>/.improve/evidence/once-claim/target",
+    "scope": "actual55ea sources plus tests; unique clone with all workspace artifacts cleaned; locked/offline and OS network denied; no live services/keys/config"
+  },
+  "base": "55ea2ad5462d378bf5aaea603a305c6ae73146c7",
+  "patch": {
+    "base": "55ea2ad5462d378bf5aaea603a305c6ae73146c7",
+    "patch_bytes": 67492,
+    "patch_sha256": "6bbac7e09ce2a00b616b60987b22a4342f5e923f2dab87b362728f49c6c2bb49",
+    "live_apply_check": 0,
+    "apply_note": "",
+    "files": {
+      "crates/arbos-relay/src/db_secrets.rs": {
+        "bytes": 62599,
+        "sha256": "0693c2a2ca2a25491bf9a0661344579b6b12538ca364f1fad33dbc3ab3e07295"
+      },
+      "crates/arbos-relay/src/secrets.rs": {
+        "bytes": 215095,
+        "sha256": "d6684752a2c624624955b5942e0b6c2fa9b4b660fd7051ad70c11e95fbce0f7c"
+      },
+      "crates/arbos-relay/src/vaults.rs": {
+        "bytes": 66624,
+        "sha256": "f7c390fb48bbb27e02278f27f3cfa787b28b78f437aba9eb011873f514302891"
+      },
+      "crates/arbos-relay/src/vault.rs": {
+        "bytes": 33334,
+        "sha256": "aa417adefe9110e9d586eb85f209c1c08c87553face1515fb916062f56d5253e"
+      },
+      ".improve/state-machine-checks/once_claim_bridge.py": {
+        "bytes": 6035,
+        "sha256": "d04d42d9bf9107455891affc685df308d0beb0525612986a899bf12a6911154c"
+      },
+      ".improve/state-machine-checks/check_once_claim_mutant.py": {
+        "bytes": 4461,
+        "sha256": "602f121a36a03c20af1e80e896a93430b1fe1b50b0d8de4b37038a631964b8c8"
+      },
+      ".improve/state-machine-checks/ONCE_CLAIM.md": {
+        "bytes": 2187,
+        "sha256": "473f9ee250592272f172fa995b6e0d11c978b000e8b44fbf9bd13694f9bbb42a"
+      },
+      "harness/arbos-pi-ext/once-claim-laws.test.ts": {
+        "bytes": 11995,
+        "sha256": "d0d7b85f15800665128db87033248e67a96cbf26ee543141b050211befe46c67"
+      }
+    },
+    "root_lock_sha256": "404b50f95d0823158059f346500153fc9c0e6cdc6abca5e41d11d31e946e5435",
+    "scope": "private snapshot only; live checkout/index unchanged"
+  },
+  "clean": {
+    "command": [
+      "/usr/bin/sandbox-exec",
+      "-p",
+      "(version 1) (allow default) (deny network*)",
+      "cargo",
+      "clean",
+      "--locked",
+      "--offline",
+      "-p",
+      "arbos-core",
+      "-p",
+      "arbos-client",
+      "-p",
+      "arbos-matrix",
+      "-p",
+      "arbos-ffi",
+      "-p",
+      "arbos-relay",
+      "-p",
+      "arbos-agentd",
+      "-p",
+      "arbosctl",
+      "-p",
+      "arbos-acp",
+      "-p",
+      "arbos-sidecar",
+      "-p",
+      "arbos-local",
+      "-p",
+      "arbos-mac",
+      "-p",
+      "arbos-update"
+    ],
+    "exit": 0,
+    "seconds": 0.6946697080275044,
+    "target": "<checkout>/.improve/evidence/once-claim/target",
+    "scope": "APFS clone only; all workspace crate artifacts cleaned; dependency cache retained; old shared target never modified"
+  },
+  "final_tests": {
+    "distinct_targeted": 42,
+    "new_regressions": 16,
+    "secret_and_db_secret_suite": 39,
+    "vault_suite": 3,
+    "new_regressions_subset_of_secret_suite": true,
+    "full_workspace": false
+  },
+  "post_gate_doc_only_edits": [
+    "secrets.rs EgressPlan comment: admission occurs before request dispatch",
+    "vaults.rs OpPlan comment: admission occurs before request dispatch"
+  ],
+  "logs": {
+    "before": {
+      "sha256": "df5929cacceeed1d251cf8d44de768204e9663eefed028e5947c3bc555e294cf",
+      "bytes": 2773
+    },
+    "builder-before": {
+      "sha256": "8a2e9d15c973d405dc3d0505f989832aed526a797a4182e08bf6a2eeed46a9d8",
+      "bytes": 1175
+    },
+    "batch-before": {
+      "sha256": "6f05995d5734f1647268388e7d81dba0e20405a1de62c0cbdb91ee3a93c36355",
+      "bytes": 2376
+    },
+    "after": {
+      "sha256": "1dc3fecf83be7ee4c9758a4fb8cc11bc4d158c249f1c8028a2c0cbd28d70e2f6",
+      "bytes": 2016
+    },
+    "secrets-tests": {
+      "sha256": "ee52775878dd767b7934903037c1cafa10e3be5aef9e6e558130358474175cb8",
+      "bytes": 3783
+    },
+    "vaults-tests": {
+      "sha256": "8b0495b3b5d77598f6341bd5cd104224dcd122eec45d200de7528361d8909cab",
+      "bytes": 509
+    },
+    "check": {
+      "sha256": "f058ae9cce2e18d4974d14fc098dba74033a44442382e9065e3957faf5b58180",
+      "bytes": 192
+    },
+    "clippy": {
+      "sha256": "f6c4b41dedeac38dcc21dc5b379111cbeaff3a851949b00975b0fc9ebc337281",
+      "bytes": 192
+    },
+    "build": {
+      "sha256": "6d8daa69d33ba0cf7014ef585a5634a150f780c9956190d18d278cdeaecbd6ad",
+      "bytes": 192
+    },
+    "fmt": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    }
+  },
+  "plaintext_marker_hits": {
+    "fixture-not-a-real-password": 0,
+    "fixture-not-a-real-key": 0,
+    "fixture.login": 0
+  },
+  "laws": {
+    "command": [
+      "node",
+      "--test",
+      "once-claim-laws.test.ts"
+    ],
+    "exit": 0,
+    "seconds": 3.0160167909925804,
+    "tests": 5,
+    "generated_cases": 1024
+  },
+  "laws_typecheck": {
+    "command": [
+      "node",
+      "<checkout>/.improve/evidence/once-claim/workspace/harness/arbos-pi-ext/node_modules/typescript/bin/tsc",
+      "--noEmit",
+      "--target",
+      "ES2022",
+      "--module",
+      "NodeNext",
+      "--moduleResolution",
+      "NodeNext",
+      "--strict",
+      "--skipLibCheck",
+      "--types",
+      "node",
+      "once-claim-laws.test.ts"
+    ],
+    "exit": 0,
+    "seconds": 0.7740965409902856
+  },
+  "sql_mutant": {
+    "source_unchanged": true,
+    "source_sha256": {
+      "crates/arbos-relay/src/db_secrets.rs": "0693c2a2ca2a25491bf9a0661344579b6b12538ca364f1fad33dbc3ab3e07295",
+      ".improve/state-machine-checks/once_claim_bridge.py": "d04d42d9bf9107455891affc685df308d0beb0525612986a899bf12a6911154c",
+      "harness/arbos-pi-ext/once-claim-laws.test.ts": "d0d7b85f15800665128db87033248e67a96cbf26ee543141b050211befe46c67"
+    },
+    "results": [
+      {
+        "variant": "control",
+        "command": [
+          "node",
+          "--test",
+          "--test-name-pattern=spent authorization",
+          "once-claim-laws.test.ts"
+        ],
+        "exit": 0,
+        "seconds": 0.5808019579853863,
+        "actual_sql_source_sha256": "0693c2a2ca2a25491bf9a0661344579b6b12538ca364f1fad33dbc3ab3e07295",
+        "generated_cases": 256
+      },
+      {
+        "variant": "mutant",
+        "command": [
+          "node",
+          "--test",
+          "--test-name-pattern=spent authorization",
+          "once-claim-laws.test.ts"
+        ],
+        "exit": 1,
+        "seconds": 0.3028637500246987,
+        "actual_sql_source_sha256": "769e95e094d28e26c5cb3ff4d42e0a3a5345339fe52e85240608a85d59ae5cdf",
+        "counterexample": {
+          "law": "spent authorization absorbs later claim attempts",
+          "seed": 81001,
+          "result": {
+            "_tag": "Falsified",
+            "initialInput": {
+              "field": "user_id",
+              "mismatch": true,
+              "nullable": false,
+              "status": "denied",
+              "time": 1000,
+              "sqlError": false,
+              "refs": [],
+              "tail": []
+            },
+            "shrunkInput": {
+              "field": "id",
+              "mismatch": false,
+              "nullable": false,
+              "status": "allowed_once",
+              "time": 1000,
+              "sqlError": false,
+              "refs": [],
+              "tail": []
+            },
+            "failure": {
+              "_tag": "ReturnedFalse"
+            },
+            "runs": 1,
+            "discards": 0,
+            "shrinks": 1,
+            "replay": "[0,\"81001\",0,0,[0],\"ReturnedFalse\"]"
+          },
+          "replay": {
+            "_tag": "Falsified",
+            "initialInput": {
+              "field": "user_id",
+              "mismatch": true,
+              "nullable": false,
+              "status": "denied",
+              "time": 1000,
+              "sqlError": false,
+              "refs": [],
+              "tail": []
+            },
+            "shrunkInput": {
+              "field": "id",
+              "mismatch": false,
+              "nullable": false,
+              "status": "allowed_once",
+              "time": 1000,
+              "sqlError": false,
+              "refs": [],
+              "tail": []
+            },
+            "failure": {
+              "_tag": "ReturnedFalse"
+            },
+            "runs": 1,
+            "discards": 0,
+            "shrinks": 1,
+            "replay": "[0,\"81001\",0,0,[0],\"ReturnedFalse\"]"
+          }
+        }
+      }
+    ]
+  },
+  "runtime_versions": {
+    "python": "3.14.2",
+    "python_sqlite": "3.53.4",
+    "native_bundled_sqlite": "3.46.0",
+    "libsqlite3_sys": "0.30.1"
+  }
+}

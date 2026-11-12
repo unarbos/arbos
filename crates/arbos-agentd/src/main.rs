@@ -86,9 +86,12 @@ mod media;
 mod memory;
 #[cfg(test)]
 mod model_switch_tests;
+#[cfg(test)]
+mod model_usage_tests;
 mod people;
 #[cfg(test)]
 mod pi_crash_loop_tests;
+mod pi_slot;
 #[cfg(test)]
 mod refusal_line_and_window_notice_tests;
 #[cfg(test)]
@@ -115,6 +118,7 @@ mod settings;
 mod silence;
 mod sites;
 mod skills;
+mod sleep;
 mod status;
 mod steer_gate;
 mod store;
@@ -130,6 +134,7 @@ mod turn_marks_tests;
 mod vault;
 mod voice;
 mod web;
+mod worker_lifetime;
 #[cfg(test)]
 mod worker_model_refusal_tests;
 #[cfg(test)]
@@ -462,6 +467,10 @@ async fn resolve_relay_url() -> String {
 
 async fn boot() -> Result<()> {
     let t_boot = Instant::now();
+    // Taken first: until it is, SIGUSR1 is the default action, which ends the process.
+    let mut restored =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1())
+            .expect("sigusr1");
     let relay_url = resolve_relay_url().await;
     // Config reads the env; the resolved URL wins over whatever the sandbox was created with.
     std::env::set_var("ARBOS_RELAY_URL", &relay_url);
@@ -483,29 +492,8 @@ async fn boot() -> Result<()> {
     http::serve_box(main_l, sup.clone()).context("serve box http")?;
 
     // Hello: one box per user; the answer lists every project as a workspace.
-    let http_client = reqwest::Client::new();
     let listing = loop {
-        let hello = http_client
-            .post(format!("{}/box/hello", cfg.relay_url))
-            .bearer_auth(&cfg.box_token)
-            .json(&json!({
-                "url": format!("http://127.0.0.1:{}", cfg.port),
-                "version": env!("CARGO_PKG_VERSION"),
-                "proto": arbos_core::PROTO_VERSION,
-                // Baked by image.yml (ARBOS_AGENTD_SHA / ARBOS_IMAGE_VERSION): which commit this
-                // box runs, so the relay admin can tell what is shipped.
-                "sha": std::env::var("ARBOS_AGENTD_SHA").ok().filter(|v| !v.is_empty() && v != "unknown"),
-                "image": std::env::var("ARBOS_IMAGE_VERSION").ok().filter(|v| !v.is_empty() && v != "unknown"),
-                // The pi-ext seed this box actually copies into its projects (#1708): on a host
-                // sandbox /etc is persisted, so it can lag behind the image.
-                "seed_sha": std::fs::read_to_string("/etc/arbos/pi-seed/extensions/arbos-pi-ext/.source-sha")
-                    .ok()
-                    .map(|s| s.trim().to_owned())
-                    .filter(|s| !s.is_empty()),
-            }))
-            .send()
-            .await;
-        match hello {
+        match sup.hello().await {
             Ok(r) if r.status().is_success() => break r.json::<Value>().await.unwrap_or_default(),
             Ok(r) if r.status() == reqwest::StatusCode::CONFLICT => {
                 let text = r.text().await.unwrap_or_default();
@@ -640,6 +628,16 @@ async fn boot() -> Result<()> {
                 tokio::time::sleep(Duration::from_secs(60)).await;
                 let running = sup2.any_turn_running().await;
                 let _ = sup2.keepalive(running).await;
+            }
+        });
+    }
+    // SIGUSR1: the sandbox's supervisor restored it from a checkpoint. Every relay connection
+    // is dead on the wire, so they are dropped and dialed again (docs/box-scaling.md §4.3.1).
+    {
+        let sup2 = sup.clone();
+        tokio::spawn(async move {
+            while restored.recv().await.is_some() {
+                sup2.reconnect().await;
             }
         });
     }

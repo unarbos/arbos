@@ -643,8 +643,10 @@ struct ViewablePicture<Content: View>: View {
     @State private var viewer: MediaViewerState?
 
     var body: some View {
+        let work = model.accountWork()
         if let url, !url.isEmpty {
             Button {
+                guard model.acceptsAccountWork(work) else { return }
                 viewer = MediaViewerState(items: [MediaAlbum.picture(name: name, url: url)], index: 0)
             } label: {
                 content().contentShape(Circle())
@@ -655,6 +657,7 @@ struct ViewablePicture<Content: View>: View {
             .onAppear {
                 if DebugHooks.viewPicture {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                        guard model.acceptsAccountWork(work) else { return }
                         viewer = MediaViewerState(items: [MediaAlbum.picture(name: name, url: url)], index: 0)
                     }
                 }
@@ -1003,6 +1006,7 @@ struct UserProfileView: View {
     }
 
     var body: some View {
+        let work = model.accountWork()
         ZStack(alignment: .top) {
             theme.bg.ignoresSafeArea()
             ScrollView {
@@ -1041,19 +1045,26 @@ struct UserProfileView: View {
         }
         .confirm(BlockRow.blockConfirm(handle: person.handle), isPresented: $confirmBlock) {
             // The pane stays open: the row flips to Unblock once the relay lists them.
+            guard model.acceptsAccountWork(work) else { return }
             if let m = dm?.humans.first(where: isPeer) { model.block(m) } else { model.block(handle: peerHandle) }
         }
         .confirm(BlockedState.unblockConfirm(handle: person.handle), isPresented: $confirmUnblock) {
             // The pane stays open: the chip and the row go once the relay's list comes back.
+            guard model.acceptsAccountWork(work) else { return }
             if let entry = blockedEntry { model.unblock(entry) }
         }
         .task {
+            guard model.acceptsAccountWork(work) else { return }
             // Rig: `ARBOS_PANEL_TAB=Groups` lands on that tab (screenshot rig, as the group page).
             if let t = DebugHooks.panelTab, PaneKinds.person.contains(t) { tab = t }
-            await model.refreshBlocks()
-            await model.refreshPeople()
+            await model.refreshBlocks(expectedOwner: work?.owner)
+            guard model.acceptsAccountWork(work) else { return }
+            await model.refreshPeople(expectedOwner: work?.owner)
+            guard model.acceptsAccountWork(work) else { return }
             let id = model.personId(handle: person.handle) ?? person.id
-            fresh = await model.fetchUser(id)
+            let received = await model.fetchUser(id, expectedOwner: work?.owner)
+            guard model.acceptsAccountWork(work) else { return }
+            fresh = received
             let who = ProfilePerson(
                 id: fresh?.id ?? id,
                 handle: fresh?.handle ?? person.handle,
@@ -1063,7 +1074,9 @@ struct UserProfileView: View {
                 online: fresh?.online ?? person.online,
                 avatarColorIndex: fresh?.avatarColorIndex ?? person.avatarColorIndex
             )
-            sharedProjects = await model.sharedProjects(with: who)
+            let shared = await model.sharedProjects(with: who, expectedOwner: work?.owner)
+            guard model.acceptsAccountWork(work) else { return }
+            sharedProjects = shared
         }
     }
 
@@ -1071,12 +1084,14 @@ struct UserProfileView: View {
     /// through the same `POST /chats/dm` path the New Message sheet uses (`openDM`
     /// navigates and shows "You can't message this person." on a relay refusal).
     private var messageButton: some View {
-        PanePillButton(glyph: "bubble.left", title: MessageButton.title) {
+        let work = model.accountWork()
+        return PanePillButton(glyph: "bubble.left", title: MessageButton.title) {
+            guard model.acceptsAccountWork(work) else { return }
             if let dm {
                 dismiss()
                 model.open(peopleChat: dm)
             } else {
-                Task { if await model.openDM(handle: peerHandle) != nil { dismiss() } }
+                Task { guard model.acceptsAccountWork(work) else { return }; if await model.openDM(handle: peerHandle) != nil { guard model.acceptsAccountWork(work) else { return }; dismiss() } }
             }
         }
     }
@@ -1097,6 +1112,7 @@ struct UserProfileView: View {
     }
 
     private var groupsSections: [PaneSection] {
+        let work = model.accountWork()
         let groups = sharedGroups
         if groups.isEmpty && sharedProjects.isEmpty {
             return [.empty("No groups in common yet.")]
@@ -1105,7 +1121,7 @@ struct UserProfileView: View {
         // the placeholder only when it has none ([feedback group-row-avatar-ios-2026-10-27]).
         var rows: [AnyView] = groups.map { g in
             AnyView(
-                Button { dismiss(); model.open(peopleChat: g) } label: {
+                Button { guard model.acceptsAccountWork(work) else { return }; dismiss(); model.open(peopleChat: g) } label: {
                     PaneRow(
                         leading: .avatar(AnyView(GroupAvatar(chat: g, model: model, size: PaneKit.avatar))),
                         title: g.title,
@@ -1118,7 +1134,7 @@ struct UserProfileView: View {
         }
         rows += sharedProjects.map { p in
             AnyView(
-                Button { dismiss(); model.open(project: p) } label: {
+                Button { guard model.acceptsAccountWork(work) else { return }; dismiss(); model.open(project: p) } label: {
                     PaneRow(
                         leading: .avatar(AnyView(AgentAvatar(project: p, theme: theme, size: PaneKit.avatar))),
                         title: p.name,
@@ -1306,10 +1322,12 @@ struct GroupProfileView: View {
 
     /// Notifications card on the overview — people groups only (relay `me.muted` + local duration).
     private var notificationsSection: [PaneSection] {
+        let work = model.accountWork()
         guard people?.isGroup == true, projectId == nil else { return [] }
         let notified = Binding<Bool>(
             get: { !model.isPeopleChatMuted(chatId) },
             set: { on in
+                guard model.acceptsAccountWork(work) else { return }
                 if on { model.unmutePeopleChat(chatId) }
                 else { model.mutePeopleChat(chatId, for: .untilTurnedOn) }
             }
@@ -1344,6 +1362,7 @@ struct GroupProfileView: View {
     }
 
     var body: some View {
+        let work = model.accountWork()
         withDialogs(mainStack)
             .navigationDestination(isPresented: $showEdit) {
                 GroupEditView(chatId: chatId, openAvatarOnAppear: openAvatarOnEdit, initialAvatarTab: avatarTab)
@@ -1361,9 +1380,16 @@ struct GroupProfileView: View {
                     .backSwipeToPop()
             }
             .task {
-                if let projectId { projectMembers = await model.projectMembers(projectId) }
+                guard model.acceptsAccountWork(work) else { return }
+                if let projectId {
+                    let members = await model.projectMembers(projectId, expectedOwner: work?.owner)
+                    guard model.acceptsAccountWork(work) else { return }
+                    projectMembers = members
+                }
                 if projectId == nil, people?.kind == "group" {
-                    groupInvites = await model.groupInvites(chatId)
+                    let invites = await model.groupInvites(chatId, expectedOwner: work?.owner)
+                    guard model.acceptsAccountWork(work) else { return }
+                    groupInvites = invites
                 }
             }
             .onAppear(perform: applyDebugHooks)
@@ -1412,7 +1438,8 @@ struct GroupProfileView: View {
     }
 
     private func overviewRow(icon: String, title: String, value: String?, page: Subpage) -> some View {
-        Button { subpage = page } label: {
+        let work = model.accountWork()
+        return Button { guard model.acceptsAccountWork(work) else { return }; subpage = page } label: {
             PaneRow(leading: .tile(icon), title: title, value: value, chevron: true)
         }
         .buttonStyle(.plain)
@@ -1469,7 +1496,8 @@ struct GroupProfileView: View {
 
     /// The confirms, centred alerts (`Confirm.swift`). Member actions stay on their row.
     private func withDialogs<Content: View>(_ content: Content) -> some View {
-        content
+        let work = model.accountWork()
+        return content
             .confirm(ConfirmSpec(
                 title: pendingRemoveName.map { "Remove \($0) from \(title)?" } ?? "Remove from chat?",
                 message: "They can be added again later.", action: "Remove"
@@ -1479,8 +1507,10 @@ struct GroupProfileView: View {
             )) {
                 if let id = pendingRemoveId {
                     if rows.first(where: { $0.id == id })?.agent != nil {
+                        guard model.acceptsAccountWork(work) else { return }
                         model.removeAgent(chatId: chatId, projectId: id)
                     } else {
+                        guard model.acceptsAccountWork(work) else { return }
                         model.removeMember(chatId: chatId, userId: id, ban: false)
                     }
                 }
@@ -1495,6 +1525,7 @@ struct GroupProfileView: View {
                 set: { if !$0 { pendingBanId = nil; pendingBanName = nil } }
             )) {
                 if let id = pendingBanId {
+                    guard model.acceptsAccountWork(work) else { return }
                     model.removeMember(chatId: chatId, userId: id, ban: true)
                 }
                 pendingBanId = nil
@@ -1503,18 +1534,22 @@ struct GroupProfileView: View {
             .confirm(ConfirmSpec(title: "Leave \(title)?", message: "You leave the group. It stays for everyone else.",
                                  action: "Leave group chat"), isPresented: $confirmLeave) {
                 // No `dismiss()` on either: both take the path home, this page included.
+                guard model.acceptsAccountWork(work) else { return }
                 model.leavePeopleChat(chatId)
             }
             .confirm(ConfirmSpec(title: "Delete \(title)?", message: "Deletes the group for everyone in it.",
                                  action: "Delete group chat"), isPresented: $confirmDelete) {
+                guard model.acceptsAccountWork(work) else { return }
                 model.deletePeopleChat(chatId)
             }
     }
 
     private func applyDebugHooks() {
+        let work = model.accountWork()
         // Rig: `ARBOS_SHOW=removemember` arms the Remove confirm for the first other member.
         if DebugHooks.show == "removemember", let r = rows.first(where: { canRemove($0) }) {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                guard model.acceptsAccountWork(work) else { return }
                 pendingRemoveId = r.person.id
                 pendingRemoveName = r.agent?.name ?? "@\(r.person.handle)"
             }
@@ -1538,7 +1573,7 @@ struct GroupProfileView: View {
         if let show = DebugHooks.show, show.hasPrefix("groupavatar"), project == nil {
             avatarTab = show.hasSuffix("generate") ? .generate : (show.hasSuffix("upload") ? .upload : .bot)
             openAvatarOnEdit = true
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { showEdit = true }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { guard model.acceptsAccountWork(work) else { return }; showEdit = true }
         }
     }
 
@@ -1569,6 +1604,7 @@ struct GroupProfileView: View {
 
     /// Invite links for a people group (not a shared project chat): mint, copy, share, revoke.
     private var groupInviteSections: [PaneSection] {
+        let work = model.accountWork()
         guard projectId == nil, people?.kind == "group" else { return [] }
         let now = Int64(Date().timeIntervalSince1970 * 1000)
         var rows: [AnyView] = []
@@ -1583,10 +1619,13 @@ struct GroupProfileView: View {
                         trailing: AnyView(HStack(spacing: 4) {
                             if inv.usable {
                                 Button {
+                                    guard model.acceptsAccountWork(work) else { return }
                                     UIPasteboard.general.string = inv.url
                                     inviteCopied = true
                                     Task { @MainActor in
+                                        guard model.acceptsAccountWork(work) else { return }
                                         try? await Task.sleep(for: .seconds(1.5))
+                                        guard model.acceptsAccountWork(work) else { return }
                                         inviteCopied = false
                                     }
                                 } label: {
@@ -1606,8 +1645,11 @@ struct GroupProfileView: View {
                                 }
                             }
                             Button {
+                                guard model.acceptsAccountWork(work) else { return }
                                 Task {
-                                    if await model.revokeGroupInvite(chatId, inviteId: inv.id) {
+                                    guard model.acceptsAccountWork(work) else { return }
+                                    if await model.revokeGroupInvite(chatId, inviteId: inv.id, expectedOwner: work?.owner) {
+                                        guard model.acceptsAccountWork(work) else { return }
                                         groupInvites.removeAll { $0.id == inv.id }
                                     }
                                 }
@@ -1626,8 +1668,11 @@ struct GroupProfileView: View {
             AnyView(PaneToggleRow(title: "Expires after 7 days", isOn: $inviteExpires)),
             AnyView(PaneToggleRow(title: "Single use", subtitle: "One person joins, then the link is spent", isOn: $inviteSingleUse)),
             AnyView(Button {
+                guard model.acceptsAccountWork(work) else { return }
                 Task {
-                    if let inv = await model.createGroupInvite(chatId, expires: inviteExpires, singleUse: inviteSingleUse) {
+                    guard model.acceptsAccountWork(work) else { return }
+                    if let inv = await model.createGroupInvite(chatId, expires: inviteExpires, singleUse: inviteSingleUse, expectedOwner: work?.owner) {
+                        guard model.acceptsAccountWork(work) else { return }
                         groupInvites.insert(inv, at: 0)
                     }
                 }
@@ -1647,8 +1692,9 @@ struct GroupProfileView: View {
     /// every person (name, @handle) and agent as kit rows. Banned people
     /// (owner/admin) sit under Banned with Unban. Activity lives on the overview.
     private var membersSections: [PaneSection] {
+        let work = model.accountWork()
         var list: [AnyView] = [
-            AnyView(Button { showAdd = true } label: {
+            AnyView(Button { guard model.acceptsAccountWork(work) else { return }; showAdd = true } label: {
                 PaneRow(leading: .glyph("person.badge.plus"), title: "Add members")
             }
             .buttonStyle(.plain)),
@@ -1658,7 +1704,7 @@ struct GroupProfileView: View {
         if projectId == nil, people?.isGroup == true {
             let desc = people?.description ?? ""
             if canEditGroupSettings {
-                list.append(AnyView(Button { showEdit = true } label: {
+                list.append(AnyView(Button { guard model.acceptsAccountWork(work) else { return }; showEdit = true } label: {
                     PaneRow(
                         leading: .glyph("text.alignleft"),
                         title: "Description",
@@ -1678,7 +1724,9 @@ struct GroupProfileView: View {
         // People groups only (not a shared project): one-tap share of the invite link.
         if project == nil, people?.kind == "group" {
             list.append(AnyView(Button {
-                shareGroupInvite()
+                guard model.acceptsAccountWork(work) else { return }
+                guard let work, model.acceptsAccountWork(work) else { return }
+                shareGroupInvite(work: work)
             } label: {
                 PaneRow(
                     leading: .glyph("square.and.arrow.up"),
@@ -1701,8 +1749,10 @@ struct GroupProfileView: View {
 
     /// A banned person: name, @handle · banned, Unban for whoever may mute/ban.
     private func bannedRow(_ r: Row) -> some View {
+        let work = model.accountWork()
         let unban: AnyView? = iCanMuteBan ? AnyView(
             Button {
+                guard model.acceptsAccountWork(work) else { return }
                 model.unbanMember(chatId: chatId, userId: r.person.id)
             } label: {
                 Text("Unban")
@@ -1713,6 +1763,7 @@ struct GroupProfileView: View {
             .accessibilityLabel("Unban @\(r.person.handle)")
         ) : nil
         return Button {
+            guard model.acceptsAccountWork(work) else { return }
             model.showProfile(.user(r.person), in: profileHost)
         } label: {
             PaneRow(
@@ -1725,11 +1776,13 @@ struct GroupProfileView: View {
         .buttonStyle(.borderless)
         .contextMenu {
             Button {
+                guard model.acceptsAccountWork(work) else { return }
                 model.showProfile(.user(r.person), in: profileHost)
             } label: { Label("View profile", systemImage: "person.crop.circle") }
             if iCanMuteBan {
                 Divider()
                 Button {
+                    guard model.acceptsAccountWork(work) else { return }
                     model.unbanMember(chatId: chatId, userId: r.person.id)
                 } label: { Label("Unban", systemImage: "hand.raised.slash") }
             }
@@ -1739,25 +1792,25 @@ struct GroupProfileView: View {
     /// Reuse a usable invite URL, or mint one, then open the system share sheet.
     /// Pass the link as a `String`, not a `URL`: Telegram's share extension drops a
     /// bare URL activity item, so the recipient's chat gets an empty message.
-    private func shareGroupInvite() {
-        guard !sharingInvite else { return }
+    private func shareGroupInvite(work: AccountWork) {
+        guard model.acceptsAccountWork(work), !sharingInvite else { return }
         sharingInvite = true
         Task {
+            guard model.acceptsAccountWork(work) else { return }
+            defer { if model.accountLifetime.accepts(work.owner) { sharingInvite = false } }
             if let existing = groupInvites.first(where: { $0.usable }),
                URL(string: existing.url) != nil {
                 presentShareSheet(items: [existing.url])
-                sharingInvite = false
                 return
             }
-            if let inv = await model.createGroupInvite(
-                chatId, expires: inviteExpires, singleUse: inviteSingleUse
-            ) {
+            let created = await model.createGroupInvite(
+                chatId, expires: inviteExpires, singleUse: inviteSingleUse, expectedOwner: work.owner
+            )
+            guard model.acceptsAccountWork(work) else { return }
+            if let inv = created {
                 groupInvites.insert(inv, at: 0)
-                if URL(string: inv.url) != nil {
-                    presentShareSheet(items: [inv.url])
-                }
+                if URL(string: inv.url) != nil { presentShareSheet(items: [inv.url]) }
             }
-            sharingInvite = false
         }
     }
 
@@ -1773,6 +1826,7 @@ struct GroupProfileView: View {
     }
 
     private func memberRow(_ r: Row) -> some View {
+        let work = model.accountWork()
         let isMe = r.agent == nil && r.person.id == model.user?.id
         let title = r.agent?.name ?? (isMe ? "\(r.person.displayName) (you)" : r.person.displayName)
         let avatar: AnyView = r.agent.map { AnyView(AgentAvatar(project: $0, theme: theme, size: PaneKit.avatar)) }
@@ -1789,12 +1843,14 @@ struct GroupProfileView: View {
                     if canMuteBan(r) {
                         if isSilenced {
                             Button {
+                                guard model.acceptsAccountWork(work) else { return }
                                 model.setMemberSilenced(chatId: chatId, userId: r.person.id, silenced: false)
                             } label: { Label("Unmute", systemImage: "speaker.wave.2") }
                         } else {
                             Menu {
                                 ForEach(MemberMuteDuration.allCases) { duration in
                                     Button(duration.title) {
+                                        guard model.acceptsAccountWork(work) else { return }
                                         model.setMemberSilenced(
                                             chatId: chatId, userId: r.person.id,
                                             silenced: true, duration: duration
@@ -1807,11 +1863,13 @@ struct GroupProfileView: View {
                     if isGroupOwner {
                         if r.role == "member" {
                             Button {
+                                guard model.acceptsAccountWork(work) else { return }
                                 model.setMemberRole(chatId: chatId, userId: r.person.id, role: "admin")
                             } label: { Label("Make admin", systemImage: "person.badge.key") }
                         } else if r.role == "admin" {
                             let allowed = member?.canMuteBan ?? true
                             Button {
+                                guard model.acceptsAccountWork(work) else { return }
                                 model.setMemberCanMuteBan(
                                     chatId: chatId, userId: r.person.id, canMuteBan: !allowed
                                 )
@@ -1822,6 +1880,7 @@ struct GroupProfileView: View {
                                 )
                             }
                             Button {
+                                guard model.acceptsAccountWork(work) else { return }
                                 model.setMemberRole(chatId: chatId, userId: r.person.id, role: "member")
                             } label: { Label("Remove admin", systemImage: "person.badge.minus") }
                         }
@@ -1829,11 +1888,13 @@ struct GroupProfileView: View {
                     if canRemove(r) {
                         Divider()
                         Button(role: .destructive) {
+                            guard model.acceptsAccountWork(work) else { return }
                             pendingRemoveId = r.person.id
                             pendingRemoveName = label
                         } label: { Label("Remove", systemImage: "person.badge.minus") }
                         if canMuteBan(r) {
                             Button(role: .destructive) {
+                                guard model.acceptsAccountWork(work) else { return }
                                 pendingBanId = r.person.id
                                 pendingBanName = label
                             } label: { Label("Ban", systemImage: "hand.raised") }
@@ -1841,6 +1902,7 @@ struct GroupProfileView: View {
                     }
                 } else if canRemove(r) {
                     Button(role: .destructive) {
+                        guard model.acceptsAccountWork(work) else { return }
                         pendingRemoveId = r.person.id
                         pendingRemoveName = label
                     } label: { Label("Remove", systemImage: "person.badge.minus") }
@@ -1866,6 +1928,7 @@ struct GroupProfileView: View {
             }
         }()
         return Button {
+            guard model.acceptsAccountWork(work) else { return }
             if let a = r.agent {
                 model.showProfile(.agent(projectId: a.id), in: profileHost)
             } else if isMe {
@@ -1888,13 +1951,16 @@ struct GroupProfileView: View {
         .contextMenu {
             if r.agent == nil && !isMe {
                 Button {
+                    guard model.acceptsAccountWork(work) else { return }
                     let handle = r.person.handle
                     Task {
-                        if await model.openDM(handle: handle) != nil { dismiss() }
+                        guard model.acceptsAccountWork(work) else { return }
+                        if await model.openDM(handle: handle) != nil { guard model.acceptsAccountWork(work) else { return }; dismiss() }
                     }
                 } label: { Label("Send private message", systemImage: "bubble.left") }
             }
             Button {
+                guard model.acceptsAccountWork(work) else { return }
                 if let a = r.agent { model.showProfile(.agent(projectId: a.id), in: profileHost) } else { model.showProfile(.user(r.person), in: profileHost) }
             } label: { Label("View profile", systemImage: "person.crop.circle") }
             if showManage {
@@ -1903,11 +1969,13 @@ struct GroupProfileView: View {
                     if canMuteBan(r) {
                         if isSilenced {
                             Button {
+                                guard model.acceptsAccountWork(work) else { return }
                                 model.setMemberSilenced(chatId: chatId, userId: r.person.id, silenced: false)
                             } label: { Label("Unmute", systemImage: "speaker.wave.2") }
                         } else {
                             ForEach(MemberMuteDuration.allCases) { duration in
                                 Button("Mute · \(duration.title)") {
+                                    guard model.acceptsAccountWork(work) else { return }
                                     model.setMemberSilenced(
                                         chatId: chatId, userId: r.person.id,
                                         silenced: true, duration: duration
@@ -1919,11 +1987,13 @@ struct GroupProfileView: View {
                     if isGroupOwner {
                         if r.role == "member" {
                             Button {
+                                guard model.acceptsAccountWork(work) else { return }
                                 model.setMemberRole(chatId: chatId, userId: r.person.id, role: "admin")
                             } label: { Label("Make admin", systemImage: "person.badge.key") }
                         } else if r.role == "admin" {
                             let allowed = member?.canMuteBan ?? true
                             Button {
+                                guard model.acceptsAccountWork(work) else { return }
                                 model.setMemberCanMuteBan(
                                     chatId: chatId, userId: r.person.id, canMuteBan: !allowed
                                 )
@@ -1934,17 +2004,20 @@ struct GroupProfileView: View {
                                 )
                             }
                             Button {
+                                guard model.acceptsAccountWork(work) else { return }
                                 model.setMemberRole(chatId: chatId, userId: r.person.id, role: "member")
                             } label: { Label("Remove admin", systemImage: "person.badge.minus") }
                         }
                     }
                     if canRemove(r) {
                         Button(role: .destructive) {
+                            guard model.acceptsAccountWork(work) else { return }
                             pendingRemoveId = r.person.id
                             pendingRemoveName = label
                         } label: { Label("Remove from group", systemImage: "person.badge.minus") }
                         if canMuteBan(r) {
                             Button(role: .destructive) {
+                                guard model.acceptsAccountWork(work) else { return }
                                 pendingBanId = r.person.id
                                 pendingBanName = label
                             } label: { Label("Ban from group", systemImage: "hand.raised") }
@@ -1952,6 +2025,7 @@ struct GroupProfileView: View {
                     }
                 } else if canRemove(r) {
                     Button(role: .destructive) {
+                        guard model.acceptsAccountWork(work) else { return }
                         pendingRemoveId = r.person.id
                         pendingRemoveName = label
                     } label: { Label("Remove from group", systemImage: "xmark") }
@@ -1965,17 +2039,20 @@ struct GroupProfileView: View {
             set: { if !$0 { memberActions = nil } }
         ), titleVisibility: .visible) {
             Button("Send private message") {
+                guard model.acceptsAccountWork(work) else { return }
                 let handle = r.person.handle
                 memberActions = nil
                 Task {
-                    if await model.openDM(handle: handle) != nil { dismiss() }
+                    guard model.acceptsAccountWork(work) else { return }
+                    if await model.openDM(handle: handle) != nil { guard model.acceptsAccountWork(work) else { return }; dismiss() }
                 }
             }
             Button("View profile") {
+                guard model.acceptsAccountWork(work) else { return }
                 model.showProfile(.user(r.person), in: profileHost)
                 memberActions = nil
             }
-            Button("Cancel", role: .cancel) { memberActions = nil }
+            Button("Cancel", role: .cancel) { guard model.acceptsAccountWork(work) else { return }; memberActions = nil }
         }
     }
 
@@ -2240,6 +2317,7 @@ struct ServerProfileView: View {
     private var memberCount: Int { max(server?.memberCount ?? 0, server?.members.count ?? 0) }
 
     var body: some View {
+        let work = model.accountWork()
         serverDialogs(memberDialogs(channelDialogs(frame)))
             .navigationDestination(isPresented: $showEdit) {
                 ServerEditView(serverId: serverId, openAvatarOnAppear: openAvatarOnEdit, initialAvatarTab: avatarTab)
@@ -2266,6 +2344,7 @@ struct ServerProfileView: View {
                     .backSwipeToPop()
             }
             .task {
+                guard model.acceptsAccountWork(work) else { return }
                 if let t = DebugHooks.panelTab {
                     switch t {
                     case "Channels": subpage = .channels
@@ -2274,7 +2353,8 @@ struct ServerProfileView: View {
                     default: break
                     }
                 }
-                await model.refreshServer(serverId)
+                await model.refreshServer(serverId, expectedOwner: work?.owner)
+                guard model.acceptsAccountWork(work) else { return }
                 loadedMembers = true
             }
             .accessibilityIdentifier("server-profile")
@@ -2413,6 +2493,7 @@ struct ServerProfileView: View {
     /// The owner's invite links: each with its terms, Copy / Share and revoke; then the two
     /// options and "New invite link".
     private func inviteSections(_ server: Server) -> [PaneSection] {
+        let work = model.accountWork()
         let now = Int64(Date().timeIntervalSince1970 * 1000)
         var rows: [AnyView] = []
         if server.invites.isEmpty {
@@ -2426,10 +2507,13 @@ struct ServerProfileView: View {
                         trailing: AnyView(HStack(spacing: 4) {
                             if inv.usable {
                                 Button {
+                                    guard model.acceptsAccountWork(work) else { return }
                                     UIPasteboard.general.string = inv.url
                                     copied = true
                                     Task { @MainActor in
+                                        guard model.acceptsAccountWork(work) else { return }
                                         try? await Task.sleep(for: .seconds(1.5))
+                                        guard model.acceptsAccountWork(work) else { return }
                                         copied = false
                                     }
                                 } label: {
@@ -2449,7 +2533,8 @@ struct ServerProfileView: View {
                                 }
                             }
                             Button {
-                                Task { await model.revokeServerInvite(serverId, inviteId: inv.id) }
+                                guard model.acceptsAccountWork(work) else { return }
+                                Task { guard model.acceptsAccountWork(work) else { return }; await model.revokeServerInvite(serverId, inviteId: inv.id, expectedOwner: work?.owner) }
                             } label: {
                                 Image(systemName: "xmark.circle")
                                     .font(theme.font(17)).foregroundStyle(theme.muted)
@@ -2465,7 +2550,8 @@ struct ServerProfileView: View {
             AnyView(PaneToggleRow(title: "Expires after 7 days", isOn: $inviteExpires)),
             AnyView(PaneToggleRow(title: "Single use", subtitle: "One person joins, then the link is spent", isOn: $inviteSingleUse)),
             AnyView(Button {
-                Task { await model.createServerInvite(serverId, expires: inviteExpires, singleUse: inviteSingleUse) }
+                guard model.acceptsAccountWork(work) else { return }
+                Task { guard model.acceptsAccountWork(work) else { return }; await model.createServerInvite(serverId, expires: inviteExpires, singleUse: inviteSingleUse, expectedOwner: work?.owner) }
             } label: {
                 PaneRow(leading: .glyph("plus"), title: "New invite link")
             }.buttonStyle(.plain)),
@@ -2479,13 +2565,14 @@ struct ServerProfileView: View {
     }
 
     private func channelDialogs<V: View>(_ v: V) -> some View {
-        v
+        let work = model.accountWork()
+        return v
             .onAppear {
                 // Rig: `ARBOS_SHOW=serveravatar[-generate|-upload]` opens Edit → avatar picker.
                 if let show = DebugHooks.show, show.hasPrefix("serveravatar") {
                     avatarTab = show.hasSuffix("generate") ? .generate : (show.hasSuffix("upload") ? .upload : .bot)
                     openAvatarOnEdit = true
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { showEdit = true }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { guard model.acceptsAccountWork(work) else { return }; showEdit = true }
                 }
             }
             .alert("Rename channel", isPresented: Binding(
@@ -2496,56 +2583,60 @@ struct ServerProfileView: View {
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                 Button("Save") {
-                    if let c = renamingChannel { Task { await model.renameChannel(c, name: channelDraft) } }
+                    guard model.acceptsAccountWork(work) else { return }
+                    if let c = renamingChannel { Task { guard model.acceptsAccountWork(work) else { return }; await model.renameChannel(c, name: channelDraft, expectedOwner: work?.owner) } }
                     renamingChannel = nil
                 }
-                Button("Cancel", role: .cancel) { renamingChannel = nil }
+                Button("Cancel", role: .cancel) { guard model.acceptsAccountWork(work) else { return }; renamingChannel = nil }
             } message: {
                 Text("Letters, digits and dashes.")
             }
             .confirm(item: $deletingChannel, spec: { c in
                 ConfirmSpec(title: "Delete #\(c.name)?", message: "Its messages go for everyone in the server.", action: "Delete channel")
-            }) { c in
-                Task { await model.deleteChannel(c) }
+            }, isCurrent: { model.acceptsAccountWork(work) }) {c in
+                Task { guard model.acceptsAccountWork(work) else { return }; await model.deleteChannel(c, expectedOwner: work?.owner) }
             }
     }
 
     private func memberDialogs<V: View>(_ v: V) -> some View {
-        v
+        let work = model.accountWork()
+        return v
             .confirm(item: $removingMember, spec: { m in
                 ConfirmSpec(title: "Remove @\(m.handle)?", message: "They can join again with the invite link.", action: "Remove")
-            }) { m in
-                Task { await model.removeServerMember(serverId: serverId, userId: m.id, ban: false) }
+            }, isCurrent: { model.acceptsAccountWork(work) }) {m in
+                Task { guard model.acceptsAccountWork(work) else { return }; await model.removeServerMember(serverId: serverId, userId: m.id, ban: false, expectedOwner: work?.owner) }
             }
             .confirm(item: $banningMember, spec: { m in
                 ConfirmSpec(title: "Ban @\(m.handle)?", message: "They are removed and the invite link no longer works for them.", action: "Ban")
-            }) { m in
-                Task { await model.removeServerMember(serverId: serverId, userId: m.id, ban: true) }
+            }, isCurrent: { model.acceptsAccountWork(work) }) {m in
+                Task { guard model.acceptsAccountWork(work) else { return }; await model.removeServerMember(serverId: serverId, userId: m.id, ban: true, expectedOwner: work?.owner) }
             }
     }
 
     private func serverDialogs<V: View>(_ v: V) -> some View {
-        v
+        let work = model.accountWork()
+        return v
             .confirm(ConfirmSpec(title: "Leave \(server?.name ?? "this server")?", message: "You can come back with an invite link.",
                                  action: "Leave"), isPresented: $confirmLeave) {
                 // No `dismiss()` on either: the model leaves every screen about the
                 // server, this page included, and popping as well would overshoot.
-                Task { _ = await model.leaveServer(serverId) }
+                Task { guard model.acceptsAccountWork(work) else { return }; _ = await model.leaveServer(serverId, expectedOwner: work?.owner) }
             }
             .confirm(ConfirmSpec(title: "Delete \(server?.name ?? "this server")?", message: "Every channel and message goes, for everyone.",
                                  action: "Delete server"), isPresented: $confirmDelete) {
-                Task { _ = await model.deleteServer(serverId) }
+                Task { guard model.acceptsAccountWork(work) else { return }; _ = await model.deleteServer(serverId, expectedOwner: work?.owner) }
             }
     }
 
     // MARK: Channels
 
     private func channelSections(_ server: Server) -> [PaneSection] {
+        let work = model.accountWork()
         let inset = PaneKit.separatorInset(.glyph(""))
         var rows: [AnyView] = []
         if isAdmin {
             // Rule 7: owners/admins add channels; members never see this row.
-            rows.append(AnyView(Button { showNewChannel = true } label: {
+            rows.append(AnyView(Button { guard model.acceptsAccountWork(work) else { return }; showNewChannel = true } label: {
                 PaneRow(leading: .glyph("plus"), title: "Add channel")
             }.buttonStyle(.plain)))
         }
@@ -2558,7 +2649,13 @@ struct ServerProfileView: View {
                 AnyView(PaneRow(leading: .glyph("archivebox"), title: c.name,
                                 subtitle: model.channelRestricted(c) ? "Admins only post" : nil,
                                 trailing: AnyView(
-                                    Button("Unarchive") { Task { await model.archiveChannel(c, false) } }
+                                    Button("Unarchive") {
+                                        guard model.acceptsAccountWork(work) else { return }
+                                        Task {
+                                            guard model.acceptsAccountWork(work) else { return }
+                                            await model.archiveChannel(c, false, expectedOwner: work?.owner)
+                                        }
+                                    }
                                         .font(theme.font(Theme.small, weight: .medium))
                                         .buttonStyle(.bordered)
                                         .tint(theme.muted)
@@ -2569,22 +2666,25 @@ struct ServerProfileView: View {
     }
 
     private func channelRow(_ c: ServerChannel, in server: Server) -> some View {
+        let work = model.accountWork()
         let restricted = model.channelRestricted(c)
         let isGeneral = c.id == server.generalChannelId || (server.generalChannelId == nil && c.name == "general")
         let menu: AnyView? = isAdmin ? AnyView(
             Menu {
                 Button {
+                    guard model.acceptsAccountWork(work) else { return }
                     channelDraft = c.name
                     renamingChannel = c
                 } label: { Label("Rename", systemImage: "pencil") }
                 Button {
-                    Task { await model.setChannelRestricted(c, !restricted) }
+                    guard model.acceptsAccountWork(work) else { return }
+                    Task { guard model.acceptsAccountWork(work) else { return }; await model.setChannelRestricted(c, !restricted, expectedOwner: work?.owner) }
                 } label: {
                     Label("Admins only post", systemImage: restricted ? "checkmark" : "lock")
                 }
                 if !isGeneral {
                     Divider()
-                    Button(role: .destructive) { deletingChannel = c } label: { Label("Delete channel", systemImage: "trash") }
+                    Button(role: .destructive) { guard model.acceptsAccountWork(work) else { return }; deletingChannel = c } label: { Label("Delete channel", systemImage: "trash") }
                 }
             } label: {
                 Image(systemName: "ellipsis.circle")
@@ -2596,6 +2696,7 @@ struct ServerProfileView: View {
             .accessibilityLabel("Channel options")
         ) : nil
         return Button {
+            guard model.acceptsAccountWork(work) else { return }
             dismiss()
             model.open(channel: c)
         } label: {
@@ -2642,6 +2743,7 @@ struct ServerProfileView: View {
     }
 
     private func memberRow(_ m: ServerMember) -> some View {
+        let work = model.accountWork()
         let isMe = m.id == model.user?.id
         let title = isMe ? "\(m.displayName) (you)" : m.displayName
         // Owners manage everyone else; admins manage members only.
@@ -2650,18 +2752,30 @@ struct ServerProfileView: View {
             Menu {
                 if isOwner {
                     if m.role == "admin" {
-                        Button { Task { await model.setServerRole(serverId: serverId, userId: m.id, role: "member") } } label: {
+                        Button {
+                            guard model.acceptsAccountWork(work) else { return }
+                            Task {
+                                guard model.acceptsAccountWork(work) else { return }
+                                await model.setServerRole(serverId: serverId, userId: m.id, role: "member", expectedOwner: work?.owner)
+                            }
+                        } label: {
                             Label("Make member", systemImage: "person")
                         }
                     } else {
-                        Button { Task { await model.setServerRole(serverId: serverId, userId: m.id, role: "admin") } } label: {
+                        Button {
+                            guard model.acceptsAccountWork(work) else { return }
+                            Task {
+                                guard model.acceptsAccountWork(work) else { return }
+                                await model.setServerRole(serverId: serverId, userId: m.id, role: "admin", expectedOwner: work?.owner)
+                            }
+                        } label: {
                             Label("Make admin", systemImage: "person.badge.key")
                         }
                     }
                     Divider()
                 }
-                Button(role: .destructive) { removingMember = m } label: { Label("Remove", systemImage: "person.badge.minus") }
-                Button(role: .destructive) { banningMember = m } label: { Label("Ban", systemImage: "hand.raised") }
+                Button(role: .destructive) { guard model.acceptsAccountWork(work) else { return }; removingMember = m } label: { Label("Remove", systemImage: "person.badge.minus") }
+                Button(role: .destructive) { guard model.acceptsAccountWork(work) else { return }; banningMember = m } label: { Label("Ban", systemImage: "hand.raised") }
             } label: {
                 Image(systemName: "ellipsis.circle")
                     .font(theme.font(17))
@@ -2674,6 +2788,7 @@ struct ServerProfileView: View {
         let person = ProfilePerson(id: m.id, handle: m.handle, name: m.name, avatarUrl: m.avatarUrl,
                                    lastSeenAt: m.lastSeenAt, online: m.online, avatarColorIndex: m.avatarColorIndex)
         return Button {
+            guard model.acceptsAccountWork(work) else { return }
             model.showProfile(.user(person), in: profileHost)
         } label: {
             PaneRow(
@@ -2689,7 +2804,8 @@ struct ServerProfileView: View {
     // MARK: Open + invite (rule 6)
 
     private func openCard(_ server: Server) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        let work = model.accountWork()
+        return VStack(alignment: .leading, spacing: 8) {
             PaneCard(header: "Discovery", footer: "When open, anyone on Arbos can find this server by name and join without an invite link.") {
                 PaneRow(
                     title: "Open server",
@@ -2697,7 +2813,7 @@ struct ServerProfileView: View {
                     trailing: AnyView(
                         Toggle("", isOn: Binding(
                             get: { server.isOpen },
-                            set: { on in Task { await model.setServerOpen(serverId, open: on) } }
+                            set: { on in guard model.acceptsAccountWork(work) else { return }; Task { guard model.acceptsAccountWork(work) else { return }; await model.setServerOpen(serverId, open: on, expectedOwner: work?.owner) } }
                         ))
                         .labelsHidden()
                         .tint(theme.online)
@@ -2809,6 +2925,7 @@ struct GroupEditView: View {
     }
 
     var body: some View {
+        let work = model.accountWork()
         ZStack(alignment: .top) {
             theme.bg.ignoresSafeArea()
             VStack(spacing: 0) {
@@ -2816,11 +2933,11 @@ struct GroupEditView: View {
                     title: "Edit Group",
                     doneTitle: saving ? "Saving…" : "Done",
                     doneEnabled: !saving,
-                    onDone: { Task { await save() } }
+                    onDone: { guard let work, model.acceptsAccountWork(work) else { return }; Task { await save(work: work) } }
                 )
                 ScrollView(showsIndicators: false) {
                     VStack(alignment: .leading, spacing: 22) {
-                        EntityEditHero(onAvatar: { showAvatar = true }) {
+                        EntityEditHero(onAvatar: { guard model.acceptsAccountWork(work) else { return }; showAvatar = true }) {
                             AvatarCluster(
                                 members: clusterMembers,
                                 size: 72,
@@ -2871,7 +2988,7 @@ struct GroupEditView: View {
                         VStack(alignment: .leading, spacing: 8) {
                             EntitySectionHeader(title: "Appearance")
                             PaneCard {
-                                Button { showAvatar = true } label: {
+                                Button { guard model.acceptsAccountWork(work) else { return }; showAvatar = true } label: {
                                     PaneRow(title: "Avatar", chevron: true)
                                 }
                                 .buttonStyle(.plain)
@@ -2899,7 +3016,7 @@ struct GroupEditView: View {
             name = people?.title ?? ""
             descriptionText = people?.description ?? ""
             if openAvatarOnAppear {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showAvatar = true }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { guard model.acceptsAccountWork(work) else { return }; showAvatar = true }
             }
         }
         .navigationDestination(isPresented: $showAvatar) {
@@ -2908,12 +3025,14 @@ struct GroupEditView: View {
         }
     }
 
-    private func save() async {
+    private func save(work: AccountWork) async {
+        guard model.acceptsAccountWork(work) else { return }
         saving = true
+        defer { if model.accountLifetime.accepts(work.owner) { saving = false } }
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let desc = String(descriptionText.trimmingCharacters(in: .whitespacesAndNewlines).prefix(200))
-        let ok = await model.patchPeopleChat(chatId, title: trimmed, description: desc)
-        saving = false
+        let ok = await model.patchPeopleChat(chatId, title: trimmed, description: desc, expectedOwner: work.owner)
+        guard model.acceptsAccountWork(work) else { return }
         if ok { dismiss() }
     }
 }
@@ -2936,6 +3055,7 @@ struct ServerEditView: View {
     private var server: Server? { model.server(serverId) }
 
     var body: some View {
+        let work = model.accountWork()
         ZStack(alignment: .top) {
             theme.bg.ignoresSafeArea()
             VStack(spacing: 0) {
@@ -2943,12 +3063,12 @@ struct ServerEditView: View {
                     title: "Edit Server",
                     doneTitle: saving ? "Saving…" : "Done",
                     doneEnabled: !saving,
-                    onDone: { Task { await save() } }
+                    onDone: { guard let work, model.acceptsAccountWork(work) else { return }; Task { await save(work: work) } }
                 )
                 ScrollView(showsIndicators: false) {
                     if let server {
                         VStack(alignment: .leading, spacing: 22) {
-                            EntityEditHero(onAvatar: { showAvatar = true }) {
+                            EntityEditHero(onAvatar: { guard model.acceptsAccountWork(work) else { return }; showAvatar = true }) {
                                 ServerAvatar(server: server, size: PaneKit.heroAvatar)
                             }
                             .padding(.top, 12)
@@ -2969,7 +3089,7 @@ struct ServerEditView: View {
                             VStack(alignment: .leading, spacing: 8) {
                                 EntitySectionHeader(title: "Appearance")
                                 PaneCard {
-                                    Button { showAvatar = true } label: {
+                                    Button { guard model.acceptsAccountWork(work) else { return }; showAvatar = true } label: {
                                         PaneRow(title: "Avatar", chevron: true)
                                     }
                                     .buttonStyle(.plain)
@@ -2995,7 +3115,7 @@ struct ServerEditView: View {
         .onAppear {
             name = server?.name ?? ""
             if openAvatarOnAppear {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showAvatar = true }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { guard model.acceptsAccountWork(work) else { return }; showAvatar = true }
             }
         }
         .navigationDestination(isPresented: $showAvatar) {
@@ -3004,12 +3124,14 @@ struct ServerEditView: View {
         }
     }
 
-    private func save() async {
+    private func save(work: AccountWork) async {
+        guard model.acceptsAccountWork(work) else { return }
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { dismiss(); return }
         if trimmed == server?.name { dismiss(); return }
         saving = true
-        let ok = await model.renameServer(serverId, name: trimmed)
+        let ok = await model.renameServer(serverId, name: trimmed, expectedOwner: work.owner)
+        guard model.acceptsAccountWork(work) else { return }
         saving = false
         if ok { dismiss() }
     }
@@ -3343,6 +3465,7 @@ struct ChannelProfileView: View {
     private var isAdmin: Bool { server?.isAdmin ?? false }
 
     var body: some View {
+        let work = model.accountWork()
         ZStack(alignment: .top) {
             theme.bg.ignoresSafeArea()
             ScrollView {
@@ -3373,21 +3496,22 @@ struct ChannelProfileView: View {
             ProfileTopBar(screen: .channelPage) { EmptyView() }
         }
         .task {
+                guard model.acceptsAccountWork(work) else { return }
             if let t = model.openServerHookTab { tab = t; model.openServerHookTab = nil }
-            if let channel { await model.refreshServer(channel.serverId) }
+            if let channel { await model.refreshServer(channel.serverId, expectedOwner: work?.owner) }
         }
         .alert("Rename channel", isPresented: $showRename) {
             TextField("Channel name", text: $renameDraft)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
-            Button("Save") { if let c = channel { Task { _ = await model.renameChannel(c, name: renameDraft) } } }
+            Button("Save") { guard model.acceptsAccountWork(work) else { return }; if let c = channel { Task { guard model.acceptsAccountWork(work) else { return }; _ = await model.renameChannel(c, name: renameDraft, expectedOwner: work?.owner) } } }
             Button("Cancel", role: .cancel) { }
         } message: {
             Text("Letters, digits and dashes.")
         }
         .alert("Topic", isPresented: $showTopic) {
             TextField("What this channel is for", text: $topicDraft)
-            Button("Save") { if let c = channel { Task { await model.setChannelTopic(c, topic: topicDraft) } } }
+            Button("Save") { guard model.acceptsAccountWork(work) else { return }; if let c = channel { Task { guard model.acceptsAccountWork(work) else { return }; await model.setChannelTopic(c, topic: topicDraft, expectedOwner: work?.owner) } } }
             Button("Cancel", role: .cancel) { }
         }
         .confirm(ConfirmSpec(title: channel.map { "Delete #\($0.name)?" } ?? "Delete channel?",
@@ -3395,7 +3519,7 @@ struct ChannelProfileView: View {
                  isPresented: $confirmDelete) {
             // No `dismiss()`: the model leaves every screen about the channel itself,
             // this page included. Dismissing as well would pop the channel list too.
-            if let c = channel { Task { _ = await model.deleteChannel(c) } }
+            if let c = channel { Task { guard model.acceptsAccountWork(work) else { return }; _ = await model.deleteChannel(c, expectedOwner: work?.owner) } }
         }
     }
 
@@ -3415,10 +3539,11 @@ struct ChannelProfileView: View {
     }
 
     private func muteRow(_ channel: ServerChannel, title: String, subtitle: String?) -> AnyView {
-        AnyView(PaneRow(title: title, subtitle: subtitle, trailing: AnyView(
+        let work = model.accountWork()
+        return AnyView(PaneRow(title: title, subtitle: subtitle, trailing: AnyView(
             Toggle("", isOn: Binding(
                 get: { model.isChannelMuted(channel) },
-                set: { _ in model.toggleChannelMute(channel) }
+                set: { _ in guard model.acceptsAccountWork(work) else { return }; model.toggleChannelMute(channel) }
             )).labelsHidden().tint(theme.online)
         )))
     }
@@ -3443,13 +3568,16 @@ struct ChannelProfileView: View {
     }
 
     private func settingsSections(_ channel: ServerChannel, _ server: Server, restricted: Bool) -> [PaneSection] {
+        let work = model.accountWork()
         var identity: [AnyView] = []
         if isAdmin {
             identity.append(AnyView(Button {
+                guard model.acceptsAccountWork(work) else { return }
                 renameDraft = channel.name
                 showRename = true
             } label: { PaneRow(title: "Name", value: channel.name, chevron: true) }.buttonStyle(.plain)))
             identity.append(AnyView(Button {
+                guard model.acceptsAccountWork(work) else { return }
                 topicDraft = channel.topic ?? ""
                 showTopic = true
             } label: { PaneRow(title: "Topic", value: channel.topic ?? "Add a topic", chevron: true) }.buttonStyle(.plain)))
@@ -3465,7 +3593,7 @@ struct ChannelProfileView: View {
             behaviour.append(AnyView(PaneRow(title: "Admins only post", subtitle: "Members read", trailing: AnyView(
                 Toggle("", isOn: Binding(
                     get: { restricted },
-                    set: { on in Task { await model.setChannelRestricted(channel, on) } }
+                    set: { on in guard model.acceptsAccountWork(work) else { return }; Task { guard model.acceptsAccountWork(work) else { return }; await model.setChannelRestricted(channel, on, expectedOwner: work?.owner) } }
                 )).labelsHidden().tint(theme.online)
             ))))
         } else {
@@ -3481,9 +3609,11 @@ struct ChannelProfileView: View {
     }
 
     private func footerSections(_ channel: ServerChannel, _ server: Server) -> [PaneSection] {
+        let work = model.accountWork()
         let archived = channel.archived
         var rows: [AnyView] = [AnyView(Button {
-            Task { await model.archiveChannel(channel, !archived) }
+            guard model.acceptsAccountWork(work) else { return }
+            Task { guard model.acceptsAccountWork(work) else { return }; await model.archiveChannel(channel, !archived, expectedOwner: work?.owner) }
         } label: {
             PaneRow(leading: .tile(archived ? "tray.and.arrow.up" : "archivebox"),
                     title: archived ? "Unarchive channel" : "Archive channel",

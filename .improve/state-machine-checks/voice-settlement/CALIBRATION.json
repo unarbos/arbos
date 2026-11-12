@@ -1,0 +1,109 @@
+{
+  "policy": {
+    "total_delta_skip": "<= 0.000_001",
+    "voice_part_and_vision_part_admission": "> 0.000_001",
+    "credits_inner_admission": "finite and >= MIN_DEBIT_USD",
+    "MIN_DEBIT_USD": "0.000_001",
+    "order": "voice before vision; UTC day read after legacy init for each chargeable part",
+    "balance_policy": "same negative override/daily soft cap/remaining-positive-balance clamp",
+    "report_policy": "settlement tracks reported dollars; a report of150 can debit100",
+    "legacy_policy": "initialize only the first chargeable metered part; default0 leaves unfunded account"
+  },
+  "unchanged_constants": [
+    {
+      "file": "db_accounts.rs",
+      "name": "ACCOUNTS_SCHEMA",
+      "sha256": "c7845106ee00308ca374b7a610f112628023804e00095eb49305d4932ea6cabd"
+    },
+    {
+      "file": "db_accounts.rs",
+      "name": "KILL_SWITCH_KEY",
+      "sha256": "fd24e25ab46be4e06809535b24cf8811603a8e609a42a761b91b559cb15ce2d7"
+    },
+    {
+      "file": "db_accounts.rs",
+      "name": "USER_COLS",
+      "sha256": "e728e673656dd968f8f2d76ce7099b21e4296bcce74c339d4d05c7ef2ed6bd45"
+    },
+    {
+      "file": "db_voice.rs",
+      "name": "VOICE_SCHEMA",
+      "sha256": "b20260de82ef3600631e13e4a67f1fc1358774e3f20aa650031f4bc1619f0084"
+    },
+    {
+      "file": "db_voice.rs",
+      "name": "CHATTINESS_LEVELS",
+      "sha256": "cd8445962f085390b1dbd004f05682d3ab7509a8b69821acc8074b8423d76391"
+    },
+    {
+      "file": "db_voice.rs",
+      "name": "VOICE_COLS",
+      "sha256": "5e0a73380427d7ccbaa4b8a359a6bb5191da19587c72b419edb72ea336e5ea2a"
+    },
+    {
+      "file": "credits.rs",
+      "name": "MIN_DEBIT_USD",
+      "sha256": "2e3259064b7ebacd94bd7c47687ed1f21008857956bc8f8ce8a9489fc164ad57"
+    },
+    {
+      "file": "credits.rs",
+      "name": "METER_PERIOD",
+      "sha256": "a54be82bf4d5cd4ff72dcc1c054be9920aaee3605824cc05891e1ee7cd991179"
+    },
+    {
+      "file": "credits.rs",
+      "name": "UNLIMITED_WORDS",
+      "sha256": "c1cce58541c94a7e3cabc75a1347ef0ae9043ab256021c766a11d201f1c96d42"
+    },
+    {
+      "file": "credits.rs",
+      "name": "PROJECT_CAP_UNLIMITED",
+      "sha256": "18ed8a576ad1ba4699e90ca2a4663b17e109d4859d6b01a266b82002f47b97c5"
+    },
+    {
+      "file": "voice.rs",
+      "name": "PING_EVERY",
+      "sha256": "8cb9bcb3459e11ba0d1bdafdf2968cad3cbeb8e8f474255ac309b4570398badf"
+    },
+    {
+      "file": "voice.rs",
+      "name": "TOOL_WAIT",
+      "sha256": "213cae19abff4d4bc2a0612cccf3116e445a9cd3ae0715bb9f1f6feec3e17f09"
+    },
+    {
+      "file": "voice.rs",
+      "name": "CONTEXT_WAIT",
+      "sha256": "b4c9d2cfa02d708d9cece34c2d9b3ed9edb255a216f9d6de7c5a7aca1e8246cb"
+    },
+    {
+      "file": "voice.rs",
+      "name": "FRAME_MAX_BYTES",
+      "sha256": "664fd25625ed975069f032440bef88237ff1cfda764b00d9a496cdbf88eda926"
+    },
+    {
+      "file": "voice.rs",
+      "name": "CALL_LEAK_GUARD_MINUTES",
+      "sha256": "73adc029a4f4158564e6a271bdfb828e763accc8507c0ff50cf9389c35e190d9"
+    },
+    {
+      "file": "voice.rs",
+      "name": "INBOX_KEEP",
+      "sha256": "a4c8b1cee78b99aefa871c7f2a0242e71c08a9abda1a2f8cacd5f831feb8c31b"
+    },
+    {
+      "file": "voice.rs",
+      "name": "INBOX_TEXT_MAX",
+      "sha256": "0ee581a7fbf9c6c1156a729cb4f90fa791d7065aa8036bce9f47316c69311333"
+    },
+    {
+      "file": "voice.rs",
+      "name": "INBOX_WAIT_MAX_S",
+      "sha256": "8a5478e2c3e75a27cbc64a069db282ba12866cf7e014a1e4400f31fcf02a3d42"
+    },
+    {
+      "file": "voice.rs",
+      "name": "DISPATCH_FRESH_MS",
+      "sha256": "19947c52a1ac40b357a5507f19fa3a87fa500b06c086b8130a9a751c90902f27"
+    }
+  ]
+}

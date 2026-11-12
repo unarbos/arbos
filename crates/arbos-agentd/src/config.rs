@@ -655,6 +655,17 @@ impl Config {
         format!("http://127.0.0.1:{}", self.proxy_port)
     }
 
+    /// Local proxy credentials distinguish concurrent workers from the shared main pi child.
+    /// The real box credential is added by the stub, never forwarded from this local token.
+    pub fn model_proxy_token(&self, worker: Option<&str>) -> String {
+        use sha2::{Digest, Sha256};
+        let scope = worker
+            .map(|s| format!("worker:{s}"))
+            .unwrap_or_else(|| "main".into());
+        let digest = Sha256::digest(format!("model:{}:{scope}", self.mcp_token).as_bytes());
+        format!("arbos-model:{scope}:{}", hex::encode(digest))
+    }
+
     pub fn hook_base(&self) -> String {
         format!("http://127.0.0.1:{}", self.hook_port)
     }

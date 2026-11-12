@@ -509,6 +509,61 @@ impl Store {
 
     // ---- sessions and subagents ---------------------------------------------------------------
 
+    /// Resolve the logical session and its current run from durable workspace metadata.
+    /// Internal memory/decision calls use the same attribution as harness requests.
+    pub fn usage_context(&self, id: &str) -> Result<arbos_core::usage::UsageContext> {
+        use arbos_core::usage::UsageContext;
+        let mut context = UsageContext {
+            session_id: Some(id.to_owned()),
+            ..Default::default()
+        };
+        let path = if let Some(sub) = self.subagent(id)? {
+            let job = self.job_for_subagent(id)?;
+            // A worker can be woken by another chat. Its last run's input is the durable
+            // attribution; creation-time subagent metadata and an older job can be stale.
+            let origin: Option<String> = self.with(|c| {
+                c.query_row(
+                    "SELECT source FROM t3 WHERE thread_id = ?1 AND kind = 'user'
+                     AND json_extract(source, '$.chat_id') IS NOT NULL
+                     ORDER BY at DESC, rowid DESC LIMIT 1",
+                    params![id],
+                    |r| r.get(0),
+                )
+                .optional()
+            })?;
+            let origin = origin.and_then(|s| serde_json::from_str::<Value>(&s).ok());
+            context.chat_id = origin
+                .as_ref()
+                .and_then(|v| v.get("chat_id"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .or_else(|| job.as_ref().map(|j| j.chat_id.clone()))
+                .or(sub.chat_id);
+            context.parent_session_id = context.chat_id.clone();
+            context.turn_id = origin
+                .as_ref()
+                .and_then(|v| v.get("turn_id"))
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            context.job_id = match origin.as_ref().and_then(|v| v.get("job_id")) {
+                Some(value) => value.as_str().map(str::to_owned),
+                None => job
+                    .filter(|j| Some(&j.chat_id) == context.chat_id.as_ref())
+                    .map(|j| j.id),
+            };
+            self.session_path(id)?
+        } else {
+            context.chat_id = Some(id.to_owned());
+            self.chat(id)?.and_then(|c| c.pi_session_path)
+        };
+        context.session_run_id = path
+            .as_deref()
+            .and_then(|p| Path::new(p).file_stem())
+            .and_then(|s| s.to_str())
+            .map(str::to_owned);
+        Ok(context)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn upsert_session(
         &self,
@@ -1987,20 +2042,44 @@ impl Store {
         })
     }
 
-    /// Record the decision; returns false when the row was already decided (first decision wins).
+    /// Record the decision; returns false when already decided (first decision wins).
+    /// Active inline/polled callers must own the one-use grant before Approved is visible.
+    /// Deferred decisions retain it for the existing canonical re-run claim path.
     pub fn decide_approval(
         &self,
         id: &str,
         state: &str,
         decided_by: Option<&str>,
         reason: Option<&str>,
+        claim_grant: bool,
     ) -> Result<bool> {
+        if claim_grant && state != "approved" {
+            anyhow::bail!("only an approved decision can claim a grant");
+        }
         self.with(|c| {
-            c.execute(
+            let transaction = rusqlite::Transaction::new_unchecked(
+                c,
+                rusqlite::TransactionBehavior::Immediate,
+            )?;
+            let now = now_ms();
+            let decided = transaction.execute(
                 "UPDATE approvals SET state = ?2, decided_at = ?3, decided_by = ?4, reason = ?5 WHERE id = ?1 AND state = 'pending'",
-                params![id, state, now_ms(), decided_by, reason],
-            )
-            .map(|n| n > 0)
+                params![id, state, now, decided_by, reason],
+            )?;
+            if decided == 0 {
+                return Ok(false);
+            }
+            if claim_grant {
+                let claimed = transaction.execute(
+                    "UPDATE approvals SET grant_consumed_at = ?2 WHERE id = ?1 AND state = 'approved' AND grant_consumed_at IS NULL",
+                    params![id, now],
+                )?;
+                if claimed != 1 {
+                    return Err(rusqlite::Error::QueryReturnedNoRows);
+                }
+            }
+            transaction.commit()?;
+            Ok(true)
         })
     }
 

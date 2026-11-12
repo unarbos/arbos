@@ -108,41 +108,78 @@ fn advance_room_doc(
     Ok(())
 }
 
-/// What a pushed row does to the room's messages, read from the room's own doc.
-///
-/// A Loro update cannot be read on its own — it is a delta against history — so the payload is
-/// imported into the cached doc and the diff taken across the import. Three things follow from
-/// that, and all three are why this is one function holding one lock:
-///
-/// * The mirror of message ids must advance in the same locked section as the diff. Two sockets
-///   pushing at once would otherwise both diff against the same pre-image, and the second's
-///   deletions would name the first's messages.
-/// * The ops are in the cached doc before anything has authorised them. A caller that refuses
-///   the push must drop the cache (`Db` rows, not this doc, are the room's record), which is
-///   why the refusal path exists in the caller rather than here.
-/// * An import that fails leaves nothing to judge, so it is reported as unreadable rather than
-///   as "changed nothing".
-async fn push_message_changes(
+/// One admission owns its speculative Loro doc until its row is durably accepted.
+/// Readers can rebuild stored state while this value is private; no Loro clone escapes.
+struct PendingRoomPush<'a> {
+    room: &'a crate::state::Room,
+    room_name: &'a str,
+    cached: crate::state::RoomDocCache,
+    changes: arbos_core::doc::MessageChanges,
+    _admission: tokio::sync::MutexGuard<'a, ()>,
+}
+
+impl PendingRoomPush<'_> {
+    /// Consuming publication is legal only after a successful nonduplicate append.
+    fn commit(self, state: &AppState) -> anyhow::Result<()> {
+        if !self.changes.unreadable {
+            publish_room_doc(state, self.room, self.room_name, self.cached, |_| ())?;
+        }
+        Ok(())
+    }
+}
+
+/// Publish only durable state, retaining and advancing a reader's newer cache if present.
+/// A cold build may finish after another row was appended or another cache was published.
+fn publish_room_doc<T>(
     state: &AppState,
     room: &crate::state::Room,
     room_name: &str,
-    payload: &[u8],
-) -> anyhow::Result<arbos_core::doc::MessageChanges> {
-    {
-        let mut guard = room.doc_cache.lock().unwrap();
-        if let Some(cached) = guard.as_mut() {
-            advance_room_doc(state, room_name, cached)?;
-            return Ok(diff_pushed_row(cached, payload));
-        }
+    built: crate::state::RoomDocCache,
+    read: impl FnOnce(&crate::state::RoomDocCache) -> T,
+) -> anyhow::Result<T> {
+    let mut guard = room.doc_cache.lock().unwrap();
+    if guard.is_none() {
+        *guard = Some(built);
     }
-    let state_c = state.clone();
-    let name = room_name.to_owned();
-    let mut built = tokio::task::spawn_blocking(move || build_room_doc(&state_c, &name))
-        .await
-        .map_err(|e| anyhow::anyhow!("room doc rebuild: {e}"))??;
-    let changes = diff_pushed_row(&mut built, payload);
-    *room.doc_cache.lock().unwrap() = Some(built);
-    Ok(changes)
+    let cached = guard.as_mut().expect("room doc installed");
+    if let Err(error) = advance_room_doc(state, room_name, cached) {
+        *guard = None; // a failed incremental refresh must not leave a partial mirror
+        return Err(error);
+    }
+    Ok(read(cached))
+}
+
+/// Move the warm doc into one private admission; return it only after durable acceptance.
+/// The admission lease serializes message-id preimages through gates and author recording.
+async fn push_message_changes<'a>(
+    state: &AppState,
+    room: &'a crate::state::Room,
+    room_name: &'a str,
+    payload: &[u8],
+    admission: tokio::sync::MutexGuard<'a, ()>,
+) -> anyhow::Result<PendingRoomPush<'a>> {
+    let cached = room.doc_cache.lock().unwrap().take();
+    let mut cached = match cached {
+        Some(mut cached) => {
+            advance_room_doc(state, room_name, &mut cached)?;
+            cached
+        }
+        None => {
+            let state_c = state.clone();
+            let name = room_name.to_owned();
+            tokio::task::spawn_blocking(move || build_room_doc(&state_c, &name))
+                .await
+                .map_err(|e| anyhow::anyhow!("room doc rebuild: {e}"))??
+        }
+    };
+    let changes = diff_pushed_row(&mut cached, payload);
+    Ok(PendingRoomPush {
+        room,
+        room_name,
+        cached,
+        changes,
+        _admission: admission,
+    })
 }
 
 /// [`push_message_changes`] over a cache already in step with the room's stored rows.
@@ -190,9 +227,9 @@ async fn room_version_vector(
     let built = tokio::task::spawn_blocking(move || build_room_doc(&state_c, &name))
         .await
         .map_err(|e| anyhow::anyhow!("room doc rebuild: {e}"))??;
-    let vv = encode_vv(&built.doc.oplog_vv());
-    *room.doc_cache.lock().unwrap() = Some(built);
-    Ok(vv)
+    publish_room_doc(state, room, room_name, built, |cached| {
+        encode_vv(&cached.doc.oplog_vv())
+    })
 }
 
 /// Version vector of the room's stored doc (same cache as [`room_version_vector`]).
@@ -213,9 +250,9 @@ async fn room_oplog_vv(
     let built = tokio::task::spawn_blocking(move || build_room_doc(&state_c, &name))
         .await
         .map_err(|e| anyhow::anyhow!("room doc rebuild: {e}"))??;
-    let vv = built.doc.oplog_vv();
-    *room.doc_cache.lock().unwrap() = Some(built);
-    Ok(vv)
+    publish_room_doc(state, room, room_name, built, |cached| {
+        cached.doc.oplog_vv()
+    })
 }
 
 /// The newest `n` message rows of a room's stored doc (projected JSON, oldest first), from the
@@ -246,9 +283,7 @@ pub async fn room_tail_rows(
     let built = tokio::task::spawn_blocking(move || build_room_doc(&state_c, &name))
         .await
         .map_err(|e| anyhow::anyhow!("room doc rebuild: {e}"))??;
-    let rows = tail(&built.doc);
-    *room.doc_cache.lock().unwrap() = Some(built);
-    Ok(rows)
+    publish_room_doc(state, &room, room_name, built, |cached| tail(&cached.doc))
 }
 
 /// Per-socket row ordering (see `run`).
@@ -722,9 +757,12 @@ async fn handle_frame(
                     "history heal: a device pushed ops the relay lacked"
                 );
             }
+            // Serialize the existing duplicate checks with every prepared admission.
+            let admission = room.push_admission.lock().await;
             // A batch id the room already stored is a dup before the people gates — no rate
             // event, no store, no broadcast.
             if let Some(seq) = state.db.row_seq_for_batch(room_name, &p.batch_id)? {
+                drop(admission);
                 sink.send(frame(
                     FrameType::Ack,
                     json!({ "batchId": p.batch_id, "seq": seq, "dup": true }),
@@ -739,6 +777,7 @@ async fn handle_frame(
                 if let Ok(vv) = room_oplog_vv(state, room, room_name).await {
                     if arbos_core::doc::update_covered_by(&f.payload, &vv) {
                         let seq = state.db.room_state(room_name).map(|s| s.head).unwrap_or(0);
+                        drop(admission);
                         sink.send(frame(
                             FrameType::Ack,
                             json!({ "batchId": p.batch_id, "seq": seq, "dup": true }),
@@ -758,24 +797,22 @@ async fn handle_frame(
                 .rsplit_once('/')
                 .map(|(_, c)| c)
                 .unwrap_or(room_name);
-            let changes = push_message_changes(state, room, room_name, &f.payload).await?;
+            let pending =
+                push_message_changes(state, room, room_name, &f.payload, admission).await?;
             let (carries_new_message, attributed) = match crate::push_guard::check_push(
                 state,
                 principal,
                 project_id,
                 chat_of_room,
                 p.heal,
-                &changes,
+                &pending.changes,
             ) {
                 crate::push_guard::PushCheck::Allow {
                     carries_new_message,
                     attributed,
                 } => (carries_new_message, attributed),
                 crate::push_guard::PushCheck::Refuse { code, detail } => {
-                    // The refused ops are in the cached doc now and in no stored row. The
-                    // rows are the room's record, so drop the cache rather than serve readers
-                    // a doc the rows do not account for.
-                    *room.doc_cache.lock().unwrap() = None;
+                    drop(pending); // discard private speculation and release admission before I/O
                     tracing::warn!(
                         %room_name, %device, code, detail = %detail, batch_id = %p.batch_id,
                         "room push refused"
@@ -804,6 +841,7 @@ async fn handle_frame(
                 match people::on_room_push(state, principal, chat_id) {
                     Ok(owners) => wake_owners = owners,
                     Err(r) => {
+                        drop(pending);
                         sink.send(push_refused_frame(&r, &p.batch_id)).await?;
                         return Ok(());
                     }
@@ -824,6 +862,11 @@ async fn handle_frame(
                 {
                     tracing::warn!(%room_name, %message_id, error = %e, "recording the author failed");
                 }
+            }
+            if dup {
+                drop(pending); // another stored row, not these speculative bytes
+            } else {
+                pending.commit(state)?;
             }
             sink.send(frame(
                 FrameType::Ack,
@@ -921,6 +964,11 @@ async fn handle_frame(
                                     .insert(u, arbos_core::ids::now_ms());
                             }
                             boxes::ensure_awake_project(state, project_id, "send").await;
+                            if room_name.rsplit_once('/').map(|(_, c)| c)
+                                == Some(PROJECT_DOC_CHAT_ID)
+                            {
+                                boxes::after_project_doc_row(state, room, project_id);
+                            }
                         }
                     }
                 }
@@ -932,13 +980,27 @@ async fn handle_frame(
             if let Principal::Device { id, .. } = principal {
                 let focused = f.header.get("focused_chat").and_then(|v| v.as_str());
                 crate::notify::set_focus(state, id, focused).await;
-                // Presence counts as "seen" (last_seen_at / online), at most one write a minute.
-                let now = arbos_core::ids::now_ms();
-                let mut seen = state.presence_seen.lock().await;
-                if seen.get(id).is_none_or(|t| now - t >= 60_000) {
-                    seen.insert(id.clone(), now);
-                    let _ = state.db.touch_device(id);
+                // docs/box-scaling.md §4.2: a chat on screen asks its cold box back.
+                if focused.is_some() {
+                    crate::boxd::prefetch_for_project(state, project_id).await;
+                    // §4.2: and wakes a sleeping one while its node has room to spare.
+                    if project_id != people::PEOPLE_PROJECT {
+                        crate::boxd::wake_for_focus(state, project_id).await;
+                    }
                 }
+                // §4.2: typing in an agent's chat wakes its sleeping box ahead of the message.
+                if f.header.get("typing").and_then(|v| v.as_bool()) == Some(true)
+                    && project_id != people::PEOPLE_PROJECT
+                {
+                    crate::boxd::wake_for_typing(state, project_id).await;
+                }
+                // Presence counts as "seen" (last_seen_at / online). Stamped in memory here;
+                // `flush_presence` writes every device's stamp in one transaction.
+                state
+                    .presence_seen
+                    .lock()
+                    .await
+                    .insert(id.clone(), arbos_core::ids::now_ms());
             }
             let out = Frame::new(FrameType::Presence, f.header, f.payload).encode();
             let _ = room.tx.send(RoomBroadcast {
@@ -1354,12 +1416,54 @@ mod refusal_frame_tests {
     }
 }
 
+/// How often presence stamps reach `devices.last_seen_at`.
+///
+/// Not free to raise: a person reads as online for `people::ONLINE_MS` (90 s) after the newest
+/// stamp in that column, and presence frames come every 15 s, so this plus one frame has to
+/// stay under it. Going past 60 s means answering `online` from `presence_seen` first.
+const PRESENCE_FLUSH: Duration = Duration::from_secs(60);
+
+/// Write every presence stamp newer than `since` to `devices.last_seen_at`, all in one
+/// transaction (2,500 sockets used to be 2,500 single-row writes a minute, each one queued
+/// ahead of some room's PUSH). Returns how many devices were written.
+pub async fn flush_presence(state: &AppState, since: i64) -> usize {
+    let seen: Vec<(String, i64)> = state
+        .presence_seen
+        .lock()
+        .await
+        .iter()
+        .filter(|(_, at)| **at > since)
+        .map(|(id, at)| (id.clone(), *at))
+        .collect();
+    if seen.is_empty() {
+        return 0;
+    }
+    // A failed flush loses nothing that matters: the next frame stamps the device again.
+    if let Err(e) = state.db.touch_devices(&seen) {
+        tracing::warn!(error = %e, devices = seen.len(), "presence flush failed");
+    }
+    seen.len()
+}
+
 /// Grace-period sweeper: a box socket that stays gone marks the project asleep (crdt-sync §8.5).
+/// Also the presence flush ([`flush_presence`]).
 pub async fn spawn_sweeper(state: AppState) {
+    let presence = state.clone();
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_secs(5)).await;
             boxes::sweep_box_liveness(&state).await;
+        }
+    });
+    tokio::spawn(async move {
+        let mut since = 0;
+        loop {
+            tokio::time::sleep(PRESENCE_FLUSH).await;
+            // Taken before the flush reads the map, so a stamp that lands meanwhile is
+            // written by the next one rather than skipped.
+            let now = arbos_core::ids::now_ms();
+            flush_presence(&presence, since).await;
+            since = now;
         }
     });
 }
@@ -1584,6 +1688,106 @@ mod ordering_tests {
 
     /// #1347: a planned restart tells every room socket `restart_soon`, then closes it with 1012
     /// (not a dropped stream), drains to zero, and a socket that arrives mid-drain gets 1012 at once.
+    /// A device's row into a project doc the box holds no socket on (a settings change while
+    /// the box has closed the room for being idle) queues the push that reopens it; with the
+    /// box on the room it arrives live and nothing is queued.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_device_row_into_a_project_doc_without_a_box_socket_queues_its_reopen_push() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 1);
+        let project = project_of(&state, &alice, "Doc");
+        let (_, token) = device_with_token(&state, &alice);
+        let addr = serve(state.clone()).await;
+        let doc = arbos_core::wire::PROJECT_DOC_CHAT_ID;
+        let (ws, _) = tokio_tungstenite::connect_async(format!(
+            "ws://{addr}/room/{project}/{doc}?token={token}"
+        ))
+        .await
+        .unwrap();
+        let (mut sink, mut stream) = ws.split();
+        sink.send(TMsg::Binary(
+            Frame::new(
+                FrameType::Hello,
+                json!({ "cursor": 0, "device": "dev:w", "room": format!("{project}/{doc}"), "proto": arbos_core::PROTO_VERSION }),
+                bytes::Bytes::new(),
+            )
+            .encode(),
+        ))
+        .await
+        .unwrap();
+        let _ = state.db.take_pushes(&project).unwrap();
+        let opens = |state: &AppState| {
+            state
+                .db
+                .take_pushes(&project)
+                .unwrap()
+                .into_iter()
+                .filter(|(_, k, _)| k == crate::boxes::PROJECT_DOC_OPEN_PUSH)
+                .count()
+        };
+        for (n, expect) in [(1, 1), (2, 0)] {
+            sink.send(TMsg::Binary(
+                Frame::new(
+                    FrameType::Push,
+                    json!({ "batchId": format!("b{n}") }),
+                    bytes::Bytes::from_static(b"row"),
+                )
+                .encode(),
+            ))
+            .await
+            .unwrap();
+            // Frames are handled in order on the socket task, so the probe's answer means the
+            // row before it has been handled in full (the ack alone is sent mid-way).
+            sink.send(TMsg::Binary(
+                Frame::new(FrameType::Probe, json!({}), bytes::Bytes::new()).encode(),
+            ))
+            .await
+            .unwrap();
+            let handled = tokio::time::timeout(Duration::from_secs(10), async {
+                while let Some(Ok(m)) = stream.next().await {
+                    if decode(m).is_some_and(|f| f.ty == FrameType::ProbeOk) {
+                        return true;
+                    }
+                }
+                false
+            })
+            .await
+            .unwrap_or(false);
+            assert!(handled, "row {n} handled");
+            assert_eq!(opens(&state), expect, "reopen pushes after row {n}");
+            // The box joins the room before the second row.
+            state
+                .room(&format!("{project}/{doc}"))
+                .await
+                .box_joined(&alice);
+        }
+    }
+
+    /// Presence stamps reach `last_seen_at` through the batched flush: only the ones newer than
+    /// the last flush are written, and a stamp never moves a device back behind a later HTTP
+    /// call's `touch_device`.
+    #[tokio::test]
+    async fn presence_stamps_are_flushed_in_a_batch_and_never_move_a_device_back() {
+        let state = test_state(AuthMode::Github);
+        let (alice, dev) = person(&state, 1);
+        let Principal::Device { id, .. } = dev else {
+            unreachable!()
+        };
+        let t = now_ms() + 60_000;
+        state.presence_seen.lock().await.insert(id.clone(), t);
+        assert_eq!(super::flush_presence(&state, 0).await, 1);
+        assert_eq!(state.db.user_last_seen(&alice).unwrap(), Some(t));
+        assert_eq!(
+            super::flush_presence(&state, t).await,
+            0,
+            "nothing new since"
+        );
+
+        state.presence_seen.lock().await.insert(id, t - 500);
+        assert_eq!(super::flush_presence(&state, t - 1_000).await, 1);
+        assert_eq!(state.db.user_last_seen(&alice).unwrap(), Some(t));
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn planned_restart_notifies_then_closes_room_sockets_with_1012() {
         let state = test_state(AuthMode::Github);
@@ -2436,6 +2640,17 @@ mod covered_push_tests {
         device: &str,
         batches: &[(String, Vec<u8>)],
     ) -> Vec<Frame> {
+        push_after_catchup_with_heal(addr, room, token, device, batches, false).await
+    }
+
+    async fn push_after_catchup_with_heal(
+        addr: SocketAddr,
+        room: &str,
+        token: &str,
+        device: &str,
+        batches: &[(String, Vec<u8>)],
+        heal: bool,
+    ) -> Vec<Frame> {
         let url = format!("ws://{addr}/room/{room}?token={token}");
         let (ws, _) = tokio_tungstenite::connect_async(url).await.unwrap();
         let (mut sink, mut stream) = ws.split();
@@ -2484,7 +2699,7 @@ mod covered_push_tests {
             sink.send(TMsg::Binary(
                 Frame::new(
                     FrameType::Push,
-                    json!({ "batchId": batch_id }),
+                    json!({ "batchId": batch_id, "heal": heal }),
                     bytes::Bytes::from(bytes.clone()),
                 )
                 .encode(),
@@ -2726,6 +2941,476 @@ mod covered_push_tests {
         assert_ne!(vv1, vv_cached);
         // And it equals encoding the writer's own vv once the room holds the same ops.
         assert_eq!(vv_cached, encode_vv(&doc.oplog_vv()));
+    }
+    async fn prepare_push<'a>(
+        state: &AppState,
+        room: &'a crate::state::Room,
+        name: &'a str,
+        payload: &[u8],
+    ) -> super::PendingRoomPush<'a> {
+        let admission = room.push_admission.lock().await;
+        super::push_message_changes(state, room, name, payload, admission)
+            .await
+            .unwrap()
+    }
+
+    fn speculative_fixture(state: &AppState) -> (String, String, String, Vec<u8>) {
+        let (alice, _) = person(state, 1);
+        let (bob, _) = person(state, 2);
+        let chat = dm(state, &alice, &bob);
+        let room = format!("people/{chat}");
+        let token = device_token(state, &alice);
+        let writer = ChatDoc::new(Some(71), false);
+        let before = writer.oplog_vv();
+        writer.init_meta(&chat, "people", 1);
+        writer
+            .append_user_message(
+                "m-seed",
+                "synthetic history",
+                "dev:bob",
+                &UserMessageOpts {
+                    sender: Some(format!("user:{bob}")),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        state
+            .db
+            .append_row(
+                &room,
+                "dev:bob",
+                "seed",
+                &writer.export_updates_since(&before),
+            )
+            .unwrap();
+        state
+            .db
+            .record_message_author(&chat, "m-seed", &format!("user:{bob}"))
+            .unwrap();
+        let before = writer.oplog_vv();
+        writer
+            .append_user_message(
+                "m-new",
+                "synthetic pending",
+                "dev:alice",
+                &UserMessageOpts {
+                    sender: Some(format!("user:{alice}")),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        (alice, room, token, writer.export_updates_since(&before))
+    }
+
+    fn fill_synthetic_rate_window(state: &AppState, alice: &str) {
+        for _ in 0..100 {
+            assert!(state
+                .db
+                .rate_check_and_note(alice, "msg", 60_000, 100)
+                .unwrap());
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn speculative_refusal_cannot_be_reclassified_as_history() {
+        let state = test_state(AuthMode::Github);
+        let (alice, name, token, payload) = speculative_fixture(&state);
+        fill_synthetic_rate_window(&state, &alice);
+        let room = state.room(&name).await;
+        // Real other subscribers keep the cache warm; last-socket cleanup must not hide a refusal.
+        let _keep_cache = room.tx.subscribe();
+        let addr = serve(state.clone()).await;
+        let first = push_after_catchup_with_heal(
+            addr,
+            &name,
+            &token,
+            "dev:alice",
+            &[("refused-first".into(), payload.clone())],
+            true,
+        )
+        .await;
+        assert_eq!(first[0].ty, FrameType::Error);
+        assert_eq!(first[0].header["code"], "rate_limited");
+        assert_eq!(state.db.room_state(&name).unwrap().head, 1);
+        let second = push_after_catchup_with_heal(
+            addr,
+            &name,
+            &token,
+            "dev:alice",
+            &[("refused-again".into(), payload)],
+            true,
+        )
+        .await;
+        assert_eq!(
+            second[0].ty,
+            FrameType::Error,
+            "the same refused ops are still a new message, not stored history: {}",
+            second[0].header
+        );
+        assert_eq!(second[0].header["code"], "rate_limited");
+        assert_eq!(state.db.room_state(&name).unwrap().head, 1);
+        assert_eq!(state.db.rate_count(&alice, "msg", 60_000).unwrap(), 100);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn speculative_refusal_keeps_cache_equal_to_stored_doc() {
+        let state = test_state(AuthMode::Github);
+        let (alice, name, token, payload) = speculative_fixture(&state);
+        fill_synthetic_rate_window(&state, &alice);
+        let room = state.room(&name).await;
+        let _keep_cache = room.tx.subscribe();
+        let addr = serve(state.clone()).await;
+        let frames = push_after_catchup(
+            addr,
+            &name,
+            &token,
+            "dev:alice",
+            &[("refused".into(), payload)],
+        )
+        .await;
+        assert_eq!(frames[0].ty, FrameType::Error);
+        assert_eq!(frames[0].header["code"], "rate_limited");
+        let cached = super::room_version_vector(&state, &room, &name)
+            .await
+            .unwrap();
+        let stored = super::build_room_doc(&state, &name).unwrap();
+        assert_eq!(
+            cached,
+            encode_vv(&stored.doc.oplog_vv()),
+            "a refused push must never become the room's advertised stored version"
+        );
+        assert_eq!(state.db.room_state(&name).unwrap().head, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn speculative_inflight_cache_is_not_visible_to_other_readers() {
+        let state = test_state(AuthMode::Github);
+        let (_, name, _, payload) = speculative_fixture(&state);
+        let room = state.room(&name).await;
+        let before = super::room_version_vector(&state, &room, &name)
+            .await
+            .unwrap();
+        // Pause at the actual production preparation/authorization boundary by owning its result.
+        let pending = prepare_push(&state, &room, &name, &payload).await;
+        let visible = super::room_version_vector(&state, &room, &name)
+            .await
+            .unwrap();
+        assert_eq!(
+            visible, before,
+            "another reader must not see ops which have no durable admission"
+        );
+        let peer = room
+            .doc_cache
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .doc
+            .doc
+            .peer_id();
+        drop(pending);
+        assert_eq!(
+            room.doc_cache
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .doc
+                .doc
+                .peer_id(),
+            peer
+        );
+        assert_eq!(state.db.room_state(&name).unwrap().head, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn speculative_preparations_hold_one_admission_lease() {
+        let state = test_state(AuthMode::Github);
+        let (_, name, _, payload) = speculative_fixture(&state);
+        let room = state.room(&name).await;
+        let pending = prepare_push(&state, &room, &name, &payload).await;
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let (second_state, second_room, second_name) = (state.clone(), room.clone(), name.clone());
+        let second = tokio::spawn(async move {
+            let _ = started_tx.send(());
+            let prepared = prepare_push(&second_state, &second_room, &second_name, &payload).await;
+            let _ = ready_tx.send(());
+            drop(prepared);
+        });
+        started_rx.await.unwrap();
+        let raced = tokio::time::timeout(Duration::from_millis(50), ready_rx)
+            .await
+            .is_ok();
+        drop(pending);
+        second.await.unwrap();
+        assert!(
+            !raced,
+            "a second preparation cannot authorize against an uncommitted pre-image"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn speculative_aborted_waiter_preserves_owner_and_releases_its_queue_slot() {
+        let state = test_state(AuthMode::Github);
+        let (_, name, _, payload) = speculative_fixture(&state);
+        let room = state.room(&name).await;
+        let pending = prepare_push(&state, &room, &name, &payload).await;
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (wait_state, wait_room, wait_name, wait_payload) =
+            (state.clone(), room.clone(), name.clone(), payload.clone());
+        let waiter = tokio::spawn(async move {
+            let _ = started_tx.send(());
+            let prepared = prepare_push(&wait_state, &wait_room, &wait_name, &wait_payload).await;
+            drop(prepared);
+        });
+        started_rx.await.unwrap();
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+        assert!(
+            room.push_admission.try_lock().is_err(),
+            "a canceled waiter cannot release the active lease"
+        );
+        drop(pending);
+        let next = tokio::time::timeout(
+            Duration::from_secs(1),
+            prepare_push(&state, &room, &name, &payload),
+        )
+        .await
+        .unwrap();
+        drop(next);
+        assert!(room.push_admission.try_lock().is_ok());
+    }
+
+    fn append_other_durable_row(state: &AppState, name: &str) {
+        let writer = super::build_room_doc(state, name).unwrap().doc;
+        let before = writer.oplog_vv();
+        writer
+            .append_user_message(
+                "m-other",
+                "synthetic intervening history",
+                "dev:relay",
+                &UserMessageOpts::default(),
+            )
+            .unwrap();
+        state
+            .db
+            .append_row(
+                name,
+                "dev:relay",
+                "intervening",
+                &writer.export_updates_since(&before),
+            )
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn speculative_commit_refreshes_every_intervening_durable_row() {
+        let state = test_state(AuthMode::Github);
+        let (_, name, _, payload) = speculative_fixture(&state);
+        let room = state.room(&name).await;
+        let pending = prepare_push(&state, &room, &name, &payload).await;
+        // Notice/import paths can append without the websocket admission lease.
+        append_other_durable_row(&state, &name);
+        let (seq, dup) = state
+            .db
+            .append_row(&name, "dev:alice", "accepted", &payload)
+            .unwrap();
+        assert_eq!(seq, 3);
+        assert!(!dup);
+        pending.commit(&state).unwrap();
+        let stored = super::build_room_doc(&state, &name).unwrap();
+        let guard = room.doc_cache.lock().unwrap();
+        let cached = guard.as_ref().unwrap();
+        assert_eq!(cached.key, (3, 0));
+        assert_eq!(
+            encode_vv(&cached.doc.oplog_vv()),
+            encode_vv(&stored.doc.oplog_vv())
+        );
+        assert_eq!(cached.message_ids, cached.doc.message_identities());
+        assert!(cached.message_ids.iter().any(|(id, _)| id == "m-new"));
+        assert!(cached.message_ids.iter().any(|(id, _)| id == "m-other"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn speculative_late_commit_and_cold_reader_preserve_a_newer_published_cache() {
+        let state = test_state(AuthMode::Github);
+        let (_, name, _, payload) = speculative_fixture(&state);
+        let room = state.room(&name).await;
+        let old_reader = super::build_room_doc(&state, &name).unwrap();
+        let pending = prepare_push(&state, &room, &name, &payload).await;
+        state
+            .db
+            .append_row(&name, "dev:alice", "accepted", &payload)
+            .unwrap();
+        append_other_durable_row(&state, &name);
+        let newer = super::build_room_doc(&state, &name).unwrap();
+        let peer = newer.doc.doc.peer_id();
+        let vv = encode_vv(&newer.doc.oplog_vv());
+        *room.doc_cache.lock().unwrap() = Some(newer);
+        let key =
+            super::publish_room_doc(&state, &room, &name, old_reader, |cached| cached.key).unwrap();
+        assert_eq!(key, (3, 0));
+        assert_eq!(
+            room.doc_cache
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .doc
+                .doc
+                .peer_id(),
+            peer
+        );
+        pending.commit(&state).unwrap();
+        let guard = room.doc_cache.lock().unwrap();
+        let cached = guard.as_ref().unwrap();
+        assert_eq!(cached.key, (3, 0));
+        assert_eq!(
+            cached.doc.doc.peer_id(),
+            peer,
+            "late publication must retain the newer cache object"
+        );
+        assert_eq!(encode_vv(&cached.doc.oplog_vv()), vv);
+    }
+
+    /// Seeded finite native laws over the actual Loro/SQLite/owned-admission boundary.
+    /// This supplements the actual socket authorization REDs; it is not an enum/model copy.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn speculative_seeded_native_laws_preserve_durable_visibility_and_replay() {
+        let mut seed = 0x05ee_d513_u64;
+        let (mut accepted, mut refused) = (0, 0);
+        for case in 0..32 {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let reject = seed & 1 == 0;
+            let extra = ((seed >> 4) % 4) as usize;
+            let replays = 1 + ((seed >> 9) % 3);
+            let state = test_state(AuthMode::Github);
+            let (_, name, _, payload) = speculative_fixture(&state);
+            let room = state.room(&name).await;
+            let old_reader = super::build_room_doc(&state, &name).unwrap();
+            let stored_before = encode_vv(&old_reader.doc.oplog_vv());
+            let pending = prepare_push(&state, &room, &name, &payload).await;
+            assert_eq!(
+                super::room_version_vector(&state, &room, &name)
+                    .await
+                    .unwrap(),
+                stored_before,
+                "uncommitted visibility, case={case} seed={seed}"
+            );
+            if reject {
+                refused += 1;
+                drop(pending);
+                assert_eq!(
+                    super::room_version_vector(&state, &room, &name)
+                        .await
+                        .unwrap(),
+                    stored_before,
+                    "refused visibility, case={case} seed={seed}"
+                );
+            } else {
+                accepted += 1;
+                for index in 0..extra {
+                    let writer = super::build_room_doc(&state, &name).unwrap().doc;
+                    let before = writer.oplog_vv();
+                    writer
+                        .append_user_message(
+                            &format!("m-generated-{index}"),
+                            "synthetic generated history",
+                            "dev:relay",
+                            &UserMessageOpts::default(),
+                        )
+                        .unwrap();
+                    state
+                        .db
+                        .append_row(
+                            &name,
+                            "dev:relay",
+                            &format!("generated-{index}"),
+                            &writer.export_updates_since(&before),
+                        )
+                        .unwrap();
+                }
+                let (seq, duplicate) = state
+                    .db
+                    .append_row(&name, "dev:alice", "generated-accepted", &payload)
+                    .unwrap();
+                assert!(!duplicate);
+                pending.commit(&state).unwrap();
+                for _ in 0..replays {
+                    assert_eq!(
+                        state
+                            .db
+                            .append_row(&name, "dev:alice", "generated-accepted", &payload)
+                            .unwrap(),
+                        (seq, true),
+                        "durable replay, case={case} seed={seed}"
+                    );
+                }
+            }
+            let peer = room
+                .doc_cache
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .doc
+                .doc
+                .peer_id();
+            super::publish_room_doc(&state, &room, &name, old_reader, |_| ()).unwrap();
+            let stored = super::build_room_doc(&state, &name).unwrap();
+            let guard = room.doc_cache.lock().unwrap();
+            let cached = guard.as_ref().unwrap();
+            assert_eq!(
+                cached.doc.doc.peer_id(),
+                peer,
+                "stale publication, case={case} seed={seed}"
+            );
+            assert_eq!(cached.key, stored.key);
+            assert_eq!(
+                encode_vv(&cached.doc.oplog_vv()),
+                encode_vv(&stored.doc.oplog_vv()),
+                "durable completeness, case={case} seed={seed}"
+            );
+            assert_eq!(
+                cached.message_ids,
+                cached.doc.message_identities(),
+                "mirror identity, case={case} seed={seed}"
+            );
+        }
+        assert_eq!((accepted, refused), (16, 16));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn speculative_authorized_heal_still_commits() {
+        let state = test_state(AuthMode::Github);
+        let (alice, name, token, payload) = speculative_fixture(&state);
+        let room = state.room(&name).await;
+        let _keep_cache = room.tx.subscribe();
+        let addr = serve(state.clone()).await;
+        let frames = push_after_catchup_with_heal(
+            addr,
+            &name,
+            &token,
+            "dev:alice",
+            &[("authorized".into(), payload)],
+            true,
+        )
+        .await;
+        assert_eq!(frames[0].ty, FrameType::Ack);
+        assert_eq!(state.db.room_state(&name).unwrap().head, 2);
+        let chat = name.strip_prefix("people/").unwrap();
+        assert_eq!(
+            state.db.message_author(chat, "m-new").unwrap().as_deref(),
+            Some(format!("user:{alice}").as_str())
+        );
+        let cached = super::room_version_vector(&state, &room, &name)
+            .await
+            .unwrap();
+        let stored = super::build_room_doc(&state, &name).unwrap();
+        assert_eq!(cached, encode_vv(&stored.doc.oplog_vv()));
     }
 }
 

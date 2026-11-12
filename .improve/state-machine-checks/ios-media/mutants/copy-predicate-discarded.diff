@@ -1,0 +1,11 @@
+--- a/apps/ios/Arbos/Arbos/UI/MessagePasteboard.swift
++++ b/apps/ios/Arbos/Arbos/UI/MessagePasteboard.swift
+@@ -280,7 +280,7 @@
+             notice = Notice(text: attachment.blobRef?.hasPrefix("local:") == true ? "Still uploading — try again in a moment" : "Nothing to copy")
+             return false
+         }
+-        return await copy(text: "", attachments: [attachment], slot: slot, isCurrent: isCurrent)
++        return await copy(text: "", attachments: [attachment], slot: slot, isCurrent: { true })
+     }
+ 
+     @MainActor

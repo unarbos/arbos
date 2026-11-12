@@ -22,7 +22,7 @@ struct MessagePush {
     let chatId: String
     let projectId: String
     let title: String
-    let body: String
+    private(set) var body: String
     let senderKind: String
     let senderId: String
     let senderName: String
@@ -39,7 +39,11 @@ struct MessagePush {
     /// `dm` | `group` | `project` | `channel` (`chat_kind`; an older relay sends none).
     let chatKind: String
     /// The message alone (`text`), for the intent's content when the body carries "Sender: ".
-    let text: String?
+    private(set) var text: String?
+    /// The encrypted event this alert announces and its room (`matrix`), when the relay could
+    /// not read the message and said only that there is one: the notification extension
+    /// reads it on the device (phase 5).
+    let sealed: (roomId: String, event: String)?
     /// Tokenised URL of the group picture (app-only: the extension has no relay token and
     /// draws the group's initials instead).
     let groupImageUrl: String?
@@ -71,6 +75,24 @@ struct MessagePush {
         chatKind = (userInfo["chat_kind"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? (groupName == nil ? "dm" : "group")
         text = (userInfo["text"] as? String).flatMap { $0.isEmpty ? nil : $0 }
         groupImageUrl = (userInfo["chat_image_url"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        let matrix = userInfo["matrix"] as? [String: Any] ?? [:]
+        if let room = matrix["room_id"] as? String, room.hasPrefix("!"), room.utf8.count <= 255,
+           let event = matrix["event"] as? [String: Any],
+           let json = try? JSONSerialization.data(withJSONObject: event) {
+            sealed = (room, String(decoding: json, as: UTF8.self))
+        } else {
+            sealed = nil
+        }
+    }
+
+    /// Say `words` where the alert said only that there is a message.
+    mutating func show(_ words: String) {
+        if let placeholder = text, body.hasSuffix(placeholder) {
+            body = body.dropLast(placeholder.count) + words
+        } else {
+            body = words
+        }
+        text = words
     }
 
     /// The same shape built locally (the /me/pushes poll, the debug hook).
@@ -185,5 +207,57 @@ struct MessagePush {
         let conversation = await groupImage()
         log.notice("message for chat \(chatId, privacy: .public) from \(senderName, privacy: .public) kind=\(chatKind, privacy: .public) image=\(image == nil ? "none" : "ok", privacy: .public) group=\(conversation == nil ? "none" : "ok", privacy: .public)")
         return communicationContent(from: base, image: image, groupImage: conversation) ?? base
+    }
+}
+
+/// What the notification extension needs to read an encrypted message without the app: which
+/// Matrix device this phone is and the key of its store, in a keychain item the app and the
+/// extension share through their App Group (the group is an access group of both; no other
+/// entitlement). The store itself is under the group's container. A build without the group
+/// keeps the store in the app's own container and every alert as the relay wrote it.
+enum PreviewVault {
+    static let group = "group.com.unarbos.arbos"
+
+    struct Device: Codable, Equatable {
+        var userId: String
+        var deviceId: String
+        var storeKey: String
+    }
+
+    /// Where the Matrix stores are, one directory per device id; nil without the App Group.
+    static var storeRoot: URL? {
+        FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: group)?
+            .appendingPathComponent("matrix", isDirectory: true)
+    }
+
+    private static let query: [String: Any] = [
+        kSecClass as String: kSecClassGenericPassword,
+        kSecAttrService as String: "sh.arbos.ios.preview",
+        kSecAttrAccount as String: "device",
+        kSecAttrAccessGroup as String: group,
+    ]
+
+    static func load() -> Device? {
+        guard storeRoot != nil else { return nil }
+        var q = query
+        q[kSecReturnData as String] = true
+        q[kSecMatchLimit as String] = kSecMatchLimitOne
+        var item: CFTypeRef?
+        guard SecItemCopyMatching(q as CFDictionary, &item) == errSecSuccess, let data = item as? Data else { return nil }
+        return try? JSONDecoder().decode(Device.self, from: data)
+    }
+
+    /// Keep `device` for the extension, or forget it (signed out). Readable while the phone
+    /// is locked, like the store's own key; never leaves this phone. Without the App Group
+    /// there is no shared keychain to write and no extension that could read the store.
+    static func save(_ device: Device?) {
+        guard storeRoot != nil else { return }
+        SecItemDelete(query as CFDictionary)
+        guard let device, let data = try? JSONEncoder().encode(device) else { return }
+        var add = query
+        add[kSecValueData as String] = data
+        add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        let status = SecItemAdd(add as CFDictionary, nil)
+        if status != errSecSuccess { log.error("preview vault: keychain \(status)") }
     }
 }

@@ -1,0 +1,12 @@
+{
+  "base": "0f3044dff95f8f05f0a848039b2cad00fee6ff11",
+  "root_integrated_commit": "dc71d596d09b693aae4a26d0107ead299f4ab4f2",
+  "final_source_sha256": {
+    "crates/arbos-agentd/src/rpc_child.rs": "cc277c8e333ec8e3d705ee71d30f6818b2c9950c8bfb187981ea9bcbb5082b69",
+    "crates/arbos-agentd/src/harness.rs": "8e19c6d511157928040d50f4ca0cb1022f24bcc11741d23a8f17be0153077442",
+    "crates/arbos-agentd/src/sweep_contention_tests.rs": "f063691c4b2f661163ce07c8894c6c65cdbaaf7fa1a951c6f7e33bd47edc5929"
+  },
+  "combined_patch_sha256": "8f3241e2524ebc1aae3b776823e70ffb47825c080223714c0b207b48839ebcc7",
+  "successor_after_approved_barrier_patch_sha256": "a7dd9e9140ef59066be356f6a6f3ae76e530fd9b87fec9dbb56522bd41f108d6",
+  "scope": "actual owned RpcChild/RpcSessions source; retained writer/fake CLI only; Linux physical checks pending separately"
+}

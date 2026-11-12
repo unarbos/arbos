@@ -677,7 +677,10 @@ impl Agent {
             used_model = true;
             let system = quick_system_prompt(&self.name(), address.as_deref());
             let user = snap.render(&user_text);
-            let llm = self.llm.with_purpose("quick-reply");
+            let llm = self
+                .llm
+                .with_purpose("quick-reply")
+                .with_context(arbos_core::usage::UsageContext::for_chat(chat_id));
             // Reasoning off where the endpoint allows it (#1411: thinking counted against
             // `max_tokens` and cut the visible sentence), and on the endpoints that refuse,
             // the larger budget instead — either way one call, and the answer stays on this
@@ -1324,13 +1327,20 @@ It ran as a real background job, not inline.";
     }
 
     /// Every activity text the stub relay received (`POST /projects/{id}/activity`), in order.
-    /// A log, not a last-value slot: tests run in parallel and another chat's act ack can land
-    /// between a test's own post and its read.
-    static ACTIVITY_LOG: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    /// Entries carry the chat id: parallel fixtures must neither clear nor read another
+    /// chat's activity while waiting for their own asynchronous HTTP post.
+    static ACTIVITY_LOG: std::sync::Mutex<Vec<(String, String)>> =
+        std::sync::Mutex::new(Vec::new());
 
     async fn mock_activity(axum::Json(body): axum::Json<Value>) -> axum::http::StatusCode {
-        if let Some(t) = body.get("text").and_then(Value::as_str) {
-            ACTIVITY_LOG.lock().unwrap().push(t.to_owned());
+        if let (Some(chat), Some(text)) = (
+            body.get("chat_id").and_then(Value::as_str),
+            body.get("text").and_then(Value::as_str),
+        ) {
+            ACTIVITY_LOG
+                .lock()
+                .unwrap()
+                .push((chat.to_owned(), text.to_owned()));
         }
         axum::http::StatusCode::NO_CONTENT
     }
@@ -1890,7 +1900,7 @@ It ran as a real background job, not inline.";
             t.activity = Some("Finding sock stores in LA".into());
             agent.test_open_row(&host, t).await;
         }
-        ACTIVITY_LOG.lock().unwrap().clear();
+        ACTIVITY_LOG.lock().unwrap().retain(|(id, _)| id != chat);
         let (msg_id, cmd) = send_cmd(&host, "also add a plot of the results when you are done");
         let a2 = agent.clone();
         let chat2 = chat.to_owned();
@@ -1918,13 +1928,13 @@ It ran as a real background job, not inline.";
             "a task is not a side note"
         );
         // The presence line names the new ask, not the step that was already running.
-        // Match this ask's gist — ACTIVITY_LOG is process-wide and parallel Queued-ack
-        // cases can post other "Queued: …" lines into the same vec.
+        // Match this chat and ask's gist even when other fixtures post activities in parallel.
         let seen = loop {
             if let Some(a) = ACTIVITY_LOG
                 .lock()
                 .unwrap()
                 .iter()
+                .filter_map(|(id, text)| (id == chat).then_some(text))
                 .find(|a| a.starts_with("Queued: also add a plot of the results"))
                 .cloned()
             {
@@ -4632,7 +4642,7 @@ It ran as a real background job, not inline.";
         let chat = "01TESTCHATQUICKREPLY000010";
         let host = agent.sync.open_room(chat).await.unwrap();
         let _busy = agent.test_hold_turn(chat).await;
-        ACTIVITY_LOG.lock().unwrap().clear();
+        ACTIVITY_LOG.lock().unwrap().retain(|(id, _)| id != chat);
         let (msg_id, cmd) = send_cmd(
             &host,
             "Change of plan: stop at 20, not 40. Please apply that to the run that is going now.",
@@ -4649,13 +4659,13 @@ It ran as a real background job, not inline.";
             "no bubble for a steer"
         );
         let t0 = Instant::now();
-        // The stub relay's log is process-wide: another test's act ack can land in between,
-        // so look for this chat's own "Steering: …" line.
+        // Read only this chat's activity; other fixtures can post or reset theirs in parallel.
         let seen = loop {
             if let Some(a) = ACTIVITY_LOG
                 .lock()
                 .unwrap()
                 .iter()
+                .filter_map(|(id, text)| (id == chat).then_some(text))
                 .find(|a| a.starts_with("Steering:"))
                 .cloned()
             {
@@ -4729,11 +4739,16 @@ It ran as a real background job, not inline.";
         // the one under test.
         *agent.turn.lock().await = None;
         tokio::time::sleep(Duration::from_millis(300)).await;
-        ACTIVITY_LOG.lock().unwrap().clear();
+        ACTIVITY_LOG.lock().unwrap().retain(|(id, _)| id != chat);
         agent.refresh_job_activity(chat).await;
         let t0 = Instant::now();
         loop {
-            if ACTIVITY_LOG.lock().unwrap().contains(&want) {
+            if ACTIVITY_LOG
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(id, text)| id == chat && text == &want)
+            {
                 break;
             }
             assert!(

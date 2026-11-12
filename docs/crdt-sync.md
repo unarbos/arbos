@@ -9,7 +9,8 @@ This document is drawn from the code as it exists today:
 | Shared Loro chat writes (box / core) | `crates/arbos-core/src/doc.rs` |
 | App sans-IO room session | `crates/arbos-client/src/room.rs` (`RoomSession`) |
 | Shared Matrix client (D88 C1: servers and channels) | `crates/arbos-matrix` (`MatrixClient`: sliding sync through the relay proxy, channel timelines as chat-doc message rows, send, read) |
-| UniFFI / Swift bindings | `crates/arbos-ffi` (wraps client + core + the Matrix client; produces xcframework) |
+| Every user's wallet | `crates/arbos-wallet` (`Seed`: one phrase → TAO account, chat key backup passphrase, wallet link proof; `chain`: offline cheques) |
+| UniFFI / Swift bindings | `crates/arbos-ffi` (wraps client + core + the Matrix client + the wallet; produces xcframework) |
 | Golden doc / wire fixtures | `crates/arbos-core/fixtures/` |
 | Mac chat doc (reader shim; writes via arbos-core) | `crates/arbos-mac/src/sync/doc.rs` |
 | iOS chat doc (arbos-core via ArbosFFI) | `apps/ios/Arbos/Arbos/Sync/CoreChatDoc.swift` |
@@ -28,8 +29,9 @@ This document is drawn from the code as it exists today:
 - **Source of truth:** `crates/arbos-core/src/api.rs` — serde structs marked `#[typeshare]`, each with a `Dto` suffix. The relay builds these and serializes them; the JSON on the wire is unchanged from the old `json!` helpers.
 - **Swift:** `./scripts/gen-swift-types.sh` runs `typeshare-cli` (pinned) on `crates/arbos-core` and writes `packages/ArbosFFI/Sources/ArbosFFI/RelayTypes.swift`. CI fails when that file is stale. Do not edit `RelayTypes.swift` by hand.
 - **`arbos-client`** — app-only sans-IO `RoomSession` (handshake, catch-up, pending PUSH, reconnect backoff, held wake/presence). Depends on `arbos-core`. No tokio, tungstenite, or HTTP.
-- **`arbos-matrix`** — the apps' Matrix client (D88 C1): one `matrix-sdk` client per device (no E2EE, memory store, injected HTTP client), sliding sync through `relay/_matrix/client/*`, servers (Spaces) and channels as list rows, channel timelines as the same message rows a chat doc projects, sending with `life.arbos.id` = the app's ULID, read receipts. Depends on tokio and `matrix-sdk`; like `arbos-client`, **only `arbos-mac` and `arbos-ffi` may depend on it** (CI checks). The relay never uses it (it has its own appservice client).
-- **`arbos-ffi`** — UniFFI layer over `arbos-client`, `arbos-matrix` and the core pieces Swift needs. The only crate that names Swift or `uniffi`. Builds an xcframework + generated Swift bindings (`scripts/build-xcframework.sh`).
+- **`arbos-matrix`** — the apps' Matrix client (D88 C1): one `matrix-sdk` client per device (stage D: E2EE, keys, room state and the events it has read in a per-device SQLite store, so a room opens from the device before the homeserver is asked; key backup under the person's recovery passphrase; injected HTTP client), sliding sync through `relay/_matrix/client/*`, servers (Spaces) and channels as list rows, channel timelines as the same message rows a chat doc projects, sending with `life.arbos.id` = the app's ULID, read receipts. Depends on tokio and `matrix-sdk`; like `arbos-client`, **only `arbos-mac` and `arbos-ffi` may depend on it** (CI checks). The relay never uses it (it has its own appservice client).
+- **`arbos-wallet`** — the wallet every user has without having to know it: a BIP39 phrase made on the device (iCloud Keychain on the iPhone) derives the Bittensor account (the same address `btcli` derives from those words), the Matrix key-backup passphrase and the proof behind `PUT /me/wallet`; `chain` signs TAO cheques with no network from a saved chain snapshot and cashes them over plain JSON-RPC. Like `arbos-matrix`, **only `arbos-mac` and `arbos-ffi` may depend on it** (CI checks). The relay never holds a key; it only verifies link proofs (`arbos-relay/src/wallets.rs`).
+- **`arbos-ffi`** — UniFFI layer over `arbos-client`, `arbos-matrix`, `arbos-wallet` and the core pieces Swift needs. The only crate that names Swift or `uniffi`. Builds an xcframework + generated Swift bindings (`scripts/build-xcframework.sh`).
 - **Who may depend on `arbos-client`:** device apps and the FFI crate (`arbos-mac`, `arbos-ffi`). **`arbos-relay`, `arbos-agentd`, `arbosctl`, and `arbos-local` must not.** CI enforces this with `cargo tree -i arbos-client`.
 
 ### arbos-ffi / xcframework
@@ -297,6 +299,8 @@ Relay broadcasts `STATUS { box, since, detail? }` on box lifecycle changes to ro
 ### 7.5 Presence and `focused_chat`
 
 Clients send `PRESENCE` periodically (iOS ~15 s) with `device`, `at`, optional user identity, `in_call`, and **`focused_chat`**: the chat id currently on screen while the app is active. The relay suppresses push notifications for that chat while focus is fresh, and may update `last_seen_at`.
+
+A composer keystroke adds **`typing: true`** to a presence frame, at most once every 3 s. In a people chat the other members show it as a typing row for 6 s. In a project chat nobody is shown it; the relay wakes the project's box if it is a `boxd` box asleep and its user has not stopped it, so the box is up a moment before the message arrives.
 
 ### 7.6 Row size cap
 

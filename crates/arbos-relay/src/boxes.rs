@@ -5,7 +5,7 @@
 //! more, and the relay holds no Daytona credentials. [`RETIRED_PROVIDER`] names it so a `boxes` row
 //! left on it is reported plainly instead of being mistaken for a local box.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
@@ -19,7 +19,7 @@ use arbos_core::ids::now_ms;
 use arbos_core::wire::BoxState;
 
 use crate::db::Sandbox;
-use crate::state::{AppState, CreatingGuard};
+use crate::state::{AppState, CreatingGuard, CreationPermit};
 
 /// The provider name no box may be created, started or rolled on any more. Stored rows and
 /// `box_history` entries keep the name, so a leftover row is recognised and reported.
@@ -31,11 +31,14 @@ pub enum Provider {
     Docker,
     /// A gVisor (`runsc`) container on the relay host with a per-user `/work` image (D89).
     Gvisor,
+    /// An OCI bundle under the host's `arbos-boxd` daemon (docs/box-scaling.md, `boxd.rs`). Works
+    /// only with `ARBOS_BOXD_URL` set; no box is on it unless an operator names it.
+    Boxd,
 }
 
 impl Provider {
     /// Every provider a box may be created on, for the messages that list the choices.
-    pub const NAMES: &'static str = "process|docker|gvisor";
+    pub const NAMES: &'static str = "process|docker|gvisor|boxd";
     /// `None` for anything this relay cannot run, including [`RETIRED_PROVIDER`]. A caller holding
     /// a stored row uses [`provider_of`] instead, so the retirement shows up in the message.
     pub fn parse(s: &str) -> Option<Self> {
@@ -43,6 +46,7 @@ impl Provider {
             "process" => Some(Provider::Process),
             "docker" => Some(Provider::Docker),
             "gvisor" => Some(Provider::Gvisor),
+            "boxd" => Some(Provider::Boxd),
             _ => None,
         }
     }
@@ -51,6 +55,7 @@ impl Provider {
             Provider::Process => "process",
             Provider::Docker => "docker",
             Provider::Gvisor => "gvisor",
+            Provider::Boxd => "boxd",
         }
     }
 }
@@ -158,30 +163,24 @@ pub(crate) fn box_env(
     env
 }
 
-/// Create the user's box (one computer per user; created with the user's first project, D32).
+/// Create the user's box (one computer per user; created with the user's first project, D32)
+/// under an already admitted per-user lease; never reacquire it inside the pipeline.
 /// `snapshot` overrides the relay default (per-user class).
-pub async fn create_box(
+pub(crate) async fn create_box(
     state: &AppState,
-    user_id: &str,
+    permit: &mut CreationPermit,
     provider: Provider,
     snapshot: Option<&str>,
 ) -> Result<Sandbox> {
-    create_box_row(state, user_id, provider, snapshot).await
-}
-
-async fn create_box_row(
-    state: &AppState,
-    user_id: &str,
-    provider: Provider,
-    snapshot: Option<&str>,
-) -> Result<Sandbox> {
+    let user = permit.user_id().to_owned();
+    let user_id = user.as_str();
     let snapshot_name = snapshot
         .map(str::to_owned)
         .unwrap_or_else(|| state.default_snapshot());
     let box_token = mint(TokenKind::Box);
     let mcp_token = mint(TokenKind::Mcp);
     let replacing = state.db.user_box(user_id)?.and_then(|r| r.sandbox_id);
-    let _creating = CreatingGuard::new(&state.restart, user_id);
+    let _creating = CreatingGuard::new(permit);
     let mut sb = Sandbox {
         user_id: user_id.to_owned(),
         provider: provider.as_str().to_owned(),
@@ -217,6 +216,8 @@ async fn create_box_row(
         Provider::Process => format!("local-{user_id}"),
         Provider::Docker => format!("arbos-box-{}", user_id.to_ascii_lowercase()),
         Provider::Gvisor => crate::fleet::container_name(user_id),
+        // The daemon's id for it, dot and all (`arbos-boxd` `Boxd::paths`).
+        Provider::Boxd => format!("arbos-box-{user_id}."),
     };
     state.db.begin_box_create(
         user_id,
@@ -315,6 +316,28 @@ async fn create_on_provider(
             state.db.record_timing(
                 &timing_key(user_id),
                 "gvisor_create_ms",
+                t0.elapsed().as_millis() as i64,
+                None,
+            )?;
+        }
+        Provider::Boxd => {
+            sb.snapshot = Some(snapshot_name.to_owned());
+            if let Err(e) = crate::boxd::create_box(state, user_id, sb, box_token, mcp_token).await
+            {
+                // As for gVisor: a box that was not made leaves no row to be woken later. Nor is
+                // anything waking: left at that, the stale-box detector bounces a box that does
+                // not exist and reports that it cannot reach the relay.
+                if replacing.is_none() {
+                    let _ = state.db.delete_box_row(user_id);
+                    state
+                        .set_box_state(user_id, BoxState::Asleep, Some("create failed"))
+                        .await;
+                }
+                return Err(e);
+            }
+            state.db.record_timing(
+                &timing_key(user_id),
+                "boxd_create_ms",
                 t0.elapsed().as_millis() as i64,
                 None,
             )?;
@@ -588,6 +611,16 @@ pub async fn start_box(state: &AppState, user_id: &str) -> Result<()> {
                 None,
             )?;
         }
+        Provider::Boxd => {
+            let t0 = Instant::now();
+            crate::boxd::start_box(state, user_id, &mut sb).await?;
+            state.db.record_timing(
+                &timing_key(user_id),
+                "boxd_start_ms",
+                t0.elapsed().as_millis() as i64,
+                None,
+            )?;
+        }
     }
     Ok(())
 }
@@ -628,6 +661,10 @@ pub async fn stop_box(state: &AppState, user_id: &str, force: bool) -> Result<()
             let name = sb.sandbox_id.clone().unwrap_or_default();
             // One agentd stops every workspace's children; give it the full grace.
             crate::fleet::stop_box(&name, 30).await?;
+        }
+        Provider::Boxd => {
+            // Unforced, a box agentd calls busy keeps running, and the caller is told so.
+            crate::boxd::stop_box(state, user_id, force).await?;
         }
     }
     sb.last_stopped_at = Some(now_ms());
@@ -721,6 +758,10 @@ pub struct ServingAgent {
 /// box: the rows waiting in the room are the work.
 pub const CHAT_OPEN_PUSH: &str = "chat_open";
 pub const PEOPLE_CHAT_OPEN_PUSH: &str = "people_chat_open";
+/// Tells a box to open one workspace's project-doc room (`{reason}`). The project doc is not a
+/// chat — it has no `chats` row — so `chat_open` cannot name it. A box that still holds every
+/// project doc open never needs this; one that predates the kind logs it as unknown.
+pub const PROJECT_DOC_OPEN_PUSH: &str = "project_doc_open";
 
 /// The `chat_open` payload: the chat row rides along because agentd's `open_listed_chat`
 /// upserts title / pin / created_at from it (a bare id would reset them).
@@ -772,6 +813,16 @@ pub async fn after_person_row(
     agents: &[ServingAgent],
 ) -> usize {
     let mut queued = 0;
+    // How many agents each owner serves in this chat. A people room is one shared room
+    // (`people/{chat_id}`), so two workspaces of the same user can both be agents of it, and
+    // `Room.boxes` is keyed by owner alone — one workspace's socket is indistinguishable from
+    // the other's. Comparing the socket count against the number of agents that owner serves
+    // is what makes presence mean something: only when every one of them is accounted for can
+    // the relay conclude they are all on the room.
+    let mut serving: HashMap<&str, usize> = HashMap::new();
+    for a in agents {
+        *serving.entry(a.owner.as_str()).or_default() += 1;
+    }
     for a in agents {
         state
             .last_client_push
@@ -779,7 +830,12 @@ pub async fn after_person_row(
             .await
             .insert(a.owner.clone(), now_ms());
         ensure_awake(state, &a.owner, "send").await;
-        if room.has_box(&a.owner) {
+        // Fail open on ambiguity. With fewer sockets than agents, at least one of this owner's
+        // agents is off the room and the relay cannot tell which — so every one of them is
+        // told to open it. The redundant push costs the box a fetch it no-ops; the alternative
+        // is a row that the missing agent never learns about (`enqueue_push_once` also drops a
+        // duplicate that is still waiting).
+        if room.box_count(&a.owner) as usize >= serving[a.owner.as_str()] {
             continue;
         }
         let (kind, payload) = match &chat.project_id {
@@ -821,6 +877,7 @@ pub async fn ensure_user_box(
     user_id: &str,
     provider: Provider,
 ) -> Result<Sandbox> {
+    let mut permit = state.restart.admit_creation(user_id).await;
     if let Some(sb) = state.db.user_box(user_id)? {
         return Ok(sb);
     }
@@ -828,7 +885,7 @@ pub async fn ensure_user_box(
         return Err(anyhow!(crate::fleet::WAITLISTED));
     }
     let snapshot = state.db.user_snapshot(user_id)?;
-    create_box(state, user_id, provider, snapshot.as_deref()).await
+    create_box(state, &mut permit, provider, snapshot.as_deref()).await
 }
 
 pub async fn ensure_awake(state: &AppState, user_id: &str, reason: &str) {
@@ -892,6 +949,7 @@ pub async fn ensure_awake(state: &AppState, user_id: &str, reason: &str) {
     state
         .set_box_state(user_id, BoxState::Waking, Some(reason))
         .await;
+    state.wake_kick.notify_one();
 }
 
 /// Stale-box detector (runs from the liveness sweep and from `ensure_awake`): a box that has been
@@ -1014,7 +1072,8 @@ pub async fn box_disconnected(state: &AppState, user_id: &str) {
     e.1 = now_ms();
 }
 
-/// Called every 5 s: a box with no sockets for `box_idle_grace_ms` is asleep (unless it was never seen),
+/// Called every 5 s: a box with no sockets for `box_idle_grace_ms` is asleep (unless it was never seen,
+/// or still polls over HTTP: agentd closes idle room sockets and stays up),
 /// and a box waking past the hello deadline goes through the stale-box detector.
 pub async fn sweep_box_liveness(state: &AppState) {
     let waking: Vec<(String, i64)> = state
@@ -1064,7 +1123,11 @@ pub async fn sweep_box_liveness(state: &AppState) {
         state.box_http_seen.lock().await.remove(&user_id);
     }
     for (user_id, n, last) in snapshot {
-        if n == 0 && last > 0 && now_ms() - last > state.cfg.box_idle_grace_ms {
+        if n == 0
+            && last > 0
+            && now_ms() - last > state.cfg.box_idle_grace_ms
+            && !box_reachable(state, &user_id).await
+        {
             let (st, _) = state.box_state(&user_id).await;
             if st == BoxState::Awake {
                 state
@@ -1352,6 +1415,13 @@ pub async fn spawn_always_on(state: AppState) {
                 if state.db.is_waitlisted(&user_id).unwrap_or(false) {
                     continue;
                 }
+                // A `boxd` box sleeps when idle and wakes when something needs it
+                // (`boxd::spawn_idle_sleeper`); keeping it up is not this sweep's to do.
+                if state.cfg.boxd.is_some()
+                    && matches!(state.db.user_box(&user_id), Ok(Some(sb)) if sb.provider == Provider::Boxd.as_str())
+                {
+                    continue;
+                }
                 tracing::info!(%user_id, "always-on: waking");
                 ensure_awake(&state, &user_id, "always-on").await;
             }
@@ -1442,57 +1512,105 @@ pub async fn spawn_sandboxless_box_check(state: AppState) {
 /// Wake-job runner: 3 attempts with backoff, then S13 error (crdt-sync §8.4 step 5).
 pub async fn spawn_wake_runner(state: AppState) {
     tokio::spawn(async move {
+        let mut waking = Waking::new();
         loop {
-            tokio::time::sleep(Duration::from_millis(750)).await;
-            run_wake_jobs(&state).await;
+            // A job just queued is run now: a user is waiting on it. The timer is for the jobs
+            // that come due by themselves (a retry, a cold box on its way back).
+            tokio::select! {
+                _ = state.wake_kick.notified() => {}
+                _ = tokio::time::sleep(Duration::from_millis(750)) => {}
+            }
+            start_wake_jobs(&state, &mut waking).await;
         }
     });
 }
 
-/// One pass over the wake jobs that are due.
+/// The `boxd` wakes under way, by user.
+type Waking = HashMap<String, tokio::task::JoinHandle<()>>;
+
+/// One pass over the wake jobs that are due, to the end of each.
+#[cfg(test)]
 pub(crate) async fn run_wake_jobs(state: &AppState) {
+    let mut waking = Waking::new();
+    start_wake_jobs(state, &mut waking).await;
+    for (_, wake) in waking {
+        let _ = wake.await;
+    }
+}
+
+/// Start the wake jobs that are due. The wake of a `boxd` box runs on a task of its own, so no
+/// box waits for another's: how many a node wakes at once is the node's to say
+/// (`boxd::WAKES_PER_NODE`), and a box whose wake is still under way is not started again. Every
+/// other wake runs here, one after another, as it always has; so does the making of a box, whose
+/// placement reads each node's free disk and must see the box made before it.
+async fn start_wake_jobs(state: &AppState, waking: &mut Waking) {
     let jobs = match state.db.due_wake_jobs() {
         Ok(j) => j,
         Err(_) => return,
     };
-    for (user_id, reason, attempts) in jobs {
-        let (st, _) = state.box_state(&user_id).await;
-        if st == BoxState::Awake || st == BoxState::Error {
-            // Awake: the dial finished it. Error: the stale-box detector gave up; only an
-            // explicit wake/start re-arms it.
-            let _ = state.db.finish_wake_job(&user_id);
+    waking.retain(|_, wake| !wake.is_finished());
+    for job in jobs {
+        if waking.contains_key(&job.0) {
             continue;
         }
-        if read_only_box(state, &user_id) {
-            // A job queued before the provider was retired. It can only fail three times and end
-            // as `error`, which says nothing true about that box, so it ends here and the state is
-            // left as it stands.
-            let _ = state.db.finish_wake_job(&user_id);
-            continue;
+        let on_boxd = matches!(state.db.user_box(&job.0), Ok(Some(sb)) if sb.provider == Provider::Boxd.as_str());
+        if on_boxd {
+            let state = state.clone();
+            let user_id = job.0.clone();
+            let wake = tokio::spawn(async move { run_wake_job(&state, job).await });
+            waking.insert(user_id, wake);
+        } else {
+            run_wake_job(state, job).await;
         }
-        if state.upgrading.lock().await.contains_key(&user_id) {
-            // The upgrade starts the box it ends on. A start from here would bounce a box mid-roll
-            // and write back a row read before the new sandbox landed in it (#2262); the job waits
-            // for the upgrade.
-            continue;
+    }
+}
+
+/// One wake job that is due.
+async fn run_wake_job(state: &AppState, (user_id, reason, attempts): (String, String, i64)) {
+    let (st, _) = state.box_state(&user_id).await;
+    if st == BoxState::Awake || st == BoxState::Error {
+        // Awake: the dial finished it. Error: the stale-box detector gave up; only an
+        // explicit wake/start re-arms it.
+        let _ = state.db.finish_wake_job(&user_id);
+        return;
+    }
+    if read_only_box(state, &user_id) {
+        // A job queued before the provider was retired. It can only fail three times and end
+        // as `error`, which says nothing true about that box, so it ends here and the state is
+        // left as it stands.
+        let _ = state.db.finish_wake_job(&user_id);
+        return;
+    }
+    if state.upgrading.lock().await.contains_key(&user_id) {
+        // The upgrade starts the box it ends on. A start from here would bounce a box mid-roll
+        // and write back a row read before the new sandbox landed in it (#2262); the job waits
+        // for the upgrade.
+        return;
+    }
+    // Mark the job as in flight by pushing its due time out; the box dial finishes it.
+    let _ = state.db.retry_wake_job(&user_id, 120_000, "in flight");
+    tracing::info!(%user_id, %reason, attempts, "waking box");
+    match start_box(state, &user_id).await {
+        Ok(()) => {}
+        Err(e) if e.to_string() == crate::boxd::FETCHING => {
+            // Not a failed wake: the daemon is bringing a cold box back from the object
+            // store. Look again shortly. Each look restarts the waking clock (`start_box`
+            // does), so the box is not called unreachable for not having dialled in yet.
+            let _ = state
+                .db
+                .retry_wake_job(&user_id, 3_000, crate::boxd::FETCHING);
         }
-        // Mark the job as in flight by pushing its due time out; the box dial finishes it.
-        let _ = state.db.retry_wake_job(&user_id, 120_000, "in flight");
-        tracing::info!(%user_id, %reason, attempts, "waking box");
-        match start_box(state, &user_id).await {
-            Ok(()) => {}
-            Err(e) => {
-                tracing::warn!(%user_id, error = %e, "wake failed");
-                let n = state
-                    .db
-                    .retry_wake_job(&user_id, 5_000 * (attempts + 1), &e.to_string())
-                    .unwrap_or(99);
-                if n >= 3 {
-                    let _ = state.db.finish_wake_job(&user_id);
-                    state
-                        .set_box_state(&user_id, BoxState::Error, Some(&e.to_string()))
-                        .await;
-                }
+        Err(e) => {
+            tracing::warn!(%user_id, error = %e, "wake failed");
+            let n = state
+                .db
+                .retry_wake_job(&user_id, 5_000 * (attempts + 1), &e.to_string())
+                .unwrap_or(99);
+            if n >= 3 {
+                let _ = state.db.finish_wake_job(&user_id);
+                state
+                    .set_box_state(&user_id, BoxState::Error, Some(&e.to_string()))
+                    .await;
             }
         }
     }
@@ -1505,6 +1623,8 @@ pub async fn keepalive(state: &AppState, user_id: &str, turn_running: bool) -> R
         let mut t = state.turn_running.lock().await;
         if turn_running {
             t.insert(user_id.to_owned(), now_ms());
+            let mut last = state.last_turn.lock().await;
+            last.insert(user_id.to_owned(), now_ms());
         } else {
             t.remove(user_id);
         }
@@ -1525,11 +1645,271 @@ pub async fn provider_status(state: &AppState, user_id: &str) -> Value {
         Ok(Some(s)) => s,
         _ => return json!({ "provider": null }),
     };
-    json!({
+    let mut status = json!({
         "provider": sb.provider, "sandbox_id": sb.sandbox_id, "box_url": sb.box_url, "user_id": sb.user_id,
         "migrated_from": sb.migrated_from,
         "last_started_at": sb.last_started_at, "last_stopped_at": sb.last_stopped_at, "last_seen_at": sb.last_seen_at,
-    })
+    });
+    // A `boxd` box also says where its daemon last left it (docs/box-scaling.md §4.2). No other
+    // box has these, and what it shows is as it was.
+    if let Ok(Some((node_id, lifecycle_state, storage))) = state.db.box_lifecycle(user_id) {
+        status["node_id"] = json!(node_id);
+        status["lifecycle_state"] = json!(lifecycle_state);
+        status["storage"] = storage
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or(Value::Null);
+    }
+    status
+}
+
+/// A person's row landed in `project_id`'s project doc (a settings change): a box with no socket
+/// on that room is told to open it, the same obligation [`after_person_row`] meets for chats.
+/// Without it a project doc the box closed for being idle would never learn of the row. Returns
+/// whether a push was queued.
+pub fn after_project_doc_row(
+    state: &AppState,
+    room: &crate::state::Room,
+    project_id: &str,
+) -> bool {
+    let Some(owner) = state.user_of(project_id) else {
+        return false;
+    };
+    if room.box_count(&owner) > 0 {
+        return false;
+    }
+    match state.db.enqueue_push_once(
+        project_id,
+        PROJECT_DOC_OPEN_PUSH,
+        &json!({ "reason": "rows_pending" }),
+    ) {
+        Ok(true) => {
+            tracing::info!(project = %project_id, %owner, "row landed with no box socket on the project doc; told the box to open it");
+            true
+        }
+        Ok(false) => false,
+        Err(e) => {
+            tracing::warn!(project = %project_id, error = %e, "project_doc_open push not queued");
+            false
+        }
+    }
+}
+
+#[cfg(test)]
+mod sibling_workspace_reopen_tests {
+    //! Whether a box is "on" a people room has to be decided per agent, not per owner. One box
+    //! serves every workspace of its user, a `people/{chat_id}` room is shared by every agent
+    //! of the chat, and the sockets carry no workspace — so an owner's socket count is the only
+    //! evidence there is, and it only settles the question when it covers every agent.
+
+    use super::*;
+    use crate::notify::ChatRef;
+    use crate::people;
+    use crate::people::tests_support::{group, person, project_of};
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+    use arbos_core::ids::ulid;
+
+    /// The shape that drops a message. Two workspaces of one user are both agents of the same
+    /// people chat; A holds the socket, B has closed its room. Keyed by owner alone, A's socket
+    /// read as presence for B too, and B's reopen push was never queued — B never learned the
+    /// row existed. Against the per-owner check this fails with `left: 0, right: 2`.
+    #[tokio::test]
+    async fn one_workspaces_socket_on_a_people_room_does_not_suppress_a_siblings_reopen_push() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _dev) = person(&state, 1);
+        let project_a = project_of(&state, &alice, "WorkspaceA");
+        let project_b = project_of(&state, &alice, "WorkspaceB");
+        let g = group(&state, &[&alice]);
+        for p in [&project_a, &project_b] {
+            state
+                .db
+                .add_member(&g, &format!("agent:{p}"), "agent", &alice, &json!({}))
+                .expect("agent member");
+        }
+        let cm = people::load_chat(&state, &g).expect("chat");
+        let agents = people::serving_agents(&state, &cm);
+        assert_eq!(agents.len(), 2, "both workspaces serve this people chat");
+
+        // A is live on the people room; B has closed its room on the very same chat.
+        let people_room = state.room(&people::room_of(&g)).await;
+        people_room.box_joined(&alice);
+
+        state
+            .db
+            .append_row(&people::room_of(&g), "dev-mac", &ulid(), b"x")
+            .expect("row");
+        let _ = state.db.take_pushes(&project_a).unwrap();
+        let _ = state.db.take_pushes(&project_b).unwrap();
+
+        // One socket, two agents: the relay cannot tell which of them is on the room, so both
+        // are told to open it. B's push is the one that matters — without it B drops the row.
+        assert_eq!(
+            after_person_row(&state, &people_room, &ChatRef::people(&g), &agents).await,
+            2,
+            "the sibling workspace with no socket on this room must get its reopen push"
+        );
+        let pushes = state.db.take_pushes(&project_b).unwrap();
+        assert_eq!(pushes.len(), 1, "the closed sibling's push: {pushes:?}");
+        assert_eq!(pushes[0].1, PEOPLE_CHAT_OPEN_PUSH);
+        assert_eq!(pushes[0].2["chat_id"], json!(g));
+        // The accepted cost of failing open: A is on the room and is told anyway, because
+        // nothing on the wire says the socket is A's. `join_people_chat` no-ops an open room.
+        assert_eq!(state.db.take_pushes(&project_a).unwrap().len(), 1);
+    }
+
+    /// The other side of the same rule, and what keeps the fix from pushing on every row: once
+    /// every agent of the owner is on the room, the count settles it and nothing is queued.
+    #[tokio::test]
+    async fn both_workspaces_on_the_room_need_no_push() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _dev) = person(&state, 1);
+        let project_a = project_of(&state, &alice, "WorkspaceA");
+        let project_b = project_of(&state, &alice, "WorkspaceB");
+        let g = group(&state, &[&alice]);
+        for p in [&project_a, &project_b] {
+            state
+                .db
+                .add_member(&g, &format!("agent:{p}"), "agent", &alice, &json!({}))
+                .expect("agent member");
+        }
+        let cm = people::load_chat(&state, &g).expect("chat");
+        let agents = people::serving_agents(&state, &cm);
+
+        let people_room = state.room(&people::room_of(&g)).await;
+        people_room.box_joined(&alice);
+        people_room.box_joined(&alice);
+
+        state
+            .db
+            .append_row(&people::room_of(&g), "dev-mac", &ulid(), b"x")
+            .expect("row");
+        let _ = state.db.take_pushes(&project_a).unwrap();
+        let _ = state.db.take_pushes(&project_b).unwrap();
+        assert_eq!(
+            after_person_row(&state, &people_room, &ChatRef::people(&g), &agents).await,
+            0,
+            "both agents are accounted for; the rows reach them live"
+        );
+
+        // One of them leaves: the count no longer covers both, so both are told again.
+        people_room.box_left(&alice);
+        assert_eq!(
+            after_person_row(&state, &people_room, &ChatRef::people(&g), &agents).await,
+            2
+        );
+    }
+
+    /// An owner with a single agent in the chat is unchanged by any of this: one socket is
+    /// unambiguous, so presence still means exactly what it used to.
+    #[tokio::test]
+    async fn a_lone_agent_behaves_exactly_as_before() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _dev) = person(&state, 1);
+        let project = project_of(&state, &alice, "WorkspaceA");
+        let g = group(&state, &[&alice]);
+        state
+            .db
+            .add_member(&g, &format!("agent:{project}"), "agent", &alice, &json!({}))
+            .expect("agent member");
+        let cm = people::load_chat(&state, &g).expect("chat");
+        let agents = people::serving_agents(&state, &cm);
+        assert_eq!(agents.len(), 1);
+
+        let people_room = state.room(&people::room_of(&g)).await;
+        state
+            .db
+            .append_row(&people::room_of(&g), "dev-mac", &ulid(), b"x")
+            .expect("row");
+        let _ = state.db.take_pushes(&project).unwrap();
+
+        // Off the room: told to open it.
+        assert_eq!(
+            after_person_row(&state, &people_room, &ChatRef::people(&g), &agents).await,
+            1
+        );
+        let _ = state.db.take_pushes(&project).unwrap();
+        // On the room: nothing queued.
+        people_room.box_joined(&alice);
+        assert_eq!(
+            after_person_row(&state, &people_room, &ChatRef::people(&g), &agents).await,
+            0
+        );
+    }
+
+    /// Two different people's boxes in one chat stay independent: Bob being on the room says
+    /// nothing about Alice, and never did.
+    #[tokio::test]
+    async fn another_persons_socket_is_not_this_owners_presence() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _d1) = person(&state, 1);
+        let (bob, _d2) = person(&state, 2);
+        let pa = project_of(&state, &alice, "Alice");
+        let pb = project_of(&state, &bob, "Bob");
+        let g = group(&state, &[&alice, &bob]);
+        for (p, u) in [(&pa, &alice), (&pb, &bob)] {
+            state
+                .db
+                .add_member(&g, &format!("agent:{p}"), "agent", u, &json!({}))
+                .expect("agent member");
+        }
+        let cm = people::load_chat(&state, &g).expect("chat");
+        let agents = people::serving_agents(&state, &cm);
+        assert_eq!(agents.len(), 2);
+
+        let people_room = state.room(&people::room_of(&g)).await;
+        people_room.box_joined(&bob);
+        state
+            .db
+            .append_row(&people::room_of(&g), "dev-mac", &ulid(), b"x")
+            .expect("row");
+        let _ = state.db.take_pushes(&pa).unwrap();
+        let _ = state.db.take_pushes(&pb).unwrap();
+
+        assert_eq!(
+            after_person_row(&state, &people_room, &ChatRef::people(&g), &agents).await,
+            1,
+            "only Alice's box is off the room"
+        );
+        assert_eq!(state.db.take_pushes(&pa).unwrap().len(), 1);
+        assert!(state.db.take_pushes(&pb).unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod project_doc_reopen_tests {
+    use super::*;
+    use crate::people::tests_support::{person, project_of};
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+    use arbos_core::wire::{room_name, PROJECT_DOC_CHAT_ID};
+
+    /// A row into a project doc the box holds no socket on queues exactly one reopen push for
+    /// that workspace; a socket on the room — and only on that room — means it arrives live.
+    #[tokio::test]
+    async fn a_row_into_a_project_doc_with_no_box_socket_tells_the_box_to_open_it() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _dev) = person(&state, 1);
+        let a = project_of(&state, &alice, "WorkspaceA");
+        let b = project_of(&state, &alice, "WorkspaceB");
+        let room_a = state.room(&room_name(&a, PROJECT_DOC_CHAT_ID)).await;
+        let room_b = state.room(&room_name(&b, PROJECT_DOC_CHAT_ID)).await;
+        let _ = state.db.take_pushes(&a).unwrap();
+
+        // The box is on B's project doc only: that says nothing about A's.
+        room_b.box_joined(&alice);
+        assert!(after_project_doc_row(&state, &room_a, &a));
+        assert!(
+            !after_project_doc_row(&state, &room_a, &a),
+            "one is already waiting"
+        );
+        let pushes = state.db.take_pushes(&a).unwrap();
+        assert_eq!(pushes.len(), 1, "{pushes:?}");
+        assert_eq!(pushes[0].1, PROJECT_DOC_OPEN_PUSH);
+        assert!(!after_project_doc_row(&state, &room_b, &b), "B is live");
+
+        room_a.box_joined(&alice);
+        assert!(!after_project_doc_row(&state, &room_a, &a));
+    }
 }
 
 #[cfg(test)]
@@ -1580,6 +1960,31 @@ mod zero_project_tests {
         assert!(state.wake_started.lock().await.get(&user).is_none());
 
         // The heartbeat stops (box died): after the grace period it is asleep, not "error".
+        state
+            .box_http_seen
+            .lock()
+            .await
+            .insert(user.clone(), now_ms() - 120_000);
+        sweep_box_liveness(&state).await;
+        assert_eq!(state.box_state(&user).await.0, BoxState::Asleep);
+    }
+
+    #[tokio::test]
+    async fn box_that_closed_its_idle_sockets_but_still_polls_stays_awake() {
+        let state = test_state(AuthMode::Github);
+        let (user, _dev) = person(&state, 1);
+
+        // agentd closed its last room socket well past the grace period, and keeps polling.
+        box_connected(&state, &user).await;
+        box_disconnected(&state, &user).await;
+        state.box_conns.lock().await.get_mut(&user).unwrap().1 = now_ms() - 120_000;
+        box_seen_http(&state, &user).await;
+        for _ in 0..3 {
+            sweep_box_liveness(&state).await;
+            assert_eq!(state.box_state(&user).await.0, BoxState::Awake);
+        }
+
+        // The polls stop too (box died): asleep on the next sweep.
         state
             .box_http_seen
             .lock()

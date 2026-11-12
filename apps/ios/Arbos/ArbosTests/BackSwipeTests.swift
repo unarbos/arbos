@@ -45,4 +45,14 @@ final class BackSwipeTests: XCTestCase {
         XCTAssertFalse(BackSwipe.fullScreenPops(translation: CGSize(width: -120, height: 0), velocity: .zero), "left")
         XCTAssertFalse(BackSwipe.fullScreenPops(translation: CGSize(width: 90, height: 10), velocity: CGSize(width: 100, height: 400)), "short and faster vertically: a scroll that wandered")
     }
+
+    /// The finger that held a picture into the message menu lifts as a tap; that tap must not
+    /// also open the viewer over the menu, and it is the only one spent.
+    func testTheTapThatEndsAMenuHoldIsSpentOnce() {
+        ChatGestures.heldIntoMenu = false
+        XCTAssertFalse(ChatGestures.tapEndsHold(), "a plain tap opens the viewer")
+        ChatGestures.heldIntoMenu = true
+        XCTAssertTrue(ChatGestures.tapEndsHold(), "the lift after the hold is swallowed")
+        XCTAssertFalse(ChatGestures.tapEndsHold(), "the next tap is a real one")
+    }
 }

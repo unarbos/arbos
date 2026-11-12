@@ -1,0 +1,76 @@
+{
+  "scope": "all9harness test files;64loopback-fenced tests plus5lease laws using their own stricter child sandbox,69total/no drops; strictTS pass",
+  "macOS_fence_note": "Nested Seatbelt is rejected (Operation not permitted). No production source/test was weakened; on macOS lease oracle is run with its own deny-network/files/exec child policy, other tests under outer loopback policy. Linux CI runs whole suite under its existing netns fence.",
+  "gates": [
+    {
+      "label": "harness-loopback",
+      "exit_code": 0,
+      "seconds": 1.3818367079365999,
+      "counts": {
+        "tests": 64,
+        "pass": 64,
+        "fail": 0,
+        "skipped": 0
+      },
+      "log_sha256": "fe9c52bbbcb9dbfe37d52c8df42bdab94fa1a677e7ef1dab34f8bd9f3f1a624e",
+      "test_file_count": 9,
+      "source_sha256": {
+        "harness/arbos-pi-ext/approval.test.ts": "c85c8ac0e614ca8e894da4b4bbd0345f4d33a6c5b3ea12d1c86745ed31232aa5",
+        "harness/arbos-pi-ext/feedback-state-laws.test.ts": "00d50f35bda5d1dd5ed017c70e28325e6ade7f43b956cfa9cb2262234ff7e983",
+        "harness/arbos-pi-ext/index.test.ts": "c72242f22a48469805e53030173430a84569425d29d53b0f5e87232a661f0aa3",
+        "harness/arbos-pi-ext/lease-state-laws.test.ts": "e5c0e4d957cfc92464ee4c94b1cfec3dd63b54165f8ce36402fd61bd8ac1e8c6",
+        "harness/arbos-pi-ext/once-claim-laws.test.ts": "d0d7b85f15800665128db87033248e67a96cbf26ee543141b050211befe46c67",
+        "harness/arbos-pi-ext/publication-state-laws.test.ts": "61441ca2053419ee7e23bc0f0cb30e2ba49332aec85063d2fdaabeccc8e3f200",
+        "harness/arbos-pi-ext/restart-state-laws.test.ts": "c5753656825a8d512b1d3e3f007dd84764d49fe508924a9cbaa495e7e09550fd",
+        "harness/arbos-pi-ext/stop-job-render.test.ts": "7104e2d9192d2139d80e0547e9dbcc706973da3e9e3b50e3430f74f1c12a815d",
+        "harness/arbos-pi-ext/voice-state-laws.test.ts": "1d81ee6d8019b69c4df01d4d5a6059304a4e5df5bb87f8dadfbf3048cf13e69d"
+      },
+      "network": "validatedloopback-only"
+    },
+    {
+      "label": "harness-lease",
+      "exit_code": 0,
+      "seconds": 23.20023533294443,
+      "counts": {
+        "tests": 5,
+        "pass": 5,
+        "fail": 0,
+        "skipped": 0
+      },
+      "log_sha256": "f34cd903aed2b75b7c529a1ff214a5a46a946c62e6831583564c845cb21a51a0",
+      "test_file_count": 9,
+      "source_sha256": {
+        "harness/arbos-pi-ext/approval.test.ts": "c85c8ac0e614ca8e894da4b4bbd0345f4d33a6c5b3ea12d1c86745ed31232aa5",
+        "harness/arbos-pi-ext/feedback-state-laws.test.ts": "00d50f35bda5d1dd5ed017c70e28325e6ade7f43b956cfa9cb2262234ff7e983",
+        "harness/arbos-pi-ext/index.test.ts": "c72242f22a48469805e53030173430a84569425d29d53b0f5e87232a661f0aa3",
+        "harness/arbos-pi-ext/lease-state-laws.test.ts": "e5c0e4d957cfc92464ee4c94b1cfec3dd63b54165f8ce36402fd61bd8ac1e8c6",
+        "harness/arbos-pi-ext/once-claim-laws.test.ts": "d0d7b85f15800665128db87033248e67a96cbf26ee543141b050211befe46c67",
+        "harness/arbos-pi-ext/publication-state-laws.test.ts": "61441ca2053419ee7e23bc0f0cb30e2ba49332aec85063d2fdaabeccc8e3f200",
+        "harness/arbos-pi-ext/restart-state-laws.test.ts": "c5753656825a8d512b1d3e3f007dd84764d49fe508924a9cbaa495e7e09550fd",
+        "harness/arbos-pi-ext/stop-job-render.test.ts": "7104e2d9192d2139d80e0547e9dbcc706973da3e9e3b50e3430f74f1c12a815d",
+        "harness/arbos-pi-ext/voice-state-laws.test.ts": "1d81ee6d8019b69c4df01d4d5a6059304a4e5df5bb87f8dadfbf3048cf13e69d"
+      },
+      "network": "pure lease oracle applies its own OS deny-network/deny-files/deny-exec sandbox; parent test has no networking code"
+    },
+    {
+      "label": "typecheck",
+      "exit_code": 0,
+      "seconds": 3.3211177500197664,
+      "counts": {},
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "test_file_count": 9,
+      "source_sha256": {
+        "harness/arbos-pi-ext/approval.test.ts": "c85c8ac0e614ca8e894da4b4bbd0345f4d33a6c5b3ea12d1c86745ed31232aa5",
+        "harness/arbos-pi-ext/feedback-state-laws.test.ts": "00d50f35bda5d1dd5ed017c70e28325e6ade7f43b956cfa9cb2262234ff7e983",
+        "harness/arbos-pi-ext/index.test.ts": "c72242f22a48469805e53030173430a84569425d29d53b0f5e87232a661f0aa3",
+        "harness/arbos-pi-ext/lease-state-laws.test.ts": "e5c0e4d957cfc92464ee4c94b1cfec3dd63b54165f8ce36402fd61bd8ac1e8c6",
+        "harness/arbos-pi-ext/once-claim-laws.test.ts": "d0d7b85f15800665128db87033248e67a96cbf26ee543141b050211befe46c67",
+        "harness/arbos-pi-ext/publication-state-laws.test.ts": "61441ca2053419ee7e23bc0f0cb30e2ba49332aec85063d2fdaabeccc8e3f200",
+        "harness/arbos-pi-ext/restart-state-laws.test.ts": "c5753656825a8d512b1d3e3f007dd84764d49fe508924a9cbaa495e7e09550fd",
+        "harness/arbos-pi-ext/stop-job-render.test.ts": "7104e2d9192d2139d80e0547e9dbcc706973da3e9e3b50e3430f74f1c12a815d",
+        "harness/arbos-pi-ext/voice-state-laws.test.ts": "1d81ee6d8019b69c4df01d4d5a6059304a4e5df5bb87f8dadfbf3048cf13e69d"
+      },
+      "network": "validatedloopback-only"
+    }
+  ]
+}

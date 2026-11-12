@@ -109,6 +109,18 @@ struct Machine: Equatable {
     var cpu: Int? = nil
     var memGib: Int? = nil
     var image: String? = nil
+    /// `lifecycle_state`: where a machine that sleeps by itself was last left (`warm`,
+    /// `asleep_clean`, `asleep_ckpt`, `cold`, …). Nil for every other machine.
+    var lifecycle: String? = nil
+    /// `storage`: what its disk held when it last went to sleep, in bytes. The relay keeps it,
+    /// so it is there for a machine that is asleep or in cold storage too.
+    var storage: Storage? = nil
+
+    struct Storage: Equatable {
+        var files: Int64
+        var scratch: Int64?
+        var trash: Int64?
+    }
 
     static let unknown = Machine(state: .hibernatedLight, since: nil, spec: "")
 
@@ -179,6 +191,8 @@ struct Machine: Equatable {
             memGib: Int(dto.spec.mem_gib),
             image: dto.image.current ?? (dto.spec.`class`.isEmpty ? nil : dto.spec.`class`)
         )
+        lifecycle = dto.lifecycle_state
+        storage = dto.storage.map { Storage(files: $0.files_bytes, scratch: $0.scratch_bytes, trash: $0.trash_bytes) }
     }
 
     /// The state the UI may show: always-on boxes collapse everything but
@@ -688,6 +702,9 @@ enum Part: Equatable {
     /// Secret hand-off: the message's value moved into the vault; the row is the ghost
     /// "Secret saved as NAME". Names only — there is no value field.
     case secretRedacted(id: Id, name: String, savedBy: String, agent: String?)
+    /// A TAO cheque (Sync/Wallet.swift): the signed transfer as 0x-hex. What it pays is read
+    /// from these bytes, never from the message text.
+    case cheque(id: Id, bytes: String)
     case unknown(id: Id)
 
     var id: Id {
@@ -695,7 +712,7 @@ enum Part: Equatable {
         case .text(let id, _), .reasoning(let id), .tool(let id, _, _), .attachment(let id, _),
              .error(let id, _, _), .status(let id, _, _), .question(let id, _), .subagentResult(let id),
              .chart(let id, _, _, _, _), .linkPreview(let id, _), .secretRedacted(let id, _, _, _),
-             .unknown(let id):
+             .cheque(let id, _), .unknown(let id):
             return id
         }
     }
@@ -703,6 +720,11 @@ enum Part: Equatable {
     /// The vault name when this is a `secret_redacted` ghost part.
     var secretRedactedName: String? {
         if case .secretRedacted(_, let name, _, _) = self { return name }
+        return nil
+    }
+
+    var chequeBytes: String? {
+        if case .cheque(_, let bytes) = self { return bytes }
         return nil
     }
 
@@ -1369,7 +1391,7 @@ struct Message: Identifiable, Equatable {
             switch part {
             case .text(_, let t): return t.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             case .reasoning, .status, .subagentResult, .unknown: return true
-            case .tool, .attachment, .error, .question, .chart, .linkPreview, .secretRedacted: return false
+            case .tool, .attachment, .error, .question, .chart, .linkPreview, .secretRedacted, .cheque: return false
             }
         }
     }
@@ -1640,6 +1662,9 @@ enum DocJSON {
             return .question(id: id, question: approval(pm))
         case "subagent_result":
             return .subagentResult(id: id)
+        case "cheque":
+            guard let bytes = str(pm["cheque"]), bytes.count <= 4096 else { return .unknown(id: id) }
+            return .cheque(id: id, bytes: bytes)
         case "secret_redacted":
             let name = str(pm["name"]).flatMap { $0.isEmpty ? nil : $0 } ?? str(pm["env"]) ?? ""
             return .secretRedacted(id: id, name: name, savedBy: str(pm["savedBy"]) ?? "", agent: str(pm["agent"]))

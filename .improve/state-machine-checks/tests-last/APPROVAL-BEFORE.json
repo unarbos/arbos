@@ -1,0 +1,32 @@
+{
+  "command": [
+    "/usr/bin/sandbox-exec",
+    "-f",
+    "/Users/cister/arbos life/arbos-codex/.improve/evidence/backend-claude-stage3/loopback-only.sb",
+    "cargo",
+    "test",
+    "--locked",
+    "--offline",
+    "-p",
+    "arbos-agentd",
+    "approval::job_approval_tests::",
+    "--",
+    "--test-threads=1"
+  ],
+  "exit_code": 101,
+  "seconds": 1.3585641250247136,
+  "counts": [
+    [
+      5,
+      2,
+      0
+    ]
+  ],
+  "source_unchanged": true,
+  "failures": [
+    "test approval::job_approval_tests::a_job_deleting_a_file_it_created_itself_raises_no_card ... FAILED",
+    "test approval::job_approval_tests::the_gate_allows_the_agents_own_workspace_and_cards_everything_else ... FAILED",
+    "test result: FAILED. 5 passed; 2 failed; 0 ignored; 0 measured; 634 filtered out; finished in 0.14s"
+  ],
+  "scope": "Actual classification/approval tests only; commands are classified/recorded, never executed; existing immutable target/source"
+}

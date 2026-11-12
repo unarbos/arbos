@@ -378,6 +378,11 @@ jobs:
           set -euo pipefail
           deps=$(cargo tree -i arbos-matrix --prefix none --depth 1 | awk '/^arbos-/ {print $1}' | grep -v '^arbos-matrix$' | sort -u)
           test "$deps" = $'arbos-ffi' || test "$deps" = $'arbos-ffi\narbos-mac'
+      - name: arbos-wallet dependents
+        run: |
+          set -euo pipefail
+          deps=$(cargo tree -i arbos-wallet --prefix none --depth 1 | awk '/^arbos-/ {print $1}' | grep -v '^arbos-wallet$' | sort -u)
+          test "$deps" = $'arbos-ffi' || test "$deps" = $'arbos-ffi\narbos-mac'
 
   harness:
     name: harness (arbos-pi-ext typecheck + build + test)
@@ -393,6 +398,14 @@ jobs:
           node-version: 22
           cache: pnpm
           cache-dependency-path: harness/pnpm-lock.yaml
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Prepare native ownership-law dependencies
+        run: |
+          set -euo pipefail
+          cargo fetch --locked --manifest-path .improve/state-machine-checks/pending-owners/native/Cargo.toml
+          cargo fetch --locked --manifest-path .improve/state-machine-checks/voice-settlement/native/Cargo.toml
+          echo "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" >> "$GITHUB_ENV"
+          echo "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}" >> "$GITHUB_ENV"
       - run: pnpm install --frozen-lockfile
         working-directory: harness
       - run: pnpm -r typecheck

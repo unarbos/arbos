@@ -9,6 +9,29 @@ import UIKit
 import os
 import ArbosFFI
 
+struct AccountWork {
+    let owner: WorkLifetime.Ticket
+    let api: RelayAPI
+}
+
+/// Draft fixtures need local lifetime authority; live sends also retain the
+/// exact API captured at admission, before their queued task starts.
+private enum DraftDMWork {
+    #if DEBUG || ARBOS_FIXTURE
+    case fixture(WorkLifetime.Ticket)
+    #endif
+    case relay(AccountWork)
+
+    var owner: WorkLifetime.Ticket {
+        switch self {
+        #if DEBUG || ARBOS_FIXTURE
+        case .fixture(let owner): return owner
+        #endif
+        case .relay(let work): return work.owner
+        }
+    }
+}
+
 /// Theme choice: System follows the device; Dark is the default for anyone who
 /// never picked (D90, which replaced D81's System default). The order is the
 /// Settings order (System first, then Light, then Dark).
@@ -123,6 +146,7 @@ private enum StoreKey {
     static let people = "people"
     static let directory = "directory"
     static let serversAvailable = "serversAvailable"
+    static let nativeRooms = "nativeRooms"
     static let me = "me"
     static let unread = "unread"
     static let lastChat = "lastChat"
@@ -297,7 +321,12 @@ final class AppModel: ObservableObject {
     /// After a fresh GitHub sign-in, ask for display name + handle once (Settings can edit later).
     @Published var needsProfileSetup = false
     private let webAuth = WebAuth()
-    private var refreshTask: Task<Bool, Never>?
+    var accountLifetime = WorkLifetime()
+    private enum TokenRefreshState {
+        case idle
+        case running(WorkLifetime.Ticket, Task<Bool, Never>)
+    }
+    private var tokenRefreshState: TokenRefreshState = .idle
     /// Outside agents (#2142): the connection per project, for the agent pane and the reveal.
     @Published var outsideInfo: [Id: OutsideAgentInfo] = [:]
     /// Connected agents' session logs (`GET /outside-agents/{id}/log`, #2224), oldest first,
@@ -490,10 +519,23 @@ final class AppModel: ObservableObject {
     var channelAtStart: Set<Id> = []
     /// Channels with an `openRoom` / `loadOlder` in flight.
     var channelLoading: Set<Id> = []
+    /// Native chats whose earlier history this launch has already offered to carry
+    /// (`carryHistory`).
+    var historyAsked: Set<Id> = []
     /// Servers whose member list was asked for this session (`wantServerRosters`).
     var serverRostersRequested: Set<Id> = []
     /// `matrixStart` in flight (one at a time).
-    var matrixStarting = false
+    var matrixLifetime = MatrixLifetime()
+    /// Phase 3: `GET /me/matrix` said `people_native`. Without it nothing asks the relay for
+    /// `nativeRooms`.
+    var peopleNative = false
+    /// The people chats the relay says are read and written on the homeserver, chat id → room
+    /// id (`GET /me/matrix/people`). A chat in here has no Loro room on this phone; its rows
+    /// are `channelRows[chatId]`, from the room once the homeserver lists it (`nativeRoom`).
+    /// Set through `applyNativeRooms`.
+    private(set) var nativeRooms: [Id: String] = [:]
+    /// The wallet step on screen: show a new phrase once, or ask for it (Sync/Wallet.swift).
+    @Published var walletPrompt: WalletPrompt?
 
     /// Who the call screen shows before anyone joins: the DM peer, or (for a
     /// people group) every other human plus the agents in that chat; for a
@@ -595,10 +637,16 @@ final class AppModel: ObservableObject {
         if archived { unpinHome(projectId: projectId) }
         archiveLocalUntil["p:" + projectId] = Date().addingTimeInterval(Self.archiveLocalGraceSeconds)
         guard credentials != nil, !isFixture else { return }
+        guard let work = accountWork() else { return }
+        let api = work.api
         Task {
+            guard accountLifetime.accepts(work.owner) else { return }
             do { try await api.setProjectArchived(projectId, archived: archived) } catch let e as RelayError where e.status == 404 {
+                guard accountLifetime.accepts(work.owner) else { return }
                 // Older relay: the archive stays on this device.
-            } catch { fail(archived ? "archive the chat" : "unarchive the chat", error) }
+            } catch {
+                guard accountLifetime.accepts(work.owner) else { return }; fail(archived ? "archive the chat" : "unarchive the chat", error)
+            }
         }
     }
 
@@ -612,10 +660,16 @@ final class AppModel: ObservableObject {
         }
         archiveLocalUntil["c:" + peopleChatId] = Date().addingTimeInterval(Self.archiveLocalGraceSeconds)
         guard credentials != nil, !isFixture else { return }
+        guard let work = accountWork() else { return }
+        let api = work.api
         Task {
+            guard accountLifetime.accepts(work.owner) else { return }
             do { try await api.chatSettings(chatId: peopleChatId, archived: archived) } catch let e as RelayError where e.status == 404 {
+                guard accountLifetime.accepts(work.owner) else { return }
                 // Older relay: the archive stays on this device.
-            } catch { fail(archived ? "archive the chat" : "unarchive the chat", error) }
+            } catch {
+                guard accountLifetime.accepts(work.owner) else { return }; fail(archived ? "archive the chat" : "unarchive the chat", error)
+            }
         }
     }
 
@@ -626,10 +680,16 @@ final class AppModel: ObservableObject {
         if archived { unpinHome(serverId: serverId) }
         archiveLocalUntil["s:" + serverId] = Date().addingTimeInterval(Self.archiveLocalGraceSeconds)
         guard credentials != nil, !isFixture else { return }
+        guard let work = accountWork() else { return }
+        let api = work.api
         Task {
+            guard accountLifetime.accepts(work.owner) else { return }
             do { try await api.setServerArchived(serverId, archived: archived) } catch let e as RelayError where e.status == 404 {
+                guard accountLifetime.accepts(work.owner) else { return }
                 // Older relay: the archive stays on this device.
-            } catch { fail(archived ? "archive the chat" : "unarchive the chat", error) }
+            } catch {
+                guard accountLifetime.accepts(work.owner) else { return }; fail(archived ? "archive the chat" : "unarchive the chat", error)
+            }
         }
     }
 
@@ -795,17 +855,26 @@ final class AppModel: ObservableObject {
         pinnedHomeIds = pins
         HomePins.cache(pins)
         guard credentials != nil, !isFixture else { return }
+        guard let work = accountWork() else { return }
+        let api = work.api
         Task {
+            guard accountLifetime.accepts(work.owner) else { return }
             do {
-                applyPins(try await api.setPins(pins))
+                let saved = try await api.setPins(pins)
+                guard accountLifetime.accepts(work.owner) else { return }
+                applyPins(saved)
+                guard accountLifetime.accepts(work.owner) else { return }
             } catch let e as RelayError where e.status == 404 {
+                guard accountLifetime.accepts(work.owner) else { return }
                 // Older relay: the pins stay on this device.
             } catch let e as RelayError where e.status == 409 {
+                guard accountLifetime.accepts(work.owner) else { return }
                 failRefused("pin the chat", e.message.isEmpty ? "You can pin up to \(pinCap) chats." : e.message)
-                await refreshPins()
+                await refreshPins(expectedOwner: work.owner)
             } catch {
+                guard accountLifetime.accepts(work.owner) else { return }
                 fail("save your pins", error)
-                await refreshPins()
+                await refreshPins(expectedOwner: work.owner)
             }
         }
     }
@@ -814,14 +883,19 @@ final class AppModel: ObservableObject {
     /// synced list — the relay has nothing and this device still holds `pinnedHome` — the old
     /// local pins go up once, in their order (Jacob's option A, 2026-10-28); the local list
     /// stands until the relay confirms.
-    func refreshPins() async {
-        guard credentials != nil, !isFixture else { return }
+    func refreshPins(expectedOwner: WorkLifetime.Ticket? = nil) async {
+        guard credentials != nil, !isFixture,
+            let work = accountWork(expectedOwner: expectedOwner)
+        else { return }
+        let api = work.api
         do {
             let dto = try await api.pins()
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
             let legacy = HomePins.legacyLocal()
             if dto.pins.isEmpty, !legacy.isEmpty, !HomePins.migrated() {
                 let migrated = HomePins.migrateLegacy(legacy, cap: Int(dto.cap))
                 let kept = try await api.setPins(migrated)
+                guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
                 HomePins.markMigrated()
                 applyPins(kept)
             } else {
@@ -831,6 +905,7 @@ final class AppModel: ObservableObject {
         } catch let e as RelayError where e.status == 404 {
             // Older relay: the cached list stands, quietly.
         } catch {
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
             NSLog("pins: \(error)")
         }
     }
@@ -1149,13 +1224,14 @@ final class AppModel: ObservableObject {
     /// relay's HTTP poll each vote; the highest-priority verdict wins (offline >
     /// relay down > reconnecting > syncing). A state younger than `linkPillGrace`
     /// does not show; `linkPillRepaint` ticks the view once the grace is over.
-    /// A channel's room is the Matrix client: its `onConnection` false is a reconnect.
+    /// A channel's room (and a native people chat's) is the Matrix client: its `onConnection`
+    /// false is a reconnect.
     func linkPill(for chatId: Id, channel: Bool = false, now: Date = Date()) -> LinkState? {
         func settled(_ state: LinkState, _ since: Date) -> LinkState? {
             state != .live && now.timeIntervalSince(since) >= Self.linkPillGrace ? state : nil
         }
         var verdict: LinkState? = settled(relayLink, relayLinkSince)
-        if channel {
+        if channel || nativeRooms[chatId] != nil {
             if !matrixConnected, let since = matrixDisconnectedSince, let s = settled(.reconnecting, since) {
                 verdict = max(verdict ?? .live, s)
             }
@@ -1201,7 +1277,8 @@ final class AppModel: ObservableObject {
     // MARK: Feedback
 
     /// JPEG the screenshot (≤15 MB per the contract) and post it with the note.
-    func sendFeedback(note: String, image: UIImage?, projectId: Id?) async throws -> String? {
+    func sendFeedback(note: String, image: UIImage?, projectId: Id?, expectedOwner: WorkLifetime.Ticket? = nil) async throws -> String? {
+        if let expectedOwner, !accountLifetime.accepts(expectedOwner) { throw CancellationError() }
         var data: Data? = nil
         var mime: String? = nil
         var w = 0, h = 0
@@ -1221,8 +1298,12 @@ final class AppModel: ObservableObject {
             try? await Task.sleep(nanoseconds: 900_000_000)
             return "01FIXTURE0000000000FEEDBK"
         }
-        return try await api.sendFeedback(note: note, image: data, mime: mime, width: w, height: h,
-                                          appVersion: FeedbackCenter.appVersion, os: "iOS \(UIDevice.current.systemVersion)", projectId: projectId)
+        guard let work = accountWork(expectedOwner: expectedOwner) else { throw CancellationError() }
+        let id = try await work.api.sendFeedback(
+            note: note, image: data, mime: mime, width: w, height: h,
+            appVersion: FeedbackCenter.appVersion, os: "iOS \(UIDevice.current.systemVersion)", projectId: projectId)
+        guard accountLifetime.accepts(work.owner) else { throw CancellationError() }
+        return id
     }
 
     /// Opt-in MetricKit payload → the relay (`PerfDiagnostics`). The fixture never posts.
@@ -1233,9 +1314,31 @@ final class AppModel: ObservableObject {
 
     // MARK: Calls v1
 
+    /// Capture the API and publication authority before asynchronous account work.
+    func accountWork(expectedOwner: WorkLifetime.Ticket? = nil) -> AccountWork? {
+        guard credentials != nil, let owner = accountLifetime.ticket,
+            expectedOwner == nil || expectedOwner == owner, !Task.isCancelled
+        else { return nil }
+        let bound = api.bound(to: { [weak self] in self?.accountLifetime.accepts(owner) == true })
+        bound.refresher = { [weak self] in await self?.refreshTokens(expectedOwner: owner) ?? false }
+        return AccountWork(owner: owner, api: bound)
+    }
+
+    /// Rendered rows and delayed callbacks keep the work they were built for.
+    /// An absent owner never grants permission to mutate the current account.
+    func acceptsAccountWork(_ work: AccountWork?) -> Bool {
+        guard let work, !Task.isCancelled else { return false }
+        return accountLifetime.accepts(work.owner)
+    }
+
+    private func boundCallAPI() -> RelayAPI? {
+        accountWork()?.api
+    }
+
+
     private func hookCalls() {
         let calls = CallManager.shared
-        calls.api = api
+        calls.api = boundCallAPI()
         calls.isFixture = isFixture
         calls.deviceId = { [weak self] in self?.deviceId ?? "" }
         calls.me = { [weak self] in
@@ -1291,19 +1394,26 @@ final class AppModel: ObservableObject {
     func liveDoc(_ chatId: Id) -> CoreChatDoc? { docs[chatId] }
 
     /// D82 first login: `POST /projects` for the account's first agent.
-    func createFirstProject(name: String) async throws {
+    func createFirstProject(name: String, expectedOwner: WorkLifetime.Ticket? = nil) async throws {
+        guard let work = accountWork(expectedOwner: expectedOwner) else { throw CancellationError() }
+        let api = work.api
         _ = try await api.createProject(name: name)
     }
 
     /// D82 first login: `POST /machine/start` from the Retry block.
-    func startMachineQuietly() async {
+    func startMachineQuietly(expectedOwner: WorkLifetime.Ticket? = nil) async {
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return }
+        let api = work.api
         try? await api.startMachine()
     }
 
     /// Opening a chat: is a call on there? (GET /chats/{id}/call)
-    func refreshActiveCall(chatId: Id, projectId: Id?) async {
+    func refreshActiveCall(chatId: Id, projectId: Id?, expectedOwner: WorkLifetime.Ticket? = nil) async {
         guard credentials != nil, !isFixture, !Self.isDraftDM(chatId) else { return }
-        if let c = try? await api.activeCall(chatId: chatId, projectId: projectId) {
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return }
+        let fetched = try? await work.api.activeCall(chatId: chatId, projectId: projectId)
+        guard accountLifetime.accepts(work.owner) else { return }
+        if let c = fetched {
             CallManager.shared.noteActive(c, chatId: chatId)
         } else {
             CallManager.shared.noteActive(nil, chatId: chatId)
@@ -1313,13 +1423,16 @@ final class AppModel: ObservableObject {
     /// A peer's presence says `in_call`: fetch it for the Join bar.
     private func peerInCall(_ callId: String, chatId: Id) {
         guard CallManager.shared.activeByChat[chatId]?.callId != callId else { return }
+        guard let work = accountWork() else { return }
+        let api = work.api
         Task {
-            if let c = try? await api.call(callId) {
+            guard accountLifetime.accepts(work.owner) else { return }
+            if let c = try? await api.call(callId), accountLifetime.accepts(work.owner) {
                 CallManager.shared.noteActive(c, chatId: chatId)
                 #if DEBUG
-                if DebugHooks.autoJoinCall, !c.ended, !CallManager.shared.isActive, visibleChatId == chatId {
-                    await CallManager.shared.join(c, title: peopleChat(chatId)?.title ?? "Call")
-                }
+                    if DebugHooks.autoJoinCall, !c.ended, !CallManager.shared.isActive, visibleChatId == chatId {
+                        await CallManager.shared.join(c, title: peopleChat(chatId)?.title ?? "Call")
+                    }
                 #endif
             }
         }
@@ -1329,28 +1442,52 @@ final class AppModel: ObservableObject {
 
     private func hookPush() {
         hookCalls()
-        guard let creds = credentials, !isFixture else { return }
-        let api = self.api
-        PushManager.shared.register = { token, env in
-            let version = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "") + " (" + (Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "") + ")"
+        guard let creds = credentials, !isFixture, let work = accountWork() else { return }
+        let api = work.api
+        PushManager.shared.register = { [weak self] token, env in
+            guard await MainActor.run(body: { self?.accountLifetime.accepts(work.owner) == true }),
+                !Task.isCancelled
+            else { return }
+            let version =
+                (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "") + " ("
+                + (Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "") + ")"
             do {
-                let enabled = try await api.registerPush(deviceId: creds.deviceId, token: token, environment: env,
-                                                         bundleId: Bundle.main.bundleIdentifier ?? "com.unarbos.arbos.ios", appVersion: version)
-                await MainActor.run { PushManager.shared.relayPushEnabled = enabled }
+                let enabled = try await api.registerPush(
+                    deviceId: creds.deviceId, token: token, environment: env,
+                    bundleId: Bundle.main.bundleIdentifier ?? "com.unarbos.arbos.ios", appVersion: version)
+                await MainActor.run {
+                    guard self?.accountLifetime.accepts(work.owner) == true, !Task.isCancelled else { return }
+                    PushManager.shared.relayPushEnabled = enabled
+                }
             } catch {
+                guard await MainActor.run(body: { self?.accountLifetime.accepts(work.owner) == true }),
+                    !Task.isCancelled
+                else { return }
                 #if DEBUG
-                print("push: register failed: \(error.localizedDescription)")
+                    print("push: register failed: \(error.localizedDescription)")
                 #endif
-                await MainActor.run { PushManager.shared.forgetRegistration() }
+                await MainActor.run {
+                    guard self?.accountLifetime.accepts(work.owner) == true, !Task.isCancelled else { return }
+                    PushManager.shared.forgetRegistration()
+                }
             }
         }
-        Task { await PushManager.shared.refreshStatus(); await PushManager.shared.sendTokenIfNeeded(force: true) }
+        Task { [weak self] in
+            guard self?.accountLifetime.accepts(work.owner) == true, !Task.isCancelled else { return }
+            await PushManager.shared.refreshStatus()
+            guard self?.accountLifetime.accepts(work.owner) == true, !Task.isCancelled else { return }
+            await PushManager.shared.sendTokenIfNeeded(force: true)
+        }
     }
 
     /// `GET /me/unread` when the relay has it; otherwise the local counts.
-    func refreshUnread() async {
+    func refreshUnread(expectedOwner: WorkLifetime.Ticket? = nil) async {
+        if let expectedOwner, !accountLifetime.accepts(expectedOwner) { return }
         guard credentials != nil, !isFixture else { applyBadge(); return }
-        if let r = (try? await api.unread()) ?? nil {
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return }
+        let result = (try? await work.api.unread()) ?? nil
+        guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
+        if let r = result {
             if r.chats != unreadCounts { unreadCounts = r.chats }
             saveUnreadCache()
         }
@@ -1415,7 +1552,10 @@ final class AppModel: ObservableObject {
     }
 
     func unreadCount(for chat: PeopleChat) -> Int {
-        Self.peopleUnreadCount(
+        // A native chat's count is the homeserver's (the relay counts rows of the Loro room,
+        // which gets none).
+        if let row = nativePeopleRow(chat.id) { return chat.id == visibleChatId ? 0 : Int(row.unread) }
+        return Self.peopleUnreadCount(
             remote: unreadCounts[chat.id],
             flagged: chat.unread || peopleUnread.contains(chat.id),
             watching: chat.id == visibleChatId
@@ -1451,17 +1591,23 @@ final class AppModel: ObservableObject {
         guard !signingIn else { return }
         signingIn = true
         signInError = nil
+        let owner = accountLifetime.ticket ?? accountLifetime.reopen()
+        let requestAPI = api
         Task {
-            defer { signingIn = false }
+            defer { if accountLifetime.accepts(owner) { signingIn = false } }
             do {
-                guard let start = api.authStartURL(deviceName: UIDevice.current.name) else {
+                guard let start = requestAPI.authStartURL(deviceName: UIDevice.current.name) else {
                     throw AuthError(message: "Bad relay address")
                 }
                 let code = try await webAuth.signIn(startURL: start)
-                let (toks, who) = try await api.exchange(grantCode: code)
+                guard accountLifetime.accepts(owner) else { return }
+                let (toks, who) = try await requestAPI.exchange(grantCode: code)
+                guard accountLifetime.accepts(owner) else { return }
+                signingIn = false
                 adopt(tokens: toks, user: who)
                 needsProfileSetup = true
             } catch {
+                guard accountLifetime.accepts(owner) else { return }
                 signInError = UserError.classify("sign in", error)
             }
         }
@@ -1469,43 +1615,73 @@ final class AppModel: ObservableObject {
 
     /// Settings / onboarding: save display name and handle via `PATCH /me`.
     @discardableResult
-    func updateProfile(name: String, handle: String) async -> String? {
+    func updateProfile(name: String, handle: String, expectedOwner: WorkLifetime.Ticket? = nil) async -> String? {
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return nil }
+        let api = work.api
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedHandle = handle.trimmingCharacters(in: .whitespacesAndNewlines)
             .trimmingCharacters(in: CharacterSet(charactersIn: "@"))
         guard !trimmedHandle.isEmpty else { return "Choose a handle." }
         do {
             let who = try await api.patchMe(name: trimmedName, login: trimmedHandle)
+            guard accountLifetime.accepts(work.owner) else { return nil }
             user = who
             saveAccountCache()
             needsProfileSetup = false
             return nil
         } catch let e as RelayError {
+            guard accountLifetime.accepts(work.owner) else { return nil }
             return AuthError.humanize(e.type ?? "", e.message.isEmpty ? "Could not update profile" : e.message)
         } catch {
+            guard accountLifetime.accepts(work.owner) else { return nil }
             return UserError.classify("save your profile", error).sentence
         }
     }
 
     /// Settings → Privacy: who may add me to groups (`PATCH /me {group_add}`).
     @discardableResult
-    func updateGroupAddPolicy(_ policy: GroupAddPolicy) async -> String? {
+    func updateGroupAddPolicy(_ policy: GroupAddPolicy, expectedOwner: WorkLifetime.Ticket? = nil) async -> String? {
+        if let expectedOwner, !accountLifetime.accepts(expectedOwner) { return nil }
         let previous = groupAddPolicy
         groupAddPolicy = policy.rawValue
         guard !isFixture else { return nil }
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return nil }
+        let api = work.api
         do {
-            _ = try await api.patchMe(groupAdd: policy.rawValue)
+            let received = try await api.patchMe(groupAdd: policy.rawValue)
+            guard accountLifetime.accepts(work.owner) else { return nil }
+            _ = received
             return nil
         } catch let e as RelayError {
+            guard accountLifetime.accepts(work.owner) else { return nil };
             groupAddPolicy = previous
             return AuthError.humanize(e.type ?? "", e.message.isEmpty ? "Could not update privacy" : e.message)
         } catch {
+            guard accountLifetime.accepts(work.owner) else { return nil };
             groupAddPolicy = previous
             return UserError.classify("save the privacy setting", error).sentence
         }
     }
 
+    private func prepareCredentialOwner(relayUrl: String, deviceId: String, userId: String? = nil) {
+        let changedUser = userId.flatMap { next in
+            user.map { !$0.id.isEmpty && !next.isEmpty && $0.id != next }
+        } ?? false
+        if let credentials, credentials.relayUrl == relayUrl, credentials.deviceId == deviceId,
+           accountLifetime.ticket != nil, !changedUser { return }
+        if credentials != nil {
+            unpair(forget: false)
+            tokens = nil
+            user = nil
+            credits = nil
+            needsProfileSetup = false
+        }
+        accountLifetime.reopen()
+        stopMatrix()
+    }
+
     private func adopt(tokens toks: AuthTokens, user who: AuthUser?, persist: Bool = true) {
+        prepareCredentialOwner(relayUrl: toks.relayUrl, deviceId: toks.deviceId, userId: who?.id)
         tokens = toks
         if let who { user = who }
         if persist {
@@ -1515,6 +1691,7 @@ final class AppModel: ObservableObject {
         }
         let wasPaired = credentials != nil
         credentials = DeviceCredentials(relayUrl: toks.relayUrl, deviceId: toks.deviceId, deviceToken: toks.accessToken)
+        CallManager.shared.api = boundCallAPI()
         if !wasPaired {
             // A sign-in through the browser (not a token refresh): a possible first login.
             // Rig (Debug): `ARBOS_SKIP_FIRST_LOGIN=1` lands on the lists at once — a shot of an
@@ -1526,16 +1703,26 @@ final class AppModel: ObservableObject {
 
     /// Single-flight refresh; false when the relay rejected the refresh token
     /// (the device is then signed out — a reused rotated token revokes it).
-    func refreshTokens() async -> Bool {
-        if let running = refreshTask { return await running.value }
-        guard let current = tokens, !current.refreshToken.isEmpty else { return false }
+    func refreshTokens(expectedOwner: WorkLifetime.Ticket? = nil) async -> Bool {
+        if let expectedOwner, !accountLifetime.accepts(expectedOwner) { return false }
+        if case .running(let owner, let task) = tokenRefreshState,
+            accountLifetime.accepts(owner)
+        {
+            return await task.value
+        }
+        guard let current = tokens, !current.refreshToken.isEmpty,
+            let owner = accountLifetime.ticket
+        else { return false }
+        let requestAPI = api
         let task = Task<Bool, Never> { [weak self] in
-            guard let self else { return false }
+            guard let self, self.accountLifetime.accepts(owner) else { return false }
             do {
-                let (next, who) = try await api.refresh(current)
+                let (next, who) = try await requestAPI.refresh(current)
+                guard accountLifetime.accepts(owner), !Task.isCancelled else { return false }
                 adopt(tokens: next, user: who)
                 return true
             } catch {
+                guard accountLifetime.accepts(owner), !Task.isCancelled else { return false }
                 if let e = error as? RelayError, e.status == 401 || e.status == 403 {
                     signOut(remote: false)
                     signInError = UserError.of("stay signed in", .authExpired, "token refresh refused")
@@ -1543,17 +1730,25 @@ final class AppModel: ObservableObject {
                 return false
             }
         }
-        refreshTask = task
+        tokenRefreshState = .running(owner, task)
         let ok = await task.value
-        refreshTask = nil
+        if case .running(let currentOwner, _) = tokenRefreshState, currentOwner == owner {
+            tokenRefreshState = .idle
+        }
         return ok
     }
 
     /// `/me`; runs with every registry poll.
-    func refreshAccount() async {
-        guard credentials != nil, !isFixture else { return }
-        if tokens?.isExpiringSoon == true { _ = await refreshTokens() }
-        if let (who, cr, summary, features, privacy) = try? await api.me() {
+    func refreshAccount(expectedOwner: WorkLifetime.Ticket? = nil) async {
+        guard credentials != nil, !isFixture,
+            let work = accountWork(expectedOwner: expectedOwner)
+        else { return }
+        if tokens?.isExpiringSoon == true {
+            _ = await refreshTokens(expectedOwner: work.owner)
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
+        }
+        if let (who, cr, summary, features, privacy) = try? await work.api.me() {
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
             if who != user { user = who }
             if cr != credits { credits = cr }
             saveAccountCache()
@@ -1580,14 +1775,14 @@ final class AppModel: ObservableObject {
 
     func signOut(remote: Bool = true) {
         let had = tokens
-        if remote, let creds = credentials {
-            let api = self.api
-            Task { try? await api.unregisterPush(deviceId: creds.deviceId); try? await api.unregisterVoip(deviceId: creds.deviceId) }
+        let cleanupAPI = remote ? api.frozenAuthority() : nil
+        if let cleanupAPI, let creds = credentials {
+            Task { try? await cleanupAPI.unregisterPush(deviceId: creds.deviceId); try? await cleanupAPI.unregisterVoip(deviceId: creds.deviceId) }
         }
         CallManager.shared.forgetVoipRegistration()
         PushManager.shared.forgetRegistration()
         PushManager.shared.setBadge(0)
-        if remote, had != nil { Task { await api.logout() } }
+        if had != nil, let cleanupAPI { Task { await cleanupAPI.logout() } }
         if let had { Keychain.deleteAuth(relayUrl: had.relayUrl) }
         tokens = nil
         user = nil
@@ -1604,8 +1799,10 @@ final class AppModel: ObservableObject {
     /// Unit tests: talk to a loopback relay with a fixed token — no keychain, no auth probe,
     /// no rooms. Used by `AddMembersActionTests` to drive `addMembers` end to end.
     func installRelayForTests(url: String, token: String) {
+        prepareCredentialOwner(relayUrl: url, deviceId: "ios:test")
         api = RelayAPI(endpoint: RelayEndpoint(url)) { token }
         credentials = DeviceCredentials(relayUrl: url, deviceId: "ios:test", deviceToken: token)
+        CallManager.shared.api = boundCallAPI()
     }
     #endif
 
@@ -1628,21 +1825,26 @@ final class AppModel: ObservableObject {
             credentials = Keychain.load(relayUrl: endpoint.httpUrl)
         }
         if credentials != nil {
+            accountLifetime.reopen()
+            CallManager.shared.api = boundCallAPI()
             startAfterPairing()
         } else if let previous, tokens == nil, previous.deviceToken.hasPrefix("adv_") {
             // A quick-tunnel URL changes while the relay (and this device's
             // token) stays the same: try the old token on the new address
             // before asking for a pairing code.
-            Task { await adopt(previous, at: endpoint) }
+            let owner = accountLifetime.reopen()
+            Task { await adopt(previous, at: endpoint, owner: owner) }
         }
     }
 
-    private func adopt(_ old: DeviceCredentials, at endpoint: RelayEndpoint) async {
+    private func adopt(_ old: DeviceCredentials, at endpoint: RelayEndpoint, owner: WorkLifetime.Ticket) async {
         let probe = RelayAPI(endpoint: endpoint) { old.deviceToken }
-        guard (try? await probe.registry()) != nil else { return }
+        guard (try? await probe.registry()) != nil, accountLifetime.accepts(owner) else { return }
         let creds = DeviceCredentials(relayUrl: endpoint.httpUrl, deviceId: old.deviceId, deviceToken: old.deviceToken)
+        prepareCredentialOwner(relayUrl: creds.relayUrl, deviceId: creds.deviceId)
         try? Keychain.store(creds)
         credentials = creds
+        CallManager.shared.api = boundCallAPI()
         startAfterPairing()
     }
 
@@ -1791,19 +1993,26 @@ final class AppModel: ObservableObject {
         guard !pairingBusy else { return }
         pairingBusy = true
         pairingError = nil
+        let owner = accountLifetime.ticket ?? accountLifetime.reopen()
+        let requestAPI = api
         Task {
-            defer { pairingBusy = false }
+            defer { if accountLifetime.accepts(owner) { pairingBusy = false } }
             do {
-                let creds = try await api.pair(code: code, name: UIDevice.current.name)
+                let creds = try await requestAPI.pair(code: code, name: UIDevice.current.name)
+                guard accountLifetime.accepts(owner) else { return }
+                pairingBusy = false
+                prepareCredentialOwner(relayUrl: creds.relayUrl, deviceId: creds.deviceId)
                 do {
                     try Keychain.store(creds)
                 } catch {
                     fail("save your sign-in to the keychain", error)
                 }
                 credentials = creds
+                CallManager.shared.api = boundCallAPI()
                 beginFirstLogin()
                 startAfterPairing()
             } catch {
+                guard accountLifetime.accepts(owner) else { return }
                 pairingError = (error as? RelayError)?.isUnauthorized == true
                     ? UserError.refused("pair this iPhone", "That code was not accepted. Codes expire after 10 minutes.")
                     : UserError.classify("pair this iPhone", error)
@@ -1811,7 +2020,103 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Private account views and queued UI actions must not survive into another
+    /// account while its first responses are loading. Device appearance and
+    /// notification/archive preferences keep their existing persistence policy.
+    private func resetAccountViews() {
+        FeedbackCenter.shared.isPresented = false
+        FeedbackCenter.shared.screenshot = nil
+        FeedbackCenter.shared.context = FeedbackCenter.Context()
+        secrets = nil
+        projectSecrets = [:]
+        shellGrants = [:]
+        handoff = [:]
+        secretsBusy = false
+        devices = []
+        devicesLoaded = false
+        devicesError = nil
+        goals = []
+        goalsBusy = false
+        selectedGoalId = nil
+        serverRostersRequested = []
+        pinnedHomeIds = []
+        HomePins.cache([])
+        pinsLoaded = false
+        pinCap = Self.maxHomePins
+        blocked = []
+        models = []
+        machine = .unknown
+        machineBusy = false
+        machineError = nil
+        jobs = [:]
+        jobsPolledAt = [:]
+        jobsPolling = []
+        jobTabs = [:]
+        closedJobTabs = []
+        rollouts = [:]
+        pendingSteers = [:]
+        rolloutPolledAt = [:]
+        rolloutPolling = []
+        outsideInfo = [:]
+        outsideLogs = [:]
+        optimisticNotices = [:]
+        messagesVersion = [:]
+        tailEditVersion = [:]
+        activityCache = [:]
+        sendErrors = [:]
+        sendErrorDetailsOpen = []
+        pushRefused = []
+        pushRefusalText = [:]
+        pushRefusalReason = [:]
+        snapshotPending = []
+        snapshotLastAt = [:]
+        snapshotGeneration = [:]
+        activityPending = []
+        pendingOpen = nil
+        notifiedPushIds = []
+        visibleChatId = nil
+        path = []
+        profile = nil
+        profilePath = []
+        pendingSearchChat = nil
+        pendingReveal = nil
+        pendingAgentSetting = nil
+        searchIndex = SearchIndex()
+        composerDrafts = [:]
+        lastSeen = [:]
+        typing = [:]
+        typingSentAt = [:]
+        optimisticSends = [:]
+        optimisticChatIds = []
+        optimisticRemap = [:]
+        pendingDMReply = nil
+        pendingForwardDraft = nil
+        routines = [:]
+        boxReport = nil
+        voiceCatalog = nil
+        for task in toastTimers.values { task.cancel() }
+        toastTimers = [:]
+        toastRetries = [:]
+        toasts = []
+        failureClaim = nil
+        claimedFailure = nil
+        claimedFailureDetailsOpen = false
+        registryError = nil
+        registryErrorDetailsOpen = false
+        contentOrigin = "relay"
+        meAlwaysOn = nil
+        waitlistPosition = nil
+    }
+
     func unpair(forget: Bool = true) {
+        accountLifetime.close()
+        retireDraftSends()
+        resetAccountViews()
+        CallManager.shared.invalidateForSignOut()
+        signingIn = false
+        pairingBusy = false
+        if case .running(_, let task) = tokenRefreshState { task.cancel() }
+        tokenRefreshState = .idle
         registryTask?.cancel()
         registryTask = nil
         for room in rooms.values { room.stop() }
@@ -1853,6 +2158,7 @@ final class AppModel: ObservableObject {
             if forget { Keychain.delete(relayUrl: creds.relayUrl) }
         }
         credentials = nil
+        CallManager.shared.api = nil
         link = .connecting
         roomLinks = [:]
         roomLinkSince = [:]
@@ -1862,7 +2168,8 @@ final class AppModel: ObservableObject {
         endFirstLogin()
     }
 
-    private func startAfterPairing() {
+    private func startAfterPairing(expectedOwner: WorkLifetime.Ticket? = nil) {
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return }
         link = .connecting
         roomLinks = [:]
         roomLinkSince = [:]
@@ -1874,8 +2181,10 @@ final class AppModel: ObservableObject {
         }
         if projects.isEmpty { resumeFirstLoginIfPending() }
         hookPush()
-        Task {
-            if let ids = try? await api.models(), !ids.isEmpty {
+        Task { [weak self] in
+            guard self?.accountLifetime.accepts(work.owner) == true, !Task.isCancelled else { return }
+            if let ids = try? await work.api.models(), !ids.isEmpty {
+                guard let self, accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
                 models = ids
             }
         }
@@ -1883,26 +2192,37 @@ final class AppModel: ObservableObject {
         registryTask = Task { [weak self] in
             // Saved docs first, so their rooms dial with a cursor instead of
             // the registry opening them empty (one checkpoint download each).
-            if let self, let store = self.store { await self.loadStoreDocs(store) }
+            if let self, let store = self.store {
+                await self.loadStoreDocs(store, expectedOwner: work.owner)
+            }
+            guard self?.accountLifetime.accepts(work.owner) == true, !Task.isCancelled else { return }
             self?.storeDocsLoaded = true
             // Notification opens deferred while docs loaded can ensureRoom now.
             self?.retryPendingOpen()
             while !Task.isCancelled {
-                guard let self else { return }
-                await self.refreshRegistry()
-                await self.refreshAccount()
-                await self.refreshPeople()
+                guard let self, accountLifetime.accepts(work.owner) else { return }
+                await refreshRegistry(expectedOwner: work.owner)
+                guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
+                await refreshAccount(expectedOwner: work.owner)
+                guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
+                await refreshPeople(expectedOwner: work.owner)
+                guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
                 // The New Message sheet's list, ahead of the first "+" (TTL-gated, off this loop).
-                Task { await self.loadDirectory() }
-                await self.refreshServers()
-                if !self.pinsLoaded {
-                    await self.refreshPins()
-                    self.pinsLoaded = true
+                Task { await self.loadDirectory(expectedOwner: work.owner) }
+                await refreshServers(expectedOwner: work.owner)
+                guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
+                if !pinsLoaded {
+                    await refreshPins(expectedOwner: work.owner)
+                    guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
+                    pinsLoaded = true
                 }
-                await self.startMatrixIfNeeded()
-                await self.drainPushes()
-                await self.refreshUnread()
-                self.retryPendingOpen()
+                await startMatrixIfNeeded(expectedOwner: work.owner)
+                guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
+                await drainPushes(expectedOwner: work.owner)
+                guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
+                await refreshUnread(expectedOwner: work.owner)
+                guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
+                retryPendingOpen()
                 try? await Task.sleep(nanoseconds: 15_000_000_000)
             }
         }
@@ -1910,9 +2230,11 @@ final class AppModel: ObservableObject {
 
     // MARK: Registry
 
-    func refreshRegistry() async {
+    func refreshRegistry(expectedOwner: WorkLifetime.Ticket? = nil) async {
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return }
         do {
-            let result = try await api.registry()
+            let result = try await work.api.registry()
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
             let items = result.projects
             // The 15 s poll: a write that changes nothing still publishes to every subscriber.
             if registryError != nil { registryError = nil }
@@ -1968,7 +2290,8 @@ final class AppModel: ObservableObject {
             reconcileArchivedProjects(newProjects)
             saveRegistryCache()
             setRelayLink(.live)
-            await refreshMachine()
+            await refreshMachine(expectedOwner: work.owner)
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
             for p in newProjects {
                 ensureRoom(projectId: p.id, key: projectDocKey(p.id), roomChat: projectDocChatId)
             }
@@ -1987,9 +2310,10 @@ final class AppModel: ObservableObject {
                 let peopleKeys = Set(rooms.compactMap { key, room in room.projectId == peopleSlot ? key : nil })
                     .union(peopleChats.map(\.id))
                 let now = Date()
-                let recentKeys = Set(roomCreatedAt.compactMap { key, at in
-                    now.timeIntervalSince(at) < Self.roomRecentGraceSeconds ? key : nil
-                })
+                let recentKeys = Set(
+                    roomCreatedAt.compactMap { key, at in
+                        now.timeIntervalSince(at) < Self.roomRecentGraceSeconds ? key : nil
+                    })
                 let doomed = Self.roomsToPrune(
                     roomKeys: Set(rooms.keys).union(docs.keys),
                     listedChatIds: listedChatIds,
@@ -2001,6 +2325,7 @@ final class AppModel: ObservableObject {
             }
             firstLoginRegistryUpdated()
         } catch {
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
             if (error as? RelayError)?.isUnauthorized == true {
                 // Token revoked or relay re-initialised: pair again.
                 unpair(forget: true)
@@ -2055,6 +2380,10 @@ final class AppModel: ObservableObject {
         if let data = store.get(StoreKey.unread), let counts = try? JSONDecoder().decode([String: Int].self, from: data) {
             unreadCounts = counts
         }
+        // Before any room is dialled: a native chat opens no Loro room on this launch either.
+        if let data = store.get(StoreKey.nativeRooms), let rooms = try? JSONDecoder().decode([Id: String].self, from: data) {
+            nativeRooms = rooms
+        }
         // One copy of each agent's avatar everywhere, before the first frame: the record and
         // the roster copies came back from two caches written at different times; the
         // newest wins and every picture URL is rebuilt on the public versioned route (a
@@ -2067,7 +2396,8 @@ final class AppModel: ObservableObject {
 
     /// Import every saved room off the main thread (last opened first), then
     /// hand each to `ensureRoom` with its cursor so it paints and dials at once.
-    private func loadStoreDocs(_ store: DeviceStore) async {
+    private func loadStoreDocs(_ store: DeviceStore, expectedOwner: WorkLifetime.Ticket? = nil) async {
+        guard let work = accountWork(expectedOwner: expectedOwner), self.store === store else { return }
         let saved = store.loadDocs()
         guard !saved.isEmpty else { return }
         let pending = store.loadPending()
@@ -2093,9 +2423,11 @@ final class AppModel: ObservableObject {
                 return (s, doc, messages)
             }
         }.value
+        guard accountLifetime.accepts(work.owner), self.store === store, !Task.isCancelled else { return }
         for (s, doc, messages) in docs {
-            ensureRoom(projectId: s.projectId, key: s.key, roomChat: s.roomChat,
-                       restored: (doc, s.cursor, pending[s.key] ?? [], messages))
+            ensureRoom(
+                projectId: s.projectId, key: s.key, roomChat: s.roomChat,
+                restored: (doc, s.cursor, pending[s.key] ?? [], messages))
         }
         LaunchClock.mark("store-docs", detail: "\(docs.count) docs in \(Int(Date().timeIntervalSince(started) * 1000)) ms")
     }
@@ -2380,7 +2712,9 @@ final class AppModel: ObservableObject {
 
     private func ensureRoom(projectId: Id, key: Id, roomChat: String,
                             restored: (doc: CoreChatDoc, cursor: Int64, pending: [(String, Data)], messages: [Message]?)? = nil) {
-        guard rooms[key] == nil else { return }
+        // A native people chat lives on the homeserver; a doc saved for it stays on disk for
+        // the day the relay hands the chat back.
+        guard rooms[key] == nil, nativeRooms[key] == nil else { return }
         guard Self.shouldRecreateRoom(
             failures: roomUnavailableFailures[key] ?? 0,
             lastFailureAt: roomUnavailableAt[key],
@@ -2594,6 +2928,35 @@ final class AppModel: ObservableObject {
         forgetDoc(key)
     }
 
+    /// Phase 3: the relay's answer on which people chats are read from the homeserver
+    /// (`refreshNativeRooms`; empty is the rollback). A chat that became native gives up its
+    /// Loro room (the saved doc stays on disk); one handed back drops the homeserver's rows
+    /// and gets its room again from the next `refreshPeople`.
+    func applyNativeRooms(_ next: [Id: String]) {
+        guard next != nativeRooms else { return }
+        let old = nativeRooms
+        nativeRooms = next
+        if next.isEmpty {
+            store?.remove(StoreKey.nativeRooms)
+        } else if let data = try? JSONEncoder().encode(next) {
+            store?.put(StoreKey.nativeRooms, data)
+        }
+        for key in next.keys where old[key] == nil {
+            rooms[key]?.stop()
+            rooms[key] = nil
+            docs[key] = nil
+            dirtyDocs.remove(key)
+            messages[key] = nil
+            roomLinks[key] = nil
+            roomLinkSince[key] = nil
+            caughtUp.remove(key)
+        }
+        for (key, room) in old where next[key] != room {
+            channelRows[key] = nil
+            caughtUp.remove(key)
+        }
+    }
+
     /// Re-dial every listed chat after the unavailable backoff was cleared.
     private func recreateListedRooms() {
         for p in projects {
@@ -2648,6 +3011,7 @@ final class AppModel: ObservableObject {
         snapshotPending.remove(chatId)
         snapshotLastAt[chatId] = Date().timeIntervalSince1970
         guard let doc = docs[chatId] else { return }
+        guard let account = accountLifetime.ticket else { return }
         let gen = (snapshotGeneration[chatId] ?? 0) &+ 1
         snapshotGeneration[chatId] = gen
         #if DEBUG
@@ -2673,7 +3037,13 @@ final class AppModel: ObservableObject {
             await MainActor.run {
                 // A superseded read still paints a chat that shows nothing yet: rows arriving
                 // faster than one read finishes must not keep the transcript blank.
-                guard let self, self.snapshotGeneration[chatId] == gen || (self.messages[chatId]?.isEmpty ?? true) else { return }
+                guard let self else { return }
+                let ticket = SnapshotPublication.Ticket(account: account, doc: ObjectIdentifier(doc), revision: gen)
+                let target: SnapshotPublication.Target = self.docs[chatId].map {
+                    .active(doc: ObjectIdentifier($0), revision: self.snapshotGeneration[chatId] ?? 0)
+                } ?? .disposed
+                guard SnapshotPublication.accepts(ticket, account: self.accountLifetime, target: target,
+                                                  empty: self.messages[chatId]?.isEmpty ?? true) else { return }
                 self.applySnapshot(chatId, list: list)
             }
         }
@@ -2684,6 +3054,9 @@ final class AppModel: ObservableObject {
         let t0 = Date()
         defer { PerfCounters.time("applySnapshot", ms: Date().timeIntervalSince(t0) * 1000) }
         #endif
+        // A chat that went native while a read of its Loro doc was in flight: the homeserver's
+        // rows are the chat, not this doc's.
+        if nativeRooms[chatId] != nil { return }
         if let doc = docs[chatId], !Self.shouldPublishSnapshot(rows: list.count, docCount: doc.count) {
             // [feedback arbonites-blank-chat-ios-2026-10-28]: an empty read over a doc with rows
             // is a failed read, not an empty chat. Keep what is on screen (or the spinner).
@@ -2881,9 +3254,11 @@ final class AppModel: ObservableObject {
     }
 
     /// `GET /machine`: state, since, spec, spend and the workspace states.
-    func refreshMachine() async {
+    func refreshMachine(expectedOwner: WorkLifetime.Ticket? = nil) async {
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return }
         do {
-            var m = try await api.machine()
+            var m = try await work.api.machine()
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
             // `/me` may carry `always_on` on relays whose `/machine` does not.
             if meAlwaysOn == true, !m.alwaysOn {
                 m.alwaysOn = true
@@ -2895,6 +3270,7 @@ final class AppModel: ObservableObject {
                 if let w = m.workspaces[projects[i].id], projects[i].workspace != w { projects[i].workspace = w }
             }
         } catch {
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
             if (error as? RelayError)?.status == 404 {
                 machineError = "This relay has no machine API yet"
             } else {
@@ -2914,55 +3290,67 @@ final class AppModel: ObservableObject {
     // MARK: Machine control (D70: one call for the whole box)
 
     func startMachine() {
-        guard !machineBusy else { return }
+        guard !machineBusy, let work = accountWork() else { return }
+        let api = work.api
         machineBusy = true
         machine.state = machine.coerced(.waking)
         machine.since = nowMs()
         Task {
-            defer { machineBusy = false }
+            guard accountLifetime.accepts(work.owner) else { return }
+            defer { if accountLifetime.accepts(work.owner) { machineBusy = false } }
             do {
                 try await api.startMachine()
+                guard accountLifetime.accepts(work.owner) else { return }
             } catch {
+                guard accountLifetime.accepts(work.owner) else { return }
                 fail("start the machine", error)
                 machine.state = .error
                 machineError = UserError.classify("start the machine", error).sentence
             }
-            await refreshMachine()
+            await refreshMachine(expectedOwner: work.owner)
         }
     }
 
     func stopMachine() {
-        guard !machineBusy else { return }
+        guard !machineBusy, let work = accountWork() else { return }
+        let api = work.api
         machineBusy = true
         Task {
-            defer { machineBusy = false }
+            guard accountLifetime.accepts(work.owner) else { return }
+            defer { if accountLifetime.accepts(work.owner) { machineBusy = false } }
             do {
                 try await api.stopMachine()
+                guard accountLifetime.accepts(work.owner) else { return }
                 machine.state = .stoppedByUser
                 machine.since = nowMs()
             } catch {
+                guard accountLifetime.accepts(work.owner) else { return }
                 fail("stop the machine", error)
             }
-            await refreshMachine()
+            await refreshMachine(expectedOwner: work.owner)
         }
     }
 
     /// Always-on boxes (D73): the one control is a restart. The state stays
     /// awake throughout; `machineBusy` is the only progress signal.
     func restartMachine() {
-        guard !machineBusy else { return }
+        guard !machineBusy, let work = accountWork() else { return }
+        let api = work.api
         machineBusy = true
         Task {
-            defer { machineBusy = false }
+            guard accountLifetime.accepts(work.owner) else { return }
+            defer { if accountLifetime.accepts(work.owner) { machineBusy = false } }
             do {
                 try await api.restartMachine()
+                guard accountLifetime.accepts(work.owner) else { return }
                 machine.since = nowMs()
             } catch {
+                guard accountLifetime.accepts(work.owner) else { return }
                 fail("restart the machine", error)
                 machine.state = .error
                 machineError = UserError.classify("restart the machine", error).sentence
             }
-            await refreshMachine()
+            await refreshMachine(expectedOwner: work.owner)
         }
     }
 
@@ -2972,17 +3360,8 @@ final class AppModel: ObservableObject {
     /// Failures stay quiet — opening Settings must not alert on a transient TLS
     /// blip. Connect / Disconnect still set `notice` themselves.
     func refreshConnectors() {
-        guard credentials != nil, !isFixture else { return }
-        Task {
-            do {
-                connectors = try await api.connectors()
-            } catch let e as RelayError where e.status == 404 {
-                // Older relays have no connectors route.
-                connectors = ConnectorsView(loaded: true)
-            } catch {
-                // Same as refreshConnectorsOnce: leave prior state, no alert.
-            }
-        }
+        guard credentials != nil, !isFixture, let work = accountWork() else { return }
+        Task { await refreshConnectorsOnce(expectedOwner: work.owner) }
     }
 
     /// Start OAuth in the system auth sheet, or store a pasted token. The relay finishes
@@ -2992,13 +3371,18 @@ final class AppModel: ObservableObject {
     /// sits under the sheet and looks like a silent fail).
     func connectConnector(provider: String, token: String? = nil) {
         guard !connectorsBusy, credentials != nil, !isFixture else { return }
+        guard let work = accountWork() else { return }
+        let api = work.api
         connectorsBusy = true
         Task { @MainActor in
+            guard accountLifetime.accepts(work.owner) else { return }
             do {
                 if let token, !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     _ = try await api.connectConnector(provider: provider, token: token)
+                    guard accountLifetime.accepts(work.owner) else { return }
                     connectorsBusy = false
-                    await refreshConnectorsOnce()
+                    await refreshConnectorsOnce(expectedOwner: work.owner)
+                    guard accountLifetime.accepts(work.owner) else { return }
                     if connectors.connector(for: provider)?.status != .connected {
                         let err = connectors.connector(for: provider)?.lastError ?? ""
                         fail(UserError.refused("connect \(provider)", err.isEmpty ? "The token was not accepted." : err))
@@ -3006,19 +3390,25 @@ final class AppModel: ObservableObject {
                     return
                 }
                 guard let urlStr = try await api.connectConnector(provider: provider),
-                      let url = URL(string: urlStr) else {
+                    let url = URL(string: urlStr)
+                else {
+                    guard accountLifetime.accepts(work.owner) else { return }
                     connectorsBusy = false
                     fail(UserError.fromText("connect \(provider)", "the relay sent no sign-in URL"))
-                    await refreshConnectorsOnce()
+                    await refreshConnectorsOnce(expectedOwner: work.owner)
+                    guard accountLifetime.accepts(work.owner) else { return }
                     return
                 }
+                guard accountLifetime.accepts(work.owner) else { return }
                 let web = WebAuth()
                 do {
                     let callback = try await web.open(url)
+                    guard accountLifetime.accepts(work.owner) else { return }
                     connectorsBusy = false
                     let items = URLComponents(url: callback, resolvingAgainstBaseURL: false)?.queryItems ?? []
                     let ok = items.first(where: { $0.name == "ok" })?.value != "0"
-                    await refreshConnectorsOnce()
+                    await refreshConnectorsOnce(expectedOwner: work.owner)
+                    guard accountLifetime.accepts(work.owner) else { return }
                     if connectors.connector(for: provider)?.status == .connected { return }
                     if !ok {
                         let err = connectors.connector(for: provider)?.lastError ?? ""
@@ -3028,15 +3418,20 @@ final class AppModel: ObservableObject {
                     // Token write can lag the redirect by a beat.
                     for wait in [1, 2, 4] as [UInt64] {
                         try? await Task.sleep(nanoseconds: wait * 1_000_000_000)
-                        await refreshConnectorsOnce()
+                        await refreshConnectorsOnce(expectedOwner: work.owner)
+                        guard accountLifetime.accepts(work.owner) else { return }
                         if connectors.connector(for: provider)?.status == .connected { break }
                     }
                 } catch let e as AuthError where e.message == "Sign-in cancelled" {
+                    guard accountLifetime.accepts(work.owner) else { return };
                     connectorsBusy = false
-                    await refreshConnectorsOnce()
+                    await refreshConnectorsOnce(expectedOwner: work.owner)
+                    guard accountLifetime.accepts(work.owner) else { return }
                 } catch let e as AuthError where e.message == "Could not open the sign-in sheet" {
+                    guard accountLifetime.accepts(work.owner) else { return };
                     // Rare: fall back to Safari and poll like Mac.
                     let opened = await UIApplication.shared.open(url)
+                    guard accountLifetime.accepts(work.owner) else { return }
                     connectorsBusy = false
                     guard opened else {
                         fail(UserError.fromText("connect \(provider)", "could not open the sign-in page"))
@@ -3044,20 +3439,27 @@ final class AppModel: ObservableObject {
                     }
                     for wait in [0, 4, 8, 15, 30, 60] as [UInt64] {
                         if wait > 0 { try? await Task.sleep(nanoseconds: wait * 1_000_000_000) }
+                        guard accountLifetime.accepts(work.owner) else { return }
                         do {
-                            connectors = try await api.connectors()
-                        } catch { break }
+                            let kept = try await api.connectors()
+                            guard accountLifetime.accepts(work.owner) else { return }
+                            connectors = kept
+                        } catch { guard accountLifetime.accepts(work.owner) else { return }; break }
                         if connectors.connector(for: provider)?.status == .connected { break }
                     }
                 } catch {
+                    guard accountLifetime.accepts(work.owner) else { return };
                     connectorsBusy = false
                     fail(Self.connectError(provider: provider, error: error))
-                    await refreshConnectorsOnce()
+                    await refreshConnectorsOnce(expectedOwner: work.owner)
+                    guard accountLifetime.accepts(work.owner) else { return }
                 }
             } catch {
+                guard accountLifetime.accepts(work.owner) else { return };
                 connectorsBusy = false
                 fail(Self.connectError(provider: provider, error: error))
-                await refreshConnectorsOnce()
+                await refreshConnectorsOnce(expectedOwner: work.owner)
+                guard accountLifetime.accepts(work.owner) else { return }
             }
         }
     }
@@ -3073,26 +3475,34 @@ final class AppModel: ObservableObject {
 
     func disconnectConnector(id: Id) {
         guard !connectorsBusy, credentials != nil, !isFixture else { return }
+        guard let work = accountWork() else { return }
+        let api = work.api
         connectorsBusy = true
         var next = connectors
         next.items.removeAll { $0.id == id }
         connectors = next
         Task {
-            defer { connectorsBusy = false }
+            guard accountLifetime.accepts(work.owner) else { return }
+            defer { if accountLifetime.accepts(work.owner) { connectorsBusy = false } }
             do {
                 try await api.disconnectConnector(id: id)
             } catch {
+                guard accountLifetime.accepts(work.owner) else { return }
                 fail("disconnect it", error)
             }
-            await refreshConnectorsOnce()
+            await refreshConnectorsOnce(expectedOwner: work.owner)
         }
     }
 
-    private func refreshConnectorsOnce() async {
-        guard credentials != nil, !isFixture else { return }
+    private func refreshConnectorsOnce(expectedOwner: WorkLifetime.Ticket? = nil) async {
+        guard credentials != nil, !isFixture, let work = accountWork(expectedOwner: expectedOwner) else { return }
+        let api = work.api
         do {
-            connectors = try await api.connectors()
+            let kept = try await api.connectors()
+            guard accountLifetime.accepts(work.owner) else { return }
+            connectors = kept
         } catch let e as RelayError where e.status == 404 {
+            guard accountLifetime.accepts(work.owner) else { return }
             connectors = ConnectorsView(loaded: true)
         } catch {}
     }
@@ -3127,10 +3537,13 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func refreshPeople() async {
-        guard credentials != nil, !isFixture else { return }
+    func refreshPeople(expectedOwner: WorkLifetime.Ticket? = nil) async {
+        guard credentials != nil, !isFixture,
+            let work = accountWork(expectedOwner: expectedOwner)
+        else { return }
         do {
-            let raw = try await api.peopleChatsJSON()
+            let raw = try await work.api.peopleChatsJSON()
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
             let list = raw.compactMap(PeopleChat.parse)
             if list != peopleChats { peopleChats = list }
             reconcileAgentAvatars()
@@ -3140,12 +3553,16 @@ final class AppModel: ObservableObject {
                 // Loro can mark unread before the people list's head_seq catches up;
                 // keep the blue circle while the latest row is still incoming.
                 if let last = messages[c.id]?.last,
-                   !last.pending, last.role != .system,
-                   myUserId == nil || last.sender != myUserId {
+                    !last.pending, last.role != .system,
+                    myUserId == nil || last.sender != myUserId
+                {
                     continue
                 }
                 peopleUnread.remove(c.id)
             }
+            // Before the rooms are dialled: a chat the relay just made native opens none.
+            await refreshNativeRooms(expectedOwner: work.owner)
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
             for c in list { ensureRoom(projectId: peopleSlot, key: c.id, roomChat: c.id) }
             // Drop rooms/docs for people chats the relay no longer lists so a
             // restored chat cannot reconnect forever on HTTP 403.
@@ -3169,32 +3586,47 @@ final class AppModel: ObservableObject {
     /// the sheet itself lists the directory through the shared matcher
     /// (`PeoplePicker.people`) and adds these on top. The fixture answers from
     /// the directory through the same matcher.
-    func searchPeople(_ q: String) async -> [Person] {
+    func searchPeople(_ q: String, expectedOwner: WorkLifetime.Ticket? = nil) async -> [Person] {
+        if let expectedOwner, !accountLifetime.accepts(expectedOwner) { return [] }
         if isFixture {
             return PeoplePicker.people(directory: directory, remote: [], me: nil, query: q)
         }
-        return (try? await api.searchUsers(q)) ?? []
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return [] }
+        let api = work.api
+        let received = (try? await api.searchUsers(q)) ?? []
+        guard accountLifetime.accepts(work.owner) else { return [] }
+        return received
     }
 
     /// `GET /users` (members and invited people except me), cached 10 min.
     /// Older relays without the route: the union of one-letter searches.
-    func loadDirectory(force: Bool = false) async {
-        guard credentials != nil, !isFixture else { return }
+    func loadDirectory(force: Bool = false, expectedOwner: WorkLifetime.Ticket? = nil) async {
+        guard credentials != nil, !isFixture,
+            let work = accountWork(expectedOwner: expectedOwner)
+        else { return }
         if !force, !AppModel.directoryNeedsRefresh(loadedAt: directoryLoadedAt, now: nowMs(), isEmpty: directory.isEmpty) { return }
         directoryLoadedAt = nowMs()
+        let api = work.api
         if let list = try? await api.users() {
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
             setDirectory(list.filter { $0.id != user?.id })
             return
         }
+        guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
         var seen: [String: Person] = [:]
         await withTaskGroup(of: [Person].self) { group in
             for ch in "abcdefghijklmnopqrstuvwxyz0123456789" {
                 group.addTask { [api] in (try? await api.searchUsers(String(ch))) ?? [] }
             }
             for await list in group {
+                guard accountLifetime.accepts(work.owner), !Task.isCancelled else {
+                    group.cancelAll()
+                    return
+                }
                 for p in list where p.status != "github" && p.id != user?.id { seen[p.id] = p }
             }
         }
+        guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
         setDirectory(seen.values.sorted { $0.handle.lowercased() < $1.handle.lowercased() })
     }
 
@@ -3229,8 +3661,15 @@ final class AppModel: ObservableObject {
     /// People, agents, or both — never nobody. Agents ride in the create body
     /// (`agent_ids`); whatever the relay did not add (an older relay) is added
     /// one by one afterwards.
-    func createGroup(handles: [String], agentIds: [Id] = [], title: String? = nil, discColor: UInt8? = nil, picture: DraftPicture? = nil) async -> Bool {
-        let cleaned = handles
+    func createGroup(
+        handles: [String], agentIds: [Id] = [], title: String? = nil, discColor: UInt8? = nil, picture: DraftPicture? = nil,
+        expectedOwner: WorkLifetime.Ticket? = nil
+    ) async -> Bool {
+        if let expectedOwner, !accountLifetime.accepts(expectedOwner) { return false }
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return false }
+        let api = work.api
+        let cleaned =
+            handles
             .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "@ ")) }
             .filter { !$0.isEmpty }
         guard !cleaned.isEmpty || !agentIds.isEmpty else {
@@ -3240,21 +3679,32 @@ final class AppModel: ObservableObject {
         do {
             var chat: PeopleChat
             do {
-                chat = try await api.createGroup(handles: cleaned, agentIds: agentIds, title: title, discColor: discColor)
+                let received = try await api.createGroup(handles: cleaned, agentIds: agentIds, title: title, discColor: discColor)
+                guard accountLifetime.accepts(work.owner) else { return false }
+                chat = received
             } catch let e as RelayError where !cleaned.isEmpty && (e.status == 404 || e.status == 405 || e.status == 501) {
-                chat = try await createGroupViaDm(handles: cleaned)
+                guard accountLifetime.accepts(work.owner) else { return false };
+                chat = try await createGroupViaDm(handles: cleaned, work: work)
             }
-            if let picture, let jpeg = await draftJpeg(picture) {
+            if let picture, let jpeg = await draftJpeg(picture, expectedOwner: work.owner) {
+                guard accountLifetime.accepts(work.owner) else { return false }
                 let key = "group-avatar-\(Int(Date().timeIntervalSince1970 * 1000)).\(PictureMaster.ext(jpeg))"
-                if (try? await api.putBlob(projectId: "\(peopleSlot):\(chat.id)", key: key, mime: PictureMaster.mime(jpeg), data: jpeg)) != nil,
-                   let patched = try? await api.patchPeopleChat(chat.id, imageKey: key) {
+                if (try? await api.putBlob(projectId: "\(peopleSlot):\(chat.id)", key: key, mime: PictureMaster.mime(jpeg), data: jpeg))
+                    != nil,
+                    let patched = try? await api.patchPeopleChat(chat.id, imageKey: key)
+                {
+                    guard accountLifetime.accepts(work.owner) else { return false }
                     chat = patched
                 }
             }
+            guard accountLifetime.accepts(work.owner) else { return false }
             for pid in agentIds where !chat.hasAgent(pid) {
                 do {
-                    chat = try await api.addAgent(chatId: chat.id, projectId: pid)
+                    let received = try await api.addAgent(chatId: chat.id, projectId: pid)
+                    guard accountLifetime.accepts(work.owner) else { return false }
+                    chat = received
                 } catch {
+                    guard accountLifetime.accepts(work.owner) else { return false };
                     fail("add the agent to the new group", error)
                 }
             }
@@ -3267,16 +3717,21 @@ final class AppModel: ObservableObject {
             path = [.chat(chatId: chat.id, projectId: peopleSlot)]
             return true
         } catch {
+            guard accountLifetime.accepts(work.owner) else { return false };
             fail("create the group", error)
             return false
         }
     }
 
     /// Fallback when `POST /chats {kind: group}` is not on the relay yet.
-    private func createGroupViaDm(handles: [String]) async throws -> PeopleChat {
+    private func createGroupViaDm(handles: [String], work: AccountWork) async throws -> PeopleChat {
+        guard accountLifetime.accepts(work.owner) else { throw CancellationError() }
+        let api = work.api
         var chat = try await api.openDM(handle: handles[0])
+        guard accountLifetime.accepts(work.owner) else { throw CancellationError() }
         for handle in handles.dropFirst() {
             chat = try await api.addMember(chatId: chat.id, handle: handle)
+            guard accountLifetime.accepts(work.owner) else { throw CancellationError() }
         }
         return chat
     }
@@ -3287,13 +3742,18 @@ final class AppModel: ObservableObject {
     func setVision(_ projectId: Id, enabled: Bool) {
         if let i = projects.firstIndex(where: { $0.id == projectId }) { projects[i].visionEnabled = enabled }
         guard !isFixture else { return }
+        guard let work = accountWork() else { return }
+        let api = work.api
         Task {
+            guard accountLifetime.accepts(work.owner) else { return }
             do {
-                if let kept = try await api.setProjectVision(projectId, enabled: enabled),
-                   let i = projects.firstIndex(where: { $0.id == projectId }) { projects[i].visionEnabled = kept }
+                let kept = try await api.setProjectVision(projectId, enabled: enabled)
+                guard accountLifetime.accepts(work.owner) else { return }
+                if let kept, let i = projects.firstIndex(where: { $0.id == projectId }) { projects[i].visionEnabled = kept }
             } catch {
+                guard accountLifetime.accepts(work.owner) else { return }
                 fail("save the camera setting", error)
-                await refreshRegistry()
+                await refreshRegistry(expectedOwner: work.owner)
             }
         }
     }
@@ -3307,13 +3767,18 @@ final class AppModel: ObservableObject {
     /// The call-voice catalog for the agent's Voice row and `VoicePickerView`. It is
     /// independent of the voice-mode kill switch (spoken replies): the row picks the
     /// voice used in calls, so the list must load while voice mode is off.
-    func loadVoices() async {
+    func loadVoices(expectedOwner: WorkLifetime.Ticket? = nil) async {
+        if let expectedOwner, !accountLifetime.accepts(expectedOwner) { return }
         guard voiceCatalog == nil else { return }
         if isFixture {
             voiceCatalog = AppModel.fixtureVoiceCatalog
             return
         }
-        voiceCatalog = try? await api.voices()
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return }
+        let api = work.api
+        let received = try? await api.voices()
+        guard accountLifetime.accepts(work.owner) else { return }
+        voiceCatalog = received
     }
 
     /// The Mac fixture's five voices (`fixture_voices` in arbos-mac), so the rig's picker
@@ -3333,13 +3798,18 @@ final class AppModel: ObservableObject {
     func setVoice(_ projectId: Id, _ voice: String?) {
         if let i = projects.firstIndex(where: { $0.id == projectId }) { projects[i].voice = voice }
         guard !isFixture else { return }
+        guard let work = accountWork() else { return }
+        let api = work.api
         Task {
+            guard accountLifetime.accepts(work.owner) else { return }
             do {
                 let kept = try await api.setProjectVoice(projectId, voice: voice)
+                guard accountLifetime.accepts(work.owner) else { return }
                 if let i = projects.firstIndex(where: { $0.id == projectId }) { projects[i].voice = kept }
             } catch {
+                guard accountLifetime.accepts(work.owner) else { return }
                 fail("save the voice", error)
-                await refreshRegistry()
+                await refreshRegistry(expectedOwner: work.owner)
             }
         }
     }
@@ -3352,14 +3822,17 @@ final class AppModel: ObservableObject {
     @Published private(set) var boxReport: BoxReport?
 
     /// `GET /projects/{id}/routines` when an owned agent's pane opens.
-    func refreshRoutines(_ projectId: Id) async {
+    func refreshRoutines(_ projectId: Id, expectedOwner: WorkLifetime.Ticket? = nil) async {
         if isFixture {
             #if DEBUG || ARBOS_FIXTURE
-            routines[projectId] = fixtureRoutines(projectId)
+                routines[projectId] = fixtureRoutines(projectId)
             #endif
             return
         }
-        guard let list = try? await api.routines(projectId) else { return }
+        guard let work = accountWork(expectedOwner: expectedOwner),
+            let list = try? await work.api.routines(projectId),
+            accountLifetime.accepts(work.owner)
+        else { return }
         routines[projectId] = list
     }
 
@@ -3371,31 +3844,43 @@ final class AppModel: ObservableObject {
             routines[projectId] = list
         }
         guard !isFixture else { return }
+        guard let work = accountWork() else { return }
+        let api = work.api
         Task {
+            guard accountLifetime.accepts(work.owner) else { return }
             do {
                 try await api.setRoutineEnabled(projectId, routineId: routineId, enabled: enabled)
+                guard accountLifetime.accepts(work.owner) else { return }
             } catch {
+                guard accountLifetime.accepts(work.owner) else { return }
                 fail("save the routine", error)
             }
-            await refreshRoutines(projectId)
+            await refreshRoutines(projectId, expectedOwner: work.owner)
         }
     }
 
     /// `GET /machine/debug` when the pane opens and when the Computer tab is picked. A relay
     /// without the route (404) leaves the last report alone; any other failure is shown as
     /// "The machine did not answer" with the reason.
-    func refreshBoxReport() async {
+    func refreshBoxReport(expectedOwner: WorkLifetime.Ticket? = nil) async {
+        if let expectedOwner, !accountLifetime.accepts(expectedOwner) { return }
         if isFixture {
             #if DEBUG || ARBOS_FIXTURE
-            boxReport = fixtureBoxReport()
+                boxReport = fixtureBoxReport()
             #endif
             return
         }
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return }
+        let api = work.api
         do {
-            boxReport = try await api.machineDebug()
+            let received = try await api.machineDebug()
+            guard accountLifetime.accepts(work.owner) else { return }
+            boxReport = received
         } catch let error as RelayError where error.status == 404 {
+            guard accountLifetime.accepts(work.owner) else { return };
             return
         } catch {
+            guard accountLifetime.accepts(work.owner) else { return };
             var r = BoxReport(debug: [String: Any](), now: nowMs())
             r.state = machine.state.rawValue
             r.unreachableReason = UserError.classify("reach the machine", error).why
@@ -3403,7 +3888,10 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func updateProject(_ projectId: Id, name: String? = nil, color: String? = nil, icon: String? = nil, avatar: String? = nil, avatarColor: String? = nil, description: String? = nil) {
+    func updateProject(
+        _ projectId: Id, name: String? = nil, color: String? = nil, icon: String? = nil, avatar: String? = nil, avatarColor: String? = nil,
+        description: String? = nil
+    ) {
         if let i = projects.firstIndex(where: { $0.id == projectId }) {
             if let description { projects[i].description = description }
             if let name { projects[i].name = name }
@@ -3414,9 +3902,14 @@ final class AppModel: ObservableObject {
             if let avatarColor { projects[i].avatarColor = avatarColor }
         }
         guard !isFixture else { return }
+        guard let work = accountWork() else { return }
+        let api = work.api
         Task {
-            do { try await api.patchProject(projectId, name: name, color: color, icon: icon, avatar: avatar, avatarColor: avatarColor, description: description) }
-            catch { fail("save the file", error) }
+            guard accountLifetime.accepts(work.owner) else { return }
+            do {
+                try await api.patchProject(
+                    projectId, name: name, color: color, icon: icon, avatar: avatar, avatarColor: avatarColor, description: description)
+            } catch { guard accountLifetime.accepts(work.owner) else { return }; fail("save the file", error) }
         }
     }
 
@@ -3429,15 +3922,20 @@ final class AppModel: ObservableObject {
         let local = (newestAgentAvatar(projectId)?.version ?? 0) + 1
         applyAgentAvatar(projectId, AgentAvatarFacts(imageKey: nil, avatarDiscColor: color, version: local), force: true)
         guard !isFixture else { return }
+        guard let work = accountWork() else { return }
+        let api = work.api
         Task {
+            guard accountLifetime.accepts(work.owner) else { return }
             do {
                 let stamped = try await api.setProjectAvatarDisc(projectId, color: color)
+                guard accountLifetime.accepts(work.owner) else { return }
                 if stamped > 0 {
                     applyAgentAvatar(projectId, AgentAvatarFacts(imageKey: nil, avatarDiscColor: color, version: stamped), force: true)
                 }
             } catch {
+                guard accountLifetime.accepts(work.owner) else { return }
                 fail("save the picture", error)
-                await refreshRegistry()
+                await refreshRegistry(expectedOwner: work.owner)
             }
         }
     }
@@ -3458,23 +3956,30 @@ final class AppModel: ObservableObject {
 
     /// `POST /chats/dm`: the relay makes the DM (or answers the one it has) and tells the
     /// other person. Only the first send of a draft calls it.
-    private func createDM(handle: String) async -> PeopleChat? {
+    private func createDM(handle: String, work: DraftDMWork) async -> PeopleChat? {
+        guard accountLifetime.accepts(work.owner) else { return nil }
+        let api: RelayAPI
+        switch work {
         #if DEBUG || ARBOS_FIXTURE
-        if isFixture {
+        case .fixture:
             let dm = fixtureOpenDM(handle: handle, navigate: false)
             if let dm { fixtureAttachDoc(chatId: dm.id) }
             return dm
-        }
         #endif
+        case .relay(let work): api = work.api
+        }
         do {
             let chat = try await api.openDM(handle: handle)
+            guard accountLifetime.accepts(work.owner) else { return nil }
             if !peopleChats.contains(where: { $0.id == chat.id }) { peopleChats.insert(chat, at: 0) }
             ensureRoom(projectId: peopleSlot, key: chat.id, roomChat: chat.id)
             return chat
         } catch {
-            fail((error as? RelayError)?.type == "not_available"
-                 ? UserError.refused("open the chat", "You can't message this person.")
-                 : UserError.classify("open the chat", error))
+            guard accountLifetime.accepts(work.owner) else { return nil }
+            fail(
+                (error as? RelayError)?.type == "not_available"
+                    ? UserError.refused("open the chat", "You can't message this person.")
+                    : UserError.classify("open the chat", error))
             return nil
         }
     }
@@ -3486,7 +3991,9 @@ final class AppModel: ObservableObject {
     /// screen before a send drops it.
     @Published private(set) var draftDM: PeopleChat?
     /// The draft's first send is with the relay: popping the screen no longer drops it.
-    private(set) var draftDMSending = false
+    var draftDMSending: Bool {
+        draftDM.map { draftSends.isPending($0.id) } ?? false
+    }
     static let draftDMPrefix = "draft-dm:"
     static func isDraftDM(_ chatId: Id) -> Bool { chatId.hasPrefix(draftDMPrefix) }
 
@@ -3535,30 +4042,57 @@ final class AppModel: ObservableObject {
     }
 
     /// Sends made in the draft while the relay makes the DM, in order.
-    private var draftDMSends: [(Id) -> Void] = []
+    private var draftSends = DraftSendQueue<(Id) -> Void>()
 
     /// A send in a draft: the first one makes the DM on the relay, swaps the screen onto it,
     /// then every send made meanwhile goes out there. The relay refusing keeps the draft and
     /// says why.
+    private func retireDraftSends() {
+        draftSends.retire()
+        draftDM = nil
+    }
+
+    private func draftDMWork() -> DraftDMWork? {
+        #if DEBUG || ARBOS_FIXTURE
+        if isFixture {
+            guard let owner = accountLifetime.ticket, !Task.isCancelled else { return nil }
+            return .fixture(owner)
+        }
+        #endif
+        guard let work = accountWork() else { return nil }
+        return .relay(work)
+    }
+
     private func sendDraftDM(_ draft: PeopleChat, send: @escaping (Id) -> Void) {
-        draftDMSends.append(send)
-        guard !draftDMSending else { return }
+        guard let work = draftDMWork() else { return }
+        if draftSends.owner != work.owner { draftSends = DraftSendQueue(owner: work.owner) }
+        let attempt = WorkLifetime().ticket!
+        guard
+            case .started(let ticket) = draftSends.enqueue(
+                draft: draft.id, account: work.owner, attempt: attempt, send: send
+            )
+        else { return }
         let handle = String(draft.id.dropFirst(Self.draftDMPrefix.count))
-        draftDMSending = true
         Task { @MainActor in
-            let dm = await createDM(handle: handle)
-            draftDMSending = false
-            let sends = draftDMSends
-            draftDMSends = []
+            guard accountLifetime.accepts(work.owner) else { return }
+            let dm = await createDM(handle: handle, work: work)
+            guard accountLifetime.accepts(work.owner),
+                let sends = draftSends.finish(ticket)
+            else { return }
             guard let dm else { return }
-            draftDM = nil
+            if draftDM?.id == draft.id {
+                draftDM = nil
+                if let i = path.lastIndex(where: { if case .chat(let id, _) = $0 { return id == draft.id } else { return false } }) {
+                    path[i] = .chat(chatId: dm.id, projectId: peopleSlot)
+                }
+            }
             messages[draft.id] = nil
             caughtUp.remove(draft.id)
             setComposerDraft("", for: draft.id)
-            if let i = path.lastIndex(where: { if case .chat(let id, _) = $0 { return id == draft.id } else { return false } }) {
-                path[i] = .chat(chatId: dm.id, projectId: peopleSlot)
+            for send in sends {
+                guard accountLifetime.accepts(work.owner) else { return }
+                send(dm.id)
             }
-            for s in sends { s(dm.id) }
         }
     }
 
@@ -3576,15 +4110,27 @@ final class AppModel: ObservableObject {
     /// member id: an `@handle` in the text that has a chip means exactly that member.
     /// `extraParts` (#forward-attachments): doc parts written after the text and attachment
     /// parts — a forwarded chart and its fallback picture, already uploaded.
-    func sendPeople(chatId: String, text: String, replyTo: String?, address: String? = nil,
-                    chipMentions: [String] = [], attachments: [PendingAttachment] = [],
-                    forwardedFrom: String? = nil, chipTokens: [String: String] = [:],
-                    replyRef: ReplyRef? = nil, extraParts: [[String: Any]] = []) {
+    func sendPeople(
+        chatId: String, text: String, replyTo: String?, address: String? = nil,
+        chipMentions: [String] = [], attachments: [PendingAttachment] = [],
+        forwardedFrom: String? = nil, chipTokens: [String: String] = [:],
+        replyRef: ReplyRef? = nil, extraParts: [[String: Any]] = []
+    ) {
         if let draft = draftDM, draft.id == chatId {
             sendDraftDM(draft) { [weak self] dmId in
-                self?.sendPeople(chatId: dmId, text: text, replyTo: replyTo, address: address, chipMentions: chipMentions,
-                                 attachments: attachments, forwardedFrom: forwardedFrom, chipTokens: chipTokens,
-                                 replyRef: replyRef, extraParts: extraParts)
+                self?.sendPeople(
+                    chatId: dmId, text: text, replyTo: replyTo, address: address, chipMentions: chipMentions,
+                    attachments: attachments, forwardedFrom: forwardedFrom, chipTokens: chipTokens,
+                    replyRef: replyRef, extraParts: extraParts)
+            }
+            return
+        }
+        if nativeRooms[chatId] != nil {
+            // Text, files and an answer to a row of this chat go to the homeserver so far.
+            if forwardedFrom == nil, replyRef == nil, extraParts.isEmpty {
+                sendNativePeople(chatId: chatId, text: text, replyTo: replyTo, attachments: attachments)
+            } else {
+                failRefused("send your message", Self.nativeTextOnly)
             }
             return
         }
@@ -3601,7 +4147,8 @@ final class AppModel: ObservableObject {
         // Leading bare person names ("Allan", "Allan?", "Yo Allan …") count as addressing
         // that person — so a sticky "Message @bob" chip does not wake the agent. When an
         // agent handle/slug already matched, only person @handles count (not display names).
-        let leadingPeople = leadingAgents.isEmpty
+        let leadingPeople =
+            leadingAgents.isEmpty
             ? AppModel.namedPeople(in: text, members: chat.members)
             : AppModel.namedPeopleByHandle(in: text, members: chat.members)
         for person in leadingPeople where !mentions.contains(person) {
@@ -3640,13 +4187,15 @@ final class AppModel: ObservableObject {
         let addressedPerson = mentions.contains { $0.hasPrefix("user:") }
         let hasHumanPeer = chat.humans.contains { $0.id != me.id }
         if chat.kind != "group", !hasHumanPeer, !mentions.contains(where: { $0.hasPrefix("agent:") }),
-           !addressedPerson, reply == nil,
-           let last = messages(of: chatId).last(where: { $0.role == .assistant }) {
+            !addressedPerson, reply == nil,
+            let last = messages(of: chatId).last(where: { $0.role == .assistant })
+        {
             reply = last.id
             if let h = last.senderHandle?.lowercased(),
-               let agent = chat.agents.first(where: {
-                   mentionSlug($0.project?.name ?? "").lowercased() == h || $0.handle.lowercased() == h
-               }) {
+                let agent = chat.agents.first(where: {
+                    mentionSlug($0.project?.name ?? "").lowercased() == h || $0.handle.lowercased() == h
+                })
+            {
                 mentions.append(agent.member)
             }
         }
@@ -3658,15 +4207,18 @@ final class AppModel: ObservableObject {
         // A cross-chat reply never carries an in-chat `replyTo` as well.
         if replyRef != nil { reply = nil }
         if attachments.isEmpty {
-            commitPeople(chatId: chatId, doc: doc, messageId: messageId, text: text, author: author,
-                         mentions: mentions, reply: reply, attachments: [], forwardedFrom: forwardedFrom,
-                         replyRef: replyRef, extraParts: extraParts)
+            commitPeople(
+                chatId: chatId, doc: doc, messageId: messageId, text: text, author: author,
+                mentions: mentions, reply: reply, attachments: [], forwardedFrom: forwardedFrom,
+                replyRef: replyRef, extraParts: extraParts)
             return
         }
+        guard let work = accountWork() else { return }
         markUnacked(chatId: chatId, messageId: messageId)
-        let api = api
         Task {
-            guard let outcomes = await uploadAttachments(attachments, slot: "\(peopleSlot):\(chatId)", api: api) else { return }
+            guard accountLifetime.accepts(work.owner) else { return }
+            guard let outcomes = await uploadAttachments(attachments, slot: "\(peopleSlot):\(chatId)", api: work.api) else { return }
+            guard accountLifetime.accepts(work.owner) else { return }
             var uploaded: [Attachment] = []
             for outcome in outcomes {
                 switch outcome {
@@ -3675,11 +4227,13 @@ final class AppModel: ObservableObject {
                     setSendError(chatId, UserError.classify("upload the attachment", error))
                 }
             }
+            guard accountLifetime.accepts(work.owner) else { return }
             // The forward header rides along with the pictures ([feedback
             // forward-attachments-ios-2026-10-27]: it was dropped on this path).
-            commitPeople(chatId: chatId, doc: doc, messageId: messageId, text: text, author: author,
-                         mentions: mentions, reply: reply, attachments: uploaded, alreadyUnacked: true,
-                         forwardedFrom: forwardedFrom, replyRef: replyRef, extraParts: extraParts)
+            commitPeople(
+                chatId: chatId, doc: doc, messageId: messageId, text: text, author: author,
+                mentions: mentions, reply: reply, attachments: uploaded, alreadyUnacked: true,
+                forwardedFrom: forwardedFrom, replyRef: replyRef, extraParts: extraParts)
         }
     }
 
@@ -3900,6 +4454,9 @@ final class AppModel: ObservableObject {
     /// relay clears unread events recorded after the last PUT.
     func markPeopleRead(_ chatId: String, force: Bool = false) {
         if Self.isDraftDM(chatId) { return }
+        // A native chat is read on the homeserver (a private receipt on its newest row),
+        // which is also what clears it on this person's other devices.
+        if nativeRooms[chatId] != nil { markChannelRead(chatId) }
         let hadRemote = (unreadCounts[chatId] ?? 0) > 0
         let hadLocalFlag = peopleUnread.contains(chatId)
         peopleUnread.remove(chatId)
@@ -3947,17 +4504,24 @@ final class AppModel: ObservableObject {
     }
 
     func addAgent(chatId: String, projectId: Id) {
-        showMembershipNotice(chatId: chatId, names: projects.filter { $0.id == projectId }.map(\.name),
-                             subjects: [MembershipNotice.Subject(kind: "agent", id: projectId)])
+        showMembershipNotice(
+            chatId: chatId, names: projects.filter { $0.id == projectId }.map(\.name),
+            subjects: [MembershipNotice.Subject(kind: "agent", id: projectId)])
+        guard let work = accountWork() else { return }
+        let api = work.api
         Task {
+            guard accountLifetime.accepts(work.owner) else { return }
             do {
                 let chat = try await api.addAgent(chatId: chatId, projectId: projectId)
+                guard accountLifetime.accepts(work.owner) else { return }
                 if let i = peopleChats.firstIndex(where: { $0.id == chatId }) { peopleChats[i] = chat }
             } catch {
+                guard accountLifetime.accepts(work.owner) else { return }
                 withdrawOptimisticNotices(chatId: chatId)
-                fail((error as? RelayError)?.type == "own_project_only"
-                     ? UserError.refused("add the agent", "You can only add your own agents.")
-                     : UserError.classify("add the agent", error))
+                fail(
+                    (error as? RelayError)?.type == "own_project_only"
+                        ? UserError.refused("add the agent", "You can only add your own agents.")
+                        : UserError.classify("add the agent", error))
             }
         }
     }
@@ -3972,6 +4536,9 @@ final class AppModel: ObservableObject {
     func showMembershipNotice(chatId: Id, names: [String], subjects: [MembershipNotice.Subject]? = nil) {
         let name = user?.name?.trimmingCharacters(in: .whitespaces) ?? ""
         let who = name.isEmpty ? (user?.login ?? "") : name
+        // A native chat's list is the homeserver's (`channelRows`); a row put in `messages`
+        // would stand in front of it.
+        guard nativeRooms[chatId] == nil else { return }
         guard !who.isEmpty, let text = OptimisticNotice.addedLine(who: who, names: names) else { return }
         var facts: MembershipNotice? = nil
         if let me = user?.id, let subjects, !subjects.isEmpty {
@@ -4024,53 +4591,84 @@ final class AppModel: ObservableObject {
     }
 
     func addPerson(chatId: String, handle: String) {
+        guard let work = accountWork() else { return }
+        let api = work.api
         Task {
+            guard accountLifetime.accepts(work.owner) else { return }
             do {
                 let chat = try await api.addMember(chatId: chatId, handle: handle)
+                guard accountLifetime.accepts(work.owner) else { return }
                 if let i = peopleChats.firstIndex(where: { $0.id == chatId }) { peopleChats[i] = chat }
             } catch {
+                guard accountLifetime.accepts(work.owner) else { return }
                 let e = error as? RelayError
-                let said: String? = e?.type == "already_member" ? "@\(handle) is already in this chat."
-                    : e?.type == "not_available" ? "You can't add this person."
-                    : (e?.status == 404 || e?.status == 405 || e?.status == 501) ? "Adding people is not on this relay yet."
-                    : nil
+                let said: String? =
+                    e?.type == "already_member"
+                    ? "@\(handle) is already in this chat."
+                    : e?.type == "not_available"
+                        ? "You can't add this person."
+                        : (e?.status == 404 || e?.status == 405 || e?.status == 501)
+                            ? "Adding people is not on this relay yet."
+                            : nil
                 fail(said.map { UserError.refused("add @\(handle)", $0) } ?? UserError.classify("add @\(handle)", error))
             }
         }
     }
 
     /// Group profile › Invite links › New link (any member).
-    func createGroupInvite(_ chatId: Id, expires: Bool, singleUse: Bool) async -> ServerInviteLink? {
+    func createGroupInvite(_ chatId: Id, expires: Bool, singleUse: Bool, expectedOwner: WorkLifetime.Ticket? = nil) async
+        -> ServerInviteLink?
+    {
+        if let expectedOwner, !accountLifetime.accepts(expectedOwner) { return nil }
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return nil }
+        let api = work.api
         do {
-            return try await api.createGroupInvite(chatId, expires: expires, maxUses: singleUse ? 1 : nil)
+            let received = try await api.createGroupInvite(chatId, expires: expires, maxUses: singleUse ? 1 : nil)
+            guard accountLifetime.accepts(work.owner) else { return nil }
+            return received
         } catch {
+            guard accountLifetime.accepts(work.owner) else { return nil };
             fail("make an invite link", error)
             return nil
         }
     }
 
     /// Group profile › Invite links › list.
-    func groupInvites(_ chatId: Id) async -> [ServerInviteLink] {
-        (try? await api.groupInvites(chatId)) ?? []
+    func groupInvites(_ chatId: Id, expectedOwner: WorkLifetime.Ticket? = nil) async -> [ServerInviteLink] {
+        if let expectedOwner, !accountLifetime.accepts(expectedOwner) { return [] }
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return [] }
+        let api = work.api
+        let received = (try? await api.groupInvites(chatId)) ?? []
+        guard accountLifetime.accepts(work.owner) else { return [] }
+        return received
     }
 
     /// Group profile › Invite links › revoke.
-    func revokeGroupInvite(_ chatId: Id, inviteId: String) async -> Bool {
+    func revokeGroupInvite(_ chatId: Id, inviteId: String, expectedOwner: WorkLifetime.Ticket? = nil) async -> Bool {
+        if let expectedOwner, !accountLifetime.accepts(expectedOwner) { return false }
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return false }
+        let api = work.api
         do {
             try await api.revokeGroupInvite(chatId, inviteId: inviteId)
+            guard accountLifetime.accepts(work.owner) else { return false }
             return true
         } catch {
+            guard accountLifetime.accepts(work.owner) else { return false };
             fail("revoke the link", error)
             return false
         }
     }
 
     /// `arbos://join-group/<code>` (the site's group invite page): join and open the chat.
-    func joinGroupFromLink(code: String) async {
+    func joinGroupFromLink(code: String, expectedOwner: WorkLifetime.Ticket? = nil) async {
+        if let expectedOwner, !accountLifetime.accepts(expectedOwner) { return }
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return }
+        let api = work.api
         let code = code.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
         guard !code.isEmpty else { return }
         do {
             let chat = try await api.joinGroup(code: code)
+            guard accountLifetime.accepts(work.owner) else { return }
             if let i = peopleChats.firstIndex(where: { $0.id == chat.id }) {
                 peopleChats[i] = chat
             } else {
@@ -4079,10 +4677,14 @@ final class AppModel: ObservableObject {
             ensureRoom(projectId: peopleSlot, key: chat.id, roomChat: chat.id)
             open(peopleChat: chat)
         } catch {
+            guard accountLifetime.accepts(work.owner) else { return };
             let type = (error as? RelayError)?.type
-            let said: String? = type == "not_available" ? "You can't join this group."
-                : type == "not_found" || (error as? RelayError)?.status == 404 ? "That invite link is not valid."
-                : nil
+            let said: String? =
+                type == "not_available"
+                ? "You can't join this group."
+                : type == "not_found" || (error as? RelayError)?.status == 404
+                    ? "That invite link is not valid."
+                    : nil
             fail(said.map { UserError.refused("join the group", $0) } ?? UserError.classify("join the group", error))
         }
     }
@@ -4090,19 +4692,26 @@ final class AppModel: ObservableObject {
     /// The group pane's Add members: every pick goes to THIS chat — people by
     /// `POST /chats/{id}/members`, agents by `POST /chats/{id}/agents`. All are
     /// tried; the first failure is reported once and the call returns false.
-    func addMembers(chatId: String, handles: [String], agentIds: [Id]) async -> Bool {
-        showMembershipNotice(chatId: chatId, names: membershipNames(handles: handles, agentIds: agentIds),
-                             subjects: membershipSubjects(handles: handles, agentIds: agentIds))
+    func addMembers(chatId: String, handles: [String], agentIds: [Id], expectedOwner: WorkLifetime.Ticket? = nil) async -> Bool {
+        if let expectedOwner, !accountLifetime.accepts(expectedOwner) { return false }
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return false }
+        let api = work.api
+        showMembershipNotice(
+            chatId: chatId, names: membershipNames(handles: handles, agentIds: agentIds),
+            subjects: membershipSubjects(handles: handles, agentIds: agentIds))
         // One call for the batch (#1349): the relay adds everyone and writes one
         // "<me> added A, B and C" line. A relay that only knows `{handle}` answers 4xx;
         // then every add is tried on its own as before.
         do {
             let chat = try await api.addMembers(chatId: chatId, handles: handles, agentIds: agentIds)
+            guard accountLifetime.accepts(work.owner) else { return false }
             if let i = peopleChats.firstIndex(where: { $0.id == chatId }) { peopleChats[i] = chat }
             return true
         } catch let e as RelayError where [400, 404, 415, 422].contains(e.status) {
+            guard accountLifetime.accepts(work.owner) else { return false };
             // fall through to the per-item adds
         } catch {
+            guard accountLifetime.accepts(work.owner) else { return false };
             withdrawOptimisticNotices(chatId: chatId)
             fail("add members", error)
             return false
@@ -4111,22 +4720,32 @@ final class AppModel: ObservableObject {
         for handle in handles {
             do {
                 let chat = try await api.addMember(chatId: chatId, handle: handle)
+                guard accountLifetime.accepts(work.owner) else { return false }
                 if let i = peopleChats.firstIndex(where: { $0.id == chatId }) { peopleChats[i] = chat }
             } catch {
+                guard accountLifetime.accepts(work.owner) else { return false };
                 let e = error as? RelayError
-                failure = failure ?? (e?.type == "already_member" ? UserError.refused("add @\(handle)", "@\(handle) is already in this chat.")
-                                      : e?.type == "not_available" ? UserError.refused("add @\(handle)", "You can't add @\(handle).")
-                                      : UserError.classify("add @\(handle)", error))
+                failure =
+                    failure
+                    ?? (e?.type == "already_member"
+                        ? UserError.refused("add @\(handle)", "@\(handle) is already in this chat.")
+                        : e?.type == "not_available"
+                            ? UserError.refused("add @\(handle)", "You can't add @\(handle).")
+                            : UserError.classify("add @\(handle)", error))
             }
         }
         for projectId in agentIds {
             do {
                 let chat = try await api.addAgent(chatId: chatId, projectId: projectId)
+                guard accountLifetime.accepts(work.owner) else { return false }
                 if let i = peopleChats.firstIndex(where: { $0.id == chatId }) { peopleChats[i] = chat }
             } catch {
-                failure = failure ?? ((error as? RelayError)?.type == "own_project_only"
-                                      ? UserError.refused("add the agent", "You can only add your own agents.")
-                                      : UserError.classify("add the agent", error))
+                guard accountLifetime.accepts(work.owner) else { return false };
+                failure =
+                    failure
+                    ?? ((error as? RelayError)?.type == "own_project_only"
+                        ? UserError.refused("add the agent", "You can only add your own agents.")
+                        : UserError.classify("add the agent", error))
             }
         }
         if let failure {
@@ -4141,11 +4760,16 @@ final class AppModel: ObservableObject {
     /// (`DELETE /chats/{id}/members/{userId}[?ban=1]`); the relay writes the
     /// "<me> removed @handle" line (#1349). Ban keeps them from rejoining.
     func removeMember(chatId: String, userId: String, ban: Bool = false) {
+        guard let work = accountWork() else { return }
+        let api = work.api
         Task {
+            guard accountLifetime.accepts(work.owner) else { return }
             do {
                 try await api.removeMember(chatId: chatId, userId: userId, ban: ban)
+                guard accountLifetime.accepts(work.owner) else { return }
                 if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
                     if ban, let chat = try? await api.peopleChat(chatId) {
+                        guard accountLifetime.accepts(work.owner) else { return }
                         peopleChats[i] = chat
                     } else {
                         peopleChats[i].members.removeAll { !$0.isAgent && $0.id == userId }
@@ -4153,28 +4777,36 @@ final class AppModel: ObservableObject {
                 }
                 // The relay writes "<me> removed @handle" into the chat (#1349).
             } catch {
+                guard accountLifetime.accepts(work.owner) else { return }
                 let e = error as? RelayError
                 let verb = ban ? "ban them" : "remove them"
-                fail(e?.type == "owner_only"
-                     ? UserError.refused(verb, "Only an owner or admin can manage members.")
-                     : UserError.classify(verb, error))
+                fail(
+                    e?.type == "owner_only"
+                        ? UserError.refused(verb, "Only an owner or admin can manage members.")
+                        : UserError.classify(verb, error))
             }
         }
     }
 
     /// Owner/admin clears a ban (`POST …/members/{userId}/unban`) so the person can be added again.
     func unbanMember(chatId: String, userId: String) {
+        guard let work = accountWork() else { return }
+        let api = work.api
         Task {
+            guard accountLifetime.accepts(work.owner) else { return }
             do {
                 let chat = try await api.unbanMember(chatId: chatId, userId: userId)
+                guard accountLifetime.accepts(work.owner) else { return }
                 if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
                     peopleChats[i] = chat
                 }
             } catch {
+                guard accountLifetime.accepts(work.owner) else { return }
                 let e = error as? RelayError
-                fail(e?.type == "owner_only"
-                     ? UserError.refused("unban them", "Only an owner or an admin with mute and ban rights can unban.")
-                     : UserError.classify("unban them", error))
+                fail(
+                    e?.type == "owner_only"
+                        ? UserError.refused("unban them", "Only an owner or an admin with mute and ban rights can unban.")
+                        : UserError.classify("unban them", error))
             }
         }
     }
@@ -4187,77 +4819,105 @@ final class AppModel: ObservableObject {
         silenced: Bool,
         duration: MemberMuteDuration? = nil
     ) {
+        guard let work = accountWork() else { return }
+        let api = work.api
         Task {
+            guard accountLifetime.accepts(work.owner) else { return }
             do {
                 let until = silenced ? duration?.silencedUntilMs : nil
                 let chat = try await api.setMemberSilenced(
                     chatId: chatId, userId: userId, silenced: silenced, silencedUntilMs: until
                 )
+                guard accountLifetime.accepts(work.owner) else { return }
                 if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
                     peopleChats[i] = chat
                 }
             } catch {
+                guard accountLifetime.accepts(work.owner) else { return }
                 let e = error as? RelayError
-                fail(e?.type == "owner_only"
-                     ? UserError.refused("mute them", "Only an owner or an admin with mute rights can mute members.")
-                     : UserError.classify("mute them", error))
+                fail(
+                    e?.type == "owner_only"
+                        ? UserError.refused("mute them", "Only an owner or an admin with mute rights can mute members.")
+                        : UserError.classify("mute them", error))
             }
         }
     }
 
     /// Owner promotes or demotes a group member (`admin` / `member`).
     func setMemberRole(chatId: String, userId: String, role: String) {
+        guard let work = accountWork() else { return }
+        let api = work.api
         Task {
+            guard accountLifetime.accepts(work.owner) else { return }
             do {
                 let chat = try await api.setMemberRole(chatId: chatId, userId: userId, role: role)
+                guard accountLifetime.accepts(work.owner) else { return }
                 if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
                     peopleChats[i] = chat
                 }
             } catch {
+                guard accountLifetime.accepts(work.owner) else { return }
                 let e = error as? RelayError
-                fail(e?.type == "owner_only"
-                     ? UserError.refused("change the role", "Only the owner can change admin roles.")
-                     : UserError.classify("change the role", error))
+                fail(
+                    e?.type == "owner_only"
+                        ? UserError.refused("change the role", "Only the owner can change admin roles.")
+                        : UserError.classify("change the role", error))
             }
         }
     }
 
     /// Owner sets whether an admin may mute and ban members.
     func setMemberCanMuteBan(chatId: String, userId: String, canMuteBan: Bool) {
+        guard let work = accountWork() else { return }
+        let api = work.api
         Task {
+            guard accountLifetime.accepts(work.owner) else { return }
             do {
                 let chat = try await api.setMemberCanMuteBan(
                     chatId: chatId, userId: userId, canMuteBan: canMuteBan
                 )
+                guard accountLifetime.accepts(work.owner) else { return }
                 if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
                     peopleChats[i] = chat
                 }
             } catch {
+                guard accountLifetime.accepts(work.owner) else { return }
                 let e = error as? RelayError
-                fail(e?.type == "owner_only"
-                     ? UserError.refused("change the mute and ban rights", "Only the owner can set mute and ban rights.")
-                     : UserError.classify("change the mute and ban rights", error))
+                fail(
+                    e?.type == "owner_only"
+                        ? UserError.refused("change the mute and ban rights", "Only the owner can set mute and ban rights.")
+                        : UserError.classify("change the mute and ban rights", error))
             }
         }
     }
 
     func removeAgent(chatId: String, projectId: Id) {
+        guard let work = accountWork() else { return }
+        let api = work.api
         Task {
+            guard accountLifetime.accepts(work.owner) else { return }
             do {
                 try await api.removeAgent(chatId: chatId, projectId: projectId)
+                guard accountLifetime.accepts(work.owner) else { return }
                 if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
                     peopleChats[i].members.removeAll { $0.isAgent && $0.id == projectId }
                 }
-            } catch { fail("remove the agent", error) }
+            } catch { guard accountLifetime.accepts(work.owner) else { return }; fail("remove the agent", error) }
         }
     }
 
     func setReplyPolicy(chatId: String, projectId: Id, policy: String) {
         if let i = peopleChats.firstIndex(where: { $0.id == chatId }),
-           let j = peopleChats[i].members.firstIndex(where: { $0.isAgent && $0.id == projectId }) {
+            let j = peopleChats[i].members.firstIndex(where: { $0.isAgent && $0.id == projectId })
+        {
             peopleChats[i].members[j].replyPolicy = policy
         }
-        Task { try? await api.setReplyPolicy(chatId: chatId, projectId: projectId, policy: policy) }
+        guard let work = accountWork() else { return }
+        let api = work.api
+        Task {
+            guard accountLifetime.accepts(work.owner) else { return }
+            try? await api.setReplyPolicy(chatId: chatId, projectId: projectId, policy: policy)
+        }
     }
 
     func leavePeopleChat(_ chatId: String) {
@@ -4267,13 +4927,25 @@ final class AppModel: ObservableObject {
         unacked[chatId] = nil
         forgetDoc(chatId)
         path = []
-        Task { try? await api.leaveChat(chatId) }
+        guard let work = accountWork() else { return }
+        let api = work.api
+        Task {
+            guard accountLifetime.accepts(work.owner) else { return }
+            try? await api.leaveChat(chatId)
+        }
     }
 
     /// Rename a people group and/or set its picture blob key or description (`PATCH /chats/{id}`).
-    func patchPeopleChat(_ chatId: String, title: String? = nil, imageKey: String? = nil, description: String? = nil) async -> Bool {
+    func patchPeopleChat(
+        _ chatId: String, title: String? = nil, imageKey: String? = nil, description: String? = nil,
+        expectedOwner: WorkLifetime.Ticket? = nil
+    ) async -> Bool {
+        if let expectedOwner, !accountLifetime.accepts(expectedOwner) { return false }
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return false }
+        let api = work.api
         do {
             let chat = try await api.patchPeopleChat(chatId, title: title, imageKey: imageKey, description: description)
+            guard accountLifetime.accepts(work.owner) else { return false }
             if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
                 peopleChats[i] = chat
             } else {
@@ -4281,6 +4953,7 @@ final class AppModel: ObservableObject {
             }
             return true
         } catch {
+            guard accountLifetime.accepts(work.owner) else { return false };
             fail("update the group", error)
             return false
         }
@@ -4293,22 +4966,29 @@ final class AppModel: ObservableObject {
     }
 
     /// D92 amendment: upload an agent picture into the project's own blob slot and set it.
-    func setProjectImage(projectId: Id, jpeg: Data) async -> Bool {
+    func setProjectImage(projectId: Id, jpeg: Data, expectedOwner: WorkLifetime.Ticket? = nil) async -> Bool {
+        if let expectedOwner, !accountLifetime.accepts(expectedOwner) { return false }
         let key = "avatar-\(Int(Date().timeIntervalSince1970 * 1000)).\(PictureMaster.ext(jpeg))"
         if isFixture {
-            return await setProjectImageKey(projectId: projectId, key: key)
+            return await setProjectImageKey(projectId: projectId, key: key, expectedOwner: expectedOwner)
         }
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return false }
+        let api = work.api
         do {
-            _ = try await api.putBlob(projectId: projectId, key: key, mime: PictureMaster.mime(jpeg), data: jpeg)
-            return await setProjectImageKey(projectId: projectId, key: key)
+            let received = try await api.putBlob(projectId: projectId, key: key, mime: PictureMaster.mime(jpeg), data: jpeg)
+            guard accountLifetime.accepts(work.owner) else { return false }
+            _ = received
+            return await setProjectImageKey(projectId: projectId, key: key, expectedOwner: work.owner)
         } catch {
+            guard accountLifetime.accepts(work.owner) else { return false };
             fail("upload the picture", error)
             return false
         }
     }
 
     /// D92 amendment: a blob the relay already holds (the Generate tab's answer) becomes the picture.
-    func setProjectImageKey(projectId: Id, key: String) async -> Bool {
+    func setProjectImageKey(projectId: Id, key: String, expectedOwner: WorkLifetime.Ticket? = nil) async -> Bool {
+        if let expectedOwner, !accountLifetime.accepts(expectedOwner) { return false }
         // Optimistic, into every copy at once (the header used to keep its old URL while the
         // working row already drew the new picture — Jacob, 2026-10-25); the relay's stamp
         // replaces the local one when it answers.
@@ -4316,73 +4996,105 @@ final class AppModel: ObservableObject {
         let local = (base?.version ?? 0) + 1
         applyAgentAvatar(projectId, AgentAvatarFacts(imageKey: key, avatarDiscColor: base?.avatarDiscColor, version: local), force: true)
         guard !isFixture else { return true }
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return false }
+        let api = work.api
         do {
             let stamped = try await api.setProjectImageKey(projectId, key: key)
+            guard accountLifetime.accepts(work.owner) else { return false }
             if stamped > 0 {
-                applyAgentAvatar(projectId, AgentAvatarFacts(imageKey: key, avatarDiscColor: base?.avatarDiscColor, version: stamped), force: true)
+                applyAgentAvatar(
+                    projectId, AgentAvatarFacts(imageKey: key, avatarDiscColor: base?.avatarDiscColor, version: stamped), force: true)
             }
             return true
         } catch {
+            guard accountLifetime.accepts(work.owner) else { return false };
             fail("save the picture", error)
-            await refreshRegistry()
+            await refreshRegistry(expectedOwner: work.owner)
             return false
         }
     }
 
     /// D92 amendment: the Generate tab — the relay paints one picture and answers with its key.
-    func generateProjectAvatar(projectId: Id, prompt: String) async throws -> String {
+    func generateProjectAvatar(projectId: Id, prompt: String, expectedOwner: WorkLifetime.Ticket? = nil) async throws -> String {
+        if let expectedOwner, !accountLifetime.accepts(expectedOwner) { throw CancellationError() }
         if isFixture { return try await Self.fixtureGenerate(prompt) }
-        return try await api.generateProjectAvatar(projectId, prompt: prompt)
+        guard let work = accountWork(expectedOwner: expectedOwner) else { throw CancellationError() }
+        let api = work.api
+        let received = try await api.generateProjectAvatar(projectId, prompt: prompt)
+        guard accountLifetime.accepts(work.owner) else { throw CancellationError() }
+        return received
     }
 
     /// The same for a people group's picture (any member) — the key lands in `people:{chat}`.
-    func generateGroupAvatar(chatId: String, prompt: String) async throws -> String {
+    func generateGroupAvatar(chatId: String, prompt: String, expectedOwner: WorkLifetime.Ticket? = nil) async throws -> String {
+        if let expectedOwner, !accountLifetime.accepts(expectedOwner) { throw CancellationError() }
         if isFixture { return try await Self.fixtureGenerate(prompt) }
-        return try await api.generateGroupAvatar(chatId, prompt: prompt)
+        guard let work = accountWork(expectedOwner: expectedOwner) else { throw CancellationError() }
+        let api = work.api
+        let received = try await api.generateGroupAvatar(chatId, prompt: prompt)
+        guard accountLifetime.accepts(work.owner) else { throw CancellationError() }
+        return received
     }
 
     /// Set a group picture from a key the relay already holds (the Generate tab's answer).
-    func setGroupImageKey(chatId: String, key: String) async -> Bool {
+    func setGroupImageKey(chatId: String, key: String, expectedOwner: WorkLifetime.Ticket? = nil) async -> Bool {
+        if let expectedOwner, !accountLifetime.accepts(expectedOwner) { return false }
         if isFixture {
             if let i = peopleChats.firstIndex(where: { $0.id == chatId }) { peopleChats[i].imageKey = key }
             return true
         }
-        return await patchPeopleChat(chatId, imageKey: key)
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return false }
+        return await patchPeopleChat(chatId, imageKey: key, expectedOwner: work.owner)
     }
 
     /// D92 amendment: a group's disc colour (nil = initials); drops the uploaded picture.
-    func setGroupDisc(chatId: String, color: UInt8?) async -> Bool {
+    func setGroupDisc(chatId: String, color: UInt8?, expectedOwner: WorkLifetime.Ticket? = nil) async -> Bool {
+        if let expectedOwner, !accountLifetime.accepts(expectedOwner) { return false }
         if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
             peopleChats[i].avatarDiscColor = color.map { Int($0) }
             peopleChats[i].imageKey = nil
         }
         guard !isFixture else { return true }
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return false }
+        let api = work.api
         do {
             let chat = try await api.setPeopleChatDisc(chatId, color: color)
+            guard accountLifetime.accepts(work.owner) else { return false }
             if let i = peopleChats.firstIndex(where: { $0.id == chatId }) { peopleChats[i] = chat }
             return true
         } catch {
+            guard accountLifetime.accepts(work.owner) else { return false };
             fail("save the group picture", error)
             return false
         }
     }
 
     /// Upload a group picture to `people:{chatId}` and patch `image_key`.
-    func setGroupImage(chatId: String, jpeg: Data) async -> Bool {
+    func setGroupImage(chatId: String, jpeg: Data, expectedOwner: WorkLifetime.Ticket? = nil) async -> Bool {
+        if let expectedOwner, !accountLifetime.accepts(expectedOwner) { return false }
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return false }
+        let api = work.api
         let key = "group-avatar-\(Int(Date().timeIntervalSince1970 * 1000)).\(PictureMaster.ext(jpeg))"
         do {
-            _ = try await api.putBlob(projectId: "\(peopleSlot):\(chatId)", key: key, mime: PictureMaster.mime(jpeg), data: jpeg)
-            return await patchPeopleChat(chatId, imageKey: key)
+            let received = try await api.putBlob(projectId: "\(peopleSlot):\(chatId)", key: key, mime: PictureMaster.mime(jpeg), data: jpeg)
+            guard accountLifetime.accepts(work.owner) else { return false }
+            _ = received
+            return await patchPeopleChat(chatId, imageKey: key, expectedOwner: work.owner)
         } catch {
+            guard accountLifetime.accepts(work.owner) else { return false };
             fail("upload the group picture", error)
             return false
         }
     }
 
     /// Settings profile picture: `PUT /me/avatar` with the master (PNG or JPEG), then update the local user.
-    func setUserAvatar(jpeg: Data) async -> Bool {
+    func setUserAvatar(jpeg: Data, expectedOwner: WorkLifetime.Ticket? = nil) async -> Bool {
+        if let expectedOwner, !accountLifetime.accepts(expectedOwner) { return false }
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return false }
+        let api = work.api
         do {
             let url = try await api.putMeAvatar(jpeg: jpeg)
+            guard accountLifetime.accepts(work.owner) else { return false }
             if var who = user {
                 who.avatarUrl = url
                 user = who
@@ -4390,6 +5102,7 @@ final class AppModel: ObservableObject {
             }
             return true
         } catch {
+            guard accountLifetime.accepts(work.owner) else { return false };
             fail("save your picture", error)
             return false
         }
@@ -4412,14 +5125,20 @@ final class AppModel: ObservableObject {
 
     /// The avatar picker's Generate tab for my own picture: the relay paints one picture into
     /// my `users:{id}` slot and answers with its key (not yet set).
-    func generateMyAvatar(prompt: String) async throws -> String {
+    func generateMyAvatar(prompt: String, expectedOwner: WorkLifetime.Ticket? = nil) async throws -> String {
+        if let expectedOwner, !accountLifetime.accepts(expectedOwner) { throw CancellationError() }
         if isFixture { return try await Self.fixtureGenerate(prompt) }
-        return try await api.generateMyAvatar(prompt: prompt)
+        guard let work = accountWork(expectedOwner: expectedOwner) else { throw CancellationError() }
+        let api = work.api
+        let received = try await api.generateMyAvatar(prompt: prompt)
+        guard accountLifetime.accepts(work.owner) else { throw CancellationError() }
+        return received
     }
 
     /// The generated preview becomes my picture (`PUT /me/avatar {image_key}`), then the local
     /// user carries the new URL like after an upload.
-    func setUserAvatarKey(_ key: String) async -> Bool {
+    func setUserAvatarKey(_ key: String, expectedOwner: WorkLifetime.Ticket? = nil) async -> Bool {
+        if let expectedOwner, !accountLifetime.accepts(expectedOwner) { return false }
         if isFixture {
             if var who = user {
                 who.avatarUrl = "fixture://avatar/me-\(key)"
@@ -4427,8 +5146,11 @@ final class AppModel: ObservableObject {
             }
             return true
         }
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return false }
+        let api = work.api
         do {
             let url = try await api.putMeAvatarKey(key)
+            guard accountLifetime.accepts(work.owner) else { return false }
             if var who = user {
                 who.avatarUrl = url
                 user = who
@@ -4436,6 +5158,7 @@ final class AppModel: ObservableObject {
             }
             return true
         } catch {
+            guard accountLifetime.accepts(work.owner) else { return false };
             fail("save your picture", error)
             return false
         }
@@ -4448,12 +5171,18 @@ final class AppModel: ObservableObject {
     }
 
     /// Settings profile picture: `DELETE /me/avatar` — back to the GitHub picture.
-    func removeUserAvatar() async -> Bool {
+    func removeUserAvatar(expectedOwner: WorkLifetime.Ticket? = nil) async -> Bool {
+        if let expectedOwner, !accountLifetime.accepts(expectedOwner) { return false }
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return false }
+        let api = work.api
         do {
-            user = try await api.deleteMeAvatar()
+            let received = try await api.deleteMeAvatar()
+            guard accountLifetime.accepts(work.owner) else { return false }
+            user = received
             saveAccountCache()
             return true
         } catch {
+            guard accountLifetime.accepts(work.owner) else { return false };
             fail("remove your picture", error)
             return false
         }
@@ -4484,17 +5213,30 @@ final class AppModel: ObservableObject {
         }
         unpinHome(peopleChatId: chatId)
         path = []
+        guard let work = accountWork() else { return }
+        let api = work.api
         Task {
-            do { try await api.deleteChat(chatId) } catch { fail("delete it", error) }
+            guard accountLifetime.accepts(work.owner) else { return }
+            do { try await api.deleteChat(chatId) } catch {
+                guard accountLifetime.accepts(work.owner) else { return }; fail("delete it", error)
+            }
         }
     }
 
     func block(_ member: ChatMember) { block(handle: member.handle) }
 
     func block(handle: String) {
+        guard let work = accountWork() else { return }
+        let api = work.api
         Task {
-            do { try await api.block(handle: handle); blocked = (try? await api.blocks()) ?? blocked }
-            catch { fail("block them", error) }
+            guard accountLifetime.accepts(work.owner) else { return }
+            do {
+                try await api.block(handle: handle)
+                guard accountLifetime.accepts(work.owner) else { return }
+                let list = try? await api.blocks()
+                guard accountLifetime.accepts(work.owner) else { return }
+                blocked = list ?? blocked
+            } catch { guard accountLifetime.accepts(work.owner) else { return }; fail("block them", error) }
         }
     }
 
@@ -4745,11 +5487,11 @@ final class AppModel: ObservableObject {
         typing[chatId] = chat.isEmpty ? nil : chat
     }
 
-    /// Composer keystroke in a people chat (DM or group): at most one presence
-    /// typing ping per 3 s so peers see who is typing ([feedback
-    /// app-01M5N7WSA1VCYHE9BE3CX4V0R6], Mac `AppState::typed_in`).
+    /// Composer keystroke: at most one presence typing ping per 3 s. In a people
+    /// chat (DM or group) peers see who is typing ([feedback
+    /// app-01M5N7WSA1VCYHE9BE3CX4V0R6]); in an agent's chat the relay wakes a
+    /// sleeping machine on it (docs/box-scaling.md §4.2). Mac `AppState::typed_in`.
     func typedIn(chatId: Id) {
-        guard peopleChat(chatId) != nil else { return }
         let now = nowMs()
         let last = typingSentAt[chatId] ?? 0
         guard now - last > 3_000 else { return }
@@ -4770,7 +5512,12 @@ final class AppModel: ObservableObject {
     func setMuted(chatId: String, muted: Bool) {
         if let i = peopleChats.firstIndex(where: { $0.id == chatId }) { peopleChats[i].muted = muted }
         guard !isFixture else { return }
-        Task { try? await api.chatSettings(chatId: chatId, muted: muted) }
+        guard let work = accountWork() else { return }
+        let api = work.api
+        Task {
+            guard accountLifetime.accepts(work.owner) else { return }
+            try? await api.chatSettings(chatId: chatId, muted: muted)
+        }
     }
 
     private static let peopleMutedUntilKey = "peopleMutedUntil"
@@ -4825,14 +5572,21 @@ final class AppModel: ObservableObject {
     }
 
     /// `GET /users/{id}` for a fresh presence line on a profile page.
-    func fetchUser(_ id: String) async -> Person? {
+    func fetchUser(_ id: String, expectedOwner: WorkLifetime.Ticket? = nil) async -> Person? {
+        if let expectedOwner, !accountLifetime.accepts(expectedOwner) { return nil }
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return nil }
+        let api = work.api
         guard credentials != nil, !isFixture else { return nil }
-        return (try? await api.user(id)) ?? nil
+        let received = (try? await api.user(id)) ?? nil
+        guard accountLifetime.accepts(work.owner) else { return nil }
+        return received
     }
 
     /// Projects of mine (or shared with me) that this person is a member of.
-    func sharedProjects(with person: ProfilePerson) async -> [Project] {
+    func sharedProjects(with person: ProfilePerson, expectedOwner: WorkLifetime.Ticket? = nil) async -> [Project] {
+        if let expectedOwner, !accountLifetime.accepts(expectedOwner) { return [] }
         guard !isFixture else { return projects.filter { $0.shared } }
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return [] }
         let id = personId(handle: person.handle) ?? person.id
         let handle = person.handle
         var out: [Project] = []
@@ -4843,27 +5597,34 @@ final class AppModel: ObservableObject {
             if let oid = p.ownerId, oid == id || oid == person.id {
                 out.append(p); continue
             }
-            let members = await projectMembers(p.id)
+            let members = await projectMembers(p.id, expectedOwner: work.owner)
+            guard accountLifetime.accepts(work.owner) else { return [] }
             if members.contains(where: {
                 $0.id == id || $0.id == person.id
                     || $0.handle.caseInsensitiveCompare(handle) == .orderedSame
-            }) { out.append(p) }
+            }) {
+                out.append(p)
+            }
         }
+        guard accountLifetime.accepts(work.owner) else { return [] }
         return out
     }
 
     func unblock(_ person: Person) {
+        guard let work = accountWork() else { return }
+        let api = work.api
         Task {
+            guard accountLifetime.accepts(work.owner) else { return }
             do {
                 try await api.unblock(userId: person.id)
+                guard accountLifetime.accepts(work.owner) else { return }
                 // A DM refused as `blocks_member` is postable again: resend now.
                 retryRefusedRooms(only: nil)
-            }
-            catch let e as RelayError where e.status == 404 {
+            } catch let e as RelayError where e.status == 404 {
+                guard accountLifetime.accepts(work.owner) else { return }
                 // Already not blocked on the relay; the list below says so.
-            }
-            catch { fail("unblock them", error) }
-            await refreshBlocks()
+            } catch { guard accountLifetime.accepts(work.owner) else { return }; fail("unblock them", error) }
+            await refreshBlocks(expectedOwner: work.owner)
         }
     }
 
@@ -4875,36 +5636,57 @@ final class AppModel: ObservableObject {
         for key in targets { rooms[key]?.retryRefused() }
     }
 
-    func refreshBlocks() async {
-        if let list = try? await api.blocks() { blocked = list }
+    func refreshBlocks(expectedOwner: WorkLifetime.Ticket? = nil) async {
+        guard let work = accountWork(expectedOwner: expectedOwner),
+            let list = try? await work.api.blocks(), accountLifetime.accepts(work.owner)
+        else { return }
+        blocked = list
     }
 
     // Projects together (step 3)
-    func projectMembers(_ projectId: Id) async -> [ProjectMember] {
-        (try? await api.projectMembers(projectId)) ?? []
+    func projectMembers(_ projectId: Id, expectedOwner: WorkLifetime.Ticket? = nil) async -> [ProjectMember] {
+        if let expectedOwner, !accountLifetime.accepts(expectedOwner) { return [] }
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return [] }
+        let api = work.api
+        let received = (try? await api.projectMembers(projectId)) ?? []
+        guard accountLifetime.accepts(work.owner) else { return [] }
+        return received
     }
 
-    func inviteToProject(_ projectId: Id, handle: String) async -> [ProjectMember]? {
-        do { return try await api.addProjectMember(projectId, handle: handle) }
-        catch {
-            fail((error as? RelayError)?.type == "already_member"
-                 ? UserError.refused("invite @\(handle)", "@\(handle) is already a member.")
-                 : UserError.classify("invite @\(handle)", error))
+    func inviteToProject(_ projectId: Id, handle: String, expectedOwner: WorkLifetime.Ticket? = nil) async -> [ProjectMember]? {
+        if let expectedOwner, !accountLifetime.accepts(expectedOwner) { return nil }
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return nil }
+        let api = work.api
+        do { return try await api.addProjectMember(projectId, handle: handle) } catch {
+            guard accountLifetime.accepts(work.owner) else { return nil };
+            fail(
+                (error as? RelayError)?.type == "already_member"
+                    ? UserError.refused("invite @\(handle)", "@\(handle) is already a member.")
+                    : UserError.classify("invite @\(handle)", error))
             return nil
         }
     }
 
-    func removeProjectMember(_ projectId: Id, userId: String) async {
-        do { try await api.removeProjectMember(projectId, userId: userId) }
-        catch { fail("remove them", error) }
+    func removeProjectMember(_ projectId: Id, userId: String, expectedOwner: WorkLifetime.Ticket? = nil) async {
+        if let expectedOwner, !accountLifetime.accepts(expectedOwner) { return }
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return }
+        let api = work.api
+        do { try await api.removeProjectMember(projectId, userId: userId) } catch {
+            guard accountLifetime.accepts(work.owner) else { return }; fail("remove them", error)
+        }
     }
 
     /// `/me/pushes`: unread flags, chat list refreshes and local notifications.
-    func drainPushes() async {
-        guard credentials != nil, !isFixture, let items = try? await api.pushes(), !items.isEmpty else { return }
+    func drainPushes(expectedOwner: WorkLifetime.Ticket? = nil) async {
+        guard credentials != nil, !isFixture,
+            let work = accountWork(expectedOwner: expectedOwner),
+            let items = try? await work.api.pushes(), !items.isEmpty
+        else { return }
+        guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
         var needChats = false
         var needServers = false
         for p in items where !notifiedPushIds.contains(p.id) {
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
             notifiedPushIds.insert(p.id)
             pushLog.notice("push id=\(p.id, privacy: .public) event=\(String(describing: p.event), privacy: .public)")
             // The chat's members or settings changed: a refused room there resends now.
@@ -4940,10 +5722,13 @@ final class AppModel: ObservableObject {
                         // relay sends none → the chat list's kind): title = the chat's name,
                         // body = "Sender: text". A DM is titled with the sender.
                         let chatKind = payload.chat_kind ?? (peopleChat(cid)?.kind == "group" ? "group" : "dm")
-                        let groupTitle = (payload.chat_title ?? peopleChat(cid)?.title ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                        let groupTitle = (payload.chat_title ?? peopleChat(cid)?.title ?? "").trimmingCharacters(
+                            in: .whitespacesAndNewlines)
                         let titled = chatKind != "dm" && !groupTitle.isEmpty
                         let imageKey = payload.chat_image_key ?? peopleChat(cid)?.imageKey
-                        let groupImage = titled && inPeople ? imageKey.flatMap { blobURL(projectId: "\(peopleSlot):\(cid)", key: $0)?.absoluteString } : nil
+                        let groupImage =
+                            titled && inPeople
+                            ? imageKey.flatMap { blobURL(projectId: "\(peopleSlot):\(cid)", key: $0)?.absoluteString } : nil
                         let shown = text.isEmpty ? "New message" : text
                         let info = MessagePush.userInfo(
                             chatId: cid, projectId: projectId,
@@ -4958,7 +5743,14 @@ final class AppModel: ObservableObject {
                             chatKind: chatKind,
                             text: text.isEmpty ? nil : text,
                             chatImageUrl: groupImage)
-                        Task { await PushManager.shared.postMessage(id: p.id, info: info) }
+                        Task { [weak self] in
+                            guard self?.accountLifetime.accepts(work.owner) == true, !Task.isCancelled else { return }
+                            await PushManager.shared.postMessage(
+                                id: p.id, info: info,
+                                isCurrent: { [weak self] in
+                                    self?.accountLifetime.accepts(work.owner) == true
+                                })
+                        }
                     }
                     applyBadge()
                 }
@@ -4992,17 +5784,17 @@ final class AppModel: ObservableObject {
                 if !payload.by_handle.isEmpty {
                     PushManager.post(id: p.id, title: "@\(payload.by_handle)", body: "Shared a project with you", chatId: "")
                 }
-                await refreshRegistry()
+                await refreshRegistry(expectedOwner: work.owner)
             case .projectMemberRemoved:
-                await refreshRegistry()
+                await refreshRegistry(expectedOwner: work.owner)
             case .secretRequest(let payload):
                 // D83: an agent wants a secret; the card is in its chat, Settings badges too.
                 let agent = payload.project_name.isEmpty ? "An agent" : payload.project_name
                 let host = payload.host.flatMap { $0.isEmpty ? nil : " at \($0)" } ?? ""
                 PushManager.post(id: p.id, title: agent, body: "\(agent) wants to use \(payload.name)\(host)", chatId: "")
-                await refreshSecrets()
+                await refreshSecrets(expectedOwner: work.owner)
             case .secretsPaused:
-                await refreshSecrets()
+                await refreshSecrets(expectedOwner: work.owner)
             case .messageRedacted(let payload):
                 // Secret hand-off: the row itself arrives through room sync (and the store's
                 // next snapshot is shallow); here the delivered notifications that may still
@@ -5015,9 +5807,9 @@ final class AppModel: ObservableObject {
                     body: payload.expired ? "\(payload.name) expired. Agents lost it." : "\(payload.name) expires in 3 days.",
                     chatId: ""
                 )
-                await refreshSecrets()
+                await refreshSecrets(expectedOwner: work.owner)
             case .feedbackCapture:
-                await answerFeedbackCapture(p)
+                await answerFeedbackCapture(p, expectedOwner: work.owner)
             case .releasePublished(let payload):
                 // A build is installable (TestFlight processed it): refresh the Update card now.
                 if payload.platform == "ios" { await checkForUpdate() }
@@ -5027,14 +5819,14 @@ final class AppModel: ObservableObject {
             case .profileUpdated(let payload):
                 // Someone's picture changed: mine on another device (re-read /me) or a person I
                 // share a chat or a server with (their card comes with the lists).
-                if payload.user_id == user?.id { await refreshAccount() }
+                if payload.user_id == user?.id { await refreshAccount(expectedOwner: work.owner) }
                 needChats = true
                 needServers = true
             case .agentProfileUpdated(let payload):
                 // An agent's avatar changed (the agents' `profile_updated`): the new picture and
                 // stamp land in every copy now; the re-reads bring the colour pick and the rest.
                 applyAgentAvatarPush(projectId: payload.project_id, imageKey: payload.image_key, version: Int(payload.avatar_version))
-                await refreshRegistry()
+                await refreshRegistry(expectedOwner: work.owner)
                 needChats = true
             case .chatArchived(let payload):
                 // Another device of mine archived / unarchived a people chat.
@@ -5050,10 +5842,11 @@ final class AppModel: ObservableObject {
                     let sender = payload.sender
                     let who = sender.kind == "agent" || sender.handle.isEmpty ? sender.name : "@\(sender.handle)"
                     let text = (payload.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-// Same shape as a group: title = where ("Server › #channel"), body = "Sender: text".
-                    PushManager.post(id: p.id, title: "\(payload.server_name) › #\(payload.channel_name)",
-                                     body: "\(who): \(text.isEmpty ? "New message" : text)",
-                                     chatId: payload.channel_id, projectId: channelSlot)
+                    // Same shape as a group: title = where ("Server › #channel"), body = "Sender: text".
+                    PushManager.post(
+                        id: p.id, title: "\(payload.server_name) › #\(payload.channel_name)",
+                        body: "\(who): \(text.isEmpty ? "New message" : text)",
+                        chatId: payload.channel_id, projectId: channelSlot)
                 }
             case .peopleChatDeleted, .peopleInviteAccepted, .machineReady:
                 break
@@ -5065,15 +5858,19 @@ final class AppModel: ObservableObject {
                 applyRemoteClear(chatId: payload.chat_id, relayTotal: payload.badge)
             }
         }
-        if needChats { await refreshPeople() }
-        if needServers { await refreshServers() }
+        guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
+        if needChats { await refreshPeople(expectedOwner: work.owner) }
+        guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
+        if needServers { await refreshServers(expectedOwner: work.owner) }
+        guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
         if notifiedPushIds.count > 2000 { notifiedPushIds.removeAll() }
     }
 
     /// `feedback_capture`: the user asked their agent to file feedback; the agent wants a picture
     /// of the screen they are looking at. Only the app in the foreground answers with an image
     /// (the same key-window capture as the shake sheet); a stale or background request is skipped.
-    private func answerFeedbackCapture(_ p: PushItem) async {
+    private func answerFeedbackCapture(_ p: PushItem, expectedOwner: WorkLifetime.Ticket? = nil) async {
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return }
         guard case .feedbackCapture(let payload) = p.event else { return }
         let requestId = payload.request_id
         guard !requestId.isEmpty else { return }
@@ -5090,11 +5887,14 @@ final class AppModel: ObservableObject {
             skipped = appActive ? "failed: window capture returned nothing" : "background"
         }
         do {
-            try await api.sendFeedbackCapture(requestId: requestId, image: image, mime: "image/jpeg", width: size.w, height: size.h,
-                                              appVersion: FeedbackCenter.appVersion, os: "iOS \(UIDevice.current.systemVersion)",
-                                              device: FeedbackCenter.deviceLine, screen: screen, skipped: skipped)
+            try await work.api.sendFeedbackCapture(
+                requestId: requestId, image: image, mime: "image/jpeg", width: size.w, height: size.h,
+                appVersion: FeedbackCenter.appVersion, os: "iOS \(UIDevice.current.systemVersion)",
+                device: FeedbackCenter.deviceLine, screen: screen, skipped: skipped)
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
             if image != nil { notice = Notice(text: "Screenshot added to your feedback") }
         } catch {
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
             pushLog.notice("feedback capture upload failed: \(error.localizedDescription, privacy: .public)")
         }
     }
@@ -5107,6 +5907,8 @@ final class AppModel: ObservableObject {
     /// Relay blob URL with the device token as a query parameter (the relay
     /// accepts `?token=` on every route), so AVPlayer and Safari can open it.
     func blobURL(projectId: Id, key: String) -> URL? {
+        // A native chat's file on the homeserver: decrypted on this phone, not a relay URL.
+        if key.hasPrefix(MatrixMediaProtocol.refPrefix) { return MatrixMediaProtocol.url(slot: projectId, key: key) }
         let base = api.endpoint.httpUrl
         guard !base.isEmpty else { return nil }
         // Build via URLComponents so a people-slot `:` and JWT characters stay valid;
@@ -5218,6 +6020,10 @@ final class AppModel: ObservableObject {
             return
         }
         #endif
+        if nativeRooms[chatId] != nil {
+            reactNativePeople(chatId: chatId, messageId: messageId, emoji: emoji)
+            return
+        }
         guard let doc = docs[chatId] else { return }
         do {
             try doc.toggleReaction(messageId: messageId, emoji: emoji, sender: me)
@@ -5236,21 +6042,26 @@ final class AppModel: ObservableObject {
         guard !messageId.isEmpty else { return }
         let audit = groupDeletionAuditLine(chatId: chatId)
         #if DEBUG || ARBOS_FIXTURE
-        if isFixture {
-            guard var list = messages[chatId] else { return }
-            list.removeAll { $0.id == messageId }
-            if let audit {
-                let m = Message(id: newId(), chatId: chatId, role: .system, sender: "system", status: .done, turn: nil, decision: nil,
-                                subagentId: nil, subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: nowMs(),
-                                completedAt: nowMs(), pending: false, parts: [.text(id: newId(), text: audit)], hiddenCount: 0)
-                list.append(m)
+            if isFixture {
+                guard var list = messages[chatId] else { return }
+                list.removeAll { $0.id == messageId }
+                if let audit {
+                    let m = Message(
+                        id: newId(), chatId: chatId, role: .system, sender: "system", status: .done, turn: nil, decision: nil,
+                        subagentId: nil, subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: nowMs(),
+                        completedAt: nowMs(), pending: false, parts: [.text(id: newId(), text: audit)], hiddenCount: 0)
+                    list.append(m)
+                }
+                messages[chatId] = list
+                clearUnacked(chatId: chatId, messageId: messageId)
+                Haptics.pick()
+                return
             }
-            messages[chatId] = list
-            clearUnacked(chatId: chatId, messageId: messageId)
-            Haptics.pick()
+        #endif
+        if nativeRooms[chatId] != nil {
+            deleteNativePeople(chatId: chatId, messageId: messageId)
             return
         }
-        #endif
         if let audit, let doc = docs[chatId] {
             do {
                 try doc.insertSystemLine(id: newId(), text: audit, deviceId: deviceId)
@@ -5267,16 +6078,22 @@ final class AppModel: ObservableObject {
         } else {
             room = "people/\(chatId)"
         }
+        guard let work = accountWork() else { return }
+        let api = work.api
         Task {
+            guard accountLifetime.accepts(work.owner) else { return }
             do {
                 try await api.deleteMessage(room: room, messageId: messageId)
+                guard accountLifetime.accepts(work.owner) else { return }
                 clearUnacked(chatId: chatId, messageId: messageId)
                 Haptics.pick()
             } catch {
+                guard accountLifetime.accepts(work.owner) else { return }
                 let e = error as? RelayError
-                fail(e?.status == 403
-                     ? UserError.refused("delete the message", "You can only delete your own messages.")
-                     : UserError.classify("delete the message", error))
+                fail(
+                    e?.status == 403
+                        ? UserError.refused("delete the message", "You can only delete your own messages.")
+                        : UserError.classify("delete the message", error))
             }
         }
     }
@@ -5285,12 +6102,16 @@ final class AppModel: ObservableObject {
     /// (`preview: "off"`, the delete rule); the card goes at once here, the row follows.
     func removeLinkPreview(chatId: Id, messageId: Id, projectId: Id? = nil) {
         guard !messageId.isEmpty else { return }
+        if nativeRooms[chatId] != nil {
+            failRefused("remove the preview", Self.nativeTextOnly)
+            return
+        }
         if var list = messages[chatId], let i = list.firstIndex(where: { $0.id == messageId }) {
             list[i].preview = "off"
             messages[chatId] = list
         }
         #if DEBUG || ARBOS_FIXTURE
-        if isFixture { Haptics.pick(); return }
+            if isFixture { Haptics.pick(); return }
         #endif
         let room: String
         if peopleChat(chatId) != nil {
@@ -5300,15 +6121,21 @@ final class AppModel: ObservableObject {
         } else {
             room = "people/\(chatId)"
         }
+        guard let work = accountWork() else { return }
+        let api = work.api
         Task {
+            guard accountLifetime.accepts(work.owner) else { return }
             do {
                 try await api.removeLinkPreview(room: room, messageId: messageId)
+                guard accountLifetime.accepts(work.owner) else { return }
                 Haptics.pick()
             } catch {
+                guard accountLifetime.accepts(work.owner) else { return }
                 let e = error as? RelayError
-                fail(e?.status == 403
-                     ? UserError.refused("remove the preview", "You can only remove previews on your own messages.")
-                     : UserError.classify("remove the preview", error))
+                fail(
+                    e?.status == 403
+                        ? UserError.refused("remove the preview", "You can only remove previews on your own messages.")
+                        : UserError.classify("remove the preview", error))
             }
         }
     }
@@ -5339,6 +6166,10 @@ final class AppModel: ObservableObject {
             return
         }
         #endif
+        if nativeRooms[chatId] != nil {
+            failRefused("edit the message", Self.nativeTextOnly)
+            return
+        }
         guard let doc = docs[chatId] else { return }
         do {
             try doc.editMessage(messageId: messageId, text: trimmed)
@@ -5593,8 +6424,10 @@ final class AppModel: ObservableObject {
     /// so every client draws the quote header and agentd puts the quoted message in the turn.
     /// `extraParts` (#forward-attachments): doc parts written after the text and attachment
     /// parts — a forwarded chart and its fallback picture, already uploaded.
-    func send(chatId: Id, text: String, attachments: [PendingAttachment] = [], replyTo: Id? = nil,
-              forwardedFrom: String? = nil, extraParts: [[String: Any]] = []) {
+    func send(
+        chatId: Id, text: String, attachments: [PendingAttachment] = [], replyTo: Id? = nil,
+        forwardedFrom: String? = nil, extraParts: [[String: Any]] = []
+    ) {
         // A new send clears the composer's note (the next failure brings its own).
         clearSendError(chatId)
         if JobTabs.isJobChat(chatId) {
@@ -5602,20 +6435,25 @@ final class AppModel: ObservableObject {
             return
         }
         if attachments.isEmpty {
-            write(chatId: chatId, text: text, command: "send", attachments: [], replyTo: replyTo,
-                  forwardedFrom: forwardedFrom, extraParts: extraParts)
+            write(
+                chatId: chatId, text: text, command: "send", attachments: [], replyTo: replyTo,
+                forwardedFrom: forwardedFrom, extraParts: extraParts)
             return
         }
         guard let chat = chat(chatId) else { return }
         if isFixture {
-            write(chatId: chatId, text: text, command: "send", attachments: attachments.map {
-                Attachment(name: $0.name, mime: $0.mime, blobRef: nil, kind: Self.attachmentKind(mime: $0.mime, name: $0.name))
-            }, replyTo: replyTo)
+            write(
+                chatId: chatId, text: text, command: "send",
+                attachments: attachments.map {
+                    Attachment(name: $0.name, mime: $0.mime, blobRef: nil, kind: Self.attachmentKind(mime: $0.mime, name: $0.name))
+                }, replyTo: replyTo)
             return
         }
-        let api = api
+        guard let work = accountWork() else { return }
         Task {
-            guard let outcomes = await uploadAttachments(attachments, slot: chat.projectId, api: api) else { return }
+            guard accountLifetime.accepts(work.owner) else { return }
+            guard let outcomes = await uploadAttachments(attachments, slot: chat.projectId, api: work.api) else { return }
+            guard accountLifetime.accepts(work.owner) else { return }
             var uploaded: [Attachment] = []
             for outcome in outcomes {
                 switch outcome {
@@ -5625,10 +6463,12 @@ final class AppModel: ObservableObject {
                     uploaded.append(attachment)
                 }
             }
+            guard accountLifetime.accepts(work.owner) else { return }
             // The forward header rides along with the pictures ([feedback
             // forward-attachments-ios-2026-10-27]: it was dropped on this path).
-            write(chatId: chatId, text: text, command: "send", attachments: uploaded, replyTo: replyTo,
-                  forwardedFrom: forwardedFrom, extraParts: extraParts)
+            write(
+                chatId: chatId, text: text, command: "send", attachments: uploaded, replyTo: replyTo,
+                forwardedFrom: forwardedFrom, extraParts: extraParts)
         }
     }
 
@@ -5643,6 +6483,10 @@ final class AppModel: ObservableObject {
             sendDraftDM(draft) { [weak self] dmId in self?.sendMedia(chatId: dmId, pick: pick) }
             return
         }
+        if nativeRooms[chatId] != nil {
+            failRefused("send your message", Self.nativeTextOnly)
+            return
+        }
         let people = peopleChat(chatId) != nil
         switch pick {
         case .gif(let gif):
@@ -5654,7 +6498,12 @@ final class AppModel: ObservableObject {
             } else {
                 write(chatId: chatId, text: "", command: "send", attachments: [attachment])
             }
-            Task { await api.gifShare(id: gif.id, query: gif.query) }
+            if !isFixture, let work = accountWork() {
+                Task {
+                    guard accountLifetime.accepts(work.owner) else { return }
+                    await work.api.gifShare(id: gif.id, query: gif.query)
+                }
+            }
         case .sticker(let pack, let item, let data):
             let ext = item.mime == "image/webp" ? "webp" : "png"
             let name = "\(item.id).\(ext)"
@@ -5665,16 +6514,20 @@ final class AppModel: ObservableObject {
                 return
             }
             let slot = people ? "\(peopleSlot):\(chatId)" : (chat(chatId)?.projectId ?? "")
-            guard !slot.isEmpty else { return }
+            guard !slot.isEmpty, let work = accountWork() else { return }
             Task {
-                var attachment = Attachment(name: name, mime: item.mime, blobRef: nil, kind: "sticker",
-                                            bytes: Int64(data.count), source: source)
+                guard accountLifetime.accepts(work.owner) else { return }
+                var attachment = Attachment(
+                    name: name, mime: item.mime, blobRef: nil, kind: "sticker",
+                    bytes: Int64(data.count), source: source)
                 do {
-                    attachment.blobRef = try await uploadBlob(slot: slot, name: name, mime: item.mime, data: data)
+                    attachment.blobRef = try await uploadBlob(slot: slot, name: name, mime: item.mime, data: data, work: work)
                 } catch {
+                    guard accountLifetime.accepts(work.owner) else { return }
                     setSendError(chatId, UserError.classify("send the sticker", error))
                     return
                 }
+                guard accountLifetime.accepts(work.owner) else { return }
                 if people {
                     sendPeopleAttachments(chatId: chatId, attachments: [attachment])
                 } else {
@@ -5704,12 +6557,15 @@ final class AppModel: ObservableObject {
     /// Voice memo → text through the relay. The audio is only an STT input; callers send
     /// the transcript (or put it in the draft) and do not attach the file. `nil` when the
     /// relay cannot transcribe; the user sees why.
-    func transcribe(projectId: Id?, memo: PendingAttachment) async -> String? {
+    func transcribe(projectId: Id?, memo: PendingAttachment, work: AccountWork) async -> String? {
         if isFixture { return nil }
+        guard accountLifetime.accepts(work.owner) else { return nil }
         do {
-            let text = try await api.transcribe(projectId: projectId, data: memo.data, mime: memo.mime)
+            let text = try await work.api.transcribe(projectId: projectId, data: memo.data, mime: memo.mime)
+            guard accountLifetime.accepts(work.owner) else { return nil }
             return text.isEmpty ? nil : text
         } catch {
+            guard accountLifetime.accepts(work.owner) else { return nil }
             if let chat = visibleChatId {
                 setSendError(chat, UserError.classify("transcribe your memo", error))
             } else {
@@ -5777,9 +6633,11 @@ final class AppModel: ObservableObject {
     /// Upload one attachment's bytes under `slot` (`people:<chat>` or a project id) with a
     /// fresh relay key; returns the key the row references. Forward copies a chart's fallback
     /// picture into the target chat's slot with it ([feedback forward-attachments-ios-2026-10-27]).
-    func uploadBlob(slot: String, name: String, mime: String, data: Data) async throws -> String {
+    func uploadBlob(slot: String, name: String, mime: String, data: Data, work: AccountWork) async throws -> String {
+        guard accountLifetime.accepts(work.owner) else { throw CancellationError() }
         let key = AppModel.blobKey(for: name)
-        _ = try await api.putBlob(projectId: slot, key: key, mime: mime, data: data)
+        _ = try await work.api.putBlob(projectId: slot, key: key, mime: mime, data: data)
+        guard accountLifetime.accepts(work.owner) else { throw CancellationError() }
         return key
     }
 
@@ -5847,7 +6705,10 @@ final class AppModel: ObservableObject {
     /// the saved secret's id and names — never the value — so the agent learns only the name.
     func saveSecretFromCard(chatId: Id, approvalId: String, projectId: Id, name: String, value: String, purpose: String) {
         handoff[approvalId] = .saving
+        guard let work = accountWork() else { return }
+        let api = work.api
         Task { @MainActor in
+            guard accountLifetime.accepts(work.owner) else { return }
             do {
                 let body: [String: Any] = [
                     "name": name, "kind": "key", "value": value, "note": purpose,
@@ -5855,16 +6716,20 @@ final class AppModel: ObservableObject {
                     "source": ["kind": "chat", "project_id": projectId, "chat_id": chatId],
                 ]
                 let saved = try await api.createSecret(body)
+                guard accountLifetime.accepts(work.owner) else { return }
                 markQuestionAnswered(chatId: chatId, questionId: "approval:\(approvalId)", answer: ["saved"])
                 if let doc = docs[chatId] {
-                    let payload: [String: Any] = ["approvalId": approvalId,
-                                                  "secret": ["id": saved.id, "name": saved.name, "env": saved.env]]
+                    let payload: [String: Any] = [
+                        "approvalId": approvalId,
+                        "secret": ["id": saved.id, "name": saved.name, "env": saved.env],
+                    ]
                     try? doc.pushCommand("approve", payload: payload, device: deviceId)
                     doc.commit()
                 }
                 handoff[approvalId] = .saved(saved.env)
-                await refreshSecrets()
+                await refreshSecrets(expectedOwner: work.owner)
             } catch {
+                guard accountLifetime.accepts(work.owner) else { return }
                 handoff[approvalId] = .failed(UserError.classify("save the secret", error))
             }
         }
@@ -5881,11 +6746,16 @@ final class AppModel: ObservableObject {
         markQuestionAnswered(chatId: chatId, questionId: questionId, answer: [choice])
         let approve = choice != "deny" && choice != "reject"
         if let rid = secretRequestId {
+            guard let work = accountWork() else { return }
+            let api = work.api
             Task { @MainActor in
+                guard accountLifetime.accepts(work.owner) else { return }
                 do {
                     try await api.decideSecretRequest(rid, decision: choice)
-                    await refreshSecrets()
+                    guard accountLifetime.accepts(work.owner) else { return }
+                    await refreshSecrets(expectedOwner: work.owner)
                 } catch {
+                    guard accountLifetime.accepts(work.owner) else { return }
                     fail("save the secret", error)
                 }
             }
@@ -5900,9 +6770,9 @@ final class AppModel: ObservableObject {
     }
 
     /// #1544: the agent pane opened — load its standing shell approvals.
-    func refreshShellGrants(_ projectId: Id) async {
-        guard credentials != nil, !isFixture else { return }
-        if let v = try? await relay.shellGrants(projectId) {
+    func refreshShellGrants(_ projectId: Id, expectedOwner: WorkLifetime.Ticket? = nil) async {
+        guard credentials != nil, !isFixture, let work = accountWork(expectedOwner: expectedOwner) else { return }
+        if let v = try? await work.api.shellGrants(projectId), accountLifetime.accepts(work.owner) {
             shellGrants[projectId] = v
         }
     }
@@ -5912,13 +6782,17 @@ final class AppModel: ObservableObject {
     func revokeShellGrant(projectId: Id, grantId: String) {
         shellGrants[projectId]?.removeAll { $0.id == grantId }
         guard !isFixture else { return }
+        guard let work = accountWork() else { return }
+        let api = work.api
         Task { @MainActor in
+            guard accountLifetime.accepts(work.owner) else { return }
             do {
-                try await relay.revokeShellGrant(projectId, grantId: grantId)
+                try await api.revokeShellGrant(projectId, grantId: grantId)
             } catch {
+                guard accountLifetime.accepts(work.owner) else { return };
                 fail("change the shell approvals", error)
             }
-            await refreshShellGrants(projectId)
+            await refreshShellGrants(projectId, expectedOwner: work.owner)
         }
     }
 
@@ -6137,8 +7011,12 @@ final class AppModel: ObservableObject {
     /// phones get a real preview instead of "New message". Best effort.
     private func announce(chatId: Id, projectId: Id?, messageId: String, text: String, replyRef: ReplyRef? = nil) {
         guard !isFixture else { return }
-        let api = self.api
-        Task { try? await api.notifyMessage(chatId: chatId, projectId: projectId, messageId: messageId, text: text, replyRef: replyRef) }
+        guard let work = accountWork() else { return }
+        let api = work.api
+        Task {
+            guard accountLifetime.accepts(work.owner) else { return }
+            try? await api.notifyMessage(chatId: chatId, projectId: projectId, messageId: messageId, text: text, replyRef: replyRef)
+        }
     }
 
     // MARK: Reply in DM (#1836)
@@ -6445,16 +7323,21 @@ final class AppModel: ObservableObject {
         rolloutPolledAt[jobId] = now
         rolloutPolling.insert(jobId)
         let after = rollouts[jobId].flatMap { $0.entries.isEmpty ? nil : $0.nextSeq - 1 }
-        let api = self.api
+        guard let work = accountWork() else { rolloutPolling.remove(jobId); return }
+        let api = work.api
         Task { @MainActor [weak self] in
-            defer { self?.rolloutPolling.remove(jobId) }
-            guard let self else { return }
+            guard let self, accountLifetime.accepts(work.owner) else { return }
+            defer { if accountLifetime.accepts(work.owner) { rolloutPolling.remove(jobId) } }
             do {
-                if let doc = try await api.jobRollout(projectId: projectId, jobId: jobId, after: after) {
+                let fetched = try await api.jobRollout(projectId: projectId, jobId: jobId, after: after)
+                guard accountLifetime.accepts(work.owner) else { return }
+                if let doc = fetched {
                     applyRollout(jobId: jobId, doc)
                 } else {
-                    var ph = rollouts[jobId] ?? JobRollout.placeholder(
-                        jobRow(jobId) ?? Job(id: jobId, title: "", state: .running, step: "", elapsedS: 0), parentName: "")
+                    var ph =
+                        rollouts[jobId]
+                        ?? JobRollout.placeholder(
+                            jobRow(jobId) ?? Job(id: jobId, title: "", state: .running, step: "", elapsedS: 0), parentName: "")
                     ph.unavailable = true
                     applyRollout(jobId: jobId, ph, replace: true)
                 }
@@ -6568,16 +7451,19 @@ final class AppModel: ObservableObject {
         guard !projects.isEmpty else { return }
         let listed = projects.contains { !(jobs[$0] ?? []).isEmpty }
         guard listed || hasLiveJob(chatId) else { return }
+        guard let work = accountWork() else { return }
         let now = nowMs()
         for projectId in projects {
             guard now - (jobsPolledAt[projectId] ?? 0) >= AppModel.jobsPollMs, !jobsPolling.contains(projectId) else { continue }
             jobsPolledAt[projectId] = now
             jobsPolling.insert(projectId)
-            let api = self.api
+            let api = work.api
             Task { @MainActor [weak self] in
-                defer { self?.jobsPolling.remove(projectId) }
+                guard let self, accountLifetime.accepts(work.owner) else { return }
+                defer { if accountLifetime.accepts(work.owner) { jobsPolling.remove(projectId) } }
                 guard let fresh = try? await api.projectJobs(projectId: projectId) else { return }
-                self?.applyJobs(projectId: projectId, fresh)
+                guard accountLifetime.accepts(work.owner) else { return }
+                applyJobs(projectId: projectId, fresh)
             }
         }
     }
@@ -6640,15 +7526,19 @@ final class AppModel: ObservableObject {
         setProjectState(projectId, .waking, detail: nil)
         machine.state = machine.coerced(.waking)
         machine.since = nowMs()
+        guard let work = accountWork() else { return }
+        let api = work.api
         Task {
+            guard accountLifetime.accepts(work.owner) else { return }
             do {
                 try await api.wake(projectId: projectId)
             } catch {
+                guard accountLifetime.accepts(work.owner) else { return };
                 fail("wake the machine", error)
                 setProjectState(projectId, .error, detail: UserError.classify("wake the machine", error).sentence)
                 machine.state = .error
             }
-            await refreshMachine()
+            await refreshMachine(expectedOwner: work.owner)
         }
     }
 
@@ -6659,8 +7549,9 @@ final class AppModel: ObservableObject {
     @discardableResult
     func startNewChat(projectId: Id) -> Chat {
         let localId = newId()
-        let chat = Chat(id: localId, projectId: projectId, title: "New chat",
-                        isPinned: false, unread: false, lastMessageAt: nowMs())
+        let chat = Chat(
+            id: localId, projectId: projectId, title: "New chat",
+            isPinned: false, unread: false, lastMessageAt: nowMs())
         var list = chats[projectId] ?? []
         // Right after the pinned "Main" chat, same strip order as Mac.
         let at = min((list.firstIndex(where: { $0.isPinned }).map { $0 + 1 } ?? 0), list.count)
@@ -6673,34 +7564,44 @@ final class AppModel: ObservableObject {
             wake(projectId: projectId, reason: "new-chat")
         }
         open(chat: chat)
-        Task { await finalizeNewChat(localId: localId, projectId: projectId) }
+        if let work = accountWork() {
+            Task { await finalizeNewChat(localId: localId, projectId: projectId, expectedOwner: work.owner) }
+        }
         return chat
     }
 
     /// Returns the new chat once the relay has created it (legacy awaiters).
-    func newChat(projectId: Id) async -> Chat? {
+    func newChat(projectId: Id, expectedOwner: WorkLifetime.Ticket? = nil) async -> Chat? {
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return nil }
         let local = startNewChat(projectId: projectId)
         let localId = local.id
         for _ in 0..<100 {
+            guard accountLifetime.accepts(work.owner) else { return nil }
             if let realId = optimisticRemap[localId], let c = chat(realId) {
                 optimisticRemap.removeValue(forKey: localId)
                 return c
             }
             if !optimisticChatIds.contains(localId), optimisticRemap[localId] == nil {
-                return nil // abandoned
+                return nil  // abandoned
             }
             try? await Task.sleep(nanoseconds: 50_000_000)
         }
+        guard accountLifetime.accepts(work.owner) else { return nil }
         return optimisticRemap[localId].flatMap(chat) ?? chat(localId)
     }
 
-    private func finalizeNewChat(localId: Id, projectId: Id) async {
+    private func finalizeNewChat(localId: Id, projectId: Id, expectedOwner: WorkLifetime.Ticket? = nil) async {
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return }
+        let api = work.api
         do {
             let real = try await api.createChat(projectId: projectId)
+            guard accountLifetime.accepts(work.owner) else { return }
             adoptOptimisticChat(localId: localId, real: real)
         } catch {
-            abandonOptimisticChat(localId: localId, projectId: projectId,
-                                  reason: UserError.classify("start the chat", error).raw)
+            guard accountLifetime.accepts(work.owner) else { return }
+            abandonOptimisticChat(
+                localId: localId, projectId: projectId,
+                reason: UserError.classify("start the chat", error).raw)
         }
     }
 
@@ -6820,10 +7721,11 @@ final class AppModel: ObservableObject {
             // Forced re-PUT of the same cursor still keeps a pending send.
             pendingReadPutValue[chatId] = value
             guard readPutTasks[chatId] == nil else { return }
+            guard let work = accountWork() else { return }
             readPutTasks[chatId] = Task { [weak self] in
                 let ms = max(1, Int((seconds * 1000).rounded()))
                 try? await Task.sleep(for: .milliseconds(ms))
-                guard !Task.isCancelled, let self else { return }
+                guard !Task.isCancelled, let self, accountLifetime.accepts(work.owner) else { return }
                 self.readPutTasks[chatId] = nil
                 let latest = self.pendingReadPutValue[chatId] ?? value
                 self.pendingReadPutValue[chatId] = nil
@@ -6833,10 +7735,14 @@ final class AppModel: ObservableObject {
     }
 
     private func performReadPut(chatId: Id, value: Int64, at: Date) {
+        guard let work = accountWork() else { return }
         lastReadPutValue[chatId] = value
         lastReadPutAt[chatId] = at
-        let api = self.api
-        Task { try? await api.markRead(chatId: chatId, seq: value) }
+        let api = work.api
+        Task {
+            guard accountLifetime.accepts(work.owner) else { return }
+            try? await api.markRead(chatId: chatId, seq: value)
+        }
     }
 
     /// Clear a project chat's unread dot. Local unread/badge clear is immediate;
@@ -6876,29 +7782,41 @@ final class AppModel: ObservableObject {
             projects[i].model = model
             projects[i].effort = effort
         }
+        guard let work = accountWork() else { return }
+        let api = work.api
         Task {
+            guard accountLifetime.accepts(work.owner) else { return }
             do {
                 try await api.setModel(projectId: projectId, model: model, effort: effort)
+                guard accountLifetime.accepts(work.owner) else { return }
             } catch {
+                guard accountLifetime.accepts(work.owner) else { return }
                 fail("change the model", error)
             }
         }
     }
 
     func createProject(name: String, avatarColorIndex: Int? = nil, discColor: UInt8? = nil, picture: DraftPicture? = nil) {
+        guard let work = accountWork() else { return }
+        let api = work.api
         Task {
+            guard accountLifetime.accepts(work.owner) else { return }
             do {
                 let id = try await api.createProject(name: name, avatarColorIndex: avatarColorIndex, discColor: discColor)
+                guard accountLifetime.accepts(work.owner) else { return }
                 // The Create sheet's picture goes into the new agent's own slot first, so the
                 // list refresh already shows it.
-                if let picture, let id, let jpeg = await draftJpeg(picture) {
+                if let picture, let id, let jpeg = await draftJpeg(picture, expectedOwner: work.owner) {
+                    guard accountLifetime.accepts(work.owner) else { return }
                     let key = "avatar-\(Int(Date().timeIntervalSince1970 * 1000)).\(PictureMaster.ext(jpeg))"
                     if (try? await api.putBlob(projectId: id, key: key, mime: PictureMaster.mime(jpeg), data: jpeg)) != nil {
                         _ = try? await api.setProjectImageKey(id, key: key)
                     }
                 }
-                await refreshRegistry()
+                await refreshRegistry(expectedOwner: work.owner)
+                guard accountLifetime.accepts(work.owner) else { return }
             } catch {
+                guard accountLifetime.accepts(work.owner) else { return };
                 fail("create the agent", error)
             }
         }
@@ -6908,13 +7826,19 @@ final class AppModel: ObservableObject {
 
     /// `POST /outside-agents`: the relay makes the agent (no box) and mints its key; the caller
     /// pushes the reveal screen. A refusal is the claimed failure on the Create sheet.
-    func connectAgent(name: String, transport: String) async -> ConnectReveal? {
+    func connectAgent(name: String, transport: String, expectedOwner: WorkLifetime.Ticket? = nil) async -> ConnectReveal? {
+        if let expectedOwner, !accountLifetime.accepts(expectedOwner) { return nil }
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return nil }
+        let api = work.api
         do {
             let reveal = try await api.connectAgent(name: name, transport: transport)
+            guard accountLifetime.accepts(work.owner) else { return nil }
             if let info = reveal.info { outsideInfo[reveal.projectId] = info }
-            await refreshRegistry()
+            await refreshRegistry(expectedOwner: work.owner)
+            guard accountLifetime.accepts(work.owner) else { return nil }
             return reveal
         } catch {
+            guard accountLifetime.accepts(work.owner) else { return nil };
             fail("connect the agent", error)
             return nil
         }
@@ -6923,20 +7847,30 @@ final class AppModel: ObservableObject {
     /// The connection of an outside agent for the pane and the reveal screen; a native agent
     /// leaves no entry.
     @discardableResult
-    func refreshOutsideInfo(_ projectId: Id) async -> OutsideAgentInfo? {
+    func refreshOutsideInfo(_ projectId: Id, expectedOwner: WorkLifetime.Ticket? = nil) async -> OutsideAgentInfo? {
+        if let expectedOwner, !accountLifetime.accepts(expectedOwner) { return nil }
         guard !isFixture else { return nil }
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return nil }
+        let api = work.api
         if let info = try? await api.outsideAgent(projectId) {
+            guard accountLifetime.accepts(work.owner) else { return nil }
             outsideInfo[projectId] = info
-            if info.logSummary != nil { await refreshOutsideLog(projectId) }
+            if info.logSummary != nil { await refreshOutsideLog(projectId, expectedOwner: work.owner) }
+            guard accountLifetime.accepts(work.owner) else { return nil }
             return info
         }
+        guard accountLifetime.accepts(work.owner) else { return nil }
         return outsideInfo[projectId]
     }
 
     /// The session log for the Details pane's card and View all (#2224).
-    func refreshOutsideLog(_ projectId: Id) async {
+    func refreshOutsideLog(_ projectId: Id, expectedOwner: WorkLifetime.Ticket? = nil) async {
+        if let expectedOwner, !accountLifetime.accepts(expectedOwner) { return }
         guard !isFixture else { return }
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return }
+        let api = work.api
         if let entries = try? await api.outsideAgentLog(projectId) {
+            guard accountLifetime.accepts(work.owner) else { return }
             outsideLogs[projectId] = entries
         }
     }
@@ -6951,12 +7885,17 @@ final class AppModel: ObservableObject {
         return "Chat"
     }
 
-    func rotateOutsideKey(_ projectId: Id) async -> ConnectReveal? {
+    func rotateOutsideKey(_ projectId: Id, expectedOwner: WorkLifetime.Ticket? = nil) async -> ConnectReveal? {
+        if let expectedOwner, !accountLifetime.accepts(expectedOwner) { return nil }
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return nil }
+        let api = work.api
         do {
             let reveal = try await api.rotateOutsideKey(projectId)
+            guard accountLifetime.accepts(work.owner) else { return nil }
             if let info = reveal.info { outsideInfo[projectId] = info }
             return reveal
         } catch {
+            guard accountLifetime.accepts(work.owner) else { return nil };
             fail("rotate the key", error)
             return nil
         }
@@ -6966,23 +7905,32 @@ final class AppModel: ObservableObject {
     func setOutsideScope(_ projectId: Id, _ scope: String, on: Bool) {
         outsideInfo[projectId]?.scopes[scope] = on
         guard !isFixture else { return }
+        guard let work = accountWork() else { return }
+        let api = work.api
         Task {
+            guard accountLifetime.accepts(work.owner) else { return }
             do {
                 if let info = try await api.setOutsideScope(projectId, scope, on: on) {
                     outsideInfo[projectId] = info
                 }
             } catch {
+                guard accountLifetime.accepts(work.owner) else { return }
                 outsideInfo[projectId]?.scopes[scope] = !on
                 fail("change what the agent may do", error)
             }
         }
     }
 
-    func revokeOutsideAgent(_ projectId: Id) async {
+    func revokeOutsideAgent(_ projectId: Id, expectedOwner: WorkLifetime.Ticket? = nil) async {
+        if let expectedOwner, !accountLifetime.accepts(expectedOwner) { return }
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return }
+        let api = work.api
         do {
             try await api.revokeOutsideAgent(projectId)
-            await refreshOutsideInfo(projectId)
+            guard accountLifetime.accepts(work.owner) else { return }
+            await refreshOutsideInfo(projectId, expectedOwner: work.owner)
         } catch {
+            guard accountLifetime.accepts(work.owner) else { return };
             fail("revoke the agent's access", error)
         }
     }
@@ -6991,44 +7939,65 @@ final class AppModel: ObservableObject {
     /// URL clears the URL and the header value together; an empty value with a URL keeps the stored
     /// value (it is never shown back, so blank means "unchanged"). Returns the relay's short reason
     /// when it refused, `nil` when saved.
-    func saveOutsideWake(_ projectId: Id, url: String, auth: String) async -> String? {
+    func saveOutsideWake(_ projectId: Id, url: String, auth: String, expectedOwner: WorkLifetime.Ticket? = nil) async -> String? {
+        if let expectedOwner, !accountLifetime.accepts(expectedOwner) { return nil }
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return nil }
+        let api = work.api
         let url = url.trimmingCharacters(in: .whitespacesAndNewlines)
         let auth = auth.trimmingCharacters(in: .whitespacesAndNewlines)
         do {
-            let info = url.isEmpty
+            let info =
+                url.isEmpty
                 ? try await api.setOutsideWake(projectId, url: "", auth: "")
                 : try await api.setOutsideWake(projectId, url: url, auth: auth.isEmpty ? nil : auth)
+            guard accountLifetime.accepts(work.owner) else { return nil }
             if let info { outsideInfo[projectId] = info }
             return nil
         } catch let e as RelayError where !e.message.isEmpty {
+            guard accountLifetime.accepts(work.owner) else { return nil };
             return e.message
         } catch {
+            guard accountLifetime.accepts(work.owner) else { return nil };
             return "Could not reach the relay"
         }
     }
 
     /// Connection card → Wake URL → Send test wake: `(ok, text)` for the line under the buttons.
-    func testOutsideWake(_ projectId: Id) async -> (ok: Bool, text: String) {
+    func testOutsideWake(_ projectId: Id, expectedOwner: WorkLifetime.Ticket? = nil) async -> (ok: Bool, text: String) {
+        if let expectedOwner, !accountLifetime.accepts(expectedOwner) { return (false, "") }
+        guard let work = accountWork(expectedOwner: expectedOwner) else { return (false, "") }
+        let api = work.api
         let result: (ok: Bool, text: String)
         do {
-            result = try await api.testOutsideWake(projectId)
+            let received = try await api.testOutsideWake(projectId)
+            guard accountLifetime.accepts(work.owner) else { return (false, "") }
+            result = received
         } catch let e as RelayError where !e.message.isEmpty {
+            guard accountLifetime.accepts(work.owner) else { return (false, "") };
             result = (false, e.message)
         } catch {
+            guard accountLifetime.accepts(work.owner) else { return (false, "") };
             result = (false, "Could not reach the relay")
         }
-        await refreshOutsideInfo(projectId)
+        await refreshOutsideInfo(projectId, expectedOwner: work.owner)
+        guard accountLifetime.accepts(work.owner) else { return (false, "") }
         return result
     }
 
     // MARK: Create sheet pictures (Jacob, 2026-10-25)
 
     /// Generate before the entity exists: into my own slot (`POST /me/avatar/generate`, #1789).
-    func generateDraftAvatar(prompt: String) async throws -> String {
+    func generateDraftAvatar(prompt: String, expectedOwner: WorkLifetime.Ticket? = nil) async throws -> String {
+        if let expectedOwner, !accountLifetime.accepts(expectedOwner) { throw CancellationError() }
         if isFixture { return try await Self.fixtureGenerate(prompt) }
+        guard let work = accountWork(expectedOwner: expectedOwner) else { throw CancellationError() }
+        let api = work.api
         do {
-            return try await api.generateMyAvatar(prompt: prompt)
+            let received = try await api.generateMyAvatar(prompt: prompt)
+            guard accountLifetime.accepts(work.owner) else { throw CancellationError() }
+            return received
         } catch let e as RelayError where e.status == 404 {
+            guard accountLifetime.accepts(work.owner) else { throw CancellationError() };
             // A relay without the own-slot route yet: say so instead of "HTTP 404".
             throw RelayError(status: 404, message: "Generate is not on this relay yet; upload a picture instead.")
         }
@@ -7043,15 +8012,18 @@ final class AppModel: ObservableObject {
     /// The Create sheet's picture as JPEG bytes for the new entity's slot: the photo as chosen, or
     /// the generated picture read back from my slot. nil when it cannot be read (a notice says so;
     /// the entity keeps its neutral initial).
-    func draftJpeg(_ picture: DraftPicture) async -> Data? {
+    func draftJpeg(_ picture: DraftPicture, expectedOwner: WorkLifetime.Ticket? = nil) async -> Data? {
         switch picture {
         case .jpeg(let data):
             return data
         case .generated(let key):
-            guard let me = user?.id else { return nil }
+            guard let work = accountWork(expectedOwner: expectedOwner), let me = user?.id else { return nil }
             do {
-                return try await api.blobData(projectId: "users:\(me)", key: key)
+                let data = try await work.api.blobData(projectId: "users:\(me)", key: key)
+                guard accountLifetime.accepts(work.owner) else { return nil }
+                return data
             } catch {
+                guard accountLifetime.accepts(work.owner) else { return nil }
                 fail("keep the generated picture", error)
                 return nil
             }
@@ -7067,7 +8039,10 @@ final class AppModel: ObservableObject {
         let modelId = project.model
         let effort = project.effort
         let sourceId = project.id
+        guard let work = accountWork() else { return }
+        let api = work.api
         Task {
+            guard accountLifetime.accepts(work.owner) else { return }
             do {
                 // Do not pass `models` on create: a partial map would drop the
                 // relay's default subagent/decision slots. Set the talking
@@ -7083,7 +8058,8 @@ final class AppModel: ObservableObject {
                     instructions: project.instructions,
                     sourceProjectId: sourceId
                 )
-                await refreshRegistry()
+                await refreshRegistry(expectedOwner: work.owner)
+                guard accountLifetime.accepts(work.owner) else { return }
                 if let copy = projects.first(where: { $0.name == name && !$0.shared }) {
                     if copy.model != modelId || copy.effort != effort {
                         setModel(projectId: copy.id, model: modelId, effort: effort)
@@ -7091,6 +8067,7 @@ final class AppModel: ObservableObject {
                     open(project: copy)
                 }
             } catch {
+                guard accountLifetime.accepts(work.owner) else { return };
                 fail("duplicate the agent", error)
             }
         }
@@ -7120,13 +8097,19 @@ final class AppModel: ObservableObject {
             UserDefaults.standard.set(Array(archivedProjectIds), forKey: "archivedProjects")
         }
         unpinHome(projectId: projectId)
+        guard let work = accountWork() else { return }
+        let api = work.api
         Task {
+            guard accountLifetime.accepts(work.owner) else { return }
             do {
                 try await api.deleteProject(projectId)
-                await refreshRegistry()
+                await refreshRegistry(expectedOwner: work.owner)
+                guard accountLifetime.accepts(work.owner) else { return }
             } catch {
+                guard accountLifetime.accepts(work.owner) else { return };
                 fail("delete it", error)
-                await refreshRegistry()
+                await refreshRegistry(expectedOwner: work.owner)
+                guard accountLifetime.accepts(work.owner) else { return }
             }
         }
     }

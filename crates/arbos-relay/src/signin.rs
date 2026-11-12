@@ -1710,7 +1710,14 @@ pub async fn me(State(state): State<AppState>, principal: Principal) -> Response
     } else {
         None
     };
-    let signup = if fleet && sb.is_none() && !crate::fleet::capacity(&state).await.has_room {
+    // A user whose box goes to `boxd` is never waitlisted (docs/box-scaling.md §4.2): the gVisor
+    // row count is not theirs, and a host short of disk refuses the create itself.
+    let signup = if fleet
+        && sb.is_none()
+        && !(state.cfg.boxd.is_some()
+            && crate::boxes::provider_for_user(&state, &user_id) == crate::boxes::Provider::Boxd)
+        && !crate::fleet::capacity(&state).await.has_room
+    {
         "waitlist"
     } else {
         "open"

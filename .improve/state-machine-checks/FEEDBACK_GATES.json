@@ -1,0 +1,128 @@
+{
+  "base": "55ea2ad5462d378bf5aaea603a305c6ae73146c7",
+  "private_only": false,
+  "files": {
+    "scripts/feedback/feedback_poller.py": "81f5c55e03c7986de426fb121aa93d23a70934bd5c07c5a15001e1df730f8b9e",
+    "scripts/feedback/feedback_state.py": "6b7eec0d3a6aba4a0ee40801d0e22a614a982e4d30a7b364f3fe4d6870b1546b",
+    "scripts/feedback/test_feedback_state.py": "4531161cbd03b88619bcd9eb2999dcd88005f1da4eaeca3b130724c37faf99ea",
+    "scripts/feedback/feedback_state_bridge.py": "04e54495db0f4d893144c31fd2918c384897629d1d01044cde1ccf8d087bd920",
+    "scripts/feedback/install-poller.sh": "c622604146e557d59cc50ca8d351ef5e231f0f1dd5bdeeb589e6c7440331b429",
+    "scripts/feedback/install-feedback-loop.sh": "2d5d21f7e6c048a3ba35f438fd0f581f5930c2886c6f0aa1552daec92d08e0f5",
+    "harness/arbos-pi-ext/feedback-state-laws.test.ts": "00d50f35bda5d1dd5ed017c70e28325e6ade7f43b956cfa9cb2262234ff7e983",
+    ".improve/state-machine-checks/check_feedback_mutant.py": "8850a19ed0fc114468efa89d7b61c080969bd3fb88d1b2c8fcfe44101fcdc5a0"
+  },
+  "patch_bytes": 62078,
+  "patch_sha256": "4fb77b99ba62011f5069137bf1363efc9cadbda29472acc3cda0f27b205128c1",
+  "python_ast_count": 5,
+  "checks": [
+    {
+      "name": "bash-syntax",
+      "path": "scripts/feedback/install-poller.sh",
+      "exit": 0,
+      "seconds": 0.004769999999552965
+    },
+    {
+      "name": "bash-syntax",
+      "path": "scripts/feedback/install-feedback-loop.sh",
+      "exit": 0,
+      "seconds": 0.0040825000032782555
+    },
+    {
+      "name": "laws",
+      "command": [
+        "node",
+        "--test",
+        "feedback-state-laws.test.ts"
+      ],
+      "exit": 0,
+      "seconds": 0.47415949997957796
+    },
+    {
+      "name": "typecheck",
+      "command": [
+        "/Users/cister/arbos life/arbos-codex/harness/arbos-pi-ext/node_modules/.bin/tsc",
+        "--noEmit"
+      ],
+      "exit": 0,
+      "seconds": 0.69775820907671
+    }
+  ],
+  "unchanged_boundaries": {
+    "Config": "300f1953b29525812783f8ebe2b1cf5d81f04c208aef07e7d1d3c4a4e3cb5dbb",
+    "Asc": "c4f7129a447ff05d5fdf159121726a30e820415f861615a9006c8b43e59aff83",
+    "GitHub": "0b94460f885ea80f9af227581fcf58f02539d27a6ffa5f2b3b4bec11a408ff71",
+    "Cursor": "c69e5a60cb03aed69857e8e3a43f22bf5858f28e16c6649585862802ce8ba394",
+    "Store": "13d7d296c2ef61651445a15dd9e8d3090939decd0f26aa8a641913cebb25edaa",
+    "http": "d447f126bbed9de58d3abdd006aef9e04867f951050317b196437f1826b1cc40",
+    "http_json": "3623ed0a758a8d747dee92751a433a181b002b62c30fd56edae0e4dda24a6808",
+    "main": "2f8592f9616288d6f8c3ccec0acc4181f53a4e125e52886d3e9b3dc5f6b5a079",
+    "Loop.gate": "08722818d2ea389ba24c3ebd5ec7708aea75397907abd58d9788735c478047e5",
+    "Loop.check_ship": "0907c63487ef90780e51bdcf441d55fe5a862031f69e27ae95aee3b989ba2894",
+    "Loop.freeze_allows": "d6cfda32f1c5b4f2597dff0c6dc90b29d3fe1a504d34c53a138c47e540daccb3",
+    "Loop.needs_device_evidence": "d259a2718bd5a8117c94db8bb37f7f798946fed1e34ee901f59d9661d2890cc8",
+    "Loop.deploy_kinds": "e06df27891e08a82b5167633d74ca286f3a00df62db58ee5cd0645e6e7c58f51",
+    "Loop.request_deploys": "81e6d566c1362b3cc95a09bad404f278f4824a1d0c88730b4181b11f0545d8e1",
+    "Loop.watch_late_pushes": "c0fa2871a70d5eac4f9b97034f19570fa23c42f8ee8bf9a50e5bb94a18ebdd74"
+  },
+  "unit_before": {
+    "variant": "before",
+    "tests": 20,
+    "passed": 6,
+    "failures": 14,
+    "errors": 0,
+    "skipped": 0,
+    "seconds": 0.031916124979034066,
+    "failed_tests": [
+      "feedback_state_tests.DeliveryPersistenceTests.test_a_processed_partial_build_does_not_requeue_an_already_proven_deploy",
+      "feedback_state_tests.DeliveryPersistenceTests.test_deploy_completion_first_save_contains_its_proof_not_an_empty_queue",
+      "feedback_state_tests.DeliveryPersistenceTests.test_first_shipping_save_keeps_unprocessed_testflight_nonterminal",
+      "feedback_state_tests.DeliveryPersistenceTests.test_first_shipping_save_retains_pending_deploy_and_device_evidence",
+      "feedback_state_tests.DeliveryPersistenceTests.test_partial_ios_and_deploy_both_remain_required",
+      "feedback_state_tests.DeliveryPersistenceTests.test_retry_after_interrupted_record_keeps_deploy_intent_and_can_complete",
+      "feedback_state_tests.MergeAdmissionTests.test_a_missing_live_branch_does_not_merge_an_old_recorded_head",
+      "feedback_state_tests.MergeAdmissionTests.test_all_members_are_checked_before_an_atomic_tree_merge",
+      "feedback_state_tests.MergeAdmissionTests.test_lifting_the_global_gate_does_not_approve_an_already_held_item",
+      "feedback_state_tests.MergeAdmissionTests.test_prepared_tree_cannot_merge_after_a_member_branch_moves",
+      "feedback_state_tests.MergeAdmissionTests.test_prepared_tree_cannot_merge_an_operator_held_member",
+      "feedback_state_tests.MergeAdmissionTests.test_prepared_tree_cannot_merge_an_unapproved_outside_member",
+      "feedback_state_tests.MergeAdmissionTests.test_prepared_tree_must_actually_contain_the_claimed_member_head",
+      "feedback_state_tests.MergeAdmissionTests.test_truthy_nonboolean_gate_results_are_not_a_green_verdict"
+    ],
+    "scope": "actual controller + actual atomic Store, temp records, fake GH/effect edges, network/config/key/subprocess denied; JWT cryptography explicitly unavailable"
+  },
+  "unit_after": {
+    "variant": "after",
+    "tests": 20,
+    "passed": 20,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "seconds": 0.04113337490707636,
+    "failed_tests": [],
+    "scope": "actual controller + actual atomic Store, temp records, fake GH/effect edges, network/config/key/subprocess denied; JWT cryptography explicitly unavailable"
+  },
+  "laws": {
+    "count": 5,
+    "cases_each": 256,
+    "generated_cases": 1280,
+    "protocol_tests": 1,
+    "seeds": [
+      84601,
+      84602,
+      84603,
+      84604,
+      84605
+    ]
+  },
+  "mutation": "mutant/mutant.json",
+  "git_apply_check": "PASS",
+  "root_repeat": {
+    "command": "python3 -I -B scripts/feedback/test_feedback_state.py",
+    "passed": 20,
+    "failed": 0,
+    "errors": 0,
+    "skipped": 0,
+    "test_seconds": 0.031
+  },
+  "review": "Root read-only review of actual shared admission, all-member barrier, strict observations, atomic delivery writes and unchanged boundaries; scope is not a live operator/deployment trial."
+}

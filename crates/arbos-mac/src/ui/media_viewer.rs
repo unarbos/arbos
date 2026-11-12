@@ -237,10 +237,12 @@ pub fn overlay(shell: &Shell, focus: &FocusHandle, cx: &mut Context<Shell>) -> A
     // ----- the item --------------------------------------------------------
     let body: AnyElement = match kind {
         AttachmentKind::Image => match picture {
+            // With an id, so a GIF plays: GPUI keeps an `img`'s frame clock under its id.
             Some(image) => img(image)
                 .w_full()
                 .h_full()
                 .object_fit(ObjectFit::Contain)
+                .id("media-viewer-picture")
                 .into_any_element(),
             None if failed => placeholder("photo", "No preview", &item, &theme).into_any_element(),
             None => div()

@@ -7,6 +7,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		A1C098000000000000000004 /* DraftSendQueue.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C098000000000000000003 /* DraftSendQueue.swift */; };
+		A1C098000000000000000002 /* WorkLifetime.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C098000000000000000001 /* WorkLifetime.swift */; };
 		A1ENT0000000000000000012 /* EntityProfileStructureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1ENT0000000000000000011 /* EntityProfileStructureTests.swift */; };
 		A1ENT0000000000000000002 /* EntityNavPushUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1ENT0000000000000000001 /* EntityNavPushUITests.swift */; };
 		A1GROK000000000000000012 /* AgentEditView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1GROK000000000000000011 /* AgentEditView.swift */; };
@@ -38,6 +40,7 @@
 		A10B17B543EDC6C9BAAEDF33 /* PushManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15D0D4E1ADC058D632D0769 /* PushManager.swift */; };
 		A1C76C55AC33FA79D6C27FAA /* Auth.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B646F374BD7AE1F3BE7A4B /* Auth.swift */; };
 		A14BB8E6904C5D3D5CFFCA56 /* Keychain.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A8BC5FCD045299B0D7D13D /* Keychain.swift */; };
+		A1E7A11E7000000000000002 /* Wallet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1E7A11E7000000000000001 /* Wallet.swift */; };
 		A156C11ABF2E8C649148533D /* RelayAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1E592B43CC1234959AF2E63 /* RelayAPI.swift */; };
 		A15C00000000000000000009 /* SessionRoom.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15C00000000000000000008 /* SessionRoom.swift */; };
 		A15C0000000000000000000D /* CoreChatDoc.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15C0000000000000000000C /* CoreChatDoc.swift */; };
@@ -59,6 +62,7 @@
 		A1F7A0000000000000000002 /* ProfileToggle.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F7A0000000000000000001 /* ProfileToggle.swift */; };
 		A1BB00000000000000000002 /* BackSwipe.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000001 /* BackSwipe.swift */; };
 		A1BB00000000000000000004 /* BackSwipeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000003 /* BackSwipeTests.swift */; };
+		A1D07D075000000000000002 /* MediaViewerDotsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D07D075000000000000001 /* MediaViewerDotsTests.swift */; };
 		A1DA6B00000000000000B002 /* BackDragTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1DA6B00000000000000B001 /* BackDragTests.swift */; };
 		A1A1400000000000000000D2 /* AgentLinksStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1400000000000000000D1 /* AgentLinksStoreTests.swift */; };
 		A1DA6B00000000000000B004 /* ChatSwipeTrackingUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1DA6B00000000000000B003 /* ChatSwipeTrackingUITests.swift */; };
@@ -134,6 +138,7 @@
 		A1F10000000000000000000A /* MathText.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F100000000000000000009 /* MathText.swift */; };
 		A1F10000000000000000000E /* CodeHighlight.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F10000000000000000000D /* CodeHighlight.swift */; };
 		A1C4A2700000000000000002 /* ChartCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C4A2700000000000000001 /* ChartCard.swift */; };
+		A1E7A11E7000000000000004 /* WalletViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1E7A11E7000000000000003 /* WalletViews.swift */; };
 		A1C4A2700000000000000012 /* LinkPreviewCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C4A2700000000000000011 /* LinkPreviewCard.swift */; };
 		A1C4A2700000000000000014 /* LinkPreviewCardTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C4A2700000000000000013 /* LinkPreviewCardTests.swift */; };
 		A1DE700000000000000000C2 /* MentionComposer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1DE700000000000000000C1 /* MentionComposer.swift */; };
@@ -151,6 +156,7 @@
 		A15A00000000000000000013 /* ReactionToggleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000012 /* ReactionToggleTests.swift */; };
 		A15A00000000000000000021 /* AddMembersPlanTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000020 /* AddMembersPlanTests.swift */; };
 		A15A00000000000000000041 /* MessageDeleteRuleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000040 /* MessageDeleteRuleTests.swift */; };
+		A1C4E0000000000000000002 /* ChequeNonceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C4E0000000000000000001 /* ChequeNonceTests.swift */; };
 		A15A00000000000000000051 /* ReactionPickTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000050 /* ReactionPickTests.swift */; };
 		A1BC00000000000000000002 /* MessageMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BC00000000000000000001 /* MessageMenu.swift */; };
 		A1BC00000000000000000004 /* MessageMenuTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BC00000000000000000003 /* MessageMenuTests.swift */; };
@@ -227,6 +233,7 @@
 		A15C0000000000000000000B /* SessionRoomTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15C0000000000000000000A /* SessionRoomTests.swift */; };
 		A15C00000000000000000004 /* ArbosFFI in Frameworks */ = {isa = PBXBuildFile; productRef = A15C00000000000000000002 /* ArbosFFI */; };
 		A15C00000000000000000005 /* ArbosFFI in Frameworks */ = {isa = PBXBuildFile; productRef = A15C00000000000000000003 /* ArbosFFI */; };
+		A15C000000000000000000F8 /* ArbosFFI in Frameworks */ = {isa = PBXBuildFile; productRef = A15C000000000000000000F7 /* ArbosFFI */; };
 		A15C00000000000000000006 /* ArbosFFI in Embed Frameworks */ = {isa = PBXBuildFile; productRef = A15C00000000000000000002 /* ArbosFFI */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		A1B5EA00000000000000A002 /* GlobalSearch.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B5EA00000000000000A001 /* GlobalSearch.swift */; };
 		A1B5EA00000000000000A004 /* SearchIndex.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B5EA00000000000000A003 /* SearchIndex.swift */; };
@@ -289,6 +296,8 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		A1C098000000000000000003 /* DraftSendQueue.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DraftSendQueue.swift; sourceTree = "<group>"; };
+		A1C098000000000000000001 /* WorkLifetime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkLifetime.swift; sourceTree = "<group>"; };
 		A1EE00000000000000000007 /* ErrorUILintTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ErrorUILintTests.swift; sourceTree = "<group>"; };
 		A1EE00000000000000000009 /* ToastStackTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToastStackTests.swift; sourceTree = "<group>"; };
 		A1EE00000000000000000005 /* UserErrorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UserErrorTests.swift; sourceTree = "<group>"; };
@@ -318,6 +327,7 @@
 		A15D0D4E1ADC058D632D0769 /* PushManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PushManager.swift; sourceTree = "<group>"; };
 		A1B646F374BD7AE1F3BE7A4B /* Auth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Auth.swift; sourceTree = "<group>"; };
 		A1A8BC5FCD045299B0D7D13D /* Keychain.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Keychain.swift; sourceTree = "<group>"; };
+		A1E7A11E7000000000000001 /* Wallet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Wallet.swift; sourceTree = "<group>"; };
 		A1E592B43CC1234959AF2E63 /* RelayAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RelayAPI.swift; sourceTree = "<group>"; };
 		A15C00000000000000000008 /* SessionRoom.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionRoom.swift; sourceTree = "<group>"; };
 		A15C0000000000000000000C /* CoreChatDoc.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoreChatDoc.swift; sourceTree = "<group>"; };
@@ -341,6 +351,7 @@
 		A1F7A0000000000000000001 /* ProfileToggle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileToggle.swift; sourceTree = "<group>"; };
 		A1BB00000000000000000001 /* BackSwipe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackSwipe.swift; sourceTree = "<group>"; };
 		A1BB00000000000000000003 /* BackSwipeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackSwipeTests.swift; sourceTree = "<group>"; };
+		A1D07D075000000000000001 /* MediaViewerDotsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaViewerDotsTests.swift; sourceTree = "<group>"; };
 		A1DA6B00000000000000B001 /* BackDragTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackDragTests.swift; sourceTree = "<group>"; };
 		A1DA6B00000000000000B003 /* ChatSwipeTrackingUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatSwipeTrackingUITests.swift; sourceTree = "<group>"; };
 		A1BB00000000000000000005 /* BackSwipeUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackSwipeUITests.swift; sourceTree = "<group>"; };
@@ -416,6 +427,7 @@
 		A1F100000000000000000009 /* MathText.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MathText.swift; sourceTree = "<group>"; };
 		A1F10000000000000000000D /* CodeHighlight.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeHighlight.swift; sourceTree = "<group>"; };
 		A1C4A2700000000000000001 /* ChartCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChartCard.swift; sourceTree = "<group>"; };
+		A1E7A11E7000000000000003 /* WalletViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WalletViews.swift; sourceTree = "<group>"; };
 		A1C4A2700000000000000011 /* LinkPreviewCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinkPreviewCard.swift; sourceTree = "<group>"; };
 		A1C4A2700000000000000013 /* LinkPreviewCardTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinkPreviewCardTests.swift; sourceTree = "<group>"; };
 		A1DE700000000000000000C1 /* MentionComposer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MentionComposer.swift; sourceTree = "<group>"; };
@@ -435,6 +447,7 @@
 		A15A00000000000000000050 /* ReactionPickTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReactionPickTests.swift; sourceTree = "<group>"; };
 		A15A00000000000000000020 /* AddMembersPlanTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AddMembersPlanTests.swift; sourceTree = "<group>"; };
 		A15A00000000000000000040 /* MessageDeleteRuleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageDeleteRuleTests.swift; sourceTree = "<group>"; };
+		A1C4E0000000000000000001 /* ChequeNonceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChequeNonceTests.swift; sourceTree = "<group>"; };
 		A1BC00000000000000000001 /* MessageMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageMenu.swift; sourceTree = "<group>"; };
 		A1BC00000000000000000003 /* MessageMenuTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageMenuTests.swift; sourceTree = "<group>"; };
 		A1BC00000000000000000005 /* MessageActions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageActions.swift; sourceTree = "<group>"; };
@@ -535,6 +548,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A15C000000000000000000F8 /* ArbosFFI in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -673,9 +687,12 @@
 		A147AADF20080F5AA72B6504 /* Sync */ = {
 			isa = PBXGroup;
 			children = (
+				A1C098000000000000000001 /* WorkLifetime.swift */,
+				A1C098000000000000000003 /* DraftSendQueue.swift */,
 				A1EE00000000000000000001 /* UserError.swift */,
 				A1B646F374BD7AE1F3BE7A4B,
 				A1A8BC5FCD045299B0D7D13D,
+				A1E7A11E7000000000000001 /* Wallet.swift */,
 				A1E592B43CC1234959AF2E63,
 				A1112911C0D615A9C335C0EF,
 				A15C00000000000000000008,
@@ -733,6 +750,7 @@
 				A1F100000000000000000009 /* MathText.swift */,
 				A1F10000000000000000000D /* CodeHighlight.swift */,
 				A1C4A2700000000000000001 /* ChartCard.swift */,
+				A1E7A11E7000000000000003 /* WalletViews.swift */,
 				A1C4A2700000000000000011 /* LinkPreviewCard.swift */,
 				A1DE700000000000000000C1 /* MentionComposer.swift */,
 				A1F000000000000000000103 /* ComposerAttachments.swift */,
@@ -764,6 +782,7 @@
 				A15A00000000000000000003 /* CoreFixturesTests.swift */,
 				A15A00000000000000000020 /* AddMembersPlanTests.swift */,
 				A15A00000000000000000040 /* MessageDeleteRuleTests.swift */,
+				A1C4E0000000000000000001 /* ChequeNonceTests.swift */,
 				A15A00000000000000000030 /* ProfilePaneStructureTests.swift */,
 				A1F7B0000000000000000003 /* BlockedStateTests.swift */,
 				A1DE9C000000000000000003 /* DevicesVisibleTests.swift */,
@@ -855,6 +874,7 @@
 				A15EC9000000000000000103 /* SecretHandoffTests.swift */,
 				A1C5440000000000000003 /* ShellApprovalCardTests.swift */,
 				A1BB00000000000000000003 /* BackSwipeTests.swift */,
+				A1D07D075000000000000001 /* MediaViewerDotsTests.swift */,
 				A1DA6B00000000000000B001 /* BackDragTests.swift */,
 			);
 			path = ArbosTests;
@@ -930,6 +950,7 @@
 			);
 			name = ArbosNotificationService;
 			packageProductDependencies = (
+				A15C000000000000000000F7 /* ArbosFFI */,
 			);
 			productName = ArbosNotificationService;
 			productReference = A1F36F98FFEAB133710BB7DD /* ArbosNotificationService.appex */;
@@ -1103,6 +1124,7 @@
 				A1F10000000000000000000A /* MathText.swift in Sources */,
 				A1F10000000000000000000E /* CodeHighlight.swift in Sources */,
 				A1C4A2700000000000000002 /* ChartCard.swift in Sources */,
+				A1E7A11E7000000000000004 /* WalletViews.swift in Sources */,
 				A1C4A2700000000000000012 /* LinkPreviewCard.swift in Sources */,
 				A1DE700000000000000000C2 /* MentionComposer.swift in Sources */,
 				A1F000000000000000000104 /* ComposerAttachments.swift in Sources */,
@@ -1123,9 +1145,12 @@
 				A10B17B543EDC6C9BAAEDF33 /* PushManager.swift in Sources */,
 				A1C76C55AC33FA79D6C27FAA /* Auth.swift in Sources */,
 				A14BB8E6904C5D3D5CFFCA56 /* Keychain.swift in Sources */,
+				A1E7A11E7000000000000002 /* Wallet.swift in Sources */,
 				A156C11ABF2E8C649148533D /* RelayAPI.swift in Sources */,
 				A115819FE05076AF542EABF0 /* SecretsAPI.swift in Sources */,
 				A15C00000000000000000009 /* SessionRoom.swift in Sources */,
+				A1C098000000000000000002 /* WorkLifetime.swift in Sources */,
+				A1C098000000000000000004 /* DraftSendQueue.swift in Sources */,
 				A15C0000000000000000000D /* CoreChatDoc.swift in Sources */,
 				A1B0F9F54DB2257BA4BA7B63 /* AgentProfileView.swift in Sources */,
 				A1GROK000000000000000012 /* AgentEditView.swift in Sources */,
@@ -1187,6 +1212,7 @@
 				A15A00000000000000000051 /* ReactionPickTests.swift in Sources */,
 				A15A00000000000000000021 /* AddMembersPlanTests.swift in Sources */,
 				A15A00000000000000000041 /* MessageDeleteRuleTests.swift in Sources */,
+				A1C4E0000000000000000002 /* ChequeNonceTests.swift in Sources */,
 				A15A00000000000000000031 /* ProfilePaneStructureTests.swift in Sources */,
 				A1F7B0000000000000000004 /* BlockedStateTests.swift in Sources */,
 				A1DE9C000000000000000004 /* DevicesVisibleTests.swift in Sources */,
@@ -1260,6 +1286,7 @@
 				A1F200000000000000000002 /* MemoMicReleaseTests.swift in Sources */,
 				A1E100000000000000000052 /* HiddenJobRowAttachmentTests.swift in Sources */,
 				A1BB00000000000000000004 /* BackSwipeTests.swift in Sources */,
+				A1D07D075000000000000002 /* MediaViewerDotsTests.swift in Sources */,
 				A1F100000000000000000002 /* NoAnswerLineTests.swift in Sources */,
 				A1MR00000000000000000002 /* MissedReplyTests.swift in Sources */,
 				A1F100000000000000000004 /* MarkdownTableTests.swift in Sources */,
@@ -1376,6 +1403,7 @@
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Arbos uses the microphone for voice memos and calls.";
 				INFOPLIST_KEY_NSCameraUsageDescription = "Arbos uses the camera for video calls.";
+				INFOPLIST_KEY_NSFaceIDUsageDescription = "Arbos uses Face ID before showing your recovery phrase.";
 				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Arbos saves pictures and videos you download to your Photos.";
 				INFOPLIST_KEY_NSAppTransportSecurity_NSAllowsArbitraryLoads = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -1410,6 +1438,7 @@
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Arbos uses the microphone for voice memos and calls.";
 				INFOPLIST_KEY_NSCameraUsageDescription = "Arbos uses the camera for video calls.";
+				INFOPLIST_KEY_NSFaceIDUsageDescription = "Arbos uses Face ID before showing your recovery phrase.";
 				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Arbos saves pictures and videos you download to your Photos.";
 				INFOPLIST_KEY_NSAppTransportSecurity_NSAllowsArbitraryLoads = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -1647,6 +1676,10 @@
 			productName = ArbosFFI;
 		};
 		A15C00000000000000000003 /* ArbosFFI */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = ArbosFFI;
+		};
+		A15C000000000000000000F7 /* ArbosFFI */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = ArbosFFI;
 		};

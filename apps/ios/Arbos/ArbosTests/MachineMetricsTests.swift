@@ -41,6 +41,37 @@ final class MachineMetricsTests: XCTestCase {
                 sandboxId: "sb-1", alwaysOn: true, machineTodayUsd: 12.56, reported: true)
     }
 
+    /// A machine that sleeps by itself: the State row says awake, sleeping or cold; the Storage
+    /// card is what the relay kept, row by row; and a sleeping one is not "not answering".
+    func testAMachineThatSleepsReadsAwakeSleepingOrColdAndShowsItsStorage() {
+        func m(_ raw: BoxState, _ lifecycle: String?) -> Machine {
+            var m = hosted()
+            m.rawState = raw
+            m.lifecycle = lifecycle
+            return m
+        }
+        XCTAssertNil(MachineMetrics.stateWord(m(.hibernatedLight, nil)), "always on")
+        XCTAssertEqual(MachineMetrics.stateWord(m(.awake, "warm")), "Awake")
+        XCTAssertEqual(MachineMetrics.stateWord(m(.hibernatedLight, "asleep_ckpt")), "Sleeping")
+        XCTAssertEqual(MachineMetrics.stateWord(m(.hibernatedLight, "cold")), "Cold")
+        XCTAssertEqual(MachineMetrics.stateWord(m(.waking, "cold")), "Waking…")
+        // A box that died reads `warm` in its row until its next wake: the relay's view wins.
+        XCTAssertEqual(MachineMetrics.stateWord(m(.hibernatedLight, "warm")), "Sleeping")
+
+        var cold = m(.hibernatedLight, "cold")
+        let down = BoxReport(debug: ["box": ["reachable": false]], now: 5)
+        var p = MachineMetrics.plan(machine: cold, waitlisted: false, report: down, breakdownOpen: false)
+        XCTAssertEqual(p.storage, [])
+        XCTAssertEqual(p.resources, [])
+        cold.storage = Machine.Storage(files: 2_100_000_000, scratch: 640_000_000, trash: nil)
+        p = MachineMetrics.plan(machine: cold, waitlisted: false, report: down, breakdownOpen: false)
+        XCTAssertEqual(p.storage, [.files, .scratch])
+        XCTAssertEqual(MachineMetrics.storageValue(cold, .files), "2.1 GB")
+        XCTAssertNil(MachineMetrics.storageValue(cold, .trash))
+        XCTAssertEqual(MachineMetrics.plan(machine: m(.hibernatedLight, nil), waitlisted: false, report: down, breakdownOpen: false).resources,
+                       [.notAnswering])
+    }
+
     func testParserReadsTheSamplersResourcesAndPerWorkspaceUsage() {
         let r = BoxReport(debug: debug(diskAvail: 6900, memUsed: 2892), now: 5)
         XCTAssertTrue(r.reachable)

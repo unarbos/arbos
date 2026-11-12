@@ -1,0 +1,14 @@
+{
+  "commit": "0f3044dff",
+  "sources": {
+    "apps/ios/Arbos/Arbos/UI/MediaViewer.swift": "18f2ea2a36ccc5128865bd213346db6461e1a087cade07bacd9be18f6df9e935",
+    "apps/ios/Arbos/Arbos/UI/MessagePasteboard.swift": "17ce8f83ef6436247f8d56687ec380808d09a7dd571ed3bb11db7678f784350d",
+    "apps/ios/Arbos/Arbos/UI/LibraryList.swift": "0247b5599d88076d7464cd91e8b4d21aadc8f44182b3b0f2ef792854c7ed3ffb",
+    "apps/ios/Arbos/Arbos/UI/ChatView.swift": "3b274c383874f8c57258523381dea026afbe36d4eebc82ab2e363fc739b77d4c",
+    "apps/ios/Arbos/Arbos/UI/Transcript.swift": "60012311b2b41dc5583bed0fbf620ad3e5e7d524806d161fbf745805181f5aa8",
+    "apps/ios/Arbos/Arbos/UI/FunPicker.swift": "a0e79f32d5fa9c8ea82e46c58b4bb33b520742265061fe375f097618484e4e26",
+    "apps/ios/Arbos/Arbos/Sync/WorkLifetime.swift": "d5cb31d405b724da862e406025daca95a778a326ecbcd397b6039f4b39668b1f",
+    "apps/ios/Arbos/Arbos/Store/AppModel.swift": "7c944e04f8483f0d5e0c19a26d9414f8a50cba79462b08bdae3c704af91e2b0c",
+    "apps/ios/Arbos/Arbos/UI/LinkPreviewCard.swift": "4b263a39bef088f8c790d50ff03a41bb97a7653183e5c5825483882ba2702a26"
+  }
+}

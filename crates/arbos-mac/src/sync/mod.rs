@@ -7,8 +7,11 @@
 //! constants come from `arbos-core`; the client-side mirror (`doc.rs`) and
 //! the sources are candidates to move there later (`arbos-design.md` §7.2).
 
+use crate::call_attempt::CallAttempt;
+pub(crate) mod account_tasks;
 pub mod agent_avatar;
 pub mod avatar_master;
+mod call_requests;
 pub mod chat_send_queue;
 pub mod credentials;
 pub mod diagnostics;
@@ -17,14 +20,18 @@ pub mod dto;
 pub mod fixture;
 pub mod relay;
 mod room_docs;
+pub(crate) mod session_events;
+pub(crate) mod session_scope;
 pub mod store;
+mod store_owner;
 pub mod user_error;
+pub(crate) mod work_lifetime;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use arbos_matrix::{MessageRow, Snapshot};
+use arbos_matrix::{Backup, MessageRow, Snapshot};
 use futures::future::BoxFuture;
 use tokio::sync::mpsc;
 
@@ -180,6 +187,19 @@ impl PushRefusal {
 /// Something the source learned; the UI applies it to its mirror.
 #[derive(Clone, Debug)]
 pub enum SyncEvent {
+    /// Local ownership envelopes; never serialized onto the relay wire.
+    ForAccount {
+        owner: work_lifetime::WorkTicket,
+        event: Box<SyncEvent>,
+    },
+    ForCoordinator {
+        owner: work_lifetime::WorkTicket,
+        event: Box<SyncEvent>,
+    },
+    SessionStarted {
+        control: work_lifetime::WorkTicket,
+        account: work_lifetime::WorkTicket,
+    },
     /// No device token for this relay yet: show the pairing screen.
     NeedsPairing {
         relay_url: String,
@@ -273,13 +293,29 @@ pub enum SyncEvent {
     PeopleGroupCreated {
         chat_id: Id,
     },
+    /// Local backend owner for call commands. Refresh keeps the same ticket.
+    CallAccount(work_lifetime::WorkTicket),
     /// Calls v1: `POST …/calls` or `/join` answered with a call (and my token).
     /// `created` = 201: this device started it and writes the system line;
     /// `reachable` (201 only) says per callee whether anyone can pick up.
     CallReady {
+        attempt: CallAttempt,
         call: Call,
         created: bool,
         reachable: Vec<Reachable>,
+    },
+    /// Local leave receipts are account-scoped, unlike global call-ended pushes.
+    CallLeft {
+        attempt: CallAttempt,
+        ended: CallEnded,
+    },
+    CallLeftInfo {
+        attempt: CallAttempt,
+        call: Call,
+    },
+    CallLeaveError {
+        attempt: CallAttempt,
+        error: UserError,
     },
     /// Someone else started a call in one of my chats (`call_started` push).
     CallStarted {
@@ -310,6 +346,7 @@ pub enum SyncEvent {
     },
     /// A call request failed; shown as an error toast and the call UI resets.
     CallError {
+        attempt: CallAttempt,
         chat_id: Id,
         error: UserError,
     },
@@ -617,6 +654,9 @@ pub enum SyncEvent {
     ChannelHistoryEnd {
         room_id: String,
     },
+    /// D88: where the account's key backup stands, once the homeserver has said (never sent
+    /// on a guess), and again as `On` when a recovery phrase opened it.
+    MatrixBackup(Backup),
     /// D88: homeserver connection state.
     MatrixConnection {
         connected: bool,
@@ -696,6 +736,16 @@ pub struct CopyBlob {
 /// Something the user did; the source writes it into the doc / outbox.
 #[derive(Clone, Debug)]
 pub enum ClientCommand {
+    /// The initial UI/coordinator handshake exists only for account-scoped sources.
+    BindUi {
+        control: session_scope::UiControl,
+        owner: work_lifetime::WorkTicket,
+    },
+    Scoped {
+        control: work_lifetime::WorkTicket,
+        account: Option<work_lifetime::WorkTicket>,
+        command: Box<ClientCommand>,
+    },
     Pair {
         code: String,
     },
@@ -782,15 +832,18 @@ pub enum ClientCommand {
     },
     /// Calls v1: `POST /chats/{id}/calls` (or the projects form) — start, or join the live one.
     StartCall {
+        attempt: CallAttempt,
         chat_id: Id,
         kind: CallKind,
     },
     /// `POST /calls/{id}/join` → a fresh token.
     JoinCall {
+        attempt: CallAttempt,
         call_id: String,
     },
     /// `POST /calls/{id}/leave` → `{ended, duration_s}`.
     LeaveCall {
+        attempt: CallAttempt,
         call_id: String,
     },
     /// `GET /calls/{id}` (the "On a call · Join" bar, a push with no detail).
@@ -1553,6 +1606,12 @@ pub enum ClientCommand {
     ChannelMarkRead {
         room_id: String,
     },
+    /// D88: open the account's key backup on this Mac with the recovery phrase the person
+    /// typed; answered by `MatrixBackup(On)` or a `ServerError`. The phrase is used and
+    /// dropped, never stored (`Seed`'s `Debug` prints none of it).
+    MatrixRestore {
+        seed: arbos_wallet::Seed,
+    },
 }
 
 /// Collective mentions (Jacob, 2026-10-24, after #1596): `@here` is everyone
@@ -1644,6 +1703,9 @@ pub fn claimed_handles(space: &Project, tokens: &[String]) -> HashSet<String> {
 }
 
 pub trait SyncSource: Send + 'static {
+    fn account_scoped(&self) -> bool {
+        false
+    }
     /// Short name shown in the settings popover ("fixture", "relay").
     fn name(&self) -> &'static str;
 
