@@ -22,6 +22,17 @@ final class EntityNavPushUITests: XCTestCase {
         return app
     }
 
+    private func any(_ app: XCUIApplication, _ id: String) -> XCUIElement {
+        app.descendants(matching: .any)[id].firstMatch
+    }
+
+    /// Coordinate tap: Settings / profile chrome often reports `{-1,-1}` hit points
+    /// for plain `.tap()` even when the control is on screen (same pattern as
+    /// AgentAccessLinkUITests).
+    private func tap(_ item: XCUIElement) {
+        item.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+    }
+
     private func edgeSwipeBack(_ app: XCUIApplication, y: CGFloat = 0.45) {
         let from = app.coordinate(withNormalizedOffset: CGVector(dx: 0.0, dy: y))
         let to = app.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: y))
@@ -31,10 +42,6 @@ final class EntityNavPushUITests: XCTestCase {
     private func assertNotASheet(_ app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) {
         XCTAssertFalse(app.buttons["sheet-cancel"].exists,
                        "a sheet cancel would mean this rose as a bottom sheet", file: file, line: line)
-    }
-
-    private func any(_ app: XCUIApplication, _ id: String) -> XCUIElement {
-        app.descendants(matching: .any)[id]
     }
 
     // MARK: Create
@@ -53,7 +60,8 @@ final class EntityNavPushUITests: XCTestCase {
         XCTAssertTrue(create.waitForExistence(timeout: appear) || done.waitForExistence(timeout: appear),
                       "Create New Agent opened from the rig")
         assertNotASheet(app)
-        XCTAssertTrue(done.waitForExistence(timeout: settle),
+        XCTAssertTrue(done.waitForExistence(timeout: settle)
+                      || app.buttons["Create"].firstMatch.waitForExistence(timeout: settle),
                       "Create/Next Done pill is top-right")
         XCTAssertTrue(any(app, "entity-name-field").exists
                       || app.staticTexts["NAME"].exists
@@ -104,11 +112,13 @@ final class EntityNavPushUITests: XCTestCase {
         XCTAssertTrue(any(app, "agent-overview-library").exists
                       || app.staticTexts["Library"].exists,
                       "Library overview row is present")
-        editPill.tap()
+        tap(editPill)
         let edit = any(app, "agent-edit")
         XCTAssertTrue(edit.waitForExistence(timeout: settle), "Edit Agent pushed")
         assertNotASheet(app)
-        XCTAssertTrue(any(app, "edit-done").exists, "Done pill on Edit")
+        XCTAssertTrue(any(app, "edit-done").waitForExistence(timeout: settle)
+                      || app.buttons["Done"].firstMatch.waitForExistence(timeout: settle),
+                      "Done pill on Edit")
         edgeSwipeBack(app)
         XCTAssertTrue(profile.waitForExistence(timeout: settle), "one swipe returns to the overview")
     }

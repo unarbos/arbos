@@ -48,6 +48,10 @@ struct DonePillButton: View {
         }
         .buttonStyle(.plain)
         .disabled(!enabled)
+        // Collapse the label into one element so XCTest finds `edit-done` on the
+        // button itself (plain + disabled otherwise left the identifier stranded).
+        .accessibilityElement(children: .ignore)
+        .accessibilityAddTraits(.isButton)
         .accessibilityIdentifier("edit-done")
         .accessibilityLabel(title)
     }
@@ -81,31 +85,43 @@ struct EntityEditTopBar: View {
     var onBack: (() -> Void)? = nil
 
     var body: some View {
-        HStack(spacing: 12) {
-            Button { (onBack ?? { dismiss() })() } label: {
-                GlassCircle {
-                    Image(systemName: "chevron.left")
-                        .font(.system(size: 17, weight: .semibold))
-                        .foregroundStyle(theme.text)
+        // Title is a ZStack sibling (not between the HStack Spacers): a long
+        // "Create New Agent" title was compressing the Done pill, and an HStack
+        // overlay of the title collapsed controls out of the accessibility tree
+        // the same way New Message's title overlay hid `new-message-back`.
+        ZStack(alignment: .top) {
+            HStack(spacing: 12) {
+                Button { (onBack ?? { dismiss() })() } label: {
+                    GlassCircle {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 17, weight: .semibold))
+                            .foregroundStyle(theme.text)
+                    }
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Back")
+                Spacer(minLength: 0)
+                if let onDone {
+                    DonePillButton(title: doneTitle, enabled: doneEnabled, action: onDone)
+                } else {
+                    Color.clear.frame(width: 56, height: 28)
                 }
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Back")
-            Spacer(minLength: 0)
+            .padding(.horizontal, 16)
+            .padding(.top, 16)
+            .padding(.bottom, 8)
+
             Text(title)
                 .font(theme.font(Theme.body, weight: .semibold))
                 .foregroundStyle(theme.text)
                 .lineLimit(1)
-            Spacer(minLength: 0)
-            if let onDone {
-                DonePillButton(title: doneTitle, enabled: doneEnabled, action: onDone)
-            } else {
-                Color.clear.frame(width: 56, height: 28)
-            }
+                .padding(.horizontal, 72)
+                .padding(.top, 16)
+                .padding(.bottom, 8)
+                .frame(maxWidth: .infinity)
+                .allowsHitTesting(false)
+                .accessibilityAddTraits(.isHeader)
         }
-        .padding(.horizontal, 16)
-        .padding(.top, 16)
-        .padding(.bottom, 8)
         .background(theme.bg)
     }
 }
