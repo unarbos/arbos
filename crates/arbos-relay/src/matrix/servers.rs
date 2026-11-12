@@ -1752,7 +1752,7 @@ pub async fn forget_user(state: &AppState, user_id: &str) {
     }
 }
 
-/// `/_matrix/client/{*rest}` → Synapse, body and headers streamed both ways. The Matrix access
+/// `/_matrix/client/{*rest}` and `POST /_matrix/media/v3/upload` → Synapse, body and headers streamed both ways. The Matrix access
 /// token in the request authenticates at the homeserver; the relay adds nothing.
 pub async fn proxy(State(state): State<AppState>, req: Request) -> Response {
     if !state.matrix.cfg.mode.writes() {
