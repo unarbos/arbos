@@ -1709,10 +1709,12 @@ struct ChatSession: View {
             if DebugHooks.composerDraft != nil { composerFocused = true }
         }
         if isPeople { model.markPeopleRead(chatId, force: true) }
-        if isChannel {
-            // The newest page now, live rows through the listener from here on.
+        if isChannel || isPeople {
+            // The newest page now, live rows through the listener from here on. A people chat
+            // has a page to ask for only when it is read from the homeserver.
             model.openChannel(chatId)
-        } else {
+        }
+        if !isChannel {
             Task { await model.refreshActiveCall(chatId: chatId, projectId: isPeople ? nil : projectId) }
         }
         openPendingSearchIfNeeded()
@@ -2538,7 +2540,9 @@ struct ChatSession: View {
                 lastGrowAt = Date()
                 if windowCount + windowSkipEnd < visibleRows.count {
                     growWindow()
-                } else if isChannel {
+                } else if isChannel || isPeople {
+                    // A people chat has older pages to ask for only when it is read from
+                    // the homeserver; `loadOlderChannel` does nothing for any other.
                     model.loadOlderChannel(chatId)
                 }
             }, onSample: { old, new in

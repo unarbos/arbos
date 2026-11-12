@@ -239,6 +239,8 @@ extension AppModel {
         }
         do { try WalletVault.save(phrase, user: me.id) } catch { return error.localizedDescription }
         walletPrompt = nil
+        // The keys are here now: read the people chats whose rows were locked again.
+        for chat in nativeRooms.keys { openChannel(chat) }
         return nil
     }
 

@@ -1128,6 +1128,12 @@ final class RelayAPI {
         }
     }
 
+    /// `GET /me/matrix/people` → `{rooms: {<chat_id>: <room_id>}}`: my people chats that are read
+    /// and written on the homeserver, as the relay answers it (`AppModel.parsePeopleRooms` reads it).
+    func matrixPeopleRooms() async throws -> Any {
+        try await json("GET", "/me/matrix/people")
+    }
+
     func patchProject(_ projectId: Id, name: String?, color: String?, icon: String?, avatar: String? = nil, avatarColor: String? = nil, description: String? = nil) async throws {
         var body: [String: Any] = [:]
         if let description { body["description"] = String(description.prefix(500)) }

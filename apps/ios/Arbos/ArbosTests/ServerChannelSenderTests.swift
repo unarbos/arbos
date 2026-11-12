@@ -1,4 +1,5 @@
 import XCTest
+import ArbosFFI
 @testable import Arbos
 
 /// Affinity (Arbonites, 2026-10-28 16:52 UTC, confirmed by Scout): "bug where we are referred to
@@ -85,6 +86,95 @@ final class ServerChannelSenderTests: XCTestCase {
         XCTAssertNil(AppModel.previewWho(sender: "system", senderName: "", me: me))
         XCTAssertNil(AppModel.previewWho(sender: "system", senderName: "launchcrew", me: me))
         XCTAssertNil(AppModel.previewWho(sender: "", senderName: "", me: me), "no row yet")
+    }
+
+    // MARK: Native people chats (phase 3) — the Mac's `native_people_tests`, case for case.
+
+    private func listed(_ room: String, _ chat: String) -> ArbosFFI.MatrixPeopleRow {
+        ArbosFFI.MatrixPeopleRow(roomId: room, chatId: chat, kind: "dm", encrypted: true, unread: 0, mentions: 0,
+                                 lastText: "", lastSender: "", lastSenderName: "", lastTs: 0)
+    }
+
+    func testANativeChatNeedsTheRelayAndTheHomeserverToNameTheSameRoom() {
+        func room(_ rows: [(String, String)], _ chat: String, relay: [String: String] = ["C1": "!r1:hs"]) -> String? {
+            AppModel.confirmedRoom(relay: relay, homeserver: rows.map { listed($0.0, $0.1) }, chatId: chat)
+        }
+        XCTAssertEqual(room([("!r1:hs", "C1")], "C1"), "!r1:hs")
+        XCTAssertNil(room([], "C1"), "not listed by the homeserver yet")
+        XCTAssertNil(room([("!evil:hs", "C1")], "C1"), "another room says it is this chat; the relay's is not listed")
+        XCTAssertEqual(room([("!evil:hs", "C1"), ("!r1:hs", "C1")], "C1"), "!r1:hs", "the impostor beside the real room changes nothing")
+        XCTAssertNil(room([("!r1:hs", "C2")], "C1"), "the relay's room says it is a different chat")
+        XCTAssertNil(room([("!r2:hs", "C2")], "C2"), "a chat the relay does not name is not native")
+        XCTAssertNil(room([("!r1:hs", "C1")], "C1", relay: [:]))
+    }
+
+    func testTheRelaysMappingIsTakenOnlyAsWritten() {
+        let people: Set<String> = ["C1", "C2", "C3"]
+        func parsed(_ json: String) -> [String: String]? {
+            AppModel.parsePeopleRooms(try! JSONSerialization.jsonObject(with: Data(json.utf8), options: .fragmentsAllowed), people: people)
+        }
+        XCTAssertEqual(parsed(#"{"rooms":{}}"#), [:])
+        XCTAssertEqual(parsed(#"{"rooms":{"C1":"!r1:hs"}}"#), ["C1": "!r1:hs"])
+        // Dropped: a chat this phone does not list, something that is not a room id, a room
+        // given to two chats, and a room id longer than one can be.
+        XCTAssertEqual(parsed(#"{"rooms":{"C9":"!r9:hs","C1":"r1","C2":"!same:hs","C3":"!same:hs"}}"#), [:])
+        XCTAssertEqual(parsed(#"{"rooms":{"C1":"!\#(String(repeating: "r", count: 255))"}}"#), [:])
+        // Not the answer at all: what was known is kept (nil).
+        for bad in [#"{}"#, #"{"rooms":[]}"#, #"{"rooms":{"C1":7}}"#, #"{"rooms":{"C1":null}}"#,
+                    #"{"rooms":{},"more":true}"#, #""servers_off""#, #"null"#] {
+            XCTAssertNil(parsed(bad), bad)
+        }
+    }
+
+    func testOnlyTheRelaysTrueTurnsPeopleNativeOn() {
+        func parsed(_ flag: String) -> Bool? {
+            let json = #"{"homeserver":"https://hs","user_id":"@gh_7:hs","access_token":"t","device_id":"D"\#(flag)}"#
+            return MatrixCredentials.parse(try! JSONSerialization.jsonObject(with: Data(json.utf8)))?.peopleNative
+        }
+        XCTAssertEqual(parsed(#","people_native":true"#), true)
+        for off in ["", #","people_native":false"#, #","people_native":1"#, #","people_native":"true""#, #","people_native":null"#] {
+            XCTAssertEqual(parsed(off), false, off)
+        }
+    }
+
+    /// A row as `arbos_matrix::rows::message_row` writes it.
+    private func native(_ id: String, mxid: String, text: String, locked: Bool = false, pending: Bool = false,
+                        extra: String = "") -> ArbosFFI.MatrixMessageRow {
+        let sender = "user:" + mxid.dropFirst().split(separator: ":")[0]
+        let json = #"{"id":"\#(id)","eventId":"$\#(id)","role":"user","sender":"\#(sender)","senderHandle":"h","status":"done","#
+            + #""createdAt":1700,"completedAt":1700,"parts":[{"id":"$\#(id)#text","kind":"text","text":"\#(text)"}]\#(extra)}"#
+        return ArbosFFI.MatrixMessageRow(eventId: pending ? "~\(id)" : "$\(id)", id: id, sender: sender, senderName: "h", text: text,
+                                         createdAt: 1700, locked: locked, pending: pending, json: json)
+    }
+
+    func testANativeRowIsTheChatsMessageFromTheRelaysSpellingOfItsSender() {
+        let locked = "🔒 Waiting for this message's key"
+        let rows = [
+            native("01THEIRS", mxid: "@test_01abc:arbos.life", text: "lunch?"),
+            native("01LOCKED", mxid: "@test_01abc:arbos.life", text: locked, locked: true),
+            native("01MINE", mxid: "@gh_7:arbos.life", text: "on my way", pending: true,
+                   extra: #","reactions":{"👍":{"user:test_01abc":true}},"replyTo":"01THEIRS""#),
+        ]
+        let members = ["user:gh_7", "user:test_01ABC"]
+        let messages = AppModel.nativeMessages(rows, chatId: "C1", members: members)
+        XCTAssertEqual(messages.map(\.id), ["01THEIRS", "01LOCKED", "01MINE"])
+        XCTAssertTrue(messages.allSatisfy { $0.chatId == "C1" && $0.role == .user })
+        let (theirs, undecrypted, mine) = (messages[0], messages[1], messages[2])
+        XCTAssertEqual(theirs.sender, "user:test_01ABC", "the relay's spelling, so the roster and \"mine\" match")
+        XCTAssertFalse(theirs.pending)
+        // What this phone cannot decrypt is shown as that, never as the envelope.
+        XCTAssertEqual(undecrypted.plainText, locked)
+        // My own send, before the homeserver has it.
+        XCTAssertEqual(mine.sender, "user:gh_7")
+        XCTAssertTrue(mine.pending)
+        XCTAssertEqual(mine.replyTo, "01THEIRS")
+        XCTAssertEqual(mine.reactions, [MessageReaction(emoji: "👍", senders: ["user:test_01ABC"])])
+        // A sender nobody in the chat's roster matches keeps the homeserver's spelling.
+        XCTAssertEqual(AppModel.nativeMessages([rows[0]], chatId: "C1", members: ["user:gh_7"])[0].sender, "user:test_01abc")
+        // Who sent a row is the account the homeserver names, whatever the row's JSON says.
+        var forged = rows[0]
+        forged.json = forged.json.replacingOccurrences(of: "user:test_01abc", with: "user:gh_7")
+        XCTAssertEqual(AppModel.nativeMessages([forged], chatId: "C1", members: members)[0].sender, "user:test_01ABC")
     }
 }
 

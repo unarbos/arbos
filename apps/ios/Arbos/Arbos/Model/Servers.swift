@@ -190,6 +190,9 @@ struct MatrixCredentials: Equatable {
     var userId: String
     var accessToken: String
     var deviceId: String
+    /// The relay's per-user switch (`users.matrix_people_native`): people chats the relay
+    /// names are read and written on the homeserver. Anything but `true` is off.
+    var peopleNative = false
 
     static func parse(_ raw: Any) -> MatrixCredentials? {
         guard let d = raw as? [String: Any],
@@ -197,6 +200,7 @@ struct MatrixCredentials: Equatable {
               let userId = d["user_id"] as? String, !userId.isEmpty,
               let token = d["access_token"] as? String, !token.isEmpty
         else { return nil }
-        return MatrixCredentials(homeserver: homeserver, userId: userId, accessToken: token, deviceId: d["device_id"] as? String ?? "")
+        return MatrixCredentials(homeserver: homeserver, userId: userId, accessToken: token, deviceId: d["device_id"] as? String ?? "",
+                                 peopleNative: d["people_native"] as? NSNumber === kCFBooleanTrue)
     }
 }
