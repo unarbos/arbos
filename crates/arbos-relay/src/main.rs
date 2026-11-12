@@ -50,6 +50,8 @@ mod images;
 mod inspect;
 mod link_icons;
 mod livekit;
+#[cfg(test)]
+mod load_gate;
 mod local;
 mod matrix;
 mod moderation;

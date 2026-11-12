@@ -282,3 +282,10 @@ To go back before step 6: `DELETE /admin/users/$u/box` again, set the provider b
 store, anywhere. The cold tier has not been run against a real bucket. The real
 path (loop devices, ext4, network namespaces, runsc checkpoint and restore) is
 `scripts/ci/boxd-linux-test.sh`, which needs only Docker.
+
+The Phase 4 gate (1,000 boxes, 150 in use, 30 wakes a minute, 2,500 client sockets) is
+`scripts/ci/box-load-gate.sh`: the real relay against fake daemons in one process, ten minutes
+after the boxes are made, anywhere with cargo. It prints the wake percentiles, the write lock
+wait, the sockets held and the process's CPU and memory, and exits with the gate's verdict. A
+daemon's own wake time is a setting of that run, to be taken from a real host
+(`boxd-linux-test.sh` prints it).
