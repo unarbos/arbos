@@ -109,6 +109,41 @@ reports `active_user_pids: null`, which is not zero. Only a box with no workspac
 bearer the daemon uses for agentd's `POST /box/prepare-sleep`. `box_url` is the box's own
 address on the bridge, port 7788; no port is published on the host.
 
+## Moving a Docker `runsc` box here
+
+docs/box-scaling.md Phase 2 moves each of the relay's `gvisor` boxes onto the daemon in place:
+the same `work.img`, no copy. Nothing in the relay does this; it is an operator's step, one box
+at a time, and **this procedure has not been run on a real host yet**. Try it on a scratch user
+first. The image already has the layout a box here expects (`/work` at its root, `.home`,
+`.etc`).
+
+Before the first box: the relay runs with `ARBOS_BOXD_URL`, and the box's image version is
+installed (above). The relay only takes a disk of 8, 32 or 128 GiB, so a `work.img` of another
+size (`ARBOS_BOX_WORK_GB`) is grown to one of those first, unmounted, with `e2fsck -f`,
+`truncate -s` and `resize2fs`.
+
+For one user `$u`, with the relay's data in `$data` on the same filesystem as `ARBOS_BOXD_ROOT`:
+
+1. Wait until the box is idle: its `GET /box/state` shows no turn and no waiting send for 30 s.
+2. Give the daemon the same file under its own name. A hard link is the same disk, not a copy,
+   and from here on the daemon never finds the box without one, so it never makes an empty one:
+
+   ```sh
+   install -d -m 0700 /var/lib/arbos-boxd/boxes/$u
+   ln $data/boxes/$u/work.img /var/lib/arbos-boxd/boxes/$u/work.img
+   ```
+
+3. Send the user's next box to the daemon: `PUT /admin/users/$u/box {"provider": "boxd"}`.
+4. Remove the Docker box: `DELETE /admin/users/$u/box`. The relay stops the container and
+   detaches the image; the file stays. Check that nothing holds it before going on:
+   `losetup -j $data/boxes/$u/work.img` prints nothing.
+5. The user's next message (or `POST /machine/start`) makes the box on the daemon, on the
+   linked disk. Check `GET /v1/host/status` lists it as running and the user's files are there.
+6. Only then remove the old name: `rm $data/boxes/$u/work.img`.
+
+To go back before step 6: `DELETE /admin/users/$u/box` again, set the provider back to
+`gvisor`, and remove the daemon's `boxes/$u` directory (the link, not the disk).
+
 ## Testing
 
 `cargo test -p arbos-boxd` runs the state machine against a fake host, anywhere. The real
