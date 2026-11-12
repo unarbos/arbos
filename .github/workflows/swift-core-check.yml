@@ -108,7 +108,10 @@ jobs:
     # repo gets, so the false red is dearer than the hang it would catch. 120 clears max by 39%
     # and still bounds a genuine hang; 180 would hold a slot for three hours to learn the same
     # thing. Measured near-miss: run 42089362322 (#2804) SUCCEEDED at 84.2 min.
-    timeout-minutes: 120
+    # 2026-11-12: with no Darwin Rust cache to restore (it is evicted, and only main saves one)
+    # main run 43117138400 took 114 min, and PR runs 43191323492 and 43192095308 were killed at
+    # 120 with every test passed. 150 clears the cold-cache worst case by the same margin.
+    timeout-minutes: 150
     env:
       APP_DIR: apps/ios/Arbos
     steps:
