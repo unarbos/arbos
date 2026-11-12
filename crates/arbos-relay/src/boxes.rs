@@ -1072,7 +1072,8 @@ pub async fn box_disconnected(state: &AppState, user_id: &str) {
     e.1 = now_ms();
 }
 
-/// Called every 5 s: a box with no sockets for `box_idle_grace_ms` is asleep (unless it was never seen),
+/// Called every 5 s: a box with no sockets for `box_idle_grace_ms` is asleep (unless it was never seen,
+/// or still polls over HTTP: agentd closes idle room sockets and stays up),
 /// and a box waking past the hello deadline goes through the stale-box detector.
 pub async fn sweep_box_liveness(state: &AppState) {
     let waking: Vec<(String, i64)> = state
@@ -1122,7 +1123,11 @@ pub async fn sweep_box_liveness(state: &AppState) {
         state.box_http_seen.lock().await.remove(&user_id);
     }
     for (user_id, n, last) in snapshot {
-        if n == 0 && last > 0 && now_ms() - last > state.cfg.box_idle_grace_ms {
+        if n == 0
+            && last > 0
+            && now_ms() - last > state.cfg.box_idle_grace_ms
+            && !box_reachable(state, &user_id).await
+        {
             let (st, _) = state.box_state(&user_id).await;
             if st == BoxState::Awake {
                 state
@@ -1920,6 +1925,31 @@ mod zero_project_tests {
         assert!(state.wake_started.lock().await.get(&user).is_none());
 
         // The heartbeat stops (box died): after the grace period it is asleep, not "error".
+        state
+            .box_http_seen
+            .lock()
+            .await
+            .insert(user.clone(), now_ms() - 120_000);
+        sweep_box_liveness(&state).await;
+        assert_eq!(state.box_state(&user).await.0, BoxState::Asleep);
+    }
+
+    #[tokio::test]
+    async fn box_that_closed_its_idle_sockets_but_still_polls_stays_awake() {
+        let state = test_state(AuthMode::Github);
+        let (user, _dev) = person(&state, 1);
+
+        // agentd closed its last room socket well past the grace period, and keeps polling.
+        box_connected(&state, &user).await;
+        box_disconnected(&state, &user).await;
+        state.box_conns.lock().await.get_mut(&user).unwrap().1 = now_ms() - 120_000;
+        box_seen_http(&state, &user).await;
+        for _ in 0..3 {
+            sweep_box_liveness(&state).await;
+            assert_eq!(state.box_state(&user).await.0, BoxState::Awake);
+        }
+
+        // The polls stop too (box died): asleep on the next sweep.
         state
             .box_http_seen
             .lock()
