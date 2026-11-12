@@ -480,6 +480,9 @@ def main(argv=None, world=World):
     # The admin token and the daemon's go to this host and nowhere else. The relay may be on
     # the bridge address, where a box can dial it.
     for url in (a.relay, a.boxd_url):
+        if not url.startswith("http://"):
+            print(f"boxd-migrate: {url} is not an http:// address; the relay and the daemon are asked in plain HTTP, on this host", file=sys.stderr)
+            return 2
         if not on_this_host(url):
             print(f"boxd-migrate: {url} is not an address of this host; run this on the host", file=sys.stderr)
             return 2

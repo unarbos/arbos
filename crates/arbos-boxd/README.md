@@ -235,10 +235,12 @@ TLS is 1.3 only. No file may be a link or writable by anyone but its owner.
 relay's copy of that node's token and `key_file` the relay's key, both mode 0600. The node's
 certificate must chain to `ca_file` and name the host in `url`; no other CA is trusted for it,
 and a node that fails the check is a node that did not answer. `max_resident` defaults to 160.
-An `http://127.0.0.1:<port>` url with no certificate files is taken too, for a second daemon on
-the relay's own host; that daemon runs in a network namespace of its own, because the bridge
-`arbos-boxd0` and the veth names are the same for every daemon. Anything else in the file stops
-the relay at start.
+A second daemon on the relay's own host runs in a network namespace of its own, because the
+bridge `arbos-boxd0` and the veth names are one per namespace. Its loopback is then its own, so
+the relay reaches it like any other node: over a link between the two namespaces, at its
+`ARBOS_BOXD_TLS_LISTEN` address, with certificates. An `http://127.0.0.1:<port>` url with no
+certificate files is still taken, for what does end on the relay's loopback: the load gate's
+daemons, or a tunnel to a node. Anything else in the file stops the relay at start.
 
 **The network between them** is the operator's (the spec's WireGuard link), and three things
 have to route over it:
@@ -316,7 +318,11 @@ its step. The summary at the end has one line per box (`moved`, `done`, `skip` w
 A Linux host with Docker, `runsc`, a relay on `ARBOS_DEFAULT_PROVIDER=gvisor` with
 `ARBOS_BOXD_URL` set, and the daemon, all as in the sections above. The relay listens on the
 bridge, so every `boxd-migrate.py` below takes `--relay http://10.207.0.1:7700`. The gvisor
-side needs four things the sections above do not name:
+side needs four things the sections above do not name, and the agent image: the relay runs
+`ghcr.io/unarbos/arbos/arbos-agent:<version>`, which Docker pulls when it does not have it. On
+a host that cannot pull it, set `ARBOS_BOX_IMAGE_REPO` to a repository it can, or
+`docker import` the daemon's `rootfs.tar` under that tag, giving back the entrypoint and
+environment of `image.json` with `--change` (an import carries neither).
 
 - `ARBOS_BOX_WORK_GB=8` on the relay. Its default is 2, and a 2 GiB `work.img` is no tier: the
   tool would skip the box.
