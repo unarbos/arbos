@@ -57,8 +57,9 @@ final class SoloAgentReplyQuoteTests: XCTestCase {
     }
 
     private func userQuote(_ rows: [Row]) -> Quote? {
+        // Skip plain user bubbles; the human reply is the one that carries a quote.
         for row in rows {
-            if case .user(_, _, let quote, _) = row.kind { return quote }
+            if case .user(_, _, let quote?, _) = row.kind { return quote }
         }
         return nil
     }
