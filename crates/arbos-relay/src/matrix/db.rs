@@ -664,6 +664,19 @@ impl Db {
         })
     }
 
+    /// Whether `user_id` is flagged; someone the relay does not know is not.
+    pub fn matrix_people_native(&self, user_id: &str) -> Result<bool> {
+        self.with(|c| {
+            Ok(c.query_row(
+                "SELECT matrix_people_native FROM users WHERE id = ?1",
+                params![user_id],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()?
+                == Some(1))
+        })
+    }
+
     pub fn matrix_people_native_users(&self) -> Result<Vec<String>> {
         self.with(|c| {
             let mut st =
@@ -795,6 +808,8 @@ mod tests {
         assert!(!d.set_matrix_people_native("nobody", true).unwrap());
         assert!(d.set_matrix_people_native("gh_1", true).unwrap());
         assert_eq!(d.matrix_people_native_users().unwrap(), vec!["gh_1"]);
+        assert!(d.matrix_people_native("gh_1").unwrap());
+        assert!(!d.matrix_people_native("nobody").unwrap());
         assert!(d.set_matrix_people_native("gh_1", false).unwrap());
         assert!(d.matrix_people_native_users().unwrap().is_empty());
         assert_eq!(backoff_ms(0), 2_000);

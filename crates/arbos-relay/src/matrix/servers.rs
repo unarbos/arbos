@@ -1593,6 +1593,33 @@ pub async fn leave(
 
 // ---- the device's Matrix identity and the proxy ---------------------------------------------------
 
+/// `GET /me/matrix/people` → `{rooms: {<chat_id>: <room_id>}}`: the caller's people chats that
+/// are read and written on the homeserver ([`super::people_native_room`]), each with the room
+/// the relay made for it. The apps show a people chat from the homeserver only when this
+/// names the room; everything else stays in its Loro room. Empty for someone not flagged.
+pub async fn me_matrix_people(State(state): State<AppState>, principal: Principal) -> Response {
+    let me = match user_of(&principal) {
+        Ok(u) => u,
+        Err(r) => return *r,
+    };
+    if let Err(r) = matrix_required(&state) {
+        return *r;
+    }
+    let mut rooms = serde_json::Map::new();
+    if state.db.matrix_people_native(&me).unwrap_or(false) {
+        let chats = match state.db.chats_of_member(&format!("user:{me}")) {
+            Ok(c) => c,
+            Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+        };
+        for cm in &chats {
+            if let Some(room) = super::people_native_room(&state, cm) {
+                rooms.insert(cm.chat.id.clone(), json!(room));
+            }
+        }
+    }
+    Json(json!({ "rooms": rooms })).into_response()
+}
+
 /// `GET /me/matrix` → `{homeserver, user_id, access_token, device_id, people_native}` for this
 /// device. The token is minted once through the appservice login
 /// (`m.login.application_service`), stored encrypted, and handed back on every call; sign-out
@@ -2632,5 +2659,95 @@ mod role_residue_tests {
                 .role,
             "owner"
         );
+    }
+}
+
+#[cfg(test)]
+mod people_native_tests {
+    use axum::body::to_bytes;
+    use axum::extract::State;
+
+    use super::*;
+    use crate::matrix::{Config, Matrix, Mode};
+    use crate::people::tests_support::{dm, group, person, project_of};
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    async fn rooms(state: &AppState, who: &Principal) -> Value {
+        let r = me_matrix_people(State(state.clone()), who.clone()).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let body = to_bytes(r.into_body(), usize::MAX).await.expect("body");
+        serde_json::from_slice::<Value>(&body).expect("json")["rooms"].clone()
+    }
+
+    /// A people chat is on the homeserver for a person only when nobody in it would miss a
+    /// message sent there: every member a flagged person, and a room the relay holds open.
+    #[tokio::test]
+    async fn a_chat_is_native_only_when_every_member_is() {
+        let mut state = test_state(AuthMode::Github);
+        state.matrix = Matrix::new(Config {
+            mode: Mode::Dual,
+            ..Config::off()
+        });
+        let (alice, alice_dev) = person(&state, 1301);
+        let (bob, bob_dev) = person(&state, 1302);
+        let (carol, _) = person(&state, 1303);
+        let flag = |u: &str, on: bool| assert!(state.db.set_matrix_people_native(u, on).unwrap());
+        let room = |chat: &str, id: &str| {
+            state
+                .db
+                .matrix_insert_room(
+                    chat,
+                    id,
+                    None,
+                    if id.contains("dm") { "dm" } else { "group" },
+                    false,
+                )
+                .expect("room")
+        };
+        let both = dm(&state, &alice, &bob);
+        room(&both, "!dm:arbos.life");
+        let with_carol = group(&state, &[&alice, &bob, &carol]);
+        room(&with_carol, "!carol:arbos.life");
+        let with_agent = group(&state, &[&alice, &bob]);
+        room(&with_agent, "!agent:arbos.life");
+        let agent = project_of(&state, &alice, "Scout");
+        state
+            .db
+            .add_member(
+                &with_agent,
+                &format!("agent:{agent}"),
+                "agent",
+                &alice,
+                &json!({}),
+            )
+            .expect("agent");
+        group(&state, &[&alice, &bob]); // no room yet
+        let closed = group(&state, &[&alice, &bob]);
+        room(&closed, "!closed:arbos.life");
+        state.db.matrix_close_room(&closed).expect("closed");
+
+        // Nobody flagged: nothing, for anyone.
+        assert_eq!(rooms(&state, &alice_dev).await, json!({}));
+        // Only Alice: Bob reads the Loro room, so Alice's device must write there too.
+        flag(&alice, true);
+        assert_eq!(rooms(&state, &alice_dev).await, json!({}));
+        // Both: their DM, and none of the chats with an unflagged person, an agent, no room
+        // or a closed one.
+        flag(&bob, true);
+        let expected = json!({ both.clone(): "!dm:arbos.life" });
+        assert_eq!(rooms(&state, &alice_dev).await, expected);
+        assert_eq!(rooms(&state, &bob_dev).await, expected);
+        // Rollback is the flag: the chat is back in its Loro room for both.
+        flag(&bob, false);
+        assert_eq!(rooms(&state, &alice_dev).await, json!({}));
+        assert_eq!(rooms(&state, &bob_dev).await, json!({}));
+
+        // Not a device: refused. Matrix off: no such thing on this relay.
+        let r = me_matrix_people(State(state.clone()), Principal::Admin).await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        state.matrix = Matrix::new(Config::off());
+        let r = me_matrix_people(State(state.clone()), alice_dev).await;
+        assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 }
