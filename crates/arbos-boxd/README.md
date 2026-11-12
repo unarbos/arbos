@@ -36,6 +36,31 @@ multi-node are later phases.
   iptables -I INPUT -i arbos-boxd0 -d 10.207.0.1 -p tcp --dport <relay port> -j ACCEPT
   ```
 
+## The relay beside it
+
+The relay reaches the daemon on loopback and a box on its bridge address, and neither needs a
+firewall rule. The other way round takes three things:
+
+- **An address a box can dial.** A box sees the host only over the bridge, so the relay listens
+  there and says so: `ARBOS_RELAY_LISTEN=10.207.0.1:7700` and
+  `ARBOS_RELAY_PUBLIC_URL=http://10.207.0.1:7700` (or any address that routes back to it). The
+  relay's default, `127.0.0.1:7700`, is not reachable from a box: agentd then waits for a relay
+  for ever and the box never comes up.
+- **The daemon first.** The bridge address exists once the daemon has started, and a relay
+  bound to it cannot start before that.
+- **One `INPUT` rule** where the firewall drops by default: the last of the three above, with
+  the relay's port.
+
+Two floors of the relay's decide whether a box is made or woken, and both come from the spec's
+503 GB host, so a small host meets them at its first box:
+
+- **Disk, 80 GB free**, fixed for these boxes (docs/box-scaling.md §4.2;
+  `ARBOS_HOST_MIN_FREE_DISK_GB` is the gVisor fleet's and is not read here). Below it:
+  `boxd host has 79 GB of disk free; no new box below 80 GB`.
+- **Memory, `ARBOS_HOST_EVICT_MIN_AVAILABLE_GB`, default 64**: with less than that available
+  no box wakes unless an idle one can be put to sleep first. Below it with nothing to sleep:
+  `boxd host has 15 GB of memory available; no box wakes below 64 GB`. Set it for the host.
+
 ## Installing an image version
 
 A box's root is `/var/lib/arbos-boxd/images/<version>/rootfs`, shared read-only by every box

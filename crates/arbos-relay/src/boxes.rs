@@ -330,9 +330,14 @@ async fn create_on_provider(
             sb.snapshot = Some(snapshot_name.to_owned());
             if let Err(e) = crate::boxd::create_box(state, user_id, sb, box_token, mcp_token).await
             {
-                // As for gVisor: a box that was not made leaves no row to be woken later.
+                // As for gVisor: a box that was not made leaves no row to be woken later. Nor is
+                // anything waking: left at that, the stale-box detector bounces a box that does
+                // not exist and reports that it cannot reach the relay.
                 if replacing.is_none() {
                     let _ = state.db.delete_box_row(user_id);
+                    state
+                        .set_box_state(user_id, BoxState::Asleep, Some("create failed"))
+                        .await;
                 }
                 return Err(e);
             }

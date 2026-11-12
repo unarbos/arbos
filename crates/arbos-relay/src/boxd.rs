@@ -34,7 +34,8 @@ const IDLE_MS: i64 = 15 * 60_000;
 const ROUTINE_HORIZON_MS: i64 = 20 * 60_000;
 /// §4.2: an asleep box is woken this long before its routine is due, so the run finds it up.
 const ROUTINE_HEAD_START_MS: i64 = 60_000;
-/// §4.2: below this much free disk on the daemon's host no new box is made.
+/// §4.2: below this much free disk on the daemon's host no new box is made. The spec's own
+/// number for these boxes, and not `ARBOS_HOST_MIN_FREE_DISK_GB`, which is the gVisor fleet's.
 const MIN_FREE_DISK_GB: f64 = 80.0;
 /// §4.2 `max_resident_boxes`: awake and waking boxes on the spec's 503 GB host.
 /// `ARBOS_BOXD_MAX_RESIDENT` sets it for another one.
@@ -342,7 +343,7 @@ pub async fn create_box(
     let boxd = of(state)?;
     let free = boxd.host(&state.http).await?.disk_free_gb;
     if free < MIN_FREE_DISK_GB {
-        bail!("boxd host has {free:.0} GB of disk free; no new box below {MIN_FREE_DISK_GB:.0} GB");
+        bail!("boxd host has {free:.0} GB of disk free; no new box below {MIN_FREE_DISK_GB:.0} GB (fixed for boxd, docs/box-scaling.md §4.2)");
     }
     let snapshot = sb
         .snapshot
@@ -489,12 +490,9 @@ async fn make_room(state: &AppState, user_id: &str) -> Result<()> {
     let boxd = of(state)?;
     let host = boxd.host(&state.http).await?;
     // The memory floor is the one the gVisor fleet evicts at (`ARBOS_HOST_EVICT_MIN_AVAILABLE_GB`).
-    if room_to_wake(
-        resident(state, user_id).await,
-        boxd.max_resident,
-        host.mem_available_gb,
-        state.cfg.fleet.evict_min_available_gb,
-    ) {
+    let floor = state.cfg.fleet.evict_min_available_gb;
+    let resident = resident(state, user_id).await;
+    if room_to_wake(resident, boxd.max_resident, host.mem_available_gb, floor) {
         return Ok(());
     }
     let now = now_ms();
@@ -512,7 +510,14 @@ async fn make_room(state: &AppState, user_id: &str) -> Result<()> {
         }
     }
     // Owner's call: with nothing to sleep the wake is refused (and retried by the wake job)
-    // rather than let past the cap.
+    // rather than let past the cap. Under the cap it is the memory floor that refused, which on
+    // a host smaller than the spec's is every wake, the first box included: say that.
+    if let Some(mem) = host
+        .mem_available_gb
+        .filter(|_| resident < boxd.max_resident)
+    {
+        bail!("boxd host has {mem:.0} GB of memory available; no box wakes below {floor:.0} GB (ARBOS_HOST_EVICT_MIN_AVAILABLE_GB)");
+    }
     bail!(FULL)
 }
 
@@ -1210,6 +1215,23 @@ mod tests {
         let e = boxes::create_box(&state, &user, Provider::Boxd, None).await;
         assert!(e.unwrap_err().to_string().contains("disk"));
         assert_eq!(fake.paths(), ["/v1/host/status"]);
+        assert!(state.db.user_box(&user).unwrap().is_none());
+        // Nothing is waking: left at `waking`, the stale-box detector bounced a box that was
+        // never made and then said it could not reach the relay.
+        assert_eq!(state.box_state(&user).await.0, BoxState::Asleep);
+
+        // A host under the memory floor (the default is the spec's 64 GB) wakes no box, and
+        // says which floor rather than that it is full.
+        fake.replies.lock().unwrap().clear();
+        let mut small = usual("status").1;
+        small["mem_available_gb"] = json!(14.6);
+        fake.answer("status", 200, small);
+        let e = boxes::create_box(&state, &user, Provider::Boxd, None).await;
+        let e = e.unwrap_err().to_string();
+        assert!(
+            e.contains("15 GB of memory") && e.contains("ARBOS_HOST_EVICT_MIN_AVAILABLE_GB"),
+            "{e}"
+        );
         assert!(state.db.user_box(&user).unwrap().is_none());
 
         fake.replies.lock().unwrap().clear();
