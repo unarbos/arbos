@@ -74,6 +74,15 @@ const MAX_RESIDENT: usize = 160;
 /// little and costs the boxes: each wake is a `runsc` start on the cores the awake boxes run on,
 /// and it is the most wakes whose memory the floor's reading can be missing.
 const WAKES_PER_NODE: usize = 8;
+/// Resident slots a node keeps free, so a box that wakes on a busy node takes one at once and
+/// does not first wait for another box to be put to sleep: with none, at 3,000 and at 5,000
+/// users with every node at its cap, half the wakes waited 0.51 s for that sleep before the
+/// daemon was asked. It is the wakes a node is asked for at once, so none of those waits; the
+/// slots are refilled behind them ([`keep_headroom`]). It costs a node at its cap that many of
+/// its boxes awake, 8 of 160, and a node with a small cap never gives up more than a quarter.
+const HEADROOM: usize = WAKES_PER_NODE;
+/// How often a node's headroom is looked at when no wake has asked for it to be.
+const HEADROOM_TICK: Duration = Duration::from_secs(5);
 /// Error text of a wake on a full host where no awake box could be put to sleep to make room.
 pub const FULL: &str = "the host is full and every machine on it is busy";
 /// `boxes.node_id` of a box on the daemon of this host, the one `ARBOS_BOXD_URL` names (§4.1
@@ -104,6 +113,10 @@ struct Node {
     /// same free slot. The daemon is not asked for anything under it.
     door: Arc<tokio::sync::Mutex<()>>,
     slots: Arc<std::sync::Mutex<Slots>>,
+    /// Told when a slot or a box on its way out is let go of, and when a slot is taken: who
+    /// waits for a slot, and who keeps the headroom.
+    freed: Arc<tokio::sync::Notify>,
+    taken: Arc<tokio::sync::Notify>,
     /// [`WAKES_PER_NODE`].
     wakes: Arc<tokio::sync::Semaphore>,
 }
@@ -113,16 +126,17 @@ struct Node {
 struct Slots {
     /// Boxes let on and on their way up: each has its slot from the moment it is let on.
     coming: HashSet<String>,
-    /// Awake boxes being put to sleep, each for one of those: its slot is the newcomer's
-    /// already, and it is nobody else's to put to sleep.
+    /// Awake boxes being put to sleep, for a newcomer or for the node's headroom: nobody
+    /// else's to put to sleep. Each has its slot still, until its state says it is asleep.
     going: HashSet<String>,
 }
 
-/// One box's hold on a slot, and on the box it is putting to sleep for it. Dropped when the wake
-/// is over: the box is up and its state says so, or it is not and the slot is free again.
+/// One box's hold on a slot, or on a box it is putting to sleep, or on both. Dropped when the
+/// wake is over: the box is up and its state says so, or it is not and the slot is free again.
 struct Slot {
     slots: Arc<std::sync::Mutex<Slots>>,
-    user: String,
+    freed: Arc<tokio::sync::Notify>,
+    user: Option<String>,
     victim: Option<String>,
 }
 
@@ -130,6 +144,7 @@ impl Slot {
     fn keep_only_own(&mut self) {
         if let Some(victim) = self.victim.take() {
             self.slots.lock().unwrap().going.remove(&victim);
+            self.freed.notify_waiters();
         }
     }
 }
@@ -137,7 +152,10 @@ impl Slot {
 impl Drop for Slot {
     fn drop(&mut self) {
         self.keep_only_own();
-        self.slots.lock().unwrap().coming.remove(&self.user);
+        if let Some(user) = &self.user {
+            self.slots.lock().unwrap().coming.remove(user);
+            self.freed.notify_waiters();
+        }
     }
 }
 
@@ -515,20 +533,31 @@ impl Node {
             subnet,
             door: Arc::default(),
             slots: Arc::default(),
+            freed: Arc::default(),
+            taken: Arc::default(),
             wakes: Arc::new(tokio::sync::Semaphore::new(WAKES_PER_NODE)),
         })
     }
 
-    /// Take a slot for `user`, and with it the box that is to sleep for them.
-    fn hold(&self, user: &str, victim: Option<&str>) -> Slot {
+    /// Take a slot for `user`, the box that is to sleep (`victim`), or both.
+    fn hold(&self, user: Option<&str>, victim: Option<&str>) -> Slot {
         let mut slots = self.slots.lock().unwrap();
-        slots.coming.insert(user.to_owned());
+        slots.coming.extend(user.map(str::to_owned));
         slots.going.extend(victim.map(str::to_owned));
+        if user.is_some() {
+            self.taken.notify_one();
+        }
         Slot {
             slots: self.slots.clone(),
-            user: user.to_owned(),
+            freed: self.freed.clone(),
+            user: user.map(str::to_owned),
             victim: victim.map(str::to_owned),
         }
+    }
+
+    /// The slots this node keeps free.
+    fn headroom(&self) -> usize {
+        HEADROOM.min(self.max_resident / 4)
     }
 
     async fn send(
@@ -1007,15 +1036,76 @@ pub fn room_to_wake(resident: usize, max: usize, mem_gb: Option<f64>, min_mem_gb
     resident < max && mem_gb.is_none_or(|m| m >= min_mem_gb)
 }
 
-/// §4.2: a box that wakes on a full host does not wait in a line; the least-recently-active
-/// awake box with no turn running is put to sleep first. One out, one in, and on the same node:
-/// the cap and the memory floor are each node's own.
+/// What the door sees of a node.
+struct Seen {
+    /// The boxes that have a slot on it, but for the one that asks.
+    resident: usize,
+    here: HashMap<String, String>,
+    coming: HashSet<String>,
+    going: HashSet<String>,
+}
+
+async fn see(state: &AppState, node: &Node, user_id: &str) -> Result<Seen> {
+    // The slots first and the box states after: a box leaves `coming` only once its state
+    // says it is up, so read in this order it is in one of the two.
+    let (coming, going) = {
+        let slots = node.slots.lock().unwrap();
+        (slots.coming.clone(), slots.going.clone())
+    };
+    let here = state.db.boxd_box_nodes()?;
+    let mut up: HashSet<&str> = coming.iter().map(String::as_str).collect();
+    for (user, on) in &here {
+        if *on == node.id
+            && matches!(
+                state.box_state(user).await.0,
+                BoxState::Awake | BoxState::Waking
+            )
+        {
+            up.insert(user);
+        }
+    }
+    up.remove(user_id);
+    Ok(Seen {
+        resident: up.len(),
+        here,
+        coming,
+        going,
+    })
+}
+
+impl Seen {
+    /// The node's awake boxes that may be put to sleep, but for `user_id` and the ones in
+    /// `busy`. A box that dialled in before its wake was answered is awake and still coming:
+    /// its row is not written yet, and a sleep now would write the old one back over it.
+    async fn idle(
+        &self,
+        state: &AppState,
+        node: &Node,
+        user_id: &str,
+        busy: &HashSet<String>,
+    ) -> Vec<crate::fleet::Candidate> {
+        let mut idle = crate::fleet::candidates(state, boxes::Provider::Boxd).await;
+        idle.retain(|c| {
+            c.user_id != user_id
+                && self.here.get(&c.user_id) == Some(&node.id)
+                && !self.coming.contains(&c.user_id)
+                && !self.going.contains(&c.user_id)
+                && !busy.contains(&c.user_id)
+        });
+        idle
+    }
+}
+
+/// §4.2: a box that wakes on a full host does not wait in a line. It takes one of the slots the
+/// node keeps free ([`HEADROOM`]); when there is none, the least-recently-active awake box with
+/// no turn running is put to sleep for it first. One out, one in, and on the same node: the cap
+/// and the memory floor are each node's own.
 ///
 /// The slot is taken behind the node's door and the daemon is asked outside it. A box counts
-/// from the moment it is let on, and the box put to sleep for it stops counting then and is no
-/// other newcomer's to take, so wakes run side by side and the node is never over its cap. The
-/// memory floor is read once, ahead of the door: what the [`WAKES_PER_NODE`] wakes under way
-/// will take is not in the reading yet, which the floor's own margin is for.
+/// from the moment it is let on; the box put to sleep for it counts until it is asleep and is
+/// no other newcomer's to take. So wakes run side by side and the node is never over its cap.
+/// The memory floor is read once, ahead of the door: what the [`WAKES_PER_NODE`] wakes under
+/// way will take is not in the reading yet, which the floor's own margin is for.
 async fn take_slot(state: &AppState, node: &Node, user_id: &str) -> Result<Slot> {
     let host = node.host().await?;
     // The memory floor is the one the gVisor fleet evicts at (`ARBOS_HOST_EVICT_MIN_AVAILABLE_GB`).
@@ -1023,59 +1113,43 @@ async fn take_slot(state: &AppState, node: &Node, user_id: &str) -> Result<Slot>
     // Boxes agentd would not let go of.
     let mut busy = HashSet::new();
     loop {
+        // Listening from before the look: a slot let go of after it is not missed.
+        let freed = node.freed.notified();
+        tokio::pin!(freed);
+        freed.as_mut().enable();
         let door = node.door.lock().await;
-        // The slots first and the box states after: a box leaves `coming` only once its state
-        // says it is up, so read in this order it is in one of the two.
-        let (coming, going) = {
-            let slots = node.slots.lock().unwrap();
-            (slots.coming.clone(), slots.going.clone())
-        };
-        let here = state.db.boxd_box_nodes()?;
-        let mut up: HashSet<&str> = coming.iter().map(String::as_str).collect();
-        for (user, on) in &here {
-            if *on == node.id
-                && !going.contains(user)
-                && matches!(
-                    state.box_state(user).await.0,
-                    BoxState::Awake | BoxState::Waking
-                )
-            {
-                up.insert(user);
-            }
+        let seen = see(state, node, user_id).await?;
+        if room_to_wake(
+            seen.resident,
+            node.max_resident,
+            host.mem_available_gb,
+            floor,
+        ) {
+            return Ok(node.hold(Some(user_id), None));
         }
-        up.remove(user_id);
-        let resident = up.len();
-        if room_to_wake(resident, node.max_resident, host.mem_available_gb, floor) {
-            return Ok(node.hold(user_id, None));
-        }
-        // A box that dialled in before its wake was answered is awake and still coming: its
-        // row is not written yet, and a sleep now would write the old one back over it.
-        let mut idle = crate::fleet::candidates(state, boxes::Provider::Boxd).await;
-        idle.retain(|c| {
-            c.user_id != user_id
-                && here.get(&c.user_id) == Some(&node.id)
-                && !coming.contains(&c.user_id)
-                && !going.contains(&c.user_id)
-                && !busy.contains(&c.user_id)
-        });
+        let full = seen.resident >= node.max_resident;
+        let idle = seen.idle(state, node, user_id, &busy).await;
         let Some(victim) = crate::fleet::pick_eviction(&idle) else {
+            // Every box that could go is going already, for the headroom or for another
+            // newcomer: one of them asleep may be this box's slot.
+            if full && !seen.going.is_empty() {
+                drop(door);
+                freed.await;
+                continue;
+            }
             // Owner's call: with nothing to sleep the wake is refused (and retried by the wake
             // job) rather than let past the cap. Under the cap it is the memory floor that
             // refused, which on a host smaller than the spec's is every wake, the first box
             // included: say that.
-            if let Some(mem) = host
-                .mem_available_gb
-                .filter(|_| resident < node.max_resident)
-            {
+            if let Some(mem) = host.mem_available_gb.filter(|_| !full) {
                 bail!("boxd host has {mem:.0} GB of memory available; no box wakes below {floor:.0} GB (ARBOS_HOST_EVICT_MIN_AVAILABLE_GB)");
             }
             bail!(FULL)
         };
-        let mut slot = node.hold(user_id, Some(&victim));
+        let mut slot = node.hold(Some(user_id), Some(&victim));
         drop(door);
         let slept = sleep_box(state, &victim, now_ms()).await;
-        // Asleep or not, it is not on its way out any more, and its state says which: left as
-        // going, it would not be counted if it woke again before the newcomer was up.
+        // Asleep or not, it is not on its way out any more, and its state says which.
         slot.keep_only_own();
         match slept {
             Ok(()) => {
@@ -1087,6 +1161,78 @@ async fn take_slot(state: &AppState, node: &Node, user_id: &str) -> Result<Slot>
             Err(e) if e.to_string() == BUSY => drop(busy.insert(victim)),
             Err(e) => return Err(e),
         }
+    }
+}
+
+/// Bring a node back to its [`HEADROOM`]: while it has fewer free slots, the boxes [`take_slot`]
+/// would put to sleep for a newcomer are put to sleep ahead of one, by the same ranking and the
+/// same rules. Never a box with a turn running, one agentd calls busy, or one on its way up;
+/// a node whose every awake box is one of those keeps what room it has.
+async fn keep_headroom(state: &AppState, node: &Node) {
+    let mut busy = HashSet::new();
+    loop {
+        let door = node.door.lock().await;
+        let Ok(seen) = see(state, node, "").await else {
+            return;
+        };
+        // A box on its way out is a slot on its way back.
+        let free = node.max_resident.saturating_sub(seen.resident) + seen.going.len();
+        if free >= node.headroom() {
+            return;
+        }
+        let mut idle = seen.idle(state, node, "", &busy).await;
+        let mut leaving = Vec::new();
+        for _ in free..node.headroom() {
+            let Some(victim) = crate::fleet::pick_eviction(&idle) else {
+                break;
+            };
+            idle.retain(|c| c.user_id != victim);
+            leaving.push((node.hold(None, Some(&victim)), victim));
+        }
+        drop(door);
+        if leaving.is_empty() {
+            return;
+        }
+        let now = now_ms();
+        let sleeps = leaving.into_iter().map(|(slot, user_id)| async move {
+            let slept = sleep_box(state, &user_id, now).await;
+            drop(slot);
+            (user_id, slept)
+        });
+        for (user_id, slept) in futures::future::join_all(sleeps).await {
+            match slept {
+                Ok(()) => {
+                    tracing::info!(%user_id, node = %node.id, "boxd: idle box put to sleep to keep the node's headroom");
+                }
+                Err(e) => {
+                    if e.to_string() != BUSY {
+                        tracing::warn!(%user_id, node = %node.id, error = %e, "boxd: headroom sleep failed");
+                    }
+                    // Not asked again in this pass, whatever the reason.
+                    busy.insert(user_id);
+                }
+            }
+        }
+    }
+}
+
+/// Keep every node's headroom from now on: looked at whenever a slot is taken on the node, and
+/// every [`HEADROOM_TICK`] for the boxes that have gone idle since.
+pub(crate) fn spawn_headroom(state: &AppState) {
+    let Some(boxd) = &state.cfg.boxd else {
+        return;
+    };
+    for node in boxd.nodes.clone() {
+        let state = state.clone();
+        tokio::spawn(async move {
+            loop {
+                keep_headroom(&state, &node).await;
+                tokio::select! {
+                    _ = node.taken.notified() => {}
+                    _ = tokio::time::sleep(HEADROOM_TICK) => {}
+                }
+            }
+        });
     }
 }
 
@@ -1132,6 +1278,7 @@ pub async fn spawn_idle_sleeper(state: AppState) {
     if state.cfg.boxd.is_none() {
         return;
     }
+    spawn_headroom(&state);
     tokio::spawn(async move {
         // In memory only: a relay restart gives every box a fresh 15 minutes.
         let mut idle_since = HashMap::new();
@@ -1519,6 +1666,8 @@ mod tests {
             subnet: SUBNET,
             door: Arc::default(),
             slots: Arc::default(),
+            freed: Arc::default(),
+            taken: Arc::default(),
             wakes: Arc::new(tokio::sync::Semaphore::new(WAKES_PER_NODE)),
         };
         (fake, node)
@@ -3432,5 +3581,117 @@ mod tests {
         assert_eq!(full.to_string(), FULL);
         assert_eq!(asked(&fake, &a), before, "nothing more was asked of it");
         waking.await.unwrap().unwrap();
+    }
+
+    /// A relay whose one node has twelve slots, so a headroom of three, and an idle box awake
+    /// in every one: the first of them the longest idle, the last the least.
+    async fn twelve_idle() -> (AppState, Arc<Fake>, Vec<String>) {
+        let (mut state, fake, first) = relay().await;
+        let cfg = Arc::get_mut(&mut state.cfg).expect("one holder");
+        cfg.boxd.as_mut().unwrap().nodes[0].max_resident = 12;
+        let mut users = vec![first];
+        users.extend((0..11).map(|i| person(&state, 9900 + i).0));
+        for (i, user) in users.iter().enumerate() {
+            make_awake(&state, user).await;
+            let mut row = state.db.user_box(user).unwrap().unwrap();
+            row.last_started_at = Some(1_000 + i as i64);
+            state.db.upsert_box(&row).unwrap();
+        }
+        (state, fake, users)
+    }
+
+    fn slept(fake: &Fake, users: &[String]) -> Vec<bool> {
+        let asked = |u: &String| asked(fake, u).iter().any(|op| op == "sleep");
+        users.iter().map(asked).collect()
+    }
+
+    /// A node keeps slots free, so a box that wakes on a node at its cap takes one at once: no
+    /// box is put to sleep ahead of its wake. The slot is made up behind it.
+    #[tokio::test]
+    async fn a_wake_on_a_full_node_takes_a_slot_kept_free_and_waits_for_no_sleep() {
+        let (state, fake, users) = twelve_idle().await;
+        let node = &state.cfg.boxd.as_ref().unwrap().nodes[0];
+        assert_eq!(node.headroom(), 3);
+        keep_headroom(&state, node).await;
+        let gone = slept(&fake, &users);
+        assert_eq!(gone[..4], [true, true, true, false], "the longest idle");
+        assert_eq!(gone.iter().filter(|g| **g).count(), 3);
+        // Nothing more while the headroom is there.
+        let before = fake.paths().len();
+        keep_headroom(&state, node).await;
+        assert_eq!(fake.paths().len(), before, "the daemon is asked nothing");
+
+        boxes::start_box(&state, &users[0]).await.unwrap();
+        let asked_for: Vec<String> = fake.paths()[before..].to_vec();
+        assert!(
+            asked_for.iter().all(|p| !p.ends_with("/sleep")),
+            "{asked_for:?}"
+        );
+        assert!(asked_for.contains(&format!("/v1/boxes/{}/wake", users[0])));
+        // The slot it took is made up from the next longest idle.
+        keep_headroom(&state, node).await;
+        assert_eq!(slept(&fake, &users)[3..5], [true, false]);
+        assert!(fake.most_up.load(Ordering::SeqCst) <= 12);
+    }
+
+    /// The headroom is made of idle boxes only: one with a turn running is passed over for
+    /// the next, and one agentd calls busy stays up with nothing asked of it twice.
+    #[tokio::test]
+    async fn the_headroom_never_takes_a_busy_box() {
+        let (state, fake, users) = twelve_idle().await;
+        let node = &state.cfg.boxd.as_ref().unwrap().nodes[0];
+        let mut turns = state.turn_running.lock().await;
+        for user in &users[..3] {
+            turns.insert(user.clone(), now_ms());
+        }
+        drop(turns);
+        keep_headroom(&state, node).await;
+        let gone = slept(&fake, &users);
+        assert_eq!(gone[..7], [false, false, false, true, true, true, false]);
+
+        // The three after those are busy by agentd's account: asked once each, left awake.
+        boxes::start_box(&state, &users[3]).await.unwrap();
+        fake.answer("sleep", 409, json!({ "error": "busy: a job is running" }));
+        let before = fake.paths().len();
+        keep_headroom(&state, node).await;
+        let sleeps = |user: &String| {
+            let asked = asked(&fake, user);
+            asked.iter().filter(|op| *op == "sleep").count()
+        };
+        let asked_once = fake.paths()[before..]
+            .iter()
+            .filter(|p| p.ends_with("/sleep"))
+            .count();
+        assert_eq!(asked_once, 6, "each idle box once, and none twice");
+        for user in &users[..3] {
+            assert_eq!(sleeps(user), 0, "a turn is running");
+        }
+        for user in &users[6..] {
+            assert_eq!(state.box_state(user).await.0, BoxState::Awake);
+        }
+    }
+
+    /// The cap holds with the headroom kept behind a burst: forty boxes on twelve slots, the
+    /// sleeping ones all woken at once while the node makes room.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_cap_holds_while_the_headroom_is_kept_behind_a_burst() {
+        let (mut state, fake, first) = relay().await;
+        let cfg = Arc::get_mut(&mut state.cfg).expect("one holder");
+        cfg.boxd.as_mut().unwrap().nodes[0].max_resident = 12;
+        let mut users = vec![first];
+        users.extend((0..39).map(|i| person(&state, 9950 + i).0));
+        for user in &users {
+            make_awake(&state, user).await;
+        }
+        *fake.takes.lock().unwrap() = Duration::from_millis(20);
+        spawn_headroom(&state);
+        for user in &users {
+            boxes::ensure_awake(&state, user, "send").await;
+        }
+        boxes::run_wake_jobs(&state).await;
+        let most_up = fake.most_up.load(Ordering::SeqCst);
+        assert!(most_up <= 12, "{most_up} boxes up under a cap of 12");
+        let woken = fake.paths().iter().filter(|p| p.ends_with("/wake")).count();
+        assert!(woken > 40, "the burst woke some: {woken}");
     }
 }

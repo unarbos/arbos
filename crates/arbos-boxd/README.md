@@ -188,8 +188,13 @@ made anew anywhere else.
 
 Boxes wake side by side: the relay asks a node for at most eight wakes at once, and no node's
 wakes wait for another's. A slot on a node is taken before its daemon is asked and given back
-if the wake fails, and on a full node the box put to sleep for a newcomer is that newcomer's
-alone, so a node is never over its cap however many wake at once.
+if the wake fails, so a node is never over its cap however many wake at once. A node also keeps
+eight of its slots free (a quarter of a cap below 32): when fewer are, the relay puts the boxes
+their users left longest to sleep ahead of the next wake, never one with a turn running, one
+agentd calls busy, or one still on its way up. A box that wakes on a busy node therefore takes a
+free slot at once instead of waiting for another box's sleep, and a node with more wanted than
+it holds runs at most `max_resident` less eight boxes awake, 152 of 160. Only when the free
+slots are all taken does a wake wait for the sleep of the box it takes the place of.
 
 **Certificates.** One private CA for the pool, kept off the hosts; from it a certificate for
 each node, naming the address the relay dials, and one for the relay:
