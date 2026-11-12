@@ -238,6 +238,7 @@ enum PreviewVault {
     ]
 
     static func load() -> Device? {
+        guard storeRoot != nil else { return nil }
         var q = query
         q[kSecReturnData as String] = true
         q[kSecMatchLimit as String] = kSecMatchLimitOne
@@ -247,8 +248,10 @@ enum PreviewVault {
     }
 
     /// Keep `device` for the extension, or forget it (signed out). Readable while the phone
-    /// is locked, like the store's own key; never leaves this phone.
+    /// is locked, like the store's own key; never leaves this phone. Without the App Group
+    /// there is no shared keychain to write and no extension that could read the store.
     static func save(_ device: Device?) {
+        guard storeRoot != nil else { return }
         SecItemDelete(query as CFDictionary)
         guard let device, let data = try? JSONEncoder().encode(device) else { return }
         var add = query
