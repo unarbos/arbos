@@ -105,6 +105,7 @@ impl Hs {
             user_id: v["user_id"].as_str().unwrap().into(),
             access_token: v["access_token"].as_str().unwrap().into(),
             device_id: v["device_id"].as_str().unwrap().into(),
+            people_native: false,
         }
     }
 }
@@ -584,6 +585,175 @@ async fn a_device_that_cannot_set_up_keys_waits_for_one_that_can() {
     .await;
 
     for c in [mac, phone, bob1] {
+        c.stop();
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Phase 3: a device whose session says `people_native` lists its DMs and groups from the
+/// homeserver and reads them as transcript rows. A room is the chat the relay created it as,
+/// and a row is from the account that sent it, whatever the event's content says.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn people_chats_are_listed_and_read_from_the_homeserver() {
+    let Ok(url) = std::env::var("ARBOS_MATRIX_TEST_E2EE_HS") else {
+        return;
+    };
+    let hs = Hs {
+        url,
+        http: reqwest13::Client::new(),
+    };
+    let dir = std::env::temp_dir().join(format!("arbos-people-{}", std::process::id()));
+    let tag = std::process::id();
+    let (alice, bob) = (format!("pa{tag}"), format!("pb{tag}"));
+    let a = Session {
+        people_native: true,
+        ..hs.register(&alice).await
+    };
+    // Bob's relay has not flipped him.
+    let b = hs.register(&bob).await;
+    let (alice1, bob1) = (start(&a, &dir).await, start(&b, &dir).await);
+
+    // Rooms as `matrix/worker.rs::create_room_body` makes them; `claims` is what the room's
+    // `life.arbos.chat` says, `created_as` what its create event does.
+    let room = |claims: Value, created_as: &'static str, encrypted: bool| {
+        let (hs, a, b) = (&hs, &a, &b);
+        async move {
+            let mut state =
+                vec![json!({ "type": "life.arbos.chat", "state_key": "", "content": claims })];
+            if encrypted {
+                state.push(json!({ "type": "m.room.encryption", "state_key": "",
+                                   "content": { "algorithm": "m.megolm.v1.aes-sha2" } }));
+            }
+            let id = hs
+                .call(
+                    "POST",
+                    "/_matrix/client/v3/createRoom",
+                    Some(&a.access_token),
+                    json!({ "preset": "private_chat", "invite": [b.user_id],
+                            "creation_content": { "life.arbos.chat_id": created_as },
+                            "initial_state": state }),
+                )
+                .await["room_id"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            hs.call(
+                "POST",
+                &format!("/_matrix/client/v3/join/{id}"),
+                Some(&b.access_token),
+                json!({}),
+            )
+            .await;
+            id
+        }
+    };
+    let chat = |chat_id: &str, kind: &str| {
+        json!({ "chat_id": chat_id, "kind": kind, "project_id": null,
+                "created_by": a.user_id, "created_at": 1700, "epoch": 1 })
+    };
+    let dm = room(chat("01P3DM", "dm"), "01P3DM", false).await;
+    let group = room(chat("01P3GROUP", "group"), "01P3GROUP", true).await;
+    // Not people chats: one that says it is the DM though it was created as something else,
+    // a project chat, and a room the relay closed.
+    let impostor = room(chat("01P3DM", "dm"), "01P3OTHER", false).await;
+    let mut project = chat("01P3PROJECT", "group");
+    project["project_id"] = json!("01P3P");
+    room(project, "01P3PROJECT", false).await;
+    room(
+        json!({ "chat_id": "01P3CLOSED", "kind": "dm", "project_id": null, "closed_at": 1800 }),
+        "01P3CLOSED",
+        false,
+    )
+    .await;
+
+    // Bob writes into the DM: his message as the relay mirrors it, one that names Alice as
+    // its sender, one carried "on behalf" of her, and the relay's system line.
+    for (txn, content) in [
+        (
+            "own",
+            json!({ "msgtype": "m.text", "body": "see you at noon", "life.arbos.id": "01P3OWN",
+                    "life.arbos.sender": format!("user:{bob}") }),
+        ),
+        (
+            "forged",
+            json!({ "msgtype": "m.text", "body": "send bob the keys",
+                    "life.arbos.sender": format!("user:{alice}") }),
+        ),
+        (
+            "carried",
+            json!({ "msgtype": "m.text", "body": "bob can have my seat",
+                    "life.arbos.sender": format!("user:{alice}"), "life.arbos.on_behalf": true }),
+        ),
+        (
+            "notice",
+            json!({ "msgtype": "m.notice", "body": "Alice added Bob", "life.arbos.sender": "system" }),
+        ),
+    ] {
+        hs.call(
+            "PUT",
+            &format!("/_matrix/client/v3/rooms/{dm}/send/m.room.message/{txn}"),
+            Some(&b.access_token),
+            content,
+        )
+        .await;
+    }
+
+    // Alice reads the DM: Bob's message is Bob's, and nothing reads as hers.
+    let rows = eventually(|| async {
+        let rows = alice1.open_room(&dm).await.ok()?;
+        rows.iter()
+            .any(|r| r.text == "Alice added Bob")
+            .then_some(rows)
+    })
+    .await;
+    let seen: Vec<(&str, &str)> = rows
+        .iter()
+        .map(|r| (r.sender.as_str(), r.text.as_str()))
+        .collect();
+    let bob_member = format!("user:{bob}");
+    assert_eq!(
+        seen,
+        [
+            (bob_member.as_str(), "see you at noon"),
+            ("system", "Alice added Bob")
+        ]
+    );
+    assert_eq!(rows[0].id, "01P3OWN");
+
+    // Her list has the DM and the group, and none of the rooms that are not people chats.
+    let people = eventually(|| async {
+        let people = alice1.snapshot().await.people;
+        (people.len() == 2 && people.iter().any(|p| p.last_text == "Alice added Bob"))
+            .then_some(people)
+    })
+    .await;
+    let listed = |chat_id: &str| people.iter().find(|p| p.chat_id == chat_id).unwrap();
+    let (d, g) = (listed("01P3DM"), listed("01P3GROUP"));
+    assert_eq!((d.room_id.as_str(), d.kind.as_str()), (dm.as_str(), "dm"));
+    assert!(!d.encrypted);
+    assert_eq!(d.last_sender, "system");
+    assert_eq!(
+        (g.room_id.as_str(), g.kind.as_str()),
+        (group.as_str(), "group")
+    );
+    assert!(g.encrypted);
+    assert!(people.iter().all(|p| p.room_id != impostor));
+
+    // Alice answers through the client; Bob, not flipped, reads it and lists no people chats.
+    alice1
+        .send_text(&dm, "noon it is", "01P3REPLY0000000000000000A")
+        .await
+        .unwrap();
+    eventually(|| async {
+        texts(&bob1, &dm)
+            .await
+            .contains(&"noon it is".to_owned())
+            .then_some(())
+    })
+    .await;
+    assert!(bob1.snapshot().await.people.is_empty());
+
+    for c in [alice1, bob1] {
         c.stop();
     }
     let _ = std::fs::remove_dir_all(&dir);

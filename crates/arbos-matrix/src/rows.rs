@@ -66,6 +66,67 @@ pub struct SpaceRow {
     pub channel_ids: Vec<String>,
 }
 
+/// A DM or group in the left list (phase 3: people chats read from the homeserver).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PeopleRoomRow {
+    pub room_id: String,
+    /// The relay's chat id (`life.arbos.chat.chat_id`, the same in the room's create event).
+    pub chat_id: String,
+    /// `dm` | `group`.
+    pub kind: String,
+    /// Messages here are end-to-end encrypted; not knowing counts as encrypted.
+    pub encrypted: bool,
+    pub unread: u64,
+    pub mentions: u64,
+    pub last_text: String,
+    /// See [`ChannelRow::last_sender`].
+    pub last_sender: String,
+    pub last_sender_name: String,
+    pub last_ts: i64,
+}
+
+/// `life.arbos.chat` as the relay writes it on a chat's room (`matrix/worker.rs::chat_state`,
+/// and `close_room`'s marker). Anything else in there is not a state this build knows how to
+/// read, so the room is not listed rather than half understood.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)] // every field is type-checked; only some are read
+struct ChatState {
+    chat_id: String,
+    kind: String,
+    #[serde(default)]
+    project_id: Option<String>,
+    #[serde(default)]
+    created_by: Option<String>,
+    #[serde(default)]
+    created_at: Option<i64>,
+    #[serde(default)]
+    epoch: Option<i64>,
+    #[serde(default)]
+    closed_at: Option<i64>,
+}
+
+/// The relay's ids are ULIDs; this is the widest shape an app will take as a chat id.
+fn is_chat_id(id: &str) -> bool {
+    (1..=64).contains(&id.len())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// `(chat_id, kind)` when a room is an open people chat: `state` is its `life.arbos.chat`
+/// content, `create` its `m.room.create` content. Any member with the power to send state can
+/// rewrite `life.arbos.chat`; nobody can rewrite the create event, so a room is the chat the
+/// relay created it as (`creation_content.life.arbos.chat_id`) or it is not listed. A project
+/// chat (`project_id`) is not a people chat, whatever its kind.
+pub fn people_chat(state: &Value, create: &Value) -> Option<(String, String)> {
+    let s: ChatState = serde_json::from_value(state.clone()).ok()?;
+    let people = matches!(s.kind.as_str(), "dm" | "group") && s.project_id.is_none();
+    let created_as = create["life.arbos.chat_id"].as_str() == Some(s.chat_id.as_str());
+    (people && s.closed_at.is_none() && is_chat_id(&s.chat_id) && created_as)
+        .then_some((s.chat_id, s.kind))
+}
+
 /// `@gh_1:arbos.life` → `user:gh_1`; `@_a_<ulid>` → `agent:<ULID>`; anything else → `system`.
 pub fn member_of_mxid(mxid: &str) -> String {
     let local = mxid
@@ -111,6 +172,23 @@ pub fn shows(ev: &Value, room_encrypted: bool, decrypted: bool) -> bool {
             || decrypted
             || ev["type"] == "m.room.encrypted"
             || is_system_notice(ev))
+}
+
+/// Whether a people-chat event says nothing about its sender that the homeserver does not:
+/// `life.arbos.sender` is absent, names the Matrix `sender`, or marks the relay's system
+/// line. A row's author in a people chat is the account that sent the event, so a message
+/// carried for someone else (`life.arbos.on_behalf`, a past member's backfilled history) or
+/// one that simply names another member is not drawn.
+// Owner decision (spec §7 phase 3 backfill): dropped rather than attributed to whoever
+// carried it; the backfill slice decides how a past member's history is shown.
+pub fn sender_is_own(ev: &Value) -> bool {
+    match ev["content"].get("life.arbos.sender") {
+        None => true,
+        Some(claimed) => {
+            is_system_notice(ev)
+                || claimed.as_str() == ev["sender"].as_str().map(member_of_mxid).as_deref()
+        }
+    }
 }
 
 /// Build a [`MessageRow`] from one `m.room.message` event (JSON as the server sent it).
@@ -286,6 +364,155 @@ mod tests {
             "content": { "msgtype": "m.text", "body": LOCKED }
         });
         assert!(!message_row(&typed, &|_| None).unwrap().locked);
+    }
+
+    #[test]
+    fn a_people_chat_is_the_room_the_relay_created_for_it() {
+        let state = json!({ "chat_id": "01JCHAT", "kind": "dm", "project_id": null,
+            "created_by": "@gh_1:arbos.life", "created_at": 1700, "epoch": 1 });
+        let create = json!({ "room_version": "12", "life.arbos.chat_id": "01JCHAT" });
+        assert_eq!(
+            people_chat(&state, &create),
+            Some(("01JCHAT".to_owned(), "dm".to_owned()))
+        );
+        let with = |k: &str, v: Value| {
+            let mut s = state.clone();
+            s[k] = v;
+            s
+        };
+        assert!(people_chat(&with("kind", json!("group")), &create).is_some());
+        for (why, s, c) in [
+            ("a channel", with("kind", json!("channel")), create.clone()),
+            (
+                "a project chat",
+                with("project_id", json!("01JP")),
+                create.clone(),
+            ),
+            ("closed", with("closed_at", json!(1800)), create.clone()),
+            (
+                "an unknown field",
+                with("server_id", json!("x")),
+                create.clone(),
+            ),
+            (
+                "a chat id of the wrong type",
+                with("chat_id", json!(7)),
+                create.clone(),
+            ),
+            (
+                "an empty chat id",
+                with("chat_id", json!("")),
+                json!({ "life.arbos.chat_id": "" }),
+            ),
+            (
+                "a chat id that is a path",
+                with("chat_id", json!("../x")),
+                json!({ "life.arbos.chat_id": "../x" }),
+            ),
+            (
+                "an oversized chat id",
+                with("chat_id", json!("a".repeat(65))),
+                json!({ "life.arbos.chat_id": "a".repeat(65) }),
+            ),
+            // State rewritten to another chat's id: the create event still names the first.
+            (
+                "another chat's id",
+                with("chat_id", json!("01JOTHER")),
+                create.clone(),
+            ),
+            (
+                "no id in the create event",
+                state.clone(),
+                json!({ "room_version": "12" }),
+            ),
+            ("no state", Value::Null, create.clone()),
+        ] {
+            assert_eq!(people_chat(&s, &c), None, "{why}");
+        }
+    }
+
+    #[test]
+    fn a_people_row_is_from_the_account_that_sent_it() {
+        let ev = |sender: Value, content: Value| json!({ "type": "m.room.message", "event_id": "$e", "sender": sender, "content": content });
+        let mine = json!("@gh_7:arbos.life");
+        for (why, e, own) in [
+            (
+                "no claim",
+                ev(mine.clone(), json!({ "msgtype": "m.text", "body": "hi" })),
+                true,
+            ),
+            (
+                "the relay's mirror names the sender itself",
+                ev(
+                    mine.clone(),
+                    json!({ "body": "hi", "life.arbos.sender": "user:gh_7" }),
+                ),
+                true,
+            ),
+            (
+                "another member's name",
+                ev(
+                    mine.clone(),
+                    json!({ "body": "hi", "life.arbos.sender": "user:gh_8" }),
+                ),
+                false,
+            ),
+            (
+                "carried for a past member",
+                ev(
+                    mine.clone(),
+                    json!({ "body": "hi", "life.arbos.sender": "user:gh_8", "life.arbos.on_behalf": true }),
+                ),
+                false,
+            ),
+            (
+                "an agent's name",
+                ev(
+                    mine.clone(),
+                    json!({ "body": "hi", "life.arbos.sender": "agent:01X" }),
+                ),
+                false,
+            ),
+            (
+                "the system line",
+                ev(
+                    mine.clone(),
+                    json!({ "msgtype": "m.notice", "body": "a added b", "life.arbos.sender": "system" }),
+                ),
+                true,
+            ),
+            (
+                "a message dressed as the system",
+                ev(
+                    mine.clone(),
+                    json!({ "msgtype": "m.text", "body": "x", "life.arbos.sender": "system" }),
+                ),
+                false,
+            ),
+            (
+                "a claim that is not a string",
+                ev(mine.clone(), json!({ "life.arbos.sender": 7 })),
+                false,
+            ),
+            (
+                "a null claim",
+                ev(mine.clone(), json!({ "life.arbos.sender": null })),
+                false,
+            ),
+            (
+                "no sender at all",
+                ev(Value::Null, json!({ "life.arbos.sender": "user:gh_7" })),
+                false,
+            ),
+            // Undecryptable: the envelope carries no claim, the row is the sender's locked row.
+            (
+                "a locked event",
+                json!({ "type": "m.room.encrypted", "sender": "@gh_7:arbos.life", "content": { "ciphertext": "x" } }),
+                true,
+            ),
+        ] {
+            assert_eq!(sender_is_own(&e), own, "{why}");
+        }
     }
 
     #[test]

@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use arbos_matrix::{
     ChannelRow as CoreChannel, Listener as CoreListener, MatrixClient as CoreClient,
-    MessageRow as CoreMessage, Session as CoreSession, Snapshot as CoreSnapshot,
-    SpaceRow as CoreSpace,
+    MessageRow as CoreMessage, PeopleRoomRow as CorePeople, Session as CoreSession,
+    Snapshot as CoreSnapshot, SpaceRow as CoreSpace,
 };
 
 #[derive(Debug, Clone, thiserror::Error, uniffi::Error)]
@@ -43,6 +43,9 @@ pub struct MatrixSession {
     pub user_id: String,
     pub access_token: String,
     pub device_id: String,
+    /// `people_native` of `GET /me/matrix`: list DMs and groups in the snapshot.
+    #[uniffi(default = false)]
+    pub people_native: bool,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -90,10 +93,29 @@ pub struct MatrixSpaceRow {
     pub channel_ids: Vec<String>,
 }
 
+/// A DM or group (see `arbos_matrix::PeopleRoomRow`).
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct MatrixPeopleRow {
+    pub room_id: String,
+    pub chat_id: String,
+    /// `dm` | `group`.
+    pub kind: String,
+    pub encrypted: bool,
+    pub unread: u64,
+    pub mentions: u64,
+    pub last_text: String,
+    pub last_sender: String,
+    pub last_sender_name: String,
+    pub last_ts: i64,
+}
+
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct MatrixSnapshot {
     pub spaces: Vec<MatrixSpaceRow>,
     pub channels: Vec<MatrixChannelRow>,
+    /// Empty unless the session said `people_native`.
+    #[uniffi(default = [])]
+    pub people: Vec<MatrixPeopleRow>,
 }
 
 fn row(r: CoreMessage) -> MatrixMessageRow {
@@ -141,10 +163,26 @@ fn space(s: CoreSpace) -> MatrixSpaceRow {
     }
 }
 
+fn people(p: CorePeople) -> MatrixPeopleRow {
+    MatrixPeopleRow {
+        room_id: p.room_id,
+        chat_id: p.chat_id,
+        kind: p.kind,
+        encrypted: p.encrypted,
+        unread: p.unread,
+        mentions: p.mentions,
+        last_text: p.last_text,
+        last_sender: p.last_sender,
+        last_sender_name: p.last_sender_name,
+        last_ts: p.last_ts,
+    }
+}
+
 fn snapshot(s: CoreSnapshot) -> MatrixSnapshot {
     MatrixSnapshot {
         spaces: s.spaces.into_iter().map(space).collect(),
         channels: s.channels.into_iter().map(channel).collect(),
+        people: s.people.into_iter().map(people).collect(),
     }
 }
 
@@ -211,6 +249,7 @@ pub async fn matrix_start(
             user_id: session.user_id,
             access_token: session.access_token,
             device_id: session.device_id,
+            people_native: session.people_native,
         },
         arbos_matrix::Crypto {
             store_dir: crypto.store_dir.into(),

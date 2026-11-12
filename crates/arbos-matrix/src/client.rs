@@ -29,7 +29,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::watch;
 
-use crate::rows::{self, member_of_mxid, message_row, ChannelRow, MessageRow, SpaceRow};
+use crate::rows::{
+    self, member_of_mxid, message_row, ChannelRow, MessageRow, PeopleRoomRow, SpaceRow,
+};
 use crate::{Error, Result};
 
 /// What `GET /me/matrix` returns.
@@ -39,6 +41,10 @@ pub struct Session {
     pub user_id: String,
     pub access_token: String,
     pub device_id: String,
+    /// The relay's per-user switch (`users.matrix_people_native`): DMs and groups are listed
+    /// in the [`Snapshot`] and read from the homeserver. Off unless the relay says so.
+    #[serde(default)]
+    pub people_native: bool,
 }
 
 /// Where this device keeps its encryption keys.
@@ -71,6 +77,9 @@ pub enum Backup {
 pub struct Snapshot {
     pub spaces: Vec<SpaceRow>,
     pub channels: Vec<ChannelRow>,
+    /// DMs and groups; empty unless [`Session::people_native`].
+    #[serde(default)]
+    pub people: Vec<PeopleRoomRow>,
 }
 
 /// The app side. Called from the sync task; keep the handlers quick (post to the UI thread).
@@ -104,6 +113,7 @@ const BACKUP_STATE_WAIT: Duration = Duration::from_secs(30);
 pub struct MatrixClient {
     client: Client,
     me: OwnedUserId,
+    people_native: bool,
     listener: Arc<dyn Listener>,
     timelines: Mutex<HashMap<OwnedRoomId, Timeline>>,
     stop: watch::Sender<bool>,
@@ -159,6 +169,7 @@ impl MatrixClient {
         let this = Arc::new(Self {
             client,
             me: user_id,
+            people_native: session.people_native,
             listener,
             timelines: Mutex::new(HashMap::new()),
             stop,
@@ -261,6 +272,9 @@ impl MatrixClient {
                         };
                         let encrypted = Self::is_encrypted(&room).await;
                         if v["event_id"].is_null() || !rows::shows(&v, encrypted, info.is_some()) {
+                            return;
+                        }
+                        if this.is_people(&room).await && !rows::sender_is_own(&v) {
                             return;
                         }
                         v["room_id"] = json!(room.room_id().as_str());
@@ -380,11 +394,11 @@ impl MatrixClient {
     // ---- rooms --------------------------------------------------------------------------------
 
     async fn arbos_state(room: &Room) -> Option<Value> {
-        let raw = room
-            .get_state_event(StateEventType::from("life.arbos.chat"), "")
-            .await
-            .ok()
-            .flatten()?;
+        Self::state_content(room, StateEventType::from("life.arbos.chat")).await
+    }
+
+    async fn state_content(room: &Room, kind: StateEventType) -> Option<Value> {
+        let raw = room.get_state_event(kind, "").await.ok().flatten()?;
         let v: Value = match raw {
             matrix_sdk::deserialized_responses::RawAnySyncOrStrippedState::Sync(r) => {
                 serde_json::from_str(r.json().get()).ok()?
@@ -423,6 +437,18 @@ impl MatrixClient {
         out
     }
 
+    /// `(chat_id, kind)` when the room is an open people chat ([`rows::people_chat`]).
+    async fn people_chat(room: &Room) -> Option<(String, String)> {
+        let state = Self::arbos_state(room).await?;
+        let create = Self::state_content(room, StateEventType::RoomCreate).await?;
+        rows::people_chat(&state, &create)
+    }
+
+    /// Whether the room's rows follow the people-chat rule ([`rows::sender_is_own`]).
+    async fn is_people(&self, room: &Room) -> bool {
+        self.people_native && Self::people_chat(room).await.is_some()
+    }
+
     /// The newest row's (text, sender, sender name, time) for the list's preview.
     fn last_of(&self, room_id: &RoomId) -> (String, String, String, i64) {
         let tl = self.timelines.lock().unwrap_or_else(|p| p.into_inner());
@@ -443,6 +469,7 @@ impl MatrixClient {
     pub async fn snapshot(&self) -> Snapshot {
         let mut spaces: Vec<(SpaceRow, HashMap<String, String>)> = Vec::new();
         let mut channels: Vec<ChannelRow> = Vec::new();
+        let mut people: Vec<PeopleRoomRow> = Vec::new();
         for room in self.client.joined_rooms() {
             let Some(state) = Self::arbos_state(&room).await else {
                 continue;
@@ -487,6 +514,24 @@ impl MatrixClient {
                         order: String::new(),
                     });
                 }
+                Some("dm" | "group") if self.people_native => {
+                    let Some((chat_id, kind)) = Self::people_chat(&room).await else {
+                        continue;
+                    };
+                    let counts = room.unread_notification_counts();
+                    people.push(PeopleRoomRow {
+                        room_id: room.room_id().to_string(),
+                        chat_id,
+                        kind,
+                        encrypted: Self::is_encrypted(&room).await,
+                        unread: counts.notification_count,
+                        mentions: counts.highlight_count,
+                        last_text,
+                        last_sender,
+                        last_sender_name,
+                        last_ts,
+                    });
+                }
                 _ => {}
             }
         }
@@ -514,7 +559,12 @@ impl MatrixClient {
         channels.sort_by(|a, b| a.order.cmp(&b.order).then(a.name.cmp(&b.name)));
         let mut spaces: Vec<SpaceRow> = spaces.into_iter().map(|(s, _)| s).collect();
         spaces.sort_by(|a, b| b.last_ts.cmp(&a.last_ts).then(a.name.cmp(&b.name)));
-        Snapshot { spaces, channels }
+        people.sort_by(|a, b| b.last_ts.cmp(&a.last_ts).then(a.chat_id.cmp(&b.chat_id)));
+        Snapshot {
+            spaces,
+            channels,
+            people,
+        }
     }
 
     // ---- timelines ----------------------------------------------------------------------------
@@ -596,12 +646,15 @@ impl MatrixClient {
         opts.limit = UInt::from(HISTORY_PAGE);
         let page = room.messages(opts).await?;
         let encrypted = Self::is_encrypted(room).await;
+        let people = self.is_people(room).await;
         let events: Vec<Value> = page
             .chunk
             .iter()
             .filter_map(|e| {
                 let v = serde_json::from_str::<Value>(e.raw().json().get()).ok()?;
-                rows::shows(&v, encrypted, e.encryption_info().is_some()).then_some(v)
+                (rows::shows(&v, encrypted, e.encryption_info().is_some())
+                    && (!people || rows::sender_is_own(&v)))
+                .then_some(v)
             })
             .collect();
         let names = self.names_for(room, &events).await;
@@ -739,6 +792,7 @@ mod backup_tests {
                 user_id: "@gh_1:arbos.test".into(),
                 access_token: "t".into(),
                 device_id: "D".into(),
+                people_native: false,
             },
             Crypto {
                 store_dir: dir.clone(),
