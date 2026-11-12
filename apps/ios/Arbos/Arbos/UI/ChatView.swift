@@ -1031,7 +1031,13 @@ struct ChatSession: View {
             let name = who.name?.trimmingCharacters(in: .whitespaces) ?? ""
             memberNames[who.id] = name.isEmpty ? "@\(who.login)" : name
         }
-        let list = messages
+        // An agent-to-agent exchange — the words another agent sent into this chat and the
+        // answer that went back to it — is not what the chat shows by default (Jacob,
+        // 2026-11-04): it is between the two agents, not addressed to the owner reading
+        // here. The messages stay in the doc; the notification that announced the exchange
+        // is what opens it (`AppModel.crossRevealedChat`). A change of mind changes the id
+        // list, so the incremental paths below fall through to a full rebuild on their own.
+        let list = model.crossRevealedChat == chatId ? messages : messages.filter { !$0.isAgentCrossMessage }
         let version = model.messagesVersion[chatId]
         let shown = refreshVersion?.chat == chatId ? refreshVersion?.version : nil
         defer { refreshVersion = (chatId, version) }
@@ -1649,6 +1655,8 @@ struct ChatSession: View {
         // A bottom-bar search result or a quote tap: the rows may land after appear (room backfill).
         .onChange(of: model.pendingReveal) { _, _ in revealPendingIfNeeded() }
         .onChange(of: rows.count) { _, _ in revealPendingIfNeeded() }
+        // The agent-to-agent exchange opened or closed while this chat is on screen.
+        .onChange(of: model.crossRevealedChat) { _, _ in refreshRows() }
     }
 
     /// Message / membership / catch-up onChange hooks.

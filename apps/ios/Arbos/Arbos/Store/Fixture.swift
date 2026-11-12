@@ -804,8 +804,11 @@ extension AppModel {
                                parts: [.text(id: newId(), text: "Hello, Affine — Jacob asked me to pass along a hello.")], hiddenCount: 0)
             from.senderName = "Comms"
             from.senderHandle = "comms"
+            from.agentCrossFrom = "fx-comms"
             var reply = assistant(newId(), chatId, "Hello back, Jacob — and hi Comms! Ready whenever you want the shortlist sent.", at: t + 15_000)
             reply.agentReplyTo = "Comms"
+            reply.inReplyTo = from.id
+            reply.replyTo = from.id
             list += [from, reply]
         } else {
             let sent = Message(id: newId(), chatId: chatId, role: .assistant, sender: "agent", status: .done, turn: .spawn, decision: "new",

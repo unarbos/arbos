@@ -223,6 +223,13 @@ extension AppModel {
             } else {
                 pendingReveal = nil
             }
+            // A hit inside an agent-to-agent exchange: the transcript leaves that exchange
+            // out by default, so asking for one of its rows by id is what opens it. The
+            // `open` above cleared the flag, so this comes after it.
+            if pendingReveal != nil,
+               messages(of: chatId).contains(where: { $0.id == messageId && $0.isAgentCrossMessage }) {
+                crossRevealedChat = chatId
+            }
         case .server(let id):
             if let s = servers.first(where: { $0.id == id }) { open(server: s) }
         case .channel(_, let channelId):

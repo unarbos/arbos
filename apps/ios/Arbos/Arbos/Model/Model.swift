@@ -1214,6 +1214,11 @@ struct Message: Identifiable, Equatable {
     /// Agent-to-agent messaging: this reply answered a message another agent sent into the
     /// chat; the name drawn in the "Replied to ◉ X" line under the bubble.
     var agentReplyTo: String? = nil
+    /// Agent-to-agent messaging, receiving side: `agentMessage.fromProjectId` — the agent
+    /// whose words landed in this chat as a `project` row. Another Project's ordinary line
+    /// in a shared group (`role: .project`, F6) carries no `agentMessage`, which is what
+    /// tells the two apart.
+    var agentCrossFrom: String? = nil
     var inReplyTo: String?
     var usage: [String: Double]
     var model: String?
@@ -1258,6 +1263,16 @@ struct Message: Identifiable, Equatable {
     var preview: String? = nil
 
     var isStreaming: Bool { status == .streaming }
+
+    /// One row of an agent-to-agent exchange that landed in this chat: either the words
+    /// another agent sent in (`agentCrossFrom`) or the answer that went back to it
+    /// (`agentReplyTo`, which also carries the quote header and the "Replied to ◉ X" line).
+    var isAgentCrossMessage: Bool {
+        if role == .project, let from = agentCrossFrom, !from.isEmpty { return true }
+        if role == .assistant,
+           let to = agentReplyTo?.trimmingCharacters(in: .whitespaces), !to.isEmpty { return true }
+        return false
+    }
 
     /// The link preview the relay attached, unless the sender switched it off.
     var linkPreview: (id: Id, preview: LinkPreview)? {
@@ -1474,6 +1489,9 @@ enum DocJSON {
             job: JobRef(m["job"]),
             hidden: bool(m["hidden"]),
             agentReplyTo: str(m["agentReplyTo"]).flatMap { $0.isEmpty ? nil : $0 },
+            agentCrossFrom: (m["agentMessage"] as? [String: Any])
+                .flatMap { str($0["fromProjectId"]) }
+                .flatMap { $0.isEmpty ? nil : $0 },
             inReplyTo: str(m["inReplyTo"]),
             usage: usage,
             model: str(m["model"]),
