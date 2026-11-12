@@ -1,3 +1,4 @@
+import SwiftUI
 import XCTest
 import ArbosFFI
 @testable import Arbos
@@ -918,5 +919,31 @@ final class CoreFixturesTests: XCTestCase {
         XCTAssertNil(AttachmentSource.httpsPageURL(from: "http://example.com/g/1"))
         XCTAssertNil(AttachmentSource.httpsPageURL(from: "file:///tmp/x.gif"))
         XCTAssertNil(AttachmentSource.httpsPageURL(from: "javascript:alert(1)"))
+    }
+
+    /// An animated picture in a chat plays: the view that draws it is a `UIImageView` running
+    /// UIKit's frame animation. SwiftUI's `Image(uiImage:)` shows only the first frame.
+    @MainActor
+    func testAnAnimatedPicturePlays() throws {
+        func solid(_ color: UIColor) -> UIImage {
+            UIGraphicsImageRenderer(size: CGSize(width: 8, height: 8)).image { ctx in
+                color.setFill()
+                ctx.fill(CGRect(x: 0, y: 0, width: 8, height: 8))
+            }
+        }
+        let animated = try XCTUnwrap(UIImage.animatedImage(with: [solid(.red), solid(.blue)], duration: 0.2))
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
+        window.rootViewController = UIHostingController(rootView: PlayingImage(image: animated))
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        func find(_ v: UIView) -> UIImageView? {
+            (v as? UIImageView) ?? v.subviews.lazy.compactMap(find).first
+        }
+        let view = try XCTUnwrap(find(window), "no image view was made")
+        XCTAssertEqual(view.bounds.width, 390, "the picture takes the width it is given, not its own 8 points")
+        XCTAssertTrue(view.layer.animationKeys()?.contains("UIImageAnimationContents") ?? false, "the frames are not playing")
     }
 }

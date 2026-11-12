@@ -732,9 +732,7 @@ private struct ZoomableImagePage: View {
         GeometryReader { geo in
             ZStack {
                 if let image {
-                    Image(uiImage: image)
-                        .resizable()
-                        .scaledToFit()
+                    PlayingImage(image: image)
                         .frame(width: geo.size.width, height: geo.size.height)
                         .scaleEffect(scale)
                         .offset(offset)
@@ -760,7 +758,8 @@ private struct ZoomableImagePage: View {
             }
         }
         .task(id: item.blobRef ?? item.pictureURL) {
-            if let (data, _) = await MediaFetch.bytes(for: item, model: model), let img = UIImage(data: data) {
+            if let (data, _) = await MediaFetch.bytes(for: item, model: model),
+               let img = AnimatedImageFrames.animatedImage(from: data) ?? UIImage(data: data) {
                 image = img
             } else {
                 failed = true
