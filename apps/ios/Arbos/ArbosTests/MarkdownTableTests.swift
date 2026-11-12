@@ -1,7 +1,8 @@
 import XCTest
 @testable import Arbos
 
-/// Jacob, "Find me a book store in lima" (iPhone, 2026-10-25 21:31 UTC): the agent's table —
+/// Jacob, "Find me a book store in lima" ([feedback markdown-tables-ios-2026-10-25], iPhone,
+/// 2026-10-25 21:31 UTC): the agent's table —
 /// plain GFM, store names as `[Name](https://…)` links — was drawn as a monospace block of raw
 /// `[…](https://…)` cut off at the bubble's right edge. The table is a real table: one header row,
 /// one body row per store, the same columns in every row, and every name cell an inline link.

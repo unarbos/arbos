@@ -1081,12 +1081,29 @@ class VoiceCall:
             agent_name=self.agent_name,
             fetch=lambda after, wait: self.relay.inbox(self.call_id, self.project_id, after, wait),
             add_context=self.add_context,
-            speak=self.say,
+            speak=self.speak_update,
             quiet=self.room_quiet,
             leaving=lambda: self.state.leaving,
             on_update=lambda u: self.event("update", kind=u.kind, message_id=u.message_id, chars=len(u.text)),
         )
         self.updates.start()
+
+    async def speak_update(self, instructions: str) -> None:
+        """Speak a chat/job follow-up, and nudge once if the realtime model stayed silent.
+
+        Same failure mode as a slow `ask_agent` tool result: `generate_reply` can return without
+        audio. A background job that finished while the person waits on the call must be heard
+        without them speaking again.
+        """
+        since = time.monotonic()
+        await self.say(instructions)
+        await asyncio.sleep(3.0)
+        if self.state.leaving or self.state.muted:
+            return
+        if self.state.last_speech_started_at >= since or self.agent_speaking():
+            return
+        log.info("agent silent after a call update; nudging")
+        await self.say(instructions)
 
     # ---- vision ------------------------------------------------------------------------------------
 

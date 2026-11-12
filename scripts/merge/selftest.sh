@@ -937,5 +937,82 @@ else
 fi
 
 echo
+echo "merge.sh merges native stacked PRs via merge-async, and never exits 0 on a non-merge:"
+# 13. On 2026-11-10 a stacked PR got a clean GO, then PUT .../merge returned HTTP 403 ("Merging stacked
+# PRs via this endpoint is not supported"), and merge.sh still exited 0 without MERGED or NOT MERGED.
+# These cases pin the helpers and the control-flow contracts that close that hole. No network: the
+# classifiers run on fixtures, and the call sites are asserted in the source the same way block 12d
+# asserts the three main_head reads.
+ssf_src=$(sed -n '/^stacked_sync_forbidden() {/,/^}/p' "$D/merge.sh")
+sod_src=$(sed -n '/^stack_open_downstack() {/,/^}/p' "$D/merge.sh")
+ams_src=$(sed -n '/^async_merge_sha() {/,/^}/p' "$D/merge.sh")
+if [ -z "$ssf_src" ] || [ -z "$sod_src" ] || [ -z "$ams_src" ]; then
+  bad "stacked-merge helpers missing from merge.sh (stacked_sync_forbidden / stack_open_downstack / async_merge_sha)"
+else
+  eval "$ssf_src"; eval "$sod_src"; eval "$ams_src"
+  if stacked_sync_forbidden '{"message":"Merging stacked PRs via this endpoint is not supported. Use the asynchronous merge endpoint instead."}'; then
+    ok "the 403 stacked-PR body is recognised as a sync-merge forbid"
+  else
+    bad "stacked_sync_forbidden misses the documented 403 message"
+  fi
+  if stacked_sync_forbidden '{"message":"Resource not accessible by personal access token"}'; then
+    bad "a generic 403 is being treated as a stacked-PR forbid"
+  else
+    ok "a generic 403 is not treated as a stacked-PR forbid"
+  fi
+  # Bottom → top: 10 under 20 under 30. Open below 30 is 10 and 20; below 10 is empty; closed is skipped.
+  stack_prs='[{"number":10,"state":"open"},{"number":20,"state":"closed"},{"number":30,"state":"open"}]'
+  got=$(stack_open_downstack 30 "$stack_prs" | tr '\n' ' ')
+  if [ "$got" = "10 " ]; then ok "stack_open_downstack names only open PRs strictly below the requested one"
+  else bad "stack_open_downstack for #30: got '$got', want '10 ' (20 is closed)"; fi
+  got=$(stack_open_downstack 10 "$stack_prs" | tr '\n' ' ')
+  if [ -z "$got" ]; then ok "the bottom of a stack has no downstack"
+  else bad "bottom PR reported downstack '$got'"; fi
+  if [ "$(async_merge_sha '{"status":"merged","details":{"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}')" = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" ]; then
+    ok "async_merge_sha returns the sha only when status is merged"
+  else
+    bad "async_merge_sha did not return the merge sha for a merged result"
+  fi
+  if [ -z "$(async_merge_sha '{"status":"failed","details":{"message":"conflict"}}')" ]; then
+    ok "async_merge_sha is empty for a failed result"
+  else
+    bad "async_merge_sha returned a sha for a failed result"
+  fi
+  if [ -z "$(async_merge_sha '{"status":"enqueued","details":{"message":"queued"}}')" ]; then
+    ok "async_merge_sha is empty for enqueued (not a real merge)"
+  else
+    bad "async_merge_sha treated enqueued as merged"
+  fi
+fi
+# Control flow in the source: merge-async endpoint, 403 fallback, MERGED only with a sha, exit 3 otherwise.
+if printf '%s\n' "$mcode" | grep -q 'pulls/\$PR/merge-async'; then
+  ok "merge.sh calls the merge-async endpoint"
+else
+  bad "merge.sh never references pulls/\$PR/merge-async"
+fi
+if printf '%s\n' "$mcode" | grep -q 'stacked_sync_forbidden' && printf '%s\n' "$mcode" | grep -q 'refuse_unvetted_downstack'; then
+  ok "a sync 403 falls through stacked_sync_forbidden into refuse_unvetted_downstack before merge-async"
+else
+  bad "the 403 → vet downstack → merge-async path is gone"
+fi
+if printf '%s\n' "$mcode" | grep -qE 'echo "MERGED \$msha"'; then
+  ok "a successful merge prints MERGED <sha>"
+else
+  bad "merge.sh no longer prints MERGED <sha> on success"
+fi
+# Every non-success merge-call arm must be exit 3 with NOT MERGED — the defect was exit 0 after a 403.
+not_merged_exits=$(printf '%s\n' "$mcode" | grep -c 'echo "NOT MERGED: merge')
+if [ "$not_merged_exits" -ge 4 ]; then
+  ok "merge-call failure arms print NOT MERGED ($not_merged_exits of them)"
+else
+  bad "expected at least 4 merge-call NOT MERGED arms, found $not_merged_exits — a silent fall-through exits 0"
+fi
+if printf '%s\n' "$mcode" | awk '/merge call|merge-async call|MERGED \$msha/{p=1} p && /exit 0/{print; e=1} END{exit !e}'; then
+  bad "an explicit exit 0 sits on the merge-call path — a non-merge must not be able to reach it"
+else
+  ok "no explicit exit 0 on the merge-call path"
+fi
+
+echo
 if [ "$fail" -eq 0 ]; then echo "selftest: PASS"; else echo "selftest: FAIL"; fi
 exit "$fail"

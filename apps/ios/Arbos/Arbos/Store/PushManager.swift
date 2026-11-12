@@ -15,6 +15,16 @@ import UserNotifications
 
 private let notifyLog = Logger(subsystem: "com.unarbos.arbos.ios", category: "notify")
 
+/// Whether this device should POST a push/VoIP token to the relay.
+///
+/// Pass `force: true` when the app becomes active ([feedback closed-app-call-ring-2026-11-11]):
+/// the relay deletes tokens Apple rejects (`BadDeviceToken` / `Unregistered`), and without a
+/// forced pass the phone keeps its local "already registered" mark and never restores
+/// closed-app ringing.
+func pushTokenNeedsUpload(force: Bool, token: String, registered: String?) -> Bool {
+    force || registered != token
+}
+
 @MainActor
 final class PushManager: NSObject, ObservableObject, UNUserNotificationCenterDelegate {
     static let shared = PushManager()
@@ -100,9 +110,11 @@ final class PushManager: NSObject, ObservableObject, UNUserNotificationCenterDel
     }
 
     /// Sends the token once per (token, relay) — called after sign-in and on token change.
+    /// Pass `force: true` on foreground so a relay-dropped dead token is put back
+    /// ([feedback closed-app-call-ring-2026-11-11]).
     func sendTokenIfNeeded(force: Bool = false) async {
         guard let token = apnsToken, let register else { return }
-        if !force, registeredToken == token { return }
+        guard pushTokenNeedsUpload(force: force, token: token, registered: registeredToken) else { return }
         registeredToken = token
         await register(token, PushManager.environment)
     }
