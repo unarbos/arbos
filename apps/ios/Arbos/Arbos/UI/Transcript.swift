@@ -3380,9 +3380,7 @@ struct ImageBubble: View {
             let flush = PhotoBubbleLayout.pictureIsFlush(picture: picture, bubbleWidth: g.size.width)
             ZStack {
                 if let shown = (animate ? image : stillFrame) ?? image {
-                    Image(uiImage: shown)
-                        .resizable()
-                        .scaledToFit()
+                    PlayingImage(image: shown)
                 } else if failed || item.cacheKey == nil {
                     Image(systemName: "photo")
                         .font(theme.font(28))
@@ -4147,5 +4145,28 @@ struct StreamingText: View {
 
     private func string(_ bytes: [UInt8], _ from: Int, _ to: Int) -> String {
         String(decoding: bytes[from..<to], as: UTF8.self)
+    }
+}
+
+/// A picture fitted to the size it is given, playing when it is an animated `UIImage`.
+/// SwiftUI's `Image(uiImage:)` draws one frame of an animated image and never the rest;
+/// `UIImageView` plays it.
+struct PlayingImage: UIViewRepresentable {
+    let image: UIImage
+
+    func makeUIView(context: Context) -> UIImageView {
+        let view = UIImageView()
+        view.contentMode = .scaleAspectFit
+        view.clipsToBounds = true
+        return view
+    }
+
+    func updateUIView(_ view: UIImageView, context: Context) {
+        if view.image !== image { view.image = image }
+    }
+
+    /// The offered size, not the picture's pixel size.
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: UIImageView, context: Context) -> CGSize? {
+        proposal.replacingUnspecifiedDimensions(by: image.size)
     }
 }
