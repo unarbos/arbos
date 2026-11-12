@@ -498,6 +498,7 @@ async fn main() -> anyhow::Result<()> {
             post(matrix::appservice::push_notify),
         )
         .route("/me/matrix", get(matrix::servers::me_matrix))
+        .route("/me/matrix/people", get(matrix::servers::me_matrix_people))
         .route(
             "/_matrix/client/{*rest}",
             axum::routing::any(matrix::servers::proxy),
@@ -560,6 +561,10 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/admin/matrix/reads/{user}",
             put(matrix::appservice::set_reads),
+        )
+        .route(
+            "/admin/matrix/people/{user}",
+            put(matrix::appservice::set_people_native),
         )
         .route(
             "/admin/matrix/pushers",

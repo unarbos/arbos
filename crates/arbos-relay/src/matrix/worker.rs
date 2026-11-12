@@ -748,6 +748,13 @@ impl Worker {
         parts: Option<&Value>,
         ts: Option<i64>,
     ) -> MxResult<()> {
+        // Phase 3: a chat its members read on the homeserver (`people_native_room`) is still
+        // mirrored. A device that sends there writes no Loro row, so nothing arrives here to
+        // double; what does arrive is from a member's device that still writes the Loro room
+        // (every iPhone so far), and dropping it would hide the message from the others.
+        // Owner decision: stop mirroring such a chat only once no shipped app writes its Loro
+        // room. The one thing never sent twice is a message id this chat already has an
+        // event for (below, and the transaction id).
         if self
             .state
             .db
@@ -1143,6 +1150,56 @@ mod tests {
             .handle(&message(&plain))
             .await
             .expect_err("a plaintext room is still written to");
+    }
+
+    /// Phase 3: a chat every member reads on the homeserver keeps its mirror (a member's
+    /// phone may still write the Loro room), and a message id the chat already has an event
+    /// for is not sent again. The homeserver here does not exist: reaching it fails the job.
+    #[tokio::test]
+    async fn a_native_chat_is_still_mirrored_and_no_message_twice() {
+        let mut state = test_state(AuthMode::Github);
+        state.matrix = Matrix::new(Config {
+            mode: crate::matrix::Mode::Dual,
+            hs_url: "http://127.0.0.1:9".into(),
+            ..Config::off()
+        });
+        let (alice, _) = person(&state, 1211);
+        let (bob, _) = person(&state, 1212);
+        let chat = dm(&state, &alice, &bob);
+        state
+            .db
+            .matrix_insert_room(&chat, "!native:arbos.life", None, "dm", false)
+            .expect("room");
+        for u in [&alice, &bob] {
+            assert!(state.db.set_matrix_people_native(u, true).expect("flag"));
+        }
+        let chats = state
+            .db
+            .chats_of_member(&format!("user:{bob}"))
+            .expect("db");
+        assert_eq!(
+            crate::matrix::people_native_room(&state, &chats[0]).as_deref(),
+            Some("!native:arbos.life")
+        );
+        let message = |id: &str| Job::Message {
+            chat_id: chat.clone(),
+            project_id: None,
+            message_id: id.into(),
+            sender: format!("user:{bob}"),
+            text: "from the phone".into(),
+            parts: None,
+            ts: None,
+        };
+        let worker = Worker::new(state.clone());
+        worker
+            .handle(&message("m1"))
+            .await
+            .expect_err("written to the homeserver, which is not there");
+        state
+            .db
+            .matrix_insert_event(&chat, "m2", "$have", &format!("user:{bob}"), 1)
+            .expect("event");
+        worker.handle(&message("m2")).await.expect("not sent again");
     }
 
     #[test]

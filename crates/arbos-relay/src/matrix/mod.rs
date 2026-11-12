@@ -46,6 +46,28 @@ pub const E2EE_MEMBER_CAP: usize = 200;
 /// How long a `Resync` waits after the first row of a burst.
 const RESYNC_DELAY_MS: i64 = 4_000;
 
+/// Phase 3: the homeserver room a people chat's members read and write directly, or `None`
+/// while the chat still lives in its Loro room. A device that sends there writes nothing to
+/// the Loro room, so the answer is a room only when nobody would miss the message:
+/// every member is a person (an agent reads and answers through the Loro room), every one
+/// of them is flagged (`users.matrix_people_native`), and the chat has an open room. A
+/// failed lookup reads as `None`: the Loro room is the path that loses nothing.
+pub fn people_native_room(
+    state: &AppState,
+    cm: &crate::db_people::ChatWithMembers,
+) -> Option<String> {
+    if !state.matrix.cfg.mode.writes() || cm.members.is_empty() {
+        return None;
+    }
+    for m in &cm.members {
+        if !state.db.matrix_people_native(m.user_id()?).ok()? {
+            return None;
+        }
+    }
+    let room = state.db.matrix_room(&cm.chat.id).ok()??;
+    (room.closed_at.is_none() && room.project_id.is_none()).then_some(room.room_id)
+}
+
 /// `ARBOS_MATRIX`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {

@@ -828,10 +828,17 @@ extension AppModel {
         defer { matrixLifetime.failed(owner) }
         let requestAPI = work.api
         do {
-            guard let creds = try await requestAPI.matrixSession(), acceptsMatrix(owner) else { return }
+            let answer = try await requestAPI.matrixSession()
+            guard acceptsMatrix(owner) else { return }
+            guard let creds = answer else {
+                // No homeserver on this relay (any more): no chat is read from one.
+                applyNativeRooms([:])
+                return
+            }
             let listener = MatrixBridgeListener(model: self, owner: owner)
             let session = ArbosFFI.MatrixSession(homeserver: creds.homeserver, userId: creds.userId,
-                                                 accessToken: creds.accessToken, deviceId: creds.deviceId)
+                                                 accessToken: creds.accessToken, deviceId: creds.deviceId,
+                                                 peopleNative: creds.peopleNative)
             // No key, no client: without it the store holding the room keys would be written
             // unencrypted. The next call tries again (the Keychain may only have been locked).
             guard let storeKey = WalletVault.storeKey(device: creds.deviceId) else {
@@ -850,9 +857,15 @@ extension AppModel {
             matrixClient = client
             matrixLifetime.ready(owner)
             matrixConnected = true
+            peopleNative = creds.peopleNative
+            // Switched off (the rollback): every people chat is its Loro room again from the
+            // next `refreshPeople` on.
+            if !peopleNative { applyNativeRooms([:]) }
             let snapshot = await client.snapshot()
             guard acceptsMatrix(owner) else { return }
             applyMatrixSnapshot(snapshot)
+            await refreshNativeRooms(expectedOwner: owner.account)
+            guard acceptsMatrix(owner) else { return }
             // Waits for the first sync's word on the key backup; never holds up the start.
             Task { await ensureKeys(client) }
         } catch {
@@ -872,6 +885,8 @@ extension AppModel {
         matrixSnapshot = ArbosFFI.MatrixSnapshot(spaces: [], channels: [])
         matrixConnected = true
         matrixDisconnectedSince = nil
+        peopleNative = false
+        applyNativeRooms([:])
         for id in channelRows.keys { caughtUp.remove(id) }
         channelRows = [:]
         channelAtStart = []
@@ -885,6 +900,8 @@ extension AppModel {
         if let id = visibleChatId, channel(id) != nil, !caughtUp.contains(id) {
             openChannel(id)
         }
+        // A native people chat is shown once the homeserver lists its room.
+        openNativeRooms()
     }
 
     func applyMatrixConnection(connected: Bool, error: String?) {
@@ -905,9 +922,25 @@ extension AppModel {
         guard let channelId = channelId(forRoom: roomId) else { return }
         setChannelRows(channelId, rows)
         if visibleChatId == channelId { markChannelRead(channelId) }
+        // A native chat's newest row can arrive before its key (the first of a key session),
+        // and the client reads a locked row again only when asked (`open_room`). Asked once,
+        // shortly after, and whenever the chat opens; a row still locked then stays so until
+        // the next. Upgrade path: the client sends the row again when its key arrives.
+        if nativeRooms[channelId] != nil, rows.last?.locked == true,
+           case .running(let owner) = matrixLifetime.state {
+            Task {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                guard acceptsMatrix(owner), !Task.isCancelled else { return }
+                openChannel(channelId)
+            }
+        }
     }
 
     private func channelId(forRoom roomId: String) -> Id? {
+        if let chat = nativeRooms.first(where: { $0.value == roomId })?.key {
+            // A people chat only one of the relay and the homeserver vouches for is not shown.
+            return nativeRoom(chat) == nil ? nil : chat
+        }
         if let row = matrixSnapshot.channels.first(where: { $0.roomId == roomId }), !row.channelId.isEmpty {
             return row.channelId
         }
@@ -920,11 +953,15 @@ extension AppModel {
     /// Decode the chat-doc rows and keep optimistic sends whose echo has not landed yet
     /// (the echo carries the same id, so it simply replaces the pending row).
     private func setChannelRows(_ channelId: Id, _ rows: [ArbosFFI.MatrixMessageRow]) {
-        var decoded = rows.compactMap { Self.decodeMatrixRow($0, chatId: channelId) }
+        // A native people chat's pending rows are the client's own: it takes a failed one back.
+        let native = nativeRooms[channelId] != nil
+        var decoded = native
+            ? Self.nativeMessages(rows, chatId: channelId, members: nativeMembers(channelId))
+            : rows.compactMap { Self.decodeMatrixRow($0, chatId: channelId) }
         for i in decoded.indices { _ = fillChannelSender(&decoded[i]) }
         let ids = Set(decoded.map(\.id))
         let cutoff = nowMs() - 60_000
-        for m in channelRows[channelId] ?? [] where m.pending && !ids.contains(m.id) && m.createdAt > cutoff {
+        for m in channelRows[channelId] ?? [] where !native && m.pending && !ids.contains(m.id) && m.createdAt > cutoff {
             decoded.append(m)
         }
         decoded.sort { $0.createdAt == $1.createdAt ? $0.id < $1.id : $0.createdAt < $1.createdAt }
@@ -949,10 +986,16 @@ extension AppModel {
 
     // MARK: Channel timelines
 
+    /// The homeserver room a chat's rows are read from: a channel's, or a native people chat's.
+    private func timelineRoomId(_ chatId: Id) -> String? {
+        if let c = channel(chatId) { return channelRoomId(c) }
+        return nativeRoom(chatId)
+    }
+
     /// `openRoom`: the newest page, then live rows through the listener. Safe to call again.
     func openChannel(_ channelId: Id) {
         guard case .running(let owner) = matrixLifetime.state, acceptsMatrix(owner),
-              let c = channel(channelId), let client = matrixClient, let roomId = channelRoomId(c),
+              let client = matrixClient, let roomId = timelineRoomId(channelId),
               !channelLoading.contains(channelId) else { return }
         channelLoading.insert(channelId)
         Task {
@@ -962,19 +1005,24 @@ extension AppModel {
                 let rows = try await client.openRoom(roomId: roomId)
                 guard acceptsMatrix(owner), !Task.isCancelled else { return }
                 setChannelRows(channelId, rows)
-                try? await client.markRead(roomId: roomId)
+                // A native people chat is also read off screen (`openNativeRooms`): that is
+                // not the person reading it.
+                if nativeRooms[channelId] == nil || visibleChatId == channelId {
+                    try? await client.markRead(roomId: roomId)
+                }
             } catch {
                 guard acceptsMatrix(owner), !Task.isCancelled else { return }
                 matrixLog.notice("open room failed: \(error.localizedDescription, privacy: .public)")
-                // Paint the empty transcript rather than a spinner that never ends.
-                caughtUp.insert(channelId)
+                // Paint the empty transcript rather than a spinner that never ends. A native
+                // people chat is asked for again instead (`openNativeRooms`).
+                if nativeRooms[channelId] == nil { caughtUp.insert(channelId) }
             }
         }
     }
 
     func markChannelRead(_ channelId: Id) {
         guard case .running(let owner) = matrixLifetime.state, acceptsMatrix(owner),
-              let c = channel(channelId), let client = matrixClient, let roomId = channelRoomId(c) else { return }
+              let client = matrixClient, let roomId = timelineRoomId(channelId) else { return }
         Task {
             guard acceptsMatrix(owner), !Task.isCancelled else { return }
             try? await client.markRead(roomId: roomId)
@@ -984,7 +1032,7 @@ extension AppModel {
     /// One older page when the transcript is scrolled near its top; stops at the room's start.
     func loadOlderChannel(_ channelId: Id) {
         guard case .running(let owner) = matrixLifetime.state, acceptsMatrix(owner),
-              let c = channel(channelId), let client = matrixClient, let roomId = channelRoomId(c),
+              let client = matrixClient, let roomId = timelineRoomId(channelId),
               caughtUp.contains(channelId), !channelAtStart.contains(channelId),
               !channelLoading.contains(channelId) else { return }
         channelLoading.insert(channelId)
@@ -1032,6 +1080,186 @@ extension AppModel {
                 guard acceptsMatrix(owner), !Task.isCancelled else { return }
                 channelRows[channelId]?.removeAll { $0.id == messageId }
                 fail("send your message", error)
+            }
+        }
+    }
+
+    // MARK: Native people chats (phase 3)
+    //
+    // The Mac's rule (crates/arbos-mac/src/sync/relay.rs), kept the same here: the relay names
+    // a people chat's room only when every member is a flagged person (no agent, nobody
+    // unflagged); this phone takes that answer only as written (`parsePeopleRooms`) and reads
+    // and writes the room only once the homeserver lists that very room as that very chat
+    // (`confirmedRoom`). Everything else stays in its Loro room.
+
+    /// What a native chat answers to a verb the homeserver path does not carry yet (the Mac's
+    /// words).
+    static let nativeTextOnly = "This chat can only send text for now"
+
+    /// `GET /me/matrix/people` as the relay writes it, `{rooms: {<chat_id>: <room_id>}}` and
+    /// nothing else, or nil when the answer is not that (what was known is kept). Kept: the
+    /// people chats this phone lists, each with a room id no other chat is given.
+    static func parsePeopleRooms(_ raw: Any, people: Set<Id>) -> [Id: String]? {
+        guard let d = raw as? [String: Any], d.count == 1, let rooms = d["rooms"] as? [String: String] else { return nil }
+        let uses = Dictionary(rooms.values.map { ($0, 1) }, uniquingKeysWith: +)
+        return rooms.filter { chat, room in
+            people.contains(chat) && room.hasPrefix("!") && room.utf8.count <= 255 && uses[room] == 1
+        }
+    }
+
+    /// The room a native chat is shown from: the one the relay names for it (`relay`), and
+    /// only once the homeserver lists that very room as that very chat (`homeserver`, already
+    /// checked against the room's create event). A room only one of them vouches for is not shown.
+    static func confirmedRoom(relay: [Id: String], homeserver: [ArbosFFI.MatrixPeopleRow], chatId: Id) -> String? {
+        guard let room = relay[chatId],
+              homeserver.contains(where: { $0.roomId == room && $0.chatId == chatId }) else { return nil }
+        return room
+    }
+
+    /// The homeserver room of a native chat (`confirmedRoom`).
+    func nativeRoom(_ chatId: Id) -> String? {
+        Self.confirmedRoom(relay: nativeRooms, homeserver: matrixSnapshot.people, chatId: chatId)
+    }
+
+    /// The homeserver's row for a native chat: its unread count and whether it is encrypted.
+    func nativePeopleRow(_ chatId: Id) -> ArbosFFI.MatrixPeopleRow? {
+        guard let room = nativeRoom(chatId) else { return nil }
+        return matrixSnapshot.people.first { $0.roomId == room }
+    }
+
+    /// Ask the relay which people chats are on the homeserver. Only a session told
+    /// `people_native` asks; a failed or malformed answer keeps what was known.
+    func refreshNativeRooms(expectedOwner: WorkLifetime.Ticket? = nil) async {
+        guard peopleNative, !isFixture, let work = accountWork(expectedOwner: expectedOwner) else { return }
+        let raw = try? await work.api.matrixPeopleRooms()
+        // Another account's answer is not this one's rooms.
+        guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
+        guard let raw,
+              let rooms = Self.parsePeopleRooms(raw, people: Set(peopleChats.map(\.id))) else {
+            matrixLog.notice("bad or no /me/matrix/people")
+            return
+        }
+        // Signed out, or switched off, while the relay answered.
+        guard peopleNative else { return }
+        applyNativeRooms(rooms)
+        openNativeRooms()
+        // `link` goes live with a Loro room; an account whose every chat is native may have
+        // none left to say the relay is reachable. It just answered.
+        if link == .connecting, !nativeRooms.isEmpty { link = .live }
+    }
+
+    /// Read every native chat's room once: the newest page, then live rows through the
+    /// listener, so an unopened chat still previews the way a synced Loro doc does.
+    // One `/messages` request per native chat per launch; a persistent event cache (spec
+    // §3.2) is what makes this free.
+    private func openNativeRooms() {
+        for chat in nativeRooms.keys where !caughtUp.contains(chat) { openChannel(chat) }
+    }
+
+    /// `user:<id>` of everyone in a people chat, in the relay's spelling.
+    private func nativeMembers(_ chatId: Id) -> [String] {
+        (myUserId.map { [$0] } ?? []) + (peopleChat(chatId)?.humans.map(\.member) ?? [])
+    }
+
+    /// A native chat's rows as the transcript's messages. Who sent a row is the account the
+    /// homeserver says sent it (`row.sender`). That names a person by Matrix localpart, which
+    /// is lower-case; `members` (`user:<id>`, the relay's spelling) puts the id back so "mine"
+    /// and the roster lookups match, for a row's sender and for who reacted.
+    static func nativeMessages(_ rows: [ArbosFFI.MatrixMessageRow], chatId: Id, members: [String]) -> [Message] {
+        func exact(_ who: String) -> String {
+            members.first { $0.caseInsensitiveCompare(who) == .orderedSame } ?? who
+        }
+        return rows.compactMap { row in
+            guard var m = decodeMatrixRow(row, chatId: chatId) else { return nil }
+            m.chatId = chatId
+            m.sender = exact(row.sender)
+            m.pending = row.pending
+            for i in m.reactions.indices { m.reactions[i].senders = m.reactions[i].senders.map(exact) }
+            return m
+        }
+    }
+
+    /// The homeserver's event for a row of a native chat, by message id.
+    private func nativeEventId(_ client: ArbosFFI.MatrixClient, room: String, messageId: Id) async -> String? {
+        (try? await client.openRoom(roomId: room))?.first { $0.id == messageId && !$0.pending }?.eventId
+    }
+
+    /// Text into a native chat; `replyTo` is a row id of this chat. The row shows through the
+    /// timeline (`pending`) before the homeserver has it and leaves again if the send fails.
+    /// The client encrypts it in an encrypted room or does not send it.
+    func sendNativePeople(chatId: Id, text: String, replyTo: Id?) {
+        guard let client = matrixClient, let room = nativeRoom(chatId),
+              case .running(let owner) = matrixLifetime.state, acceptsMatrix(owner) else {
+            setSendError(chatId, UserError.of("send your message", .offline(deviceOffline: false), "Not connected to the server yet."))
+            return
+        }
+        let messageId = newId()
+        Task {
+            guard acceptsMatrix(owner), !Task.isCancelled else { return }
+            do {
+                if let replyTo {
+                    let event = await nativeEventId(client, room: room, messageId: replyTo)
+                    guard acceptsMatrix(owner), !Task.isCancelled else { return }
+                    guard let event else {
+                        failRefused("send your message", "That message is no longer here.")
+                        return
+                    }
+                    _ = try await client.sendReply(roomId: room, text: text, replyTo: event, localId: messageId)
+                } else {
+                    _ = try await client.sendText(roomId: room, text: text, localId: messageId)
+                }
+            } catch {
+                guard acceptsMatrix(owner), !Task.isCancelled else { return }
+                fail("send your message", error)
+            }
+        }
+    }
+
+    /// Flip my reaction on a native chat's row. The row changes when the homeserver's event
+    /// arrives.
+    func reactNativePeople(chatId: Id, messageId: Id, emoji: String) {
+        guard let client = matrixClient, let room = nativeRoom(chatId), let me = myUserId,
+              case .running(let owner) = matrixLifetime.state, acceptsMatrix(owner) else { return }
+        // The client refuses these too: a reaction would reach the homeserver unencrypted.
+        if nativePeopleRow(chatId)?.encrypted != false {
+            failRefused("update the reaction", "Reactions aren't available in encrypted chats yet.")
+            return
+        }
+        // Sent without its skin tone, the way the transcript groups them (`DocJSON.reactions`).
+        // Ceiling: one another app put on with a skin tone is not taken back from here.
+        let key = MessageReaction.normalizeEmoji(emoji)
+        let mine = messages(of: chatId).first { $0.id == messageId }?.reactions
+            .contains { $0.emoji == key && $0.senders.contains(me) } ?? false
+        Task {
+            guard acceptsMatrix(owner), !Task.isCancelled,
+                  let event = await nativeEventId(client, room: room, messageId: messageId),
+                  acceptsMatrix(owner), !Task.isCancelled else { return }
+            do {
+                try await client.react(roomId: room, eventId: event, key: key, on: !mine)
+                guard acceptsMatrix(owner), !Task.isCancelled else { return }
+                Haptics.pick()
+            } catch {
+                guard acceptsMatrix(owner), !Task.isCancelled else { return }
+                fail("update the reaction", error)
+            }
+        }
+    }
+
+    /// Remove a native chat's message; the homeserver decides whether this person may.
+    func deleteNativePeople(chatId: Id, messageId: Id) {
+        guard let client = matrixClient, let room = nativeRoom(chatId),
+              case .running(let owner) = matrixLifetime.state, acceptsMatrix(owner) else { return }
+        Task {
+            guard acceptsMatrix(owner), !Task.isCancelled,
+                  let event = await nativeEventId(client, room: room, messageId: messageId),
+                  acceptsMatrix(owner), !Task.isCancelled else { return }
+            do {
+                try await client.redact(roomId: room, eventId: event)
+                guard acceptsMatrix(owner), !Task.isCancelled else { return }
+                Haptics.pick()
+            } catch {
+                guard acceptsMatrix(owner), !Task.isCancelled else { return }
+                fail("delete the message", error)
             }
         }
     }

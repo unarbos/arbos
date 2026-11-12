@@ -33,6 +33,9 @@ pub const KEY_LAST_CHATS: &str = "last_chats";
 pub const KEY_ARCHIVED_CHATS: &str = "archived_chats";
 /// Set once the local archived ids were pushed up to the relay (§9c union migration).
 pub const KEY_ARCHIVE_MIGRATED: &str = "archive_migrated";
+/// `{chat_id: room_id}`: the people chats the relay last said are read from the homeserver
+/// (`GET /me/matrix/people`), so the next launch opens no Loro room for them.
+pub const KEY_NATIVE_ROOMS: &str = "native_rooms";
 /// My sidebar pins (row keys, top first) as the relay last confirmed them — shown at launch
 /// before `GET /me/pins` answers ([feedback sidebar-pinning-mac-2026-10-28]).
 pub const KEY_PINS: &str = "pins";

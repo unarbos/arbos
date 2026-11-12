@@ -177,6 +177,7 @@ pub async fn status(
         v["failed_jobs"] = json!(state.db.matrix_outbox_failed_rows(100).unwrap_or_default());
     }
     v["reads_users"] = json!(state.db.matrix_reads_users().unwrap_or_default());
+    v["people_native_users"] = json!(state.db.matrix_people_native_users().unwrap_or_default());
     Json(v).into_response()
 }
 
@@ -314,5 +315,70 @@ pub async fn set_reads(
         }
         Ok(false) => api_error(StatusCode::NOT_FOUND, "not_found", "no such user"),
         Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+    }
+}
+
+/// `PUT /admin/matrix/people/{user_id} {on}` — the per-user switch for people chats on the
+/// homeserver (`users.matrix_people_native`): `GET /me/matrix` tells the user's apps to list
+/// their DMs and groups from it. Takes effect when an app next asks for its session; rollback
+/// is the same call with `on: false`.
+pub async fn set_people_native(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(user_id): Path<String>,
+    Json(b): Json<ReadsBody>,
+) -> Response {
+    if let Err(r) = admin_only(&principal) {
+        return *r;
+    }
+    match state.db.set_matrix_people_native(&user_id, b.on) {
+        Ok(true) => Json(json!({ "user_id": user_id, "matrix_people_native": b.on, "mode": state.matrix.cfg.mode.as_str() }))
+            .into_response(),
+        Ok(false) => api_error(StatusCode::NOT_FOUND, "not_found", "no such user"),
+        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod people_native_tests {
+    use super::*;
+    use crate::people::tests_support::person;
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    #[tokio::test]
+    async fn only_the_admin_flips_people_chats_onto_the_homeserver() {
+        let state = test_state(AuthMode::Github);
+        let (user, device) = person(&state, 61);
+        let flip = |who: Principal, user: &str, on: bool| {
+            set_people_native(
+                State(state.clone()),
+                who,
+                Path(user.to_owned()),
+                Json(ReadsBody { on }),
+            )
+        };
+        let flagged = || state.db.matrix_people_native_users().unwrap();
+        assert!(flagged().is_empty(), "off until flipped");
+        // A signed-in person cannot flip it, not even for themselves.
+        assert_eq!(
+            flip(device, &user, true).await.status(),
+            StatusCode::FORBIDDEN
+        );
+        assert!(flagged().is_empty());
+        assert_eq!(
+            flip(Principal::Admin, "nobody", true).await.status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            flip(Principal::Admin, &user, true).await.status(),
+            StatusCode::OK
+        );
+        assert_eq!(flagged(), vec![user.clone()]);
+        assert_eq!(
+            flip(Principal::Admin, &user, false).await.status(),
+            StatusCode::OK
+        );
+        assert!(flagged().is_empty());
     }
 }

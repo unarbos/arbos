@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use arbos_matrix::{
     ChannelRow as CoreChannel, Listener as CoreListener, MatrixClient as CoreClient,
-    MessageRow as CoreMessage, Session as CoreSession, Snapshot as CoreSnapshot,
-    SpaceRow as CoreSpace,
+    MessageRow as CoreMessage, PeopleRoomRow as CorePeople, Session as CoreSession,
+    Snapshot as CoreSnapshot, SpaceRow as CoreSpace,
 };
 
 #[derive(Debug, Clone, thiserror::Error, uniffi::Error)]
@@ -43,6 +43,9 @@ pub struct MatrixSession {
     pub user_id: String,
     pub access_token: String,
     pub device_id: String,
+    /// `people_native` of `GET /me/matrix`: list DMs and groups in the snapshot.
+    #[uniffi(default = false)]
+    pub people_native: bool,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -55,6 +58,10 @@ pub struct MatrixMessageRow {
     pub created_at: i64,
     /// This device has no key for the message (yet); `text` is a placeholder.
     pub locked: bool,
+    /// This device's own send, shown before the homeserver has it; `event_id` is not an
+    /// event's until the row comes again without this.
+    #[uniffi(default = false)]
+    pub pending: bool,
     /// Chat-doc message JSON (same shape `CoreChatDoc.readRowsJson` rows have).
     pub json: String,
 }
@@ -90,10 +97,29 @@ pub struct MatrixSpaceRow {
     pub channel_ids: Vec<String>,
 }
 
+/// A DM or group (see `arbos_matrix::PeopleRoomRow`).
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct MatrixPeopleRow {
+    pub room_id: String,
+    pub chat_id: String,
+    /// `dm` | `group`.
+    pub kind: String,
+    pub encrypted: bool,
+    pub unread: u64,
+    pub mentions: u64,
+    pub last_text: String,
+    pub last_sender: String,
+    pub last_sender_name: String,
+    pub last_ts: i64,
+}
+
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct MatrixSnapshot {
     pub spaces: Vec<MatrixSpaceRow>,
     pub channels: Vec<MatrixChannelRow>,
+    /// Empty unless the session said `people_native`.
+    #[uniffi(default = [])]
+    pub people: Vec<MatrixPeopleRow>,
 }
 
 fn row(r: CoreMessage) -> MatrixMessageRow {
@@ -105,6 +131,7 @@ fn row(r: CoreMessage) -> MatrixMessageRow {
         text: r.text,
         created_at: r.created_at,
         locked: r.locked,
+        pending: r.pending,
         json: r.json,
     }
 }
@@ -141,10 +168,26 @@ fn space(s: CoreSpace) -> MatrixSpaceRow {
     }
 }
 
+fn people(p: CorePeople) -> MatrixPeopleRow {
+    MatrixPeopleRow {
+        room_id: p.room_id,
+        chat_id: p.chat_id,
+        kind: p.kind,
+        encrypted: p.encrypted,
+        unread: p.unread,
+        mentions: p.mentions,
+        last_text: p.last_text,
+        last_sender: p.last_sender,
+        last_sender_name: p.last_sender_name,
+        last_ts: p.last_ts,
+    }
+}
+
 fn snapshot(s: CoreSnapshot) -> MatrixSnapshot {
     MatrixSnapshot {
         spaces: s.spaces.into_iter().map(space).collect(),
         channels: s.channels.into_iter().map(channel).collect(),
+        people: s.people.into_iter().map(people).collect(),
     }
 }
 
@@ -211,6 +254,7 @@ pub async fn matrix_start(
             user_id: session.user_id,
             access_token: session.access_token,
             device_id: session.device_id,
+            people_native: session.people_native,
         },
         arbos_matrix::Crypto {
             store_dir: crypto.store_dir.into(),
@@ -287,7 +331,46 @@ impl MatrixClient {
             .map(|p| serde_json::from_str(p))
             .collect::<Result<Vec<serde_json::Value>, _>>()
             .map_err(|e| MatrixError::Homeserver(format!("bad part: {e}")))?;
-        Ok(self.inner.send(&room_id, &text, parts, &local_id).await?)
+        Ok(self
+            .inner
+            .send(&room_id, &text, parts, None, &local_id)
+            .await?)
+    }
+
+    /// A text message answering the row `reply_to` (its event id) in a people chat.
+    pub async fn send_reply(
+        &self,
+        room_id: String,
+        text: String,
+        reply_to: String,
+        local_id: String,
+    ) -> Result<String, MatrixError> {
+        Ok(self
+            .inner
+            .send(&room_id, &text, Vec::new(), Some(&reply_to), &local_id)
+            .await?)
+    }
+
+    /// Put (`on`) or take back my reaction `key` on a row of a people chat. Refused in an
+    /// end-to-end encrypted chat (see `arbos_matrix::MatrixClient::react`).
+    pub async fn react(
+        &self,
+        room_id: String,
+        event_id: String,
+        key: String,
+        on: bool,
+    ) -> Result<(), MatrixError> {
+        Ok(self.inner.react(&room_id, &event_id, &key, on).await?)
+    }
+
+    /// Remove a message of a people chat (the homeserver decides who may).
+    pub async fn redact(&self, room_id: String, event_id: String) -> Result<(), MatrixError> {
+        Ok(self.inner.redact(&room_id, &event_id).await?)
+    }
+
+    /// Private read receipt on one row.
+    pub async fn mark_read_at(&self, room_id: String, event_id: String) -> Result<(), MatrixError> {
+        Ok(self.inner.mark_read_at(&room_id, &event_id).await?)
     }
 
     /// The account's key backup once the homeserver answered: `on` (this device has the keys),

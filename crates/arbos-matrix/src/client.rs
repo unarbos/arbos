@@ -5,7 +5,7 @@
 //! of their own sends. Everything else — tokens, retries, pagination tokens, the state events
 //! that say which room is a channel of which server, encryption keys — stays in here.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -22,14 +22,16 @@ use matrix_sdk::ruma::api::client::sync::sync_events::v5 as sliding;
 use matrix_sdk::ruma::events::receipt::ReceiptThread;
 use matrix_sdk::ruma::events::{AnySyncTimelineEvent, MessageLikeEventType, StateEventType};
 use matrix_sdk::ruma::serde::Raw;
-use matrix_sdk::ruma::{OwnedRoomId, OwnedUserId, RoomId, TransactionId, UInt, UserId};
+use matrix_sdk::ruma::{EventId, OwnedRoomId, OwnedUserId, RoomId, TransactionId, UInt, UserId};
 use matrix_sdk::{Client, Room, SessionMeta, SlidingSyncList, SlidingSyncMode};
 use matrix_sdk_crypto::{CollectStrategy, DecryptionSettings, TrustRequirement};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::watch;
 
-use crate::rows::{self, member_of_mxid, message_row, ChannelRow, MessageRow, SpaceRow};
+use crate::rows::{
+    self, member_of_mxid, message_row, ChannelRow, MessageRow, PeopleRoomRow, SpaceRow,
+};
 use crate::{Error, Result};
 
 /// What `GET /me/matrix` returns.
@@ -39,6 +41,10 @@ pub struct Session {
     pub user_id: String,
     pub access_token: String,
     pub device_id: String,
+    /// The relay's per-user switch (`users.matrix_people_native`): DMs and groups are listed
+    /// in the [`Snapshot`] and read from the homeserver. Off unless the relay says so.
+    #[serde(default)]
+    pub people_native: bool,
 }
 
 /// Where this device keeps its encryption keys.
@@ -71,6 +77,9 @@ pub enum Backup {
 pub struct Snapshot {
     pub spaces: Vec<SpaceRow>,
     pub channels: Vec<ChannelRow>,
+    /// DMs and groups; empty unless [`Session::people_native`].
+    #[serde(default)]
+    pub people: Vec<PeopleRoomRow>,
 }
 
 /// The app side. Called from the sync task; keep the handlers quick (post to the UI thread).
@@ -89,6 +98,37 @@ struct Timeline {
     /// The first page was loaded (so the rows are complete from `prev_batch` to now).
     loaded: bool,
     at_start: bool,
+    /// A people chat's reactions, by the reaction's own event id (what a removal names).
+    reactions: HashMap<String, rows::Reaction>,
+}
+
+impl Timeline {
+    /// The rows as the apps get them: each with its reactions and the row it answers.
+    fn view(&self) -> Vec<MessageRow> {
+        let mut by_row: HashMap<&str, BTreeMap<&str, BTreeMap<&str, bool>>> = HashMap::new();
+        for r in self.reactions.values() {
+            by_row
+                .entry(&r.target)
+                .or_default()
+                .entry(&r.key)
+                .or_default()
+                .insert(&r.sender, true);
+        }
+        self.rows
+            .iter()
+            .map(|row| {
+                let mut row = row.clone();
+                let reactions = by_row.get(row.event_id.as_str());
+                let answers = rows::reply_target(&row)
+                    .and_then(|e| self.rows.iter().find(|x| x.event_id == e))
+                    .map(|x| x.id.as_str());
+                if reactions.is_some() || answers.is_some() {
+                    rows::decorate(&mut row, reactions.unwrap_or(&BTreeMap::new()), answers);
+                }
+                row
+            })
+            .collect()
+    }
 }
 
 /// Channel read receipts are private (#1484; Jacob, 2026-10-30: "make all mirrored read
@@ -104,6 +144,7 @@ const BACKUP_STATE_WAIT: Duration = Duration::from_secs(30);
 pub struct MatrixClient {
     client: Client,
     me: OwnedUserId,
+    people_native: bool,
     listener: Arc<dyn Listener>,
     timelines: Mutex<HashMap<OwnedRoomId, Timeline>>,
     stop: watch::Sender<bool>,
@@ -159,6 +200,7 @@ impl MatrixClient {
         let this = Arc::new(Self {
             client,
             me: user_id,
+            people_native: session.people_native,
             listener,
             timelines: Mutex::new(HashMap::new()),
             stop,
@@ -260,7 +302,14 @@ impl MatrixClient {
                             return;
                         };
                         let encrypted = Self::is_encrypted(&room).await;
+                        let people = this.is_people(&room).await;
+                        if people && this.fold(room.room_id(), &v, !encrypted, true) {
+                            return;
+                        }
                         if v["event_id"].is_null() || !rows::shows(&v, encrypted, info.is_some()) {
+                            return;
+                        }
+                        if people && !rows::sender_is_own(&v) {
                             return;
                         }
                         v["room_id"] = json!(room.room_id().as_str());
@@ -380,11 +429,11 @@ impl MatrixClient {
     // ---- rooms --------------------------------------------------------------------------------
 
     async fn arbos_state(room: &Room) -> Option<Value> {
-        let raw = room
-            .get_state_event(StateEventType::from("life.arbos.chat"), "")
-            .await
-            .ok()
-            .flatten()?;
+        Self::state_content(room, StateEventType::from("life.arbos.chat")).await
+    }
+
+    async fn state_content(room: &Room, kind: StateEventType) -> Option<Value> {
+        let raw = room.get_state_event(kind, "").await.ok().flatten()?;
         let v: Value = match raw {
             matrix_sdk::deserialized_responses::RawAnySyncOrStrippedState::Sync(r) => {
                 serde_json::from_str(r.json().get()).ok()?
@@ -423,6 +472,18 @@ impl MatrixClient {
         out
     }
 
+    /// `(chat_id, kind)` when the room is an open people chat ([`rows::people_chat`]).
+    async fn people_chat(room: &Room) -> Option<(String, String)> {
+        let state = Self::arbos_state(room).await?;
+        let create = Self::state_content(room, StateEventType::RoomCreate).await?;
+        rows::people_chat(&state, &create)
+    }
+
+    /// Whether the room's rows follow the people-chat rule ([`rows::sender_is_own`]).
+    async fn is_people(&self, room: &Room) -> bool {
+        self.people_native && Self::people_chat(room).await.is_some()
+    }
+
     /// The newest row's (text, sender, sender name, time) for the list's preview.
     fn last_of(&self, room_id: &RoomId) -> (String, String, String, i64) {
         let tl = self.timelines.lock().unwrap_or_else(|p| p.into_inner());
@@ -443,6 +504,7 @@ impl MatrixClient {
     pub async fn snapshot(&self) -> Snapshot {
         let mut spaces: Vec<(SpaceRow, HashMap<String, String>)> = Vec::new();
         let mut channels: Vec<ChannelRow> = Vec::new();
+        let mut people: Vec<PeopleRoomRow> = Vec::new();
         for room in self.client.joined_rooms() {
             let Some(state) = Self::arbos_state(&room).await else {
                 continue;
@@ -487,6 +549,24 @@ impl MatrixClient {
                         order: String::new(),
                     });
                 }
+                Some("dm" | "group") if self.people_native => {
+                    let Some((chat_id, kind)) = Self::people_chat(&room).await else {
+                        continue;
+                    };
+                    let counts = room.unread_notification_counts();
+                    people.push(PeopleRoomRow {
+                        room_id: room.room_id().to_string(),
+                        chat_id,
+                        kind,
+                        encrypted: Self::is_encrypted(&room).await,
+                        unread: counts.notification_count,
+                        mentions: counts.highlight_count,
+                        last_text,
+                        last_sender,
+                        last_sender_name,
+                        last_ts,
+                    });
+                }
                 _ => {}
             }
         }
@@ -514,7 +594,12 @@ impl MatrixClient {
         channels.sort_by(|a, b| a.order.cmp(&b.order).then(a.name.cmp(&b.name)));
         let mut spaces: Vec<SpaceRow> = spaces.into_iter().map(|(s, _)| s).collect();
         spaces.sort_by(|a, b| b.last_ts.cmp(&a.last_ts).then(a.name.cmp(&b.name)));
-        Snapshot { spaces, channels }
+        people.sort_by(|a, b| b.last_ts.cmp(&a.last_ts).then(a.chat_id.cmp(&b.chat_id)));
+        Snapshot {
+            spaces,
+            channels,
+            people,
+        }
     }
 
     // ---- timelines ----------------------------------------------------------------------------
@@ -551,6 +636,38 @@ impl MatrixClient {
         names
     }
 
+    /// A people chat's reaction or removal, folded into the room's rows; `false` when `ev`
+    /// is neither. `cleartext_counts` is false in an encrypted room, where a reaction is
+    /// dropped like any message that did not arrive encrypted ([`rows::shows`];
+    /// [`Self::react`] sends none there). A removal is never encrypted and the homeserver,
+    /// which can withhold any event, is taken at its word for it.
+    fn fold(&self, room_id: &RoomId, ev: &Value, cleartext_counts: bool, notify: bool) -> bool {
+        let removes = rows::redacts(ev);
+        // An encrypted reaction this device has no key for is not a locked message.
+        let reacts = ev["type"] == "m.reaction"
+            || ev["content"]["m.relates_to"]["rel_type"] == "m.annotation";
+        if removes.is_none() && !reacts {
+            return false;
+        }
+        let mut tl = self.timelines.lock().unwrap_or_else(|p| p.into_inner());
+        let t = tl.entry(room_id.to_owned()).or_default();
+        let changed = match (removes, rows::reaction(ev).filter(|_| cleartext_counts)) {
+            (Some(gone), _) => {
+                let before = t.rows.len();
+                t.rows.retain(|r| r.event_id != gone);
+                t.reactions.remove(&gone).is_some() || t.rows.len() != before
+            }
+            (None, Some((id, r))) => t.reactions.insert(id, r.clone()) != Some(r),
+            (None, None) => false,
+        };
+        let (out, loaded) = (t.view(), t.loaded);
+        drop(tl);
+        if changed && notify && loaded {
+            self.listener.on_timeline(room_id.to_string(), out);
+        }
+        true
+    }
+
     /// Merge rows into a room's timeline (deduplicated by event id, kept in time order) and
     /// tell the listener when something changed.
     fn push_rows(&self, room_id: &RoomId, rows: Vec<MessageRow>, notify: bool) -> Vec<MessageRow> {
@@ -558,6 +675,13 @@ impl MatrixClient {
         let t = tl.entry(room_id.to_owned()).or_default();
         let mut changed = false;
         for r in rows {
+            // The event of a message this device sent takes its pending row's place.
+            if !r.pending {
+                let before = t.rows.len();
+                t.rows
+                    .retain(|x| !(x.pending && x.id == r.id && x.sender == r.sender));
+                changed |= t.rows.len() != before;
+            }
             // Same event again: keep the newest reading (a locked row becomes the message once
             // its key arrives).
             if let Some(x) = t.rows.iter_mut().find(|x| x.event_id == r.event_id) {
@@ -577,13 +701,42 @@ impl MatrixClient {
                     .then(a.event_id.cmp(&b.event_id))
             });
         }
-        let out = t.rows.clone();
+        let out = t.view();
         let loaded = t.loaded;
         drop(tl);
         if changed && notify && loaded {
             self.listener.on_timeline(room_id.to_string(), out.clone());
         }
         out
+    }
+
+    /// Take a pending row back out (its send failed).
+    fn drop_pending(&self, room_id: &RoomId, local_id: &str) {
+        let mut tl = self.timelines.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(t) = tl.get_mut(room_id) else { return };
+        t.rows.retain(|r| !(r.pending && r.id == local_id));
+        let (out, loaded) = (t.view(), t.loaded);
+        drop(tl);
+        if loaded {
+            self.listener.on_timeline(room_id.to_string(), out);
+        }
+    }
+
+    /// Whether `event_id` is a row of the room this device has read from the homeserver.
+    fn has_row(&self, room_id: &RoomId, event_id: &str) -> bool {
+        let tl = self.timelines.lock().unwrap_or_else(|p| p.into_inner());
+        tl.get(room_id)
+            .is_some_and(|t| t.rows.iter().any(|r| !r.pending && r.event_id == event_id))
+    }
+
+    /// The room, when it is a people chat this device reads natively: the only rooms whose
+    /// rows carry reactions, removals and replies ([`Self::fold`]).
+    async fn people_room(&self, room_id: &str) -> Result<Room> {
+        let room = self.room(room_id)?;
+        if !self.is_people(&room).await {
+            return Err(Error::NoRoom(room_id.to_owned()));
+        }
+        Ok(room)
     }
 
     async fn page(
@@ -596,12 +749,18 @@ impl MatrixClient {
         opts.limit = UInt::from(HISTORY_PAGE);
         let page = room.messages(opts).await?;
         let encrypted = Self::is_encrypted(room).await;
+        let people = self.is_people(room).await;
         let events: Vec<Value> = page
             .chunk
             .iter()
             .filter_map(|e| {
                 let v = serde_json::from_str::<Value>(e.raw().json().get()).ok()?;
-                rows::shows(&v, encrypted, e.encryption_info().is_some()).then_some(v)
+                if people && self.fold(room.room_id(), &v, !encrypted, false) {
+                    return None;
+                }
+                (rows::shows(&v, encrypted, e.encryption_info().is_some())
+                    && (!people || rows::sender_is_own(&v)))
+                .then_some(v)
             })
             .collect();
         let names = self.names_for(room, &events).await;
@@ -661,29 +820,118 @@ impl MatrixClient {
     /// Send a text message; `local_id` (a ULID the app made) becomes `life.arbos.id` and the
     /// transaction id, so a retry never doubles it. Returns the event id.
     pub async fn send_text(&self, room_id: &str, text: &str, local_id: &str) -> Result<String> {
-        self.send(room_id, text, Vec::new(), local_id).await
+        self.send(room_id, text, Vec::new(), None, local_id).await
     }
 
     /// [`Self::send_text`] with extra transcript parts (`life.arbos.parts`, e.g. a cheque);
-    /// `text` is what other Matrix clients and the notification show.
+    /// `text` is what other Matrix clients and the notification show. `reply_to` is the event
+    /// id of the row it answers (people chats; a row this device has read in this room).
+    ///
+    /// In a people chat the row is in the timeline before the homeserver has it
+    /// ([`rows::echo_row`], `pending`) and leaves it again if the send fails. An encrypted
+    /// room's message is encrypted or not sent: the SDK asks the homeserver when it does not
+    /// know the room's state and fails the send when that fails.
     pub async fn send(
         &self,
         room_id: &str,
         text: &str,
         parts: Vec<Value>,
+        reply_to: Option<&str>,
         local_id: &str,
     ) -> Result<String> {
         let room = self.room(room_id)?;
+        let people = self.is_people(&room).await;
         let mut content = json!({ "msgtype": "m.text", "body": text, "life.arbos.id": local_id });
         if !parts.is_empty() {
             content["life.arbos.parts"] = Value::Array(parts);
         }
+        if let Some(target) = reply_to {
+            if !people || !self.has_row(room.room_id(), target) {
+                return Err(Error::Homeserver("no such message to reply to".into()));
+            }
+            content["m.relates_to"] = json!({ "m.in_reply_to": { "event_id": target } });
+        }
+        let pending = people && {
+            let known = {
+                let tl = self.timelines.lock().unwrap_or_else(|p| p.into_inner());
+                tl.get(room.room_id())
+                    .is_some_and(|t| t.rows.iter().any(|r| r.id == local_id))
+            };
+            // A retry of a message that already went through shows nothing twice.
+            match rows::echo_row(self.me.as_str(), &content, local_id, now_ms()) {
+                Some(row) if !known => {
+                    self.push_rows(room.room_id(), vec![row], true);
+                    true
+                }
+                _ => false,
+            }
+        };
         let txn: &TransactionId = local_id.into();
-        let r = room
+        let sent = room
             .send_raw("m.room.message", content)
             .with_transaction_id(txn)
+            .await;
+        if sent.is_err() && pending {
+            self.drop_pending(room.room_id(), local_id);
+        }
+        Ok(sent?.response.event_id.to_string())
+    }
+
+    /// Put (`on`) or take back this person's reaction `key` on a row of a people chat. Asking
+    /// for what already holds does nothing. The row changes when the homeserver's event
+    /// arrives, not before.
+    // Owner decision: no reactions in an end-to-end encrypted chat. The pinned SDK sends
+    // `m.reaction` unencrypted even there (who reacted, with what, to which message, readable
+    // by the homeserver), so this refuses rather than send it. Upgrade path: a reaction event
+    // type the SDK encrypts, or an SDK that encrypts `m.reaction`.
+    pub async fn react(&self, room_id: &str, event_id: &str, key: &str, on: bool) -> Result<()> {
+        let room = self.people_room(room_id).await?;
+        if !rows::is_reaction_key(key) || !self.has_row(room.room_id(), event_id) {
+            return Err(Error::Homeserver("no such message or reaction".into()));
+        }
+        if Self::is_encrypted(&room).await {
+            return Err(Error::Homeserver(
+                "reactions are not available in encrypted chats yet".into(),
+            ));
+        }
+        let me = self.me_member();
+        let mine = {
+            let tl = self.timelines.lock().unwrap_or_else(|p| p.into_inner());
+            tl.get(room.room_id()).and_then(|t| {
+                t.reactions
+                    .iter()
+                    .find(|(_, r)| r.target == event_id && r.key == key && r.sender == me)
+                    .map(|(id, _)| id.clone())
+            })
+        };
+        match (on, mine) {
+            (true, None) => {
+                let content = json!({ "m.relates_to": { "rel_type": "m.annotation", "event_id": event_id, "key": key } });
+                room.send_raw("m.reaction", content).await?;
+            }
+            (false, Some(reaction)) => self.redact(room_id, &reaction).await?,
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Remove an event of a people chat (a message, or a reaction by its own event id). The
+    /// homeserver decides who may: the sender, and the room's moderators. The row leaves the
+    /// timeline when the removal arrives.
+    pub async fn redact(&self, room_id: &str, event_id: &str) -> Result<()> {
+        let room = self.people_room(room_id).await?;
+        let event_id = EventId::parse(event_id).map_err(|e| Error::Homeserver(e.to_string()))?;
+        room.redact(&event_id, None, None).await?;
+        Ok(())
+    }
+
+    /// Read receipt on one row, private ([`RECEIPT_KIND`]).
+    pub async fn mark_read_at(&self, room_id: &str, event_id: &str) -> Result<()> {
+        let room = self.room(room_id)?;
+        let event_id = EventId::parse(event_id).map_err(|e| Error::Homeserver(e.to_string()))?;
+        room.send_single_receipt(RECEIPT_KIND, ReceiptThread::Unthreaded, event_id)
             .await?;
-        Ok(r.response.event_id.to_string())
+        Ok(())
     }
 
     /// Read receipt on the newest row the app has, private ([`RECEIPT_KIND`]).
@@ -692,16 +940,18 @@ impl MatrixClient {
         let last = {
             let tl = self.timelines.lock().unwrap_or_else(|p| p.into_inner());
             tl.get(room.room_id())
-                .and_then(|t| t.rows.last())
+                .and_then(|t| t.rows.iter().rfind(|r| !r.pending))
                 .map(|r| r.event_id.clone())
         };
         let Some(last) = last else { return Ok(()) };
-        let event_id = matrix_sdk::ruma::EventId::parse(&last)
-            .map_err(|e| Error::Homeserver(e.to_string()))?;
-        room.send_single_receipt(RECEIPT_KIND, ReceiptThread::Unthreaded, event_id)
-            .await?;
-        Ok(())
+        self.mark_read_at(room_id, &last).await
     }
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64)
 }
 
 #[cfg(test)]
@@ -739,6 +989,7 @@ mod backup_tests {
                 user_id: "@gh_1:arbos.test".into(),
                 access_token: "t".into(),
                 device_id: "D".into(),
+                people_native: false,
             },
             Crypto {
                 store_dir: dir.clone(),

@@ -38,8 +38,8 @@ use arbos_core::api::{
 use arbos_core::doc::{UserAttachment, UserMessageOpts};
 use arbos_core::wire::{BoxState as WireBox, PROJECT_DOC_CHAT_ID};
 use arbos_matrix::{
-    Backup, Error as MatrixError, Listener as MatrixListener, MatrixClient, MessageRow, Session,
-    Snapshot,
+    Backup, Error as MatrixError, Listener as MatrixListener, MatrixClient, MessageRow,
+    PeopleRoomRow, Session, Snapshot,
 };
 use futures::future::BoxFuture;
 use futures::{SinkExt, StreamExt};
@@ -356,6 +356,15 @@ struct Shared {
     /// The relay said it has no servers (503 `servers_off`, or 404 from one that predates
     /// them): the registry poll stops retrying the homeserver.
     servers_off: AtomicBool,
+    /// Phase 3: `GET /me/matrix` said `people_native`. Nothing below is touched without it.
+    people_native: AtomicBool,
+    /// The people chats the relay says are read and written on the homeserver, chat id →
+    /// room id (`GET /me/matrix/people`). A chat in here has no Loro room on this Mac.
+    native_rooms: Mutex<HashMap<Id, String>>,
+    /// The homeserver's own list of this device's people chats, by room id.
+    matrix_people: Mutex<HashMap<String, PeopleRoomRow>>,
+    /// Rooms of native chats already read on the current homeserver client.
+    native_opened: Mutex<HashSet<String>>,
     /// Per-chat ordered network sends (photo then text must stay in push order).
     send_queue: ChatSendQueue,
 }
@@ -451,6 +460,10 @@ impl Shared {
             matrix: Mutex::new(None),
             matrix_started_at: Mutex::new(None),
             servers_off: AtomicBool::new(false),
+            people_native: AtomicBool::new(false),
+            native_rooms: Mutex::new(HashMap::new()),
+            matrix_people: Mutex::new(HashMap::new()),
+            native_opened: Mutex::new(HashSet::new()),
             send_queue: {
                 let events = events.clone();
                 ChatSendQueue::new(move |chat_id, message_id| {
@@ -880,6 +893,33 @@ impl Shared {
             .any(|p| p.id == chat_id && p.is_people())
     }
 
+    /// Phase 3: the relay names a homeserver room for this people chat, so its Loro room is
+    /// not used: no socket, and no row from a doc this Mac may still hold.
+    fn is_native(&self, chat_id: &str) -> bool {
+        self.native_rooms.lock().unwrap().contains_key(chat_id)
+    }
+
+    /// The homeserver room of a native chat ([`confirmed_room`]).
+    fn native_room(&self, chat_id: &str) -> Option<String> {
+        confirmed_room(
+            &self.native_rooms.lock().unwrap(),
+            &self.matrix_people.lock().unwrap(),
+            chat_id,
+        )
+    }
+
+    /// The native chat a homeserver room is, by the relay's mapping.
+    fn native_chat_of(&self, room_id: &str) -> Option<Id> {
+        let chat = self
+            .native_rooms
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(_, room)| *room == room_id)
+            .map(|(chat, _)| chat.clone())?;
+        self.native_room(&chat).map(|_| chat)
+    }
+
     /// The `/blob/{slot}/{key}` slot for a **project id** or a **people chat id**.
     /// People chats keep their blobs under `people:<chat_id>` (people-chats API §2).
     /// Project chats use the project id — pass that, not the chat id (a chat id is not a
@@ -985,6 +1025,8 @@ impl Shared {
             return false;
         }
         let previous = self.matrix.lock().unwrap().replace(client);
+        // A new client has read no room yet.
+        self.native_opened.lock().unwrap().clear();
         matrix.ready(owner);
         let _ = self
             .events
@@ -2390,6 +2432,11 @@ fn load_store(shared: &Arc<Shared>) {
     if projects.is_empty() {
         return;
     }
+    if let Some(Some(rooms)) =
+        shared.with_store(|s| s.get_json::<HashMap<Id, String>>(store::KEY_NATIVE_ROOMS))
+    {
+        *shared.native_rooms.lock().unwrap() = rooms;
+    }
     // Seed the people-id set from both KEY_PEOPLE and project kinds *before*
     // ensure_room / room_loop. room_loop used to re-check is_people on every
     // dial; after RoomSession it bakes the path once — an empty HashSet on
@@ -2858,22 +2905,38 @@ impl MatrixListener for MatrixBridge {
         let Some(shared) = self.shared.upgrade() else {
             return;
         };
-        let _ = shared.with_matrix_owner(self.owner, |account| {
+        let people = shared.with_matrix_owner(self.owner, |account| {
+            let people = set_matrix_people(&shared, &snapshot.people);
             let _ = shared
                 .events
                 .send_admitted(account, SyncEvent::MatrixRooms(snapshot));
+            people
         });
+        if people == Some(true) {
+            on_matrix_people(&shared);
+        }
     }
 
     fn on_timeline(&self, room_id: String, rows: Vec<MessageRow>) {
         let Some(shared) = self.shared.upgrade() else {
             return;
         };
-        let _ = shared.with_matrix_owner(self.owner, |account| {
-            let _ = shared
-                .events
-                .send_admitted(account, SyncEvent::MatrixTimeline { room_id, rows });
+        let native = shared.with_matrix_owner(self.owner, |account| {
+            if let Some(chat_id) = shared.native_chat_of(&room_id) {
+                return Some((chat_id, rows));
+            }
+            // A people chat the relay does not (or no longer does) name is not shown.
+            if !shared.matrix_people.lock().unwrap().contains_key(&room_id) {
+                let _ = shared
+                    .events
+                    .send_admitted(account, SyncEvent::MatrixTimeline { room_id, rows });
+            }
+            None
         });
+        // Outside the fence: `emit_native` takes the account's admission itself.
+        if let Some(Some((chat_id, rows))) = native {
+            emit_native(&shared, &chat_id, &rows);
+        }
     }
 
     fn on_connection(&self, connected: bool, error: Option<String>) {
@@ -2957,8 +3020,23 @@ async fn start_matrix(shared: &Arc<Shared>, expected: Option<WorkTicket>) {
             return;
         }
     };
-    if shared.with_matrix_owner(owner, |_| ()).is_none() {
+    let Some(rollback) = shared.with_matrix_owner(owner, |_| {
+        shared
+            .people_native
+            .store(session.people_native, Ordering::Relaxed);
+        // Switched off (the rollback): every people chat is its Loro room again from the next
+        // registry refresh on.
+        let mut rooms = shared.native_rooms.lock().unwrap();
+        let rollback = !session.people_native && !rooms.is_empty();
+        if rollback {
+            rooms.clear();
+        }
+        rollback
+    }) else {
         return;
+    };
+    if rollback {
+        shared.with_store(|s| s.remove(store::KEY_NATIVE_ROOMS));
     }
     let bridge = Arc::new(MatrixBridge {
         shared: Arc::downgrade(shared),
@@ -3000,6 +3078,299 @@ async fn start_matrix(shared: &Arc<Shared>, expected: Option<WorkTicket>) {
     }
     if shared.with_matrix_owner(owner, |_| ()).is_some() {
         refresh_servers_list(shared).await;
+    }
+    if shared.with_matrix_owner(owner, |_| ()).is_some() {
+        refresh_native_rooms(shared).await;
+    }
+}
+
+/// Phase 3. A native people chat is shown from the homeserver room the relay names for it,
+/// and only once the homeserver lists that very room as that very chat: the relay is the
+/// authority on which room is a chat's (`relay`, `GET /me/matrix/people`), the homeserver on
+/// what the room says it is (`homeserver`, by room id, already checked against the room's
+/// create event). A room only one of them vouches for is not shown.
+fn confirmed_room(
+    relay: &HashMap<Id, String>,
+    homeserver: &HashMap<String, PeopleRoomRow>,
+    chat_id: &str,
+) -> Option<String> {
+    let room = relay.get(chat_id)?;
+    (homeserver.get(room)?.chat_id == chat_id).then(|| room.clone())
+}
+
+/// `GET /me/matrix/people`, as the relay writes it.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PeopleRooms {
+    rooms: HashMap<Id, String>,
+}
+
+/// The relay's chat → room mapping, or `None` when the answer is not one. Kept: people chats
+/// this Mac knows, each with a room id no other chat is given.
+fn parse_people_rooms(v: Value, people: &HashSet<Id>) -> Option<HashMap<Id, String>> {
+    let rooms = serde_json::from_value::<PeopleRooms>(v).ok()?.rooms;
+    let mut uses: HashMap<&str, usize> = HashMap::new();
+    for room in rooms.values() {
+        *uses.entry(room).or_default() += 1;
+    }
+    Some(
+        rooms
+            .iter()
+            .filter(|(chat, room)| {
+                people.contains(*chat)
+                    && room.starts_with('!')
+                    && room.len() <= 255
+                    && uses[room.as_str()] == 1
+            })
+            .map(|(chat, room)| (chat.clone(), room.clone()))
+            .collect(),
+    )
+}
+
+/// Ask the relay which people chats are on the homeserver. Only a session told
+/// `people_native` asks; a failed or malformed answer keeps what was known.
+async fn refresh_native_rooms(shared: &Arc<Shared>) {
+    if !shared.people_native.load(Ordering::Relaxed) {
+        return;
+    }
+    let people = shared.people.lock().unwrap().clone();
+    let rooms = match shared.get_json("/me/matrix/people").await {
+        Ok(v) => parse_people_rooms(v, &people),
+        Err(err) => {
+            shared.diagnostic("matrix-people", format!("{err:#}"));
+            return;
+        }
+    };
+    // Signed out, or another account's, while the relay answered: not this Mac's rooms now.
+    if !shared
+        .account_lifetime
+        .lock()
+        .unwrap()
+        .accepts(shared.session_owner)
+    {
+        return;
+    }
+    let Some(rooms) = rooms else {
+        shared.diagnostic("matrix-people", "bad /me/matrix/people".to_string());
+        return;
+    };
+    let changed = {
+        let mut known = shared.native_rooms.lock().unwrap();
+        let changed = *known != rooms;
+        *known = rooms.clone();
+        changed
+    };
+    if changed {
+        shared.with_store(|s| s.put_json(store::KEY_NATIVE_ROOMS, &rooms));
+        apply_native_unread(shared);
+        let _ = shared.spawn(open_native_rooms(shared.clone()));
+    }
+}
+
+/// Keep the homeserver's list of people chats; `false` when there was none and still is none.
+/// Called inside the Matrix owner's fence (`with_matrix_owner`): locks nothing but the list.
+fn set_matrix_people(shared: &Shared, rows: &[PeopleRoomRow]) -> bool {
+    let mut known = shared.matrix_people.lock().unwrap();
+    if rows.is_empty() && known.is_empty() {
+        return false;
+    }
+    *known = rows
+        .iter()
+        .map(|r| (r.room_id.clone(), r.clone()))
+        .collect();
+    true
+}
+
+/// The homeserver's list of people chats changed (called on its sync task: post and return).
+fn on_matrix_people(shared: &Arc<Shared>) {
+    apply_native_unread(shared);
+    let _ = shared.spawn(open_native_rooms(shared.clone()));
+}
+
+/// A native chat's unread count and last activity are the homeserver's (the relay counts
+/// rows of the Loro room, which gets none). Returns the count for `chat_id`, if native.
+fn native_unread(shared: &Shared, chat_id: &str) -> Option<(u32, u64)> {
+    let room = shared.native_room(chat_id)?;
+    let people = shared.matrix_people.lock().unwrap();
+    let row = people.get(&room)?;
+    let last = row.last_ts.max(0);
+    // Read on this Mac after the newest row: the receipt may not have come back yet.
+    let local_read = shared.local_read_at.lock().unwrap().get(chat_id).copied();
+    let unread = merged_unread(row.unread.min(u32::MAX as u64) as u32, local_read, last);
+    Some((unread, last as u64))
+}
+
+fn apply_native_unread(shared: &Arc<Shared>) {
+    let mut changed = false;
+    {
+        let mut chats = shared.chats.lock().unwrap();
+        for c in chats.iter_mut() {
+            let Some((unread, last)) = native_unread(shared, &c.id) else {
+                continue;
+            };
+            let last = last.max(c.last_message_at);
+            changed |= c.unread_count != unread || c.last_message_at != last;
+            c.unread_count = unread;
+            c.unread = unread > 0;
+            c.last_message_at = last;
+        }
+    }
+    if changed {
+        emit_chats(shared);
+    }
+}
+
+/// Read every native chat's room once per homeserver client: the newest page, then live
+/// rows through the listener, so an unopened chat still previews and notifies the way a
+/// synced Loro doc does.
+// One `/messages` request per native chat per launch, one after the other; a persistent
+// event cache (spec §3.2) is what makes this free.
+async fn open_native_rooms(shared: Arc<Shared>) {
+    let Some(client) = matrix_client(&shared) else {
+        return;
+    };
+    let chats: Vec<Id> = shared
+        .native_rooms
+        .lock()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect();
+    // A client that was replaced reads for nobody: `native_opened` is the current one's.
+    let current = || matrix_client(&shared).is_some_and(|c| Arc::ptr_eq(&c, &client));
+    for chat_id in chats {
+        let Some(room) = shared.native_room(&chat_id) else {
+            continue;
+        };
+        if !current() || !shared.native_opened.lock().unwrap().insert(room.clone()) {
+            continue;
+        }
+        let opened = client.open_room(&room).await;
+        if !current() {
+            return;
+        }
+        match opened {
+            Ok(rows) => emit_native(&shared, &chat_id, &rows),
+            Err(err) => {
+                shared.native_opened.lock().unwrap().remove(&room);
+                if !matches!(err, MatrixError::NoRoom(_)) {
+                    shared.diagnostic("matrix-people-open", err.to_string());
+                }
+            }
+        }
+    }
+}
+
+/// A native chat's rows as the transcript's messages. A homeserver row names its sender by
+/// Matrix localpart, which is lower-case; `members` (`user:<id>`, the relay's spelling) puts
+/// the id back so "mine" and the roster lookups match, for a row's sender and for who reacted.
+fn native_messages(chat_id: &str, rows: &[MessageRow], members: &[String]) -> Vec<Message> {
+    let exact = |who: String| {
+        let known = members.iter().find(|x| x.eq_ignore_ascii_case(&who));
+        known.cloned().unwrap_or(who)
+    };
+    rows.iter()
+        .filter_map(|r| {
+            let mut m: Message = serde_json::from_str(&r.json).ok()?;
+            m.chat_id = chat_id.to_owned();
+            m.pending = r.pending;
+            m.sender = exact(std::mem::take(&mut m.sender));
+            for by in m.reactions.values_mut() {
+                *by = std::mem::take(by)
+                    .into_iter()
+                    .map(|(who, on)| (exact(who), on))
+                    .collect();
+            }
+            Some(m)
+        })
+        .collect()
+}
+
+/// The whole list of a native chat, in place of the Loro doc's ([`emit_snapshot`]).
+fn emit_native(shared: &Shared, chat_id: &str, rows: &[MessageRow]) {
+    let mut members = vec![format!("user:{}", shared.me_id())];
+    if let Some(p) = shared
+        .projects
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|p| p.id == chat_id)
+    {
+        members.extend(p.people.iter().map(|m| format!("user:{}", m.id)));
+    }
+    let _ = shared.events.send(SyncEvent::ChatSnapshot {
+        chat_id: chat_id.to_owned(),
+        messages: native_messages(chat_id, rows, &members),
+    });
+}
+
+/// A native chat's row the homeserver has, by message id.
+async fn native_row(client: &MatrixClient, room: &str, message_id: &str) -> Option<MessageRow> {
+    let rows = client.open_room(room).await.ok()?;
+    rows.into_iter().find(|r| r.id == message_id && !r.pending)
+}
+
+/// The homeserver client and room of a native chat, once both the relay and the homeserver
+/// name the room ([`confirmed_room`]).
+fn native_target(shared: &Arc<Shared>, chat_id: &str) -> Option<(Arc<MatrixClient>, String)> {
+    Some((matrix_client(shared)?, shared.native_room(chat_id)?))
+}
+
+/// A text message into a native chat; `message_id` is the row id the app already shows and
+/// the transaction id, so a retry never doubles it. `reply_to` is a row id of this chat.
+async fn native_send(
+    shared: &Arc<Shared>,
+    chat_id: &str,
+    message_id: &str,
+    text: &str,
+    reply_to: Option<&str>,
+) -> Result<(), String> {
+    let (client, room) = native_target(shared, chat_id).ok_or("chat is not ready")?;
+    let answers = match reply_to {
+        Some(id) => Some(
+            native_row(&client, &room, id)
+                .await
+                .ok_or("That message is no longer here")?
+                .event_id,
+        ),
+        None => None,
+    };
+    client
+        .send(&room, text, Vec::new(), answers.as_deref(), message_id)
+        .await
+        .map(drop)
+        .map_err(|e| e.to_string())
+}
+
+/// Flip my reaction on a native chat's row, as the Loro path does (`ClientCommand::React`).
+async fn native_react(shared: Arc<Shared>, chat_id: Id, message_id: Id, emoji: String) {
+    let Some((client, room)) = native_target(&shared, &chat_id) else {
+        return;
+    };
+    let Some(row) = native_row(&client, &room, &message_id).await else {
+        return;
+    };
+    let me = client.me_member();
+    let already =
+        serde_json::from_str::<Value>(&row.json).is_ok_and(|v| v["reactions"][&emoji][&me] == true);
+    if let Err(err) = client.react(&room, &row.event_id, &emoji, !already).await {
+        shared.fail_with(UserError::from_text(
+            "react to the message",
+            err.to_string(),
+        ));
+    }
+}
+
+/// Remove a native chat's message; the homeserver decides whether this person may.
+async fn native_delete(shared: Arc<Shared>, chat_id: Id, message_id: Id) {
+    let Some((client, room)) = native_target(&shared, &chat_id) else {
+        return;
+    };
+    let Some(row) = native_row(&client, &room, &message_id).await else {
+        return;
+    };
+    if let Err(err) = client.redact(&room, &row.event_id).await {
+        shared.fail_with(UserError::from_text("delete the message", err.to_string()));
     }
 }
 
@@ -4104,6 +4475,11 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
             let count = merged_unread(relay_count, local_read, c.last_message_at as i64);
             c.unread_count = count;
             c.unread = count > 0;
+            if let Some((unread, last)) = native_unread(shared, &c.id) {
+                c.unread_count = unread;
+                c.unread = unread > 0;
+                c.last_message_at = last.max(c.last_message_at);
+            }
         }
         align_people_archive(&mut projects, &merged);
         *local = merged;
@@ -4118,6 +4494,7 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
     apply_open_chat_hook(shared);
     save_registry(shared);
     refresh_blocks(shared).await;
+    refresh_native_rooms(shared).await;
     for p in projects.iter().filter(|p| !p.is_people()) {
         ensure_room(shared, &p.id, &project_doc_key(&p.id), PROJECT_DOC_CHAT_ID);
     }
@@ -4353,6 +4730,11 @@ fn emit_snapshot(shared: &Shared, chat_id: &str) {
 }
 
 fn emit_snapshot_from(shared: &Shared, chat_id: &str, handle: &Arc<RoomDoc<ChatDoc>>) {
+    // A chat that went native while its Loro room was open: the homeserver's rows are the
+    // chat ([`emit_native`]), not this doc's.
+    if shared.is_native(chat_id) {
+        return;
+    }
     let Some(doc) = handle.lock() else { return };
     let mut messages = doc.read_all();
     for m in &mut messages {
@@ -4469,7 +4851,9 @@ fn ensure_room_with(
     room_chat: &str,
     restored: Option<Restored>,
 ) {
-    if shared.rooms.lock().unwrap().contains_key(key) {
+    // A native people chat lives on the homeserver; a doc saved for it stays on disk for the
+    // day the relay hands the chat back.
+    if shared.rooms.lock().unwrap().contains_key(key) || shared.is_native(key) {
         return;
     }
     let from_store = restored.is_some();
@@ -4593,6 +4977,9 @@ async fn forward_changes(
                         emit_snapshot_from(&shared, &key, &room_doc);
                     }
                     mark_activity(&shared, &key, &room_doc);
+                    continue;
+                }
+                if shared.is_native(&key) {
                     continue;
                 }
                 let handle = &room_doc;
@@ -6350,6 +6737,28 @@ async fn send_message(
     reply_ref: Option<ReplyRef>,
     mentions: Vec<String>,
 ) {
+    if shared.is_native(&chat_id) {
+        let plain = attachments.is_empty()
+            && voice_wav.is_none()
+            && answer.is_none()
+            && forwarded.is_none()
+            && reply_ref.is_none()
+            && command == "send";
+        let sent = if plain {
+            native_send(&shared, &chat_id, &message_id, &text, reply_to.as_deref()).await
+        } else {
+            // Only text and an answer to a row of this chat go to the homeserver so far.
+            Err("This chat can only send text for now".to_string())
+        };
+        if let Err(error) = sent {
+            let _ = shared.events.send(SyncEvent::MessageSendFailed {
+                chat_id,
+                message_id,
+                error: UserError::from_text("send your message", error),
+            });
+        }
+        return;
+    }
     // No room doc yet: queue while NewChat is in flight, otherwise fail visibly.
     let Some(room_doc) = shared.docs.get(&chat_id) else {
         {
@@ -6807,6 +7216,13 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             }
         }
         ClientCommand::OpenChat { chat_id } | ClientCommand::MarkRead { chat_id } => {
+            // A native chat is read on the homeserver (a private receipt on its newest row),
+            // which is also what clears it on this person's other devices.
+            if let Some((client, room)) = native_target(shared, &chat_id) {
+                let _ = shared.spawn(async move {
+                    let _ = client.mark_read(&room).await;
+                });
+            }
             {
                 let mut chats = shared.chats.lock().unwrap();
                 if let Some(c) = chats.iter_mut().find(|c| c.id == chat_id) {
@@ -7828,6 +8244,10 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             message_id,
             emoji,
         } => {
+            if shared.is_native(&chat_id) {
+                let _ = shared.spawn(native_react(shared.clone(), chat_id, message_id, emoji));
+                return;
+            }
             let me = format!("user:{}", shared.me_id());
             let handle = shared.docs.get(&chat_id);
             if let Some(doc) = handle.as_ref().and_then(|handle| handle.lock()) {
@@ -7855,6 +8275,10 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             chat_id,
             message_id,
         } => {
+            if shared.is_native(&chat_id) {
+                let _ = shared.spawn(native_delete(shared.clone(), chat_id, message_id));
+                return;
+            }
             // The relay decides and edits the doc (`DELETE /room/{project}/{chat}/
             // messages/{id}`); the deletion comes back as a relay-signed row. A
             // refusal (403 `not_yours`) is told once; the message stays.
@@ -11402,4 +11826,147 @@ async fn compensate_call_join(shared: &Shared, call: &Call, authority: &CallAuth
         .json(&json!({}))
         .send()
         .await;
+}
+
+#[cfg(test)]
+mod native_people_tests {
+    //! Phase 3: which people chats this Mac reads from the homeserver, and what their rows
+    //! become. The Mac's window is not driven here; these are the decisions under it.
+    use super::*;
+
+    fn listed(room: &str, chat: &str) -> (String, PeopleRoomRow) {
+        let row = PeopleRoomRow {
+            room_id: room.into(),
+            chat_id: chat.into(),
+            kind: "dm".into(),
+            encrypted: false,
+            unread: 0,
+            mentions: 0,
+            last_text: String::new(),
+            last_sender: String::new(),
+            last_sender_name: String::new(),
+            last_ts: 0,
+        };
+        (room.to_owned(), row)
+    }
+
+    #[test]
+    fn a_native_chat_needs_the_relay_and_the_homeserver_to_name_the_same_room() {
+        let relay: HashMap<Id, String> = [("C1".to_owned(), "!r1:hs".to_owned())].into();
+        let hs = |rows: &[(&str, &str)]| -> HashMap<String, PeopleRoomRow> {
+            rows.iter().map(|(room, chat)| listed(room, chat)).collect()
+        };
+        assert_eq!(
+            confirmed_room(&relay, &hs(&[("!r1:hs", "C1")]), "C1").as_deref(),
+            Some("!r1:hs")
+        );
+        // Not listed by the homeserver yet.
+        assert_eq!(confirmed_room(&relay, &hs(&[]), "C1"), None);
+        // Another room says it is this chat: the relay's room is the chat's, and that one
+        // is not listed.
+        assert_eq!(
+            confirmed_room(&relay, &hs(&[("!evil:hs", "C1")]), "C1"),
+            None
+        );
+        // The impostor beside the real room changes nothing.
+        assert_eq!(
+            confirmed_room(&relay, &hs(&[("!evil:hs", "C1"), ("!r1:hs", "C1")]), "C1").as_deref(),
+            Some("!r1:hs")
+        );
+        // The relay's room says it is a different chat.
+        assert_eq!(confirmed_room(&relay, &hs(&[("!r1:hs", "C2")]), "C1"), None);
+        // A chat the relay does not name is not native, whatever the homeserver lists.
+        assert_eq!(confirmed_room(&relay, &hs(&[("!r2:hs", "C2")]), "C2"), None);
+        assert_eq!(
+            confirmed_room(&HashMap::new(), &hs(&[("!r1:hs", "C1")]), "C1"),
+            None
+        );
+    }
+
+    #[test]
+    fn the_relays_mapping_is_taken_only_as_written() {
+        let people: HashSet<Id> = ["C1".to_owned(), "C2".to_owned(), "C3".to_owned()].into();
+        let parsed = |v: Value| parse_people_rooms(v, &people);
+        assert_eq!(parsed(json!({ "rooms": {} })), Some(HashMap::new()));
+        assert_eq!(
+            parsed(json!({ "rooms": { "C1": "!r1:hs" } })),
+            Some([("C1".to_owned(), "!r1:hs".to_owned())].into())
+        );
+        // Dropped: a chat this Mac does not list, something that is not a room id, and a
+        // room given to two chats.
+        assert_eq!(
+            parsed(
+                json!({ "rooms": { "C9": "!r9:hs", "C1": "r1", "C2": "!same:hs", "C3": "!same:hs" } })
+            ),
+            Some(HashMap::new())
+        );
+        // Not the answer at all: what was known is kept (`None`).
+        for bad in [
+            json!({}),
+            json!({ "rooms": [] }),
+            json!({ "rooms": { "C1": 7 } }),
+            json!({ "rooms": {}, "more": true }),
+            json!("servers_off"),
+        ] {
+            assert_eq!(parsed(bad.clone()), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_native_row_is_the_chats_message_from_the_relays_spelling_of_its_sender() {
+        let event = |id: &str, mxid: &str, body: &str, kind: &str| {
+            let ev = json!({ "type": kind, "event_id": format!("${id}"), "sender": mxid, "origin_server_ts": 1700,
+                             "content": { "msgtype": "m.text", "body": body, "life.arbos.id": id } });
+            arbos_matrix::rows::message_row(&ev, &|_| None).expect("row")
+        };
+        let content =
+            json!({ "msgtype": "m.text", "body": "on my way", "life.arbos.id": "01MINE" });
+        let rows = vec![
+            event(
+                "01THEIRS",
+                "@test_01abc:arbos.life",
+                "lunch?",
+                "m.room.message",
+            ),
+            event(
+                "01LOCKED",
+                "@test_01abc:arbos.life",
+                "ciphertext",
+                "m.room.encrypted",
+            ),
+            arbos_matrix::rows::echo_row("@gh_7:arbos.life", &content, "01MINE", 1800)
+                .expect("echo"),
+        ];
+        let mut rows = rows;
+        let reactions = [("👍", [("user:test_01abc", true)].into())].into();
+        arbos_matrix::rows::decorate(&mut rows[2], &reactions, Some("01THEIRS"));
+        let members = ["user:gh_7".to_owned(), "user:test_01ABC".to_owned()];
+        let messages = native_messages("C1", &rows, &members);
+        assert_eq!(messages[2].reply_to.as_deref(), Some("01THEIRS"));
+        assert_eq!(
+            messages[2].reactions["👍"].keys().collect::<Vec<_>>(),
+            ["user:test_01ABC"]
+        );
+        assert_eq!(messages.len(), 3);
+        assert!(messages.iter().all(|m| m.chat_id == "C1"));
+        let (theirs, locked, mine) = (&messages[0], &messages[1], &messages[2]);
+        assert_eq!(
+            (theirs.id.as_str(), theirs.sender.as_str()),
+            ("01THEIRS", "user:test_01ABC")
+        );
+        assert!(!theirs.pending && theirs.role == Role::User);
+        // What this Mac cannot decrypt is shown as that, never as the envelope.
+        assert!(
+            matches!(&locked.parts[..], [Part::Text { text, .. }] if text == arbos_matrix::rows::LOCKED)
+        );
+        // My own send, before the homeserver has it.
+        assert_eq!(
+            (mine.id.as_str(), mine.sender.as_str()),
+            ("01MINE", "user:gh_7")
+        );
+        assert!(mine.pending);
+        // A sender nobody in the chat's roster matches keeps the homeserver's spelling.
+        let stranger = native_messages("C1", &rows[..1], &["user:gh_7".to_owned()]);
+        assert_eq!(stranger[0].sender, "user:test_01abc");
+    }
 }

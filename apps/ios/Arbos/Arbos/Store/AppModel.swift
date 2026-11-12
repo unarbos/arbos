@@ -146,6 +146,7 @@ private enum StoreKey {
     static let people = "people"
     static let directory = "directory"
     static let serversAvailable = "serversAvailable"
+    static let nativeRooms = "nativeRooms"
     static let me = "me"
     static let unread = "unread"
     static let lastChat = "lastChat"
@@ -514,6 +515,14 @@ final class AppModel: ObservableObject {
     var serverRostersRequested: Set<Id> = []
     /// `matrixStart` in flight (one at a time).
     var matrixLifetime = MatrixLifetime()
+    /// Phase 3: `GET /me/matrix` said `people_native`. Without it nothing asks the relay for
+    /// `nativeRooms`.
+    var peopleNative = false
+    /// The people chats the relay says are read and written on the homeserver, chat id → room
+    /// id (`GET /me/matrix/people`). A chat in here has no Loro room on this phone; its rows
+    /// are `channelRows[chatId]`, from the room once the homeserver lists it (`nativeRoom`).
+    /// Set through `applyNativeRooms`.
+    private(set) var nativeRooms: [Id: String] = [:]
     /// The wallet step on screen: show a new phrase once, or ask for it (Sync/Wallet.swift).
     @Published var walletPrompt: WalletPrompt?
 
@@ -1204,13 +1213,14 @@ final class AppModel: ObservableObject {
     /// relay's HTTP poll each vote; the highest-priority verdict wins (offline >
     /// relay down > reconnecting > syncing). A state younger than `linkPillGrace`
     /// does not show; `linkPillRepaint` ticks the view once the grace is over.
-    /// A channel's room is the Matrix client: its `onConnection` false is a reconnect.
+    /// A channel's room (and a native people chat's) is the Matrix client: its `onConnection`
+    /// false is a reconnect.
     func linkPill(for chatId: Id, channel: Bool = false, now: Date = Date()) -> LinkState? {
         func settled(_ state: LinkState, _ since: Date) -> LinkState? {
             state != .live && now.timeIntervalSince(since) >= Self.linkPillGrace ? state : nil
         }
         var verdict: LinkState? = settled(relayLink, relayLinkSince)
-        if channel {
+        if channel || nativeRooms[chatId] != nil {
             if !matrixConnected, let since = matrixDisconnectedSince, let s = settled(.reconnecting, since) {
                 verdict = max(verdict ?? .live, s)
             }
@@ -1531,7 +1541,10 @@ final class AppModel: ObservableObject {
     }
 
     func unreadCount(for chat: PeopleChat) -> Int {
-        Self.peopleUnreadCount(
+        // A native chat's count is the homeserver's (the relay counts rows of the Loro room,
+        // which gets none).
+        if let row = nativePeopleRow(chat.id) { return chat.id == visibleChatId ? 0 : Int(row.unread) }
+        return Self.peopleUnreadCount(
             remote: unreadCounts[chat.id],
             flagged: chat.unread || peopleUnread.contains(chat.id),
             watching: chat.id == visibleChatId
@@ -2357,6 +2370,10 @@ final class AppModel: ObservableObject {
         if let data = store.get(StoreKey.unread), let counts = try? JSONDecoder().decode([String: Int].self, from: data) {
             unreadCounts = counts
         }
+        // Before any room is dialled: a native chat opens no Loro room on this launch either.
+        if let data = store.get(StoreKey.nativeRooms), let rooms = try? JSONDecoder().decode([Id: String].self, from: data) {
+            nativeRooms = rooms
+        }
         // One copy of each agent's avatar everywhere, before the first frame: the record and
         // the roster copies came back from two caches written at different times; the
         // newest wins and every picture URL is rebuilt on the public versioned route (a
@@ -2685,7 +2702,9 @@ final class AppModel: ObservableObject {
 
     private func ensureRoom(projectId: Id, key: Id, roomChat: String,
                             restored: (doc: CoreChatDoc, cursor: Int64, pending: [(String, Data)], messages: [Message]?)? = nil) {
-        guard rooms[key] == nil else { return }
+        // A native people chat lives on the homeserver; a doc saved for it stays on disk for
+        // the day the relay hands the chat back.
+        guard rooms[key] == nil, nativeRooms[key] == nil else { return }
         guard Self.shouldRecreateRoom(
             failures: roomUnavailableFailures[key] ?? 0,
             lastFailureAt: roomUnavailableAt[key],
@@ -2899,6 +2918,35 @@ final class AppModel: ObservableObject {
         forgetDoc(key)
     }
 
+    /// Phase 3: the relay's answer on which people chats are read from the homeserver
+    /// (`refreshNativeRooms`; empty is the rollback). A chat that became native gives up its
+    /// Loro room (the saved doc stays on disk); one handed back drops the homeserver's rows
+    /// and gets its room again from the next `refreshPeople`.
+    func applyNativeRooms(_ next: [Id: String]) {
+        guard next != nativeRooms else { return }
+        let old = nativeRooms
+        nativeRooms = next
+        if next.isEmpty {
+            store?.remove(StoreKey.nativeRooms)
+        } else if let data = try? JSONEncoder().encode(next) {
+            store?.put(StoreKey.nativeRooms, data)
+        }
+        for key in next.keys where old[key] == nil {
+            rooms[key]?.stop()
+            rooms[key] = nil
+            docs[key] = nil
+            dirtyDocs.remove(key)
+            messages[key] = nil
+            roomLinks[key] = nil
+            roomLinkSince[key] = nil
+            caughtUp.remove(key)
+        }
+        for (key, room) in old where next[key] != room {
+            channelRows[key] = nil
+            caughtUp.remove(key)
+        }
+    }
+
     /// Re-dial every listed chat after the unavailable backoff was cleared.
     private func recreateListedRooms() {
         for p in projects {
@@ -2996,6 +3044,9 @@ final class AppModel: ObservableObject {
         let t0 = Date()
         defer { PerfCounters.time("applySnapshot", ms: Date().timeIntervalSince(t0) * 1000) }
         #endif
+        // A chat that went native while a read of its Loro doc was in flight: the homeserver's
+        // rows are the chat, not this doc's.
+        if nativeRooms[chatId] != nil { return }
         if let doc = docs[chatId], !Self.shouldPublishSnapshot(rows: list.count, docCount: doc.count) {
             // [feedback arbonites-blank-chat-ios-2026-10-28]: an empty read over a doc with rows
             // is a failed read, not an empty chat. Keep what is on screen (or the spinner).
@@ -3499,6 +3550,9 @@ final class AppModel: ObservableObject {
                 }
                 peopleUnread.remove(c.id)
             }
+            // Before the rooms are dialled: a chat the relay just made native opens none.
+            await refreshNativeRooms(expectedOwner: work.owner)
+            guard accountLifetime.accepts(work.owner), !Task.isCancelled else { return }
             for c in list { ensureRoom(projectId: peopleSlot, key: c.id, roomChat: c.id) }
             // Drop rooms/docs for people chats the relay no longer lists so a
             // restored chat cannot reconnect forever on HTTP 403.
@@ -4061,6 +4115,15 @@ final class AppModel: ObservableObject {
             }
             return
         }
+        if nativeRooms[chatId] != nil {
+            // Only text and an answer to a row of this chat go to the homeserver so far.
+            if attachments.isEmpty, forwardedFrom == nil, replyRef == nil, extraParts.isEmpty {
+                sendNativePeople(chatId: chatId, text: text, replyTo: replyTo)
+            } else {
+                failRefused("send your message", Self.nativeTextOnly)
+            }
+            return
+        }
         guard let doc = docs[chatId], let chat = peopleChat(chatId), let me = user else { return }
         var mentions = AppModel.mentions(in: text, members: chat.members, senderHandle: me.login, chipTokens: chipTokens)
         // Leading bare agent names ("Bob?", "hey Bob …", "Arbos what is your name") count as
@@ -4381,6 +4444,9 @@ final class AppModel: ObservableObject {
     /// relay clears unread events recorded after the last PUT.
     func markPeopleRead(_ chatId: String, force: Bool = false) {
         if Self.isDraftDM(chatId) { return }
+        // A native chat is read on the homeserver (a private receipt on its newest row),
+        // which is also what clears it on this person's other devices.
+        if nativeRooms[chatId] != nil { markChannelRead(chatId) }
         let hadRemote = (unreadCounts[chatId] ?? 0) > 0
         let hadLocalFlag = peopleUnread.contains(chatId)
         peopleUnread.remove(chatId)
@@ -4460,6 +4526,9 @@ final class AppModel: ObservableObject {
     func showMembershipNotice(chatId: Id, names: [String], subjects: [MembershipNotice.Subject]? = nil) {
         let name = user?.name?.trimmingCharacters(in: .whitespaces) ?? ""
         let who = name.isEmpty ? (user?.login ?? "") : name
+        // A native chat's list is the homeserver's (`channelRows`); a row put in `messages`
+        // would stand in front of it.
+        guard nativeRooms[chatId] == nil else { return }
         guard !who.isEmpty, let text = OptimisticNotice.addedLine(who: who, names: names) else { return }
         var facts: MembershipNotice? = nil
         if let me = user?.id, let subjects, !subjects.isEmpty {
@@ -5918,6 +5987,10 @@ final class AppModel: ObservableObject {
             return
         }
         #endif
+        if nativeRooms[chatId] != nil {
+            reactNativePeople(chatId: chatId, messageId: messageId, emoji: emoji)
+            return
+        }
         guard let doc = docs[chatId] else { return }
         do {
             try doc.toggleReaction(messageId: messageId, emoji: emoji, sender: me)
@@ -5952,6 +6025,10 @@ final class AppModel: ObservableObject {
                 return
             }
         #endif
+        if nativeRooms[chatId] != nil {
+            deleteNativePeople(chatId: chatId, messageId: messageId)
+            return
+        }
         if let audit, let doc = docs[chatId] {
             do {
                 try doc.insertSystemLine(id: newId(), text: audit, deviceId: deviceId)
@@ -5992,6 +6069,10 @@ final class AppModel: ObservableObject {
     /// (`preview: "off"`, the delete rule); the card goes at once here, the row follows.
     func removeLinkPreview(chatId: Id, messageId: Id, projectId: Id? = nil) {
         guard !messageId.isEmpty else { return }
+        if nativeRooms[chatId] != nil {
+            failRefused("remove the preview", Self.nativeTextOnly)
+            return
+        }
         if var list = messages[chatId], let i = list.firstIndex(where: { $0.id == messageId }) {
             list[i].preview = "off"
             messages[chatId] = list
@@ -6052,6 +6133,10 @@ final class AppModel: ObservableObject {
             return
         }
         #endif
+        if nativeRooms[chatId] != nil {
+            failRefused("edit the message", Self.nativeTextOnly)
+            return
+        }
         guard let doc = docs[chatId] else { return }
         do {
             try doc.editMessage(messageId: messageId, text: trimmed)
@@ -6321,6 +6406,10 @@ final class AppModel: ObservableObject {
         if JobTabs.isJobChat(chatId) { return }
         if let draft = draftDM, draft.id == chatId {
             sendDraftDM(draft) { [weak self] dmId in self?.sendMedia(chatId: dmId, pick: pick) }
+            return
+        }
+        if nativeRooms[chatId] != nil {
+            failRefused("send your message", Self.nativeTextOnly)
             return
         }
         let people = peopleChat(chatId) != nil

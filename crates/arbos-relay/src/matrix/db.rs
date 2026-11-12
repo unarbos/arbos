@@ -51,6 +51,10 @@ pub fn migrate_matrix(c: &Connection) {
         "ALTER TABLE matrix_rooms ADD COLUMN encrypted INTEGER NOT NULL DEFAULT 0",
         [],
     );
+    let _ = c.execute(
+        "ALTER TABLE users ADD COLUMN matrix_people_native INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
 }
 
 /// Backoff after a failed attempt: 2 s, 4 s, … capped at 5 min.
@@ -648,6 +652,39 @@ impl Db {
             rows.collect()
         })
     }
+
+    // ---- people chats on the homeserver (phase 3) ----------------------------------------------
+
+    pub fn set_matrix_people_native(&self, user_id: &str, on: bool) -> Result<bool> {
+        self.with(|c| {
+            Ok(c.execute(
+                "UPDATE users SET matrix_people_native = ?2 WHERE id = ?1",
+                params![user_id, on as i64],
+            )? > 0)
+        })
+    }
+
+    /// Whether `user_id` is flagged; someone the relay does not know is not.
+    pub fn matrix_people_native(&self, user_id: &str) -> Result<bool> {
+        self.with(|c| {
+            Ok(c.query_row(
+                "SELECT matrix_people_native FROM users WHERE id = ?1",
+                params![user_id],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()?
+                == Some(1))
+        })
+    }
+
+    pub fn matrix_people_native_users(&self) -> Result<Vec<String>> {
+        self.with(|c| {
+            let mut st =
+                c.prepare("SELECT id FROM users WHERE matrix_people_native = 1 ORDER BY id")?;
+            let rows = st.query_map([], |r| r.get(0))?;
+            rows.collect()
+        })
+    }
 }
 
 fn room_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<MatrixRoom> {
@@ -765,6 +802,16 @@ mod tests {
         assert!(d.matrix_txn_mark("arbos-users", "t1", 3).unwrap());
         assert!(!d.matrix_txn_mark("arbos-users", "t1", 3).unwrap());
         assert!(!d.set_matrix_reads("nobody", true).unwrap());
+        // People chats on the homeserver: nobody until flipped, and back off again.
+        d.set_user_snapshot("gh_1", None).unwrap();
+        assert!(d.matrix_people_native_users().unwrap().is_empty());
+        assert!(!d.set_matrix_people_native("nobody", true).unwrap());
+        assert!(d.set_matrix_people_native("gh_1", true).unwrap());
+        assert_eq!(d.matrix_people_native_users().unwrap(), vec!["gh_1"]);
+        assert!(d.matrix_people_native("gh_1").unwrap());
+        assert!(!d.matrix_people_native("nobody").unwrap());
+        assert!(d.set_matrix_people_native("gh_1", false).unwrap());
+        assert!(d.matrix_people_native_users().unwrap().is_empty());
         assert_eq!(backoff_ms(0), 2_000);
         assert_eq!(backoff_ms(20), 300_000);
     }
