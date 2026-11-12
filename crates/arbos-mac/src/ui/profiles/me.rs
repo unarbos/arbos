@@ -253,7 +253,9 @@ impl Shell {
             let live = report.as_ref().filter(|r| r.reachable);
             let uptime = machine
                 .since
-                .filter(|_| shown == MachineState::Awake)
+                .filter(|_| {
+                    shown == MachineState::Awake && machine::state_word(&machine) == "awake"
+                })
                 .map(|since| fmt_uptime(now_ms().saturating_sub(since)));
             let two_line = |title: &str, sub: String, theme: &Theme| {
                 div()
@@ -374,7 +376,7 @@ impl Shell {
                                 .child(value(
                                     match &uptime {
                                         Some(up) => format!("{} · {up}", shown.label()),
-                                        None => shown.label().to_string(),
+                                        None => machine::state_word(&machine).to_string(),
                                     },
                                     &theme,
                                 )),
@@ -438,6 +440,28 @@ impl Shell {
                 group = group.child(footnote(detail, &theme).pb(px(8.0)));
             }
             body = body.child(group);
+
+            // Storage card: what the relay kept of the machine's last sleep.
+            if !plan.storage.is_empty() {
+                let mut card = settings_group(&theme);
+                for row in &plan.storage {
+                    let title = match row {
+                        machine::Row::Files => "Your files",
+                        machine::Row::Scratch => "Scratch",
+                        _ => "Trash",
+                    };
+                    if let Some(v) = machine::storage_value(&machine, *row) {
+                        card = card.child(glass::row(title, &theme).child(value(v, &theme)));
+                    }
+                }
+                body = body.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .child(kit::section_title("Storage", &theme))
+                        .child(card),
+                );
+            }
 
             // Resources card (only what the box reports).
             if !plan.resources.is_empty() {

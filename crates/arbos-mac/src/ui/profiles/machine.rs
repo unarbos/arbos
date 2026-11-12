@@ -5,8 +5,10 @@
 //! the uptime folded in, spec, machine time today), **Resources** (disk, memory and CPU as gauge
 //! rows with a 3 pt bar, then network), **Agents** (running now, background jobs, a "Per-agent
 //! usage" row that unfolds one row per workspace) and the action card (request a bigger machine,
-//! restart). Near a limit — disk or memory at [`WARN_PCT`] or more — a warning card leads the page
-//! with the two ways out. Numbers come from `GET /machine` (`Machine`) and the box's own
+//! restart). A machine that sleeps by itself reads awake, asleep or cold in its State row
+//! ([`state_word`]) and gets a **Storage** card (your files, scratch, trash) from what the relay
+//! kept of its last sleep, so the card of a sleeping machine does not wake it. Near a limit —
+//! disk or memory at [`WARN_PCT`] or more — a warning card leads the page with the two ways out. Numbers come from `GET /machine` (`Machine`) and the box's own
 //! `GET /box/state` through `GET /machine/debug` (`BoxReport`), polled every [`POLL_MS`] while the
 //! page is open and not a moment longer. Rows whose metric the image does not report yet
 //! (an agentd before 0.6.277) are simply not drawn; nothing says "n/a".
@@ -275,6 +277,31 @@ pub fn agent_mem_disk(w: &BoxWorkspace) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join(" · "))
 }
 
+/// The State row's word. A machine that sleeps by itself (one with a `lifecycle`) says so here:
+/// awake, asleep, or cold once its files have moved to cold storage. The relay's own view of
+/// it decides awake and waking; `lifecycle` only tells a cold sleep from a plain one. Any other
+/// machine reads as it does everywhere ([`Machine::shown_state`]).
+pub fn state_word(m: &Machine) -> &'static str {
+    match (m.lifecycle.as_deref(), m.state) {
+        (None, _) => m.shown_state().label(),
+        (Some("cold"), MachineState::Asleep | MachineState::Stopped) => "cold",
+        (Some(_), MachineState::Stopped) => "asleep",
+        (Some(_), state) => state.label(),
+    }
+}
+
+/// A Storage row's value, when the relay has that number.
+pub fn storage_value(m: &Machine, row: Row) -> Option<String> {
+    let s = m.storage.as_ref()?;
+    match row {
+        Row::Files => Some(s.files),
+        Row::Scratch => s.scratch,
+        Row::Trash => s.trash,
+        _ => None,
+    }
+    .map(bytes)
+}
+
 /// Everything the page may draw, in order, by card. Pure, so the order and the fallbacks can be
 /// pinned without a window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -289,6 +316,10 @@ pub enum Row {
     State,
     Spec,
     MachineTime,
+    // storage card
+    Files,
+    Scratch,
+    Trash,
     // resources card
     Disk,
     Memory,
@@ -311,6 +342,7 @@ pub enum Row {
 pub struct Plan {
     pub warning: Vec<Row>,
     pub machine: Vec<Row>,
+    pub storage: Vec<Row>,
     pub resources: Vec<Row>,
     pub agents: Vec<Row>,
     pub actions: Vec<Row>,
@@ -333,6 +365,14 @@ pub fn plan(machine: &Machine, report: Option<&BoxReport>, breakdown_open: bool)
         p.machine.push(Row::InLine);
     }
     p.machine.extend([Row::State, Row::Spec, Row::MachineTime]);
+    let stored = |row: &Row| storage_value(machine, *row).is_some();
+    p.storage.extend(
+        [Row::Files, Row::Scratch, Row::Trash]
+            .into_iter()
+            .filter(stored),
+    );
+    // A machine that sleeps by itself and is down is asleep, not failing to answer.
+    let sleeping = machine.lifecycle.is_some() && machine.state.is_down();
     match live {
         Some(r) => {
             if disk_gauge(r).is_some() {
@@ -360,7 +400,7 @@ pub fn plan(machine: &Machine, report: Option<&BoxReport>, breakdown_open: bool)
             }
         }
         None => {
-            if report.is_some() && machine.shown_state() == MachineState::Awake {
+            if report.is_some() && machine.shown_state() == MachineState::Awake && !sleeping {
                 p.resources.push(Row::NotAnswering);
             }
         }
@@ -715,6 +755,57 @@ mod tests {
             [Row::Warning, Row::RequestBiggerMachineInWarning]
         );
         assert_eq!(warning(&mem_only).unwrap().title, "Running low on memory");
+    }
+
+    /// A machine that sleeps by itself: the State row says awake, asleep or cold; the Storage
+    /// card is what the relay kept, row by row; and a sleeping one is not "not answering".
+    #[test]
+    fn a_machine_that_sleeps_reads_awake_asleep_or_cold_and_shows_its_storage() {
+        let m = |state, lifecycle: Option<&str>| Machine {
+            state,
+            lifecycle: lifecycle.map(str::to_owned),
+            ..hosted()
+        };
+        assert_eq!(
+            state_word(&m(MachineState::Asleep, None)),
+            "awake",
+            "always on"
+        );
+        assert_eq!(state_word(&m(MachineState::Awake, Some("warm"))), "awake");
+        assert_eq!(
+            state_word(&m(MachineState::Asleep, Some("asleep_ckpt"))),
+            "asleep"
+        );
+        assert_eq!(
+            state_word(&m(MachineState::Stopped, Some("asleep_clean"))),
+            "asleep"
+        );
+        assert_eq!(state_word(&m(MachineState::Asleep, Some("cold"))), "cold");
+        assert_eq!(state_word(&m(MachineState::Waking, Some("cold"))), "waking");
+        // A box that died reads `warm` in its row until its next wake: the relay's view wins.
+        assert_eq!(state_word(&m(MachineState::Asleep, Some("warm"))), "asleep");
+        assert_eq!(state_word(&m(MachineState::Error, Some("cold"))), "error");
+
+        let mut cold = m(MachineState::Asleep, Some("cold"));
+        let down = BoxReport::default();
+        assert!(plan(&cold, Some(&down), false).storage.is_empty());
+        assert!(plan(&cold, Some(&down), false).resources.is_empty());
+        cold.storage = Some(crate::model::MachineStorage {
+            files: 2_100_000_000,
+            scratch: Some(640_000_000),
+            trash: None,
+        });
+        let p = plan(&cold, Some(&down), false);
+        assert_eq!(p.storage, [Row::Files, Row::Scratch]);
+        assert_eq!(storage_value(&cold, Row::Files).as_deref(), Some("2.1 GB"));
+        assert_eq!(
+            storage_value(&cold, Row::Scratch).as_deref(),
+            Some("640 MB")
+        );
+        assert_eq!(storage_value(&cold, Row::Trash), None);
+        // An always-on machine that does not answer still says so.
+        let p = plan(&m(MachineState::Asleep, None), Some(&down), false);
+        assert_eq!(p.resources, [Row::NotAnswering]);
     }
 
     #[test]

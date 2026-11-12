@@ -4054,6 +4054,20 @@ pub struct Machine {
     /// D89: the host is full and this account is in line for a machine (`/me` →
     /// `machine.waitlisted` / `machine.waitlist_position`). None = not waitlisted.
     pub waitlist_position: Option<u32>,
+    /// `lifecycle_state`: where a machine that sleeps by itself was last left (`warm`,
+    /// `asleep_clean`, `asleep_ckpt`, `cold`, …). None for every other machine.
+    pub lifecycle: Option<String>,
+    /// `storage`: what its disk held when it last went to sleep. The relay keeps it, so it is
+    /// there for a machine that is asleep or in cold storage too.
+    pub storage: Option<MachineStorage>,
+}
+
+/// `GET /machine` `storage`, in bytes.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct MachineStorage {
+    pub files: u64,
+    pub scratch: Option<u64>,
+    pub trash: Option<u64>,
 }
 
 impl Machine {

@@ -597,6 +597,15 @@ pub fn apply_machine_status(m: &mut Machine, dto: &MachineStatusDto) {
     m.spend_today_usd = dto.spend_today_usd;
     m.spend_cap_usd = dto.spend_cap_usd;
     m.always_on = dto.always_on;
+    let bytes = |n: i64| u64::try_from(n).ok();
+    m.lifecycle = dto.lifecycle_state.clone();
+    m.storage = dto.storage.as_ref().and_then(|s| {
+        Some(crate::model::MachineStorage {
+            files: bytes(s.files_bytes)?,
+            scratch: s.scratch_bytes.and_then(bytes),
+            trash: s.trash_bytes.and_then(bytes),
+        })
+    });
 }
 
 fn person_from_project_member(m: &ProjectMemberDto) -> Person {
@@ -1236,6 +1245,28 @@ mod tests {
         assert_eq!(m.state, MachineState::Asleep);
         assert_eq!(m.cpu, Some(4));
         assert_eq!(m.mem_gib, Some(8));
+
+        // A machine that sleeps by itself carries where it was left and its last storage
+        // split; a number that is not a size is no number, and absent again clears both.
+        assert_eq!((m.lifecycle.as_deref(), &m.storage), (None, &None));
+        let mut cold = status.clone();
+        cold.lifecycle_state = Some("cold".into());
+        cold.storage = Some(arbos_core::api::MachineStorageDto {
+            files_bytes: 5,
+            scratch_bytes: Some(-1),
+            trash_bytes: None,
+            at: 1,
+        });
+        apply_machine_status(&mut m, &cold);
+        assert_eq!(m.lifecycle.as_deref(), Some("cold"));
+        let kept = crate::model::MachineStorage {
+            files: 5,
+            scratch: None,
+            trash: None,
+        };
+        assert_eq!(m.storage, Some(kept));
+        apply_machine_status(&mut m, &status);
+        assert_eq!((m.lifecycle.as_deref(), &m.storage), (None, &None));
 
         let me: MeResponseDto = load_json("me_with_machine.json");
         let view = account_view_from_me(&me);

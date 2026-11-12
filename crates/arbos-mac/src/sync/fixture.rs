@@ -189,6 +189,8 @@ impl SyncSource for FixtureSource {
                     cpu: Some(4),
                     mem_gib: Some(8),
                     image: Some("arbos-agent-0.1.7".into()),
+                    lifecycle: None,
+                    storage: None,
                 }),
             });
             for doc in seed_chat_docs().into_iter().chain(seed_people_chat_docs()) {
