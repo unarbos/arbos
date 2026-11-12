@@ -3714,10 +3714,10 @@ mod tests {
             c.query_row(
                 "SELECT COUNT(*) FROM box_wake_jobs WHERE last_error = ?1",
                 [FULL],
-                |r| r.get::<_, usize>(0),
+                |r| r.get::<_, i64>(0),
             )
         });
-        assert_eq!(full.unwrap(), asleep.len() - CAP);
+        assert_eq!(full.unwrap() as usize, asleep.len() - CAP);
     }
 
     /// A box can dial in before the daemon's answer to its wake is back. It is awake then and
