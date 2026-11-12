@@ -847,6 +847,9 @@ struct ChatSession: View {
     @State private var actionsRow: Row?
     /// The composer had the keyboard up when the bubble was pressed (`openActions`).
     @State private var actionsRestoresKeyboard = false
+    /// The thumb that opened the overlay, while it is still down, so it can slide onto
+    /// an item and lift to pick it (`MessageActionsTouchHost` → `MessageActionsOverlay`).
+    @State private var actionsSlide: MessageActionsSlide = .idle
     @State private var mentionQuery: String?
     /// Chip-picked addressees in a people chat: `agent:…` and/or `user:…` member ids.
     /// Empty means no chip: agent-only DMs may still infer the last agent; human-peer DMs stay
@@ -1371,6 +1374,11 @@ struct ChatSession: View {
         // Declared after both overlays, so the fade layer and the chat bar are inside it and can
         // be measured against each other (`BottomBarFade.canvas`).
         .coordinateSpace(.named(BottomBarFade.canvas))
+        // Always mounted, never conditional: it has to be watching before the finger
+        // goes down, because the touch it reports is the one that opened the overlay.
+        // It observes without claiming, so it costs an idle scroll nothing.
+        .background(MessageActionsTouchHost(active: actionsRow != nil,
+                                            onSlide: { actionsSlide = $0 }))
         .overlayPreferenceValue(RowFrameKey.self) { anchors in
             GeometryReader { geo in
                 // The revealed row's frame, resolved in the same space its viewport is
@@ -1401,6 +1409,7 @@ struct ChatSession: View {
                                                 // Reply in DM only in people groups — not in a
                                                 // DM or 1:1 agent chat you're already in (#1871).
                                                 inPrivateChat: people?.isGroup != true),
+                        slide: actionsSlide,
                         onReact: { emoji in
                             // One toggle per overlay: a second report of the same pick
                             // (the emoji keyboard reports an insert twice, or a cell tapped
@@ -2500,6 +2509,12 @@ struct ChatSession: View {
             // composer a second time; the canvas fade is the one treatment.
             .modifier(NoBottomScrollEdgeEffect())
             .scrollDismissesKeyboard(.interactively)
+            // The thumb that opened the actions overlay is still down, and the pan it
+            // started belongs to this scroll view, which would carry the held bubble —
+            // and the overlay anchored to it — out from under that thumb mid-slide.
+            // Disabling cancels the in-flight pan, which is the point: the transcript
+            // holds still for exactly as long as the menu is up.
+            .scrollDisabled(actionsRow != nil)
             .modifier(TranscriptBottomInsetProbe())
             // Tap empty chat chrome to dismiss the keyboard and free the transcript — and, with
             // Search-in-chat up, close it ([feedback iphone-search-close-2026-10-28], Jacob:
@@ -3130,6 +3145,7 @@ struct ChatSession: View {
         composerFocused = false
         searchFocused = false
         PerfSignpost.begin(.messageMenu)
+        actionsSlide = .idle
         withAnimation(.easeOut(duration: 0.18)) { actionsRow = row }
     }
 
@@ -3139,6 +3155,7 @@ struct ChatSession: View {
     private func closeActions(after item: MessageMenuItem? = nil) {
         let restore = MessageActionsKeyboard.restoresFocus(wasFocused: actionsRestoresKeyboard, after: item)
         actionsRestoresKeyboard = false
+        actionsSlide = .idle
         withAnimation(.easeOut(duration: 0.15)) { actionsRow = nil }
         if restore { composerFocused = true }
     }
