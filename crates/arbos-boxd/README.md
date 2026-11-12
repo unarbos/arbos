@@ -244,37 +244,81 @@ This has been tested with both ends on one machine (`cargo test -p arbos-boxd tl
 ## Moving a Docker `runsc` box here
 
 docs/box-scaling.md Phase 2 moves each of the relay's `gvisor` boxes onto the daemon in place:
-the same `work.img`, no copy. Nothing in the relay does this; it is an operator's step, one box
-at a time, and **this procedure has not been run on a real host yet**. Try it on a scratch user
-first. The image already has the layout a box here expects (`/work` at its root, `.home`,
-`.etc`).
+the same `work.img`, no copy. Nothing in the relay does this; it is an operator's step, and
+`scripts/deploy/boxd-migrate.py` is that step as one command. **It has not been run on a real
+host yet**: its decisions are tested (`python3 -m unittest discover -s scripts/deploy -p
+'test_boxd_migrate.py'`, against real files and a stand-in relay and daemon), and the first
+real run is the one [below](#running-it-on-a-test-host).
 
-Before the first box: the relay runs with `ARBOS_BOXD_URL`, and the box's image version is
+Before the first box: the relay runs with `ARBOS_BOXD_URL`, the daemon and the relay's data
+are on one filesystem (a hard link does not cross two), and the box's image version is
 installed (above). The relay only takes a disk of 8, 32 or 128 GiB, so a `work.img` of another
-size (`ARBOS_BOX_WORK_GB`) is grown to one of those first, unmounted, with `e2fsck -f`,
-`truncate -s` and `resize2fs`.
+size (`ARBOS_BOX_WORK_GB`) is grown to one of those first, unmounted, with `e2fsprogs`'s
+`e2fsck -f`, `truncate -s` and `resize2fs`. The tool leaves a box alone, and says why, when any
+of this does not hold.
 
-For one user `$u`, with the relay's data in `$data` on the same filesystem as `ARBOS_BOXD_ROOT`:
+```sh
+export ARBOS_RELAY_ADMIN_TOKEN=...          # root, on the host with the relay and the daemon
+scripts/deploy/boxd-migrate.py --dry-run --all     # what it would do to each box; changes nothing
+scripts/deploy/boxd-migrate.py --yes --user $u     # one box
+scripts/deploy/boxd-migrate.py --yes --all --limit 5
+```
 
-1. Wait until the box is idle: its `GET /box/state` shows no turn and no waiting send for 30 s.
-2. Give the daemon the same file under its own name. A hard link is the same disk, not a copy,
-   and from here on the daemon never finds the box without one, so it never makes an empty one:
+It refuses to run without `--dry-run` or `--yes`. For each box, in order:
 
-   ```sh
-   install -d -m 0700 /var/lib/arbos-boxd/boxes/$u
-   ln $data/boxes/$u/work.img /var/lib/arbos-boxd/boxes/$u/work.img
-   ```
+1. **Idle.** The box is awake, agentd answers, and for 30 s no workspace has a turn, a waiting
+   send or a job (`GET /machine/debug?user=`). A box that stays busy for five minutes is left
+   for another run; so is one that is not awake, because it is checked before it is moved.
+2. **Link.** The disk's file id and its ext4 filesystem id go into
+   `/var/lib/arbos-boxd/migrate/$u.json`, then the daemon gets the same file under its own
+   name: `ln $data/boxes/$u/work.img /var/lib/arbos-boxd/boxes/$u/work.img`. A hard link is the
+   same disk, not a copy, and from here on the daemon never finds the user without one, so it
+   never makes an empty one.
+3. **Switch.** `PUT /admin/users/$u/box {"provider": "boxd"}`, then
+   `DELETE /admin/users/$u/box`: the relay stops the container and detaches the image, and the
+   tool waits until `losetup -j` shows nothing holding it.
+4. **Start.** `POST /machine/start` as a device minted for the user and revoked straight after.
+   The box is made on the daemon, on the linked disk, on this host's node.
+5. **Verify.** Within five minutes the relay has the box awake on `boxd` with a node, agentd in
+   it answers as this user, the daemon lists it running, and the file under the daemon's name
+   is the file and the filesystem written down in step 2.
+6. **Finish.** Only then: `rm $data/boxes/$u/work.img`.
 
-3. Send the user's next box to the daemon: `PUT /admin/users/$u/box {"provider": "boxd"}`.
-4. Remove the Docker box: `DELETE /admin/users/$u/box`. The relay stops the container and
-   detaches the image; the file stays. Check that nothing holds it before going on:
-   `losetup -j $data/boxes/$u/work.img` prints nothing.
-5. The user's next message (or `POST /machine/start`) makes the box on the daemon, on the
-   linked disk. Check `GET /v1/host/status` lists it as running and the user's files are there.
-6. Only then remove the old name: `rm $data/boxes/$u/work.img`.
+A box that fails step 3, 4 or 5 is put back: deleted from the daemon (a forced stop), the
+user's provider set to `gvisor`, the daemon's `boxes/$u` removed, and the box started and
+awaited on gvisor, on the disk it had. The daemon's link is removed only while the old name
+still names the same file, so the disk always has a name; if that ever does not hold the tool
+stops at that box, says `stuck`, and touches neither name.
 
-To go back before step 6: `DELETE /admin/users/$u/box` again, set the provider back to
-`gvisor`, and remove the daemon's `boxes/$u` directory (the link, not the disk).
+Where a box stands is read from the host and the relay on every run, so the command can be
+stopped anywhere and run again: a box that is done is skipped, one part way is taken on from
+its step. The summary at the end has one line per box (`moved`, `done`, `skip` with the reason,
+`rolled_back`, `stuck`), and the exit status is 1 if any box was rolled back or is stuck.
+
+### Running it on a test host
+
+A Linux host with Docker, `runsc`, a relay on `ARBOS_DEFAULT_PROVIDER=gvisor` with
+`ARBOS_BOXD_URL` set, and the daemon, all as in the sections above.
+
+1. Make a scratch user and give it a box: `POST /admin/users/test`, then
+   `POST /admin/users/$u/devices` and `POST /machine/start` with the device's token. Put a file
+   in the box you will recognise (`echo marker > /work/marker` from a chat's shell tool).
+2. `boxd-migrate.py --dry-run --user $u` prints `link` and the nine things it would do. Nothing
+   on the host has changed: `ls /var/lib/arbos-boxd/boxes` has no `$u`.
+3. `boxd-migrate.py --yes --user $u`. Expect `moved`, exit 0. Then check by hand what it
+   checked: `GET /machine/debug?user=$u` has `relay.provider.provider: "boxd"` and a
+   `node_id`; `GET /v1/host/status` on the daemon lists `$u` running;
+   `$data/boxes/$u/work.img` is gone; the marker file is in the box.
+4. Run it again: `done`, and nothing is asked of the relay but the listing.
+5. The rollback, on a second scratch user: stop the daemon (`systemctl stop arbos-boxd`) and
+   run `--yes`. The box is linked and taken off Docker, the relay cannot make it on a daemon
+   that does not answer, and the tool puts it back. Expect `rolled_back`, exit 1, the box awake
+   on `gvisor`, the marker file in it, and no `/var/lib/arbos-boxd/boxes/$u`. Start the daemon
+   and run again: `moved`.
+6. The resume: interrupt a run with Ctrl-C between the lines `link` and `start`, and run it
+   again. It goes on from `switch` or `start` and ends `moved`.
+
+Only then real users, a few at a time (`--limit`), in a quiet hour.
 
 ## Testing
 
