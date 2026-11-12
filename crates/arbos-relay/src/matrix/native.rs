@@ -9,16 +9,19 @@
 //! row comes back the same way and is known by its id, so nothing is written twice in either
 //! direction.
 //!
+//! A reaction put on a row there is put on the Loro row, and taken off it when its event is
+//! removed. What was sent before this bridge ran is read from the room once
+//! ([`catch_up_once`]), through the same rules.
+//!
 //! Bounds. An encrypted room's events are ciphertext here: nothing is carried back, and the
 //! relay is not handed the plaintext to make it so; those messages stay on the homeserver and
-//! are read there again when the flag is back on. Reactions put on a row on the homeserver
-//! are not carried back either.
+//! are read there again when the flag is back on.
 
 use arbos_core::doc::UserMessageOpts;
 use serde_json::{json, Value};
 
 use super::backfill::load_doc;
-use super::client::{MatrixError, MxResult};
+use super::client::{Client, MatrixError, MxResult};
 use super::Job;
 use crate::notices::write_doc_as;
 use crate::state::AppState;
@@ -34,6 +37,15 @@ fn is_id(id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
+/// The longest reaction carried (bytes): an emoji with its modifiers
+/// (`arbos_matrix::rows::REACTION_KEY_MAX`).
+const REACTION_KEY_MAX: usize = 64;
+/// How far back one catch-up reads a room: pages of [`CATCH_UP_PAGE`] events.
+const CATCH_UP_PAGES: usize = 200;
+const CATCH_UP_PAGE: usize = 100;
+/// `meta` key: the one catch-up over every native chat has been queued.
+const CATCH_UP_DONE: &str = "matrix_native_catch_up";
+
 /// The device a carried row is signed with: the relay, writing a member's own words.
 fn device(user_id: &str) -> String {
     format!("matrix:{user_id}")
@@ -46,21 +58,34 @@ pub fn on_transaction(state: &AppState, events: &[Value]) {
     }
 }
 
-/// The job an event of a room asks for, or `None`: not a people chat its members read on the
-/// homeserver, encrypted, not from a member, or not a message or removal an app sends.
-fn job_for(state: &AppState, ev: &Value) -> Option<Job> {
-    let room = state
-        .db
-        .matrix_room_by_room_id(ev["room_id"].as_str()?)
-        .ok()??;
+/// The chat of a room whose events are carried back, with its members: an open, unencrypted
+/// people chat they read on the homeserver.
+fn carried_chat(state: &AppState, room_id: &str) -> Option<crate::db_people::ChatWithMembers> {
+    let room = state.db.matrix_room_by_room_id(room_id).ok()??;
     if room.project_id.is_some() || room.closed_at.is_some() || room.encrypted {
         return None;
     }
     let cm = crate::people::load_chat(state, &room.chat_id).ok()?;
-    if super::people_native_room(state, &cm).as_deref() != Some(room.room_id.as_str()) {
-        return None;
-    }
-    let chat_id = room.chat_id;
+    (super::people_native_room(state, &cm).as_deref() == Some(room.room_id.as_str())).then_some(cm)
+}
+
+/// The person who sent an event, when they are a member who may write into the Loro room:
+/// the account the homeserver says sent it, not blocked by the other person of a DM, not
+/// silenced. The row path refuses those, so nothing carries them around it.
+fn author(state: &AppState, cm: &crate::db_people::ChatWithMembers, ev: &Value) -> Option<String> {
+    let member = state.matrix.cfg.member_of_mxid(ev["sender"].as_str()?)?;
+    let user_id = member.strip_prefix("user:")?;
+    (cm.members.iter().any(|m| m.member == member)
+        && crate::people::sender_allowed(state, user_id, cm).is_ok())
+    .then(|| user_id.to_owned())
+}
+
+/// The job an event of a room asks for, or `None`: not a people chat its members read on the
+/// homeserver, encrypted, not from a member, or not a message, reaction or removal an app
+/// sends.
+fn job_for(state: &AppState, ev: &Value) -> Option<Job> {
+    let cm = carried_chat(state, ev["room_id"].as_str()?)?;
+    let chat_id = cm.chat.id.clone();
     let content = &ev["content"];
     match ev["type"].as_str()? {
         "m.room.redaction" => Some(Job::NativeRemoval {
@@ -70,22 +95,27 @@ fn job_for(state: &AppState, ev: &Value) -> Option<Job> {
                 .or_else(|| content["redacts"].as_str())?
                 .to_owned(),
         }),
+        "life.arbos.reaction" if ev.get("state_key").is_none() => Some(Job::NativeReaction {
+            user_id: author(state, &cm, ev)?,
+            event_id: ev["event_id"].as_str()?.to_owned(),
+            target: content["event_id"].as_str()?.to_owned(),
+            key: content["key"]
+                .as_str()
+                .filter(|k| {
+                    (1..=REACTION_KEY_MAX).contains(&k.len()) && !k.chars().any(char::is_control)
+                })?
+                .to_owned(),
+            chat_id,
+        }),
         "m.room.message" if ev.get("state_key").is_none() => {
-            // The author is the account the homeserver says sent it, and a member here.
-            let member = state.matrix.cfg.member_of_mxid(ev["sender"].as_str()?)?;
-            let user_id = member.strip_prefix("user:")?;
-            // And one who may write into the Loro room: not blocked by the other person of a
-            // DM, not silenced. The row path refuses those, so nothing carries them around it.
-            if !cm.members.iter().any(|m| m.member == member)
-                || crate::people::sender_allowed(state, user_id, &cm).is_err()
-            {
-                return None;
-            }
+            let user_id = author(state, &cm, ev)?;
             // The apps' own rule (`arbos_matrix::rows::sender_is_own`): a message that names
-            // anyone else as its sender is shown to nobody, so it is carried nowhere.
+            // anyone else as its sender is shown to nobody, so it is carried nowhere. Nor is
+            // a row of the Loro room a device carried the other way (`history.rs`).
             if content
                 .get("life.arbos.sender")
-                .is_some_and(|s| s.as_str() != Some(member.as_str()))
+                .is_some_and(|s| s.as_str() != Some(format!("user:{user_id}").as_str()))
+                || content.get("life.arbos.history").is_some()
             {
                 return None;
             }
@@ -98,7 +128,7 @@ fn job_for(state: &AppState, ev: &Value) -> Option<Job> {
             }
             Some(Job::NativeMessage {
                 event_id: ev["event_id"].as_str()?.to_owned(),
-                user_id: user_id.to_owned(),
+                user_id,
                 message_id: message_id.to_owned(),
                 text: content["body"].as_str()?.to_owned(),
                 parts: content["life.arbos.parts"]
@@ -118,12 +148,149 @@ fn db_err(e: impl std::fmt::Display) -> MatrixError {
     MatrixError::Shape(format!("db: {e}"))
 }
 
-/// Apply a [`Job::NativeMessage`] or [`Job::NativeRemoval`].
+/// Apply one of the `Native*` jobs.
 pub async fn apply(state: &AppState, job: &Job) -> MxResult<()> {
     match job {
         Job::NativeRemoval { chat_id, event_id } => removal(state, chat_id, event_id).await,
+        Job::NativeReaction {
+            chat_id,
+            event_id,
+            user_id,
+            target,
+            key,
+        } => reaction(state, chat_id, event_id, user_id, target, key).await,
+        Job::NativeCatchUp { chat_id } => catch_up(state, chat_id).await,
         _ => message(state, job).await,
     }
+}
+
+/// Queue, once per relay, a read of every chat its members read on the homeserver: what they
+/// sent there before the relay carried such messages back is not in the Loro room yet.
+pub fn catch_up_once(state: &AppState) {
+    if !matches!(state.db.meta_get(CATCH_UP_DONE), Ok(None)) {
+        return;
+    }
+    for room in state.db.matrix_rooms_all().unwrap_or_default() {
+        if carried_chat(state, &room.room_id).is_some() {
+            state.matrix.enqueue(
+                state,
+                Job::NativeCatchUp {
+                    chat_id: room.chat_id,
+                },
+            );
+        }
+    }
+    if let Err(e) = state.db.meta_set(CATCH_UP_DONE, "1") {
+        tracing::warn!(error = %e, "matrix catch-up: not marked done, it runs again next start");
+    }
+}
+
+/// Read a chat's room back to its beginning (at most [`CATCH_UP_PAGES`] pages) and apply, in
+/// the order they happened, the events a transaction would have queued. Every one of those is
+/// safe to apply again, so this is too.
+async fn catch_up(state: &AppState, chat_id: &str) -> MxResult<()> {
+    let Some(room) = state.db.matrix_room(chat_id).map_err(db_err)? else {
+        return Ok(());
+    };
+    let Some(cm) = carried_chat(state, &room.room_id) else {
+        return Ok(());
+    };
+    // Only a member may read the room.
+    let Some(reader) = cm
+        .members
+        .iter()
+        .find_map(|m| state.matrix.cfg.member_mxid(&m.member))
+    else {
+        return Ok(());
+    };
+    let client = Client::new(state.http.clone(), state.matrix.cfg.clone());
+    let mut events = Vec::new();
+    let mut from = None;
+    for _ in 0..CATCH_UP_PAGES {
+        let (chunk, end) = client
+            .messages_page(&room.room_id, &reader, from.as_deref(), CATCH_UP_PAGE)
+            .await?;
+        let done = chunk.is_empty() || end.is_none();
+        events.extend(chunk);
+        from = end;
+        if done {
+            break;
+        }
+    }
+    for ev in events.iter().rev() {
+        if let Some(job) = job_for(state, ev) {
+            Box::pin(apply(state, &job)).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Whether `user_id` holds the reaction `key` on a row of the chat's Loro room; `None` when
+/// the chat has no such row.
+fn reacted(
+    state: &AppState,
+    chat_id: &str,
+    message_id: &str,
+    user_id: &str,
+    key: &str,
+) -> MxResult<Option<bool>> {
+    let Some(doc) = load_doc(state, chat_id, None).map_err(db_err)? else {
+        return Ok(None);
+    };
+    let sender = format!("user:{user_id}");
+    let key = arbos_core::doc::normalize_reaction_emoji(key);
+    Ok(doc
+        .projected_rows()
+        .iter()
+        .find(|r| r["id"] == message_id)
+        .map(|r| r["reactions"][key.as_str()][sender.as_str()] == true))
+}
+
+/// Put (`on`) or take off a person's reaction on a Loro row, when it is not already so.
+async fn set_reaction(
+    state: &AppState,
+    chat_id: &str,
+    message_id: &str,
+    user_id: &str,
+    key: &str,
+    on: bool,
+) -> MxResult<()> {
+    if reacted(state, chat_id, message_id, user_id, key)? != Some(!on) {
+        return Ok(());
+    }
+    let sender = format!("user:{user_id}");
+    write_doc_as(state, None, chat_id, &device(user_id), |doc| {
+        doc.transact(|d| d.set_reaction(message_id, key, &sender, on))?;
+        Ok(())
+    })
+    .await
+    .map(drop)
+    .map_err(db_err)
+}
+
+/// Put a reaction a member's device sent on the homeserver on the Loro row of the event it
+/// names. A reaction to anything that is no row here is nothing.
+async fn reaction(
+    state: &AppState,
+    chat_id: &str,
+    event_id: &str,
+    user_id: &str,
+    target: &str,
+    key: &str,
+) -> MxResult<()> {
+    let Some(message_id) = state
+        .db
+        .matrix_message_of(chat_id, target)
+        .map_err(db_err)?
+    else {
+        return Ok(());
+    };
+    // Recorded first: its removal is then known for what it is, whatever happens below.
+    state
+        .db
+        .matrix_insert_reaction(chat_id, event_id, &message_id, user_id, key)
+        .map_err(db_err)?;
+    set_reaction(state, chat_id, &message_id, user_id, key, true).await
 }
 
 /// Write a message a member's device sent on the homeserver into the chat's Loro room. Safe
@@ -203,9 +370,19 @@ async fn message(state: &AppState, job: &Job) -> MxResult<()> {
 }
 
 /// Remove the Loro row of an event removed on the homeserver, which has already decided that
-/// whoever asked may. An event that is no row here (a reaction, a message never carried) is
-/// nothing to remove.
+/// whoever asked may; a removed reaction comes off its row, unless another device of that
+/// person still holds the same one. An event that is neither here is nothing to remove.
 async fn removal(state: &AppState, chat_id: &str, event_id: &str) -> MxResult<()> {
+    if let Some((message_id, user_id, key, held)) = state
+        .db
+        .matrix_take_reaction(chat_id, event_id)
+        .map_err(db_err)?
+    {
+        if held {
+            return Ok(());
+        }
+        return set_reaction(state, chat_id, &message_id, &user_id, &key, false).await;
+    }
     let Some(message_id) = state
         .db
         .matrix_message_of(chat_id, event_id)
@@ -379,7 +556,14 @@ mod tests {
             ("an agent", with("sender", json!("@_a_01jx:arbos.life"))),
             ("no sender", with("sender", Value::Null)),
             ("a state event", with("state_key", json!(""))),
-            ("another type", with("type", json!("life.arbos.reaction"))),
+            ("another type", with("type", json!("m.sticker"))),
+            (
+                "a row carried in from the Loro room",
+                saying(
+                    json!({ "msgtype": "m.text", "body": "hi", "life.arbos.id": "01OK",
+                               "life.arbos.history": { "v": 1 } }),
+                ),
+            ),
             ("no time", with("origin_server_ts", Value::Null)),
             ("another member's name", saying(claims)),
             (
@@ -448,6 +632,82 @@ mod tests {
             .set_matrix_people_native(&bob, false)
             .expect("flag"));
         assert!(job_for(&state, &sent(&alice, "$late", text("01LATE", "hi"))).is_none());
+    }
+
+    #[tokio::test]
+    async fn a_reaction_on_the_homeserver_is_put_on_the_loro_row_and_taken_off_with_its_event() {
+        let (state, chat, alice, bob) = native_dm(false);
+        apply(&state, &[sent(&alice, "$one", text("01REACTED", "lunch?"))]).await;
+        let react = |user: &str, event_id: &str, content: Value| {
+            json!({ "type": "life.arbos.reaction", "room_id": ROOM, "event_id": event_id,
+                    "sender": format!("@{user}:arbos.life"), "origin_server_ts": 2, "content": content })
+        };
+        let on = |target: &str, key: &str| json!({ "event_id": target, "key": key, "m.relates_to": { "rel_type": "life.arbos.reaction" } });
+        let removal = |target: &str| {
+            json!({ "type": "m.room.redaction", "room_id": ROOM, "event_id": "$r",
+                    "sender": format!("@{bob}:arbos.life"), "redacts": target, "content": {} })
+        };
+        let reactions = || rows(&state, &chat)[0]["reactions"].clone();
+        let bobs = format!("user:{bob}");
+
+        // Bob reacts from two devices; the row shows it once, and again delivered changes nothing.
+        let first = react(&bob, "$r1", on("$one", "👍"));
+        apply(
+            &state,
+            &[first.clone(), react(&bob, "$r2", on("$one", "👍")), first],
+        )
+        .await;
+        assert_eq!(reactions(), json!({ "👍": { bobs.as_str(): true } }));
+        // One device takes it back: the other still holds it. Then that one does too.
+        apply(&state, &[removal("$r1")]).await;
+        assert_eq!(reactions(), json!({ "👍": { bobs.as_str(): true } }));
+        apply(&state, &[removal("$r2"), removal("$r2")]).await;
+        assert_eq!(reactions(), json!({}));
+
+        for (why, ev) in [
+            (
+                "to no row of this chat",
+                react(&bob, "$r3", on("$nothing", "👍")),
+            ),
+            ("an essay", react(&bob, "$r4", on("$one", &"a".repeat(65)))),
+            (
+                "a control character",
+                react(&bob, "$r5", on("$one", "a\nb")),
+            ),
+            ("no key", react(&bob, "$r6", json!({ "event_id": "$one" }))),
+            ("from no member", react("gh_9999", "$r7", on("$one", "👍"))),
+            (
+                "a target only the envelope names",
+                react(
+                    &bob,
+                    "$r8",
+                    json!({ "key": "👍", "m.relates_to": { "event_id": "$one" } }),
+                ),
+            ),
+        ] {
+            apply(&state, &[ev]).await;
+            assert_eq!(reactions(), json!({}), "{why}");
+        }
+        // Someone the other person of the DM has blocked reacts to nothing here.
+        state.db.block(&alice, &bob).expect("block");
+        assert!(job_for(&state, &react(&bob, "$r9", on("$one", "👍"))).is_none());
+    }
+
+    #[tokio::test]
+    async fn the_one_catch_up_is_queued_for_native_plaintext_chats_only() {
+        let (state, chat, _, _) = native_dm(false);
+        let (sealed, sealed_chat, _, _) = native_dm(true);
+        catch_up_once(&sealed);
+        assert_eq!(sealed.db.matrix_outbox_stats().unwrap().pending, 0);
+        assert!(sealed.db.matrix_room(&sealed_chat).unwrap().is_some());
+        catch_up_once(&state);
+        let due = state.db.matrix_outbox_due(10).unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].job, Job::NativeCatchUp { chat_id: chat });
+        state.db.matrix_outbox_done(due[0].id).unwrap();
+        // Once: the next start queues nothing.
+        catch_up_once(&state);
+        assert_eq!(state.db.matrix_outbox_stats().unwrap().pending, 0);
     }
 
     #[tokio::test]
@@ -613,5 +873,56 @@ mod tests {
             .expect("the removal is in the room");
         deliver("t3", vec![removal]).await;
         assert!(rows(&state, &chat).is_empty());
+
+        // What was sent while no relay was listening: a message, a reaction to it and to
+        // another that is then taken back. One read of the room brings the Loro room level.
+        let say = |who: &str, kind: &'static str, txn: &'static str, content: Value| {
+            let (client, room, who) = (client.clone(), room.room_id.clone(), who.to_owned());
+            async move {
+                client
+                    .send(&room, &who, kind, txn, &content, None)
+                    .await
+                    .expect("sent")
+            }
+        };
+        let missed = say(
+            &a,
+            "m.room.message",
+            "missed-1",
+            text("01WIREMISSED", "nobody heard"),
+        )
+        .await;
+        let on = |key: &str| json!({ "event_id": missed, "key": key, "m.relates_to": { "rel_type": "life.arbos.reaction" } });
+        say(&b, "life.arbos.reaction", "missed-2", on("👍")).await;
+        let taken_back = say(&b, "life.arbos.reaction", "missed-3", on("🎉")).await;
+        let url = format!(
+            "{hs_url}/_matrix/client/v3/rooms/{}/redact/{taken_back}/missed-4?user_id={b}",
+            room.room_id
+        );
+        let r = state
+            .http
+            .put(url)
+            .bearer_auth(&as_token)
+            .json(&json!({}))
+            .send()
+            .await;
+        assert!(r.expect("redact").status().is_success());
+        let catch_up = Job::NativeCatchUp {
+            chat_id: chat.clone(),
+        };
+        for _ in 0..2 {
+            Worker::new(state.clone())
+                .handle(&catch_up)
+                .await
+                .expect("caught up");
+            let got = rows(&state, &chat);
+            assert_eq!(got.len(), 1, "{got:?}");
+            assert_eq!(got[0]["id"], "01WIREMISSED");
+            assert_eq!(got[0]["sender"], format!("user:{alice}"));
+            assert_eq!(
+                got[0]["reactions"],
+                json!({ "👍": { format!("user:{bob}"): true } })
+            );
+        }
     }
 }

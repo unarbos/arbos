@@ -360,9 +360,10 @@ impl Worker {
                 }
                 Ok(())
             }
-            Job::NativeMessage { .. } | Job::NativeRemoval { .. } => {
-                super::native::apply(&self.state, job).await
-            }
+            Job::NativeMessage { .. }
+            | Job::NativeRemoval { .. }
+            | Job::NativeReaction { .. }
+            | Job::NativeCatchUp { .. } => super::native::apply(&self.state, job).await,
         }
     }
 
@@ -910,6 +911,7 @@ pub fn spawn(state: AppState) {
         homeserver = %state.matrix.cfg.hs_url,
         "Matrix dual-write on"
     );
+    super::native::catch_up_once(&state);
     tokio::spawn(Worker::new(state).run());
 }
 

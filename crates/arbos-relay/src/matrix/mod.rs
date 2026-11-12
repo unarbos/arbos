@@ -21,6 +21,7 @@ pub mod appservice;
 pub mod backfill;
 pub mod client;
 pub mod db;
+pub mod history;
 pub mod native;
 pub mod reads;
 pub mod servers;
@@ -339,8 +340,21 @@ pub enum Job {
         reply_to: Option<String>,
         ts: i64,
     },
-    /// Phase 3: an event was removed in the chat's room on the homeserver; remove its Loro row.
+    /// Phase 3: an event was removed in the chat's room on the homeserver; remove its Loro row
+    /// (or take back the reaction it was).
     NativeRemoval { chat_id: String, event_id: String },
+    /// Phase 3: a member's device reacted with `key` to the event `target` on the homeserver;
+    /// put the reaction on the Loro row.
+    NativeReaction {
+        chat_id: String,
+        event_id: String,
+        user_id: String,
+        target: String,
+        key: String,
+    },
+    /// Phase 3: read the chat's room from its beginning and write into the Loro room whatever
+    /// its members sent there that the Loro room does not have (`native.rs`).
+    NativeCatchUp { chat_id: String },
 }
 
 impl Job {
@@ -354,7 +368,9 @@ impl Job {
             | Job::CloseRoom { chat_id }
             | Job::Resync { chat_id, .. }
             | Job::NativeMessage { chat_id, .. }
-            | Job::NativeRemoval { chat_id, .. } => chat_id,
+            | Job::NativeRemoval { chat_id, .. }
+            | Job::NativeReaction { chat_id, .. }
+            | Job::NativeCatchUp { chat_id } => chat_id,
             Job::Pushers { user_id, .. } => user_id,
             Job::SyncServer { server_id } => server_id,
             Job::SyncChannel { channel_id } | Job::ChannelNotice { channel_id, .. } => channel_id,
@@ -405,6 +421,10 @@ pub struct Matrix {
     pub cfg: Config,
     pub wake: Notify,
     pub counters: Counters,
+    /// The device carrying each chat's history into its room, and until when (`history.rs`).
+    pub history_leases: std::sync::Mutex<std::collections::HashMap<String, (String, i64)>>,
+    /// The people whose homeserver account has been told a carried row is no new message.
+    pub history_quiet: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
 impl Matrix {
@@ -413,6 +433,8 @@ impl Matrix {
             cfg,
             wake: Notify::new(),
             counters: Counters::default(),
+            history_leases: Default::default(),
+            history_quiet: Default::default(),
         })
     }
 

@@ -496,6 +496,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/me/matrix", get(matrix::servers::me_matrix))
         .route("/me/matrix/people", get(matrix::servers::me_matrix_people))
         .route(
+            "/chats/{id}/matrix/history",
+            get(matrix::history::page).post(matrix::history::report),
+        )
+        .route(
             "/_matrix/client/{*rest}",
             axum::routing::any(matrix::servers::proxy),
         )
