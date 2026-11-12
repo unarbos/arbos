@@ -117,6 +117,10 @@ jobs:
           bash scripts/deploy/arbos-deploy-worker selftest
           curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash | bash -s -- latest /tmp >/dev/null
           /tmp/actionlint -color
+      - name: The simulator boot guard still refuses, and still lets a slotted boot through
+        # Pure bash against fake xcrun/simctl binaries, so it runs here rather than on the Mac it
+        # protects. Includes the mutation pass: a guard that has stopped guarding passes nothing.
+        run: ./scripts/runner/boot-guard-selftest.sh
 
       # Every ask Jacob has made is a row in docs/product/jacob-asks.md naming the test that
       # fails when the app stops doing it. A visual ask with no test is the one that regresses
