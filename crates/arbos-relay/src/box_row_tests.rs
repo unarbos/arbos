@@ -411,6 +411,9 @@ mod create_admission_regressions {
                 until(posts, 2, 5).await,
                 "both admitted creates must reach their local provider"
             );
+            // SQLite reports a statement when it is reset, which can trail the next one's
+            // start: the second caller's sandbox-id write may not be counted yet.
+            let _ = until(&trace.progress.writes, 4, 1).await;
         }
         let reads = trace.progress.reads.load(Ordering::SeqCst);
         let writes = trace.progress.writes.load(Ordering::SeqCst);
