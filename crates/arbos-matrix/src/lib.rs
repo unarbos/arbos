@@ -18,7 +18,7 @@
 pub mod client;
 pub mod rows;
 
-pub use client::{Backup, Crypto, Listener, MatrixClient, Session, Snapshot};
+pub use client::{Backup, Crypto, Listener, MatrixClient, Session, Snapshot, Upload};
 pub use rows::{ChannelRow, MessageRow, PeopleRoomRow, SpaceRow};
 
 /// Anything that can go wrong talking to the homeserver, flattened for the apps and the FFI.

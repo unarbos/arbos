@@ -463,6 +463,85 @@ pub fn reply_target(row: &MessageRow) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// The largest file a people chat sends or shows (the apps' "25 MB max").
+pub const MEDIA_MAX_BYTES: u64 = 25 * 1024 * 1024;
+
+/// The most files one message carries.
+pub const MEDIA_MAX_FILES: usize = 16;
+
+/// What an attachment's `ref` starts with when its file is kept on the homeserver, encrypted
+/// ([`file_part`]); `<event id>/<index in life.arbos.parts>` follows. Any other `ref` is a
+/// blob on the relay, as in a Loro room.
+pub const MEDIA_REF: &str = "mx:";
+
+/// `type/subtype`, nothing a header or a path could be made of.
+pub fn is_mime(mime: &str) -> bool {
+    let token = |t: &str| {
+        !t.is_empty()
+            && t.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"!#$&-^_.+".contains(&b))
+    };
+    mime.len() <= 127
+        && mime
+            .split_once('/')
+            .is_some_and(|(kind, sub)| token(kind) && token(sub))
+}
+
+/// The attachment part of a file this device encrypted and uploaded: `file` is the Matrix
+/// `EncryptedFile` (where the ciphertext is, its key and its hash), which travels inside the
+/// message, so only who can read the message can read the file.
+pub fn file_part(
+    id: &str,
+    name: &str,
+    mime: &str,
+    kind: Option<&str>,
+    bytes: u64,
+    file: Value,
+) -> Value {
+    let mut attachment = json!({ "name": name, "mime": mime, "bytes": bytes, "file": file });
+    if let Some(kind) = kind {
+        attachment["kind"] = json!(kind);
+    }
+    json!({ "id": id, "kind": "attachment", "attachment": attachment })
+}
+
+/// `(mime, file)` of a part that names a file on the homeserver the apps would take: a name,
+/// a media type, a size within [`MEDIA_MAX_BYTES`] and an `mxc://` address. What `file` says
+/// beyond that is checked by whoever decrypts with it.
+pub fn part_file(part: &Value) -> Option<(&str, &Value)> {
+    let a = &part["attachment"];
+    let file = a.get("file")?;
+    let sized = a["bytes"].as_u64().is_some_and(|b| b <= MEDIA_MAX_BYTES);
+    let named = a["name"]
+        .as_str()
+        .is_some_and(|n| (1..=255).contains(&n.len()) && !n.chars().any(char::is_control));
+    let mime = a["mime"].as_str().filter(|m| is_mime(m))?;
+    let placed = file["url"]
+        .as_str()
+        .is_some_and(|u| u.starts_with("mxc://") && u.len() <= 255);
+    (part["kind"] == "attachment" && sized && named && placed).then_some((mime, file))
+}
+
+/// A part of `life.arbos.parts` as the transcript gets it. A file on the homeserver is named
+/// by `ref` ([`MEDIA_REF`]) for the app to ask this client for; its key stays in the event.
+/// One that is not a file the apps would take ([`part_file`]) has no `ref` and shows as an
+/// attachment that is not there, and nobody else's `ref` is taken for one of these.
+fn shown_part(event_id: &str, index: usize, part: &Value) -> Value {
+    let reference = part_file(part).map(|_| format!("{MEDIA_REF}{event_id}/{index}"));
+    let mut part = part.clone();
+    if let Some(a) = part.get_mut("attachment").and_then(Value::as_object_mut) {
+        let claimed = a.get("ref").and_then(Value::as_str);
+        let claimed = claimed.is_some_and(|r| r.starts_with(MEDIA_REF));
+        if a.remove("file").is_some() || claimed {
+            a.remove("ref");
+        }
+        if let Some(reference) = reference {
+            a.insert("ref".to_owned(), json!(reference));
+        }
+    }
+    part
+}
+
 /// What [`echo_row`] puts before the local id to make a pending row's `event_id`; no event id
 /// starts with it (they start with `$`).
 const ECHO: &str = "~";
@@ -562,7 +641,8 @@ pub fn message_row(
     };
     let mut parts = vec![json!({ "id": format!("{event_id}#text"), "kind": "text", "text": text })];
     if let Some(extra) = content["life.arbos.parts"].as_array().filter(|_| !locked) {
-        parts.extend(extra.iter().cloned());
+        let shown = extra.iter().enumerate();
+        parts.extend(shown.map(|(i, p)| shown_part(&event_id, i, p)));
     }
     let mut row = json!({
         "id": id,
@@ -606,6 +686,37 @@ mod tests {
         assert_eq!(member_of_mxid("@gh_12:arbos.life"), "user:gh_12");
         assert_eq!(member_of_mxid("@_a_01jabc:arbos.life"), "agent:01JABC");
         assert_eq!(member_of_mxid("@_arbos:arbos.life"), "system");
+    }
+
+    #[test]
+    fn a_file_on_the_homeserver_is_a_ref_and_its_key_stays_in_the_event() {
+        let file = json!({ "url": "mxc://arbos.test/abc", "v": "v2", "key": { "k": "secret" } });
+        let part = |bytes: u64, mime: &str, file: Value| {
+            file_part("p", "cat.png", mime, Some("image"), bytes, file)
+        };
+        let row = |parts: Value| {
+            let ev = json!({ "type": "m.room.message", "event_id": "$e1", "sender": "@gh_7:arbos.test",
+                "origin_server_ts": 1, "content": { "msgtype": "m.text", "body": "", "life.arbos.parts": parts } });
+            let row = message_row(&ev, &|_| None).unwrap();
+            assert!(!row.json.contains("secret"), "{}", row.json);
+            serde_json::from_str::<Value>(&row.json).unwrap()["parts"].clone()
+        };
+        let blob = json!({ "id": "b", "kind": "attachment", "attachment": { "name": "a", "mime": "a/b", "ref": "att-1" } });
+        let shown = row(json!([blob, part(3, "image/png", file.clone())]));
+        assert_eq!(shown[1]["attachment"]["ref"], "att-1");
+        assert_eq!(shown[2]["attachment"]["ref"], "mx:$e1/1");
+        assert_eq!(shown[2]["attachment"]["kind"], "image");
+        // Too large, no media type, not on a homeserver, or a ref that only claims to be one.
+        let claims = json!({ "id": "c", "kind": "attachment", "attachment": { "name": "a", "mime": "a/b", "ref": "mx:$other/0" } });
+        for bad in [
+            part(MEDIA_MAX_BYTES + 1, "image/png", file.clone()),
+            part(3, "image/png\r\nx: y", file.clone()),
+            part(3, "image/png", json!({ "url": "https://example.com/x" })),
+            claims,
+        ] {
+            let shown = row(json!([bad]));
+            assert!(shown[1]["attachment"].get("ref").is_none(), "{shown}");
+        }
     }
 
     #[test]

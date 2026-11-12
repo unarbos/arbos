@@ -1948,3 +1948,194 @@ async fn a_room_is_read_from_the_device_after_a_restart_and_made_whole_again() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A file in an encrypted people chat: its reader gets the bytes its sender picked, the
+/// homeserver stores bytes that are not those and is told neither the file's name nor where
+/// it is, and the key that opens it never reaches the app's row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_file_in_an_encrypted_chat_is_ciphertext_on_the_homeserver() {
+    use arbos_matrix::Upload;
+    use matrix_sdk::authentication::matrix::MatrixSession;
+    use matrix_sdk::authentication::SessionTokens;
+
+    let Ok(url) = std::env::var("ARBOS_MATRIX_TEST_E2EE_HS") else {
+        return;
+    };
+    let hs = Hs {
+        url,
+        http: reqwest13::Client::new(),
+    };
+    let tag = std::process::id();
+    let dir = std::env::temp_dir().join(format!("arbos-files-{tag}"));
+    let native = |s: Session| Session {
+        people_native: true,
+        ..s
+    };
+    let a = native(hs.register(&format!("fa{tag}")).await);
+    let b = native(hs.register(&format!("fb{tag}")).await);
+    let (alice1, bob1) = (start(&a, &dir).await, start(&b, &dir).await);
+    alice1.recover("alice's passphrase").await.unwrap();
+    bob1.recover("bob's passphrase").await.unwrap();
+    let room = hs
+        .call(
+            "POST",
+            "/_matrix/client/v3/createRoom",
+            Some(&a.access_token),
+            json!({ "preset": "private_chat", "invite": [b.user_id],
+                    "creation_content": { "life.arbos.chat_id": "01P5FILES" },
+                    "initial_state": [
+                        { "type": "life.arbos.chat", "state_key": "",
+                          "content": { "chat_id": "01P5FILES", "kind": "dm", "project_id": null,
+                                       "created_by": a.user_id, "created_at": 1700, "epoch": 1 } },
+                        { "type": "m.room.encryption", "state_key": "",
+                          "content": { "algorithm": "m.megolm.v1.aes-sha2" } }] }),
+        )
+        .await["room_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    hs.call(
+        "POST",
+        &format!("/_matrix/client/v3/join/{room}"),
+        Some(&b.access_token),
+        json!({}),
+    )
+    .await;
+    eventually(|| async { alice1.open_room(&room).await.ok() }).await;
+    eventually(|| async { bob1.open_room(&room).await.ok() }).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    // A picture: the PNG signature, then 200 kB no cipher would leave standing.
+    let mut picture = b"\x89PNG\r\n\x1a\n".to_vec();
+    picture.extend((0..200_000u32).map(|i| (i * 31 % 251) as u8));
+    let upload = |bytes: Vec<u8>| Upload {
+        name: "launch-plan.png".into(),
+        mime: "image/png".into(),
+        kind: Some("image".into()),
+        bytes,
+    };
+    // More than the apps take is refused before anything is uploaded.
+    let too_large = alice1
+        .send_files(
+            &room,
+            "",
+            vec![upload(vec![0; 25 * 1024 * 1024 + 1])],
+            None,
+            "01P5FILESBIG",
+        )
+        .await;
+    assert!(
+        matches!(&too_large, Err(arbos_matrix::Error::Homeserver(e)) if e.contains("too large")),
+        "{too_large:?}"
+    );
+    let id = "01P5FILESONE00000000000000";
+    let event = alice1
+        .send_files(&room, "the plan", vec![upload(picture.clone())], None, id)
+        .await
+        .unwrap();
+
+    // Both read it: a row with the caption and an attachment named by event and part.
+    let reference = format!("{event}/0");
+    for c in [&alice1, &bob1] {
+        let row = eventually(|| async {
+            let rows = c.open_room(&room).await.ok()?;
+            rows.into_iter()
+                .find(|r| r.id == id && !r.pending && !r.locked)
+        })
+        .await;
+        assert_eq!(row.text, "the plan");
+        let attachment = row_json(&row)["parts"][1]["attachment"].clone();
+        assert_eq!(
+            attachment,
+            json!({ "name": "launch-plan.png", "mime": "image/png", "kind": "image",
+                    "bytes": picture.len(), "ref": format!("mx:{reference}") })
+        );
+        let (mime, bytes) = c.media(&room, &reference).await.unwrap();
+        assert_eq!(mime, "image/png");
+        assert!(bytes == picture, "the reader's bytes are the sender's");
+    }
+    // No other part, event or room answers with a file.
+    for (r, bad) in [
+        (&room, format!("{event}/1")),
+        (&room, format!("{event}/x")),
+        (&room, "$nothing/0".to_owned()),
+    ] {
+        assert!(bob1.media(r, &bad).await.is_err(), "{bad}");
+    }
+
+    // The homeserver: an encrypted event that says nothing of the file.
+    let raw = hs
+        .call(
+            "GET",
+            &format!("/_matrix/client/v3/rooms/{room}/messages?dir=b&limit=20"),
+            Some(&a.access_token),
+            Value::Null,
+        )
+        .await
+        .to_string();
+    assert!(raw.contains(&event) && raw.contains("m.room.encrypted"));
+    for told in ["launch-plan", "image/png", "mxc://", "the plan"] {
+        assert!(!raw.contains(told), "the homeserver was told {told}");
+    }
+
+    // What it stores under the address in the message, read with Bob's own keys from his
+    // device's store: as long as the picture and none of it.
+    bob1.stop();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let raw_bob = matrix_sdk::Client::builder()
+        .homeserver_url(&b.homeserver)
+        .sqlite_store(dir.join(&b.device_id), Some("test store key"))
+        .build()
+        .await
+        .unwrap();
+    raw_bob
+        .restore_session(MatrixSession {
+            meta: matrix_sdk::SessionMeta {
+                user_id: b.user_id.as_str().try_into().unwrap(),
+                device_id: b.device_id.as_str().into(),
+            },
+            tokens: SessionTokens {
+                access_token: b.access_token.clone(),
+                refresh_token: None,
+            },
+        })
+        .await
+        .unwrap();
+    let raw_room = raw_bob
+        .get_room(<&matrix_sdk::ruma::RoomId>::try_from(room.as_str()).unwrap())
+        .unwrap();
+    let decrypted = raw_room
+        .event(
+            <&matrix_sdk::ruma::EventId>::try_from(event.as_str()).unwrap(),
+            None,
+        )
+        .await
+        .unwrap();
+    let decrypted: Value = serde_json::from_str(decrypted.raw().json().get()).unwrap();
+    let mxc = decrypted["content"]["life.arbos.parts"][0]["attachment"]["file"]["url"]
+        .as_str()
+        .unwrap()
+        .strip_prefix("mxc://")
+        .unwrap()
+        .to_owned();
+    let stored = hs
+        .http
+        .get(format!("{}/_matrix/client/v1/media/download/{mxc}", hs.url))
+        .bearer_auth(&b.access_token)
+        .send()
+        .await
+        .unwrap();
+    assert!(stored.status().is_success(), "{}", stored.status());
+    assert_eq!(stored.headers()["content-type"], "application/octet-stream");
+    let stored = stored.bytes().await.unwrap();
+    assert_eq!(stored.len(), picture.len());
+    assert!(
+        !stored
+            .windows(16)
+            .any(|w| picture.windows(16).take(64).any(|p| p == w)),
+        "plaintext on the homeserver"
+    );
+
+    alice1.stop();
+    let _ = std::fs::remove_dir_all(&dir);
+}
