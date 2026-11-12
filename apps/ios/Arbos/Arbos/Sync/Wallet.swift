@@ -237,7 +237,7 @@ extension AppModel {
         } catch {
             return "That phrase doesn't belong to this account."
         }
-        do { try WalletVault.save(phrase, user: me.id) } catch { return error.localizedDescription }
+        do { try WalletVault.save(phrase, user: me.id) } catch { return "Couldn't save your recovery phrase. Something went wrong." }
         walletPrompt = nil
         return nil
     }
