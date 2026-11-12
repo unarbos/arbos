@@ -393,7 +393,7 @@ dependencies = [
 
 [[package]]
 name = "arbos-boxd"
-version = "0.6.411"
+version = "0.6.412"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -636,7 +636,7 @@ dependencies = [
 
 [[package]]
 name = "arbos-wallet"
-version = "0.6.411"
+version = "0.6.412"
 dependencies = [
  "futures",
  "hex",
