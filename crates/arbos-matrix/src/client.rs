@@ -5,7 +5,7 @@
 //! of their own sends. Everything else — tokens, retries, pagination tokens, the state events
 //! that say which room is a channel of which server, encryption keys — stays in here.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -20,6 +20,7 @@ use matrix_sdk::room::MessagesOptions;
 use matrix_sdk::ruma::api::client::receipt::create_receipt::v3::ReceiptType;
 use matrix_sdk::ruma::api::client::sync::sync_events::v5 as sliding;
 use matrix_sdk::ruma::events::receipt::ReceiptThread;
+use matrix_sdk::ruma::events::room::encrypted::OriginalSyncRoomEncryptedEvent;
 use matrix_sdk::ruma::events::{AnySyncTimelineEvent, MessageLikeEventType, StateEventType};
 use matrix_sdk::ruma::serde::Raw;
 use matrix_sdk::ruma::{EventId, OwnedRoomId, OwnedUserId, RoomId, TransactionId, UInt, UserId};
@@ -100,6 +101,9 @@ struct Timeline {
     at_start: bool,
     /// A people chat's reactions, by the reaction's own event id (what a removal names).
     reactions: HashMap<String, rows::Reaction>,
+    /// The encrypted event behind each locked row, by event id: read again when a key
+    /// arrives ([`MatrixClient::unlock`]).
+    sealed: HashMap<String, String>,
 }
 
 impl Timeline {
@@ -206,6 +210,7 @@ impl MatrixClient {
             stop,
         });
         this.install_event_handler();
+        tokio::spawn(Arc::clone(&this).key_loop(stop_rx.clone()));
         tokio::spawn(Arc::clone(&this).sync_loop(stop_rx));
         Ok(this)
     }
@@ -298,28 +303,107 @@ impl MatrixClient {
                     let weak = weak.clone();
                     async move {
                         let Some(this) = weak.upgrade() else { return };
-                        let Ok(mut v) = serde_json::from_str::<Value>(ev.json().get()) else {
+                        let Ok(v) = serde_json::from_str::<Value>(ev.json().get()) else {
                             return;
                         };
-                        let encrypted = Self::is_encrypted(&room).await;
-                        let people = this.is_people(&room).await;
-                        if people && this.fold(room.room_id(), &v, !encrypted, true) {
-                            return;
-                        }
-                        if v["event_id"].is_null() || !rows::shows(&v, encrypted, info.is_some()) {
-                            return;
-                        }
-                        if people && !rows::sender_is_own(&v) {
-                            return;
-                        }
-                        v["room_id"] = json!(room.room_id().as_str());
-                        let names = this.names_for(&room, std::slice::from_ref(&v)).await;
-                        if let Some(row) = message_row(&v, &|m| names.get(m).cloned()) {
-                            this.push_rows(room.room_id(), vec![row], true);
+                        let locked = v["type"] == "m.room.encrypted";
+                        this.ingest(&room, v, info.is_some()).await;
+                        // Its key may have landed (a backup download) while it was read.
+                        if locked {
+                            this.unlock(&room).await;
                         }
                     }
                 },
             );
+    }
+
+    /// One timeline event of a room, as it arrives or once its key does: folded into the
+    /// room's rows and handed to the listener. `decrypted` is whether this device decrypted it.
+    async fn ingest(&self, room: &Room, mut v: Value, decrypted: bool) {
+        let encrypted = Self::is_encrypted(room).await;
+        let people = self.is_people(room).await;
+        if people && self.fold(room.room_id(), &v, !encrypted, true) {
+            return;
+        }
+        if v["event_id"].is_null() || !rows::shows(&v, encrypted, decrypted) {
+            return;
+        }
+        if people && !rows::sender_is_own(&v) {
+            return;
+        }
+        v["room_id"] = json!(room.room_id().as_str());
+        let names = self.names_for(room, std::slice::from_ref(&v)).await;
+        if let Some(row) = message_row(&v, &|m| names.get(m).cloned()) {
+            self.seal(room.room_id(), std::slice::from_ref(&v));
+            self.push_rows(room.room_id(), vec![row], true);
+        }
+    }
+
+    /// Keep the encrypted events among `events` for [`Self::unlock`].
+    fn seal(&self, room_id: &RoomId, events: &[Value]) {
+        let sealed = events
+            .iter()
+            .filter(|v| v["type"] == "m.room.encrypted")
+            .filter_map(|v| Some((v["event_id"].as_str()?.to_owned(), v.to_string())));
+        let mut tl = self.timelines.lock().unwrap_or_else(|p| p.into_inner());
+        tl.entry(room_id.to_owned())
+            .or_default()
+            .sealed
+            .extend(sealed);
+    }
+
+    /// Read the room's locked rows again. A key can arrive after its message (sent late, or
+    /// downloaded from the backup once the passphrase opened it); the row then becomes the
+    /// message, through the same rules as an event that arrived readable.
+    async fn unlock(&self, room: &Room) {
+        let sealed: Vec<String> = {
+            let tl = self.timelines.lock().unwrap_or_else(|p| p.into_inner());
+            tl.get(room.room_id())
+                .map(|t| t.sealed.values().cloned().collect())
+                .unwrap_or_default()
+        };
+        for json in sealed {
+            let Ok(raw) = Raw::<OriginalSyncRoomEncryptedEvent>::from_json_string(json) else {
+                continue;
+            };
+            let Ok(ev) = room.decrypt_event(&raw, None).await else {
+                continue;
+            };
+            if ev.encryption_info().is_none() {
+                continue;
+            }
+            if let Ok(v) = serde_json::from_str::<Value>(ev.raw().json().get()) {
+                self.ingest(room, v, true).await;
+            }
+        }
+    }
+
+    /// Every room key this device receives (from a member's device or the backup) opens the
+    /// locked rows of its room.
+    async fn key_loop(self: Arc<Self>, mut stop: watch::Receiver<bool>) {
+        let Some(keys) = self.client.encryption().room_keys_received_stream().await else {
+            return;
+        };
+        futures::pin_mut!(keys);
+        loop {
+            let rooms: HashSet<OwnedRoomId> = tokio::select! {
+                _ = stop.changed() => return,
+                next = keys.next() => match next {
+                    Some(Ok(keys)) => keys.into_iter().map(|k| k.room_id).collect(),
+                    // Missed some: every room this device has read.
+                    Some(Err(_)) => {
+                        let tl = self.timelines.lock().unwrap_or_else(|p| p.into_inner());
+                        tl.keys().cloned().collect()
+                    }
+                    None => return,
+                },
+            };
+            for id in rooms {
+                if let Some(room) = self.client.get_room(&id) {
+                    self.unlock(&room).await;
+                }
+            }
+        }
     }
 
     /// Whether the room is end-to-end encrypted; not knowing counts as encrypted, so a
@@ -655,6 +739,7 @@ impl MatrixClient {
             (Some(gone), _) => {
                 let before = t.rows.len();
                 t.rows.retain(|r| r.event_id != gone);
+                t.sealed.remove(&gone);
                 t.reactions.remove(&gone).is_some() || t.rows.len() != before
             }
             (None, Some((id, r))) => t.reactions.insert(id, r.clone()) != Some(r),
@@ -684,6 +769,9 @@ impl MatrixClient {
             }
             // Same event again: keep the newest reading (a locked row becomes the message once
             // its key arrives).
+            if !r.locked {
+                t.sealed.remove(&r.event_id);
+            }
             if let Some(x) = t.rows.iter_mut().find(|x| x.event_id == r.event_id) {
                 if *x != r {
                     *x = r;
@@ -768,6 +856,7 @@ impl MatrixClient {
             .iter()
             .filter_map(|v| message_row(v, &|m| names.get(m).cloned()))
             .collect();
+        self.seal(room.room_id(), &events);
         Ok((rows, page.end))
     }
 
@@ -777,11 +866,11 @@ impl MatrixClient {
         let room = self.room(room_id)?;
         let loaded = {
             let tl = self.timelines.lock().unwrap_or_else(|p| p.into_inner());
-            // A locked row means keys may have arrived since: read the newest page again.
-            tl.get(room.room_id())
-                .is_some_and(|t| t.loaded && !t.rows.iter().any(|r| r.locked))
+            tl.get(room.room_id()).is_some_and(|t| t.loaded)
         };
         if loaded {
+            // A sender's device can become trusted with no key arriving: look again here.
+            self.unlock(&room).await;
             return Ok(self.push_rows(room.room_id(), Vec::new(), false));
         }
         let (rows, end) = self.page(&room, None).await?;

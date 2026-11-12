@@ -1094,3 +1094,119 @@ async fn people_chats_reply_react_remove_and_read() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A row whose key arrives after it — a live message to a device no key was sent to, and the
+/// history it read before it had the passphrase — becomes the message by itself: the listener
+/// is handed the opened rows, with no second `open_room`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_key_that_arrives_after_its_message_opens_the_row() {
+    let Ok(url) = std::env::var("ARBOS_MATRIX_TEST_E2EE_HS") else {
+        return;
+    };
+    let hs = Hs {
+        url,
+        http: reqwest13::Client::new(),
+    };
+    let tag = std::process::id();
+    let dir = std::env::temp_dir().join(format!("arbos-late-key-{tag}"));
+    let (alice, bob) = (format!("la{tag}"), format!("lb{tag}"));
+    let passphrase = "the passphrase arbos-wallet derives from the phrase";
+    let a1 = hs.register(&alice).await;
+    let b1 = hs.register(&bob).await;
+    let (alice1, bob1) = (start(&a1, &dir).await, start(&b1, &dir).await);
+    alice1.recover(passphrase).await.unwrap();
+    bob1.recover("bob's passphrase").await.unwrap();
+    let room = hs
+        .call(
+            "POST",
+            "/_matrix/client/v3/createRoom",
+            Some(&a1.access_token),
+            json!({ "preset": "private_chat", "invite": [b1.user_id],
+                    "initial_state": [{ "type": "m.room.encryption", "state_key": "",
+                                        "content": { "algorithm": "m.megolm.v1.aes-sha2" } }] }),
+        )
+        .await["room_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    hs.call(
+        "POST",
+        &format!("/_matrix/client/v3/join/{room}"),
+        Some(&b1.access_token),
+        json!({}),
+    )
+    .await;
+    eventually(|| async { alice1.open_room(&room).await.ok() }).await;
+    eventually(|| async { bob1.open_room(&room).await.ok() }).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    alice1
+        .send_text(&room, "before the new phone", "01LATEKEYBEFORE00000000000")
+        .await
+        .unwrap();
+
+    // Alice's new phone, not yet given the passphrase: it reads the history locked, and Bob's
+    // devices send it no key for what he says next.
+    let a2 = hs.login(&alice).await;
+    let seen = Arc::new(Seen(Mutex::new(Vec::new())));
+    let alice2 = MatrixClient::start(
+        a2.clone(),
+        Crypto {
+            store_dir: dir.join(&a2.device_id),
+            store_key: Some("test store key".into()),
+            first_device: false,
+        },
+        seen.clone(),
+    )
+    .await
+    .unwrap();
+    let opened = eventually(|| async { alice2.open_room(&room).await.ok() }).await;
+    assert!(opened.iter().any(|r| r.locked), "{opened:?}");
+    bob1.send_text(
+        &room,
+        "said while it was locked",
+        "01LATEKEYLIVE0000000000000",
+    )
+    .await
+    .unwrap();
+    let last = || seen.0.lock().unwrap().last().cloned().unwrap_or_default();
+    eventually(|| async { (last().iter().filter(|r| r.locked).count() == 2).then_some(()) }).await;
+
+    // Both keys are in the backup (Alice's first device put them there) before she types the
+    // phrase; then the rows open through the listener alone.
+    let version = hs
+        .call(
+            "GET",
+            "/_matrix/client/v3/room_keys/version",
+            Some(&a1.access_token),
+            Value::Null,
+        )
+        .await["version"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    eventually(|| async {
+        let keys = hs
+            .call(
+                "GET",
+                &format!("/_matrix/client/v3/room_keys/keys/{room}?version={version}"),
+                Some(&a1.access_token),
+                Value::Null,
+            )
+            .await;
+        (keys["sessions"].as_object().map_or(0, |s| s.len()) >= 2).then_some(())
+    })
+    .await;
+    alice2.recover(passphrase).await.unwrap();
+    let rows = eventually(|| async {
+        let rows = last();
+        rows.iter().all(|r| !r.locked).then_some(rows)
+    })
+    .await;
+    let texts: Vec<&str> = rows.iter().map(|r| r.text.as_str()).collect();
+    assert_eq!(texts, ["before the new phone", "said while it was locked"]);
+
+    for c in [alice1, bob1, alice2] {
+        c.stop();
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

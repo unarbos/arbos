@@ -803,16 +803,6 @@ extension AppModel {
         guard let channelId = channelId(forRoom: roomId) else { return }
         setChannelRows(channelId, rows)
         if visibleChatId == channelId { markChannelRead(channelId) }
-        // A native chat's newest row can arrive before its key (the first of a key session),
-        // and the client reads a locked row again only when asked (`open_room`). Asked once,
-        // shortly after, and whenever the chat opens; a row still locked then stays so until
-        // the next. Upgrade path: the client sends the row again when its key arrives.
-        if nativeRooms[channelId] != nil, rows.last?.locked == true {
-            Task {
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
-                openChannel(channelId)
-            }
-        }
     }
 
     private func channelId(forRoom roomId: String) -> Id? {
