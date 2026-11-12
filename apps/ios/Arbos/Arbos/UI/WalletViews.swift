@@ -16,10 +16,14 @@ struct WalletPage: View {
     @State private var backup: String?
     @State private var showPhrase = false
     @State private var payable = UserDefaults.standard.bool(forKey: "walletPayable")
-    @State private var error: String?
+    @State private var error: UserError?
+    @State private var errorDetailsOpen = false
 
     var body: some View {
         SettingsPage(title: "Wallet") {
+            if let error {
+                ErrorNote(id: "wallet-error", error: error, detailsOpen: $errorDetailsOpen)
+            }
             if let address = model.walletAddressValue {
                 SettingsGroup(footer: "Your TAO account on Bittensor. It works in any Bittensor wallet with the same recovery phrase.") {
                     SettingsValueRow("Balance", value: balance ?? "—")
@@ -53,9 +57,6 @@ struct WalletPage: View {
                     SettingsActionRow(title: "Enter recovery phrase") { model.walletPrompt = .restore }
                 }
             }
-            if let error {
-                Text(error).font(theme.font(Theme.small)).foregroundStyle(theme.danger).padding(.horizontal, 16)
-            }
         }
         .task {
             if let address = model.walletAddressValue {
@@ -72,7 +73,7 @@ struct WalletPage: View {
         error = nil
         let context = LAContext()
         guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: nil) else {
-            error = "Set a passcode on this iPhone to see your recovery phrase."
+            error = UserError.refused("", "Set a passcode on this iPhone to see your recovery phrase.")
             return
         }
         Task {
@@ -96,7 +97,7 @@ struct WalletPage: View {
                 UserDefaults.standard.set(on, forKey: "walletPayable")
             } catch {
                 payable = !on
-                self.error = "Couldn't save that. \(error.localizedDescription)"
+                self.error = UserError.classify("save that", error)
             }
         }
     }
@@ -194,7 +195,7 @@ struct WalletPromptSheet: View {
     @Environment(\.theme) private var theme
     let prompt: WalletPrompt
     @State private var typed = ""
-    @State private var error: String?
+    @State private var error: UserError?
     @State private var working = false
 
     var body: some View {
@@ -208,6 +209,7 @@ struct WalletPromptSheet: View {
             case .restore:
                 SheetHeaderBar(title: "Unlock your chats", leading: .cancel, onLeading: { model.walletPrompt = nil },
                             action: working ? "…" : "Unlock", actionEnabled: !working && !typed.isEmpty, onAction: unlock)
+                SheetErrorNote(id: "wallet-restore-error", local: error)
                 Text("Your encrypted history is locked on this device. Enter the 12-word recovery phrase from your other device (Settings → Wallet).")
                     .font(theme.font(Theme.body)).foregroundStyle(theme.muted)
                 TextField("twelve words…", text: $typed, axis: .vertical)
@@ -215,9 +217,7 @@ struct WalletPromptSheet: View {
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .font(.system(.body, design: .monospaced))
-                    .padding(12)
-                    .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.field))
-                if let error { Text(error).font(theme.font(Theme.small)).foregroundStyle(theme.danger) }
+                    .controlFieldGrowing()
             }
             Spacer(minLength: 0)
         }
@@ -229,7 +229,7 @@ struct WalletPromptSheet: View {
     private func unlock() {
         working = true
         Task {
-            error = await model.restoreWallet(typed)
+            error = await model.restoreWallet(typed).map { UserError.refused("", $0) }
             working = false
         }
     }
@@ -342,7 +342,7 @@ struct SendChequeSheet: View {
     let chatId: Id
     @State private var amount = ""
     @State private var payee: ChequePayee?
-    @State private var error: String?
+    @State private var error: UserError?
     @State private var sending = false
     @FocusState private var focused: Bool
 
@@ -354,6 +354,7 @@ struct SendChequeSheet: View {
         VStack(spacing: 20) {
             SheetHeaderBar(title: "Send TAO", leading: .cancel, onLeading: { dismiss() },
                         action: sending ? "…" : "Sign", actionEnabled: signable, onAction: send)
+            SheetErrorNote(id: "send-cheque-error", local: error)
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 TextField("0", text: $amount)
                     .keyboardType(.decimalPad)
@@ -390,14 +391,13 @@ struct SendChequeSheet: View {
             }
             Text("A cheque is signed on this phone and pays nothing until it is cashed. They have about 7 hours to cash it, while either of you is online.")
                 .font(theme.font(Theme.small)).foregroundStyle(theme.muted).multilineTextAlignment(.center)
-            if let error { Text(error).font(theme.font(Theme.small)).foregroundStyle(theme.danger) }
             Spacer(minLength: 0)
         }
         .padding(20)
         .background(theme.bg)
         .onAppear { focused = true }
         .task {
-            do { payee = try await model.chequePayee(chatId: chatId) } catch { self.error = walletWords(error) }
+            do { payee = try await model.chequePayee(chatId: chatId) } catch { self.error = UserError.refused("", walletWords(error)) }
         }
     }
 
@@ -405,7 +405,7 @@ struct SendChequeSheet: View {
         guard let to = payee?.address else { return }
         sending = true
         Task {
-            error = await model.sendCheque(chatId: chatId, amount: amount, to: to)
+            error = await model.sendCheque(chatId: chatId, amount: amount, to: to).map { UserError.refused("", $0) }
             sending = false
             if error == nil { dismiss() }
         }
