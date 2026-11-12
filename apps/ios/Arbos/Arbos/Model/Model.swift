@@ -109,6 +109,18 @@ struct Machine: Equatable {
     var cpu: Int? = nil
     var memGib: Int? = nil
     var image: String? = nil
+    /// `lifecycle_state`: where a machine that sleeps by itself was last left (`warm`,
+    /// `asleep_clean`, `asleep_ckpt`, `cold`, …). Nil for every other machine.
+    var lifecycle: String? = nil
+    /// `storage`: what its disk held when it last went to sleep, in bytes. The relay keeps it,
+    /// so it is there for a machine that is asleep or in cold storage too.
+    var storage: Storage? = nil
+
+    struct Storage: Equatable {
+        var files: Int64
+        var scratch: Int64?
+        var trash: Int64?
+    }
 
     static let unknown = Machine(state: .hibernatedLight, since: nil, spec: "")
 
@@ -179,6 +191,8 @@ struct Machine: Equatable {
             memGib: Int(dto.spec.mem_gib),
             image: dto.image.current ?? (dto.spec.`class`.isEmpty ? nil : dto.spec.`class`)
         )
+        lifecycle = dto.lifecycle_state
+        storage = dto.storage.map { Storage(files: $0.files_bytes, scratch: $0.scratch_bytes, trash: $0.trash_bytes) }
     }
 
     /// The state the UI may show: always-on boxes collapse everything but

@@ -721,6 +721,14 @@ struct MachinePage: View {
                     }
                 }
             }
+            if !plan.storage.isEmpty {
+                SettingsGroup(header: "Storage") {
+                    ForEach(Array(plan.storage.enumerated()), id: \.offset) { _, row in
+                        SettingsValueRow(row == .files ? "Your files" : row == .scratch ? "Scratch" : "Trash",
+                                         value: MachineMetrics.storageValue(m, row) ?? "")
+                    }
+                }
+            }
             if !plan.resources.isEmpty {
                 SettingsGroup(header: "Resources") {
                     ForEach(Array(plan.resources.enumerated()), id: \.offset) { _, row in
@@ -825,6 +833,7 @@ struct MachinePage: View {
     /// "Awake · 42 m": the uptime folded into the state (Jacob 2026-10-26), as a duration
     /// (the Computer tab's), not "1 hr. ago".
     private func stateText(_ m: Machine) -> String {
+        if let word = MachineMetrics.stateWord(m), m.rawState != .awake { return word }
         if m.state == .awake, let since = m.since, since > 0 {
             return "\(m.label) · \(AgentPane.durationS(max(0, (nowMs() - since) / 1000)))"
         }
