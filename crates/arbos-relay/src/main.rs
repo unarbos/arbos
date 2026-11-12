@@ -661,6 +661,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/chats/dm", post(people::dm_create))
         .route("/chats/join", post(people::group_join))
+        .route("/chats/search/messages", get(people::messages_search))
         .route(
             "/chats/{id}",
             get(people::chat_get)

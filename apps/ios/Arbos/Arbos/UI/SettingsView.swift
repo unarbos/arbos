@@ -194,9 +194,14 @@ struct SettingsView: View {
         let inset = SettingsRow.separatorInset
         var out: [PaneSection] = []
         var account: [AnyView] = [
-            AnyView(NavigationLink { CreditsPage() } label: {
+            // Button + `showCreditsPage`, not NavigationLink: links under PaneCard are
+            // visible to XCTest but not hittable / do not push (same fix as Agent access link).
+            AnyView(Button {
+                showCreditsPage = true
+            } label: {
                 SettingsRow(icon: "creditcard.fill", title: "Credits", value: creditsSummary)
-            }),
+            }
+            .buttonStyle(.plain)),
         ]
         if model.credentials != nil {
             // Connected apps stays off the list until the feature ships (Mac already
