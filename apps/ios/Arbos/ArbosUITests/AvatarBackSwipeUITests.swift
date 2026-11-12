@@ -4,18 +4,24 @@ import XCTest
 /// go back doesn't register when you are over top a user pfp which is common but this should
 /// still register as the slide and only a direct click should go to the user profile screen").
 ///
-/// Every avatar beside a bubble is a SwiftUI `Button` (`sender-avatar` → `toggleProfile`), and
-/// a `Button` tracks its press with a recognizer that enters `.began` on touch-down. UIKit lets
-/// an already-begun recognizer prevent every later one that does not share the touch with it,
-/// so the swipe was prevented before `BackSwipe.lockDistance` and the screen did not move. The
-/// fix is `BackSwipe.sharesTouch`: the back recognizers tell UIKit they may run alongside the
-/// presses and taps, and still not alongside any pan.
+/// Every avatar beside a bubble is a profile door (`sender-avatar` → `toggleProfile`), and it
+/// was a SwiftUI `Button` when this file was written: a `Button` tracks its press with a
+/// recognizer that enters `.began` on touch-down, and UIKit lets an already-begun recognizer
+/// prevent every later one that does not share the touch with it, so the swipe was prevented
+/// before `BackSwipe.lockDistance` and the screen did not move. The fix is
+/// `BackSwipe.sharesTouch`: the back recognizers tell UIKit they may run alongside the presses
+/// and taps, and still not alongside any pan.
 ///
 /// Three cases, because the fix must buy the swipe without costing anything else:
 /// the swipe goes back, the tap still opens the page, the vertical drag still scrolls. The
 /// middle one is the guard on the mechanism as much as on the behaviour — `require(toFail:)`
 /// would also make the swipe win, by holding the tap until the swipe had failed, and a profile
 /// that opens after a pause is its own regression.
+///
+/// What these three could not see is the drag between a tap and 180 pt. A 50 pt drag from the
+/// column opened the page instead of doing nothing (AF-859), so the doors are `TapGesture`s now
+/// and `AvatarColumnShortDragUITests` holds that band. The tap cases below are what stop that
+/// fix from being "switch the doors off", so they are not optional.
 ///
 /// Separate from `BackSwipeUITests` on purpose: that file is being edited in another lane.
 ///
