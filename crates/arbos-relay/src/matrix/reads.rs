@@ -21,18 +21,26 @@ pub const PUSHER_APP_ID: &str = "life.arbos.relay";
 /// What an alert says of a message the relay cannot read (an end-to-end encrypted one).
 const NEW_MESSAGE: &str = "New message";
 
-/// What the alert for a chat's event says, or `None` for an event that gets none: a
-/// reaction, or a row of the chat's earlier history (`history.rs`). Those say what they are
-/// in the one field an encrypted room leaves readable, and each account's push rules keep the
-/// homeserver from announcing them; an account whose rule is missing is not told here either.
-/// An encrypted message says only that there is one.
-fn alert_text(ev: &Value) -> Option<&str> {
+/// What the alert for a chat's event says to a device of someone whose reads are `flipped`
+/// or not, in a chat that is `native` (read and written on the homeserver) or not; `None`
+/// for no alert from here.
+///
+/// Someone not flipped is alerted here only in a native chat, and there only for what a
+/// device sent: a row of the Loro room that the relay mirrored names its sender
+/// (`life.arbos.sender`), and `notify::announce` has told them of it. Nobody is alerted for
+/// a reaction or a row of the chat's earlier history (`history.rs`): those say what they are
+/// in the one field an encrypted room leaves readable, and each account's push rules keep
+/// the homeserver from announcing them; an account whose rule is missing is not told here
+/// either. An encrypted message says only that there is one.
+fn alert_text(flipped: bool, native: bool, ev: &Value) -> Option<&str> {
     let content = &ev["content"];
     let quiet = matches!(
         content["m.relates_to"]["rel_type"].as_str(),
         Some("life.arbos.reaction" | "life.arbos.history")
     );
-    (!quiet).then(|| content["body"].as_str().unwrap_or(NEW_MESSAGE))
+    let announced = !flipped && content.get("life.arbos.sender").is_some();
+    ((flipped || native) && !quiet && !announced)
+        .then(|| content["body"].as_str().unwrap_or(NEW_MESSAGE))
 }
 
 /// Are this user's reads served from the homeserver?
@@ -200,12 +208,7 @@ pub async fn on_notify(state: &AppState, body: &Value) -> Vec<String> {
                     continue;
                 };
                 let content = &ev["content"];
-                // In a native chat, for someone not flipped: a row of the Loro room that the
-                // relay mirrored here names its sender, and `notify::announce` has told them.
-                if !flipped && content.get("life.arbos.sender").is_some() {
-                    continue;
-                }
-                let Some(text) = alert_text(&ev) else {
+                let Some(text) = alert_text(flipped, native, &ev) else {
                     continue;
                 };
                 let Some(sender) = sender_of_event(state, &ev) else {
@@ -307,23 +310,45 @@ mod alert_tests {
             json!({ "type": "m.room.encrypted", "content": { "algorithm": "m.megolm.v1.aes-sha2",
                     "ciphertext": "AwgA", "m.relates_to": relates } })
         };
-        assert_eq!(alert_text(&sealed(Value::Null)), Some("New message"));
-        assert_eq!(alert_text(&sealed(json!({}))), Some("New message"));
+        let text = |ev: &Value| alert_text(true, true, ev).map(str::to_owned);
+        assert_eq!(text(&sealed(Value::Null)).as_deref(), Some("New message"));
+        assert_eq!(text(&sealed(json!({}))).as_deref(), Some("New message"));
         for kind in ["life.arbos.reaction", "life.arbos.history"] {
-            assert_eq!(
-                alert_text(&sealed(json!({ "rel_type": kind }))),
-                None,
-                "{kind}"
-            );
+            assert_eq!(text(&sealed(json!({ "rel_type": kind }))), None, "{kind}");
             let clear = json!({ "type": "m.room.message",
                 "content": { "body": "old words", "m.relates_to": { "rel_type": kind } } });
-            assert_eq!(alert_text(&clear), None, "{kind}, unencrypted");
+            assert_eq!(text(&clear), None, "{kind}, unencrypted");
         }
         let clear = json!({ "type": "m.room.message", "content": { "body": "see you at noon" } });
-        assert_eq!(alert_text(&clear), Some("see you at noon"));
+        assert_eq!(text(&clear).as_deref(), Some("see you at noon"));
         // Never the ciphertext, whatever else the event carries.
         let odd =
             json!({ "type": "m.room.encrypted", "content": { "ciphertext": "AwgA", "body": 7 } });
-        assert_eq!(alert_text(&odd), Some("New message"));
+        assert_eq!(text(&odd).as_deref(), Some("New message"));
+    }
+
+    #[test]
+    fn a_native_chat_alerts_everyone_once_and_any_other_chat_only_the_flipped() {
+        let sent = json!({ "type": "m.room.message", "content": { "body": "hi" } });
+        let mirrored = json!({ "type": "m.room.message",
+            "content": { "body": "hi", "life.arbos.sender": "user:gh_1" } });
+        // (flipped, native, event) -> alerted from here
+        for (flipped, native, ev, alerted) in [
+            (false, false, &sent, false),
+            (false, false, &mirrored, false),
+            (true, false, &sent, true),
+            (true, false, &mirrored, true),
+            (false, true, &sent, true),
+            // `notify::announce` told them when the Loro row landed.
+            (false, true, &mirrored, false),
+            (true, true, &sent, true),
+            (true, true, &mirrored, true),
+        ] {
+            assert_eq!(
+                alert_text(flipped, native, ev).is_some(),
+                alerted,
+                "flipped {flipped}, native {native}, {ev}"
+            );
+        }
     }
 }
