@@ -59,6 +59,23 @@ const MISSED_PENDING_MS: u64 = 120_000;
 /// How long the original message stays highlighted after a click on a reply's quote.
 const QUOTE_HIGHLIGHT_MS: u64 = 1_600;
 
+/// Where a "Messaged ◉ X" hand-off tap should land.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum HandoffDest {
+    Reveal {
+        project_id: Id,
+        chat_id: Id,
+        message_id: Id,
+    },
+    OpenChat {
+        project_id: Id,
+        chat_id: Id,
+    },
+    OpenProject {
+        project_id: Id,
+    },
+}
+
 /// Which profile sheet is open.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProfilePage {
@@ -3889,6 +3906,149 @@ impl AppState {
         self.reveal_message = Some((chat_id, message_id.clone()));
         self.reveal_nonce += 1;
         cx.notify();
+        self.clear_highlight_after(message_id, cx);
+    }
+
+    /// Whether a "Messaged ◉ X" hand-off can open a destination chat of mine.
+    pub fn can_open_handoff(&self, from_chat: &Id, handoff_message_id: &Id) -> bool {
+        let Some(msg) = self
+            .messages_of(from_chat)
+            .iter()
+            .find(|m| &m.id == handoff_message_id)
+        else {
+            return false;
+        };
+        self.handoff_destination(msg).is_some()
+    }
+
+    /// Tap on a "Messaged ◉ X" hand-off: open the destination chat and highlight the sent message.
+    pub fn open_handoff(
+        &mut self,
+        from_chat: &Id,
+        handoff_message_id: &Id,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(msg) = self
+            .messages_of(from_chat)
+            .iter()
+            .find(|m| &m.id == handoff_message_id)
+            .cloned()
+        else {
+            return;
+        };
+        let Some(dest) = self.handoff_destination(&msg) else {
+            return;
+        };
+        match dest {
+            HandoffDest::Reveal {
+                project_id,
+                chat_id,
+                message_id,
+            } => {
+                self.reveal_search_message(project_id, chat_id, message_id.clone(), cx);
+                self.clear_highlight_after(message_id, cx);
+            }
+            HandoffDest::OpenProject { project_id } => {
+                self.select_project(project_id, cx);
+            }
+            HandoffDest::OpenChat {
+                project_id,
+                chat_id,
+            } => {
+                self.selected_channel = None;
+                self.selected_project = Some(project_id.clone());
+                self.sidebar_overlay = false;
+                self.active_tab.insert(project_id.clone(), chat_id.clone());
+                self.last_chats.insert(project_id, chat_id.clone());
+                if !crate::jobtabs::is_job_chat(&chat_id) {
+                    self.command(ClientCommand::OpenChat { chat_id });
+                }
+                self.sync_focus();
+                cx.notify();
+            }
+        }
+    }
+
+    /// Resolve where a hand-off row should navigate.
+    fn handoff_destination(&self, msg: &Message) -> Option<HandoffDest> {
+        let am = msg.agent_message.as_ref();
+        if let Some(am) = am {
+            if let (Some(chat_id), Some(message_id)) = (
+                am.chat_id
+                    .as_deref()
+                    .filter(|c| !c.is_empty())
+                    .map(str::to_owned),
+                am.message_id
+                    .as_deref()
+                    .filter(|m| !m.is_empty())
+                    .map(str::to_owned),
+            ) {
+                let owning = self.space_of_chat(&chat_id);
+                let project_id = if self.project(&owning).is_some() {
+                    owning
+                } else if !am.to_project_id.is_empty() && self.project(&am.to_project_id).is_some()
+                {
+                    am.to_project_id.clone()
+                } else {
+                    owning
+                };
+                return Some(HandoffDest::Reveal {
+                    project_id,
+                    chat_id,
+                    message_id,
+                });
+            }
+        }
+
+        let project_id = am
+            .and_then(|a| {
+                (!a.to_project_id.is_empty() && self.project(&a.to_project_id).is_some())
+                    .then(|| a.to_project_id.clone())
+            })
+            .or_else(|| {
+                let name = am
+                    .map(|a| a.to_name.as_str())
+                    .filter(|n| !n.is_empty())
+                    .or(msg.subagent_name.as_deref())?;
+                self.projects
+                    .iter()
+                    .find(|p| p.name.eq_ignore_ascii_case(name) && p.kind == SpaceKind::Project)
+                    .map(|p| p.id.clone())
+            })?;
+
+        let chat_id = self
+            .primary_chat(&project_id)
+            .map(|c| c.id.clone())
+            .or_else(|| self.visible_tabs(&project_id).first().map(|c| c.id.clone()));
+
+        if let Some(am) = am {
+            if !am.id.is_empty() {
+                if let Some(chat_id) = chat_id.as_ref() {
+                    if let Some(message_id) = self.messages_of(chat_id).iter().find_map(|m| {
+                        m.agent_message
+                            .as_ref()
+                            .and_then(|other| (other.id == am.id).then(|| m.id.clone()))
+                    }) {
+                        return Some(HandoffDest::Reveal {
+                            project_id,
+                            chat_id: chat_id.clone(),
+                            message_id,
+                        });
+                    }
+                }
+            }
+        }
+
+        match chat_id {
+            Some(chat_id) => Some(HandoffDest::OpenChat {
+                project_id,
+                chat_id,
+            }),
+            None => Some(HandoffDest::OpenProject { project_id }),
+        }
+    }
+
+    fn clear_highlight_after(&mut self, message_id: Id, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(std::time::Duration::from_millis(QUOTE_HIGHLIGHT_MS))
@@ -4634,6 +4794,7 @@ impl AppState {
                 job: None,
                 hidden: false,
                 agent_reply_to: None,
+                agent_message: None,
                 reactions: Default::default(),
                 in_reply_to: None,
                 routine_name: None,
@@ -4990,19 +5151,7 @@ impl AppState {
         self.close_profile(cx);
         self.reveal_search_message(space_id, r.chat_id.clone(), r.message_id.clone(), cx);
         self.highlight_message = Some(r.message_id.clone());
-        let message_id = r.message_id.clone();
-        cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(std::time::Duration::from_millis(QUOTE_HIGHLIGHT_MS))
-                .await;
-            let _ = this.update(cx, |state, cx| {
-                if state.highlight_message.as_deref() == Some(message_id.as_str()) {
-                    state.highlight_message = None;
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
+        self.clear_highlight_after(r.message_id.clone(), cx);
         true
     }
 
@@ -5158,6 +5307,7 @@ impl AppState {
                 job: None,
                 hidden: false,
                 agent_reply_to: None,
+                agent_message: None,
                 reactions: Default::default(),
                 in_reply_to: None,
                 routine_name: None,
@@ -6056,6 +6206,7 @@ impl AppState {
                 job: None,
                 hidden: false,
                 agent_reply_to: None,
+                agent_message: None,
                 reactions: Default::default(),
                 in_reply_to: None,
                 routine_name: None,
@@ -6470,6 +6621,7 @@ impl AppState {
                 job: None,
                 hidden: false,
                 agent_reply_to: None,
+                agent_message: None,
                 reactions: Default::default(),
                 in_reply_to: None,
                 usage: None,
@@ -8537,6 +8689,7 @@ impl AppState {
                 job: None,
                 hidden: false,
                 agent_reply_to: None,
+                agent_message: None,
                 reactions: Default::default(),
                 in_reply_to: None,
                 routine_name: None,
@@ -8688,6 +8841,7 @@ impl AppState {
                 job: None,
                 hidden: false,
                 agent_reply_to: None,
+                agent_message: None,
                 reactions: Default::default(),
                 in_reply_to: None,
                 routine_name: None,
@@ -13553,6 +13707,236 @@ mod hidden_chat_open_tests {
             hidden(&state, cx),
             (true, true, 2),
             "archived elsewhere: hidden here"
+        );
+    }
+}
+
+#[cfg(test)]
+mod handoff_nav_tests {
+    //! Tap on "Messaged ◉ X": open the destination chat and briefly highlight the landed message.
+    use std::sync::{Arc, Mutex};
+
+    use futures::future::BoxFuture;
+    use gpui::{AppContext as _, Entity, TestAppContext};
+    use tokio::sync::mpsc;
+
+    use super::*;
+    use crate::model::{AccountView, AgentMessageRef, ChatKind, SpaceKind};
+
+    type Commands = Arc<Mutex<Option<mpsc::UnboundedReceiver<ClientCommand>>>>;
+
+    struct Recording(Commands);
+
+    impl SyncSource for Recording {
+        fn name(&self) -> &'static str {
+            "recording"
+        }
+
+        fn run(
+            self: Box<Self>,
+            _events: mpsc::UnboundedSender<SyncEvent>,
+            commands: mpsc::UnboundedReceiver<ClientCommand>,
+        ) -> BoxFuture<'static, anyhow::Result<()>> {
+            *self.0.lock().expect("commands") = Some(commands);
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    fn chat(id: &str, project_id: &str) -> Chat {
+        Chat {
+            id: id.into(),
+            project_id: project_id.into(),
+            title: project_id.into(),
+            is_pinned: true,
+            is_system: false,
+            unread: false,
+            unread_count: 0,
+            last_message_at: 1_000,
+            archived_at: None,
+            kind: ChatKind::Chat,
+            participants: Vec::new(),
+        }
+    }
+
+    fn handoff_msg(id: &str, chat_id: &str, to_name: &str, am: Option<AgentMessageRef>) -> Message {
+        let mut m: Message = serde_json::from_value(serde_json::json!({
+            "id": id,
+            "chatId": chat_id,
+            "role": "assistant",
+            "sender": "agent",
+            "status": "done",
+            "turn": { "kind": "spawn" },
+            "subagentName": to_name,
+            "handoffMessages": 1,
+            "createdAt": 1_000,
+            "completedAt": 1_000,
+            "parts": [],
+        }))
+        .expect("handoff");
+        m.agent_message = am;
+        m
+    }
+
+    fn receive_msg(id: &str, chat_id: &str, delivery_id: &str) -> Message {
+        let mut m: Message = serde_json::from_value(serde_json::json!({
+            "id": id,
+            "chatId": chat_id,
+            "role": "project",
+            "sender": "project:arbos",
+            "senderName": "Arbos",
+            "status": "done",
+            "createdAt": 1_000,
+            "completedAt": 1_000,
+            "parts": [{ "id": "t", "kind": "text", "text": "hello from Arbos" }],
+        }))
+        .expect("receive");
+        m.agent_message = Some(AgentMessageRef {
+            id: delivery_id.into(),
+            ..AgentMessageRef::default()
+        });
+        m
+    }
+
+    fn mount(cx: &mut TestAppContext) -> (tokio::runtime::Runtime, Entity<AppState>) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio");
+        let handle = rt.handle().clone();
+        cx.update(|cx| gpui_tokio::init_from_handle(cx, handle));
+        let commands: Commands = Arc::new(Mutex::new(None));
+        let state = cx.new(|cx| AppState::new(Box::new(Recording(commands)), cx));
+        cx.run_until_parked();
+        for _ in 0..3 {
+            rt.block_on(tokio::task::yield_now());
+        }
+        state.update(cx, |s, cx| {
+            s.account = Some(AccountView {
+                id: "gh_1".into(),
+                login: "scout".into(),
+                name: "Scout".into(),
+                avatar_url: String::new(),
+                device_name: "test".into(),
+                balance_usd: 0.0,
+                spent_today_usd: 0.0,
+                daily_cap_usd: None,
+            });
+            for (id, name) in [("arbos", "Arbos"), ("comms", "Comms")] {
+                s.projects.push(Project {
+                    id: id.into(),
+                    name: name.into(),
+                    kind: SpaceKind::Project,
+                    ..Project::default()
+                });
+            }
+            s.chats
+                .insert("arbos".into(), vec![chat("arbos-main", "arbos")]);
+            s.chats
+                .insert("comms".into(), vec![chat("comms-main", "comms")]);
+            s.select_project("arbos".into(), cx);
+            s.window_active = true;
+        });
+        (rt, state)
+    }
+
+    #[gpui::test]
+    fn open_handoff_reveals_destination_chat_and_message(cx: &mut TestAppContext) {
+        let (_rt, state) = mount(cx);
+        state.update(cx, |s, cx| {
+            s.messages.insert(
+                "arbos-main".into(),
+                vec![handoff_msg(
+                    "ho1",
+                    "arbos-main",
+                    "Comms",
+                    Some(AgentMessageRef {
+                        id: "am1".into(),
+                        to_project_id: "comms".into(),
+                        to_name: "Comms".into(),
+                        status: "delivered".into(),
+                        chat_id: Some("comms-main".into()),
+                        message_id: Some("dest1".into()),
+                    }),
+                )],
+            );
+            s.messages.insert(
+                "comms-main".into(),
+                vec![receive_msg("dest1", "comms-main", "am1")],
+            );
+            s.open_handoff(&"arbos-main".into(), &"ho1".into(), cx);
+        });
+        assert_eq!(
+            state.read_with(cx, |s, _| s.selected_project.clone()),
+            Some("comms".into())
+        );
+        assert_eq!(
+            state.read_with(cx, |s, _| s.active_chat_id()),
+            Some("comms-main".into())
+        );
+        assert_eq!(
+            state.read_with(cx, |s, _| s.highlight_message.clone()),
+            Some("dest1".into())
+        );
+    }
+
+    #[gpui::test]
+    fn open_handoff_scans_target_chat_by_agent_message_id(cx: &mut TestAppContext) {
+        let (_rt, state) = mount(cx);
+        state.update(cx, |s, cx| {
+            s.messages.insert(
+                "arbos-main".into(),
+                vec![handoff_msg(
+                    "ho2",
+                    "arbos-main",
+                    "Comms",
+                    Some(AgentMessageRef {
+                        id: "am2".into(),
+                        to_project_id: "comms".into(),
+                        to_name: "Comms".into(),
+                        status: "delivered".into(),
+                        chat_id: None,
+                        message_id: None,
+                    }),
+                )],
+            );
+            s.messages.insert(
+                "comms-main".into(),
+                vec![receive_msg("landed2", "comms-main", "am2")],
+            );
+            s.open_handoff(&"arbos-main".into(), &"ho2".into(), cx);
+        });
+        assert_eq!(
+            state.read_with(cx, |s, _| (
+                s.selected_project.clone(),
+                s.active_chat_id(),
+                s.highlight_message.clone()
+            )),
+            (
+                Some("comms".into()),
+                Some("comms-main".into()),
+                Some("landed2".into())
+            )
+        );
+    }
+
+    #[gpui::test]
+    fn old_handoff_without_ids_still_opens_the_target_project(cx: &mut TestAppContext) {
+        let (_rt, state) = mount(cx);
+        state.update(cx, |s, cx| {
+            s.messages.insert(
+                "arbos-main".into(),
+                // Pre-agentMessage notice: only subagentName.
+                vec![handoff_msg("ho3", "arbos-main", "Comms", None)],
+            );
+            s.open_handoff(&"arbos-main".into(), &"ho3".into(), cx);
+        });
+        assert_eq!(
+            state.read_with(cx, |s, _| (
+                s.selected_project.clone(),
+                s.active_chat_id(),
+                s.highlight_message.clone()
+            )),
+            (Some("comms".into()), Some("comms-main".into()), None)
         );
     }
 }

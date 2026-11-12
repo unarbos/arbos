@@ -6200,6 +6200,94 @@ final class AppModel: ObservableObject {
         return true
     }
 
+    /// Tap on a "Messaged ◉ X" hand-off ([feedback iphone-messaged-notice-nav-2026-11-10]):
+    /// push the destination chat (swipe-back returns here) and highlight the landed message
+    /// when known. Falls back to opening the target agent's chat for older notices.
+    @discardableResult
+    func openHandoff(fromChat chatId: Id, messageId: Id) -> Bool {
+        guard let msg = messages(of: chatId).first(where: { $0.id == messageId }) else { return false }
+        guard let dest = handoffDestination(msg) else { return false }
+        switch dest {
+        case .reveal(let projectId, let destChat, let destMsg):
+            return pushAndReveal(chatId: destChat, projectId: projectId, messageId: destMsg)
+        case .openChat(let projectId, let destChat):
+            pushChat(chatId: destChat, projectId: projectId)
+            return true
+        case .openProject(let projectId):
+            guard let project = project(projectId) else { return false }
+            if let chat = singleChat(of: projectId) {
+                pushChat(chatId: chat.id, projectId: projectId)
+            } else {
+                // No landing chat yet — open replaces the path (same as tapping the agent).
+                open(project: project)
+            }
+            return true
+        }
+    }
+
+    /// Whether a hand-off row can open a destination the viewer owns.
+    func canOpenHandoff(fromChat chatId: Id, messageId: Id) -> Bool {
+        guard let msg = messages(of: chatId).first(where: { $0.id == messageId }) else { return false }
+        return handoffDestination(msg) != nil
+    }
+
+    private enum HandoffDest {
+        case reveal(projectId: Id, chatId: Id, messageId: Id)
+        case openChat(projectId: Id, chatId: Id)
+        case openProject(projectId: Id)
+    }
+
+    /// Resolve where a hand-off should go: explicit destination ids, then a scan of the
+    /// target agent's chat for the matching delivery id, then the target project alone.
+    private func handoffDestination(_ msg: Message) -> HandoffDest? {
+        let am = msg.agentMessage
+        if let chat = am?.chatId, !chat.isEmpty, let mid = am?.messageId, !mid.isEmpty {
+            let pid = projectId(owning: chat) ?? am?.toProjectId
+            if let pid, !pid.isEmpty, project(pid) != nil {
+                return .reveal(projectId: pid, chatId: chat, messageId: mid)
+            }
+        }
+        let projectId = resolveHandoffProjectId(msg)
+        guard let projectId, project(projectId) != nil else { return nil }
+        let chat = singleChat(of: projectId)
+        if let delivery = am?.id, !delivery.isEmpty, let chat {
+            if let landed = messages(of: chat.id).first(where: { $0.agentMessage?.id == delivery }) {
+                return .reveal(projectId: projectId, chatId: chat.id, messageId: landed.id)
+            }
+            return .openChat(projectId: projectId, chatId: chat.id)
+        }
+        if let chat { return .openChat(projectId: projectId, chatId: chat.id) }
+        return .openProject(projectId: projectId)
+    }
+
+    private func resolveHandoffProjectId(_ msg: Message) -> Id? {
+        if let id = msg.agentMessage?.toProjectId, !id.isEmpty { return id }
+        let name = msg.agentMessage?.toName ?? msg.subagentName
+        guard let name, !name.isEmpty else { return nil }
+        return projects.first { $0.name.caseInsensitiveCompare(name) == .orderedSame }?.id
+    }
+
+    private func projectId(owning chatId: Id) -> Id? {
+        if peopleChat(chatId) != nil { return peopleSlot }
+        return chats.first(where: { $0.value.contains { $0.id == chatId } })?.key
+    }
+
+    /// Push a chat onto the stack (keep the source under it for swipe-back), unlike
+    /// `open(chat:)` which replaces the path.
+    func pushChat(chatId: Id, projectId: Id) {
+        let route = Route.chat(chatId: chatId, projectId: projectId)
+        if path.last == route { return }
+        path.append(route)
+    }
+
+    /// Push the destination chat and arm `pendingReveal` so ChatView scrolls and tints.
+    @discardableResult
+    func pushAndReveal(chatId: Id, projectId: Id, messageId: Id) -> Bool {
+        pendingReveal = MessageReveal(chatId: chatId, messageId: messageId)
+        pushChat(chatId: chatId, projectId: projectId)
+        return true
+    }
+
 
     func stop(chatId: Id) {
         if let jobId = JobTabs.jobId(chatId) {

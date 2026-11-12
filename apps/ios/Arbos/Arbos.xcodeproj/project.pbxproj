@@ -76,6 +76,7 @@
 		A1BB0000000000000000003D /* TranscriptSpacingUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB0000000000000000003C /* TranscriptSpacingUITests.swift */; };
 		A1BB4D3E7A0C29F1B6E85039 /* MentionListOverlayUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB4D3E7A0C29F1B6E85038 /* MentionListOverlayUITests.swift */; };
 		A1BB0000000000000000003D /* AvatarBackSwipeUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB0000000000000000003C /* AvatarBackSwipeUITests.swift */; };
+		A1MN00000000000000000012 /* MessagedNoticeNavUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1MN00000000000000000011 /* MessagedNoticeNavUITests.swift */; };
 		A1BB00000000000000000041 /* TranscriptFirstFrameUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000040 /* TranscriptFirstFrameUITests.swift */; };
 		A1CAB7000000000000000002 /* CaptureRigUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1CAB7000000000000000001 /* CaptureRigUITests.swift */; };
 		A1F000000000000000000108 /* ComposerParityUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F000000000000000000107 /* ComposerParityUITests.swift */; };
@@ -176,6 +177,7 @@
 		A1F900000000000000000002 /* PictureReplyQuoteTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F900000000000000000001 /* PictureReplyQuoteTests.swift */; };
 		A1S100000000000000000002 /* SoloAgentReplyQuoteTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1S100000000000000000001 /* SoloAgentReplyQuoteTests.swift */; };
 		A1E100000000000000000002 /* HiddenWorkerRowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1E100000000000000000001 /* HiddenWorkerRowTests.swift */; };
+		A1MN00000000000000000002 /* MessagedNoticeNavTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1MN00000000000000000001 /* MessagedNoticeNavTests.swift */; };
 		A1CA29740000000000000002 /* CurrentActivityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1CA29740000000000000001 /* CurrentActivityTests.swift */; };
 		B1A9C0000000000000000002 /* BlankTranscriptGuardTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1A9C0000000000000000001 /* BlankTranscriptGuardTests.swift */; };
 		A1E100000000000000000032 /* JobTabsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1E100000000000000000031 /* JobTabsTests.swift */; };
@@ -355,6 +357,7 @@
 		A1BB0000000000000000003C /* TranscriptSpacingUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptSpacingUITests.swift; sourceTree = "<group>"; };
 		A1BB4D3E7A0C29F1B6E85038 /* MentionListOverlayUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MentionListOverlayUITests.swift; sourceTree = "<group>"; };
 		A1BB0000000000000000003C /* AvatarBackSwipeUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AvatarBackSwipeUITests.swift; sourceTree = "<group>"; };
+		A1MN00000000000000000011 /* MessagedNoticeNavUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessagedNoticeNavUITests.swift; sourceTree = "<group>"; };
 		A1BB00000000000000000040 /* TranscriptFirstFrameUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptFirstFrameUITests.swift; sourceTree = "<group>"; };
 		A1CAB7000000000000000001 /* CaptureRigUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureRigUITests.swift; sourceTree = "<group>"; };
 		A1F000000000000000000107 /* ComposerParityUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerParityUITests.swift; sourceTree = "<group>"; };
@@ -456,6 +459,7 @@
 		A1F900000000000000000001 /* PictureReplyQuoteTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PictureReplyQuoteTests.swift; sourceTree = "<group>"; };
 		A1S100000000000000000001 /* SoloAgentReplyQuoteTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SoloAgentReplyQuoteTests.swift; sourceTree = "<group>"; };
 		A1E100000000000000000001 /* HiddenWorkerRowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HiddenWorkerRowTests.swift; sourceTree = "<group>"; };
+		A1MN00000000000000000001 /* MessagedNoticeNavTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessagedNoticeNavTests.swift; sourceTree = "<group>"; };
 		A1CA29740000000000000001 /* CurrentActivityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CurrentActivityTests.swift; sourceTree = "<group>"; };
 		B1A9C0000000000000000001 /* BlankTranscriptGuardTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BlankTranscriptGuardTests.swift; sourceTree = "<group>"; };
 		A1E100000000000000000031 /* JobTabsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JobTabsTests.swift; sourceTree = "<group>"; };
@@ -824,6 +828,7 @@
 				A1F900000000000000000001 /* PictureReplyQuoteTests.swift */,
 				A1S100000000000000000001 /* SoloAgentReplyQuoteTests.swift */,
 				A1E100000000000000000001 /* HiddenWorkerRowTests.swift */,
+				A1MN00000000000000000001 /* MessagedNoticeNavTests.swift */,
 				A1CA29740000000000000001 /* CurrentActivityTests.swift */,
 				B1A9C0000000000000000001 /* BlankTranscriptGuardTests.swift */,
 				A1E100000000000000000031 /* JobTabsTests.swift */,
@@ -870,6 +875,7 @@
 				A1BB0000000000000000003C /* TranscriptSpacingUITests.swift */,
 				A1BB4D3E7A0C29F1B6E85038 /* MentionListOverlayUITests.swift */,
 				A1BB0000000000000000003C /* AvatarBackSwipeUITests.swift */,
+				A1MN00000000000000000011 /* MessagedNoticeNavUITests.swift */,
 				A1BB00000000000000000040 /* TranscriptFirstFrameUITests.swift */,
 				A1CAB7000000000000000001 /* CaptureRigUITests.swift */,
 				A1F000000000000000000107 /* ComposerParityUITests.swift */,
@@ -1242,6 +1248,7 @@
 				A1F900000000000000000002 /* PictureReplyQuoteTests.swift in Sources */,
 				A1S100000000000000000002 /* SoloAgentReplyQuoteTests.swift in Sources */,
 				A1E100000000000000000002 /* HiddenWorkerRowTests.swift in Sources */,
+				A1MN00000000000000000002 /* MessagedNoticeNavTests.swift in Sources */,
 				A1CA29740000000000000002 /* CurrentActivityTests.swift in Sources */,
 				B1A9C0000000000000000002 /* BlankTranscriptGuardTests.swift in Sources */,
 				A1E100000000000000000032 /* JobTabsTests.swift in Sources */,
@@ -1288,6 +1295,7 @@
 				A1BB0000000000000000003D /* TranscriptSpacingUITests.swift in Sources */,
 				A1BB4D3E7A0C29F1B6E85039 /* MentionListOverlayUITests.swift in Sources */,
 				A1BB0000000000000000003D /* AvatarBackSwipeUITests.swift in Sources */,
+				A1MN00000000000000000012 /* MessagedNoticeNavUITests.swift in Sources */,
 				A1BB00000000000000000041 /* TranscriptFirstFrameUITests.swift in Sources */,
 				A1CAB7000000000000000002 /* CaptureRigUITests.swift in Sources */,
 				A1F000000000000000000108 /* ComposerParityUITests.swift in Sources */,
