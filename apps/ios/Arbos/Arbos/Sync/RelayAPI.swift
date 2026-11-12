@@ -1134,6 +1134,19 @@ final class RelayAPI {
         try await json("GET", "/me/matrix/people")
     }
 
+    /// `GET /chats/{id}/matrix/history`: the next rows of a native chat's earlier history for
+    /// this device to carry into its room, signed by the relay. Handed to the Matrix client as
+    /// it came (`MatrixClient.carryHistory`), which checks every row before it sends one.
+    func matrixHistoryPage(_ chatId: Id) async throws -> String {
+        let (data, _) = try await request("GET", "/chats/\(chatId)/matrix/history")
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    /// `POST /chats/{id}/matrix/history`: the events this device sent for the rows it was handed.
+    func matrixHistoryCarried(_ chatId: Id, report: Any) async throws {
+        _ = try await request("POST", "/chats/\(chatId)/matrix/history", body: report)
+    }
+
     func patchProject(_ projectId: Id, name: String?, color: String?, icon: String?, avatar: String? = nil, avatarColor: String? = nil, description: String? = nil) async throws {
         var body: [String: Any] = [:]
         if let description { body["description"] = String(description.prefix(500)) }

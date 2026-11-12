@@ -728,7 +728,7 @@ extension AppModel {
             let listener = MatrixBridgeListener(model: self)
             let session = ArbosFFI.MatrixSession(homeserver: creds.homeserver, userId: creds.userId,
                                                  accessToken: creds.accessToken, deviceId: creds.deviceId,
-                                                 peopleNative: creds.peopleNative)
+                                                 peopleNative: creds.peopleNative, historyKey: creds.historyKey)
             // No key, no client: without it the store holding the room keys would be written
             // unencrypted. The next call tries again (the Keychain may only have been locked).
             guard let storeKey = WalletVault.storeKey(device: creds.deviceId) else {
@@ -772,6 +772,7 @@ extension AppModel {
         channelRows = [:]
         channelAtStart = []
         channelLoading = []
+        historyAsked = []
     }
 
     func applyMatrixSnapshot(_ snapshot: ArbosFFI.MatrixSnapshot) {
@@ -876,12 +877,35 @@ extension AppModel {
                 if nativeRooms[channelId] == nil || visibleChatId == channelId {
                     try? await client.markRead(roomId: roomId)
                 }
+                if nativeRooms[channelId] != nil { await carryHistory(channelId, client: client, roomId: roomId) }
             } catch {
                 matrixLog.notice("open room failed: \(error.localizedDescription, privacy: .public)")
                 // Paint the empty transcript rather than a spinner that never ends. A native
                 // people chat is asked for again instead (`openNativeRooms`).
                 if nativeRooms[channelId] == nil { caughtUp.insert(channelId) }
             }
+        }
+    }
+
+    /// Carry a native chat's earlier history from its Loro room into its homeserver room,
+    /// once per launch: the relay hands out signed rows a batch at a time, the Matrix client
+    /// sends them, and the relay is told which events they became. Stops at the first thing
+    /// that fails (the next launch, or another member's device, takes it up there) and when
+    /// another device is at it.
+    private func carryHistory(_ chatId: Id, client: ArbosFFI.MatrixClient, roomId: String) async {
+        guard historyAsked.insert(chatId).inserted else { return }
+        while true {
+            guard let page = try? await relay.matrixHistoryPage(chatId),
+                  let said = (try? JSONSerialization.jsonObject(with: Data(page.utf8))) as? [String: Any],
+                  let rows = said["rows"] as? [Any], !rows.isEmpty else { return }
+            do {
+                let report = try await client.carryHistory(roomId: roomId, pageJson: page)
+                try await relay.matrixHistoryCarried(chatId, report: JSONSerialization.jsonObject(with: Data(report.utf8)))
+            } catch {
+                matrixLog.notice("history not carried: \(error.localizedDescription, privacy: .public)")
+                return
+            }
+            guard said["more"] as? NSNumber === kCFBooleanTrue else { return }
         }
     }
 
@@ -1000,8 +1024,8 @@ extension AppModel {
 
     /// Read every native chat's room once: the newest page, then live rows through the
     /// listener, so an unopened chat still previews the way a synced Loro doc does.
-    // One `/messages` request per native chat per launch; a persistent event cache (spec
-    // §3.2) is what makes this free.
+    // Read from the device's event store; the homeserver is asked only for a chat the store
+    // holds less than a page of.
     private func openNativeRooms() {
         for chat in nativeRooms.keys where !caughtUp.contains(chat) { openChannel(chat) }
     }

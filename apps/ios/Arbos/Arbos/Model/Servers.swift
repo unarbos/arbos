@@ -193,6 +193,9 @@ struct MatrixCredentials: Equatable {
     /// The relay's per-user switch (`users.matrix_people_native`): people chats the relay
     /// names are read and written on the homeserver. Anything but `true` is off.
     var peopleNative = false
+    /// The key the relay signs a chat's carried history with (`history_key`); the Matrix
+    /// client pins the first one it is given.
+    var historyKey: String?
 
     static func parse(_ raw: Any) -> MatrixCredentials? {
         guard let d = raw as? [String: Any],
@@ -201,6 +204,7 @@ struct MatrixCredentials: Equatable {
               let token = d["access_token"] as? String, !token.isEmpty
         else { return nil }
         return MatrixCredentials(homeserver: homeserver, userId: userId, accessToken: token, deviceId: d["device_id"] as? String ?? "",
-                                 peopleNative: d["people_native"] as? NSNumber === kCFBooleanTrue)
+                                 peopleNative: d["people_native"] as? NSNumber === kCFBooleanTrue,
+                                 historyKey: d["history_key"] as? String)
     }
 }
