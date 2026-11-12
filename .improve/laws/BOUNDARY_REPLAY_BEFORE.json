@@ -1,0 +1,6 @@
+{
+  "exit_code": 1,
+  "stdout": "confident-token-nonword-ending-removal: Falsified\nProperty falsified after 1 run(s) and 1 shrink(s)\nShrunk input: {\n  \"family\": \"anthropic\",\n  \"body\": [\n    \"0\",\n    \"0\",\n    \"0\",\n    \"0\",\n    \"0\",\n    \"0\",\n    \"0\",\n    \"0\",\n    \"0\",\n    \"0\",\n    \"0\",\n    \"0\",\n    \"0\",\n    \"0\",\n    \"0\",\n    \"0\",\n    \"0\",\n    \"0\",\n    \"0\",\n    \"0\",\n    \"0\",\n    \"0\",\n    \"0\",\n    \"0\",\n    \"0\",\n    \"0\",\n    \"0\",\n    \"0\",\n    \"0\",\n    \"0\",\n    \"0\",\n    \"0\"\n  ]\n}\nFailure: returned false\nReplay: [0,\"81006\",0,0,[0],\"ReturnedFalse\"]\n",
+  "stderr": "",
+  "replay": "[0,\"81006\",0,0,[0],\"ReturnedFalse\"]"
+}

@@ -11,14 +11,22 @@ use serde_json::Value;
 
 /// Known key shapes, `Authorization: Bearer …` and `KEY=value` lines for well-known secret names.
 ///
-/// The shapes come from [`KEY_PREFIXES`], wrapped in word boundaries: this pass removes exactly
-/// the tokens `find_key_like` can name, no more and no less.
+/// The shapes come from [`KEY_PREFIXES`], with word boundaries or a nonword tail: keys ending
+/// in `-` must also disappear. A consumed nonword delimiter is kept in the output.
 pub fn redact_patterns(text: &str) -> String {
     let mut out = text.to_owned();
     for (re, replacement) in REDACTION_PATTERNS.iter() {
-        out = re.replace_all(&out, *replacement).into_owned();
+        out = re.replace_all(&out, replacement.as_str()).into_owned();
     }
     out
+}
+
+fn key_redaction(body: &str, marker: &str) -> Option<(regex_lite::Regex, String)> {
+    // Keep the existing word-boundary matches. At a nonword-ending key, consume and
+    // restore one delimiter (regex-lite has no lookaround), or accept end of input.
+    regex_lite::Regex::new(&format!(r"\b{body}(?:\b|(?P<redact_tail>\W)|$)"))
+        .ok()
+        .map(|re| (re, format!("{marker}${{redact_tail}}")))
 }
 
 /// Secret placeholders and vault references the secrets system hands an agent
@@ -122,7 +130,7 @@ impl KeyLike {
 /// token wins, in both directions.
 ///
 /// One table, two anchorings. [`find_key_like`] wraps each body in `^…$` because it classifies a
-/// whole token; [`redact_patterns`] wraps it in `\b…\b` because it finds values inside running
+/// whole token; [`redact_patterns`] adds boundaries because it finds values inside running
 /// text. Both are derived from these bodies so the two cannot disagree about what a key is — a
 /// hand-maintained second list had already drifted to covering nine of these seventeen shapes,
 /// which left a pasted Stripe key readable in storage.
@@ -214,12 +222,10 @@ const KEY_PREFIXES: &[(&str, &str, &str)] = &[
     ),
 ];
 
-static REDACTION_PATTERNS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
-    let keys = KEY_PREFIXES.iter().filter_map(|(body, _, marker)| {
-        Regex::new(&format!(r"\b{body}\b"))
-            .ok()
-            .map(|re| (re, *marker))
-    });
+static REDACTION_PATTERNS: LazyLock<Vec<(Regex, String)>> = LazyLock::new(|| {
+    // Same shapes as key_redaction: word boundaries, or a consumed nonword tail (keys ending
+    // in `-` must also disappear; the delimiter is restored in the replacement).
+    let keys = KEY_PREFIXES.iter().filter_map(|(body, _, marker)| key_redaction(body, marker));
     // These match headers and assignments rather than a token shape in KEY_PREFIXES.
     let other = [
         (
@@ -232,7 +238,7 @@ static REDACTION_PATTERNS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(
         ),
     ]
     .into_iter()
-    .filter_map(|(pattern, replacement)| Regex::new(pattern).ok().map(|re| (re, replacement)));
+    .filter_map(|(pattern, replacement)| Regex::new(pattern).ok().map(|re| (re, replacement.to_string())));
     keys.chain(other).collect()
 });
 
@@ -498,6 +504,84 @@ mod tests {
             "see crates/arbos-core/src/redact.rs for the shape table",
         ] {
             assert_eq!(redact_patterns(t), t, "over-redacted");
+        }
+    }
+
+    fn nonword_ending_keys() -> Vec<(String, &'static str)> {
+        vec![
+            (
+                format!("sk-ant-{}-", "a".repeat(19)),
+                "[REDACTED:anthropic-key]",
+            ),
+            (
+                format!("sk-proj-{}-", "_".repeat(19)),
+                "[REDACTED:openai-key]",
+            ),
+            (format!("xoxb-{}", "-".repeat(10)), "[REDACTED:token]"),
+            (
+                format!("dp.st.{}-", "a".repeat(9)),
+                "[REDACTED:doppler-token]",
+            ),
+            (format!("AIza{}-", "a".repeat(29)), "[REDACTED:google-key]"),
+            (
+                format!("SG.{}.{}-", "a".repeat(16), "_".repeat(15)),
+                "[REDACTED:sendgrid-key]",
+            ),
+            (
+                format!(
+                    "eyJ{}.{}.{}-",
+                    "a".repeat(10),
+                    "_".repeat(10),
+                    "-".repeat(9)
+                ),
+                "[REDACTED:jwt]",
+            ),
+        ]
+    }
+
+    #[test]
+    fn nonword_ending_confident_keys_are_redacted_and_keep_the_tail() {
+        for (sample, marker) in nonword_ending_keys() {
+            for tail in ["", " ", "\n", "'", "\"", ")", "—", "🙂", ":."] {
+                let text = format!("前 ({sample}{tail}");
+                let found = find_key_like(&text);
+                assert_eq!(found.len(), 1, "one known key before {tail:?}");
+                assert!(found[0].confident);
+                assert_eq!(found[0].value(&text), sample);
+                assert_eq!(
+                    redact_patterns(&text),
+                    format!("前 ({marker}{tail}"),
+                    "a confident key must disappear whole and keep {tail:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn adjacent_nonword_ending_keys_are_each_redacted() {
+        let samples = nonword_ending_keys();
+        for (sample, marker) in &samples {
+            for (next, next_marker) in &samples {
+                for separator in [" ", "\n", "'", "\"", "—", "🙂", "::"] {
+                    assert_eq!(
+                        redact_patterns(&format!("{sample}{separator}{next}")),
+                        format!("{marker}{separator}{next_marker}"),
+                        "both keys and their separator must survive replacement correctly"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_word_boundaries_still_leave_embedded_or_overlong_words_alone() {
+        for text in [
+            "AKIAIOSFODNN7EXAMPLEZ",
+            "xAKIAIOSFODNN7EXAMPLE",
+            "xghp_abcdefghijklmnopqrst",
+            "prefix_sk-ant-aaaaaaaaaaaaaaaaaaa-",
+        ] {
+            assert_eq!(redact_patterns(text), text);
         }
     }
 

@@ -1,0 +1,62 @@
+[
+  {
+    "law": "redaction-idempotence",
+    "seed": 81001,
+    "runs_requested": 256,
+    "maxShrinks": 256,
+    "seconds": 0.32285850000000005,
+    "result": {
+      "_tag": "Passed",
+      "runs": 256,
+      "discards": 0
+    }
+  },
+  {
+    "law": "confident-alphanumeric-token-removal",
+    "seed": 81002,
+    "runs_requested": 256,
+    "maxShrinks": 256,
+    "seconds": 0.2646445419999999,
+    "result": {
+      "_tag": "Passed",
+      "runs": 256,
+      "discards": 0
+    }
+  },
+  {
+    "law": "utf8-key-byte-ranges",
+    "seed": 81003,
+    "runs_requested": 256,
+    "maxShrinks": 256,
+    "seconds": 0.276717625,
+    "result": {
+      "_tag": "Passed",
+      "runs": 256,
+      "discards": 0
+    }
+  },
+  {
+    "law": "json-keys-and-scalars",
+    "seed": 81004,
+    "runs_requested": 256,
+    "maxShrinks": 256,
+    "seconds": 0.05405858399999999,
+    "result": {
+      "_tag": "Passed",
+      "runs": 256,
+      "discards": 0
+    }
+  },
+  {
+    "law": "url-visible-text-roundtrip",
+    "seed": 81005,
+    "runs_requested": 256,
+    "maxShrinks": 256,
+    "seconds": 0.01139666699999998,
+    "result": {
+      "_tag": "Passed",
+      "runs": 256,
+      "discards": 0
+    }
+  }
+]
