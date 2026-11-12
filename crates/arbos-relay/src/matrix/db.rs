@@ -670,6 +670,34 @@ impl Db {
         })
     }
 
+    /// Every signed-in device of a user: when it was last seen (when it was made, if never),
+    /// and the `(platform, version, build)` it last said it runs, if it ever said.
+    pub fn matrix_device_clients(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<(i64, Option<super::AppBuild>)>> {
+        self.with(|c| {
+            let mut st = c.prepare(
+                "SELECT COALESCE(d.last_seen_at, d.created_at), v.platform, v.app_version, v.build
+                 FROM devices d LEFT JOIN device_versions v ON v.rowid = (
+                   SELECT rowid FROM device_versions WHERE device_id = d.id
+                   ORDER BY last_seen_at DESC, rowid DESC LIMIT 1)
+                 WHERE d.user_id = ?1 AND d.revoked_at IS NULL",
+            )?;
+            let rows = st.query_map(params![user_id], |r| {
+                let platform: Option<String> = r.get(1)?;
+                Ok((
+                    r.get(0)?,
+                    match platform {
+                        Some(p) => Some((p, r.get(2)?, r.get(3)?)),
+                        None => None,
+                    },
+                ))
+            })?;
+            rows.collect()
+        })
+    }
+
     // ---- reactions carried back from the homeserver (phase 3) ---------------------------------
 
     /// Remember the reaction an event of a chat's room is; `false` when it was known.

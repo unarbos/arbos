@@ -479,7 +479,14 @@ impl Worker {
     }
 
     async fn create_room(&self, spec: &RoomSpec) -> MxResult<String> {
-        let encrypted = Self::encrypts(&self.state.matrix.cfg, spec);
+        // Encrypted when the chat is one that is ([`Self::encrypts`]) and every person in it
+        // runs an app that decrypts; otherwise a room all of them can read, for good.
+        let people = spec
+            .members
+            .iter()
+            .filter_map(|m| m.member.strip_prefix("user:"));
+        let encrypted = Self::encrypts(&self.state.matrix.cfg, spec)
+            && super::clients_decrypt(&self.state, people);
         let body = Self::create_room_body(spec, encrypted);
         let room_id = self.client.create_room(&spec.creator, &body).await?;
         self.state
@@ -1114,6 +1121,110 @@ mod tests {
         assert!(Worker::encrypts(&on, &dm_spec), "the cap itself is allowed");
         dm_spec.members.push(one);
         assert!(!Worker::encrypts(&on, &dm_spec), "one over is plaintext");
+    }
+
+    /// Against a real homeserver (see `matrix::native::tests`), with the flag on: a DM and a
+    /// group of exactly the cap are created encrypted, a group of one more is not, and
+    /// neither is a DM one of whose people runs an app older than the minimum. What the room
+    /// is on the homeserver is what the relay recorded.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn rooms_are_created_encrypted_up_to_the_cap_and_only_for_apps_that_decrypt() {
+        let (Ok(hs_url), Ok(as_token)) = (
+            std::env::var("ARBOS_MATRIX_TEST_HS"),
+            std::env::var("ARBOS_MATRIX_TEST_AS_TOKEN"),
+        ) else {
+            return;
+        };
+        let cfg = Config {
+            mode: crate::matrix::Mode::Dual,
+            hs_url,
+            server_name: std::env::var("ARBOS_MATRIX_TEST_SERVER_NAME")
+                .unwrap_or_else(|_| "arbos.life".into()),
+            as_token_users: as_token.clone(),
+            as_token_agents: as_token.clone(),
+            as_token_bridges: as_token,
+            e2ee: true,
+            ..Config::off()
+        };
+        let mut state = test_state(AuthMode::Github);
+        state.matrix = Matrix::new(cfg.clone());
+        let first = 7_200_000_000 + i64::from(std::process::id()) * 1_000;
+        let people: Vec<String> = (0..=E2EE_MEMBER_CAP as i64)
+            .map(|i| person(&state, first + i).0)
+            .collect();
+        let ids: Vec<&str> = people.iter().map(String::as_str).collect();
+        let worker = Worker::new(state.clone());
+        let client = Client::new(state.http.clone(), cfg.clone());
+        // The room a chat gets: (the relay's record, what the homeserver holds).
+        let made = |state: AppState, chat: String| {
+            let (worker, client) = (Worker::new(state.clone()), client.clone());
+            async move {
+                let job = Job::SyncRoom {
+                    chat_id: chat.clone(),
+                    project_id: None,
+                };
+                worker.handle(&job).await.expect("the room is made");
+                let room = state.db.matrix_room(&chat).expect("row").expect("room");
+                let spec = room_spec(&state, &chat, None).expect("spec");
+                let on_hs = client
+                    .state(&room.room_id, &spec.creator, "m.room.encryption", "")
+                    .await
+                    .expect("state")
+                    .is_some_and(|c| c["algorithm"] == "m.megolm.v1.aes-sha2");
+                let joined = client
+                    .joined_members(&room.room_id, &spec.creator)
+                    .await
+                    .expect("members")
+                    .len();
+                (room.encrypted, on_hs, joined)
+            }
+        };
+        drop(worker);
+        let group = crate::people::tests_support::group;
+        assert_eq!(
+            made(state.clone(), dm(&state, ids[0], ids[1])).await,
+            (true, true, 2)
+        );
+        assert_eq!(
+            made(state.clone(), group(&state, &ids[..E2EE_MEMBER_CAP])).await,
+            (true, true, E2EE_MEMBER_CAP),
+            "the cap itself"
+        );
+        assert_eq!(
+            made(state.clone(), group(&state, &ids)).await,
+            (false, false, E2EE_MEMBER_CAP + 1),
+            "one over"
+        );
+
+        // With a minimum named, a chat is encrypted only once everyone in it runs it.
+        let mut gated = state.clone();
+        gated.matrix = Matrix::new(Config {
+            e2ee_min_clients: vec![("mac".into(), "0.6.420".into(), String::new())],
+            ..cfg
+        });
+        let device = |user: &str| {
+            let d = gated.db.devices_of_user(user).expect("devices");
+            d[0]["id"].as_str().expect("id").to_owned()
+        };
+        let runs = |user: &str, version: &str| {
+            gated
+                .db
+                .note_device_version(&device(user), user, "mac", version, "1", now_ms())
+                .expect("noted");
+        };
+        runs(ids[2], "0.6.420");
+        runs(ids[3], "0.6.419");
+        assert_eq!(
+            made(gated.clone(), dm(&gated, ids[2], ids[3])).await,
+            (false, false, 2),
+            "one of them cannot decrypt"
+        );
+        runs(ids[3], "0.6.421");
+        runs(ids[4], "0.6.420");
+        assert_eq!(
+            made(gated.clone(), group(&gated, &ids[2..5])).await,
+            (true, true, 3)
+        );
     }
 
     /// With the flag on, a message for an encrypted room is dropped before anything is sent:

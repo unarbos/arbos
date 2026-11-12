@@ -1775,7 +1775,8 @@ pub struct AddAgentBody {
 
 /// An end-to-end encrypted chat is capped at [`E2EE_MEMBER_CAP`] members, agents included (a
 /// room can never drop its encryption, and Megolm shares every key with every member device).
-/// Growing past it means converting to a plaintext group, which is not built yet.
+/// It does not grow past that, by any way in: what its members said stays between the people
+/// it was said to, and a bigger group is a new one.
 fn over_e2ee_cap(state: &AppState, chat_id: &str, members_after: usize) -> Option<Response> {
     let encrypted = state
         .db
@@ -1787,7 +1788,7 @@ fn over_e2ee_cap(state: &AppState, chat_id: &str, members_after: usize) -> Optio
         api_error(
             StatusCode::CONFLICT,
             "encrypted_chat_full",
-            format!("an end-to-end encrypted chat holds up to {E2EE_MEMBER_CAP} members"),
+            format!("This chat is end-to-end encrypted and holds up to {E2EE_MEMBER_CAP} people. Start a new group for more."),
         )
     })
 }
@@ -3687,6 +3688,10 @@ pub async fn group_join(
     // Already a member: return the chat (re-tapping the link).
     if cm.members.iter().any(|m| m.user_id() == Some(me.as_str())) {
         return Json(chat_json(&state, &cm, &me, &device_of(&principal))).into_response();
+    }
+    // A link is one more way in, not a way past the cap.
+    if let Some(r) = over_e2ee_cap(&state, &inv.chat_id, cm.members.len() + 1) {
+        return r;
     }
     if state
         .db
@@ -6479,6 +6484,33 @@ mod group_add_privacy_tests {
             .unwrap();
         assert_eq!(add().await.status(), StatusCode::CONFLICT);
         assert_eq!(state.db.members_of(&chat).unwrap().len(), E2EE_MEMBER_CAP);
+
+        // An invite link is no way past it either, and a refused join does not use the link up.
+        let (_, carol_dev) = person(&state, 3);
+        let link = GroupInvite {
+            id: ulid(),
+            chat_id: chat.clone(),
+            code: "capcode".into(),
+            created_by: alice.clone(),
+            created_at: now_ms(),
+            expires_at: None,
+            uses_left: Some(1),
+            revoked_at: None,
+        };
+        state.db.insert_group_invite(&link).unwrap();
+        let join = || {
+            group_join(
+                State(state.clone()),
+                carol_dev.clone(),
+                Json(GroupJoinBody {
+                    code: "capcode".into(),
+                }),
+            )
+        };
+        assert_eq!(join().await.status(), StatusCode::CONFLICT);
+        assert_eq!(state.db.members_of(&chat).unwrap().len(), E2EE_MEMBER_CAP);
+        let left = state.db.group_invite_by_code("capcode").unwrap().unwrap();
+        assert_eq!(left.uses_left, Some(1));
 
         state
             .db
