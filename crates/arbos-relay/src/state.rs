@@ -9,7 +9,6 @@ use tokio::sync::{broadcast, Mutex, RwLock};
 
 use arbos_core::wire::BoxState;
 
-use crate::daytona::Daytona;
 use crate::db::Db;
 
 #[derive(Clone)]
@@ -31,16 +30,18 @@ pub struct Config {
     /// (= direct when `OPENAI_API_KEY` is set, else OpenRouter).
     pub openai_route: OpenAiRoute,
     pub anthropic_base: String,
-    pub daytona_snapshot: String,
-    /// Inline Dockerfile for Daytona's declarative builder when the snapshot is not registered.
-    pub daytona_dockerfile: Option<PathBuf>,
+    /// Snapshot new boxes are made from, from `ARBOS_DAYTONA_SNAPSHOT` (the variable keeps its
+    /// name: the deploy worker and every live relay already use it). It names the agentd image
+    /// version; `fleet::image_for_snapshot` turns it into a registry tag.
+    pub default_snapshot: String,
     /// Directory served at `/bootstrap/{file}` to boxes (arbos-agentd binary, arbos-pi-ext.tar).
     pub bootstrap_dir: Option<PathBuf>,
     pub agentd_bin: PathBuf,
     pub local_box_image: String,
     pub box_idle_grace_ms: i64,
-    /// `ARBOS_DEFAULT_PROVIDER`: where a user without a box gets one (`daytona|process|docker|gvisor`);
-    /// unset = Daytona when configured, else a local process. D89 sets `gvisor` on the relay host.
+    /// `ARBOS_DEFAULT_PROVIDER`: where a user without a box gets one (`process|docker|gvisor`);
+    /// unset = a local process. D89 sets `gvisor` on the relay host, which is where every new box
+    /// goes now that Daytona is retired.
     pub default_provider: Option<String>,
     /// Host fleet knobs (D89).
     pub fleet: crate::fleet::FleetCfg,
@@ -90,9 +91,9 @@ pub struct Config {
     /// Machines always on (`ARBOS_ALWAYS_ON`, default on in GitHub mode): no idle auto-stop,
     /// a box per signed-in user from sign-in on, re-woken after a relay restart.
     pub always_on: bool,
-    /// Our Daytona cost for a running box (`ARBOS_MACHINE_USD_PER_HOUR`).
+    /// Our machine cost for a running box (`ARBOS_MACHINE_USD_PER_HOUR`).
     pub machine_usd_per_hour: f64,
-    /// Our Daytona cost for a stopped box's disk (`ARBOS_MACHINE_STOPPED_USD_PER_DAY`).
+    /// Our machine cost for a stopped box's disk (`ARBOS_MACHINE_STOPPED_USD_PER_DAY`).
     pub machine_stopped_usd_per_day: f64,
     /// `owner/repo` whose `edge` release feeds `GET /download/mac` (`ARBOS_RELEASES_REPO`).
     pub releases_repo: String,
@@ -285,7 +286,6 @@ pub struct AppState {
     pub db: Db,
     pub cfg: Arc<Config>,
     pub http: reqwest::Client,
-    pub daytona: Option<Daytona>,
     pub rooms: Arc<RwLock<HashMap<String, Arc<Room>>>>,
     /// user_id → live state of the user's box as the relay believes it (STATUS frames, crdt-sync §8).
     pub box_states: Arc<RwLock<HashMap<String, (BoxState, i64)>>>,
@@ -319,9 +319,6 @@ pub struct AppState {
     pub download_cache: Arc<Mutex<Option<(i64, String)>>>,
     /// user_id → box upgrade in progress (`POST /machine/upgrade`).
     pub upgrading: Arc<Mutex<HashMap<String, UpgradeStatus>>>,
-    /// user_id → the last upgrade the relay refused before touching the box (ARB-339: `/work`
-    /// over the carry limit). Shown as `upgrade.last_refused`; cleared by the next success.
-    pub upgrade_refused: Arc<Mutex<HashMap<String, UpgradeRefusal>>>,
     /// Hash of a just-rotated refresh token → (when, the pair it was rotated into). Within
     /// `signin::REFRESH_GRACE_MS` the old token gets that same pair again instead of counting
     /// as a replay, so concurrent refreshers from one device converge on one rotation.
@@ -341,9 +338,6 @@ pub struct AppState {
     /// user_id → last HTTP call from that user's box (`/box/hello`, `/box/projects`,
     /// `/box/keepalive`). A box with no project opens no room socket; this is its heartbeat.
     pub box_http_seen: Arc<Mutex<HashMap<String, i64>>>,
-    /// sandbox_id → the Daytona preview token learned after the row's one got a 401
-    /// (`boxes::send_to_box`). Memory only: the row is rewritten only by a start the relay finishes.
-    pub fresh_preview_tokens: Arc<Mutex<HashMap<String, String>>>,
     /// Users whose box said "turn running" in its last keepalive, with the time (D89: eviction skips them).
     pub turn_running: Arc<Mutex<HashMap<String, i64>>>,
     /// Sandboxes evicted under host pressure (D89), with the time; only the user's own activity wakes them.
@@ -354,7 +348,7 @@ pub struct AppState {
     pub voice: Arc<crate::voice::VoiceCfg>,
     /// user_id → the box's `WS /box/voice` link (tool calls and transcript rows to agentd).
     pub voice_conns: crate::voice::VoiceConns,
-    /// The Daytona snapshot new boxes are made from, switchable at runtime (`POST /admin/snapshot/default`)
+    /// The snapshot new boxes are made from, switchable at runtime (`POST /admin/snapshot/default`)
     /// so an image roll no longer restarts the relay — every restart dropped every client's websocket
     /// (2026-10-22 18:5x: four restarts in 95 min, "Reconnecting…" banners in Jacob's chats).
     pub default_snapshot: Arc<std::sync::RwLock<String>>,
@@ -398,7 +392,7 @@ impl AppState {
             .map(|s| s.clone())
             .unwrap_or_default();
         if cur.is_empty() {
-            self.cfg.daytona_snapshot.clone()
+            self.cfg.default_snapshot.clone()
         } else {
             cur
         }
@@ -427,14 +421,6 @@ pub struct UpgradeStatus {
     pub since: i64,
     pub from_snapshot: Option<String>,
     pub to_snapshot: String,
-}
-
-/// An upgrade refused at the measure step: the box kept running, nothing was stopped or copied.
-#[derive(Debug, Clone)]
-pub struct UpgradeRefusal {
-    pub reason: String,
-    pub at: i64,
-    pub work_mib: i64,
 }
 
 impl AppState {
@@ -644,8 +630,7 @@ pub(crate) mod test_support {
             openai_key: None,
             openai_base: String::new(),
             anthropic_base: String::new(),
-            daytona_snapshot: String::new(),
-            daytona_dockerfile: None,
+            default_snapshot: String::new(),
             bootstrap_dir: None,
             agentd_bin: "arbos-agentd".into(),
             local_box_image: String::new(),
@@ -691,7 +676,6 @@ pub(crate) mod test_support {
             db: db.clone(),
             cfg: Arc::new(cfg),
             http: reqwest::Client::new(),
-            daytona: None,
             rooms: Arc::new(RwLock::new(HashMap::new())),
             box_states: Arc::new(RwLock::new(HashMap::new())),
             local_children: Arc::new(Mutex::new(HashMap::new())),
@@ -705,7 +689,6 @@ pub(crate) mod test_support {
             jwt_key: Arc::new(RelayKey::derive("test-key").subkey("jwt")),
             download_cache: Arc::new(Mutex::new(None)),
             upgrading: Arc::new(Mutex::new(HashMap::new())),
-            upgrade_refused: Arc::new(Mutex::new(HashMap::new())),
             stale_bounces: Arc::new(Mutex::new(HashMap::new())),
             local_conns: Arc::new(Mutex::new(HashMap::new())),
             refresh_grace: Arc::new(Mutex::new(HashMap::new())),
@@ -716,7 +699,6 @@ pub(crate) mod test_support {
             presence_seen: Arc::new(Mutex::new(HashMap::new())),
             activity: Arc::new(Mutex::new(HashMap::new())),
             box_http_seen: Arc::new(Mutex::new(HashMap::new())),
-            fresh_preview_tokens: Arc::new(Mutex::new(HashMap::new())),
             turn_running: Arc::new(Mutex::new(HashMap::new())),
             evicted: Arc::new(Mutex::new(HashMap::new())),
             fleet_pressure: Arc::new(Mutex::new(None)),

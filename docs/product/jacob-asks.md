@@ -100,6 +100,7 @@ Deleting a row, or the test it names, needs sign-off — see **Changing a guard*
 | `sidebar-pinning-ios-2026-10-28` | 2026-10-28 | iPhone | Pins are one synced list, top first, cached so the section is there at launch. | `HomePinsTests` |
 | `sidecar-sessions-ios-2026-10-28` | 2026-10-28 | iPhone | The Session log card shows the newest four lines worth reading; the plumbing stays behind View all. | `JacobAskGuardTests.testTheSessionLogCardShowsTheNewestFourRealLines` |
 | `archived-chat-stays-archived-2026-10-29` | 2026-10-29 | iPhone | Opening a hidden chat only views it; it takes new activity or Unarchive to bring it back. | `HiddenChatOpenTests` |
+| `scaled-timestamp-clip-mac-2026-10-29` | 2026-10-29 | iPhone + Mac | My message's hover/swipe time stays in the column on a scaled display or large Text Size — the peek column grows with text size on iPhone; the Mac reserves a fixed time + rail lane. | `ChatDensityMetricsTests.testSwipeTimeColumnGrowsWithTextSize` |
 | `draft-chat-from-search-ios-2026-10-29` | 2026-10-29 | iPhone | A DM started from search lives on its own screen only: the home list never shows it, and leaving before a send drops it. | `DraftDMTests` |
 | `full-picker-reaction-ios-2026-10-29` | 2026-10-29 | iPhone | A keycap or text-default symbol picked from the full picker reaches the row; a bare letter or digit does not. | `ReactionPickTests.testPickedKeycapReachesTheDocRow` |
 | `image-viewer-close-button-2026-10-29` | 2026-10-29 | iPhone | The viewer's close control stays legible on a white, dark or busy picture. | `ViewerChromeTests` |
@@ -116,12 +117,16 @@ Deleting a row, or the test it names, needs sign-off — see **Changing a guard*
 | `typing-anchor-2026-11-08` | 2026-11-08 | iPhone | The presence row belongs to the end of the transcript: it scrolls away with the end it describes rather than riding the bar over old bubbles. | `PresenceAnchorUITests` |
 | `attachment-in-composer-2026-11-09` | 2026-11-09 | iPhone | A picked image shows as a thumbnail inside the composer box, Grok-style, before it is sent. | `ComposerParityUITests.testAStagedPicturePreviewsInsideTheComposer` |
 | `composer-hold-highlight-2026-11-09` | 2026-11-09 | iPhone | Resting a finger on the composer lights the box, as Grok's does, while the system menu comes up. | `ComposerParityUITests.testTheBoxVisiblyLightsUnderAHoldingFinger` |
+| `agent-access-link-ios-2026-11-10` | 2026-11-10 | iPhone | Settings → Agent access link creates, copies/shares and revokes the same agent links as the Mac, so a phone can hand an agent a key. | `AgentAccessLinkUITests` |
+| `connected-apps-hidden-until-implemented-2026-11-10` | 2026-11-10 | iPhone | Settings lists no Connected apps row until the feature ships (Mac already omits it; `connected_apps_stays_off_the_settings_list_until_implemented` holds that side). | `ConnectedAppsHiddenUITests` |
+| `iphone-settings-nav-push-2026-11-10` | 2026-11-10 | iPhone | Tapping the account avatar pushes Settings from the right (not a sheet); edge-swipe returns to the chat list; a sub-setting pushes and swipes back one level. | `HomeNavPushUITests` |
+| `iphone-compose-nav-push-2026-11-10` | 2026-11-10 | iPhone | Home's + pushes New Message from the right (not a sheet); edge-swipe returns to the chat list. | `HomeNavPushUITests` |
+| `iphone-composer-less-opaque-2026-11-11` | 2026-11-11 | iPhone | The Glass composer field pill fills at 12 %, not the 22 % that still read as a dark plate over the transcript. | `ComposerParityTests.testTheFieldPillLetsTheTranscriptThrough` |
 | `connection-pill` | — | iPhone | The header pill shows the worst of the disagreeing signals, and says nothing at all while the link is live. | `JacobAskGuardTests.testTheConnectionPillShowsTheWorstSignalAndStaysQuietWhenLive` |
 | `in-call-bar` | — | iPhone | The in-call strip's chip stays 36 pt, a recorded exception to the one app-wide control height. | `JacobAskGuardTests.testTheInCallChipKeepsItsRecordedException` |
 | `reply-preview-fixed-height` | — | iPhone | The reply bar above the field is one row high whatever it quotes: the quote is flattened to a line and capped. | `JacobAskGuardTests.testTheReplyPreviewIsOneRowWhateverItQuotes` |
 | `2005` | — | iPhone | After an unblock, the rooms standing refused are asked to resend; a room that is not refused ignores the nudge. | `SessionRoomTests.testChatToRetryNamesOnlyMembershipAndSettingsChanges` |
-| `iphone-settings-nav-push-2026-11-10` | 2026-11-10 | iPhone | Tapping the account avatar pushes Settings from the right (not a sheet); edge-swipe returns to the chat list; a sub-setting pushes and swipes back one level. | `HomeNavPushUITests` |
-| `iphone-compose-nav-push-2026-11-10` | 2026-11-10 | iPhone | Home's + pushes New Message from the right (not a sheet); edge-swipe returns to the chat list. | `HomeNavPushUITests` |
+| `closed-app-call-ring-2026-11-11` | 2026-11-11 | iPhone | VoIP and APNs tokens re-upload on every foreground pass so a closed iPhone can still ring after the relay drops a dead Apple token (TestFlight AFjyB3HHRZ7GzKtZHyvxIUw / #2995). | `JacobAskGuardTests.testForcedTokenUploadRunsEvenWhenTheHexIsUnchanged` |
 
 ## Superseded
 

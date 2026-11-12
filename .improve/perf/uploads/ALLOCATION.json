@@ -1,0 +1,2707 @@
+{
+  "seed": 61119,
+  "seconds": 10.696381584042683,
+  "scope": "Allocation counters only, shared host; no timing/latency inference. Sum requested sizes of successful alloc/realloc; not bytes physically copied/RSS. Global meter includes loopback collaborators. Payload-sized event count tests removal of one whole response-to-Vec allocation; peak dominated by response accumulation and does not materially improve.",
+  "cases": [
+    {
+      "bytes": 4194304,
+      "pairs": 21,
+      "requested_allocation_bytes_before_median": 15313432,
+      "requested_allocation_bytes_after_median": 11119119,
+      "paired_median_bytes_saved": 4194313,
+      "bootstrap_median_95ci": [
+        4194313,
+        4194313
+      ],
+      "payload_sized_events_before": [
+        2
+      ],
+      "payload_sized_events_after": [
+        1
+      ],
+      "peak_heap_before_median": 8472869,
+      "peak_heap_after_median": 8472849,
+      "two_sided_paired_sign_test_p": 9.5367431640625e-07
+    },
+    {
+      "bytes": 16777216,
+      "pairs": 21,
+      "requested_allocation_bytes_before_median": 53017257,
+      "requested_allocation_bytes_after_median": 36240032,
+      "paired_median_bytes_saved": 16777225,
+      "bootstrap_median_95ci": [
+        16777225,
+        16777225
+      ],
+      "payload_sized_events_before": [
+        2
+      ],
+      "payload_sized_events_after": [
+        1
+      ],
+      "peak_heap_before_median": 33592277,
+      "peak_heap_after_median": 33592257,
+      "two_sided_paired_sign_test_p": 9.5367431640625e-07
+    }
+  ],
+  "sources": {
+    "before": {
+      "source": {
+        "relay_sha256": "a8c95f914e9036e5ff8f4cfb4a2f694cfd2665497769c453b276e8ce0d66dc7a",
+        "actual_upload_tranche_sha256": "64c7c68bcb8e0e387f9e0fac1cda3e23013f74a3e7c23454153a30c4664b9cdb",
+        "actual_functions": {
+          "pub(crate) struct RelayError {": "6988ba27fa4fa25f629112727efc42cc8cfd53382fc6dbb89b44ac4561ec4864",
+          "impl RelayError {": "f5ef40ac03dc78ccb672beb3af623fc09e691999bb09f482b6d6abc411e3dcc3",
+          "impl std::fmt::Display for RelayError {": "4ca54ba8c775b78dbe8200beba94904dc5dd98ca9f5609d2d7b9db64868f94a5",
+          "impl std::error::Error for RelayError {}": "cfd61db95ee055f376b96e4de04f42667c03464e9722e3942814b0e6e121492b",
+          "pub(crate) fn mime_for(": "0030eb51a3b65eb2da54921482d0fc292db96623066deab7942dbee3def347aa",
+          "fn blob_request_url(": "e90fd55ce40be95dcf5abf91f7458513dfac3ff4f6aaa000e94a4c5dd384fe10",
+          "async fn fetch_blob_bytes(": "739f8060f0f366848db57d4f674909baf2d44d113b0fa8842ded6b88a8977a68",
+          "fn safe_name(": "d0e35e731ac6aac5421e0bb4cf5d53f98b3debd8ceefe352eaeb58aad867c008",
+          "fn attachment_kind_str(": "7c024aada69ea2a2f697a7fc086f9f0928d0bcd924667433885ffa6c968703bf",
+          "fn user_attachment_from_part(": "d278820d1f78a9831b702bf01b4ae171de602511502b9c445d48d8d8fba957da",
+          "async fn upload_outgoing(": "38d15ff6557f51201f5eb17dc82b4d977fc61553053f9698e4c0aec8e9b9d921",
+          "fn forwarded_chart_parts(": "c44ab19d052b685383e6fd365ee0223289cb84655aa23d6893a9c984e132e43a",
+          "async fn upload_voice_memo(": "4f51921620c4caaa715ed992feffea450c6d4b0ad73326fc5a9e2889993be29d"
+        },
+        "actual_rs_sha256": "feae5360b0d3fb8e10c232e94c58ae971d0f683783bebc8b320aadd246afd83b",
+        "fixture_rs_sha256": "23627519e541d8aaa31325ee2ee63dfc400a977c6a693bd2cd9c7eff7383d23b",
+        "driver_sha256": "61fbc97c1ead1e8a339892468215f44b97e01f73110a513b522fbe49bba5669b",
+        "scope": "Actual selected production bodies plus actual error classifier and ChatSendQueue; fresh local HTTP/files and account/DTO collaborators; no GPUI, SDK, CRDT or real credentials. HTTP-only reqwest build, no TLS claims."
+      },
+      "binary_sha256": "984e0c5c684f54c4fe2bab19d392c30a715e28e2697c3721a87477fbab7c8a74"
+    },
+    "after": {
+      "source": {
+        "relay_sha256": "973433f5b9eb4e0731180ae6a818130d44882dd0d5508fed13035b38fb419dbc",
+        "actual_upload_tranche_sha256": "64c7c68bcb8e0e387f9e0fac1cda3e23013f74a3e7c23454153a30c4664b9cdb",
+        "actual_functions": {
+          "pub(crate) struct RelayError {": "6988ba27fa4fa25f629112727efc42cc8cfd53382fc6dbb89b44ac4561ec4864",
+          "impl RelayError {": "f5ef40ac03dc78ccb672beb3af623fc09e691999bb09f482b6d6abc411e3dcc3",
+          "impl std::fmt::Display for RelayError {": "4ca54ba8c775b78dbe8200beba94904dc5dd98ca9f5609d2d7b9db64868f94a5",
+          "impl std::error::Error for RelayError {}": "cfd61db95ee055f376b96e4de04f42667c03464e9722e3942814b0e6e121492b",
+          "pub(crate) fn mime_for(": "0030eb51a3b65eb2da54921482d0fc292db96623066deab7942dbee3def347aa",
+          "fn blob_request_url(": "e90fd55ce40be95dcf5abf91f7458513dfac3ff4f6aaa000e94a4c5dd384fe10",
+          "async fn fetch_blob_bytes(": "e4b71a08b31594d32760fa748a30414bd29c09c9077a1b1dea5aa1c23863cc9d",
+          "fn safe_name(": "d0e35e731ac6aac5421e0bb4cf5d53f98b3debd8ceefe352eaeb58aad867c008",
+          "fn attachment_kind_str(": "7c024aada69ea2a2f697a7fc086f9f0928d0bcd924667433885ffa6c968703bf",
+          "fn user_attachment_from_part(": "d278820d1f78a9831b702bf01b4ae171de602511502b9c445d48d8d8fba957da",
+          "async fn upload_outgoing(": "d4de49f19361752c0704f5336ad620f7c7facbba06c57c1ab68325271c1a6b7e",
+          "fn forwarded_chart_parts(": "c44ab19d052b685383e6fd365ee0223289cb84655aa23d6893a9c984e132e43a",
+          "async fn upload_voice_memo(": "c6529b3b9c58f1d45eb478ca00c45bcd0a83c492bb8fa05738c6d3960393e57e"
+        },
+        "actual_rs_sha256": "1766dc831ec6e985361f2fddc7b53ef6046723aa6525f5238c33092330318380",
+        "fixture_rs_sha256": "23627519e541d8aaa31325ee2ee63dfc400a977c6a693bd2cd9c7eff7383d23b",
+        "driver_sha256": "61fbc97c1ead1e8a339892468215f44b97e01f73110a513b522fbe49bba5669b",
+        "scope": "Actual selected production bodies plus actual error classifier and ChatSendQueue; fresh local HTTP/files and account/DTO collaborators; no GPUI, SDK, CRDT or real credentials. HTTP-only reqwest build, no TLS claims."
+      },
+      "binary_sha256": "3de6c233b5df13b436f40a217060e19f45d7da6d74ddec3a35c71cd8897655dd"
+    }
+  },
+  "raw_pairs": [
+    {
+      "pair": 0,
+      "bytes": 4194304,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "allocation_requested_bytes": 15313432,
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61294,
+        "heap_peak_bytes": 8534163,
+        "heap_peak_delta_bytes": 8472869,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 2,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "after": {
+        "allocation_requested_bytes": 11119119,
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61332,
+        "heap_peak_bytes": 8534181,
+        "heap_peak_delta_bytes": 8472849,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 1,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 0,
+      "bytes": 16777216,
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "allocation_requested_bytes": 36240032,
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 33653590,
+        "heap_peak_delta_bytes": 33592257,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 1,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "before": {
+        "allocation_requested_bytes": 53017257,
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 33653572,
+        "heap_peak_delta_bytes": 33592277,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 2,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 1,
+      "bytes": 4194304,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "allocation_requested_bytes": 15313432,
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61294,
+        "heap_peak_bytes": 8534163,
+        "heap_peak_delta_bytes": 8472869,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 2,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "after": {
+        "allocation_requested_bytes": 11119119,
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61332,
+        "heap_peak_bytes": 8534181,
+        "heap_peak_delta_bytes": 8472849,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 1,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 1,
+      "bytes": 16777216,
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "allocation_requested_bytes": 36240032,
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 33653590,
+        "heap_peak_delta_bytes": 33592257,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 1,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "before": {
+        "allocation_requested_bytes": 53017257,
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 33653572,
+        "heap_peak_delta_bytes": 33592277,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 2,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 2,
+      "bytes": 4194304,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "allocation_requested_bytes": 15313432,
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61294,
+        "heap_peak_bytes": 8534163,
+        "heap_peak_delta_bytes": 8472869,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 2,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "after": {
+        "allocation_requested_bytes": 11119119,
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61332,
+        "heap_peak_bytes": 8534181,
+        "heap_peak_delta_bytes": 8472849,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 1,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 2,
+      "bytes": 16777216,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "allocation_requested_bytes": 53017257,
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 33653572,
+        "heap_peak_delta_bytes": 33592277,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 2,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "after": {
+        "allocation_requested_bytes": 36657864,
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 34071422,
+        "heap_peak_delta_bytes": 34010089,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 1,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 3,
+      "bytes": 4194304,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "allocation_requested_bytes": 15313432,
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61294,
+        "heap_peak_bytes": 8534163,
+        "heap_peak_delta_bytes": 8472869,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 2,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "after": {
+        "allocation_requested_bytes": 11119119,
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61332,
+        "heap_peak_bytes": 8534181,
+        "heap_peak_delta_bytes": 8472849,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 1,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 3,
+      "bytes": 16777216,
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "allocation_requested_bytes": 36240032,
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 33653590,
+        "heap_peak_delta_bytes": 33592257,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 1,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "before": {
+        "allocation_requested_bytes": 53017257,
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 33653572,
+        "heap_peak_delta_bytes": 33592277,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 2,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 4,
+      "bytes": 4194304,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "allocation_requested_bytes": 15313432,
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61294,
+        "heap_peak_bytes": 8534163,
+        "heap_peak_delta_bytes": 8472869,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 2,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "after": {
+        "allocation_requested_bytes": 11119119,
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61332,
+        "heap_peak_bytes": 8534181,
+        "heap_peak_delta_bytes": 8472849,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 1,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 4,
+      "bytes": 16777216,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "allocation_requested_bytes": 53017257,
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 33653572,
+        "heap_peak_delta_bytes": 33592277,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 2,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "after": {
+        "allocation_requested_bytes": 36240032,
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 33653590,
+        "heap_peak_delta_bytes": 33592257,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 1,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 5,
+      "bytes": 4194304,
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "allocation_requested_bytes": 11119119,
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61332,
+        "heap_peak_bytes": 8534181,
+        "heap_peak_delta_bytes": 8472849,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 1,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "before": {
+        "allocation_requested_bytes": 15313432,
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61294,
+        "heap_peak_bytes": 8534163,
+        "heap_peak_delta_bytes": 8472869,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 2,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 5,
+      "bytes": 16777216,
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "allocation_requested_bytes": 36240032,
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 33653590,
+        "heap_peak_delta_bytes": 33592257,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 1,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "before": {
+        "allocation_requested_bytes": 53017257,
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 33653572,
+        "heap_peak_delta_bytes": 33592277,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 2,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 6,
+      "bytes": 4194304,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "allocation_requested_bytes": 15313432,
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61294,
+        "heap_peak_bytes": 8534163,
+        "heap_peak_delta_bytes": 8472869,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 2,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "after": {
+        "allocation_requested_bytes": 11119119,
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61332,
+        "heap_peak_bytes": 8534181,
+        "heap_peak_delta_bytes": 8472849,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 1,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 6,
+      "bytes": 16777216,
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "allocation_requested_bytes": 36657864,
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 34071422,
+        "heap_peak_delta_bytes": 34010089,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 1,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "before": {
+        "allocation_requested_bytes": 53017257,
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 33653572,
+        "heap_peak_delta_bytes": 33592277,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 2,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 7,
+      "bytes": 4194304,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "allocation_requested_bytes": 15313432,
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61294,
+        "heap_peak_bytes": 8534163,
+        "heap_peak_delta_bytes": 8472869,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 2,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "after": {
+        "allocation_requested_bytes": 11119119,
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61332,
+        "heap_peak_bytes": 8534181,
+        "heap_peak_delta_bytes": 8472849,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 1,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 7,
+      "bytes": 16777216,
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "allocation_requested_bytes": 36240032,
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 33653590,
+        "heap_peak_delta_bytes": 33592257,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 1,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "before": {
+        "allocation_requested_bytes": 53017257,
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 33653572,
+        "heap_peak_delta_bytes": 33592277,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 2,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 8,
+      "bytes": 4194304,
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "allocation_requested_bytes": 11119119,
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61332,
+        "heap_peak_bytes": 8534181,
+        "heap_peak_delta_bytes": 8472849,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 1,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "before": {
+        "allocation_requested_bytes": 15313432,
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61294,
+        "heap_peak_bytes": 8534163,
+        "heap_peak_delta_bytes": 8472869,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 2,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 8,
+      "bytes": 16777216,
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "allocation_requested_bytes": 36240032,
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 33653590,
+        "heap_peak_delta_bytes": 33592257,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 1,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "before": {
+        "allocation_requested_bytes": 53017257,
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 33653572,
+        "heap_peak_delta_bytes": 33592277,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 2,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 9,
+      "bytes": 4194304,
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "allocation_requested_bytes": 11119119,
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61332,
+        "heap_peak_bytes": 8534181,
+        "heap_peak_delta_bytes": 8472849,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 1,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "before": {
+        "allocation_requested_bytes": 15313432,
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61294,
+        "heap_peak_bytes": 8534163,
+        "heap_peak_delta_bytes": 8472869,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 2,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 9,
+      "bytes": 16777216,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "allocation_requested_bytes": 53017257,
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 33653572,
+        "heap_peak_delta_bytes": 33592277,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 2,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "after": {
+        "allocation_requested_bytes": 36240032,
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 33653590,
+        "heap_peak_delta_bytes": 33592257,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 1,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 10,
+      "bytes": 4194304,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "allocation_requested_bytes": 15313432,
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61294,
+        "heap_peak_bytes": 8534163,
+        "heap_peak_delta_bytes": 8472869,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 2,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "after": {
+        "allocation_requested_bytes": 11119119,
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61332,
+        "heap_peak_bytes": 8534181,
+        "heap_peak_delta_bytes": 8472849,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 1,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 10,
+      "bytes": 16777216,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "allocation_requested_bytes": 53435089,
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 34071404,
+        "heap_peak_delta_bytes": 34010109,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 2,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "after": {
+        "allocation_requested_bytes": 36240032,
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 33653590,
+        "heap_peak_delta_bytes": 33592257,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 1,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 11,
+      "bytes": 4194304,
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "allocation_requested_bytes": 11119119,
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61332,
+        "heap_peak_bytes": 8534181,
+        "heap_peak_delta_bytes": 8472849,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 1,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "before": {
+        "allocation_requested_bytes": 15313432,
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61294,
+        "heap_peak_bytes": 8534163,
+        "heap_peak_delta_bytes": 8472869,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 2,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 11,
+      "bytes": 16777216,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "allocation_requested_bytes": 53017257,
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 33653572,
+        "heap_peak_delta_bytes": 33592277,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 2,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "after": {
+        "allocation_requested_bytes": 36240032,
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 33653590,
+        "heap_peak_delta_bytes": 33592257,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 1,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 12,
+      "bytes": 4194304,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "allocation_requested_bytes": 15313432,
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61294,
+        "heap_peak_bytes": 8534163,
+        "heap_peak_delta_bytes": 8472869,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 2,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "after": {
+        "allocation_requested_bytes": 11119119,
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61332,
+        "heap_peak_bytes": 8534181,
+        "heap_peak_delta_bytes": 8472849,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 1,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 12,
+      "bytes": 16777216,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "allocation_requested_bytes": 53017257,
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 33653572,
+        "heap_peak_delta_bytes": 33592277,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 2,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "after": {
+        "allocation_requested_bytes": 36240032,
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 33653590,
+        "heap_peak_delta_bytes": 33592257,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 1,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 13,
+      "bytes": 4194304,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "allocation_requested_bytes": 15313432,
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61294,
+        "heap_peak_bytes": 8534163,
+        "heap_peak_delta_bytes": 8472869,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 2,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "after": {
+        "allocation_requested_bytes": 11119119,
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61332,
+        "heap_peak_bytes": 8534181,
+        "heap_peak_delta_bytes": 8472849,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 1,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 13,
+      "bytes": 16777216,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "allocation_requested_bytes": 53017257,
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 33653572,
+        "heap_peak_delta_bytes": 33592277,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 2,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "after": {
+        "allocation_requested_bytes": 36240032,
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 33653590,
+        "heap_peak_delta_bytes": 33592257,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 1,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 14,
+      "bytes": 4194304,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "allocation_requested_bytes": 15313432,
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61294,
+        "heap_peak_bytes": 8534163,
+        "heap_peak_delta_bytes": 8472869,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 2,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "after": {
+        "allocation_requested_bytes": 11119119,
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61332,
+        "heap_peak_bytes": 8534181,
+        "heap_peak_delta_bytes": 8472849,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 1,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 14,
+      "bytes": 16777216,
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "allocation_requested_bytes": 36240032,
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 33653590,
+        "heap_peak_delta_bytes": 33592257,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 1,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "before": {
+        "allocation_requested_bytes": 53017257,
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 33653572,
+        "heap_peak_delta_bytes": 33592277,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 2,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 15,
+      "bytes": 4194304,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "allocation_requested_bytes": 15313432,
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61294,
+        "heap_peak_bytes": 8534163,
+        "heap_peak_delta_bytes": 8472869,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 2,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "after": {
+        "allocation_requested_bytes": 11119119,
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61332,
+        "heap_peak_bytes": 8534181,
+        "heap_peak_delta_bytes": 8472849,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 1,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 15,
+      "bytes": 16777216,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "allocation_requested_bytes": 53017257,
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 33653572,
+        "heap_peak_delta_bytes": 33592277,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 2,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "after": {
+        "allocation_requested_bytes": 36240032,
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 33653590,
+        "heap_peak_delta_bytes": 33592257,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 1,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 16,
+      "bytes": 4194304,
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "allocation_requested_bytes": 11119119,
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61332,
+        "heap_peak_bytes": 8534181,
+        "heap_peak_delta_bytes": 8472849,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 1,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "before": {
+        "allocation_requested_bytes": 15313432,
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61294,
+        "heap_peak_bytes": 8534163,
+        "heap_peak_delta_bytes": 8472869,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 2,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 16,
+      "bytes": 16777216,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "allocation_requested_bytes": 53017257,
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 33653572,
+        "heap_peak_delta_bytes": 33592277,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 2,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "after": {
+        "allocation_requested_bytes": 36240032,
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 33653590,
+        "heap_peak_delta_bytes": 33592257,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 1,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 17,
+      "bytes": 4194304,
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "allocation_requested_bytes": 11119119,
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61332,
+        "heap_peak_bytes": 8534181,
+        "heap_peak_delta_bytes": 8472849,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 1,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "before": {
+        "allocation_requested_bytes": 15313432,
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61294,
+        "heap_peak_bytes": 8534163,
+        "heap_peak_delta_bytes": 8472869,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 2,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 17,
+      "bytes": 16777216,
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "allocation_requested_bytes": 36240032,
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 33653590,
+        "heap_peak_delta_bytes": 33592257,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 1,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "before": {
+        "allocation_requested_bytes": 53017257,
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 33653572,
+        "heap_peak_delta_bytes": 33592277,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 2,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 18,
+      "bytes": 4194304,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "allocation_requested_bytes": 15313432,
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61294,
+        "heap_peak_bytes": 8534163,
+        "heap_peak_delta_bytes": 8472869,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 2,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "after": {
+        "allocation_requested_bytes": 11119119,
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61332,
+        "heap_peak_bytes": 8534181,
+        "heap_peak_delta_bytes": 8472849,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 1,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 18,
+      "bytes": 16777216,
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "allocation_requested_bytes": 36240032,
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 33653590,
+        "heap_peak_delta_bytes": 33592257,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 1,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "before": {
+        "allocation_requested_bytes": 53017257,
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 33653572,
+        "heap_peak_delta_bytes": 33592277,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 2,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 19,
+      "bytes": 4194304,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "allocation_requested_bytes": 15313432,
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61294,
+        "heap_peak_bytes": 8534163,
+        "heap_peak_delta_bytes": 8472869,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 2,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "after": {
+        "allocation_requested_bytes": 11119119,
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61332,
+        "heap_peak_bytes": 8534181,
+        "heap_peak_delta_bytes": 8472849,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 1,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 19,
+      "bytes": 16777216,
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "allocation_requested_bytes": 36240032,
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 33653590,
+        "heap_peak_delta_bytes": 33592257,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 1,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "before": {
+        "allocation_requested_bytes": 53017257,
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 33653572,
+        "heap_peak_delta_bytes": 33592277,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 2,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 20,
+      "bytes": 4194304,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "allocation_requested_bytes": 15313432,
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61294,
+        "heap_peak_bytes": 8534163,
+        "heap_peak_delta_bytes": 8472869,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 2,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "after": {
+        "allocation_requested_bytes": 11119119,
+        "bytes_each": 4194304,
+        "count": 1,
+        "heap_baseline_bytes": 61332,
+        "heap_peak_bytes": 8534181,
+        "heap_peak_delta_bytes": 8472849,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 1,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 4194304,
+            "hash": 5147388838966076197,
+            "length": 4194304,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    },
+    {
+      "pair": 20,
+      "bytes": 16777216,
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "allocation_requested_bytes": 53017257,
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61295,
+        "heap_peak_bytes": 33653572,
+        "heap_peak_delta_bytes": 33592277,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 2,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      },
+      "after": {
+        "allocation_requested_bytes": 36240032,
+        "bytes_each": 16777216,
+        "count": 1,
+        "heap_baseline_bytes": 61333,
+        "heap_peak_bytes": 33653590,
+        "heap_peak_delta_bytes": 33592257,
+        "kind": "copy",
+        "mode": "memory",
+        "names": [
+          "file-0.png"
+        ],
+        "payload_sized_allocation_events": 1,
+        "peak_get": 1,
+        "peak_http": 1,
+        "put_receipts": [
+          {
+            "bytes": 16777216,
+            "hash": 13456884142631428901,
+            "length": 16777216,
+            "mime": "image/png"
+          }
+        ],
+        "saved": [
+          true
+        ]
+      }
+    }
+  ]
+}

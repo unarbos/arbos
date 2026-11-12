@@ -490,3 +490,140 @@ fn unread_query(c: &Connection, user_id: &str) -> rusqlite::Result<Vec<UnreadCha
     })?;
     rows.collect()
 }
+
+#[cfg(test)]
+mod unread_query_tests {
+    use super::*;
+    use crate::people::tests_support::{group, person, project_of};
+    use crate::state::{test_support::test_state, AppState, AuthMode};
+    use serde_json::{json, Value};
+
+    fn event(db: &Db, chat: &str, project: Option<&str>, id: &str, sender: Option<&str>) {
+        let author = sender
+            .map(|user| format!("user:{user}"))
+            .unwrap_or_else(|| "agent:fixture".into());
+        db.insert_chat_event(chat, project, id, sender, &author)
+            .unwrap();
+    }
+
+    fn fixture() -> (AppState, String, Value) {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 121);
+        let (bob, _) = person(&state, 122);
+        let (blocked, _) = person(&state, 123);
+        let people = group(&state, &[&alice, &bob, &blocked]);
+        let archived = group(&state, &[&alice, &bob]);
+        let left = group(&state, &[&alice, &bob]);
+        state
+            .db
+            .remove_member(&left, &format!("user:{alice}"), false)
+            .unwrap();
+        state.db.block(&alice, &blocked).unwrap();
+        state.db.set_chat_archived(&alice, &archived, true).unwrap();
+        let own_project = project_of(&state, &alice, "Own");
+        let shared_project = project_of(&state, &bob, "Shared");
+        let former_project = project_of(&state, &bob, "Former");
+        let foreign_project = project_of(&state, &bob, "Foreign");
+        // Both ACL OR branches may admit the same event; it must still count only once.
+        state
+            .db
+            .add_project_member(&own_project, &alice, &alice)
+            .unwrap();
+        state
+            .db
+            .add_project_member(&shared_project, &alice, &bob)
+            .unwrap();
+        state
+            .db
+            .add_project_member(&former_project, &alice, &bob)
+            .unwrap();
+        state
+            .db
+            .remove_project_member(&former_project, &alice)
+            .unwrap();
+        let chat_of = |project: &str| state.db.list_chats(project).unwrap()[0].id.clone();
+        let own_chat = chat_of(&own_project);
+        let shared_chat = chat_of(&shared_project);
+        let former_chat = chat_of(&former_project);
+        let foreign_chat = chat_of(&foreign_project);
+        event(&state.db, &people, None, "before-read", Some(&bob));
+        state.db.mark_chat_read(&alice, &people).unwrap();
+        event(
+            &state.db,
+            &own_chat,
+            Some(&own_project),
+            "own-visible",
+            Some(&bob),
+        );
+        event(
+            &state.db,
+            &own_chat,
+            Some(&own_project),
+            "own-self",
+            Some(&alice),
+        );
+        event(
+            &state.db,
+            &shared_chat,
+            Some(&shared_project),
+            "shared-visible",
+            None,
+        );
+        event(&state.db, &people, None, "peer", Some(&bob));
+        event(&state.db, &people, None, "blocked", Some(&blocked));
+        event(&state.db, &people, None, "self", Some(&alice));
+        event(&state.db, &people, None, "agent", None);
+        event(&state.db, &archived, None, "archived", None);
+        event(&state.db, &left, None, "left", None);
+        event(
+            &state.db,
+            &former_chat,
+            Some(&former_project),
+            "former",
+            None,
+        );
+        event(
+            &state.db,
+            &foreign_chat,
+            Some(&foreign_project),
+            "foreign",
+            None,
+        );
+        let expected = json!([
+            {"chat_id":people,"project_id":null,"unread":2},
+            {"chat_id":shared_chat,"project_id":shared_project,"unread":1},
+            {"chat_id":own_chat,"project_id":own_project,"unread":1},
+        ]);
+        (state, alice, expected)
+    }
+
+    #[test]
+    fn unread_preserves_acl_read_archive_sender_filters_and_order() {
+        let (state, alice, expected) = fixture();
+        assert_eq!(
+            serde_json::to_value(state.db.unread_for_user(&alice).unwrap()).unwrap(),
+            expected
+        );
+        assert_eq!(state.db.unread_total(&alice).unwrap(), 4);
+        assert!(state.db.unread_for_user("absent-user").unwrap().is_empty());
+    }
+
+    #[test]
+    fn unread_preserves_project_value_of_latest_counted_event_in_legacy_mixed_chat() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 124);
+        let (bob, _) = person(&state, 125);
+        let chat = group(&state, &[&alice, &bob]);
+        let own = project_of(&state, &alice, "Own");
+        let foreign = project_of(&state, &bob, "Foreign");
+        // Historical/corrupt event metadata is permitted by the schema. The unchanged
+        // GROUP BY/MAX contract must keep the same full row when an index changes its plan.
+        event(&state.db, &chat, Some(&own), "one", Some(&bob));
+        event(&state.db, &chat, None, "two", None);
+        event(&state.db, &chat, Some(&foreign), "three", Some(&bob));
+        assert_eq!(
+            serde_json::to_value(state.db.unread_for_user(&alice).unwrap()).unwrap(),
+            json!([{"chat_id":chat,"project_id":foreign,"unread":3}])
+        );
+    }
+}

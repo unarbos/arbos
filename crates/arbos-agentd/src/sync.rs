@@ -3392,6 +3392,10 @@ mod tests {
     /// Jacob's 2026-10-25 "didn't answer" bug. So the flag has to survive the push, not only
     /// the renderers. This takes the bytes `next_push` hands the relay and reads them back the
     /// way a client does.
+    ///
+    /// Trim only hides when another visible reply already answered the ask (#2964): a sole
+    /// empty result is kept for the stock "didn't answer" line. The bubble below is that
+    /// sibling, so the trailing row still takes the hide path this test is about.
     #[test]
     fn the_hidden_flag_is_in_the_bytes_the_relay_receives() {
         let doc = ChatDoc::new(Some(7), true);
@@ -3404,10 +3408,19 @@ mod tests {
                 &arbos_core::doc::UserMessageOpts::default(),
             )
             .unwrap();
+        let bubble_part = host.doc.start_assistant_message("b1", "u1", "box");
+        host.doc
+            .append_text("b1", &bubble_part, "Sorted: 1, 2, 3, 5, 8.");
+        host.doc
+            .finish_message("b1", arbos_core::doc::MessageStatus::Done);
         host.doc.start_assistant_message("r1", "u1", "box");
         host.doc
             .finish_message("r1", arbos_core::doc::MessageStatus::Done);
-        crate::agent::trim_wordless_result_row(&host.doc, "r1");
+        assert_eq!(
+            crate::agent::trim_wordless_result_row(&host.doc, "r1"),
+            "hidden_empty",
+            "a wordless trailer after a visible bubble is the hide path"
+        );
 
         let (_batch, bytes) = host.next_push().expect("something to push");
         let mut far_side = ChatDoc::new(Some(9), true);
