@@ -2,8 +2,9 @@
 //!
 //! The apps see three things: a [`Snapshot`] of servers and channels whenever the room list
 //! changes, the timeline rows of a room they opened (and every new row after), and the result
-//! of their own sends. Everything else — tokens, retries, pagination tokens, the state events
-//! that say which room is a channel of which server, encryption keys — stays in here.
+//! of their own sends. Everything else — tokens, retries, the state events that say which
+//! room is a channel of which server, encryption keys, the events kept in the device's store
+//! so a room opens without a request — stays in here.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
@@ -13,10 +14,9 @@ use std::time::Duration;
 use futures::StreamExt;
 use matrix_sdk::authentication::matrix::MatrixSession;
 use matrix_sdk::authentication::SessionTokens;
-use matrix_sdk::deserialized_responses::EncryptionInfo;
+use matrix_sdk::deserialized_responses::{EncryptionInfo, TimelineEvent};
 use matrix_sdk::encryption::recovery::RecoveryState;
 use matrix_sdk::encryption::{BackupDownloadStrategy, EncryptionSettings};
-use matrix_sdk::room::MessagesOptions;
 use matrix_sdk::ruma::api::client::push::set_pushrule;
 use matrix_sdk::ruma::api::client::receipt::create_receipt::v3::ReceiptType;
 use matrix_sdk::ruma::api::client::sync::sync_events::v5 as sliding;
@@ -25,7 +25,7 @@ use matrix_sdk::ruma::events::room::encrypted::OriginalSyncRoomEncryptedEvent;
 use matrix_sdk::ruma::events::{AnySyncTimelineEvent, MessageLikeEventType, StateEventType};
 use matrix_sdk::ruma::push::NewPushRule;
 use matrix_sdk::ruma::serde::Raw;
-use matrix_sdk::ruma::{EventId, OwnedRoomId, OwnedUserId, RoomId, TransactionId, UInt, UserId};
+use matrix_sdk::ruma::{EventId, OwnedRoomId, OwnedUserId, RoomId, TransactionId, UserId};
 use matrix_sdk::{Client, Room, SessionMeta, SlidingSyncList, SlidingSyncMode};
 use matrix_sdk_crypto::vodozemac::Ed25519PublicKey;
 use matrix_sdk_crypto::{CollectStrategy, DecryptionSettings, TrustRequirement};
@@ -134,9 +134,8 @@ pub trait Listener: Send + Sync {
 #[derive(Default)]
 struct Timeline {
     rows: Vec<MessageRow>,
-    /// `/messages` token for the next page back; `None` before the first page or at the start.
-    prev_batch: Option<String>,
-    /// The first page was loaded (so the rows are complete from `prev_batch` to now).
+    /// The room was opened: the rows are every row from the oldest one here to now, with
+    /// none missing in between ([`MatrixClient::mend`] keeps it so).
     loaded: bool,
     at_start: bool,
     /// A people chat's reactions, by the reaction's own event id (what a removal names).
@@ -180,7 +179,10 @@ impl Timeline {
 /// this person's other devices; it is not federated and no other member can read it.
 const RECEIPT_KIND: ReceiptType = ReceiptType::ReadPrivate;
 
-const HISTORY_PAGE: u32 = 50;
+const HISTORY_PAGE: u16 = 50;
+/// How many pages back [`MatrixClient::load_older`] reads for one that has a row (a page can
+/// be all membership changes), and [`MatrixClient::mend`] for one that joins what it had.
+const PAGE_ROUNDS: usize = 8;
 const ROOM_RANGE_END: u32 = 1999;
 const POLL_TIMEOUT: Duration = Duration::from_secs(30);
 const BACKUP_STATE_WAIT: Duration = Duration::from_secs(30);
@@ -242,6 +244,12 @@ impl MatrixClient {
             .await
             .map_err(|e| Error::Session(e.to_string()))?;
         let (stop, stop_rx) = watch::channel(false);
+        // Every room's events are kept in the device's store (the same SQLite files, under the
+        // same key) as they arrive and as they are paged in: a room is read from there first.
+        client
+            .event_cache()
+            .subscribe()
+            .map_err(|e| Error::Homeserver(e.to_string()))?;
         let this = Arc::new(Self {
             client,
             me: user_id,
@@ -253,6 +261,7 @@ impl MatrixClient {
         });
         this.install_event_handler();
         tokio::spawn(Arc::clone(&this).key_loop(stop_rx.clone()));
+        tokio::spawn(Arc::clone(&this).mend_loop(stop_rx.clone()));
         tokio::spawn(Arc::clone(&this).sync_loop(stop_rx));
         Ok(this)
     }
@@ -954,19 +963,14 @@ impl MatrixClient {
         Ok(room)
     }
 
-    async fn page(
-        &self,
-        room: &Room,
-        from: Option<String>,
-    ) -> Result<(Vec<MessageRow>, Option<String>)> {
-        let mut opts = MessagesOptions::backward();
-        opts.from = from;
-        opts.limit = UInt::from(HISTORY_PAGE);
-        let page = room.messages(opts).await?;
+    /// The rows of events read from the device's store or paged in from the homeserver,
+    /// through the rules a live event goes through ([`Self::takes`], [`Self::row_of`]): a
+    /// stored event is shown decrypted only if this device decrypted it, under the same
+    /// trust rule, when it was stored.
+    async fn rows_from(&self, room: &Room, page: &[TimelineEvent]) -> Vec<MessageRow> {
         let encrypted = Self::is_encrypted(room).await;
         let chat = self.people_chat_id(room).await;
         let events: Vec<Value> = page
-            .chunk
             .iter()
             .filter_map(|e| {
                 let v = serde_json::from_str::<Value>(e.raw().json().get()).ok()?;
@@ -982,15 +986,132 @@ impl MatrixClient {
             })
             .collect();
         let names = self.names_for(room, &events).await;
-        let rows: Vec<MessageRow> = events
+        events
             .iter()
             .filter_map(|v| self.row_of(room.room_id(), chat.as_deref(), v, &names))
-            .collect();
-        Ok((rows, page.end))
+            .collect()
     }
 
-    /// The room's recent history (newest page), chronological. Later rows arrive through the
-    /// listener. Marks the room as open; call again freely (cached after the first load).
+    /// Whether any of `page` is a row the room's timeline already has.
+    fn joins(&self, room_id: &RoomId, page: &[TimelineEvent]) -> bool {
+        let tl = self.timelines.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(t) = tl.get(room_id) else {
+            return false;
+        };
+        page.iter().filter_map(|e| e.event_id()).any(|id| {
+            t.rows
+                .iter()
+                .any(|r| !r.pending && r.event_id == id.as_str())
+        })
+    }
+
+    /// Every update of the event store for a room this device has open: check its rows are
+    /// still whole ([`Self::mend`]).
+    async fn mend_loop(self: Arc<Self>, mut stop: watch::Receiver<bool>) {
+        use tokio::sync::broadcast::error::RecvError;
+        let mut updates = self
+            .client
+            .event_cache()
+            .subscribe_to_room_generic_updates();
+        loop {
+            let rooms: Vec<OwnedRoomId> = tokio::select! {
+                _ = stop.changed() => return,
+                next = updates.recv() => match next {
+                    Ok(update) => vec![update.room_id],
+                    // Missed some: every room this device has read.
+                    Err(RecvError::Lagged(_)) => {
+                        let tl = self.timelines.lock().unwrap_or_else(|p| p.into_inner());
+                        tl.keys().cloned().collect()
+                    }
+                    Err(RecvError::Closed) => return,
+                },
+            };
+            for id in rooms {
+                if let Some(room) = self.client.get_room(&id) {
+                    self.mend(&room).await;
+                }
+            }
+        }
+    }
+
+    /// The rows of the room's timeline that are older than everything in `window` (what the
+    /// event store holds in one piece up to now) and not part of it, by event id.
+    fn before(&self, room_id: &RoomId, window: &[TimelineEvent]) -> HashSet<String> {
+        let Some(oldest) = window.iter().filter_map(|e| e.timestamp()).min() else {
+            return HashSet::new();
+        };
+        let oldest = i64::from(oldest.0);
+        let held: HashSet<&str> = window
+            .iter()
+            .filter_map(|e| e.event_id().map(|id| id.as_str()))
+            .collect();
+        let tl = self.timelines.lock().unwrap_or_else(|p| p.into_inner());
+        let rows = tl
+            .get(room_id)
+            .map(|t| t.rows.as_slice())
+            .unwrap_or_default();
+        rows.iter()
+            .filter(|r| !r.pending && r.created_at <= oldest && !held.contains(r.event_id.as_str()))
+            .map(|r| r.event_id.clone())
+            .collect()
+    }
+
+    /// Keep an open room's rows whole. A sync hands over a room's newest event only, so when
+    /// more than one was sent since the last (the app was in the background, or several
+    /// people wrote at once) the others are missing between the rows this device had and the
+    /// one that just arrived. The event store knows: it then holds, in one piece up to now,
+    /// only what came after the break, and the timeline has rows from before it. Page back
+    /// until a page reaches one of those; if none does within [`PAGE_ROUNDS`] pages, they are
+    /// let go rather than shown with a hole after them, and [`Self::load_older`] reads on
+    /// from there.
+    async fn mend(&self, room: &Room) {
+        let id = room.room_id();
+        let open = {
+            let tl = self.timelines.lock().unwrap_or_else(|p| p.into_inner());
+            tl.get(id)
+                .is_some_and(|t| t.loaded && t.rows.iter().any(|r| !r.pending))
+        };
+        if !open {
+            return;
+        }
+        let Ok((cache, _)) = room.event_cache().await else {
+            return;
+        };
+        let Ok(mut whole) = cache.events().await else {
+            return;
+        };
+        if self.before(id, &whole).is_empty() {
+            return;
+        }
+        for _ in 0..PAGE_ROUNDS {
+            // Offline, or the homeserver refused: nothing is let go, the next update asks again.
+            let Ok(older) = cache.pagination().run_backwards_once(HISTORY_PAGE).await else {
+                return;
+            };
+            let joined = older.reached_start || self.joins(id, &older.events);
+            let rows = self.rows_from(room, &older.events).await;
+            self.push_rows(id, rows, true);
+            if joined {
+                return;
+            }
+            whole.extend(older.events);
+        }
+        let cut_off = self.before(id, &whole);
+        let mut tl = self.timelines.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(t) = tl.get_mut(id) else { return };
+        t.rows.retain(|r| !cut_off.contains(&r.event_id));
+        t.at_start = false;
+        let out = t.view();
+        drop(tl);
+        self.listener.on_timeline(id.to_string(), out);
+    }
+
+    /// The room's recent history, chronological. Later rows arrive through the listener.
+    /// Marks the room as open; call again freely (cached after the first load).
+    ///
+    /// What the device's store holds of the room is read first, with no request; the
+    /// homeserver is asked for a page only when that is less than one, and when it cannot be
+    /// reached what the store had is the answer.
     pub async fn open_room(&self, room_id: &str) -> Result<Vec<MessageRow>> {
         let room = self.room(room_id)?;
         let loaded = {
@@ -1002,13 +1123,26 @@ impl MatrixClient {
             self.unlock(&room).await;
             return Ok(self.push_rows(room.room_id(), Vec::new(), false));
         }
-        let (rows, end) = self.page(&room, None).await?;
+        let stored = |e: matrix_sdk::event_cache::EventCacheError| Error::Homeserver(e.to_string());
+        let (cache, _) = room.event_cache().await.map_err(stored)?;
+        let mut events = cache.events().await.map_err(stored)?;
+        let mut at_start = false;
+        if events.len() < usize::from(HISTORY_PAGE) {
+            match cache.pagination().run_backwards_once(HISTORY_PAGE).await {
+                Ok(older) => {
+                    at_start = older.reached_start;
+                    events.extend(older.events);
+                }
+                Err(_) if !events.is_empty() => {}
+                Err(e) => return Err(stored(e)),
+            }
+        }
+        let rows = self.rows_from(&room, &events).await;
         {
             let mut tl = self.timelines.lock().unwrap_or_else(|p| p.into_inner());
             let t = tl.entry(room.room_id().to_owned()).or_default();
             t.loaded = true;
-            t.at_start = end.is_none();
-            t.prev_batch = end;
+            t.at_start = at_start;
         }
         Ok(self.push_rows(room.room_id(), rows, false))
     }
@@ -1016,20 +1150,31 @@ impl MatrixClient {
     /// One more page of older history; `Ok(None)` at the beginning of the room.
     pub async fn load_older(&self, room_id: &str) -> Result<Option<Vec<MessageRow>>> {
         let room = self.room(room_id)?;
-        let from = {
+        {
             let tl = self.timelines.lock().unwrap_or_else(|p| p.into_inner());
-            match tl.get(room.room_id()) {
-                Some(t) if t.at_start => return Ok(None),
-                Some(t) => t.prev_batch.clone(),
-                None => None,
+            if tl.get(room.room_id()).is_some_and(|t| t.at_start) {
+                return Ok(None);
             }
-        };
-        let (rows, end) = self.page(&room, from).await?;
+        }
+        let stored = |e: matrix_sdk::event_cache::EventCacheError| Error::Homeserver(e.to_string());
+        let (cache, _) = room.event_cache().await.map_err(stored)?;
+        let (mut rows, mut at_start) = (Vec::new(), false);
+        for _ in 0..PAGE_ROUNDS {
+            let older = cache
+                .pagination()
+                .run_backwards_once(HISTORY_PAGE)
+                .await
+                .map_err(stored)?;
+            at_start = older.reached_start;
+            rows = self.rows_from(&room, &older.events).await;
+            if at_start || !rows.is_empty() {
+                break;
+            }
+        }
         {
             let mut tl = self.timelines.lock().unwrap_or_else(|p| p.into_inner());
             let t = tl.entry(room.room_id().to_owned()).or_default();
-            t.at_start = end.is_none() || rows.is_empty();
-            t.prev_batch = end;
+            t.at_start = at_start;
             t.loaded = true;
         }
         Ok(Some(self.push_rows(room.room_id(), rows, false)))

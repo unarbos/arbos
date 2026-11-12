@@ -1988,8 +1988,8 @@ fn apply_native_unread(shared: &Arc<Shared>) {
 /// Read every native chat's room once per homeserver client: the newest page, then live
 /// rows through the listener, so an unopened chat still previews and notifies the way a
 /// synced Loro doc does.
-// One `/messages` request per native chat per launch, one after the other; a persistent
-// event cache (spec §3.2) is what makes this free.
+// Read from the device's event store; the homeserver is asked only for a chat the store
+// holds less than a page of.
 async fn open_native_rooms(shared: Arc<Shared>) {
     let Some(client) = matrix_client(&shared) else {
         return;

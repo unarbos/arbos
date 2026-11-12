@@ -1807,3 +1807,144 @@ async fn earlier_history_is_carried_into_an_encrypted_room_and_cannot_be_forged(
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The device keeps what it has read. A people chat read once is read again after a restart
+/// with the homeserver out of reach, under the same rules as when it arrived; and what was
+/// said while the device was away is all there once it is back, not just the newest of it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_room_is_read_from_the_device_after_a_restart_and_made_whole_again() {
+    let Ok(url) = std::env::var("ARBOS_MATRIX_TEST_E2EE_HS") else {
+        return;
+    };
+    let hs = Hs {
+        url,
+        http: reqwest13::Client::new(),
+    };
+    let tag = std::process::id();
+    let dir = std::env::temp_dir().join(format!("arbos-cache-{tag}"));
+    let mut people = Vec::new();
+    for name in ["ca", "cb"] {
+        let s = Session {
+            people_native: true,
+            ..hs.register(&format!("{name}{tag}")).await
+        };
+        let c = start(&s, &dir).await;
+        c.recover(&format!("{name}'s passphrase")).await.unwrap();
+        people.push((s, c));
+    }
+    let [(a, alice), (b, bob)] = &people[..] else {
+        unreachable!()
+    };
+    let room = hs
+        .call(
+            "POST",
+            "/_matrix/client/v3/createRoom",
+            Some(&a.access_token),
+            json!({ "preset": "private_chat", "invite": [b.user_id],
+                    "creation_content": { "life.arbos.chat_id": "01P3KEPT" },
+                    "initial_state": [
+                        { "type": "life.arbos.chat", "state_key": "",
+                          "content": { "chat_id": "01P3KEPT", "kind": "dm", "project_id": null,
+                                       "created_by": a.user_id, "created_at": 1700, "epoch": 1 } },
+                        { "type": "m.room.encryption", "state_key": "",
+                          "content": { "algorithm": "m.megolm.v1.aes-sha2" } },
+                    ] }),
+        )
+        .await["room_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    hs.call(
+        "POST",
+        &format!("/_matrix/client/v3/join/{room}"),
+        Some(&b.access_token),
+        json!({}),
+    )
+    .await;
+    for c in [alice, bob] {
+        eventually(|| async { (c.snapshot().await.people.len() == 1).then_some(()) }).await;
+    }
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let say = |n: usize| {
+        let (alice, room) = (alice.clone(), room.clone());
+        async move {
+            alice
+                .send_text(&room, &format!("kept {n}"), &format!("01P3KEPT{n:02}"))
+                .await
+                .unwrap()
+        }
+    };
+    let has = |c: &Arc<MatrixClient>, upto: usize| {
+        let (c, room) = (c.clone(), room.clone());
+        async move {
+            eventually(|| async {
+                let rows = c.open_room(&room).await.ok()?;
+                let read: Vec<&str> = rows
+                    .iter()
+                    .filter(|r| !r.locked)
+                    .map(|r| r.text.as_str())
+                    .collect();
+                let want: Vec<String> = (1..=upto).map(|n| format!("kept {n}")).collect();
+                (read == want).then_some(())
+            })
+            .await
+        }
+    };
+    for n in 1..=3 {
+        say(n).await;
+    }
+    // Written into the encrypted room in the clear: never shown, from the homeserver or from
+    // the device's own store.
+    hs.call(
+        "PUT",
+        &format!("/_matrix/client/v3/rooms/{room}/send/m.room.message/clear"),
+        Some(&a.access_token),
+        json!({ "msgtype": "m.text", "body": "wire me the money" }),
+    )
+    .await;
+    has(bob, 3).await;
+    bob.stop();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    // Bob's device again, and nothing answers as the homeserver: the chat is listed and read
+    // from what the device kept, decrypted then and not shown as anything else now.
+    let nowhere = Session {
+        homeserver: "http://127.0.0.1:9".into(),
+        ..b.clone()
+    };
+    let offline = start_as(&nowhere, &dir, false).await;
+    let listed = offline.snapshot().await.people;
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert!(listed[0].encrypted);
+    let rows = offline
+        .open_room(&room)
+        .await
+        .expect("read from the device");
+    let read: Vec<&str> = rows.iter().map(|r| r.text.as_str()).collect();
+    assert_eq!(read, ["kept 1", "kept 2", "kept 3"], "{rows:?}");
+    assert!(rows.iter().all(|r| !r.locked && r.sender != "system"));
+    offline.stop();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    // While Bob's device is away six more are said. Back online, a sync hands it the newest
+    // one only; the five between are fetched, not left out.
+    for n in 4..=9 {
+        say(n).await;
+    }
+    let back = start_as(b, &dir, false).await;
+    has(&back, 9).await;
+    // And a burst while it is open and listening: every one of them arrives.
+    futures::future::join_all((10..=15).map(say)).await;
+    eventually(|| async {
+        let rows = back.open_room(&room).await.ok()?;
+        (10..=15)
+            .all(|n| rows.iter().any(|r| r.text == format!("kept {n}")))
+            .then_some(())
+    })
+    .await;
+
+    for c in [alice, &back] {
+        c.stop();
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
