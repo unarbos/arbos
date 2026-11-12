@@ -737,6 +737,8 @@ extension AppModel {
             }
             let crypto = ArbosFFI.MatrixCrypto(storeDir: WalletVault.storeDir(device: creds.deviceId),
                                                storeKey: storeKey)
+            // For the notification extension, which reads an encrypted message's words.
+            PreviewVault.save(.init(userId: creds.userId, deviceId: creds.deviceId, storeKey: storeKey))
             let client = try await matrixStart(session: session, crypto: crypto, listener: listener)
             // Signed out (or started twice) while the handshake ran.
             guard credentials != nil, matrixClient == nil else {
@@ -767,6 +769,7 @@ extension AppModel {
     func stopMatrix() {
         matrixClient?.stop()
         matrixClient = nil
+        PreviewVault.save(nil)
         matrixListener = nil
         matrixSnapshot = ArbosFFI.MatrixSnapshot(spaces: [], channels: [])
         matrixConnected = true
