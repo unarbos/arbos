@@ -9,8 +9,8 @@
 //! What is modelled, each a knob (`ARBOS_LOAD_*`, [`Knobs`]): how long a daemon takes to wake,
 //! sleep and fetch a box, and what the users do. A box is a socket: once its daemon has started
 //! it, it dials its user's room with the box token the relay gave it, as agentd does, and the
-//! relay calls it awake for that. A wake is counted from the client's PUSH to that socket being
-//! up; how long a real agentd takes to boot and dial is inside the daemon's wake time or not in
+//! relay calls it awake for that. A wake is counted from what woke the box (the chat coming on
+//! screen where its node has room to spare, else the client's PUSH) to that socket being up; how long a real agentd takes to boot and dial is inside the daemon's wake time or not in
 //! the model at all. The idle clock runs fast (`ARBOS_LOAD_IDLE_SPEEDUP`), so 15 idle minutes
 //! fit a 10-minute run.
 //!
@@ -167,8 +167,9 @@ struct FakeBox {
 struct Woke {
     user: String,
     kind: Kind,
-    /// When the daemon was asked, and when the box's socket was up.
+    /// When the daemon was asked, when it had the box up, and when the box's socket was up.
     asked: Instant,
+    done: Instant,
     at: Instant,
 }
 
@@ -331,6 +332,7 @@ async fn answer(State(node): State<Arc<FakeNode>>, req: Request) -> Response {
                     user: user.to_owned(),
                     kind,
                     asked,
+                    done: Instant::now(),
                     at: Instant::now(),
                 };
                 let room = node.rooms.lock().unwrap().get(user).cloned();
@@ -533,8 +535,12 @@ struct User {
 #[derive(Default)]
 struct Stats {
     wakes: Mutex<HashMap<Kind, Vec<f64>>>,
-    /// From the PUSH that wakes a box to its daemon being asked: the relay's share of a wake.
-    queued: Mutex<Vec<f64>>,
+    /// A wake in its three parts: waiting for a slot (from what woke it to its daemon being
+    /// asked), the daemon's wake, and the box's dial.
+    parts: Mutex<[Vec<f64>; 3]>,
+    /// How long the sender of the message waited for the box: nothing, for one that the chat
+    /// coming on screen had already woken.
+    waited: Mutex<Vec<f64>>,
     wakes_lost: AtomicU64,
     acks: Mutex<Vec<f64>>,
     acks_lost: AtomicU64,
@@ -546,8 +552,9 @@ struct Run {
     state: AppState,
     users: Vec<Arc<User>>,
     stats: Stats,
-    /// When the PUSH that is waking a box was sent.
-    waking: Mutex<HashMap<String, Instant>>,
+    /// When what may wake a box happened (the chat on screen, or the PUSH if that did not), and
+    /// when the PUSH was sent.
+    waking: Mutex<HashMap<String, (Instant, Option<Instant>)>>,
     /// Users whose box is in use, or about to be.
     busy: Mutex<HashSet<String>>,
     rng: Mutex<Rng>,
@@ -620,10 +627,16 @@ impl Run {
     /// A user comes back: the chat on screen, a message a while later, and once the box is up,
     /// a session on it.
     async fn arrival(self: Arc<Self>, u: Arc<User>, session: Duration) {
+        let looked = (Instant::now(), None);
+        self.waking.lock().unwrap().insert(u.id.clone(), looked);
         let _ = u.primary.send(Cmd::Focus(true));
         tokio::time::sleep(Duration::from_millis(self.k.think_ms)).await;
         let sent = Instant::now();
-        self.waking.lock().unwrap().insert(u.id.clone(), sent);
+        // Still asleep: the look did not wake it, and the PUSH is what does.
+        let asleep = self.state.box_state(&u.id).await.0 == BoxState::Asleep;
+        if let Some(w) = self.waking.lock().unwrap().get_mut(&u.id) {
+            *w = (if asleep { sent } else { w.0 }, Some(sent));
+        }
         self.push_counted(&u).await;
         // Unprefetched from cold is the slowest wake there is; twice that is a lost one.
         let patience = Duration::from_millis(60_000 + 4 * self.k.fetch_ms);
@@ -851,10 +864,15 @@ async fn the_thousand_user_load_gate() {
     tokio::spawn(async move {
         while let Some(w) = woken.recv().await {
             let sent = timing.waking.lock().unwrap().remove(&w.user);
-            if let Some(sent) = sent {
-                let queued = w.asked.saturating_duration_since(sent).as_secs_f64();
-                timing.stats.queued.lock().unwrap().push(queued);
-                let took = w.at.saturating_duration_since(sent).as_secs_f64();
+            if let Some((sent, pushed)) = sent {
+                let secs = |a: Instant, b: Instant| b.saturating_duration_since(a).as_secs_f64();
+                let mut parts = timing.stats.parts.lock().unwrap();
+                parts[0].push(secs(sent, w.asked));
+                parts[1].push(secs(w.asked, w.done));
+                parts[2].push(secs(w.done, w.at));
+                let waited = pushed.map_or(0.0, |p| secs(p, w.at));
+                timing.stats.waited.lock().unwrap().push(waited);
+                let took = secs(sent, w.at);
                 let mut wakes = timing.stats.wakes.lock().unwrap();
                 wakes.entry(w.kind).or_default().push(took);
             }
@@ -1045,7 +1063,9 @@ async fn the_thousand_user_load_gate() {
         .map(|f| f.archives.load(Ordering::Relaxed))
         .sum();
     let mut wakes = std::mem::take(&mut *run.stats.wakes.lock().unwrap());
-    let mut queued = std::mem::take(&mut *run.stats.queued.lock().unwrap());
+    let mut parts = std::mem::take(&mut *run.stats.parts.lock().unwrap());
+    let mut waited = std::mem::take(&mut *run.stats.waited.lock().unwrap());
+    let ahead = waited.iter().filter(|w| **w == 0.0).count();
     let most_up = fakes.iter().map(|f| f.most_up.load(Ordering::Relaxed));
     let most_up = most_up.max().unwrap_or(0);
     let mut acks = std::mem::take(&mut *run.stats.acks.lock().unwrap());
@@ -1071,13 +1091,27 @@ async fn the_thousand_user_load_gate() {
             pct(s, 100.0)
         );
     }
+    for (part, name) in parts
+        .iter_mut()
+        .zip(["wait for a slot", "daemon wake", "box dial"])
+    {
+        println!(
+            "      {name}: p50 {:.3} s, p95 {:.3} s, p99 {:.3} s, max {:.3} s",
+            pct(part, 50.0),
+            pct(part, 95.0),
+            pct(part, 99.0),
+            pct(part, 100.0)
+        );
+    }
     println!(
-        "    PUSH to the daemon asked: p50 {:.3} s, p99 {:.3} s, max {:.3} s; most boxes up on a node {most_up} of {}",
-        pct(&mut queued, 50.0),
-        pct(&mut queued, 99.0),
-        pct(&mut queued, 100.0),
-        k.node_cap
+        "    the sender's wait for the box: p50 {:.3} s, p95 {:.3} s, p99 {:.3} s, max {:.3} s; {ahead} of {} were up before the message",
+        pct(&mut waited, 50.0),
+        pct(&mut waited, 95.0),
+        pct(&mut waited, 99.0),
+        pct(&mut waited, 100.0),
+        waited.len()
     );
+    println!("    most boxes up on a node {most_up} of {}", k.node_cap);
     println!("    sleeps {slept}: {idle_sleeps} idle, {} at the cap; archived {} ({archived_before} before the clock started)",
         slept.saturating_sub(idle_sleeps), archived);
     println!("    PUSH to ACK: n {}, p50 {:.2} ms, p95 {:.2} ms, p99 {:.2} ms, max {:.1} ms; unacked {acks_lost}",
