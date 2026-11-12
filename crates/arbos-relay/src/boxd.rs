@@ -3102,4 +3102,24 @@ mod tests {
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// A wake job is run when it is queued: the runner does not sit out the rest of its
+    /// 750 ms look first.
+    #[tokio::test]
+    async fn a_queued_wake_reaches_the_daemon_at_once() {
+        let (state, fake, user) = relay().await;
+        boxes::create_box(&state, &user, Provider::Boxd, None)
+            .await
+            .unwrap();
+        state.set_box_state(&user, BoxState::Awake, None).await;
+        boxes::stop_box(&state, &user, false).await.unwrap();
+        boxes::spawn_wake_runner(state.clone()).await;
+        // The runner has found nothing and is 100 ms into its wait.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let before = fake.paths().len();
+        boxes::ensure_awake(&state, &user, "send").await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let wake = format!("/v1/boxes/{user}/wake");
+        assert!(fake.paths()[before..].contains(&wake), "{:?}", fake.paths());
+    }
 }
