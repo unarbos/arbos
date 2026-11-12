@@ -343,6 +343,9 @@ impl Config {
             Some(format!("agent:{}", p.to_ascii_uppercase()))
         } else if local.starts_with('_') {
             None
+        } else if let Some(u) = local.strip_prefix("test_") {
+            // A test user is `test_<ULID>` (`POST /admin/users/test`), upper-case like a project id.
+            Some(format!("user:test_{}", u.to_ascii_uppercase()))
         } else {
             Some(format!("user:{local}"))
         }
@@ -723,6 +726,11 @@ mod tests {
         assert_eq!(
             c.member_of_mxid("@gh_12345:arbos.life").as_deref(),
             Some("user:gh_12345")
+        );
+        assert_eq!(
+            c.member_of_mxid(&c.user_mxid("test_01JAXYZ9ABCDEFGHJKMNPQRSTV"))
+                .as_deref(),
+            Some("user:test_01JAXYZ9ABCDEFGHJKMNPQRSTV")
         );
         assert_eq!(c.member_of_mxid("@_arbos:arbos.life"), None);
         assert_eq!(c.member_of_mxid("@gh_1:elsewhere.org"), None);
