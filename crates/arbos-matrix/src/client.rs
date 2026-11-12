@@ -17,11 +17,13 @@ use matrix_sdk::deserialized_responses::EncryptionInfo;
 use matrix_sdk::encryption::recovery::RecoveryState;
 use matrix_sdk::encryption::{BackupDownloadStrategy, EncryptionSettings};
 use matrix_sdk::room::MessagesOptions;
+use matrix_sdk::ruma::api::client::push::set_pushrule;
 use matrix_sdk::ruma::api::client::receipt::create_receipt::v3::ReceiptType;
 use matrix_sdk::ruma::api::client::sync::sync_events::v5 as sliding;
 use matrix_sdk::ruma::events::receipt::ReceiptThread;
 use matrix_sdk::ruma::events::room::encrypted::OriginalSyncRoomEncryptedEvent;
 use matrix_sdk::ruma::events::{AnySyncTimelineEvent, MessageLikeEventType, StateEventType};
+use matrix_sdk::ruma::push::NewPushRule;
 use matrix_sdk::ruma::serde::Raw;
 use matrix_sdk::ruma::{EventId, OwnedRoomId, OwnedUserId, RoomId, TransactionId, UInt, UserId};
 use matrix_sdk::{Client, Room, SessionMeta, SlidingSyncList, SlidingSyncMode};
@@ -101,8 +103,8 @@ struct Timeline {
     at_start: bool,
     /// A people chat's reactions, by the reaction's own event id (what a removal names).
     reactions: HashMap<String, rows::Reaction>,
-    /// The encrypted event behind each locked row, by event id: read again when a key
-    /// arrives ([`MatrixClient::unlock`]).
+    /// The encrypted events this device could not read (a locked row, or a reaction), by
+    /// event id: read again when a key arrives ([`MatrixClient::unlock`]).
     sealed: HashMap<String, String>,
 }
 
@@ -322,37 +324,52 @@ impl MatrixClient {
     async fn ingest(&self, room: &Room, mut v: Value, decrypted: bool) {
         let encrypted = Self::is_encrypted(room).await;
         let people = self.is_people(room).await;
-        if people && self.fold(room.room_id(), &v, !encrypted, true) {
-            return;
-        }
-        if v["event_id"].is_null() || !rows::shows(&v, encrypted, decrypted) {
-            return;
-        }
-        if people && !rows::sender_is_own(&v) {
+        if !self.takes(room.room_id(), &v, (encrypted, people), decrypted, true) {
             return;
         }
         v["room_id"] = json!(room.room_id().as_str());
         let names = self.names_for(room, std::slice::from_ref(&v)).await;
         if let Some(row) = message_row(&v, &|m| names.get(m).cloned()) {
-            self.seal(room.room_id(), std::slice::from_ref(&v));
             self.push_rows(room.room_id(), vec![row], true);
         }
     }
 
-    /// Keep the encrypted events among `events` for [`Self::unlock`].
-    fn seal(&self, room_id: &RoomId, events: &[Value]) {
-        let sealed = events
-            .iter()
-            .filter(|v| v["type"] == "m.room.encrypted")
-            .filter_map(|v| Some((v["event_id"].as_str()?.to_owned(), v.to_string())));
+    /// Whether `ev` becomes a row of the room, which is `(encrypted, a people chat)`. An
+    /// encrypted event this device cannot read is kept for [`Self::unlock`], and a people
+    /// chat's reaction or removal is folded into the rows here ([`Self::fold`]).
+    fn takes(
+        &self,
+        room_id: &RoomId,
+        ev: &Value,
+        (encrypted, people): (bool, bool),
+        decrypted: bool,
+        notify: bool,
+    ) -> bool {
+        if ev["event_id"].is_null() {
+            return false;
+        }
+        if ev["type"] == "m.room.encrypted" && !rows::is_redacted(ev) {
+            self.seal(room_id, ev);
+        }
+        if people && self.fold(room_id, ev, !encrypted || decrypted, notify) {
+            return false;
+        }
+        rows::shows(ev, encrypted, decrypted) && (!people || rows::sender_is_own(ev))
+    }
+
+    /// Keep an encrypted event for [`Self::unlock`].
+    fn seal(&self, room_id: &RoomId, ev: &Value) {
+        let Some(id) = ev["event_id"].as_str() else {
+            return;
+        };
         let mut tl = self.timelines.lock().unwrap_or_else(|p| p.into_inner());
         tl.entry(room_id.to_owned())
             .or_default()
             .sealed
-            .extend(sealed);
+            .insert(id.to_owned(), ev.to_string());
     }
 
-    /// Read the room's locked rows again. A key can arrive after its message (sent late, or
+    /// Read the room's encrypted events this device could not, again. A key can arrive after its message (sent late, or
     /// downloaded from the backup once the passphrase opened it); the row then becomes the
     /// message, through the same rules as an event that arrived readable.
     async fn unlock(&self, room: &Room) {
@@ -416,6 +433,7 @@ impl MatrixClient {
 
     async fn sync_loop(self: Arc<Self>, mut stop: watch::Receiver<bool>) {
         let me_key = self.me.to_string();
+        let mut reactions_quiet = false;
         loop {
             if *stop.borrow() {
                 return;
@@ -489,6 +507,9 @@ impl MatrixClient {
                         Some(Ok(summary)) => {
                             backoff = Duration::from_secs(1);
                             self.listener.on_connection(true, None);
+                            if self.people_native && !reactions_quiet {
+                                reactions_quiet = self.quiet_reactions().await.is_ok();
+                            }
                             if !summary.rooms.is_empty() || !summary.lists.is_empty() {
                                 let snap = self.snapshot().await;
                                 self.listener.on_rooms(snap);
@@ -508,6 +529,18 @@ impl MatrixClient {
                 }
             }
         }
+    }
+
+    /// Tell the homeserver a reaction is not an unread message ([`rows::reaction_push_rule`]):
+    /// it cannot tell by itself once reactions are encrypted. The same rule every time, so
+    /// asked once per run, after the first sync that got through.
+    async fn quiet_reactions(&self) -> Result<()> {
+        let rule = serde_json::from_value(rows::reaction_push_rule())
+            .map_err(|e| Error::Homeserver(e.to_string()))?;
+        self.client
+            .send(set_pushrule::v3::Request::new(NewPushRule::Override(rule)))
+            .await?;
+        Ok(())
     }
 
     // ---- rooms --------------------------------------------------------------------------------
@@ -721,30 +754,35 @@ impl MatrixClient {
     }
 
     /// A people chat's reaction or removal, folded into the room's rows; `false` when `ev`
-    /// is neither. `cleartext_counts` is false in an encrypted room, where a reaction is
-    /// dropped like any message that did not arrive encrypted ([`rows::shows`];
-    /// [`Self::react`] sends none there). A removal is never encrypted and the homeserver,
-    /// which can withhold any event, is taken at its word for it.
-    fn fold(&self, room_id: &RoomId, ev: &Value, cleartext_counts: bool, notify: bool) -> bool {
+    /// is neither. `vouched` is false for an event that did not arrive encrypted in an
+    /// encrypted room, where a reaction is dropped like any such message ([`rows::shows`]).
+    /// A removal is never encrypted and the homeserver, which can withhold any event, is
+    /// taken at its word for it.
+    fn fold(&self, room_id: &RoomId, ev: &Value, vouched: bool, notify: bool) -> bool {
         let removes = rows::redacts(ev);
         // An encrypted reaction this device has no key for is not a locked message.
-        let reacts = ev["type"] == "m.reaction"
-            || ev["content"]["m.relates_to"]["rel_type"] == "m.annotation";
+        let reacts = ev["type"] == rows::REACTION || rows::sealed_reaction(ev);
         if removes.is_none() && !reacts {
             return false;
         }
         let mut tl = self.timelines.lock().unwrap_or_else(|p| p.into_inner());
         let t = tl.entry(room_id.to_owned()).or_default();
-        let changed = match (removes, rows::reaction(ev).filter(|_| cleartext_counts)) {
+        let before = t.rows.len();
+        let changed = match (removes, rows::reaction(ev).filter(|_| vouched)) {
             (Some(gone), _) => {
-                let before = t.rows.len();
                 t.rows.retain(|r| r.event_id != gone);
                 t.sealed.remove(&gone);
-                t.reactions.remove(&gone).is_some() || t.rows.len() != before
+                t.reactions.remove(&gone).is_some()
             }
-            (None, Some((id, r))) => t.reactions.insert(id, r.clone()) != Some(r),
+            (None, Some((id, r))) => {
+                // Read at last: no longer kept, and no locked row stands in for it (one did
+                // if its envelope did not say what it was).
+                t.rows.retain(|x| x.event_id != id);
+                t.sealed.remove(&id);
+                t.reactions.insert(id, r.clone()) != Some(r)
+            }
             (None, None) => false,
-        };
+        } || t.rows.len() != before;
         let (out, loaded) = (t.view(), t.loaded);
         drop(tl);
         if changed && notify && loaded {
@@ -843,12 +881,9 @@ impl MatrixClient {
             .iter()
             .filter_map(|e| {
                 let v = serde_json::from_str::<Value>(e.raw().json().get()).ok()?;
-                if people && self.fold(room.room_id(), &v, !encrypted, false) {
-                    return None;
-                }
-                (rows::shows(&v, encrypted, e.encryption_info().is_some())
-                    && (!people || rows::sender_is_own(&v)))
-                .then_some(v)
+                let decrypted = e.encryption_info().is_some();
+                self.takes(room.room_id(), &v, (encrypted, people), decrypted, false)
+                    .then_some(v)
             })
             .collect();
         let names = self.names_for(room, &events).await;
@@ -856,7 +891,6 @@ impl MatrixClient {
             .iter()
             .filter_map(|v| message_row(v, &|m| names.get(m).cloned()))
             .collect();
-        self.seal(room.room_id(), &events);
         Ok((rows, page.end))
     }
 
@@ -938,7 +972,7 @@ impl MatrixClient {
             if !people || !self.has_row(room.room_id(), target) {
                 return Err(Error::Homeserver("no such message to reply to".into()));
             }
-            content["m.relates_to"] = json!({ "m.in_reply_to": { "event_id": target } });
+            content[rows::REPLY_TO] = json!(target);
         }
         let pending = people && {
             let known = {
@@ -968,38 +1002,36 @@ impl MatrixClient {
 
     /// Put (`on`) or take back this person's reaction `key` on a row of a people chat. Asking
     /// for what already holds does nothing. The row changes when the homeserver's event
-    /// arrives, not before.
-    // Owner decision: no reactions in an end-to-end encrypted chat. The pinned SDK sends
-    // `m.reaction` unencrypted even there (who reacted, with what, to which message, readable
-    // by the homeserver), so this refuses rather than send it. Upgrade path: a reaction event
-    // type the SDK encrypts, or an SDK that encrypts `m.reaction`.
+    /// arrives, not before. In an encrypted chat the reaction is encrypted like a message:
+    /// the homeserver learns that this account reacted, not to which row nor with what
+    /// ([`rows::reaction_content`]).
     pub async fn react(&self, room_id: &str, event_id: &str, key: &str, on: bool) -> Result<()> {
         let room = self.people_room(room_id).await?;
         if !rows::is_reaction_key(key) || !self.has_row(room.room_id(), event_id) {
             return Err(Error::Homeserver("no such message or reaction".into()));
         }
-        if Self::is_encrypted(&room).await {
-            return Err(Error::Homeserver(
-                "reactions are not available in encrypted chats yet".into(),
-            ));
-        }
         let me = self.me_member();
-        let mine = {
+        // Every one of them: two devices of this person can each have put it on.
+        let mine: Vec<String> = {
             let tl = self.timelines.lock().unwrap_or_else(|p| p.into_inner());
-            tl.get(room.room_id()).and_then(|t| {
-                t.reactions
-                    .iter()
-                    .find(|(_, r)| r.target == event_id && r.key == key && r.sender == me)
-                    .map(|(id, _)| id.clone())
-            })
+            tl.get(room.room_id())
+                .map(|t| {
+                    t.reactions
+                        .iter()
+                        .filter(|(_, r)| r.target == event_id && r.key == key && r.sender == me)
+                        .map(|(id, _)| id.clone())
+                        .collect()
+                })
+                .unwrap_or_default()
         };
-        match (on, mine) {
-            (true, None) => {
-                let content = json!({ "m.relates_to": { "rel_type": "m.annotation", "event_id": event_id, "key": key } });
-                room.send_raw("m.reaction", content).await?;
+        if on && mine.is_empty() {
+            room.send_raw(rows::REACTION, rows::reaction_content(event_id, key))
+                .await?;
+        }
+        if !on {
+            for reaction in mine {
+                self.redact(room_id, &reaction).await?;
             }
-            (false, Some(reaction)) => self.redact(room_id, &reaction).await?,
-            _ => {}
         }
         Ok(())
     }

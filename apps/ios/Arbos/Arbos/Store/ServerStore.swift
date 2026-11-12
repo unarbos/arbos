@@ -1064,11 +1064,6 @@ extension AppModel {
     /// arrives.
     func reactNativePeople(chatId: Id, messageId: Id, emoji: String) {
         guard let client = matrixClient, let room = nativeRoom(chatId), let me = myUserId else { return }
-        // The client refuses these too: a reaction would reach the homeserver unencrypted.
-        if nativePeopleRow(chatId)?.encrypted != false {
-            failRefused("update the reaction", "Reactions aren't available in encrypted chats yet.")
-            return
-        }
         // Sent without its skin tone, the way the transcript groups them (`DocJSON.reactions`).
         // Ceiling: one another app put on with a skin tone is not taken back from here.
         let key = MessageReaction.normalizeEmoji(emoji)

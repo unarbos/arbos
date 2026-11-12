@@ -197,7 +197,7 @@ pub fn sender_is_own(ev: &Value) -> bool {
 }
 
 /// A removed event as the homeserver hands it out afterwards: its content stripped.
-fn is_redacted(ev: &Value) -> bool {
+pub fn is_redacted(ev: &Value) -> bool {
     ev["unsigned"]["redacted_because"].is_object()
 }
 
@@ -218,15 +218,42 @@ pub struct Reaction {
     pub sender: String,
 }
 
-/// `(the reaction's own event id, the reaction)` when `ev` is a well-formed `m.reaction`.
+/// A people chat's reaction: its event type, and the one thing its `m.relates_to` says. Not
+/// `m.reaction`, which the SDK sends unencrypted into an encrypted room, key and target
+/// readable by the homeserver.
+pub const REACTION: &str = "life.arbos.reaction";
+
+/// The content of a reaction `key` on the event `target`. Both are in the part an encrypted
+/// room encrypts. `m.relates_to` is the one field that stays outside the ciphertext, so it
+/// carries no more than what kind of event this is: enough for the homeserver not to count
+/// it as an unread message ([`reaction_push_rule`]), and neither the row nor the emoji.
+pub fn reaction_content(target: &str, key: &str) -> Value {
+    json!({ "event_id": target, "key": key, "m.relates_to": { "rel_type": REACTION } })
+}
+
+/// The push rule (`PUT …/pushrules/global/override/life.arbos.reaction`) under which the
+/// homeserver neither counts nor announces a [`REACTION`].
+pub fn reaction_push_rule() -> Value {
+    json!({ "rule_id": REACTION, "actions": [], "conditions": [{ "kind": "event_property_is",
+            "key": "content.m\\.relates_to.rel_type", "value": REACTION }] })
+}
+
+/// Whether an encrypted event's envelope says it is a reaction, so it is no locked message
+/// while this device has no key for it. The homeserver can write that on any envelope; what
+/// the event is once decrypted does not depend on it.
+pub fn sealed_reaction(ev: &Value) -> bool {
+    ev["type"] == "m.room.encrypted" && ev["content"]["m.relates_to"]["rel_type"] == REACTION
+}
+
+/// `(the reaction's own event id, the reaction)` when `ev` is a well-formed [`REACTION`].
 pub fn reaction(ev: &Value) -> Option<(String, Reaction)> {
-    let rel = &ev["content"]["m.relates_to"];
-    let key = rel["key"].as_str().filter(|k| is_reaction_key(k))?;
-    (ev["type"] == "m.reaction" && rel["rel_type"] == "m.annotation").then_some(())?;
+    let c = &ev["content"];
+    let key = c["key"].as_str().filter(|k| is_reaction_key(k))?;
+    (ev["type"] == REACTION).then_some(())?;
     Some((
         ev["event_id"].as_str()?.to_owned(),
         Reaction {
-            target: rel["event_id"].as_str()?.to_owned(),
+            target: c["event_id"].as_str()?.to_owned(),
             key: key.to_owned(),
             sender: member_of_mxid(ev["sender"].as_str()?),
         },
@@ -243,7 +270,12 @@ pub fn redacts(ev: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// The event id a row answers (`replyToEvent`, from the event's `m.in_reply_to`).
+/// The content key naming the event a people chat's message answers. Not `m.in_reply_to`:
+/// `m.relates_to` stays outside the ciphertext of an encrypted room, where the homeserver
+/// reads it and can rewrite it.
+pub const REPLY_TO: &str = "life.arbos.reply_to";
+
+/// The event id a row answers (`replyToEvent`, from the event's [`REPLY_TO`]).
 pub fn reply_target(row: &MessageRow) -> Option<String> {
     row.json.contains("\"replyToEvent\"").then_some(())?;
     serde_json::from_str::<Value>(&row.json).ok()?["replyToEvent"]
@@ -366,10 +398,7 @@ pub fn message_row(
         row["senderName"] = json!(sender_name);
     }
     // Nothing from an undecrypted event's envelope.
-    if let Some(e) = content["m.relates_to"]["m.in_reply_to"]["event_id"]
-        .as_str()
-        .filter(|_| !locked)
-    {
+    if let Some(e) = content[REPLY_TO].as_str().filter(|_| !locked) {
         row["replyToEvent"] = json!(e);
     }
     Some(MessageRow {
@@ -620,10 +649,9 @@ mod tests {
 
     #[test]
     fn reactions_removals_and_replies_are_read_from_the_event_not_its_claims() {
-        let react = |content: Value| json!({ "type": "m.reaction", "event_id": "$r", "sender": "@gh_7:arbos.life", "content": content });
-        let rel = |key: Value| json!({ "m.relates_to": { "rel_type": "m.annotation", "event_id": "$m", "key": key } });
+        let react = |content: Value| json!({ "type": REACTION, "event_id": "$r", "sender": "@gh_7:arbos.life", "content": content });
         assert_eq!(
-            reaction(&react(rel(json!("👍")))),
+            reaction(&react(reaction_content("$m", "👍"))),
             Some((
                 "$r".to_owned(),
                 Reaction {
@@ -633,37 +661,50 @@ mod tests {
                 }
             ))
         );
+        // What stays outside an encrypted room's ciphertext names neither the row nor the emoji.
+        assert_eq!(
+            reaction_content("$m", "👍")["m.relates_to"],
+            json!({ "rel_type": REACTION })
+        );
         // Who reacted is the account that sent it, whatever the content adds.
-        let mut claims = rel(json!("👍"));
+        let mut claims = reaction_content("$m", "👍");
         claims["life.arbos.sender"] = json!("user:gh_8");
         assert_eq!(reaction(&react(claims)).unwrap().1.sender, "user:gh_7");
+        let keyed = |key: Value| json!({ "event_id": "$m", "key": key });
         for (why, ev) in [
-            ("an empty key", react(rel(json!("")))),
-            ("a key that is not a string", react(rel(json!(7)))),
+            ("an empty key", react(keyed(json!("")))),
+            ("a key that is not a string", react(keyed(json!(7)))),
             (
                 "an essay",
-                react(rel(json!("a".repeat(REACTION_KEY_MAX + 1)))),
+                react(keyed(json!("a".repeat(REACTION_KEY_MAX + 1)))),
             ),
-            ("a control character", react(rel(json!("a\nb")))),
+            ("a control character", react(keyed(json!("a\nb")))),
+            ("no target", react(json!({ "key": "👍" }))),
             (
-                "another relation",
+                "a target only the envelope names",
                 react(
-                    json!({ "m.relates_to": { "rel_type": "m.thread", "event_id": "$m", "key": "👍" } }),
+                    json!({ "key": "👍", "m.relates_to": { "rel_type": REACTION, "event_id": "$m" } }),
                 ),
-            ),
-            (
-                "no target",
-                react(json!({ "m.relates_to": { "rel_type": "m.annotation", "key": "👍" } })),
             ),
             // A removed reaction comes back with its content stripped.
             ("removed", react(json!({}))),
             (
                 "a message dressed as a reaction",
-                json!({ "type": "m.room.message", "event_id": "$r", "sender": "@gh_7:arbos.life", "content": rel(json!("👍")) }),
+                json!({ "type": "m.room.message", "event_id": "$r", "sender": "@gh_7:arbos.life", "content": reaction_content("$m", "👍") }),
+            ),
+            (
+                "the reaction other clients send, which no room of ours encrypts",
+                json!({ "type": "m.reaction", "event_id": "$r", "sender": "@gh_7:arbos.life",
+                        "content": { "m.relates_to": { "rel_type": "m.annotation", "event_id": "$m", "key": "👍" } } }),
             ),
         ] {
             assert_eq!(reaction(&ev), None, "{why}");
         }
+        // An undecrypted reaction is known by its envelope; a message is not.
+        let sealed = |relates: Value| json!({ "type": "m.room.encrypted", "content": { "ciphertext": "x", "m.relates_to": relates } });
+        assert!(sealed_reaction(&sealed(json!({ "rel_type": REACTION }))));
+        assert!(!sealed_reaction(&sealed(json!({}))));
+        assert!(!sealed_reaction(&react(reaction_content("$m", "👍"))));
         assert_eq!(
             redacts(&json!({ "type": "m.room.redaction", "redacts": "$m", "content": {} })),
             Some("$m".to_owned())
@@ -685,20 +726,25 @@ mod tests {
         let mut gone_locked = gone.clone();
         gone_locked["type"] = json!("m.room.encrypted");
         assert!(!shows(&gone_locked, true, false));
-        let answer = |relates: Value, kind: &str| {
-            let ev = json!({ "type": kind, "event_id": "$a", "sender": "@gh_7:arbos.life",
-                             "content": { "body": "\"replyToEvent\"", "m.relates_to": relates } });
+        let answer = |content: Value, kind: &str| {
+            let mut ev = json!({ "type": kind, "event_id": "$a", "sender": "@gh_7:arbos.life",
+                                 "content": { "body": "\"replyToEvent\"" } });
+            for (k, v) in content.as_object().unwrap() {
+                ev["content"][k] = v.clone();
+            }
             reply_target(&message_row(&ev, &|_| None).unwrap())
         };
-        let to = |id: Value| json!({ "m.in_reply_to": { "event_id": id } });
         assert_eq!(
-            answer(to(json!("$m")), "m.room.message"),
+            answer(json!({ REPLY_TO: "$m" }), "m.room.message"),
             Some("$m".to_owned())
         );
-        assert_eq!(answer(to(json!(7)), "m.room.message"), None);
+        assert_eq!(answer(json!({ REPLY_TO: 7 }), "m.room.message"), None);
         assert_eq!(answer(json!({}), "m.room.message"), None);
+        // `m.relates_to` is the homeserver's to write on an encrypted event: never read.
+        let relates = json!({ "m.relates_to": { "m.in_reply_to": { "event_id": "$m" } } });
+        assert_eq!(answer(relates, "m.room.message"), None);
         // An undecrypted event's envelope says nothing the row repeats.
-        assert_eq!(answer(to(json!("$m")), "m.room.encrypted"), None);
+        assert_eq!(answer(json!({ REPLY_TO: "$m" }), "m.room.encrypted"), None);
     }
 
     #[test]

@@ -777,7 +777,8 @@ fn row_json(r: &MessageRow) -> Value {
 /// Phase 3 verbs in a people chat, two native devices: a send shows before the homeserver has
 /// it, a reply names the row it answers, a reaction is the reacting account's and comes off
 /// again, a removed message leaves both timelines, and a receipt lands on the row asked for.
-/// In an encrypted chat the reply is ciphertext on the homeserver and a reaction is refused.
+/// In an encrypted chat the reply and the reaction are ciphertext on the homeserver, which is
+/// told neither the row they are about nor the emoji, and counts no unread for a reaction.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn people_chats_reply_react_remove_and_read() {
     let Ok(url) = std::env::var("ARBOS_MATRIX_TEST_E2EE_HS") else {
@@ -955,12 +956,12 @@ async fn people_chats_reply_react_remove_and_read() {
 
     // React: Bob's reaction reads as Bob's on both devices; asking twice sends it once.
     bob1.react(&dm, &first, "👍", true).await.unwrap();
-    let reacted = |c: Arc<MatrixClient>, on: bool| {
-        let (dm, first, bob) = (dm.clone(), first.clone(), bob.clone());
+    let reacted = |c: Arc<MatrixClient>, room: &String, row: &String, on: bool| {
+        let (room, row, bob) = (room.clone(), row.clone(), bob.clone());
         async move {
             eventually(|| async {
-                let rows = c.open_room(&dm).await.ok()?;
-                let v = row_json(rows.iter().find(|r| r.event_id == first)?);
+                let rows = c.open_room(&room).await.ok()?;
+                let v = row_json(rows.iter().find(|r| r.event_id == row)?);
                 (v["reactions"]["👍"][format!("user:{bob}")].as_bool() == on.then_some(true))
                     .then_some(v)
             })
@@ -968,7 +969,7 @@ async fn people_chats_reply_react_remove_and_read() {
         }
     };
     for c in [&alice1, &bob1] {
-        let v = reacted(c.clone(), true).await;
+        let v = reacted(c.clone(), &dm, &first, true).await;
         assert_eq!(v["reactions"].as_object().unwrap().len(), 1, "{v}");
     }
     bob1.react(&dm, &first, "👍", true).await.unwrap();
@@ -986,12 +987,12 @@ async fn people_chats_reply_react_remove_and_read() {
         .as_array()
         .unwrap()
         .iter()
-        .filter(|e| e["type"] == "m.reaction")
+        .filter(|e| e["type"] == arbos_matrix::rows::REACTION)
         .count();
     assert_eq!(reactions, 1, "the second ask sent nothing");
     bob1.react(&dm, &first, "👍", false).await.unwrap();
     for c in [&alice1, &bob1] {
-        reacted(c.clone(), false).await;
+        reacted(c.clone(), &dm, &first, false).await;
     }
 
     // Read: a private receipt on the row asked for, and a bad id is refused here.
@@ -1025,8 +1026,9 @@ async fn people_chats_reply_react_remove_and_read() {
     let reply = row_of(alice1.clone(), dm.clone(), "01P3VERBSREPLY000000000000").await;
     assert!(row_json(&reply)["replyTo"].is_null());
 
-    // Encrypted chat: the message and its reply are ciphertext on the homeserver, the reply
-    // still names its row, and a reaction is refused rather than sent in the clear.
+    // Encrypted chat: the message, its reply and a reaction are ciphertext on the homeserver.
+    // The reply still names its row and the reaction reads as Bob's, though nothing outside
+    // the ciphertext says which row either is about, or with what.
     tokio::time::sleep(Duration::from_secs(3)).await;
     let secret = alice1
         .send_text(
@@ -1050,7 +1052,24 @@ async fn people_chats_reply_react_remove_and_read() {
     let reply = row_of(alice1.clone(), group.clone(), "01P3SECRETREPLY00000000000").await;
     assert_eq!(reply.text, "got the code");
     assert_eq!(row_json(&reply)["replyTo"], "01P3SECRETFIRST00000000000");
-    assert!(bob1.react(&group, &secret, "👍", true).await.is_err());
+    // Alice has Bob's reply unread; his reaction does not count as another unread message.
+    let unread = || async {
+        hs.call(
+            "GET",
+            "/_matrix/client/v3/sync?timeout=0",
+            Some(&a.access_token),
+            Value::Null,
+        )
+        .await["rooms"]["join"][&group]["unread_notifications"]["notification_count"]
+            .as_u64()
+    };
+    let before = eventually(|| async { unread().await.filter(|n| *n > 0) }).await;
+    bob1.react(&group, &secret, "👍", true).await.unwrap();
+    for c in [&alice1, &bob1] {
+        let v = reacted(c.clone(), &group, &secret, true).await;
+        assert_eq!(v["reactions"].as_object().unwrap().len(), 1, "{v}");
+    }
+    assert_eq!(unread().await, Some(before));
     let raw = hs
         .call(
             "GET",
@@ -1058,24 +1077,54 @@ async fn people_chats_reply_react_remove_and_read() {
             Some(&a.access_token),
             Value::Null,
         )
-        .await
-        .to_string();
-    assert!(raw.contains("m.room.encrypted"));
-    for clear in ["door code", "got the code", "m.reaction", "m.room.message"] {
-        assert!(
-            !raw.contains(clear),
-            "{clear} in the clear on the homeserver"
-        );
+        .await;
+    let sent: Vec<&Value> = raw["chunk"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["state_key"].is_null())
+        .collect();
+    assert_eq!(sent.len(), 3, "{sent:?}");
+    for e in &sent {
+        assert_eq!(e["type"], "m.room.encrypted");
+        let said = e["content"].to_string();
+        for clear in [
+            "door code",
+            "got the code",
+            "👍",
+            secret.as_str(),
+            "reply_to",
+        ] {
+            assert!(
+                !said.contains(clear),
+                "{clear} in the clear on the homeserver"
+            );
+        }
+    }
+    bob1.react(&group, &secret, "👍", false).await.unwrap();
+    for c in [&alice1, &bob1] {
+        reacted(c.clone(), &group, &secret, false).await;
     }
     // A reaction the homeserver (or a member's other client) writes there in the clear is
-    // nobody's reaction.
-    hs.call(
-        "PUT",
-        &format!("/_matrix/client/v3/rooms/{group}/send/m.reaction/forged"),
-        Some(&b.access_token),
-        json!({ "m.relates_to": { "rel_type": "m.annotation", "event_id": secret, "key": "👎" } }),
-    )
-    .await;
+    // nobody's reaction, in either spelling.
+    for (kind, content) in [
+        (
+            "m.reaction",
+            json!({ "m.relates_to": { "rel_type": "m.annotation", "event_id": secret, "key": "👎" } }),
+        ),
+        (
+            arbos_matrix::rows::REACTION,
+            arbos_matrix::rows::reaction_content(&secret, "👎"),
+        ),
+    ] {
+        hs.call(
+            "PUT",
+            &format!("/_matrix/client/v3/rooms/{group}/send/{kind}/forged"),
+            Some(&b.access_token),
+            content,
+        )
+        .await;
+    }
     alice1
         .send_text(&group, "after", "01P3SECRETAFTER00000000000")
         .await
