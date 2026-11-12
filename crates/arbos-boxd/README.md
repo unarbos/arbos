@@ -284,9 +284,9 @@ It refuses to run without `--dry-run` or `--yes`. For each box, in order:
    is the file and the filesystem written down in step 2.
 6. **Finish.** Only then: `rm $data/boxes/$u/work.img`.
 
-A box that fails step 3, 4 or 5 is put back: deleted from the daemon (a forced stop), the
-user's provider set to `gvisor`, the daemon's `boxes/$u` removed, and the box started and
-awaited on gvisor, on the disk it had. The daemon's link is removed only while the old name
+A box that fails step 3, 4 or 5 is put back: the user's provider set to `gvisor`, the box
+deleted from the daemon (a forced stop), the daemon's `boxes/$u` removed, and the box started
+and awaited on gvisor, on the disk it had. The daemon's link is removed only while the old name
 still names the same file, so the disk always has a name; if that ever does not hold the tool
 stops at that box, says `stuck`, and touches neither name.
 

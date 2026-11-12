@@ -1217,7 +1217,7 @@ impl Db {
 
     /// The node of every `boxd` box that has one on its row, by user.
     pub fn boxd_box_nodes(&self) -> Result<HashMap<String, String>> {
-        self.with(|c| {
+        self.read(|c| {
             let mut st = c.prepare(
                 "SELECT user_id, node_id FROM boxes WHERE provider = 'boxd' AND node_id IS NOT NULL",
             )?;
@@ -1238,7 +1238,7 @@ impl Db {
     }
 
     pub fn boxd_node(&self, user_id: &str) -> Result<Option<String>> {
-        self.with(|c| {
+        self.read(|c| {
             c.query_row(
                 "SELECT boxd_node FROM users WHERE id = ?1",
                 params![user_id],
