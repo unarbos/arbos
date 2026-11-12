@@ -1,154 +1,206 @@
-# Spec: Inference Payments — Card In, One Ledger, Bittensor Under the Hood
+# Spec: Inference Payments — Gamma Credits In, One Ledger
 
-Status: **Proposed design** (2026-11-11). Nothing here is implemented; §8 lists the owner decisions that gate coding.
-Companion docs: [`docs/self-host.md`](self-host.md), `docs/box-scaling.md` (#2957), `docs/matrix-groups-e2ee-spec.md` (#2958).
+Status: **Proposal, revision 2** (2026-11-11). Nothing here is implemented. There is **no owner spec** behind it: "proper inference payments" was asked for, this is our reading of it, and the decisions in §10 are unanswered.
+
+**What changed in this revision.** Revision 1 (`fc6d71977`) centred on card top-up through Stripe, with TAO as a late optional rail. This one recommends a single design: users fund inference with Bittensor **gamma** credits and the relay is the service's **spender**. Stripe, gifting, sponsored rooms and the Bittensor upstream provider are out of this revision (§7); TAO cheques are sidelined (§7).
+
+Sources read for this revision: the Bittensor docs pages `guides/gamma`, `guides/services`, `guides/signed-requests`, `tx/spend-gamma`, `query/gamma-deposit` (www.bittensor.com/docs, 2026-11-11), and the code named in §1. What those pages leave open is listed in §8.
 
 ---
 
 ## 0. Goal & Core Decisions
 
-**Grandma pays with a card and never learns what a subnet is.** Bittensor makes the default models cheap; it is not something she sees.
-
-1. **Keep the one ledger and the one cap.** `credit_ledger` and the three-layer gate in `crates/arbos-relay/src/credits.rs` already meter every spend source. Payments are a new way for money to come *in*, not a new accounting system.
-2. **Prepaid credit, bought on the web with a card.** Stripe Checkout (hosted page) → signed webhook → one `purchase` ledger row. No card data touches the relay; no new client code is needed to sell.
-3. **Bittensor is an upstream, not a feature.** A Bittensor-served OpenAI-compatible provider becomes one more arm in `proxy::forward`, and its models become the defaults. Cheaper calls are the whole user-visible effect.
-4. **Social is "who pays", decided in one function.** Gifting and sponsoring a room both reduce to `credits::payer()` and one new ledger kind.
-5. **TAO is an optional, later top-up rail** for people who already hold it. It is never required and never shown by default.
+1. **Keep the one ledger and the one cap.** `credit_ledger` and the gate in `crates/arbos-relay/src/credits.rs` stay the only meter, for every user. Gamma is a way for value to come *in*, not a second accounting system.
+2. **Gamma is the funding rail.** A user holds a gamma deposit on one subnet; the relay, as that deposit's spender, calls `spend-gamma` to repay what the ledger has metered. 1 gamma repays $1.00 of metered cost.
+3. **Settle in arrears, with a small fixed exposure.** The relay never spends gamma it has not metered. A linked user may run `E` (default 1 gamma) below zero, plus the call in flight, before the gate refuses.
+4. **The relay holds one narrow key.** A `GammaSpend` proxy key, which per the docs can make no other call. No user key, no coldkey, no price feed.
+5. **Users without a deposit are unchanged**: welcome grant and admin top-up, as today.
 
 ---
 
-## 1. Starting Point: What Exists on `main`
+## 1. Starting Point: What Exists
 
 | Piece | Where | State |
 | --- | --- | --- |
-| Metering proxy — boxes hold no provider key | `crates/arbos-relay/src/proxy.rs` (`/proxy/v1/*`, `/proxy/anthropic/*`) | Shipping. Upstreams: OpenRouter, OpenAI direct, Anthropic direct |
-| Per-user ledger | `credit_ledger(user_id, at, kind, usd REAL, ref, note, actor)` in `db_accounts.rs` | Shipping. Kinds: `grant`, `inference`, `voice`, `machine` |
-| Spend gate | `credits::check` — kill switch → balance → one daily limit | Shipping |
-| Payer resolution | `credits::payer()` — the principal's user, else the project owner | Shipping |
-| Money in | Welcome grant (`ARBOS_DEFAULT_GRANT_USD`) and `PUT /admin/users/{id}/credits` | **Admin-only. No purchase path.** |
-| Pricing | Upstream-reported `usage.cost`, else a substring-matched table (`proxy::price`) | **Zero margin** |
-| Client UI | iPhone `CreditsPage` (`SettingsView.swift`), Mac `SettingsPage::Credits` | Balance + "Request a top-up" → feedback sheet |
-| Site | `site/index.html` pricing cards | "$0 during the beta", Pro "Soon" |
+| Metering proxy; boxes hold no provider key | `crates/arbos-relay/src/proxy.rs` | On `main`. Every call gets a `req_id`; `credits::check_call` before, `credits::charge_call` after |
+| Per-user ledger | `credit_ledger(user_id, at, kind, usd REAL, ref, note, actor)` in `db_accounts.rs` | On `main`. Kinds `grant`, `inference`, `voice`, `machine` |
+| Spend gate | `credits::check`: kill switch, balance, one daily limit | On `main`. Returns `Ok` on a DB error |
+| Payer | `credits::payer()`: the principal's user, else the project owner | On `main` |
+| Money in | `ARBOS_DEFAULT_GRANT_USD` (default 100) and `PUT /admin/users/{id}/credits` | Admin-only. No purchase path |
+| Client surface | `GET /me` → `credits` block; iPhone Settings › Credits; Mac the same page on `cursor/mac-credit-balance-53ee` (`84f458bd9`) | Both clients render what the relay reports. Gamma follows that: the relay reports it, the clients show a line |
+| Wallet | `crates/arbos-wallet` (#2932), `PUT /me/wallet` link proof (#2933), iPhone wallet (#2935) | **Open PRs, not on `main`.** One 12-word phrase → sr25519 account (`Seed::address`), JSON-RPC over HTTPS, `Net::{Main, Test}`. Device-only by design |
+| TAO cheques | `arbos_wallet::chain`, iPhone `Wallet.chequesEnabled = false` (`fab447c65`) | Off in the app |
 
-Not on `main`: any payment processor, StoreKit, any Bittensor provider, any user-to-user transfer. The wallet stack (#2932, #2933, #2935) gives each user a TAO address and peer-to-peer cheques, but is deliberately device-only and unconnected to the ledger.
+Nothing in the repository mentions gamma, a netuid, or a subnet of our own.
 
 ---
 
-## 2. Ledger Hardening (Prerequisite — Ships Before Any Money Moves)
+## 2. Ledger Hardening (Prerequisite)
 
-The ledger was built for grants. Four properties must hold before a card is charged against it:
-
-| Today | Problem once real money is in | Change |
+| Today | Problem once value moves | Change |
 | --- | --- | --- |
-| `usd REAL`, balance = `SUM(usd)` | Float drift on a money column | Add `micros INTEGER NOT NULL` (1 USD = 1,000,000). Backfill `round(usd * 1e6)`. Balance and caps read `SUM(micros)`. Keep writing `usd` for one release, then drop its readers |
-| Rows carry no idempotency key | A retried webhook or debit double-counts | Add `idem TEXT`, with `CREATE UNIQUE INDEX … ON credit_ledger(idem) WHERE idem IS NOT NULL`. Purchases use the Stripe event id; debits use the proxy `req_id` |
-| `credits::check` returns `Ok` on a DB error | A locked DB means free inference | Fail **closed** for metered accounts (503, retryable). Self-host (`paircode`) stays ungated |
-| `charge` clamps an overshoot at the balance | The operator absorbs the tail of every final call | Debit the true cost and let the balance go at most one call negative; the next `check` refuses. The purchase that follows repays it |
+| `usd REAL`, balance = `SUM(usd)` | Float drift | Add `micros INTEGER NOT NULL` (1 USD = 10^6), backfill `round(usd * 1e6)`, read `SUM(micros)`. 1 micro = 1000 gamma units exactly |
+| No idempotency key | A re-read chain event double-credits | Add `idem TEXT` with a unique partial index. Gamma credits use the settlement `reference` |
+| `credits::check` returns `Ok` on a DB error | A locked DB is free inference | Fail **closed** for metered accounts (503). `paircode` stays ungated |
+| `charge` clamps an overshoot at the balance | The clamp hides what is owed | Debit the true cost. The balance may go below zero; the gate (§3.3) bounds how far |
 
-New kinds: `purchase`, `refund`, `transfer_out`, `transfer_in`. Refunds and transfers are rows, never edits — the ledger stays append-only.
+One new kind: `gamma` (a positive row). The ledger stays append-only.
 
-**Sequencing:** #2951 rewrites voice/vision settlement in `credits.rs` and `db_accounts.rs`. Land or decline it first; this section conflicts with it either way.
+**Sequencing:** #2951 rewrites settlement in `credits.rs` and `db_accounts.rs`. Land or decline it first.
 
 ---
 
-## 3. Money In: Card via Stripe Checkout
+## 3. Money In: Gamma
+
+What the docs define: gamma is a USD-valued credit of one subnet (10^9 units per gamma), minted by burning that subnet's alpha, held in a deposit keyed `(netuid, hotkey)` and controlled by a coldkey. The deposit names one **spender**, who can take from it up to a daily cap. Gamma cannot move between coldkeys, cannot be redeemed, does not expire, and is destroyed if the subnet is dissolved.
 
 ```
-client ── POST /me/credits/checkout {pack} ──▶ relay ── create Checkout Session ──▶ Stripe
-client ◀── {url} ─────────────────────────────  relay
-client ── opens url in the system browser, pays ─────────────────────────────────▶ Stripe
-relay  ◀── POST /stripe/webhook  checkout.session.completed (signed) ───────────── Stripe
-relay  ── INSERT credit_ledger(kind='purchase', micros, idem=event.id) ; push balance to devices
+user coldkey ── mint-gamma (--service-hotkey <ours>, daily cap) ──▶ deposit (netuid, hotkey)
+device ── PUT /me/gamma, signed by the deposit hotkey ──▶ relay ── reads the deposit, stores the link
+box ── /proxy/v1/* ──▶ relay ── check → upstream → debit ledger (as today)
+relay ── spend-gamma [(hotkey, owed, reference)…] ──▶ chain ── GammaSpent ──▶ relay ── ledger +gamma row
 ```
 
-- **`POST /me/credits/checkout`** — device principal only. Body is exactly `{ "pack": "p5" | "p10" | "p25" | "p50" }`; unknown fields and unknown packs are 400. The pack → price mapping lives on the relay; **the client never sends an amount.** The session carries `client_reference_id = user_id`. Rate-limited per user through the existing `rate_events` table.
-- **`POST /stripe/webhook`** — unauthenticated route whose only credential is the `Stripe-Signature` header, verified against `STRIPE_WEBHOOK_SECRET` over the **raw** body, with the timestamp tolerance enforced. The amount credited comes from the verified event (`amount_total`, `currency == "usd"`, `payment_status == "paid"`), never from the request that started checkout. The unique `idem` index makes redelivery a no-op. Anything that fails validation gets a generic 400.
-- **Refunds and disputes** — `charge.refunded` and `charge.dispute.created` write a negative `refund` row. A balance driven below zero simply refuses further spend.
-- **Config** — `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_P5…` are relay env only, like the provider keys. Unset means the route returns 404 and the clients keep today's copy, so self-hosters and the beta are unaffected.
-- **No new dependency is required** — two HTTPS calls with the relay's existing HTTP client and one HMAC-SHA256 verification.
+### 3.1 Keys
 
-**Clients.** The "Request a top-up" row on both `CreditsPage`s becomes **Add credit**, which opens the returned URL in the system browser; the balance updates live when the webhook lands. The site's Pro card links to the same flow.
+- **Coldkey** = the wallet account that exists today (`Seed::address`). It mints, sets the cap and can pause or re-point the deposit at any time. It never signs anything for the relay.
+- **Deposit hotkey** = a new sr25519 key from the same phrase by Substrate hard derivation, `<phrase>//arbos//gamma`. The docs ask for a fresh hotkey per deposit and never a coldkey; deriving it means the one phrase still recovers everything. It stays on the device and signs exactly one kind of request (§3.2). It never signs a chain transaction.
+- **Spender** = the account our published service names (§3.5). The relay holds only its `GammaSpend` proxy key.
 
-**Why packs, not a subscription, first:** it is the smallest thing that matches the ledger as built (a positive row), has no proration, dunning or entitlement state, and is what the site's "usage credit" copy already describes. A subscription later is a monthly `grant` row driven by `invoice.paid` — the same webhook, one more event type.
+Inference calls come from boxes, not devices, so the hotkey cannot sign each call and is not given to a box. It signs the link once; after that the existing bearer tokens and `credits::payer()` decide who pays, as today.
 
-**Sign-in is a dependency, not part of this spec.** Accounts are GitHub users today (`signin.rs`). Grandma has no GitHub account; card payments do not help her until Apple / email sign-in exists.
+### 3.2 Linking a deposit
 
----
+`PUT /me/gamma`, device principal, plus the Bittensor signed-request headers (`btauth/1`) made with the deposit hotkey, receiver = our service hotkey. Body, exactly: `{ "v": 1, "action": "gamma.link", "user_id", "netuid", "hotkey", "genesis", "expires_at" }`. Verification is §6. On success the relay reads the deposit at a finalized block and requires that it exists, that `spender` is ours and that its cap is absent or at least `E`. It then stores `gamma_links(user_id PRIMARY KEY, hotkey UNIQUE)`.
 
-## 4. Pricing & Margin
+`DELETE /me/gamma` needs only the device principal: unlinking can stop spending, never start it, and must work for someone who lost the phrase.
 
-- One knob: `ARBOS_INFERENCE_MARKUP` (default `0.0` = today's pass-through). The debit is `upstream_cost × (1 + markup)`, applied in `Meter::usd` so every spend source inherits it. The ledger row's `note` records the upstream cost for audit.
-- Replace the substring-matched `proxy::price` table with exact ids loaded from the upstream's own `/models` pricing, cached. A model with no known price and no reported cost is **refused**, not guessed — today any id in OpenRouter's catalog is selectable, from Haiku to models 50× dearer.
-- Machine time stays informational and outside the balance, as `credits.rs` has it, until `docs/box-scaling.md` Phase 2 makes boxes sleep (an always-on box billed hourly would drain every balance).
+`GET /me` → `credits` gains `gamma: { spendable, daily_cap, usable }`; both clients add one line to Settings › Credits.
 
----
+### 3.3 The gate
 
-## 5. Bittensor Under the Hood
+`owed = max(0, −balance)`. A call is allowed when the balance is above zero, or when all of these hold: the user has a link; `owed < E`; the last read of the deposit is at most 10 minutes old; and it showed our spender and `spendable_gamma ≥ E`. Everything else is today's 402. `E` is what our service document publishes as `max_spend`, which the docs define as the amount a customer must keep spendable.
 
-- **Provider arm.** Add one OpenAI-compatible upstream to the `match api` in `proxy::forward`, configured by `ARBOS_BITTENSOR_BASE` + `ARBOS_BITTENSOR_KEY`, selected by model-id prefix exactly the way `openai_goes_direct` routes `openai/*` today. The relay holds the key; boxes are unchanged.
-- **Cost source.** Use the provider's reported usage cost when it sends one, else its published per-token rates (§4's exact-id table).
-- **Defaults.** The three per-project slots (`talking_model`, `subagent_model`, `decision_model` in `api.rs` / `settings.rs`) default to Bittensor-served open models once they pass the eval gate in `evals/`. Claude and GPT stay one tap away in `ModelPickerView` at their real price. This is where "way cheaper" comes from, and the only place the user meets it — as a lower number.
-- **Failover.** A provider 5xx or timeout retries once on the equivalent OpenRouter model at the same quoted price, so a miner outage is not a user-visible error.
-- **Which provider** is owner decision 3. Requirements: OpenAI-compatible chat + streaming + tool calls, per-request usage reporting, and a stable key the relay can hold.
+A welcome grant is therefore used before any gamma (decision 6).
 
----
+### 3.4 Settling
 
-## 6. Social: Gifting and Sponsored Rooms
+One task, one signer, once a minute:
 
-Both are small because the payer is already resolved in one place.
+1. For each linked user with `owed − pending > 0`, in one SQLite transaction insert `gamma_settlements(id, user_id, hotkey, units, reference, state='pending')`, with `units = (owed − pending) × 1000` and `reference = SHA-256("arbos/gamma-settle/v1\n" ‖ id)`. Owed derives only from metered debits, so **the relay cannot ask for more than it metered.**
+2. Put up to 512 entries in one `spend_gamma(netuid, spends)` call, sign it as a **mortal** extrinsic with the proxy key, and store the signed bytes and the era's last block **before** submitting.
+3. Submit. A retry only ever resubmits the stored bytes; the account nonce makes those land at most once. The docs are explicit that the chain does not deduplicate by reference ("an entry sent twice spends twice"), so a new extrinsic for the same debt is built only after step 5.
+4. Follow finalized blocks. A `GammaSpent` whose netuid, hotkey, amount and reference all equal a pending row writes one ledger row (`kind='gamma'`, `+micros`, `idem=reference`) and marks it settled. An event carrying our reference with any other field different stops the settler and alerts.
+5. A row whose era has passed in the finalized chain with no event is marked expired; the next tick starts again from step 1 with a new id.
 
-- **Gift credit.** `POST /me/credits/gift { "to": "<user_id>", "pack": … }` writes `transfer_out` and `transfer_in` in **one** SQLite transaction with a shared `idem`. Only purchased credit is giftable (granted beta credit is not), with a per-day cap, so a welcome grant cannot be farmed across accounts.
-- **Sponsored room.** A group gains an optional `sponsor_user_id`. `credits::payer()` returns it for agent turns in that room, so one person can run an agent for a whole group. The sponsor sets it; only the sponsor or a room admin clears it; the sponsor's one daily limit bounds it.
-- **"Gamma".** The term appears nowhere in this repository. If it names a specific token or allowance to be shared between users, it maps onto one of the two mechanisms above — see owner decision 5.
+One entry per user per tick, not per request: an agent makes many small calls and each entry is a fee. The per-request trail stays in the ledger (`ref` = `req_id`); the settlement row lists the ledger ids it covers.
+
+### 3.5 What the relay needs on chain (owner actions, not code)
+
+A service published on the subnet by its owner hotkey or a validator with a permit, naming the spender; a JSON document at its URL with `payments: gamma`, `max_spend = E`, `signature: "btauth/1"`; a `GammaSpend` proxy from the spender to the relay's key; TAO on that key for fees. The docs recommend a multisig spender so a coldkey swap never pauses spending.
 
 ---
 
-## 7. TAO Top-Up (Optional, Later)
+## 4. Pricing & Who Is Paid
 
-For users who already hold TAO and linked an address (#2933):
-
-- The relay publishes one deposit address. A **finalized** `Balances.transfer` to it from a user's *linked* address credits that user a `purchase` row at the spot rate when finality is observed, `idem` = block hash + extrinsic index.
-- Cheques (#2932) are not used for this: they are bounceable until cashed, and a cheque shown as credit before finality is a free-inference bug.
-- The relay only watches the chain. It holds a deposit address, never a user key — the wallet stays device-only.
-- The surface lives inside Settings → Wallet and is invisible to anyone who never opened it.
+- 1 gamma repays $1.00 of ledger debit. `ARBOS_INFERENCE_MARKUP` (default `0.0`) applies to the debit, in `Meter::usd`, as proposed before.
+- **Spent gamma pays the spender nothing.** The docs: the burned alpha's value goes to the subnet's alpha holders. The relay's upstream bills (OpenRouter, OpenAI, Anthropic) are still paid in dollars by the operator. Gamma only makes sense if whoever pays those bills is content to be repaid through the subnet's alpha. This is decision 2.
+- A model with no known price and no reported cost is refused, not guessed (unchanged from revision 1).
 
 ---
 
-## 8. Owner Decisions Needed Before Coding
+## 5. Failure Handling
 
-1. **Margin.** Stay at zero markup, or set `ARBOS_INFERENCE_MARKUP` (and to what)?
-2. **Packs and free tier.** Pack sizes, and what the welcome grant becomes once people can pay (today: $100).
-3. **Bittensor provider.** Which OpenAI-compatible provider(s) the relay routes to, and which models become the defaults.
-4. **iPhone purchase surface.** Selling consumable credit inside the iOS app is In-App Purchase territory under App Store rule 3.1.1, and external-purchase links are permitted only in some storefronts. Options: (a) web-only, with the iPhone showing balance and no purchase button; (b) an external link where the storefront allows it; (c) StoreKit consumables at Apple's commission. Recommended: (a) for the first release, since it needs no review risk and no client code.
-5. **"Gamma".** What it refers to, and whether sharing it means gifting (§6) or sponsoring (§6).
-6. **Sign-in.** Whether Apple / email sign-in lands before payments are announced.
-
----
-
-## 9. Phased Rollout
-
-Each phase is flagged by its env being unset, so rollback is removing the variable.
-
-- **Phase 0 — Ledger hardening (§2).** No user-visible change.
-  - *Gate:* property test — any interleaving of grants, debits and retried `idem` rows yields `SUM(micros)` equal to the model; a forced DB error refuses a metered call and allows a `paircode` one.
-- **Phase 1 — Card top-up on the web (§3).** Stripe test mode on a staging relay, then live.
-  - *Gate:* a replayed webhook credits once; a tampered body, a stale timestamp and a wrong secret are each rejected; a refund drives the balance down and the next call returns 402; `POST /me/credits/checkout` with an unknown field or pack is 400.
-- **Phase 2 — Pricing table and markup (§4).**
-  - *Gate:* an unpriced model id is refused; the sum of a day's ledger debits equals the day's upstream invoices × (1 + markup) within rounding.
-- **Phase 3 — Bittensor upstream and defaults (§5).**
-  - *Gate:* the existing `evals/` suite on the candidate default models meets the bar the current defaults set; killing the provider mid-stream fails over with no user-visible error.
-- **Phase 4 — Gifting and sponsored rooms (§6).**
-  - *Gate:* a gift is atomic under a crash between the two rows; granted credit cannot be gifted; a sponsored room debits the sponsor and stops at the sponsor's limit.
-- **Phase 5 — TAO top-up (§7).**
-  - *Gate:* a transfer credits only after finality and only from a linked address; a reorged block credits nothing.
+| Event | What the relay does |
+| --- | --- |
+| `GammaSpendSkipped` (no deposit, other spender, over balance, over cap) | Mark the row skipped, re-read the deposit. Nothing else: the gate already refuses a deposit that no longer shows our spender and `spendable ≥ E`. The debt stays on the ledger and is retried when a read shows it fits. Worst case loss is `E` plus the one call in flight, per account |
+| Daily cap exhausted (`spendable < E`, balance above it) | 402 `daily_cap`, the existing shape. The cap refills linearly over 7200 blocks; the next read lifts the refusal |
+| Stale TAO/USD feed | No effect on spending: the docs gate only **minting** on the feed (`TaoUsdPriceUnavailable` after 300 blocks). The relay never reads a price or converts TAO |
+| Chain or RPC unavailable | Reads age past 10 minutes, so linked users at or below zero get the 402; users with a positive balance are untouched. Pending settlements wait; nothing is rebuilt until finality answers (§3.4 step 5) |
+| Relay crash mid-settlement | Rows and signed bytes were stored first; restart resumes at step 3 or 4 |
+| User pauses, re-points or empties the deposit | Their right, at any time. Seen on the next read; loss bounded by `E` |
+| Subnet dissolved | The docs: its gamma is destroyed with nothing paid. No remedy on our side; say so in the client before a user mints |
+| DB error | Gate fails closed (§2) |
 
 ---
 
-## 10. Security Invariants
+## 6. Signed Requests and Validation
 
-- The relay never sees or stores card data; Stripe's hosted page does.
-- Every credit to a balance is traceable to one verified external event (`idem`) or one named admin (`actor`).
-- The client never names an amount. Packs are relay-side constants; webhook amounts come from the signed event.
-- Money routes are device-principal only, reject unknown fields, are rate-limited, and return generic errors.
-- The single static `ARBOS_ADMIN_TOKEN` can mint credit through `PUT /admin/users/{id}/credits`. Before live payments, admin grants need a per-admin identity in `actor` and an alert on any grant above a threshold.
-- The spend gate fails closed for metered accounts.
+`PUT /me/gamma` is the only request a wallet key signs. `btauth/1` signs eight lines: version, scheme, method, request target, SHA-256 of the raw body, nonce, sender, receiver. It does not bind a chain or an explicit expiry, so those go in the body, which the hash covers.
+
+| Must be bound | Where |
+| --- | --- |
+| Action | body `action`, must equal `gamma.link` |
+| Method, route | `btauth/1` lines 3 and 4, rebuilt from the request as received |
+| Body hash | line 5, over the raw bytes, computed before parsing |
+| Resource ids | body `user_id` (must equal the device principal's), `netuid` (must equal ours), `hotkey` |
+| Signer | line 7, must equal body `hotkey`; sr25519 only, fixed server-side, an `X-Bittensor-Crypto` header is rejected |
+| Audience | line 8, must be our service hotkey; unbound requests rejected |
+| Nonce | line 6; `(hotkey, nonce)` inserted into a unique table after the signature verifies; a second use is rejected |
+| Expiry | body `expires_at`, at most 60 s ahead, and the `btauth/1` window (10 s past, 2 s future) |
+| Chain | body `genesis`, must equal the genesis hash pinned in relay config |
+| Schema version | the literal `btauth/1` and body `v` |
+
+Rules:
+
+- Unsigned, expired, replayed, wrong-audience and bad-signature requests all get the **same** 401 body. The body is parsed only after the signature verifies; unknown or duplicate fields are 400.
+- **Every chain response is validated**: the node's genesis hash against the pinned one at connect; reads and events at finalized blocks only; a deposit's `netuid`, `hotkey` and `spender` against what was asked; amounts as exact non-negative decimals of at most 9 places, converted with integer arithmetic; anything else is an error, never a default.
+- **Never spend more than metered** (§3.4 step 1), and every `gamma` ledger row traces to one finalized `GammaSpent` with our reference.
+- The proxy key is relay env only (`ARBOS_GAMMA_SPEND_KEY`), like provider keys. `ARBOS_GAMMA_NETUID` unset turns the whole feature off: routes 404, gate and clients as today.
+- Money routes are device-principal only and rate-limited through `rate_events`.
+- Cost: the relay gains chain access (the `subxt` stack `arbos-wallet` already brings into the workspace). `arbos-wallet` itself stays device-only.
+
+---
+
+## 7. Considered, Sidelined
+
+- **TAO cheques (#2932, #2935).** A cheque is a signed transfer that can bounce until someone cashes it, so crediting one before finality is free inference, and after finality it is just a transfer. They are off in the app (`chequesEnabled = false`). Gamma replaces them for paying for inference: the spender pulls, on chain, under a cap the user set. Cheques between people are a separate question this document does not touch.
+- **TAO transfer to a relay address.** Needed a spot rate and custody of received TAO. Gamma is already dollar-valued and the relay holds nothing.
+- **Card top-up (Stripe), gifting, sponsored rooms, a Bittensor upstream provider.** Not part of this revision; the text is in `fc6d71977`. Gamma cannot be gifted at all: it does not move between coldkeys. Users without TAO stay on the grant (decision 7).
+
+---
+
+## 8. Not Specified by the Bittensor Docs — Confirm on a Test Network Before Any Code
+
+1. Whether gamma is enabled today on mainnet or testnet, and on which subnets. Not checked on chain.
+2. The field layout of `GammaSpent` and `GammaSpendSkipped`, and the SCALE shape `GammaRuntimeApi.get_gamma_deposit` returns.
+3. Which failures reject the whole `spend_gamma` call rather than skip one entry. Per-entry skipping is described; whole-call atomicity is not stated.
+4. The fee per call and per entry, and any minimum spend (the 0.1 gamma minimum is stated for minting only). `E` and the tick are placeholders until this is measured.
+5. What exactly the `GammaSpend` proxy type allows, and that the proxied call emits the same events.
+6. `set-service`: the spender parameter, whether the hotkey must be registered, URL limits, what readers do when the document is unreachable.
+7. Whether a hard-derived key (`//arbos//gamma`) can be named as the hotkey in `btcli gamma mint` and regenerated by standard tools.
+8. Whether the local subtensor image the wallet tests use has gamma at all.
+9. `btauth/1` is specified between hotkeys of validators, miners and service customers; using it for a one-time link rather than per request is our choice, not a documented pattern.
+
+---
+
+## 9. Phases
+
+Each ships alone. Nothing writes to a public chain, and no service is published, without the owner's go-ahead. `ARBOS_GAMMA_NETUID` unset is the rollback for all of them.
+
+- **Phase 0 — Ledger hardening (§2).** No visible change.
+  - *Verify:* property test: any interleaving of grants, debits and repeated `idem` rows gives `SUM(micros)` equal to the model; a forced DB error refuses a metered call and allows a `paircode` one.
+- **Phase 1 — Read-only: show a deposit's `spendable_gamma`.** The relay reads one deposit at a finalized block, behind an admin-only route. No link, no key, no spend.
+  - *Verify:* for a test-network deposit the value equals `btcli query gamma-deposit --json`; recorded responses with a wrong netuid, hotkey, genesis or malformed amount are each rejected. This phase also answers §8 items 1, 2 and 8.
+- **Phase 2 — Link and display (§3.2, §6).** Needs #2932.
+  - *Verify:* one test per row of the §6 table (change it, expect the generic 401), plus replay, expiry and unknown field; iPhone and Mac show the same spendable figure as Phase 1.
+- **Phase 3 — Settle on a local or test network (§3.3–3.4, §5).**
+  - *Verify:* kill the relay before submit, after submit and before finality: exactly one `GammaSpent` per reference each time; each skip reason ends in the §5 state; property test that `Σ units ≤ Σ metered debits`; `Σ gamma rows = Σ GammaSpent` read back from the chain.
+- **Phase 4 — Mainnet.** The owner publishes the service and creates the proxy (§3.5); `E` stays at 1 gamma.
+  - *Verify:* one real deposit, one day, ledger and chain reconcile to the unit.
+
+Minting inside the app is not planned here; until asked for, a user mints with `btcli` from the same phrase.
+
+---
+
+## 10. Decisions for const
+
+1. **Which subnet's gamma?** Is there an Arbos subnet (netuid), who owns it, and is gamma enabled on it? *Default: none possible. Only Phase 0 proceeds until this is answered.*
+2. **Who is repaid?** Spent gamma pays the spender nothing; the value goes to that subnet's alpha holders while upstream bills stay in dollars. *Default: proceed only if that is the intent.*
+3. **Spender.** *Default: the subnet owner's service names a multisig spender; the relay holds only a `GammaSpend` proxy key.*
+4. **Arrears or ahead.** The docs advise services to spend before serving, since a user can pause a deposit at any moment. Spending ahead would hold users' unspent gamma on our ledger with no way to return it. *Default: arrears, exposure `E` = 1 gamma per account.*
+5. **Deposit hotkey.** *Default: derived from the wallet phrase (`//arbos//gamma`), not a second secret to back up.*
+6. **Welcome grant.** It is spent before gamma and is $100 today. *Default: leave it for the beta; revisit at Phase 4.*
+7. **Users with no TAO.** *Default: grant and admin top-up only; card top-up stays shelved.*
+8. **Markup.** *Default: `0.0`.*
+9. **Minting in the app.** *Default: no; `btcli` until asked.*
