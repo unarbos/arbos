@@ -77,6 +77,7 @@
 		A1CAB7000000000000000002 /* CaptureRigUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1CAB7000000000000000001 /* CaptureRigUITests.swift */; };
 		A1F000000000000000000108 /* ComposerParityUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F000000000000000000107 /* ComposerParityUITests.swift */; };
 		A1A1300000000000000000C2 /* AgentAccessLinkUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1300000000000000000C1 /* AgentAccessLinkUITests.swift */; };
+		A1CA00000000000000000002 /* ConnectedAppsHiddenUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1CA00000000000000000001 /* ConnectedAppsHiddenUITests.swift */; };
 		A11B0000000000000000A002 /* LibraryList.swift in Sources */ = {isa = PBXBuildFile; fileRef = A11B0000000000000000A001 /* LibraryList.swift */; };
 		A15EC9000000000000000002 /* AgentPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15EC9000000000000000001 /* AgentPicker.swift */; };
 		A11B0000000000000000A004 /* LibraryListTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A11B0000000000000000A003 /* LibraryListTests.swift */; };
@@ -349,6 +350,7 @@
 		A1CAB7000000000000000001 /* CaptureRigUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureRigUITests.swift; sourceTree = "<group>"; };
 		A1F000000000000000000107 /* ComposerParityUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerParityUITests.swift; sourceTree = "<group>"; };
 		A1A1300000000000000000C1 /* AgentAccessLinkUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentAccessLinkUITests.swift; sourceTree = "<group>"; };
+		A1CA00000000000000000001 /* ConnectedAppsHiddenUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectedAppsHiddenUITests.swift; sourceTree = "<group>"; };
 		A1BB00000000000000000010 /* ArbosUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ArbosUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		A11B0000000000000000A001 /* LibraryList.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryList.swift; sourceTree = "<group>"; };
 		A15EC9000000000000000001 /* AgentPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentPicker.swift; sourceTree = "<group>"; };
@@ -851,6 +853,7 @@
 				A1CAB7000000000000000001 /* CaptureRigUITests.swift */,
 				A1F000000000000000000107 /* ComposerParityUITests.swift */,
 				A1A1300000000000000000C1 /* AgentAccessLinkUITests.swift */,
+				A1CA00000000000000000001 /* ConnectedAppsHiddenUITests.swift */,
 				A1DA6B00000000000000B003 /* ChatSwipeTrackingUITests.swift */,
 			);
 			path = ArbosUITests;
@@ -1261,6 +1264,7 @@
 				A1CAB7000000000000000002 /* CaptureRigUITests.swift in Sources */,
 				A1F000000000000000000108 /* ComposerParityUITests.swift in Sources */,
 				A1A1300000000000000000C2 /* AgentAccessLinkUITests.swift in Sources */,
+				A1CA00000000000000000002 /* ConnectedAppsHiddenUITests.swift in Sources */,
 				A1DA6B00000000000000B004 /* ChatSwipeTrackingUITests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

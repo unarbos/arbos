@@ -1355,8 +1355,14 @@ struct ChatSession: View {
         // status row and the newest bubble at rest are outside it (Jacob, 2026-11-01) — placed
         // from the composer's measured frame, since that inset is wrong on some hardware.
         .overlay(alignment: .bottom) { ChatBarFade(bar: chatBarHeight, composer: composerEdge, keyboard: composerFocused) }
+        // Both jump chips sit centred just above the chat bar. While Search-in-chat is open
+        // they overlay the lower result rows: a tap aimed at a hit there lands on the chip
+        // instead, `jumpToLatest` re-pins the filtered list to its end, and the bar stays
+        // open — the reveal never runs. Gate run 43133707619 is that miss on `long-265` at
+        // y457 (24 pt above the bar, dead centre of the chevron's 44 pt hit). Hide them for
+        // the life of the bar; they return the moment it closes.
         .overlay(alignment: .bottom) {
-            if newBelowCount > 0 {
+            if newBelowCount > 0, !showSearch {
                 ChatBarHeightReader(bar: chatBarHeight) { bar in
                     newMessagesPill.padding(.bottom, bar + 10)
                 }
@@ -1370,7 +1376,7 @@ struct ChatSession: View {
         // straight through — so the hit target is the disc and not a full-width bar, and a
         // UIKit tap inside it still works while the transcript decelerates.
         .overlay(alignment: .bottom) {
-            if newBelowCount == 0, awayFromBottom {
+            if newBelowCount == 0, awayFromBottom, !showSearch {
                 ChatBarHeightReader(bar: chatBarHeight) { bar in
                     scrollToBottomButton
                         .padding(.bottom, bar + 10)
