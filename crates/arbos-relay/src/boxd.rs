@@ -554,6 +554,11 @@ impl Node {
             .and_then(|a| a.parse::<SocketAddrV4>().ok())
             .is_some_and(|a| a.ip().octets()[..2] == self.subnet && a.port() != 0);
         if !ours {
+            // The daemon started it all the same: left running, its agentd would dial in and
+            // the relay would call a box awake that it has no address for.
+            if let Err(e) = self.sleep(user_id, true).await {
+                tracing::warn!(%user_id, node = %self.id, error = %e, "boxd: a refused box was not stopped");
+            }
             bail!(
                 "boxd {} {path}: the box address is not in this node's subnet",
                 self.id
@@ -1501,6 +1506,27 @@ mod tests {
         status["mem_available_gb"] = json!(-1.0);
         fake.answer("status", 200, status);
         assert!(boxd.host().await.is_err());
+    }
+
+    /// A box the daemon started at an address outside its node's subnet is stopped there, and
+    /// the relay does not have it awake.
+    #[tokio::test]
+    async fn a_box_woken_outside_its_nodes_subnet_is_stopped_on_the_node() {
+        let (state, fake, user) = relay().await;
+        fake.answer(
+            "wake",
+            200,
+            json!({ "state": "warm", "restored": false, "box_url": "http://10.208.0.2:7788" }),
+        );
+        let e = boxes::create_box(&state, &user, Provider::Boxd, None).await;
+        assert!(e.unwrap_err().to_string().contains("not in this node"));
+        let paths = fake.paths();
+        assert_eq!(
+            paths.last().unwrap(),
+            &format!("/v1/boxes/{user}/sleep?force=true")
+        );
+        assert!(state.db.user_box(&user).unwrap().is_none());
+        assert_ne!(state.box_state(&user).await.0, BoxState::Awake);
     }
 
     /// agentd refusing is not an error and not a sleep; any other refusal is an error, with the
