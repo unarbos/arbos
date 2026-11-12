@@ -220,6 +220,8 @@ pub struct Boxd {
     /// Unpacking an image and handing out an address: one at a time across all boxes. Both are
     /// rare; a first unpack holds other boxes' `ensure` for as long as the tar takes.
     host: tokio::sync::Mutex<()>,
+    /// user_id → a prefetch: `None` while it runs, why it failed once it has.
+    prefetches: std::sync::Mutex<HashMap<String, Option<String>>>,
 }
 
 fn mkdir_private(dir: &str) -> std::io::Result<()> {
@@ -291,6 +293,7 @@ impl Boxd {
             sys,
             locks: Default::default(),
             host: Default::default(),
+            prefetches: Default::default(),
         }
     }
 
@@ -673,21 +676,40 @@ impl Boxd {
     }
 
     /// `POST /v1/boxes/{user_id}/prefetch`: start bringing a cold box back to this host ahead
-    /// of its wake, and answer at once. A wake that comes meanwhile waits on the box's lock
-    /// and finds the work done; a second prefetch finds nothing left to do.
+    /// of its wake, and answer at once: `cold` is whether it is still on its way. A wake that
+    /// comes meanwhile waits on the box's lock and finds the work done. The fetch runs behind
+    /// the answer, so a failed one is the next call's to report: it gets the reason as a 502,
+    /// once, and the call after that tries again.
     pub fn prefetch(self: &Arc<Self>, user: &UserId) -> Res<Value> {
         let p = self.paths(user)?;
         self.config(&p)?;
         let cold = self.cold(&p, Part::Work)? || self.cold(&p, Part::Ckpt)?;
         if cold {
             self.store()?;
-            let (boxd, user) = (self.clone(), user.clone());
-            tokio::spawn(async move {
-                let _box = boxd.lock(&user).await;
-                if let Err(e) = boxd.fetch_cold(&p).await {
-                    tracing::warn!(id = %p.id, error = %e.msg, "prefetch failed");
+            let mut prefetches = self.prefetches.lock().unwrap();
+            match prefetches.get(&user.0) {
+                Some(None) => {}
+                Some(Some(_)) => {
+                    let why = prefetches.remove(&user.0).flatten().unwrap_or_default();
+                    return Err(refuse(StatusCode::BAD_GATEWAY, why));
                 }
-            });
+                None => {
+                    prefetches.insert(user.0.clone(), None);
+                    let (boxd, user) = (self.clone(), user.clone());
+                    tokio::spawn(async move {
+                        let _box = boxd.lock(&user).await;
+                        let fetched = boxd.fetch_cold(&p).await;
+                        let mut prefetches = boxd.prefetches.lock().unwrap();
+                        match fetched {
+                            Ok(()) => drop(prefetches.remove(&user.0)),
+                            Err(e) => {
+                                tracing::warn!(id = %p.id, error = %e.msg, "prefetch failed");
+                                prefetches.insert(user.0, Some(e.msg));
+                            }
+                        }
+                    });
+                }
+            }
         }
         Ok(json!({ "cold": cold }))
     }
@@ -1852,6 +1874,20 @@ pub mod tests {
         assert_eq!(b.archive(&u, Part::Work).await.unwrap()["archived"], true);
         assert!(!there(&img));
         assert_eq!(bucket.called("PUT"), puts);
+
+        // A prefetch that fails says why to the next one, once, and the one after tries again.
+        *bucket.fail.lock().unwrap() = Some((403, 99, "work"));
+        assert_eq!(b.prefetch(&u).unwrap(), json!({ "cold": true }));
+        let failed = || matches!(b.prefetches.lock().unwrap().get("u_cold"), Some(Some(_)));
+        eventually("the prefetch fails", failed).await;
+        let e = b.prefetch(&u).unwrap_err();
+        assert_eq!(e.status, StatusCode::BAD_GATEWAY);
+        assert!(
+            e.msg.contains("its work did not come back") && e.msg.contains("403"),
+            "{}",
+            e.msg
+        );
+        *bucket.fail.lock().unwrap() = None;
 
         // A prefetch and a wake together: one fetch of the disk between them.
         let gets = bucket.called("GET /cold/boxes/u_cold/work/00000");

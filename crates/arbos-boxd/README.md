@@ -127,7 +127,7 @@ are `{"error": "..."}`.
 | `POST /v1/boxes/{user_id}/sleep?force=true` | The same answer, always `asleep_clean` and with a null split. agentd is not asked: a busy box is stopped too, and no checkpoint is written or kept, so every process in the box ends. `/work` is untouched. This is the user's Stop and an operator's delete of the box. |
 | `POST /v1/boxes/{user_id}/grow` | `{"size_gb"}`: 8 → 32 → 128. 409 at 128, or while the box is asleep. |
 | `POST /v1/boxes/{user_id}/archive` with `{"part": "ckpt" \| "work"}` | `{"archived", "stored_bytes"}`: the sleeping box's checkpoint or disk is in the object store and off this host. `archived` is false when it already was. 409 while the box is awake, when it has no such part, or with the cold tier off. 502 when the upload did not round-trip; the local copy is kept. |
-| `POST /v1/boxes/{user_id}/prefetch` | `{"cold"}`, at once. If the box was cold it is being brought back behind the answer; it stays asleep. |
+| `POST /v1/boxes/{user_id}/prefetch` | `{"cold"}`, at once. A cold box is being brought back behind the answer and stays asleep; asking again says whether it is still cold. 502 with the reason, once, after a fetch that failed. |
 | `GET /v1/host/status` | `mem_available_gb`, `swap_used_gb`, `load5`, `disk_free_gb`, `resident_boxes`, `present_boxes`, `cold_tier`, and `boxes[]` with `user_id`, `running`, `size_gb`, `work_bytes`, `ckpt_bytes`, `work_cold`, `ckpt_cold`. A box whose disk is in the store is listed and is not `present`. |
 
 Known limit: a box with any workspace is always checkpointed, never stopped clean. Inside
