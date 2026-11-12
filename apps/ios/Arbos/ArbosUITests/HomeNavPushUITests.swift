@@ -22,8 +22,8 @@ final class HomeNavPushUITests: XCTestCase {
         return app
     }
 
-    /// Coordinate tap: Settings chrome often marks rows non-hittable for plain `.tap()`
-    /// even when they are on screen (AgentAccessLinkUITests pattern).
+    /// Settings / New Message chrome often marks rows and glass discs non-hittable
+    /// (`hit point {-1,-1}`); coordinate-tap still reaches them (same as AgentAccessLinkUITests).
     private func tap(_ item: XCUIElement) {
         item.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
     }
@@ -91,7 +91,7 @@ final class HomeNavPushUITests: XCTestCase {
         tap(app.buttons["home-account"])
         XCTAssertTrue(app.buttons["Back"].firstMatch.waitForExistence(timeout: settle), "Settings opened")
 
-// Prefer the stable id; Settings chrome often marks the row non-hittable even when
+        // Prefer the stable id; Settings chrome often marks the row non-hittable even when
         // it is on screen — coordinate-tap like AgentAccessLinkUITests. Do not swipeUp,
         // which parked the row under the sticky ProfileTopBar chrome.
         let credits = app.descendants(matching: .any)["settings-credits"].firstMatch
@@ -126,7 +126,7 @@ final class HomeNavPushUITests: XCTestCase {
         let plus = app.buttons["home-new"]
         XCTAssertTrue(plus.waitForExistence(timeout: settle), "Home + is on screen")
         tap(plus)
-let page = app.descendants(matching: .any)["new-message"].firstMatch
+        let page = app.descendants(matching: .any)["new-message"].firstMatch
         XCTAssertTrue(page.waitForExistence(timeout: settle), "New Message pushed in")
         // Prefer the identifier over the buttons query — the glass back is a Button, but
         // descendants are more reliable across SwiftUI accessibility trees.
@@ -148,7 +148,7 @@ let page = app.descendants(matching: .any)["new-message"].firstMatch
         let plus = app.buttons["home-new"]
         XCTAssertTrue(plus.waitForExistence(timeout: settle), "Home + is on screen")
         tap(plus)
-let back = app.descendants(matching: .any)["new-message-back"].firstMatch
+        let back = app.descendants(matching: .any)["new-message-back"].firstMatch
         XCTAssertTrue(back.waitForExistence(timeout: settle), "New Message opened")
         edgeSwipeBack(app)
         assertGone(back)
